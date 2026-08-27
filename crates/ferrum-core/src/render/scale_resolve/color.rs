@@ -122,6 +122,12 @@ pub fn build_color_scale(
                 channel: "color",
                 expected: "numeric column for quantitative/temporal type",
                 got: format!("{:?}", located.col.data_type()),
+                // "color" is never a positional channel, so `CoordFlip` never
+                // touches it — `user_facing_channel` is identity regardless
+                // (R3). `build_color_scale` has no `ChartSpec`/coord in scope
+                // here, so this is hardcoded rather than threaded for a value
+                // that can never change the rendered message.
+                coord_flipped: false,
             });
         }
         // T3: When faceted (Shared), union the per-panel extent with the global

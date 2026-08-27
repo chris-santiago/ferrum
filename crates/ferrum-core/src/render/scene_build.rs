@@ -1105,7 +1105,7 @@ fn build_panel_mark_batches(
             mark_style: &mark_style,
         };
 
-        validate_mark_encoding(&layer.mark, &layer.encoding)?;
+        validate_mark_encoding(&layer.mark, &layer.encoding, prep.coord_flipped)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
 
         // For CoordPolar, transform all mark nodes from Cartesian pixel
@@ -2034,9 +2034,17 @@ fn remap_coord(
 ///   Horizontal-band areas belong to `mark_rect`; vertical bands use `y2`.
 /// - `mark_bar` with both `x2` AND `y2` bound: a 2-D extent (width AND height
 ///   from separate columns) defines a rectangle, not a bar.  Use `mark_rect`.
+///
+/// `channel`/`mark`'s bare-channel checks act on `encoding`, which is the
+/// RESOLVED (post-`CoordFlip`) layer encoding — so is `channel`/`hint_alt_channel`
+/// on the resulting error; `coord_flipped` (R3) lets `Display` un-flip them back
+/// to the token the user actually wrote. `mark_bar`'s hint names both x2 AND y2
+/// (flip-symmetric: whichever letters the user wrote, both are still bound after
+/// the swap), so it carries no `hint_alt_channel`.
 fn validate_mark_encoding(
     mark: &crate::spec::mark::Mark,
     encoding: &crate::spec::encoding::Encoding,
+    coord_flipped: bool,
 ) -> Result<(), RenderError> {
     use crate::spec::mark::Mark;
     match mark {
@@ -2044,7 +2052,9 @@ fn validate_mark_encoding(
             Err(RenderError::UnsupportedChannelCombination {
                 mark: "mark_area",
                 channel: "x2",
-                hint: "use y2= for a vertical band area, or use mark_rect for a 2-D extent",
+                hint: "use {alt}= for a vertical band area, or use mark_rect for a 2-D extent",
+                hint_alt_channel: Some("y2"),
+                coord_flipped,
             })
         }
         Mark::Bar if encoding.x2.is_some() && encoding.y2.is_some() => {
@@ -2052,6 +2062,8 @@ fn validate_mark_encoding(
                 mark: "mark_bar",
                 channel: "x2 and y2",
                 hint: "a 2-D extent (both x2= and y2=) is a rectangle; use mark_rect instead",
+                hint_alt_channel: None,
+                coord_flipped,
             })
         }
         _ => Ok(()),
@@ -3541,6 +3553,199 @@ mod tests {
             (min_tick, max_tick),
             slot1,
             "right-axis tick extent must equal scene y_domains[1] (ticks == marks == y_domains[1]); got {tick_vals:?}"
+        );
+    }
+
+    // ── R3: user-facing channel names under CoordFlip ───────────────────────
+
+    /// Build a single-layer `ChartSpec` with `x`/`y`/`y2` bound and, optionally,
+    /// `coord: CoordFlip` — shared setup for the R3 `validate_mark_encoding`
+    /// regression tests below.
+    fn area_spec_with_y2(coord_flipped: bool) -> ChartSpec {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "price".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "weight".into(), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "weight2".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: if coord_flipped { Some(CoordKind::Flip) } else { None },
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    fn price_weight_weight2_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("price", DataType::Float64, false),
+            Field::new("weight", DataType::Float64, false),
+            Field::new("weight2", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(Float64Array::from(vec![15.0, 25.0, 35.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// R3 regression (the originally verified live bug): under `CoordFlip`, a
+    /// user who writes `mark_area().encode(y2=...)` (a vertical band — the
+    /// SUPPORTED spelling) gets an error naming `'y2'` — the channel they
+    /// actually wrote — with a hint recommending `x2=`, the spelling that
+    /// achieves the same supported vertical-band area post-flip. Before this
+    /// fix the message named the resolved `'x2'` and advised `y2=`, neither of
+    /// which the user wrote or should write.
+    #[test]
+    fn unsupported_channel_combination_names_users_channel_under_flip() {
+        let spec = area_spec_with_y2(true);
+        let batch = price_weight_weight2_batch();
+        let prep =
+            crate::render::prepare::prepare_render_inputs(&spec, &batch, &ThemeInputs::default(), None)
+                .unwrap();
+        assert!(prep.coord_flipped);
+        // Post-flip: the user's y2 (vertical-band area, supported) landed on x2
+        // (unsupported for mark_area) — this is the resolved token validation acts on.
+        assert!(prep.layers[0].encoding.x2.is_some());
+        let err = validate_mark_encoding(&Mark::Area, &prep.layers[0].encoding, prep.coord_flipped)
+            .expect_err("post-flip x2 must still be rejected for mark_area");
+        let text = format!("{err}");
+        assert_eq!(
+            text,
+            "mark_area: channel 'y2' is not supported; use x2= for a vertical band area, or use mark_rect for a 2-D extent"
+        );
+    }
+
+    /// R3 byte-identity: the same unsupported combination, unflipped, renders
+    /// exactly the pre-fix message text.
+    #[test]
+    fn unsupported_channel_combination_message_unchanged_when_not_flipped() {
+        use crate::spec::encoding::EncodingSpec;
+        let mut spec = area_spec_with_y2(false);
+        // Directly bind x2 (the actually-unsupported channel) rather than y2.
+        spec.encoding.y2 = None;
+        spec.encoding.x2 = Some(EncodingSpec { field: "weight2".into(), ..Default::default() });
+        let batch = price_weight_weight2_batch();
+        let prep =
+            crate::render::prepare::prepare_render_inputs(&spec, &batch, &ThemeInputs::default(), None)
+                .unwrap();
+        assert!(!prep.coord_flipped);
+        let err = validate_mark_encoding(&Mark::Area, &prep.layers[0].encoding, prep.coord_flipped)
+            .expect_err("x2 must be rejected for mark_area");
+        assert_eq!(
+            format!("{err}"),
+            "mark_area: channel 'x2' is not supported; use y2= for a vertical band area, or use mark_rect for a 2-D extent"
+        );
+    }
+
+    /// A `mark_bar` spec with `x`, `y`, `x2`, AND `y2` all bound — the
+    /// unsupported 2-D-extent combination `validate_mark_encoding` rejects for
+    /// `Mark::Bar` (`x2.is_some() && y2.is_some()`).
+    fn bar_spec_with_x2_y2(coord_flipped: bool) -> ChartSpec {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "price".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "weight".into(), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "price2".into(), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "weight2".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: if coord_flipped { Some(CoordKind::Flip) } else { None },
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    fn price_weight_price2_weight2_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("price", DataType::Float64, false),
+            Field::new("weight", DataType::Float64, false),
+            Field::new("price2", DataType::Float64, false),
+            Field::new("weight2", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(Float64Array::from(vec![5.0, 15.0, 25.0])),
+                Arc::new(Float64Array::from(vec![15.0, 25.0, 35.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// R3: `mark_bar`'s "both x2 and y2" hint is flip-symmetric — whichever
+    /// letters the user wrote, both remain bound after the whole-encoding swap
+    /// — so the message is identical flipped or not. Driven through the real
+    /// `validate_mark_encoding` on a real flipped `Mark::Bar` spec (not a
+    /// hand-built `RenderError` re-typing the production hint literal), so a
+    /// future edit to the `Mark::Bar` arm in `validate_mark_encoding` — e.g.
+    /// giving it a `hint_alt_channel` — would actually be exercised here.
+    #[test]
+    fn unsupported_channel_combination_bar_hint_is_flip_symmetric() {
+        let batch = price_weight_price2_weight2_batch();
+        let theme = ThemeInputs::default();
+
+        let flipped_spec = bar_spec_with_x2_y2(true);
+        let flipped_prep =
+            crate::render::prepare::prepare_render_inputs(&flipped_spec, &batch, &theme, None).unwrap();
+        assert!(flipped_prep.coord_flipped);
+        let flipped_err = validate_mark_encoding(&Mark::Bar, &flipped_prep.layers[0].encoding, flipped_prep.coord_flipped)
+            .expect_err("both x2 and y2 bound must be rejected for mark_bar, flipped");
+
+        let unflipped_spec = bar_spec_with_x2_y2(false);
+        let unflipped_prep =
+            crate::render::prepare::prepare_render_inputs(&unflipped_spec, &batch, &theme, None).unwrap();
+        assert!(!unflipped_prep.coord_flipped);
+        let unflipped_err = validate_mark_encoding(&Mark::Bar, &unflipped_prep.layers[0].encoding, unflipped_prep.coord_flipped)
+            .expect_err("both x2 and y2 bound must be rejected for mark_bar, unflipped");
+
+        let flipped_text = format!("{flipped_err}");
+        let unflipped_text = format!("{unflipped_err}");
+        assert_eq!(flipped_text, unflipped_text);
+        assert_eq!(
+            flipped_text,
+            "mark_bar: channel 'x2 and y2' is not supported; a 2-D extent (both x2= and y2=) is a rectangle; use mark_rect instead"
         );
     }
 }

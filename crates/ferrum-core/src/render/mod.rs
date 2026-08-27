@@ -42,7 +42,10 @@ pub enum RenderError {
     EmptyBatch,
     UnknownColumn { name: String },
     InvalidColor(String),
-    EncodingTypeMismatch { channel: &'static str, expected: &'static str, got: String },
+    /// `channel` is the RESOLVED (post-`CoordFlip`) token the caller acted on —
+    /// `coord_flipped` (R3) lets `Display` un-flip it back to what the user
+    /// wrote; non-positional channels (e.g. `"color"`) are unaffected either way.
+    EncodingTypeMismatch { channel: &'static str, expected: &'static str, got: String, coord_flipped: bool },
     TransformFailed(String),
     ScaleResolutionFailed(String),
     LayoutFailed(String),
@@ -66,11 +69,76 @@ pub enum RenderError {
     /// supplied.  `mark` names the mark (e.g. `"mark_area"`); `channel` names
     /// the unsupported channel (e.g. `"x2"`); `hint` is an actionable suggestion
     /// pointing at the correct mark or channel to use instead.
-    UnsupportedChannelCombination { mark: &'static str, channel: &'static str, hint: &'static str },
+    UnsupportedChannelCombination {
+        mark: &'static str,
+        channel: &'static str,
+        /// Hint template. A literal `"{alt}"` placeholder, when present, is
+        /// substituted with `hint_alt_channel` (un-flipped like `channel` —
+        /// R3); hints with no swappable channel (e.g. "both x2= and y2=",
+        /// which is flip-symmetric) carry no placeholder.
+        hint: &'static str,
+        hint_alt_channel: Option<&'static str>,
+        /// `Some(coord)` under `CoordFlip` — R3: `channel`/`hint_alt_channel`
+        /// are the RESOLVED (post-flip) tokens the validation acted on;
+        /// `Display` un-flips them back to what the user wrote.
+        coord_flipped: bool,
+    },
     /// A per-channel / chart-level `axis(orient=...)` named a side that does not
-    /// match the channel's dimension. `channel` is `"x"` or `"y"`; `orient` is
-    /// the rejected value. x accepts `top`/`bottom`; y accepts `left`/`right`.
-    InvalidAxisOrient { channel: &'static str, orient: String },
+    /// match the channel's dimension. `channel` is `"x"` or `"y"` — the RESOLVED
+    /// (post-`CoordFlip`) geometric axis the validation actually acted on, never
+    /// un-flipped itself (top/bottom are only ever valid for the physical x
+    /// axis). `orient` is the rejected value. x accepts `top`/`bottom`; y
+    /// accepts `left`/`right`. `coord_flipped` (R3) is a `Display`-time-only
+    /// correction un-flipping `channel` in the rendered message so it names
+    /// the axis token the user actually wrote.
+    ///
+    /// THREE call chains reach this constructor, and only TWO patch
+    /// `coord_flipped` in — the third is a deliberate EXEMPTION, not a gap:
+    /// - `prepare::build_axes` (per-channel `fm.Axis(orient=...)`) — PATCHES.
+    ///   The `EncodingSpec` carrying the override travels through
+    ///   `build_layers`' swap with its channel, so the resolved token needs
+    ///   translating back to what the user wrote.
+    /// - `prepare::build_secondary_y_axis_inputs` (independent-y layer's own
+    ///   `fm.Axis(orient=...)`) — PATCHES, same reasoning as above.
+    /// - the chart-level `configure_axis` apply block
+    ///   (`apply_axis_config_to_axis_input`, in `prepare_and_layout`) — EXEMPT.
+    ///   `channel` there is derived from the axis's PHYSICAL orientation
+    ///   (`axis_channel`), never from an `EncodingSpec`, and the config key
+    ///   the user actually typed (`axis_x`/`axis_y`) is itself RESOLVED-slot
+    ///   vocabulary that Python never remaps under flip — so the resolved
+    ///   token already IS what the user wrote; un-flipping it would say the
+    ///   opposite of the config key they typed (mirrors the `SortSpecIgnored`
+    ///   exemption in `scale_resolve/domain.rs`).
+    InvalidAxisOrient { channel: &'static str, orient: String, coord_flipped: bool },
+}
+
+/// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
+/// is constructed deep inside `prepare::parse_axis_orient`/`parse_title_orient`,
+/// which have no access to whether the chart is flipped. See the field doc on
+/// [`RenderError::InvalidAxisOrient`] for the full three-chain account: TWO of
+/// the three production call chains apply this at their own boundary
+/// (`prepare::build_axes`, `prepare::build_secondary_y_axis_inputs`); the third
+/// (the chart-level `configure_axis` apply block) is a deliberate exemption and
+/// must NOT call this — `channel`/`orient` (the resolved token validation
+/// acted on) are untouched either way; only the `Display`-time un-flip flag is
+/// corrected. A no-op for every other variant.
+///
+/// MAINTENANCE: any NEW call chain reaching `parse_axis_orient`/
+/// `parse_title_orient` ships `coord_flipped: false` by default (see the
+/// placeholder note on those two functions) — decide explicitly whether that
+/// chain's `channel` names a user-written encoding channel (patch it, like the
+/// two above) or a resolved/physical/user-typed-literal token (leave it, like
+/// the chart-level chain and `SortSpecIgnored`). This decision was missed once
+/// already (the `build_secondary_y_axis_inputs` chain went unpatched through
+/// cycle 1) — there is no compiler check forcing it, so it must be made
+/// deliberately at review time, not assumed.
+pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> RenderError {
+    match err {
+        RenderError::InvalidAxisOrient { channel, orient, .. } => {
+            RenderError::InvalidAxisOrient { channel, orient, coord_flipped }
+        }
+        other => other,
+    }
 }
 
 impl std::fmt::Display for RenderError {
@@ -84,8 +152,10 @@ impl std::fmt::Display for RenderError {
                 write!(f, "unknown column '{name}' referenced by an encoding"),
             Self::InvalidColor(s) =>
                 write!(f, "invalid color string: '{s}' (expected #rrggbb or #rrggbbaa)"),
-            Self::EncodingTypeMismatch { channel, expected, got } =>
-                write!(f, "encoding '{channel}' expected {expected}, got {got}"),
+            Self::EncodingTypeMismatch { channel, expected, got, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                write!(f, "encoding '{channel}' expected {expected}, got {got}")
+            }
             Self::TransformFailed(s) =>
                 write!(f, "transform failed: {s}"),
             Self::ScaleResolutionFailed(s) =>
@@ -106,14 +176,43 @@ impl std::fmt::Display for RenderError {
                 write!(f, "scene construction failed: {msg}"),
             Self::HtmlBundleAssembly(msg) =>
                 write!(f, "HTML bundle assembly failed: {msg}"),
-            Self::UnsupportedChannelCombination { mark, channel, hint } =>
-                write!(f, "{mark}: channel '{channel}' is not supported; {hint}"),
-            Self::InvalidAxisOrient { channel, orient } => {
-                let allowed = if *channel == "x" { "'top' or 'bottom'" } else { "'left' or 'right'" };
-                write!(
-                    f,
-                    "axis orient '{orient}' is invalid for the {channel} axis (expected {allowed})"
-                )
+            Self::UnsupportedChannelCombination { mark, channel, hint, hint_alt_channel, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                let hint: std::borrow::Cow<str> = match hint_alt_channel {
+                    Some(alt) => std::borrow::Cow::Owned(
+                        hint.replacen("{alt}", prepare::user_facing_channel(alt, *coord_flipped), 1),
+                    ),
+                    None => std::borrow::Cow::Borrowed(*hint),
+                };
+                write!(f, "{mark}: channel '{channel}' is not supported; {hint}")
+            }
+            Self::InvalidAxisOrient { channel, orient, coord_flipped } => {
+                // `allowed`/`physical` reflect the RESOLVED axis (`channel`,
+                // pre-un-flip): top/bottom validity is a GEOMETRIC property of
+                // an axis drawn horizontally, left/right of one drawn
+                // vertically — a property of the physical slot, not of
+                // whichever letter names it. `CoordFlip` is implemented as a
+                // data swap (`prepare::build_layers`), never a physical
+                // re-orientation, so this constraint never changes with flip.
+                let (allowed, physical) =
+                    if *channel == "x" { ("'top' or 'bottom'", "horizontal") } else { ("'left' or 'right'", "vertical") };
+                let user_channel = prepare::user_facing_channel(channel, *coord_flipped);
+                if *coord_flipped {
+                    // The un-flipped NAME and the physical constraint now
+                    // disagree (e.g. "the y axis" paired with "top or
+                    // bottom") — spell out why so the message reads as an
+                    // explained fact, not an internal contradiction.
+                    write!(
+                        f,
+                        "axis orient '{orient}' is invalid for the {user_channel} axis \
+                         (expected {allowed} — under CoordFlip, {user_channel} renders as the {physical} axis)"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "axis orient '{orient}' is invalid for the {user_channel} axis (expected {allowed})"
+                    )
+                }
             }
         }
     }
@@ -1156,6 +1255,23 @@ fn prepare_and_layout(
     // the shared `axis` key so `axis_x > axis` precedence holds (documented in configure.py).
     // (This is the OPPOSITE order from the overwrite-semantics theme path in
     // `apply_chart_config`, where last-writer-wins makes `axis` run first then `axis_x`.)
+    // R3 (chart-level `configure_axis` chain): deliberately EXEMPT from
+    // `with_coord_flipped` — this is the mirror image of the `SortSpecIgnored`
+    // exemption (`scale_resolve/domain.rs`'s `apply_channel_shorthand_sort`).
+    // `apply_axis_config_to_axis_input` → `apply_axis_style_to_axis_input`
+    // derives `channel` from the axis's PHYSICAL orientation (`axis_channel`,
+    // just below: `Top|Bottom → "x"`, else `"y"`), never from a user-written
+    // encoding channel. And the config KEY the user actually typed here —
+    // `axis_x`/`axis_y` (or the shared `axis`) — is itself resolved-slot
+    // vocabulary: nothing on the Python side remaps `configure_axis(axis_x=…)`
+    // to `axis_y=` under `CoordFlip` (`configure.py`, `_override_apply.py`,
+    // `_override_consume.py`). So for THIS chain the resolved token already
+    // IS what the user wrote — `prep.axes.x` is unconditionally the physical
+    // bottom axis, flip or not (flip is implemented purely as the `x`/`y`
+    // encoding swap in `prepare::build_layers`; nothing re-orients axes).
+    // Applying `with_coord_flipped` here would translate the user's own typed
+    // config key AWAY from what they wrote — see
+    // `chart_level_orient_error_names_resolved_axis_under_flip` below.
     apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref())?;
@@ -1714,6 +1830,80 @@ mod orchestration_tests {
         assert!(po.prep.legend_entries.is_empty(), "user-disabled legend must yield an empty bundle at prepare time");
         assert!(po.prep.colorbar.is_none());
         assert!(po.layout.legend.is_none(), "no legend to lay out when the bundle is empty");
+    }
+
+    /// R3 EXEMPTION: the chart-level `configure_axis(orient=...)` path applies
+    /// AFTER `prepare_render_inputs` (the `apply_axis_config_to_axis_input`
+    /// calls inside `prepare_and_layout`) and is deliberately NOT patched
+    /// through `with_coord_flipped` — the mirror image of the `SortSpecIgnored`
+    /// exemption. Chart-level `configure_axis` config keys (`axis_x`/`axis_y`)
+    /// are themselves RESOLVED-slot vocabulary Python never remaps under
+    /// `CoordFlip` (unlike a per-channel `Axis(...)`, which travels with its
+    /// whole `EncodingSpec` through the swap): a user who types
+    /// `configure_axis(axis_x=Axis(orient="left"))` always means the physical
+    /// x axis, flip or not, so the RESOLVED channel already IS what they
+    /// wrote. This test asserts the exemption holds: the message names the
+    /// resolved `x` axis (matching the config key the user actually typed),
+    /// not an un-flipped `y`, under a flipped chart.
+    #[test]
+    fn chart_level_orient_error_names_resolved_axis_under_flip() {
+        use crate::spec::coord::CoordKind;
+        let (mut spec, batch) = scatter_3();
+        spec.coord = Some(CoordKind::Flip);
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let chart_config = ChartConfig {
+            axis_x: Some(AxisConfigSpec {
+                style: chart_config::AxisStyleSpec { orient: Some("left".into()), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // PipelineOutput isn't Debug, so `expect_err`/`unwrap_err` (which both
+        // require `T: Debug`) don't work here — match it out by hand.
+        let err = match prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None) {
+            Ok(_) => panic!("orient='left' on the resolved x axis must fail loud"),
+            Err(e) => e,
+        };
+        match &err {
+            RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
+                assert_eq!(*channel, "x", "resolved/internal token — this chain's own constructor default");
+                assert_eq!(orient, "left");
+                // NOT patched: this chain is exempt, so the placeholder stays.
+                assert!(!coord_flipped);
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "axis orient 'left' is invalid for the x axis (expected 'top' or 'bottom')",
+            "message must name the RESOLVED axis ('x') — that's the config key (axis_x=) the \
+             user actually typed, not an internal token needing translation"
+        );
+    }
+
+    /// R3 byte-identity: the same chart-level cross-dimension `orient` error,
+    /// unflipped, renders exactly the pre-fix message text.
+    #[test]
+    fn chart_level_orient_fails_loud_unchanged_when_not_flipped() {
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let chart_config = ChartConfig {
+            axis_x: Some(AxisConfigSpec {
+                style: chart_config::AxisStyleSpec { orient: Some("left".into()), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = match prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None) {
+            Ok(_) => panic!("orient='left' on x must fail loud"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "axis orient 'left' is invalid for the x axis (expected 'top' or 'bottom')"
+        );
     }
 }
 

@@ -349,6 +349,35 @@ impl Channel {
     }
 }
 
+/// Un-flip a positional channel token for user-facing error/warning text (R3).
+///
+/// Every error/warning message that names a positional channel downstream of
+/// the `CoordFlip` x<->y / x2<->y2 swap (see [`build_layers`]) carries the
+/// RESOLVED (post-flip) token internally — that's the token validation and
+/// lookup logic must keep acting on. This helper is applied ONLY at
+/// message-format time, to turn that resolved token back into the one the
+/// user actually wrote in `.encode(...)`:
+/// - `!coord_flipped` → identity (every unflipped message is byte-identical).
+/// - `coord_flipped` → `x`<->`y` and `x2`<->`y2` swap back; every other token
+///   (`"color"`, a compound string like `"x2 and y2"`, a field name, ...) is
+///   returned unchanged, since only single positional tokens are swapped by
+///   `build_layers`.
+///
+/// Never applied to error-variant fields, lookup keys, or resolution logic —
+/// see the module doc on `build_layers` for where the actual swap happens.
+pub(crate) fn user_facing_channel(channel: &str, coord_flipped: bool) -> &str {
+    if !coord_flipped {
+        return channel;
+    }
+    match channel {
+        "x" => "y",
+        "y" => "x",
+        "x2" => "y2",
+        "y2" => "x2",
+        other => other,
+    }
+}
+
 /// Resolve a positional axis title via the 3-way idiom shared by the spec-level
 /// encoding title and the per-channel `Axis(title=...)` override (SPINE-08):
 ///   - **absent** (`None`)            → fall through to `fallback`;
@@ -808,6 +837,12 @@ fn build_axes(
     let x_tick_count = encoding_axis_tick_count(rendering_encoding.x.as_ref()).unwrap_or(10);
     let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
 
+    // R3: `build_axis_input`'s per-channel `Axis(orient=...)` validation has no
+    // flip context of its own (see `with_coord_flipped`'s doc); patch it in here,
+    // the boundary that DOES know it, so a rejected orient names the axis the
+    // user actually wrote instead of the resolved (post-flip) one.
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+
     let axes = AxesInput {
         x: build_axis_input(
             Channel::X,
@@ -816,7 +851,8 @@ fn build_axes(
             &provisional_scales.x,
             x_tick_count,
             theme,
-        )?,
+        )
+        .map_err(|e| crate::render::with_coord_flipped(e, coord_flipped))?,
         y: build_axis_input(
             Channel::Y,
             rendering_encoding.y.as_ref(),
@@ -824,7 +860,8 @@ fn build_axes(
             &provisional_scales.y,
             y_tick_count,
             theme,
-        )?,
+        )
+        .map_err(|e| crate::render::with_coord_flipped(e, coord_flipped))?,
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
         secondary_y: build_secondary_y_axis_inputs(
@@ -906,6 +943,19 @@ fn build_secondary_y_axis_inputs(
             )?;
         warnings.extend(layer_warnings);
         let y_tick_count = encoding_axis_tick_count(layer_encoding.y.as_ref()).unwrap_or(10);
+        // R3: one of the two chains that PATCH `coord_flipped` (the other is
+        // `build_axes`, just above; the third production chain to
+        // `InvalidAxisOrient` — the chart-level `configure_axis` apply block in
+        // `render::mod::prepare_and_layout` — is a deliberate EXEMPTION, not a
+        // sibling; see the field doc on `RenderError::InvalidAxisOrient` for the
+        // full three-chain account). A per-layer `fm.Axis(orient=...)` on an
+        // independent-y layer validates against the RESOLVED `Channel::Y`
+        // (secondary axes are always drawn right-side, never flipped
+        // themselves), but `layer_encoding` is the post-`CoordFlip` layer
+        // encoding (`build_layers`) — the `EncodingSpec` carrying the user's
+        // override traveled through the swap — so the same boundary correction
+        // `build_axes` applies is needed here too.
+        let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
         let axis_input = build_axis_input(
             Channel::Y,
             layer_encoding.y.as_ref(),
@@ -913,7 +963,8 @@ fn build_secondary_y_axis_inputs(
             &y_scale,
             y_tick_count,
             theme,
-        )?;
+        )
+        .map_err(|e| crate::render::with_coord_flipped(e, coord_flipped))?;
         out.push(axis_input);
     }
     Ok(out)
@@ -1076,6 +1127,32 @@ fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -
 /// cross-dimension value fails loud per the B5 contract. Shared by the
 /// per-channel (here) and chart-level (`render::mod`) apply paths so the two
 /// cannot drift on the accepted token set or the dimension check.
+///
+/// R3 / MAINTENANCE: both `InvalidAxisOrient` constructions below hardcode
+/// `coord_flipped: false` as a PLACEHOLDER — this function has no flip
+/// context of its own (it only ever sees the RESOLVED `channel`). It is the
+/// caller's job to decide, at ITS OWN boundary, whether that placeholder is
+/// correct or needs patching via [`crate::render::with_coord_flipped`]:
+/// - patch it when the caller's `channel` reached this function by way of a
+///   user-written `EncodingSpec` that traveled through `build_layers`' swap
+///   (e.g. `build_axes`'s per-channel `fm.Axis(orient=...)`,
+///   `build_secondary_y_axis_inputs`'s per-layer one) — there the resolved
+///   token needs translating back to what the user actually wrote;
+/// - do NOT patch it when `channel` is resolved-slot/physical vocabulary the
+///   user's own config key already names directly (the chart-level
+///   `configure_axis` chain — see the field doc on
+///   [`crate::render::RenderError::InvalidAxisOrient`] for the full
+///   three-chain account and why that one is a deliberate exemption, not a
+///   gap).
+///
+/// **This decision is NOT compiler-enforced** — a new call chain reaching
+/// this function silently gets `coord_flipped: false` whether or not that is
+/// correct for it. This is standing evidence, not hypothetical: cycle 1 of
+/// this task shipped `build_axes` and the chart-level chain but missed
+/// `build_secondary_y_axis_inputs`, which went unpatched (silently wrong
+/// under flip) until cycle 2 caught it. Any reviewer adding or auditing a
+/// call chain to `parse_axis_orient`/`parse_title_orient` must make this call
+/// explicitly, not assume the default is safe.
 pub(crate) fn parse_axis_orient(
     value: &str,
     channel: &'static str,
@@ -1085,10 +1162,12 @@ pub(crate) fn parse_axis_orient(
         "bottom" => AxisOrient::Bottom,
         "left" => AxisOrient::Left,
         "right" => AxisOrient::Right,
+        // Placeholder — see the MAINTENANCE note on this function's doc comment.
         _ => {
             return Err(RenderError::InvalidAxisOrient {
                 channel,
                 orient: value.to_owned(),
+                coord_flipped: false,
             })
         }
     };
@@ -1099,7 +1178,8 @@ pub(crate) fn parse_axis_orient(
     if ok {
         Ok(orient)
     } else {
-        Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() })
+        // Placeholder — see the MAINTENANCE note on this function's doc comment.
+        Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned(), coord_flipped: false })
     }
 }
 
@@ -1141,7 +1221,13 @@ pub(crate) fn parse_title_orient(
         "bottom" => Ok(AxisOrient::Bottom),
         "left" => Ok(AxisOrient::Left),
         "right" => Ok(AxisOrient::Right),
-        _ => Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() }),
+        // Placeholder — see the MAINTENANCE note on `parse_axis_orient`'s doc
+        // comment above (this function shares the exact same contract).
+        _ => Err(RenderError::InvalidAxisOrient {
+            channel,
+            orient: value.to_owned(),
+            coord_flipped: false,
+        }),
     }
 }
 
@@ -1819,6 +1905,41 @@ mod tests {
         assert!(Channel::Y.reverses());
         assert_eq!(Channel::X.token(), "x");
         assert_eq!(Channel::Y.token(), "y");
+    }
+
+    /// R3: `user_facing_channel` is identity for every token when the chart
+    /// isn't flipped — the byte-identity default for the overwhelming majority
+    /// of charts.
+    #[test]
+    fn user_facing_channel_identity_when_not_flipped() {
+        for token in ["x", "y", "x2", "y2", "color", "size", "x2 and y2", "field_name"] {
+            assert_eq!(user_facing_channel(token, false), token);
+        }
+    }
+
+    /// R3: under `coord_flipped`, the four positional tokens swap in the two
+    /// pairs `build_layers` actually swaps (x<->y, x2<->y2); the swap is its
+    /// own inverse.
+    #[test]
+    fn user_facing_channel_swaps_positional_pairs_when_flipped() {
+        assert_eq!(user_facing_channel("x", true), "y");
+        assert_eq!(user_facing_channel("y", true), "x");
+        assert_eq!(user_facing_channel("x2", true), "y2");
+        assert_eq!(user_facing_channel("y2", true), "x2");
+        // Involution: applying twice returns the original token.
+        for token in ["x", "y", "x2", "y2"] {
+            assert_eq!(user_facing_channel(user_facing_channel(token, true), true), token);
+        }
+    }
+
+    /// R3: non-positional tokens (channel names `build_layers` never touches,
+    /// plus compound/free-text strings) are always identity, flipped or not.
+    #[test]
+    fn user_facing_channel_non_positional_tokens_always_identity() {
+        for token in ["color", "size", "shape", "opacity", "x2 and y2", "some_field"] {
+            assert_eq!(user_facing_channel(token, true), token);
+            assert_eq!(user_facing_channel(token, false), token);
+        }
     }
 
     /// A continuous (Linear) scale over [0, 10]. Tick labels run "0".."10" in
@@ -3305,13 +3426,59 @@ mod tests {
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
             .expect_err("x orient='left' must fail loud");
         match err {
-            crate::render::RenderError::InvalidAxisOrient { channel, orient } => {
+            crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
                 assert_eq!(channel, "x");
                 assert_eq!(orient, "left");
+                // Unflipped chart: `with_coord_flipped` boundary correction is a no-op.
+                assert!(!coord_flipped);
             }
             other => panic!("expected InvalidAxisOrient, got {other:?}"),
         }
     }
+
+    /// R3: under `CoordFlip`, a per-channel `Axis(orient=...)` cross-dimension
+    /// error must name the axis the user actually configured, not the resolved
+    /// (post-flip) one it landed on. The user writes `Axis(orient="left")` on
+    /// `y` — valid for y pre-flip — but `build_layers` swaps this whole
+    /// `EncodingSpec` into the x slot, where `"left"` is invalid, so the error
+    /// fires for the RESOLVED `"x"` channel. The message must still say `y`.
+    #[test]
+    fn cross_dimension_orient_fails_loud_names_users_channel_under_flip() {
+        use crate::spec::coord::CoordKind;
+        let mut spec = single_layer_spec();
+        spec.coord = Some(CoordKind::Flip);
+        spec.encoding.y = Some(enc_with_axis("weight", serde_json::json!({ "orient": "left" })));
+        let batch = price_weight_batch();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
+            .expect_err("y orient='left', swapped onto x, must fail loud");
+        match err {
+            crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
+                // Resolved/internal token: the object landed on x post-swap.
+                assert_eq!(channel, "x");
+                assert_eq!(orient, "left");
+                assert!(coord_flipped);
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
+        let text = format!(
+            "{}",
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
+                .unwrap_err()
+        );
+        assert_eq!(
+            text,
+            "axis orient 'left' is invalid for the y axis (expected 'top' or 'bottom' — under \
+             CoordFlip, y renders as the horizontal axis)",
+            "message must name the channel the user wrote ('y'), not the resolved one ('x'), and \
+             must explain why 'top'/'bottom' applies to something named 'y'"
+        );
+    }
+
+    // The chart-level `configure_axis(orient=...)` chain is a documented R3
+    // EXEMPTION (deliberately NOT patched via `with_coord_flipped`) — see
+    // `chart_level_orient_error_names_resolved_axis_under_flip` in
+    // `render::mod`'s test module — it needs `prepare_and_layout`, which is
+    // private to that module.
 
     #[test]
     fn per_channel_orphan_positioning_fields_reach_axis_input() {
@@ -4126,6 +4293,195 @@ mod tests {
         assert_ne!(
             secondary_axis.tick_labels, prep.axes.y.tick_labels,
             "the secondary axis resolves its OWN domain, not the primary's"
+        );
+    }
+
+    /// R3: the third `InvalidAxisOrient` production chain —
+    /// `build_secondary_y_axis_inputs`'s `build_axis_input` call (distinct from
+    /// `build_axes`'s primary-axis chain, which also patches, and the
+    /// chart-level `configure_axis` chain, which is exempt — see the field doc
+    /// on `RenderError::InvalidAxisOrient`) — must also un-flip under
+    /// `CoordFlip`. `build_secondary_y_axis_inputs` always validates
+    /// `layer_encoding.y` (post-flip) as `Channel::Y` (secondary axes are
+    /// always drawn right-side, regardless of flip), so to reach it, the
+    /// user's `fm.Axis(orient="top")` must be attached to the layer's own PRE-
+    /// flip `x` — `build_layers`' whole-`EncodingSpec` swap moves it onto the
+    /// POST-flip `y` slot this chain reads. The message must still say the
+    /// axis is invalid for `x` (what the user wrote), not the resolved `y`.
+    #[test]
+    fn secondary_y_axis_orient_error_names_users_channel_under_flip() {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::layer::Layer;
+
+        let primary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let secondary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                // Pre-flip x carries the bad orient; `build_layers` swaps it
+                // onto post-flip y, where `build_secondary_y_axis_inputs`
+                // actually validates it (see the doc comment above).
+                x: Some(enc_with_axis("x", serde_json::json!({ "orient": "top" }))),
+                y: Some(EncodingSpec { field: "y1".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: true,
+        };
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![primary, secondary]),
+            coord: Some(CoordKind::Flip),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+            ],
+        )
+        .unwrap();
+
+        let theme = crate::layout::ThemeInputs::default();
+        let err = prepare_render_inputs(&spec, &batch, &theme, None)
+            .expect_err("orient='top' on the secondary y axis must fail loud");
+        match &err {
+            crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
+                assert_eq!(*channel, "y", "resolved token: secondary axes always validate as Channel::Y");
+                assert_eq!(orient, "top");
+                assert!(*coord_flipped);
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "axis orient 'top' is invalid for the x axis (expected 'left' or 'right' — under \
+             CoordFlip, x renders as the vertical axis)",
+            "message must name the channel the user wrote it under ('x'), not the resolved one ('y'); \
+             `allowed` reflects the RESOLVED axis (y → left/right), and the parenthetical explains \
+             why 'left'/'right' applies to something named 'x'"
+        );
+    }
+
+    /// R3 byte-identity: the same secondary-y-axis cross-dimension `orient`
+    /// error, unflipped, renders exactly the pre-fix message text.
+    #[test]
+    fn secondary_y_axis_orient_error_unchanged_when_not_flipped() {
+        use crate::spec::layer::Layer;
+
+        let primary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let secondary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(enc_with_axis("y1", serde_json::json!({ "orient": "top" }))),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: true,
+        };
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![primary, secondary]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+            ],
+        )
+        .unwrap();
+
+        let theme = crate::layout::ThemeInputs::default();
+        let err = prepare_render_inputs(&spec, &batch, &theme, None)
+            .expect_err("orient='top' on the secondary y axis must fail loud");
+        assert_eq!(
+            format!("{err}"),
+            "axis orient 'top' is invalid for the y axis (expected 'left' or 'right')"
         );
     }
 

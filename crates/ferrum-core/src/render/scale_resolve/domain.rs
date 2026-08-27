@@ -231,6 +231,21 @@ fn apply_channel_shorthand_sort(
         "y" => ctx.y_field,
         _ => None,
     };
+    // R3 (SortSpecIgnored family): `channel` here is NOT a resolved/post-flip
+    // token the way every other R3-covered `channel` field is — it is the
+    // literal substring of the `shorthand` STRING the user wrote in their own
+    // `sort=` spec (e.g. `sort="-x"` → `channel == "x"`), echoed back verbatim.
+    // `prepare::user_facing_channel` must NOT be applied to it: doing so would
+    // translate the user's own written text AWAY from what they wrote (and
+    // directly contradict the `sort={shorthand:?}` clause right next to it in
+    // the same sentence). This message already satisfies "names the channel as
+    // the user wrote it" by construction, flipped or not — see
+    // `sort_shorthand_missing_channel_names_users_own_text_{unflipped,under_flip}`
+    // below. (Separately: whether `ctx.x_field`/`ctx.y_field` — which DO come
+    // from the post-flip rendering encoding, `positional.rs`'s
+    // `PositionalFields` — resolve against the axis the user actually intended
+    // by `"-x"`/`"-y"` under `CoordFlip` is a resolution-semantics question,
+    // not a message-naming one; out of R3's scope, logged as a follow-up.)
     let Some(value_field) = value_field else {
         warnings.push(RenderWarning::SortSpecIgnored {
             reason: format!("sort={shorthand:?} but no field is bound to channel {channel:?}"),
@@ -597,5 +612,68 @@ mod tests {
         }
         // Sorted keys: "lv" < "lv_depth_1" < … so the "lv" batch (A, B, Z) wins.
         assert_eq!(first_seen.as_deref(), Some("A"));
+    }
+
+    // --- R3: SortSpecIgnored (channel-shorthand family) ---------------------
+
+    /// R3, unflipped shape: `SortContext.x_field`/`y_field` reflect an ordinary
+    /// (unflipped) chart — category on x, y unbound. `sort="-y"` references the
+    /// unbound channel, so the warning fires; its message must echo exactly the
+    /// literal shorthand text the user wrote.
+    #[test]
+    fn sort_shorthand_missing_channel_names_users_own_text_unflipped() {
+        let batch = group_batch(vec!["a", "b"]);
+        let ctx = SortContext {
+            category_field: "cat",
+            batch: &batch,
+            x_field: Some("price"),
+            y_field: None,
+        };
+        let mut domain = vec!["a".to_string(), "b".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &ctx, &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            RenderWarning::SortSpecIgnored { reason } => {
+                assert_eq!(reason, "sort=\"-y\" but no field is bound to channel \"y\"");
+            }
+            other => panic!("expected SortSpecIgnored, got {other:?}"),
+        }
+        assert_eq!(domain, vec!["a".to_string(), "b".to_string()], "insertion order preserved on failure");
+    }
+
+    /// R3, post-`CoordFlip` shape: `SortContext.x_field`/`y_field` are
+    /// populated from the RESOLVED (post-flip) rendering encoding on the
+    /// prepare path (`positional.rs`'s `PositionalFields`) — the same
+    /// "downstream of the swap" condition every other R3 family is un-flipped
+    /// under. This family is the deliberate exception: `channel` in the
+    /// message is parsed straight out of the `shorthand` STRING the user
+    /// wrote (`apply_channel_shorthand_sort`'s doc comment explains why), not
+    /// derived from which resolved slot matched — so the message must still
+    /// echo the user's own literal text, byte-identical in shape to the
+    /// unflipped case above, even though the underlying `ctx` here is
+    /// genuinely post-flip.
+    #[test]
+    fn sort_shorthand_missing_channel_names_users_own_text_under_flip() {
+        let batch = group_batch(vec!["a", "b"]);
+        let ctx = SortContext {
+            category_field: "cat",
+            batch: &batch,
+            x_field: Some("weight"), // post-flip x holds what was the user's y
+            y_field: None,           // post-flip y holds what was the user's x (unset)
+        };
+        let mut domain = vec!["a".to_string(), "b".to_string()];
+        let mut warnings = Vec::new();
+        apply_sort_to_domain(&mut domain, Some(&serde_json::json!("-y")), &ctx, &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            RenderWarning::SortSpecIgnored { reason } => {
+                assert_eq!(
+                    reason, "sort=\"-y\" but no field is bound to channel \"y\"",
+                    "must echo the user's own written shorthand — never a resolved/internal token"
+                );
+            }
+            other => panic!("expected SortSpecIgnored, got {other:?}"),
+        }
     }
 }

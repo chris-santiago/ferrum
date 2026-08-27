@@ -1406,6 +1406,22 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         }
     }
 
+    // R3: at the standalone/composite-leaf callers, `spec.encoding` here IS the
+    // RESOLVED (post-`CoordFlip`) layer-0 encoding. At the two hybrid callers
+    // (`scene_build::resolve_panel_scales`'s `rendering_spec_for_panel`,
+    // `resolve_layer_y_slot_scale`'s `layer_spec` just below) it is a MERGE:
+    // pre-flip chart-level `spec.encoding` overlaid by post-flip layer encoding
+    // via `Encoding::overlay_from`, which only replaces a channel when the
+    // overlay side is `Some` — so a channel absent from BOTH the layer (post-
+    // flip) and the chart level (pre-flip) stays `None` post-merge, and this
+    // `EncodingTypeMismatch` branch only fires in exactly that case. Since the
+    // channel was unbound on both sides, `x` vs. `y` in the message is moot
+    // (there was never a user-written channel to name either way) — but that
+    // is the ONLY reason `coord_flipped` derived from `spec.coord` is safe to
+    // apply uniformly here; it is not because `spec.encoding` is always
+    // literally the post-flip encoding. `spec.coord` itself is untouched by
+    // the swap either way, so this derivation needs no new parameter.
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     let x_enc = spec
         .encoding
         .x
@@ -1414,6 +1430,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             channel: "x",
             expected: "EncodingSpec",
             got: "None".into(),
+            coord_flipped,
         })?;
     let y_enc = spec
         .encoding
@@ -1423,6 +1440,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             channel: "y",
             expected: "EncodingSpec",
             got: "None".into(),
+            coord_flipped,
         })?;
 
     // Phase 8b: paired-channel endpoints (x2/y2) extend the primary axis domain

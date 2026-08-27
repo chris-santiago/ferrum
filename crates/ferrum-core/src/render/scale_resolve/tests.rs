@@ -4606,6 +4606,106 @@ fn arc_missing_theta_still_errors() {
     }
 }
 
+// --- R3: user-facing channel names under CoordFlip ------------------------
+
+/// A bare (non-Tick/Rule/Arc) mark missing its y encoding, unflipped, must
+/// name the resolved channel `'y'` (byte-identical to today).
+#[test]
+fn missing_y_encoding_names_y_when_not_flipped() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: None,
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("missing y encoding on a non-single-axis mark must error");
+    assert_eq!(
+        format!("{err}"),
+        "encoding 'y' expected EncodingSpec, got None"
+    );
+}
+
+/// R3: under `CoordFlip`, `spec.encoding` here is already the RESOLVED
+/// (post-flip) layer encoding — mirroring what `prepare::build_layers`
+/// produces (SPINE-12): a user who wrote ONLY `y=...` (never `x=...`) ends up,
+/// post-swap, with `x` present and `y` absent — which is what actually trips
+/// this branch. The rendered message must still say `'x'`, the channel the
+/// user themselves left unset, not the internal post-flip `'y'` token.
+#[test]
+fn missing_encoding_names_users_channel_under_flip() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            // Post-flip: this is what was the user's OWN y encoding.
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            // Post-flip: the user never wrote an x encoding, so this (their
+            // resolved y slot) stays unset.
+            y: None,
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: Some(CoordKind::Flip),
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("missing (post-flip) y encoding must still error");
+    match &err {
+        RenderError::EncodingTypeMismatch { channel, coord_flipped, .. } => {
+            // The resolved/internal token stays "y" — never un-flipped in the
+            // struct field, only in the rendered Display text.
+            assert_eq!(*channel, "y");
+            assert!(*coord_flipped);
+        }
+        other => panic!("expected EncodingTypeMismatch, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "encoding 'x' expected EncodingSpec, got None",
+        "message must name the user's own unset channel ('x'), not the resolved post-flip token ('y')"
+    );
+}
+
 /// Mirror of `arc_theta_only_resolves_via_dummy_radius_scale` for the other
 /// theta direction: `theta="y"`, only the `y` positional encoding present,
 /// `x` absent. Must resolve with a real y scale and a dummy unit x scale.

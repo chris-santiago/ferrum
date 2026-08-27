@@ -816,12 +816,30 @@ pub(crate) fn apply_stack(
     } else {
         (encoding.y.as_ref(), encoding.x.as_ref())
     };
+    // R3: the resolved slot each role reads from swaps with `value_on_x` (which
+    // itself already factors in `coord_flipped` — see `resolve_stack_value_on_x`
+    // above), so the "(x)"/"(y)" annotation in these messages must swap with it
+    // too, rather than staying hardcoded to the pre-#77 x=category/y=value
+    // assumption. `user_facing_channel` un-flips the RESOLVED token back to the
+    // one the user actually wrote; identity when `!coord_flipped` (byte-identical
+    // default), including for the `value_axis` override case (unrelated to
+    // `CoordFlip`, so nothing to un-flip there).
+    let cat_token = crate::render::prepare::user_facing_channel(
+        if value_on_x { "y" } else { "x" },
+        coord_flipped,
+    );
+    let value_token = crate::render::prepare::user_facing_channel(
+        if value_on_x { "x" } else { "y" },
+        coord_flipped,
+    );
 
-    let cat_field = cat_enc.ok_or_else(|| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "category (x) encoding required".into() }
+    let cat_field = cat_enc.ok_or_else(|| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Stack",
+        reason: format!("category ({cat_token}) encoding required"),
     })?;
-    let value_field = value_enc.ok_or_else(|| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: "value (y) encoding required".into() }
+    let value_field = value_enc.ok_or_else(|| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Stack",
+        reason: format!("value ({value_token}) encoding required"),
     })?;
     let xi = batch.schema().index_of(&cat_field.field).map_err(|_| {
         crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("category col '{}' not found",
@@ -850,10 +868,14 @@ pub(crate) fn apply_stack(
     } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int8Array>() {
         (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
     } else {
+        // R3: `y_col` is always the VALUE column (bound from `yi` = the resolved
+        // `value_field` index), whichever of x/y it actually reads from — see
+        // `value_token` above, computed from the same `value_on_x`/`coord_flipped`
+        // resolution this dtype check is downstream of.
         return Err(crate::render::RenderError::PositionAdjustFailed {
             adjustment: "Stack",
             reason: format!(
-                "y must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); got {:?}",
+                "{value_token} must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); got {:?}",
                 y_col.data_type()
             ),
         });
@@ -873,9 +895,11 @@ pub(crate) fn apply_stack(
             .map(|i| xxh3::hash64(xs.value(i).as_bytes()))
             .collect()
     } else {
+        // R3: `x_col` is always the CATEGORY column (bound from `xi` = the
+        // resolved `cat_field` index) — see `cat_token` above.
         return Err(crate::render::RenderError::PositionAdjustFailed {
             adjustment: "Stack",
-            reason: "x column must be Float64 or Utf8".into(),
+            reason: format!("{cat_token} column must be Float64 or Utf8"),
         });
     };
 
@@ -1928,6 +1952,162 @@ mod tests {
         assert_eq!(ya.value(1), 30.0);
         assert_eq!(ya.value(2), 30.0);
         assert_eq!(ya.value(3), 70.0);
+    }
+
+    // --- R3: user-facing channel names under CoordFlip (Stack's role labels) ---
+
+    /// Unflipped: `Stack`'s missing-encoding messages hardcode "category (x)" /
+    /// "value (y)" exactly as before this fix — byte-identical default.
+    #[test]
+    fn stack_missing_encoding_messages_unchanged_when_not_flipped() {
+        let b = batch_xyg();
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+
+        // No category (x) encoding.
+        let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(format!("{err}"), "Stack: category (x) encoding required");
+
+        // No value (y) encoding.
+        let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(format!("{err}"), "Stack: value (y) encoding required");
+    }
+
+    /// R3: under `CoordFlip` (no `value_axis` override), `apply_stack` reads
+    /// the value column from the RESOLVED (post-flip) x slot and the category
+    /// column from the RESOLVED y slot (`stack_coord_flipped_uses_x_as_value_column`
+    /// above pins that resolution). A missing RESOLVED x (value) slot is, from
+    /// the user's own perspective, their unset Y encoding — and a missing
+    /// RESOLVED y (category) slot is their unset X encoding. The message must
+    /// name the channel the user themselves left unset, not the internal
+    /// post-flip slot `apply_stack` actually checked.
+    #[test]
+    fn stack_missing_encoding_messages_name_users_channel_under_flip() {
+        let b = batch_xyg();
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+
+        // Post-flip x (value slot) missing → the user's own y is unset.
+        let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, true, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: value (y) encoding required",
+            "post-flip x missing must be reported as the user's own y"
+        );
+
+        // Post-flip y (category slot) missing → the user's own x is unset.
+        let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, true, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: category (x) encoding required",
+            "post-flip y missing must be reported as the user's own x"
+        );
+    }
+
+    /// R3: the Stack dtype-check messages ("{channel} must be Float64...",
+    /// "{channel} column must be Float64 or Utf8") swap consistently with the
+    /// value/category role under flip too — not just the missing-encoding pair.
+    #[test]
+    fn stack_dtype_error_messages_name_users_channel_under_flip() {
+        use arrow::array::BooleanArray;
+
+        // Post-flip x (value slot) is Boolean — an unsupported value dtype.
+        // Under flip this is the user's own y column.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Boolean, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let err = apply_position(&batch, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
+        let text = format!("{err}");
+        assert!(
+            text.starts_with("Stack: y must be Float64, UInt64, or a signed integer type"),
+            "post-flip x's bad dtype must be reported as the user's own y; got: {text}"
+        );
+    }
+
+    /// R3 sign-off item: a deliberate, narrow unflipped-text correction, NOT
+    /// collateral drift. `value_axis: Some(X)` (a composite-mark desugar
+    /// override, e.g. `orientation="horizontal"` — unrelated to `CoordFlip`)
+    /// makes `value_on_x == true` while `coord_flipped == false`. HEAD's four
+    /// Stack role-label messages were hardcoded to the pre-#77 x=category/
+    /// y=value assumption and never tracked `value_on_x`, so in exactly this
+    /// configuration they were factually wrong even though "unflipped":
+    ///   - missing-category: HEAD said `"category (x)"` — but `cat_enc` here
+    ///     is `encoding.y` (`value_on_x` swaps the pair), so the true missing
+    ///     channel is y. HEAD: `"category (x) encoding required"`.
+    ///     Now:  `"category (y) encoding required"`.
+    ///   - missing-value:    HEAD said `"value (y)"` — true missing channel is
+    ///     x. HEAD: `"value (y) encoding required"`.
+    ///     Now:  `"value (x) encoding required"`.
+    /// This test pins the corrected (now-accurate) text for both. It is the
+    /// ONLY configuration where an "unflipped" (`coord_flipped == false`)
+    /// Stack message's text changed from HEAD — every `coord_flipped == false`
+    /// `value_axis: None` case (the overwhelming majority of charts) stays
+    /// byte-identical, per `stack_missing_encoding_messages_unchanged_when_not_flipped`.
+    #[test]
+    fn stack_value_axis_override_corrects_stale_role_label_unflipped() {
+        let b = batch_xyg();
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+
+        // value_axis=X, coord_flipped=false → value_on_x=true → cat_enc=y.
+        // Missing y (category) → HEAD wrongly said "(x)"; now correctly "(y)".
+        let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: category (y) encoding required",
+            "HEAD said 'category (x)', which was factually wrong for value_axis=X: \
+             cat_enc is encoding.y in this configuration"
+        );
+
+        // value_axis=X, coord_flipped=false → value_enc=x. Missing x (value) →
+        // HEAD wrongly said "(y)"; now correctly "(x)".
+        let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: value (x) encoding required",
+            "HEAD said 'value (y)', which was factually wrong for value_axis=X: \
+             value_enc is encoding.x in this configuration"
+        );
     }
 
     // D4 regression: Stack must accept Int64 (and other signed integer) measure

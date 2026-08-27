@@ -91,15 +91,21 @@ pub(crate) enum CompositeResolveError {
         got: usize,
     },
     /// A shared channel referenced a field absent from the leaf's batches.
+    /// `channel` is the RESOLVED (post-`CoordFlip`) token (`Channel::as_str()`)
+    /// — `coord_flipped` (R3) lets `Display` un-flip `x`/`y` back to what the
+    /// leaf's user actually wrote; `color`/`size` are unaffected either way.
     UnknownField {
         channel: &'static str,
         field: String,
+        coord_flipped: bool,
     },
     /// The underlying scale resolver failed to union a leaf's channel domain.
+    /// See [`Self::UnknownField`] for `channel`/`coord_flipped`.
     DomainResolve {
         channel: &'static str,
         field: String,
         source: RenderError,
+        coord_flipped: bool,
     },
 }
 
@@ -110,14 +116,14 @@ impl fmt::Display for CompositeResolveError {
                 f,
                 "{kind}: composite leaf count mismatch: tree has {expected} leaves, got {got} prepared inputs"
             ),
-            Self::UnknownField { channel, field } => write!(
-                f,
-                "shared {channel} channel references unknown field '{field}'"
-            ),
-            Self::DomainResolve { channel, field, source } => write!(
-                f,
-                "failed to resolve shared {channel} domain for field '{field}': {source}"
-            ),
+            Self::UnknownField { channel, field, coord_flipped } => {
+                let channel = crate::render::prepare::user_facing_channel(channel, *coord_flipped);
+                write!(f, "shared {channel} channel references unknown field '{field}'")
+            }
+            Self::DomainResolve { channel, field, source, coord_flipped } => {
+                let channel = crate::render::prepare::user_facing_channel(channel, *coord_flipped);
+                write!(f, "failed to resolve shared {channel} domain for field '{field}': {source}")
+            }
         }
     }
 }
@@ -593,6 +599,12 @@ fn leaf_positional_domain(
     leaf: &LeafResolveInput<'_>,
     channel: Channel,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
+    // R3: `leaf.spec` is the leaf's ORIGINAL ChartSpec (`coord` untouched by
+    // `prepare::build_layers`'s encoding swap), while `leaf.encoding` is
+    // already the RESOLVED (post-flip) rendering encoding (see
+    // `LeafResolveInput`'s doc) — so `leaf.spec.coord` still tells us whether
+    // this leaf is flipped, for un-flipping `channel` in any error below.
+    let coord_flipped = matches!(leaf.spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     let enc = match channel {
         Channel::X => leaf.encoding.x.as_ref(),
         Channel::Y => leaf.encoding.y.as_ref(),
@@ -624,6 +636,7 @@ fn leaf_positional_domain(
         .ok_or_else(|| CompositeResolveError::UnknownField {
             channel: channel.as_str(),
             field: enc.field.clone(),
+            coord_flipped,
         })?;
     let dtype = infer_spec_type(enc, located.col.data_type());
 
@@ -649,6 +662,7 @@ fn leaf_positional_domain(
                 channel: channel.as_str(),
                 field: enc.field.clone(),
                 source,
+                coord_flipped,
             })?;
             Ok(Some(SharedDomain::Numeric { lo, hi }))
         }
@@ -663,6 +677,7 @@ fn leaf_positional_domain(
                 channel: channel.as_str(),
                 field: enc.field.clone(),
                 source,
+                coord_flipped,
             })?;
             Ok(Some(SharedDomain::Ordinal(cats)))
         }
@@ -694,6 +709,9 @@ fn leaf_color_domain(
         .ok_or_else(|| CompositeResolveError::UnknownField {
             channel: Channel::Color.as_str(),
             field: enc.field.clone(),
+            // "color" is never positional, so `CoordFlip` never touches it —
+            // `user_facing_channel` is identity regardless (R3).
+            coord_flipped: false,
         })?;
 
     // FA-5: area marks always group color discretely — treat any dtype as
@@ -713,6 +731,7 @@ fn leaf_color_domain(
                 channel: Channel::Color.as_str(),
                 field: enc.field.clone(),
                 source,
+                coord_flipped: false, // "color" is never positional — see above.
             }
         })?;
         Ok(Some(SharedDomain::Ordinal(cats)))
@@ -732,6 +751,8 @@ fn leaf_size_domain(
         .ok_or_else(|| CompositeResolveError::UnknownField {
             channel: Channel::Size.as_str(),
             field: enc.field.clone(),
+            // "size" is never positional — see `leaf_color_domain`'s note above.
+            coord_flipped: false,
         })?;
     Ok(Some(numeric_extent_domain(located.col)))
 }
@@ -1048,12 +1069,59 @@ mod tests {
         let inputs = [input(&l0), input(&l1)];
         let err = resolve_composite_scales(&tree, &inputs).unwrap_err();
         match err {
-            CompositeResolveError::UnknownField { channel, field } => {
+            CompositeResolveError::UnknownField { channel, field, coord_flipped } => {
                 assert_eq!(channel, "x");
                 assert_eq!(field, "v");
+                assert!(!coord_flipped, "spec_with_x's leaves aren't flipped");
             }
             other => panic!("expected UnknownField, got {other:?}"),
         }
+    }
+
+    /// R3: under `CoordFlip`, a leaf's `UnknownField` must name the channel the
+    /// LEAF's own user wrote, not the resolved one it landed on post-swap.
+    /// `flipped_encoding.y` holds `enc("v")` — as `prepare::build_layers` would
+    /// have left it after swapping the leaf's own `x="v"` into the y slot — so
+    /// the message must still say `x`, not the resolved `y`.
+    #[test]
+    fn unknown_field_errors_names_leafs_user_channel_under_flip() {
+        use crate::spec::coord::CoordKind;
+        let mut flipped_encoding = Encoding::default();
+        flipped_encoding.y = Some(enc("v")); // post-flip landing spot
+        let flipped_spec = ChartSpec { coord: Some(CoordKind::Flip), ..spec_with(flipped_encoding.clone()) };
+        let l0 = LeafOwned {
+            encoding: flipped_encoding.clone(),
+            spec: flipped_spec.clone(),
+            batch: num_batch("w", &[0.0, 10.0]),
+            outputs: outputs(&num_batch("w", &[0.0, 10.0])),
+        };
+        let l1 = LeafOwned {
+            encoding: flipped_encoding,
+            spec: flipped_spec,
+            batch: num_batch("w", &[5.0, 30.0]),
+            outputs: outputs(&num_batch("w", &[5.0, 30.0])),
+        };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(None, Some("v")), leaf_node(None, Some("v"))],
+            shared_both(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let err = resolve_composite_scales(&tree, &inputs).unwrap_err();
+        match &err {
+            CompositeResolveError::UnknownField { channel, field, coord_flipped } => {
+                // Resolved/internal token: this is the slot actually looked up.
+                assert_eq!(*channel, "y");
+                assert_eq!(field, "v");
+                assert!(*coord_flipped);
+            }
+            other => panic!("expected UnknownField, got {other:?}"),
+        }
+        assert_eq!(
+            err.to_string(),
+            "shared x channel references unknown field 'v'",
+            "message must name the leaf's own channel ('x'), not the resolved one ('y')"
+        );
     }
 
     #[test]
@@ -1085,9 +1153,26 @@ mod tests {
             channel: "y",
             field: "score".to_string(),
             source: crate::render::RenderError::ScaleResolutionFailed("boom".to_string()),
+            coord_flipped: false,
         };
         let msg = err.to_string();
         assert!(msg.contains('y') && msg.contains("score") && msg.contains("boom"), "{msg}");
+    }
+
+    /// R3: `DomainResolve`'s `channel` un-flips the same way `UnknownField`'s
+    /// does — the resolved `"y"` token renders as `"x"` under `coord_flipped`.
+    #[test]
+    fn domain_resolve_error_names_users_channel_under_flip() {
+        let err = CompositeResolveError::DomainResolve {
+            channel: "y",
+            field: "score".to_string(),
+            source: crate::render::RenderError::ScaleResolutionFailed("boom".to_string()),
+            coord_flipped: true,
+        };
+        assert_eq!(
+            err.to_string(),
+            "failed to resolve shared x domain for field 'score': scale resolution failed: boom"
+        );
     }
 
     #[test]
