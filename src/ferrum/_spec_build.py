@@ -158,13 +158,6 @@ class SpecBuildMixin:
             enc[radius_ch] = enc.pop("radius")
         if "radius2" in enc:
             enc[radius2_ch] = enc.pop("radius2")
-        # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
-        # only one axis is encoded.  The arc builder ignores the dummy scale.
-        if resolved._mark == "arc":
-            if theta_ch == "x" and "y" not in enc and "x" in enc:
-                enc["y"] = enc["x"]
-            elif theta_ch == "y" and "x" not in enc and "y" in enc:
-                enc["x"] = enc["y"]
         return enc
 
     def _build_encoding_specs(

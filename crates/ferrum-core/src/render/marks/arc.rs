@@ -105,9 +105,20 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         pc.theta_field, pc.theta2_field, pc.radius_field, pc.radius2_field, pc.radius_scale,
     );
 
-    // Annular mode: a second angular OR radial extent is bound. Note the
-    // legacy pie path always populates a dummy radius field equal to theta
-    // (Python adds `enc["y"] = enc["x"]`), so the gate is on *2 channels only.
+    // Annular mode: a second angular OR radial extent is bound. `radius_field`
+    // is `None` for a theta-only arc (Python no longer synthesizes a dummy
+    // radius channel; the single-axis exemption arm in
+    // `render::scale_resolve::resolve_scales_with_leaf_context` (~1367)
+    // supplies a dummy *unit scale* for the absent axis instead). The legacy
+    // pie sweep below only ever reads `field` (the theta column) — never
+    // `radius_field` or `radius_scale` — so this dummy scale is inert *for
+    // wedge geometry*. It is NOT inert overall: `render::prepare::build_axes`
+    // / `layout::compute_layout` size the panel's axis margin from whatever
+    // `ScaleKind` the y channel resolves to, even under `CoordPolar` where
+    // that axis is never drawn, so swapping a real domain for the dummy
+    // unit scale does shift the panel's margin (see the P8 finding in
+    // `tests/test_finding_p8.py`). So the annular-mode gate below is on *2
+    // channels only.
     if theta2_field.is_some() || radius2_field.is_some() {
         return build_annular(
             ctx, &geom, theta_field, theta2_field, radius_field, radius2_field, radius_scale,
