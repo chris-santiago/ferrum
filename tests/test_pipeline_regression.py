@@ -22,7 +22,7 @@ Coverage map:
   S1-S11 : Mark kwargs (interpolate, stroke_cap, stroke_join, filled, shape,
             limit, band_size, line on area, orient horizontal)
   W1-W18 : Encoding channels (Tooltip, Href, Description, Fill, Detail,
-            Theta/Radius raises NotImplementedError)
+            Theta/Radius remap under CoordPolar; warn_once without it)
   X1-X6  : Desugar ValueError guards
 """
 

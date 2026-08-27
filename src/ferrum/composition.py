@@ -3591,6 +3591,26 @@ def _promote_layer_color(new) -> None:
     shorthand) to the chart level, so ``build_color_scale`` can see the
     scheme and build the correct domain.
 
+    A layer whose color arrives as ``fill``/``stroke`` rather than ``color``
+    directly is resolved through :func:`ferrum.encoding._aliases.resolve_color_alias`
+    -- the same ``_ENCODING_ALIASES`` table :func:`~ferrum.encoding._aliases.apply_channel_aliases`
+    drives, exposed as a side-effect-free, read-only resolution (no
+    mutation, no warning, no ``detail`` involvement at all) -- because this
+    is the merge-time seam that actually decides whether a layer's color
+    renders; the serialization-time alias in ``_build_layers_list`` runs too
+    late to influence this promotion decision, and reading the raw,
+    un-aliased ``layer.encoding.get("color")`` here would silently miss a
+    fill/stroke-only layer. Fixed 2026-08-27 (P1 remediation, spec-review
+    finding) -- previously a layer whose only color channel was
+    ``fill``/``stroke`` was never promoted, so no chart-level color scale
+    was built and every such layer silently rendered in the theme default
+    color with no legend, identical to having no color channel at all. An
+    earlier version of this fix called the full, warning-emitting
+    ``apply_channel_aliases`` on a ``detail``-stripped throwaway copy of the
+    layer's encoding instead; ``resolve_color_alias`` replaces that
+    comment-enforced invariant with a resolver that structurally cannot
+    warn (quality-review finding).
+
     Plain string-valued color encodings (e.g. ``"class"`` from composite-mark
     desugars like ``mark_roc``) are intentionally skipped — they are
     layer-internal shorthands and must not be promoted to chart level because
@@ -3599,14 +3619,18 @@ def _promote_layer_color(new) -> None:
     This is a no-op when:
     - the chart-level color encoding is already set (first encoding-bearing
       layer already won via the LHS clone), or
-    - no layer carries a ``ChannelBase`` color encoding.
+    - no layer carries a ``ChannelBase`` color encoding (directly or via
+      fill/stroke alias).
     """
+    from ferrum.encoding._aliases import resolve_color_alias
     from ferrum.encoding.base import ChannelBase
 
     if new._encoding.get("color") is not None:
         return
     for layer in new._layers or []:
         color_ch = layer.encoding.get("color")
+        if color_ch is None:
+            color_ch = resolve_color_alias(layer.encoding)
         if isinstance(color_ch, ChannelBase):
             new._encoding["color"] = copy.copy(color_ch)
             return

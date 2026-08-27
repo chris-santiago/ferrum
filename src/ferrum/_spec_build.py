@@ -80,6 +80,68 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
     return auto_fields
 
 
+def _warn_channel_dropped(ch_name: str) -> None:
+    """``warn_once`` for a channel that is accepted but never reaches the spec.
+
+    Shared by the chart-level (:meth:`SpecBuildMixin._build_encoding_specs`)
+    and per-layer (:meth:`SpecBuildMixin._build_layers_list`) safety nets so
+    both bucket enforcements emit the identical, accurate message. The
+    channel never becomes a ``kw[axis] = EncodingSpec(...)`` assignment nor
+    any Rust ``Encoding`` field -- earlier wording ("Stored on EncodingSpec
+    for forward-compatibility ... planned for a future Phase") claimed
+    otherwise and was corrected 2026-08-27 (P1 remediation, spec-review
+    finding).
+    """
+    from ferrum._warn import warn_once
+
+    warn_once(
+        "encoding",
+        ch_name,
+        message=(
+            f"Encoding channel {ch_name!r} is accepted but not rendered; "
+            "the renderer ignores it and it is omitted from the spec."
+        ),
+    )
+
+
+def _warn_unbucketed_channels(enc: dict) -> None:
+    """Warn once on every channel in *enc* outside the RENDERER_HONORED/
+    ALIAS/FACET buckets that still carries a concrete field.
+
+    The single enforcement point for the bucket-partition safety net --
+    shared by the chart-level (:meth:`SpecBuildMixin._build_encoding_specs`)
+    and per-layer (:meth:`SpecBuildMixin._build_layers_list`) passes, so the
+    channel-known-set check and the string-vs-``ChannelBase`` field
+    extraction cannot drift between them again (2026-08-27 P1 remediation,
+    quality-review finding: the two were hand-copied and had already
+    drifted -- the layered copy handled plain-string encoding values, the
+    chart-level copy did not, even though chart-level `enc` values are
+    always ``ChannelBase`` in practice).
+
+    This is what actually produces the ``warn_once`` for the WARN bucket
+    (``x_error``/``y_error``/``x_error2``/``y_error2``/``tooltip_field``)
+    and for POLAR channels left in *enc* because no ``CoordPolar`` coord
+    remapped them away (chart-level: ``_resolve_polar_remapping`` pops
+    them from `enc` before this runs when ``CoordPolar`` IS set, so this
+    never sees them in that case; the layered path has no per-layer
+    ``CoordPolar`` remap at all, so a layer's own polar channel warns here
+    unconditionally, regardless of the chart's coord) -- see the bucket
+    partition in ``chart.py``.
+
+    *enc* values may be either a ``ChannelBase`` instance or a plain string
+    (the layered path's legitimate shorthand).
+    """
+    from ferrum.chart import _SPEC_KNOWN_CHANNELS
+    from ferrum.encoding._aliases import _channel_field
+
+    for ch_name, ch in enc.items():
+        if ch_name in _SPEC_KNOWN_CHANNELS:
+            continue
+        if _channel_field(ch) is None:
+            continue
+        _warn_channel_dropped(ch_name)
+
+
 def _selection_field_names(selections: list) -> set[str]:
     """Collect the union of field names tracked by field-based selections.
 
@@ -193,39 +255,20 @@ class SpecBuildMixin:
             ``"tooltip_fields"`` when applicable.
         """
         from ferrum import EncodingSpec
-        from ferrum._warn import warn_once
         from ferrum.chart import (
-            _FACET_CHANNELS,
-            _POLAR_CHANNELS,
             _RENDERER_HONORED_CHANNELS,
-            _SILENT_CHANNELS,
             _apply_inferred_type,
             _strip_unstackable,
         )
         from ferrum.repeat import _RepeatPlaceholder
 
-        # Safety net: warn on channels outside all known sets.
-        _all_known = (
-            frozenset(_RENDERER_HONORED_CHANNELS)
-            | _SILENT_CHANNELS
-            | _POLAR_CHANNELS
-            | _FACET_CHANNELS
-        )
-        for ch_name, ch in enc.items():
-            if ch_name in _all_known:
-                continue
-            field = getattr(ch, "field", None)
-            if field is None or isinstance(field, _RepeatPlaceholder):
-                continue
-            warn_once(
-                "encoding",
-                ch_name,
-                message=(
-                    f"Encoding channel {ch_name!r} is accepted but not yet "
-                    "rendered; the SVG will omit it (planned for a future Phase). "
-                    "Stored on EncodingSpec for forward-compatibility."
-                ),
-            )
+        # Bucket-partition safety net (single enforcement point, see
+        # _warn_unbucketed_channels) -- warns on any channel outside the
+        # RENDERER_HONORED/ALIAS/FACET buckets that still carries a concrete
+        # field: the WARN bucket (x_error*, tooltip_field), and POLAR
+        # channels left in `enc` because no CoordPolar coord remapped them
+        # away.
+        _warn_unbucketed_channels(enc)
 
         # Build full EncodingSpec instances per channel so honored kwargs
         # (scale, title) and deferred kwargs (axis, legend, sort, ...) flow to Rust.
@@ -352,13 +395,36 @@ class SpecBuildMixin:
             _apply_inferred_type,
             _strip_unstackable,
         )
+        from ferrum.encoding._aliases import apply_channel_aliases
         from ferrum._layer_transforms import _transforms_to_json_list
 
         out = []
         for layer in (layers if layers is not None else self._layers) or []:
+            # Per-layer channel aliasing (mirrors Chart.to_spec's chart-level
+            # pass exactly): fill/stroke -> color (with the same
+            # stroke-dropped-by-color conflict warning) and detail ->
+            # mark_style.detail (mark-conditional warn_once). Operates on a
+            # shallow copy so the layer's own frozen `_Layer.encoding` is
+            # never mutated. `layer_mk` starts from the layer's own
+            # mark-style kwargs so an internal composite mark that already
+            # set e.g. `mark_kwargs={"detail": ...}` directly is not
+            # clobbered (`alias_detail_channel` uses `setdefault`).
+            layer_enc = dict(layer.encoding)
+            layer_mk = dict(layer.mark_kwargs) if layer.mark_kwargs else {}
+            layer_enc, layer_mk = apply_channel_aliases(layer_enc, layer_mk, layer.mark)
+
+            # Bucket-partition safety net (single enforcement point, see
+            # _warn_unbucketed_channels; mirrors _build_encoding_specs's
+            # chart-level call exactly). Catches per-layer x_error*/
+            # tooltip_field, and theta/radius/theta2/radius2 -- the layered
+            # path has no per-layer CoordPolar remap, so a layer's own polar
+            # channel warns and never renders regardless of the chart's
+            # coord.
+            _warn_unbucketed_channels(layer_enc)
+
             encoding_dict: dict = {}
             for axis in _RENDERER_HONORED_CHANNELS:
-                ch = layer.encoding.get(axis)
+                ch = layer_enc.get(axis)
                 if ch is None:
                     continue
                 if hasattr(ch, "to_encoding_spec_dict"):
@@ -414,9 +480,10 @@ class SpecBuildMixin:
                 "encoding": encoding_dict,
             }
             # Wire format to Rust's coerce_layers preserves the legacy
-            # ``mark_style`` key.
-            if layer.mark_kwargs:
-                layer_dict["mark_style"] = dict(layer.mark_kwargs)
+            # ``mark_style`` key. ``layer_mk`` was already alias-aggregated
+            # above (fill/stroke -> color, detail -> mark_style.detail).
+            if layer_mk:
+                layer_dict["mark_style"] = layer_mk
             # data_source: composite-mark layers may pull from a named transform
             # output instead of the final pipeline batch. Only emit when set.
             if layer.data_source is not None:

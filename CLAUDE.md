@@ -231,7 +231,7 @@ path, unchanged from before.
 
 **Read `design-docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
 
-- **Channels:** `Description`/`Key` encoding (TODO G1 chart-level done, but `Key` is interactive-only), `Href` encoding already works
+- **Channels:** `Description`/`Href` encoding already work. `Key` encoding is now accepted and carried into the scene graph as mark identity for interactive/animated runtimes (as of the 2026-08-27 P1 remediation — `chart-level` and `layered` paths both populate `MarkBatch.keys` via `ChartSpec(key=...)`/`scene_build::extract_keys`, in both static and interactive scene JSON) — but **no renderer consumes it visually yet**: static SVG output is byte-identical with and without `key=`, and the WASM runtime never reads `MarkBatch.keys`. A visual/identity consumer (e.g. transition-matching on data updates) is still an open gap — see the archaeology doc's `Key` row.
 - **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
 - **Missing spec implementations:** `ferrum.Grid`, full palette library (`SceneNode::Raw` WASM and `compare=` diagnostic routing were resolved by the compare-aggregate work + Phase B composite unification, 2026-07)
 - **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`

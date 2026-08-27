@@ -929,7 +929,7 @@ class TestChartDataNone:
 
 
 # ---------------------------------------------------------------------------
-# Task 10 + Task 5: stroke/angle SVG attribute emission + _SILENT_CHANNELS
+# Task 10 + Task 5: stroke/angle SVG attribute emission + _ALIAS_CHANNELS
 # ---------------------------------------------------------------------------
 
 
@@ -949,11 +949,11 @@ def _stroke_df() -> pl.DataFrame:
 
 class TestStrokeWidthSVG:
     def test_stroke_width_not_in_silent_channels(self):
-        """stroke_width must not be in _SILENT_CHANNELS after Task 5."""
-        from ferrum.chart import _SILENT_CHANNELS
+        """stroke_width must not be in _ALIAS_CHANNELS after Task 5."""
+        from ferrum.chart import _ALIAS_CHANNELS
 
-        assert "stroke_width" not in _SILENT_CHANNELS, (
-            "stroke_width should have been removed from _SILENT_CHANNELS"
+        assert "stroke_width" not in _ALIAS_CHANNELS, (
+            "stroke_width should have been removed from _ALIAS_CHANNELS"
         )
 
     def test_scatter_stroke_width_encodes_without_error(self):
@@ -973,11 +973,11 @@ class TestStrokeWidthSVG:
 
 class TestStrokeOpacitySVG:
     def test_stroke_opacity_not_in_silent_channels(self):
-        """stroke_opacity must not be in _SILENT_CHANNELS after Task 5."""
-        from ferrum.chart import _SILENT_CHANNELS
+        """stroke_opacity must not be in _ALIAS_CHANNELS after Task 5."""
+        from ferrum.chart import _ALIAS_CHANNELS
 
-        assert "stroke_opacity" not in _SILENT_CHANNELS, (
-            "stroke_opacity should have been removed from _SILENT_CHANNELS"
+        assert "stroke_opacity" not in _ALIAS_CHANNELS, (
+            "stroke_opacity should have been removed from _ALIAS_CHANNELS"
         )
 
     def test_scatter_stroke_opacity_emits_attribute(self):
@@ -1014,11 +1014,11 @@ class TestStrokeOpacitySVG:
 
 class TestStrokeDashSVG:
     def test_stroke_dash_not_in_silent_channels(self):
-        """stroke_dash must not be in _SILENT_CHANNELS after Task 5."""
-        from ferrum.chart import _SILENT_CHANNELS
+        """stroke_dash must not be in _ALIAS_CHANNELS after Task 5."""
+        from ferrum.chart import _ALIAS_CHANNELS
 
-        assert "stroke_dash" not in _SILENT_CHANNELS, (
-            "stroke_dash should have been removed from _SILENT_CHANNELS"
+        assert "stroke_dash" not in _ALIAS_CHANNELS, (
+            "stroke_dash should have been removed from _ALIAS_CHANNELS"
         )
 
     def test_scatter_stroke_dash_index_0_is_solid(self):
@@ -1064,12 +1064,10 @@ class TestStrokeDashSVG:
 
 class TestAngleSVG:
     def test_angle_not_in_silent_channels(self):
-        """angle must not be in _SILENT_CHANNELS after Task 5."""
-        from ferrum.chart import _SILENT_CHANNELS
+        """angle must not be in _ALIAS_CHANNELS after Task 5."""
+        from ferrum.chart import _ALIAS_CHANNELS
 
-        assert "angle" not in _SILENT_CHANNELS, (
-            "angle should have been removed from _SILENT_CHANNELS"
-        )
+        assert "angle" not in _ALIAS_CHANNELS, "angle should have been removed from _ALIAS_CHANNELS"
 
     def test_scatter_angle_45_emits_rotate(self):
         """encode(angle='ang') with ang=45 → transform='rotate(45 ...)' in SVG."""
@@ -1101,11 +1099,11 @@ class TestFillOpacitySVG:
     """
 
     def test_fill_opacity_not_in_silent_channels(self):
-        """fill_opacity must not be in _SILENT_CHANNELS after promotion."""
-        from ferrum.chart import _SILENT_CHANNELS
+        """fill_opacity must not be in _ALIAS_CHANNELS after promotion."""
+        from ferrum.chart import _ALIAS_CHANNELS
 
-        assert "fill_opacity" not in _SILENT_CHANNELS, (
-            "fill_opacity should have been removed from _SILENT_CHANNELS"
+        assert "fill_opacity" not in _ALIAS_CHANNELS, (
+            "fill_opacity should have been removed from _ALIAS_CHANNELS"
         )
 
     def test_fill_opacity_in_renderer_honored_channels(self):
