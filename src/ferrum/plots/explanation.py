@@ -754,12 +754,15 @@ def _pdp_chart_from_source(
     if kind == "both":
         df = _pdp_split_kind_both(df)
 
+    # `center` is not forwarded to mark_pdp: its effect (re-basing ICE
+    # polylines to start at 0) already happened above via
+    # `_pdp_center_curves`; the mark itself treats `center` as
+    # informational and warns if it is passed directly.
     chart = (
         ferrum.Chart(df)
         .mark_pdp(
             kind=kind,
             ice_alpha=ice_alpha,
-            center=center,
             color_field=None,  # one feature per facet — color is redundant
         )
         .encode(

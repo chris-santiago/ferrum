@@ -19,6 +19,12 @@ from ferrum.marks._desugar_helpers import (
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
+#: mark_discrimination_threshold's own ``n_thresholds`` default -- named so
+#: the "did the caller actually override this informational parameter"
+#: check in that method compares against the same value the signature
+#: declares, instead of a second, driftable literal.
+_N_THRESHOLDS_DEFAULT = 50
+
 
 class ClassificationMarksMixin:
     """Mixin providing classification-diagnostic mark methods for Chart."""
@@ -351,7 +357,7 @@ class ClassificationMarksMixin:
         self,
         *,
         metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
-        n_thresholds: int = 50,
+        n_thresholds: int = _N_THRESHOLDS_DEFAULT,
         threshold_line: bool = False,
         optimum_label: bool = True,
         position=None,
@@ -372,7 +378,12 @@ class ClassificationMarksMixin:
             ``("precision", "recall", "f1", "queue_rate")``.
         n_thresholds : int, optional
             Number of evenly-spaced threshold steps to evaluate.  Default is
-            ``50``.
+            ``50``.  Informational at the mark layer -- the sweep is already
+            fixed by the time the (pre-melted) data reaches this mark; pass
+            it to ``ModelSource.discrimination_threshold(n_thresholds=...)``
+            or ``discrimination_threshold_chart(n_thresholds=...)`` instead.
+            A non-default value passed directly here emits a one-time
+            warning naming the no-op.
         threshold_line : bool, optional
             Whether to draw a vertical rule at the optimal threshold.  Default
             is ``False``.
@@ -402,6 +413,32 @@ class ClassificationMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_discrimination_threshold
+
+        if n_thresholds != _N_THRESHOLDS_DEFAULT:
+            # `n_thresholds` is registered in ferrum.marks._informational_kwargs
+            # as an informational-only parameter for this mark: it has zero
+            # effect at this call -- the threshold sweep is already fixed by
+            # the time the (pre-melted) data reaches this mark. Routing the
+            # warning through warn_informational_kwarg (rather than calling
+            # ferrum._warn.warn_once directly) is what makes the registry
+            # load-bearing: the call raises if this (mark, param) pair isn't
+            # registered, and the AST guard in
+            # tests/test_mark_kwargs_no_silent_drop.py verifies the converse
+            # -- every registered pair has a matching call site here.
+            from ferrum.marks._informational_kwargs import warn_informational_kwarg
+
+            warn_informational_kwarg(
+                "discrimination_threshold",
+                "n_thresholds",
+                (
+                    "mark_discrimination_threshold(n_thresholds=...) has no "
+                    "effect here -- the threshold sweep is already fixed by "
+                    "the time the data reaches this mark. Use "
+                    "discrimination_threshold_chart(n_thresholds=...) or "
+                    "ModelSource.discrimination_threshold(n_thresholds=...) "
+                    "to control the sweep density."
+                ),
+            )
 
         def _disc_threshold_prep(df):
             import polars as pl
@@ -500,7 +537,12 @@ class ClassificationMarksMixin:
         Parameters
         ----------
         normalize : {"true", "pred", "all"} or None, optional
-            Normalise cell counts.  ``None`` (default) shows raw counts.
+            Informational at the mark layer -- the cell values are already
+            normalized (or not) by the time they reach this mark. Pass it
+            to ``ModelSource.confusion_matrix(normalize=...)`` or
+            ``confusion_matrix_chart(normalize=...)`` instead. A non-``None``
+            value passed directly here emits a one-time warning naming the
+            no-op.
         annotate : bool, optional
             Whether to overlay per-cell count / percentage text.  Default is
             ``True``.
@@ -524,10 +566,33 @@ class ClassificationMarksMixin:
         --------
         >>> import ferrum as fm
         >>> src = fm.ModelSource(clf, X_test, y_test)
-        >>> fm.Chart(src.confusion_matrix()).mark_confusion(normalize="true")
+        >>> fm.Chart(src.confusion_matrix(normalize="true")).mark_confusion()
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_confusion
+
+        if normalize is not None:
+            # `normalize` is registered in ferrum.marks._informational_kwargs
+            # as an informational-only parameter for this mark: it has zero
+            # effect at this call -- the cell values are already normalized
+            # (or not) by the time they reach this mark. See
+            # mark_decision_boundary for the full rationale of routing this
+            # through warn_informational_kwarg rather than warn_once
+            # directly.
+            from ferrum.marks._informational_kwargs import warn_informational_kwarg
+
+            warn_informational_kwarg(
+                "confusion",
+                "normalize",
+                (
+                    "mark_confusion(normalize=...) has no effect here -- the "
+                    "cell values are already normalized (or not) by the time "
+                    "they reach this mark. Use "
+                    "confusion_matrix_chart(normalize=...) or "
+                    "ModelSource.confusion_matrix(normalize=...) to control "
+                    "normalization."
+                ),
+            )
 
         return self._set_composite_mark(
             "confusion",

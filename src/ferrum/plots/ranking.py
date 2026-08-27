@@ -941,7 +941,11 @@ def _decision_boundary_chart_from_source(
             grid_df = grid_df.with_columns(
                 pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"),
             )
-        chart = ferrum.Chart(grid_df).mark_decision_boundary(proba=proba)
+        # `proba` is not forwarded to mark_decision_boundary: its effect
+        # (which grid `z` column got computed) already happened above, in
+        # `_build_decision_boundary_grid`; the mark itself treats `proba`
+        # as informational and warns if it is passed directly.
+        chart = ferrum.Chart(grid_df).mark_decision_boundary()
         chart = chart.properties(title=ferrum.Title("Decision Boundary"))
         return _finalize_chart(
             chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -956,7 +960,9 @@ def _decision_boundary_chart_from_source(
             pl.col("z").cast(pl.Int64).cast(pl.Utf8).alias("z"),
             pl.col("scatter_z").cast(pl.Int64).cast(pl.Utf8).alias("scatter_z"),
         )
-    chart = ferrum.Chart(unified).mark_decision_boundary(proba=proba)
+    # `proba` is not forwarded to mark_decision_boundary here either -- see
+    # the pure-boundary path above for why.
+    chart = ferrum.Chart(unified).mark_decision_boundary()
     chart = chart.layer(
         _Layer(
             mark="point",

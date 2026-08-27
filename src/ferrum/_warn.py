@@ -26,7 +26,9 @@ def _get_seen() -> set:
     return s
 
 
-def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
+def warn_once(
+    channel: str, kwarg: str, message: Optional[str] = None, *, stacklevel: int = 3
+) -> None:
     """Emit a ``UserWarning`` the first time a ``(channel, kwarg)`` pair is seen.
 
     Subsequent calls with the same ``(channel, kwarg)`` key are silently
@@ -43,6 +45,14 @@ def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
     message : str or None, default None
         Custom warning text.  If ``None``, a default message is
         constructed from ``channel`` and ``kwarg``.
+    stacklevel : int, default 3
+        Passed through to ``warnings.warn``. The default of ``3`` is tuned
+        for the common shape "user code -> one ferrum helper -> `warn_once`"
+        (1 = inside this function, 2 = the helper, 3 = the helper's caller).
+        A caller with an *extra* frame between the user and this function
+        (e.g. a small wrapper that itself calls `warn_once`) should pass a
+        correspondingly higher value so the emitted warning still points at
+        the user's own call site rather than into ferrum's source.
 
     Examples
     --------
@@ -57,7 +67,7 @@ def warn_once(channel: str, kwarg: str, message: Optional[str] = None) -> None:
     msg = message or (
         f"{channel}({kwarg}=...) is accepted but not yet honored; planned for a future Phase."
     )
-    warnings.warn(msg, UserWarning, stacklevel=3)
+    warnings.warn(msg, UserWarning, stacklevel=stacklevel)
 
 
 def reset_warnings() -> None:

@@ -389,8 +389,13 @@ class StatisticalMarksMixin:
             IQR multiple beyond which points are considered outliers.  Default
             is ``1.5``.
         palette : list of str or None, optional
-            Colour palette applied to successive depth bands.  ``None`` uses
-            the active theme's categorical palette.
+            Accepted but not yet honored: this argument is never read.
+            Depth-band color follows the ordinary mark-color resolution —
+            an explicit ``fill=`` override, else the chart's ``color``
+            encoding through the theme's categorical palette, else the
+            theme's default ``mark_color`` — with only opacity ramping by
+            depth.  A non-``None`` value emits a one-time warning naming
+            the no-op (tracked as a follow-up to implement or remove).
         horizontal : bool, optional
             Swap axes so bands run horizontally.  Default is ``False``.
             Legacy alias; prefer ``orient="horizontal"``.
@@ -422,6 +427,28 @@ class StatisticalMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.composite import desugar_boxen
+
+        if palette is not None:
+            # `palette` is registered in ferrum.marks._informational_kwargs
+            # as accepted-but-not-yet-honored (not "informational" in the
+            # proba/n_thresholds sense -- no call site anywhere gives it an
+            # effect; it is a real, unimplemented feature). See
+            # mark_decision_boundary for the routing rationale.
+            from ferrum.marks._informational_kwargs import warn_informational_kwarg
+
+            warn_informational_kwarg(
+                "boxen",
+                "palette",
+                (
+                    "mark_boxen(palette=...) is accepted but not yet "
+                    "honored -- this argument is never read. Depth-band "
+                    "color follows the ordinary mark-color resolution "
+                    "(an explicit fill= override, else the chart's color "
+                    "encoding through the theme's categorical palette, "
+                    "else the theme's default mark_color), with only "
+                    "opacity ramping by depth."
+                ),
+            )
 
         effective_horizontal = _normalize_orient("mark_boxen", orient, horizontal)
 

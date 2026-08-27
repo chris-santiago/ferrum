@@ -273,9 +273,10 @@ class ClusteringMarksMixin:
         kind identically.  It is the ``decision_boundary_chart`` figure
         function that gives ``proba`` its effect: passing
         ``proba=True``/``False`` there selects which grid ``z`` gets
-        computed upstream.  Passing ``proba`` directly to
+        computed upstream.  Passing ``proba=True`` directly to
         ``mark_decision_boundary`` on data you assembled yourself has no
-        effect unless the ``z`` column was already computed to match.
+        effect unless the ``z`` column was already computed to match, and
+        emits a one-time warning naming the no-op.
 
         Parameters
         ----------
@@ -299,10 +300,34 @@ class ClusteringMarksMixin:
         --------
         >>> import ferrum as fm
         >>> src = fm.ModelSource(clf, X_test, y_test)
-        >>> fm.Chart(src.decision_boundary()).mark_decision_boundary(proba=True)
+        >>> fm.Chart(src.decision_boundary()).mark_decision_boundary()
         Chart(mark='rect', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_decision_boundary
+
+        if proba:
+            # `proba` is registered in ferrum.marks._informational_kwargs as
+            # an informational-only parameter for this mark: it has zero
+            # effect at this call -- the grid's z values were already
+            # computed by the time they reach this mark. Routing the warning
+            # through warn_informational_kwarg (rather than calling
+            # ferrum._warn.warn_once directly) is what makes the registry
+            # load-bearing: the call raises if this (mark, param) pair isn't
+            # registered, and the AST guard in
+            # tests/test_mark_kwargs_no_silent_drop.py verifies the converse
+            # -- every registered pair has a matching call site here.
+            from ferrum.marks._informational_kwargs import warn_informational_kwarg
+
+            warn_informational_kwarg(
+                "decision_boundary",
+                "proba",
+                (
+                    "mark_decision_boundary(proba=True) has no effect here -- "
+                    "the grid's z values are already computed by the time they "
+                    "reach this mark. Use decision_boundary_chart(proba=True), "
+                    "which computes P(class=1) upstream before building the grid."
+                ),
+            )
 
         return self._set_composite_mark(
             "decision_boundary",

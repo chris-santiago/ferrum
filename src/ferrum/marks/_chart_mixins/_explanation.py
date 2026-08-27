@@ -398,7 +398,10 @@ class ExplanationMarksMixin:
             Opacity of individual ICE lines when ``kind`` is ``"individual"``
             or ``"both"``.  Default is ``0.2``.
         center : bool, optional
-            Whether to centre ICE lines at their first value (centred ICE).
+            Informational at the mark layer -- ICE polylines are already
+            re-based to start at 0 by the time they reach this mark. Pass
+            it to ``pdp_chart(center=...)`` instead. A truthy value passed
+            directly here emits a one-time warning naming the no-op.
             Default is ``False``.
         color_field : str or None, optional
             Column name driving per-feature colour.  Default is ``"feature"``.
@@ -416,10 +419,31 @@ class ExplanationMarksMixin:
         --------
         >>> import ferrum as fm
         >>> src = fm.ModelSource(model, X_test, y_test)
-        >>> fm.Chart(src.partial_dependence()).mark_pdp(kind="both", center=True)
+        >>> fm.Chart(src.partial_dependence()).mark_pdp(kind="both")
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_pdp
+
+        if center:
+            # `center` is registered in ferrum.marks._informational_kwargs
+            # as an informational-only parameter for this mark: it has zero
+            # effect at this call -- ICE polylines are already re-based to
+            # start at 0 by the time they reach this mark. See
+            # mark_decision_boundary for the full rationale of routing this
+            # through warn_informational_kwarg rather than warn_once
+            # directly.
+            from ferrum.marks._informational_kwargs import warn_informational_kwarg
+
+            warn_informational_kwarg(
+                "pdp",
+                "center",
+                (
+                    "mark_pdp(center=True) has no effect here -- ICE "
+                    "polylines are already re-based to start at 0 by the "
+                    "time they reach this mark. Use pdp_chart(center=True) "
+                    "to control centering."
+                ),
+            )
 
         return self._set_composite_mark(
             "pdp",

@@ -698,3 +698,19 @@ know the band-axis selection it depends on is now `ScaleKind`-driven, not
 `coord_flipped`-driven, at the same call site; the #77 `apply_stack` audit
 should check whether its own band-axis selection needs the analogous
 widening before touching `n_dodge_groups`-adjacent code there.
+
+## 2026-08-27 — `mark_boxen(palette=)` open gap (P9 AST guard extension, Task 14 quality-review cycle 3)
+
+**New open item, not yet resolved.** While extending the P9 desugar-parameter
+AST guard (`tests/test_mark_kwargs_no_silent_drop.py`) from "every `del`" to
+"every declared parameter, `del`eted or simply never referenced", three
+mark-level parameters surfaced in that state: `mark_confusion(normalize=)`
+and `mark_pdp(center=)` matched the existing `proba`/`n_thresholds` shape
+(effect lives entirely upstream in a figure function — both now registered
+in `ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS` and warn once,
+see `ferrum-spec.md`'s 2026-08-27 P9 AST guard extension note), but
+`mark_boxen(palette=)` did not.
+
+| ID | Sev | Item |
+|---|---|---|
+| PAL-1 | S2 | **`mark_boxen(palette=...)` is a real, undelivered feature — accepted, now warned, not implemented.** `src/ferrum/marks/composite.py::desugar_boxen` never reads `palette` (now an explicit `del palette` with a comment, previously a silent unreferenced parameter). No call site anywhere — mark, mixin, or any figure function — gives it an effect. Depth-band color follows the ordinary mark-color resolution: an explicit `fill=` override, else the chart's `color` encoding through the theme's categorical palette, else the theme's default `mark_color` — with only opacity ramping by depth; `palette` is never consulted at any step (confirmed by quality review by rendering under `solarized_dark`, the one builtin theme where the default `mark_color` and `color_scheme[0]` differ, after an earlier draft of this note wrongly claimed depth-band color "always comes from the categorical palette" — that claim only coincidentally held under `paper_ink`, where `PAPER_INK[0] == mark_color`). The public docstring in `_chart_methods_statistical.py::mark_boxen` used to falsely claim "Colour palette applied to successive depth bands", contradicted by `ferrum-spec.md`'s own (also-false) "sequential palette name; nested rectangles fade toward the median" prose — both are now corrected to say "accepted but not yet honored" with the actual color-resolution order spelled out. `palette` is registered in `INFORMATIONAL_KWARGS` and warns once via `warn_informational_kwarg` when passed with a non-`None` value (`tests/test_finding_p9.py::test_mark_boxen_palette_*`), which stops it from being *silent*, but this is a stopgap, not a fix — the disposition is explicitly a warn-fallback (CLAUDE.md: "No Warn-fallbacks" — flagged by quality review as only defensible as a bridge to a real fix, not a resting state). **Two real dispositions remain, neither done:** (a) implement per-depth-band palette application in `desugar_boxen` (map an explicit `list[str]`/`None` palette across the nested rect layers by depth, analogous to how `mark_boxplot`/other composite marks resolve categorical color), or (b) remove the parameter entirely (breaking `mark_boxen(palette=...)` callers with a `TypeError`, matching the P9 "removed" disposition applied to `mark_calibration(n_bins=)` etc.). `src/ferrum/marks/composite.py` (desugar), `src/ferrum/marks/_chart_methods_statistical.py` (mixin + docstring), `src/ferrum/marks/_informational_kwargs.py` (registry, full writeup of the disposition split between this and the `normalize`/`center` shape). |

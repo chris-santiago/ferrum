@@ -727,8 +727,27 @@ def desugar_boxen(
     chart-level x/y encoding still references the user's columns, so axis
     scales resolve naturally (LetterValue copies the groupby values verbatim
     into ``group``, and quantile outputs lie within the original value range).
+
+    ``palette`` is accepted but not yet honored: it is never read, by this
+    function or anywhere else. Depth-band color follows the ordinary
+    mark-color resolution -- an explicit ``fill=`` override, else the
+    chart's ``color`` encoding through the theme's categorical palette,
+    else the theme's default ``mark_color`` -- with only opacity ramping
+    by depth (see the ``opacity`` computation in the layer loop below). It
+    is registered in ``ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS``
+    under ``"boxen"``; ``Chart.mark_boxen`` warns once if it is passed
+    directly with a non-``None`` value. Unlike the mark's other
+    informational parameters, no other call site honors it either -- this
+    is a real, unimplemented feature, not a value computed elsewhere
+    (tracked as a follow-up: implement per-depth-band palette application,
+    or remove the parameter).
     """
     user_kw = _validate("boxen", mark_kwargs)
+    # palette is accepted but not yet honored -- see the docstring above
+    # and ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS, which is
+    # what Chart.mark_boxen's warn_once is keyed against. Unlike the other
+    # registry entries, no call site anywhere gives this an effect.
+    del palette
     if x_field is None or y_field is None:
         raise ValueError("mark_boxen() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field

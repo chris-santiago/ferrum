@@ -644,10 +644,11 @@ def _confusion_chart_from_source(
     import ferrum
 
     df = source.confusion_matrix(normalize=normalize)
-    chart = ferrum.Chart(df).mark_confusion(
-        normalize=normalize,
-        annotate=annotate,
-    )
+    # `normalize` is not forwarded to mark_confusion: its effect (whether
+    # cell values are normalized) already happened above, in
+    # `source.confusion_matrix(normalize=...)`; the mark itself treats
+    # `normalize` as informational and warns if it is passed directly.
+    chart = ferrum.Chart(df).mark_confusion(annotate=annotate)
     chart = chart.encode(
         x=X("predicted", title="Predicted label"),
         y=Y("actual", title="True label"),
@@ -748,9 +749,13 @@ def _discrimination_threshold_chart_from_source(
         "queue_rate": "Queue rate",
     }
     long_df = long_df.with_columns(pl.col("metric").replace(_metric_labels).alias("metric"))
+    # `n_thresholds` is not forwarded to mark_discrimination_threshold: its
+    # effect (the sweep density) already happened above, in
+    # `source.discrimination_threshold(n_thresholds=...)`; the mark itself
+    # treats `n_thresholds` as informational and warns if it is passed
+    # directly with a non-default value.
     chart = ferrum.Chart(long_df).mark_discrimination_threshold(
         metrics=metrics,
-        n_thresholds=n_thresholds,
         threshold_line=threshold_line,
         optimum_label=optimum_label,
     )

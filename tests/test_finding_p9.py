@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import warnings
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -489,3 +490,363 @@ def test_roc_chart_multiclass_per_class_false_titles_with_auc():
     svg = chart.to_svg()
     assert "ROC Curve — AUC 0." in svg
     assert ">ROC Curve<" not in svg
+
+
+# ---------------------------------------------------------------------------
+# Task 14 (P9 AST guard follow-up): informational no-ops now warn directly
+# at the mark method -- proba (mark_decision_boundary), n_thresholds
+# (mark_discrimination_threshold) -- but the figure functions that forward
+# neither into the mark call must stay silent, and the parameter must not
+# change a single byte of rendered output either way.
+# ---------------------------------------------------------------------------
+
+
+def _decision_boundary_grid_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "x2": [1.0, 2.0],
+            "y": [0.0, 0.0],
+            "y2": [1.0, 1.0],
+            "z": ["0", "1"],
+        }
+    )
+
+
+def test_mark_decision_boundary_proba_true_warns_once():
+    reset_warnings()
+    df = _decision_boundary_grid_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = ferrum.Chart(df).mark_decision_boundary(proba=True).to_svg()
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "proba" in str(user_warnings[0].message)
+    assert "<svg" in svg
+
+
+def test_mark_decision_boundary_proba_default_is_silent():
+    reset_warnings()
+    df = _decision_boundary_grid_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ferrum.Chart(df).mark_decision_boundary().to_svg()
+    assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+
+
+def test_mark_decision_boundary_proba_has_no_effect_on_output():
+    """``proba`` is ``del``eted unread by the desugar -- passing it must
+    not change a single byte of the rendered output, only emit the
+    warning above."""
+    df = _decision_boundary_grid_df()
+    reset_warnings()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg_default = ferrum.Chart(df).mark_decision_boundary().to_svg()
+        svg_proba_true = ferrum.Chart(df).mark_decision_boundary(proba=True).to_svg()
+    assert svg_default == svg_proba_true
+
+
+def test_decision_boundary_chart_stays_silent_regardless_of_proba():
+    """The figure-function path no longer forwards ``proba`` to
+    ``mark_decision_boundary`` (Task 14), so it must never trigger the
+    mark-level warning -- for either value, and with the scatter overlay
+    on or off."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    for proba in (False, True):
+        for scatter in (False, True):
+            reset_warnings()
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                chart = ferrum.decision_boundary_chart(
+                    model,
+                    X,
+                    df["y"],
+                    features=(0, 1),
+                    grid_resolution=20,
+                    proba=proba,
+                    scatter=scatter,
+                )
+                chart.to_svg()
+            user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+            assert user_warnings == [], (proba, scatter, user_warnings)
+
+
+def _discrimination_threshold_long_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "threshold": [0.1, 0.2, 0.3] * 4,
+            "metric": ["precision"] * 3 + ["recall"] * 3 + ["f1"] * 3 + ["queue_rate"] * 3,
+            "value": [0.5] * 12,
+        }
+    )
+
+
+def test_mark_discrimination_threshold_n_thresholds_non_default_warns_once():
+    reset_warnings()
+    df = _discrimination_threshold_long_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = (
+            ferrum.Chart(df)
+            .mark_discrimination_threshold(n_thresholds=200, optimum_label=False)
+            .to_svg()
+        )
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "n_thresholds" in str(user_warnings[0].message)
+    assert "<svg" in svg
+
+
+def test_mark_discrimination_threshold_n_thresholds_default_is_silent():
+    reset_warnings()
+    df = _discrimination_threshold_long_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ferrum.Chart(df).mark_discrimination_threshold(optimum_label=False).to_svg()
+    assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+
+
+def test_mark_discrimination_threshold_n_thresholds_has_no_effect_on_output():
+    """``n_thresholds`` is ``del``eted unread by the desugar -- passing a
+    non-default value must not change a single byte of the rendered
+    output, only emit the warning above."""
+    df = _discrimination_threshold_long_df()
+    reset_warnings()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg_default = ferrum.Chart(df).mark_discrimination_threshold(optimum_label=False).to_svg()
+        svg_non_default = (
+            ferrum.Chart(df)
+            .mark_discrimination_threshold(n_thresholds=200, optimum_label=False)
+            .to_svg()
+        )
+    assert svg_default == svg_non_default
+
+
+def test_discrimination_threshold_chart_stays_silent_regardless_of_n_thresholds():
+    """The figure-function path no longer forwards ``n_thresholds`` to
+    ``mark_discrimination_threshold`` (Task 14), so it must never trigger
+    the mark-level warning -- default or not."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    for n_thresholds in (50, 10, 200):
+        reset_warnings()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            chart = ferrum.discrimination_threshold_chart(
+                y_true=y_true, y_pred=y_pred, n_thresholds=n_thresholds
+            )
+            chart.to_svg()
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert user_warnings == [], (n_thresholds, user_warnings)
+
+
+def test_informational_kwarg_warning_points_at_caller_not_ferrum_source():
+    """S4 fix: the warning must be attributed to the user's call site, not
+    to ``warn_informational_kwarg`` or the mixin method in between (two
+    extra ferrum frames sit between this line and ``warnings.warn``)."""
+    reset_warnings()
+    df = _decision_boundary_grid_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ferrum.Chart(df).mark_decision_boundary(proba=True)
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert user_warnings[0].filename == __file__, (
+        f"expected the warning attributed to this test file, got "
+        f"{user_warnings[0].filename!r} -- stacklevel points into ferrum's "
+        f"own source instead of the caller"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Quality-review follow-up (2026-08-27, Task 14 extension): the AST guard's
+# `del`-only scope missed three parameters that are declared and simply
+# never referenced -- the identical P9 defect, invisible to a guard that
+# only inspects `ast.Delete`. Two (`normalize` on mark_confusion, `center`
+# on mark_pdp) are the same "effect happens upstream" shape as proba /
+# n_thresholds above. The third (`palette` on mark_boxen) is different in
+# kind: no call site anywhere honors it -- it is a real, unimplemented
+# feature, not a value computed elsewhere. All three are now registered
+# and warn; see `ferrum.marks._informational_kwargs` for the full
+# disposition writeup, including the tracked palette follow-up.
+# ---------------------------------------------------------------------------
+
+
+def _confusion_matrix_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "actual": ["0", "0", "1", "1"],
+            "predicted": ["0", "1", "0", "1"],
+            "value": [5.0, 1.0, 2.0, 6.0],
+            "value_fmt": ["5", "1", "2", "6"],
+        }
+    )
+
+
+def test_mark_confusion_normalize_non_none_warns_once():
+    reset_warnings()
+    df = _confusion_matrix_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = ferrum.Chart(df).mark_confusion(normalize="true").to_svg()
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "normalize" in str(user_warnings[0].message)
+    assert "<svg" in svg
+
+
+def test_mark_confusion_normalize_default_is_silent():
+    reset_warnings()
+    df = _confusion_matrix_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ferrum.Chart(df).mark_confusion().to_svg()
+    assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+
+
+def test_mark_confusion_normalize_has_no_effect_on_output():
+    """``normalize`` is never referenced by ``desugar_confusion`` -- passing
+    it must not change a single byte of rendered output, only emit the
+    warning above."""
+    df = _confusion_matrix_df()
+    reset_warnings()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg_default = ferrum.Chart(df).mark_confusion().to_svg()
+        svg_normalize = ferrum.Chart(df).mark_confusion(normalize="true").to_svg()
+    assert svg_default == svg_normalize
+
+
+def test_confusion_matrix_chart_stays_silent_regardless_of_normalize():
+    """The figure-function path no longer forwards ``normalize`` to
+    ``mark_confusion`` (Task 14), so it must never trigger the mark-level
+    warning -- for any normalization mode."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0, 1, 1, 1, 0, 0, 0, 1])
+    for normalize in ("true", "pred", "all", None):
+        reset_warnings()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred, normalize=normalize)
+            chart.to_svg()
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert user_warnings == [], (normalize, user_warnings)
+
+
+def _pdp_average_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["f0"] * 3 + ["f1"] * 3,
+            "feature_value": [0.0, 0.5, 1.0, 0.0, 0.5, 1.0],
+            "pd_value": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        }
+    )
+
+
+def test_mark_pdp_center_true_warns_once():
+    reset_warnings()
+    df = _pdp_average_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = ferrum.Chart(df).mark_pdp(center=True).to_svg()
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "center" in str(user_warnings[0].message)
+    assert "<svg" in svg
+
+
+def test_mark_pdp_center_default_is_silent():
+    reset_warnings()
+    df = _pdp_average_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ferrum.Chart(df).mark_pdp().to_svg()
+    assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+
+
+def test_mark_pdp_center_has_no_effect_on_output():
+    """``center`` is never referenced by ``desugar_pdp`` -- passing it must
+    not change a single byte of rendered output, only emit the warning
+    above."""
+    df = _pdp_average_df()
+    reset_warnings()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg_default = ferrum.Chart(df).mark_pdp().to_svg()
+        svg_center_true = ferrum.Chart(df).mark_pdp(center=True).to_svg()
+    assert svg_default == svg_center_true
+
+
+def test_pdp_chart_stays_silent_regardless_of_center():
+    """The figure-function path no longer forwards ``center`` to
+    ``mark_pdp`` (Task 14), so it must never trigger the mark-level
+    warning -- default or not."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    for center in (False, True):
+        reset_warnings()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            chart = ferrum.pdp_chart(
+                model, X, df["y"], features=["f0", "f1"], grid_resolution=10, center=center
+            )
+            chart.to_svg()
+        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+        assert user_warnings == [], (center, user_warnings)
+
+
+def _boxen_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "group": ["a"] * 10 + ["b"] * 10,
+            "val": list(range(10)) + list(range(5, 15)),
+        }
+    )
+
+
+def test_mark_boxen_palette_non_none_warns_once():
+    reset_warnings()
+    df = _boxen_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = ferrum.Chart(df).mark_boxen(palette=["#111111", "#222222"])
+        svg = chart.encode(x="group", y="val").to_svg()
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "palette" in str(user_warnings[0].message)
+    assert "<svg" in svg
+
+
+def test_mark_boxen_palette_default_is_silent():
+    reset_warnings()
+    df = _boxen_df()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ferrum.Chart(df).mark_boxen().encode(x="group", y="val").to_svg()
+    assert [w for w in caught if issubclass(w.category, UserWarning)] == []
+
+
+def test_mark_boxen_palette_has_no_effect_on_output():
+    """``palette`` is a genuinely unimplemented feature (not "effect
+    happens elsewhere" like the other four registry entries) -- passing it
+    changes nothing about the rendered colors, which is exactly the defect
+    this warning surfaces rather than resolves. Pinned here so a future
+    palette implementation is a deliberate, visible change to this test,
+    not a silent one."""
+    df = _boxen_df()
+    reset_warnings()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        svg_default = ferrum.Chart(df).mark_boxen().encode(x="group", y="val").to_svg()
+        svg_palette = (
+            ferrum.Chart(df)
+            .mark_boxen(palette=["#111111", "#222222"])
+            .encode(x="group", y="val")
+            .to_svg()
+        )
+    assert svg_default == svg_palette

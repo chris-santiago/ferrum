@@ -333,7 +333,11 @@ def desugar_discrimination_threshold(
     """
     # metrics is wired via data_transform in Chart.mark_discrimination_threshold
     # (filters to the requested metric names when present in the data);
-    # n_thresholds is informational -- data is pre-melted.
+    # n_thresholds is informational -- data is already pre-melted at a fixed
+    # sweep density by the time it reaches this mark. It is registered in
+    # ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS under
+    # "discrimination_threshold"; Chart.mark_discrimination_threshold warns
+    # once if it is passed directly with a non-default value.
     del metrics, n_thresholds
     user_kw = _validate("discrimination_threshold", mark_kwargs)
     layers: list = [
@@ -388,7 +392,10 @@ def desugar_confusion(
 
     ``normalize`` is informational at the mark layer (the chart builder
     is responsible for shaping the data); the user-visible normalization
-    happens upstream in ``ModelSource.confusion_matrix``.
+    happens upstream in ``ModelSource.confusion_matrix``. It is registered
+    in ``ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS`` under
+    ``"confusion"``; ``Chart.mark_confusion`` warns once if it is passed
+    directly with a non-``None`` value.
 
     ``cmap`` selects the sequential colormap applied to the heat cells.
     ``None`` (default) defers to the theme's sequential scheme.
@@ -396,6 +403,10 @@ def desugar_confusion(
     from ferrum.encoding import Color
 
     del x_field, y_field
+    # normalize is informational at the mark layer -- see the docstring
+    # above and ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS,
+    # which is what Chart.mark_confusion's warn_once is keyed against.
+    del normalize
     user_kw = _validate("confusion", mark_kwargs)
     color_enc = Color(color_field, scheme=cmap) if cmap is not None else Color(color_field)
     layers: list = [

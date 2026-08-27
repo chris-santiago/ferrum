@@ -469,13 +469,16 @@ Marks are constructors that accept visual property overrides as keyword argument
 > parameters: `k_depth` (`"tukey"` \| `"proportion"` \| `"trustworthy"` \|
 > `"full"` \| `int`), `k_proportion` (float in `(0, 1)`, used when
 > `k_depth="proportion"`), `outlier_threshold` (float; rows beyond the
-> outermost letter value are flagged outliers), `palette` (sequential
-> palette name; nested rectangles fade toward the median).
+> outermost letter value are flagged outliers), `palette` — see 2026-08-27
+> note below: accepted but not yet honored; never read. Depth-band color
+> follows the ordinary mark-color resolution (explicit `fill=`, else the
+> chart's `color` encoding through the theme's categorical palette, else
+> the theme's default `mark_color`), with only opacity ramping by depth.
 
 | Mark | Expands To | Key Parameters |
 |---|---|---|
 | `mark_boxplot(...)` | box + whisker + outlier points | `extent` (`"min-max"` or float IQR multiplier), `size`, `outliers` |
-| `mark_boxen(...)` | nested rectangles (letter values) + outlier points | `k_depth` (`"tukey"`\|`"proportion"`\|`"trustworthy"`\|`"full"`\|`int`), `k_proportion`, `outlier_threshold`, `palette` |
+| `mark_boxen(...)` | nested rectangles (letter values) + outlier points | `k_depth` (`"tukey"`\|`"proportion"`\|`"trustworthy"`\|`"full"`\|`int`), `k_proportion`, `outlier_threshold`, `palette` — see 2026-08-27 note below: accepted but not yet honored, now warns |
 | `mark_errorbar(...)` | rule + tick | `extent` (`"ci"`, `"stderr"`, `"stdev"`, `"iqr"`), `ticks` |
 | `mark_errorband(...)` | area + line | `extent`, `borders` |
 | `mark_ribbon(...)` | area between Y and Y2 | `opacity`, `interpolate` |
@@ -534,7 +537,7 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 |---|---|---|
 | `mark_residuals(...)` | Residuals vs fitted | `kind` (`"raw"`, `"studentized"`, `"scaled"`), `reference_line`, `cook_threshold` |
 | `mark_prediction_error(...)` | Actual vs predicted | `identity_line`, `ci`, `reference_band` |
-| `mark_confusion(...)` | Confusion matrix heatmap + text | `normalize` (`None`, `"true"`, `"pred"`, `"all"`), `text_fmt` |
+| `mark_confusion(...)` | Confusion matrix heatmap + text | `normalize` (`None`, `"true"`, `"pred"`, `"all"`) — see 2026-08-27 note below: informational-only at the mark layer, now warns; `text_fmt` |
 | `mark_roc(...)` | ROC curve line | `average` (`None`, `"micro"`, `"macro"`, `"weighted"`), `reference_line`, `annotate_auc` |
 | `mark_pr(...)` | Precision-recall curve | `average`, `annotate_ap`, `iso_lines` |
 | `mark_calibration(...)` | Calibration curve | `reference_line` (see 2026-08-27 note below: `n_bins`/`strategy` removed) |
@@ -544,12 +547,12 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 | `mark_shap_beeswarm(...)` | SHAP beeswarm | `max_display`, `color_bar`, `order` (`"abs_mean"`, `"max_abs"`) |
 | `mark_shap_bar(...)` | SHAP mean absolute bar | `max_display`, `layered` |
 | `mark_shap_waterfall(...)` | SHAP waterfall (single prediction) | `max_display`, `show_data` |
-| `mark_pdp(...)` | Partial dependence + ICE | `kind` (`"average"`, `"individual"`, `"both"`), `ice_alpha`, `center` |
+| `mark_pdp(...)` | Partial dependence + ICE | `kind` (`"average"`, `"individual"`, `"both"`), `ice_alpha`, `center` — see 2026-08-27 note below: informational-only at the mark layer, now warns |
 | `mark_silhouette(...)` | Silhouette plot per cluster | `line_width`, `zero_line` |
 | `mark_learning_curve(...)` | Learning curve with CI band | `ci_style` (`"band"`, `"errorbar"`) |
 | `mark_validation_curve(...)` | Validation curve with CI band | `log_scale`, `ci_style` |
-| `mark_decision_boundary(...)` | 2D classification boundary | `grid_resolution`, `alpha`, `background`, `contour_levels` |
-| `mark_discrimination_threshold(...)` | Precision, recall, F1, and queue rate vs decision threshold for binary classifiers. Useful for threshold selection under class imbalance. | `metrics` (list of metrics to display, default all four), `n_thresholds`, `threshold_line` (bool, marks estimated optimal threshold) |
+| `mark_decision_boundary(...)` | 2D classification boundary | `grid_resolution`, `alpha`, `background`, `contour_levels` — see 2026-08-27 note below: `proba` is informational-only at the mark layer and now warns |
+| `mark_discrimination_threshold(...)` | Precision, recall, F1, and queue rate vs decision threshold for binary classifiers. Useful for threshold selection under class imbalance. | `metrics` (list of metrics to display, default all four), `n_thresholds`, `threshold_line` (bool, marks estimated optimal threshold) — see 2026-08-27 note below: `n_thresholds` is informational-only at the mark layer and now warns |
 | `mark_parallel_coordinates(...)` | Parallel coordinates plot. Each sample is a polyline drawn across vertically-arranged feature axes. General-purpose: accepts any tabular data, not only model output. | `rescale` (`"minmax"`\|`"zscore"`\|`None`), `alpha`, `highlight_selection` (bool) |
 | `mark_class_prediction_error(...)` | Stacked bar chart of predicted class counts, colored by actual class. Distinct from confusion matrix: shows absolute prediction volume per class and reveals systematic over/under-prediction. | `orient`, `normalize` (bool) |
 | `mark_pca_scree(...)` | Bar chart of explained variance ratio per principal component with optional cumulative variance line overlay. | `cumulative_line` (bool, default `True`), `threshold_line` (float, draws a horizontal line at this cumulative variance level, e.g. 0.95) — see 2026-08-27 note below: `n_components` removed |
@@ -624,6 +627,75 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > `mark_gain`/`mark_lift`, `metrics` on `mark_discrimination_threshold`,
 > `order`/`color_bar` on `mark_shap_beeswarm`) — those already matched
 > this spec's Key Parameters columns and needed no table edit.
+
+> **2026-08-27 (P9 AST guard, findings-remediation batch — Task 14):**
+> closing the P9 desugar-parameter guard's own blind spot (a `del` on a
+> *declared* parameter with no wiring and no warning) surfaced two more
+> mark-level parameters carrying the same defect the paragraph above
+> fixed, neither of which was implementable or removable — their real
+> effect lives entirely upstream, before the data ever reaches the mark.
+> Both are now registered in
+> `ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS` and warn once
+> (`UserWarning`) when passed directly to the mark method with a
+> non-default value; neither changes a single byte of rendered output.
+>
+> - `mark_decision_boundary(proba=...)` — informational at the mark
+>   layer. The grid's `z` column (class index vs. predicted probability)
+>   is already computed by the time it reaches this mark; `proba`'s real
+>   effect is in `decision_boundary_chart`'s upstream grid construction,
+>   which selects which `z` gets computed and no longer forwards `proba`
+>   into the `mark_decision_boundary()` call at all.
+> - `mark_discrimination_threshold(n_thresholds=...)` — informational at
+>   the mark layer. The threshold sweep is already fixed and the data
+>   already pre-melted by the time it reaches this mark; `n_thresholds`'s
+>   real effect is in `ModelSource.discrimination_threshold(n_thresholds=)`
+>   / `discrimination_threshold_chart(n_thresholds=)`, upstream of the
+>   mark, which likewise no longer forwards it into the
+>   `mark_discrimination_threshold()` call.
+>
+> Both were previously silent no-ops (`del <param>` with neither wiring
+> nor a warning); they now match the "works or rejects/warns loudly"
+> contract every other P9 site above already meets.
+
+> **2026-08-27 (P9 AST guard extension, findings-remediation batch —
+> Task 14, quality-review cycle 3):** extending the guard in the paragraph
+> above from "every `del`" to "every declared parameter, `del`eted or
+> simply never referenced" (closing the guard's own P9-class blind spot —
+> a parameter that is declared and never read passes a `del`-only check
+> just by not being explicitly deleted) surfaced three more mark-level
+> parameters in that exact state. Two match the `proba`/`n_thresholds`
+> shape above (effect lives entirely upstream); one does not:
+>
+> - `mark_confusion(normalize=...)` — informational at the mark layer.
+>   The cell values are already normalized (or not) by the time they
+>   reach this mark; `normalize`'s real effect is in
+>   `ModelSource.confusion_matrix(normalize=)` /
+>   `confusion_matrix_chart(normalize=)`, upstream, which no longer
+>   forwards it into the `mark_confusion()` call. Registered in
+>   `ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS`; warns once
+>   when passed directly with a non-`None` value; no effect on rendered
+>   output either way.
+> - `mark_pdp(center=...)` — informational at the mark layer. ICE
+>   polylines are already re-based to start at 0 by the time they reach
+>   this mark; `center`'s real effect is in `pdp_chart(center=)`
+>   (`_pdp_center_curves`, applied before the `Chart` is constructed),
+>   which no longer forwards it into the `mark_pdp()` call. Same registry
+>   + warn-once treatment; no effect on rendered output either way.
+> - `mark_boxen(palette=...)` — **not** the same shape as the two above.
+>   Unlike `normalize`/`center`, no call site anywhere — mark, mixin, or
+>   figure function — ever gives `palette` an effect: it is simply never
+>   read. Depth-band color follows the ordinary mark-color resolution (an
+>   explicit `fill=` override, else the chart's `color` encoding through
+>   the theme's categorical palette, else the theme's default
+>   `mark_color`), with only opacity ramping by depth — `palette` itself
+>   plays no part in any of that, under any theme. It is registered the
+>   same way (warns once on a non-`None` value) purely so it stops being a
+>   *silent* drop, but this is a stopgap, not a fix — the palette itself
+>   remains unimplemented. Tracked as an open item in
+>   `design-docs/superpowers/followups/2026-05-15-code-archaeology.md`
+>   pending either implementing per-depth-band palette application in
+>   `desugar_boxen` (`src/ferrum/marks/composite.py`) or removing the
+>   parameter.
 
 ---
 

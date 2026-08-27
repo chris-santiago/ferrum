@@ -322,9 +322,16 @@ def desugar_pdp(
 
     When ``center=True``, the chart builder pre-subtracts the value at
     the smallest ``feature_value`` per ``(feature, sample_id)`` group so
-    every polyline starts at 0.
+    every polyline starts at 0. It is registered in
+    ``ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS`` under
+    ``"pdp"``; ``Chart.mark_pdp`` warns once if it is passed directly with
+    a truthy value.
     """
     del x_field, y_field
+    # center is informational at the mark layer -- see the docstring above
+    # and ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS, which is
+    # what Chart.mark_pdp's warn_once is keyed against.
+    del center
     validate_choice("mark_pdp", "kind", kind, ("average", "individual", "both"))
     user_kw = _validate("pdp", mark_kwargs)
 

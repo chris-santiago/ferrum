@@ -238,12 +238,15 @@ def desugar_decision_boundary(
 
     ``proba`` is informational at the mark layer — the chart builder
     chooses the data and the renderer's continuous-color scale handles
-    both kinds of ``z`` identically. Recorded for future overrides.
+    both kinds of ``z`` identically. It is registered in
+    ``ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS`` under
+    ``"decision_boundary"``; ``Chart.mark_decision_boundary`` warns once if
+    it is passed directly with a truthy value.
     """
     del x_field, y_field
-    # proba is informational at the mark layer — the chart builder
-    # chooses the data and the renderer's continuous-color scale handles
-    # both kinds of z identically.
+    # proba is informational at the mark layer -- see the docstring above
+    # and ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS, which is
+    # what Chart.mark_decision_boundary's warn_once is keyed against.
     del proba
 
     user_kw = _validate("decision_boundary", mark_kwargs)
