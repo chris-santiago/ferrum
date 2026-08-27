@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ferrum.marks._desugar_helpers import _sort_by
+from ferrum.marks._desugar_helpers import (
+    _filter_class_average,
+    _normalize_names,
+    _sort_by,
+    _utf8_col,
+)
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
@@ -72,6 +77,12 @@ class ClassificationMarksMixin:
         """
         from ferrum.marks.diagnostic import desugar_roc
 
+        def _roc_prep(df):
+            df = _filter_class_average(df, average, mark_name="mark_roc")
+            if reference_line:
+                df = _sort_by(df, "fpr")
+            return df
+
         return self._set_composite_mark(
             "roc",
             desugar_roc,
@@ -84,7 +95,7 @@ class ClassificationMarksMixin:
             },
             placeholder="point",
             position=position,
-            data_transform=((lambda df: _sort_by(df, "fpr")) if reference_line else None),
+            data_transform=_roc_prep,
         )
 
     def mark_pr(
@@ -150,13 +161,12 @@ class ClassificationMarksMixin:
             },
             placeholder="point",
             position=position,
+            data_transform=(lambda df: _filter_class_average(df, average, mark_name="mark_pr")),
         )
 
     def mark_calibration(
         self,
         *,
-        n_bins: int = 10,
-        strategy: str = "uniform",
         reference_line: bool = True,
         color_field: str | None = None,
         position=None,
@@ -168,18 +178,17 @@ class ClassificationMarksMixin:
         outcomes (empirical probability) on y.  A perfectly calibrated model
         lies on the diagonal.  Data must carry the schema emitted by
         ``ModelSource.calibration_curve()``: ``mean_predicted``,
-        ``fraction_positive``, ``count``.
+        ``fraction_positive``, ``count`` -- the binning itself (``n_bins``,
+        ``strategy``) already happened when that method was called, so
+        ``mark_calibration`` has no binning parameters of its own; pass
+        ``n_bins``/``strategy`` to ``ModelSource.calibration_curve()`` (or to
+        the ``calibration_chart`` figure function, which forwards them there).
 
         When ``reference_line=True`` the data is pre-sorted ascending by
         ``mean_predicted`` before rendering.
 
         Parameters
         ----------
-        n_bins : int, optional
-            Number of calibration bins.  Default is ``10``.
-        strategy : {"uniform", "quantile"}, default "uniform"
-            Binning strategy.  ``"uniform"`` uses equally-spaced bins;
-            ``"quantile"`` uses equal-frequency bins.
         reference_line : bool, optional
             Whether to overlay a perfect-calibration diagonal reference line.
             Default is ``True``.
@@ -199,7 +208,7 @@ class ClassificationMarksMixin:
         --------
         >>> import ferrum as fm
         >>> src = fm.ModelSource(clf, X_test, y_test)
-        >>> fm.Chart(src.calibration_curve()).mark_calibration(n_bins=15)
+        >>> fm.Chart(src.calibration_curve(n_bins=15)).mark_calibration()
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_calibration
@@ -208,8 +217,6 @@ class ClassificationMarksMixin:
             "calibration",
             desugar_calibration,
             {
-                "n_bins": n_bins,
-                "strategy": strategy,
                 "reference_line": reference_line,
                 "color_field": color_field,
                 **mark_kwargs,
@@ -263,6 +270,11 @@ class ClassificationMarksMixin:
         """
         from ferrum.marks.diagnostic import desugar_gain
 
+        def _gain_filter(df):
+            if reference_line or "class" not in df.columns:
+                return df
+            return df.filter(_utf8_col("class") != "baseline")
+
         return self._set_composite_mark(
             "gain",
             desugar_gain,
@@ -273,6 +285,7 @@ class ClassificationMarksMixin:
             },
             placeholder="point",
             position=position,
+            data_transform=_gain_filter,
         )
 
     def mark_lift(
@@ -316,6 +329,11 @@ class ClassificationMarksMixin:
         """
         from ferrum.marks.diagnostic import desugar_lift
 
+        def _lift_filter(df):
+            if reference_line or "class" not in df.columns:
+                return df
+            return df.filter(_utf8_col("class") != "baseline")
+
         return self._set_composite_mark(
             "lift",
             desugar_lift,
@@ -326,6 +344,7 @@ class ClassificationMarksMixin:
             },
             placeholder="point",
             position=position,
+            data_transform=_lift_filter,
         )
 
     def mark_discrimination_threshold(
@@ -389,6 +408,34 @@ class ClassificationMarksMixin:
 
             if "threshold" not in df.columns or "metric" not in df.columns:
                 return df
+            if metrics:
+                # Restrict to the requested metric names, but only when at
+                # least one is actually present -- a figure builder that
+                # already unpivoted to just the selected (and possibly
+                # relabeled) metrics has nothing left to restrict, and
+                # filtering to zero rows would blank the chart instead of
+                # leaving its upstream-consumed selection alone.
+                present = set(df["metric"].unique().to_list())
+                keep = present & set(metrics)
+                if keep:
+                    df = df.filter(pl.col("metric").is_in(keep))
+                elif not (_normalize_names(present) & _normalize_names(metrics)):
+                    # No overlap even loosened for case/spacing (e.g. the
+                    # discrimination_threshold_chart figure builder relabels
+                    # "queue_rate" -> "Queue rate" before calling this mark,
+                    # which *is* recognized here and stays silent). Zero
+                    # overlap by any reading is most likely a typo in
+                    # metrics=, so warn instead of silently rendering every
+                    # metric.
+                    from ferrum._warn import warn_once
+
+                    warn_once(
+                        "mark_discrimination_threshold",
+                        "metrics",
+                        f"mark_discrimination_threshold(metrics={tuple(metrics)!r}) "
+                        "matched no rows in the metric column; rendering every "
+                        "metric unfiltered. Check for a typo in metrics=.",
+                    )
             n = df.height
             if n == 0:
                 return df

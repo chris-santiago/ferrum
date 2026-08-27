@@ -267,11 +267,22 @@ class ClusteringMarksMixin:
         ``_decision_boundary_chart_from_source`` produces these columns from a
         ``ModelSource``.
 
+        ``proba`` is informational at the mark layer -- the grid's ``z``
+        values are already computed (class index or probability) by the time
+        they reach this mark, and the continuous colour scale renders either
+        kind identically.  It is the ``decision_boundary_chart`` figure
+        function that gives ``proba`` its effect: passing
+        ``proba=True``/``False`` there selects which grid ``z`` gets
+        computed upstream.  Passing ``proba`` directly to
+        ``mark_decision_boundary`` on data you assembled yourself has no
+        effect unless the ``z`` column was already computed to match.
+
         Parameters
         ----------
         proba : bool, optional
             Whether to colour by predicted probability rather than class index.
-            Default is ``False``.
+            Only has an effect via the ``decision_boundary_chart`` figure
+            function; see above.  Default is ``False``.
         color_field : str, optional
             Column name for the colour encoding.  Default is ``"z"``.
         position : Position, optional

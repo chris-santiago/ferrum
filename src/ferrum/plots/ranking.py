@@ -685,7 +685,6 @@ def _rank2d_chart_from_dataframe(
     """
     import ferrum
 
-    del algorithm
     if annot and "correlation_fmt" not in df.columns:
         df = df.with_columns(
             pl.col("correlation")
@@ -696,7 +695,7 @@ def _rank2d_chart_from_dataframe(
             .alias("correlation_fmt"),
         )
     chart = ferrum.Chart(df).mark_rank2d(annot=annot)
-    chart = chart.properties(title=ferrum.Title("Feature Correlation"))
+    chart = chart.properties(title=ferrum.Title(f"Feature Correlation ({algorithm.title()})"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )

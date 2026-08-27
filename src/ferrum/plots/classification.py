@@ -243,10 +243,20 @@ def _roc_chart_from_source(
         y=Y("tpr", title="True Positive Rate"),
     )
 
-    n_curves = len(set(df[color_field].to_list())) if color_field is not None else 1
+    # Count curves and compute the title's AUC from the *post-filter* frame
+    # (chart._data -- the new frame mark_roc's average data_transform
+    # produced and rebound onto the cloned chart; `df` above is untouched),
+    # not the pre-filter `df` -- for multiclass per_class=False, `df` still
+    # carries every per-class row plus the average row (ModelSource.roc_curve
+    # appends a summary row rather than replacing the per-class ones), while
+    # the rendered chart shows exactly the one filtered curve. Using `df`
+    # here would count every leftover class and title the single rendered
+    # curve as unlabeled "ROC Curve" instead of "ROC Curve — AUC {v:.3f}".
+    curve_df = chart._data
+    n_curves = len(set(curve_df[color_field].to_list())) if color_field is not None else 1
     if n_curves == 1:
-        fpr = np.asarray(df["fpr"].to_list(), dtype=float)
-        tpr = np.asarray(df["tpr"].to_list(), dtype=float)
+        fpr = np.asarray(curve_df["fpr"].to_list(), dtype=float)
+        tpr = np.asarray(curve_df["tpr"].to_list(), dtype=float)
         auc_value = _trapezoid_auc(fpr, tpr)
         chart = chart.properties(
             title=ferrum.Title(f"ROC Curve — AUC {auc_value:.3f}", subtitle=subtitle),
@@ -431,11 +441,10 @@ def _calibration_chart_from_source(
 
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None
-    chart = ferrum.Chart(df).mark_calibration(
-        n_bins=n_bins,
-        strategy=strategy,
-        color_field=color,
-    )
+    # n_bins/strategy already binned the data above; mark_calibration has no
+    # binning parameters of its own (P9: they were dead weight at the mark
+    # layer since the data arrives pre-binned).
+    chart = ferrum.Chart(df).mark_calibration(color_field=color)
     chart = chart.encode(
         x=X("mean_predicted", title="Mean predicted probability"),
         y=Y("fraction_positive", title="Fraction of positives"),

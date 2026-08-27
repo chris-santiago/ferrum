@@ -376,9 +376,17 @@ def _shap_beeswarm_chart_from_source(
     pad = max(abs(x_min), abs(x_max)) * 0.05 if (x_min < x_max) else 1.0
     domain = (x_min - pad, x_max + pad)
 
+    # `order` here (`{"abs_mean", "max"}`) is the figure-level feature
+    # *selection* ranking already applied above via `_shap_order_features` +
+    # the `pl.Enum(keep)` row sort; it is a different, unrelated vocabulary
+    # from `mark_shap_beeswarm`'s own display-`order` (`{"abs_mean", "mean",
+    # "none"}`), so it is not forwarded. `order="none"` tells the mark to
+    # respect the row order already established above rather than
+    # re-deriving it from `shap_value` under its own (possibly different)
+    # ranking criterion.
     chart = ferrum.Chart(plot_df).mark_shap_beeswarm(
         max_display=max_display,
-        order=order,
+        order="none",
         zero_line=zero_line and not is_faceted,
         x_scale_domain=domain,
     )

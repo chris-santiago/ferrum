@@ -199,8 +199,8 @@ def desugar_cv_scores(
     as catplot's dodge-overrides-jitter).
     """
     del x_field, y_field
-    # split is consumed upstream by the chart builder (filters DataFrame
-    # to the requested split); informational at the mark layer.
+    # split is wired via data_transform in Chart.mark_cv_scores (filters the
+    # DataFrame to the requested split); informational at the desugar layer.
     del split
     validate_choice("mark_cv_scores", "kind", kind, ("box", "bar", "strip"))
     from ferrum.encoding import Y
@@ -287,7 +287,6 @@ def desugar_alpha_selection(
     *,
     log_scale: bool = True,
     highlight_best: bool = True,
-    ci_style: str = "band",
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Regularization-strength selection mark: mean-score line + best-alpha rule.
@@ -298,14 +297,11 @@ def desugar_alpha_selection(
     sentinel column with one non-null row at ``argmax(mean_score)`` for
     a single vertical rule.
 
-    ``ci_style`` is informational at the mark layer — alpha_selection
-    renders a single curve without CI bands; the multi-fold spread
-    surfaces in the companion ``cv_scores_chart``.
+    This mark renders a single curve without CI bands (no ``ci_style``
+    parameter) — the data contract carries no lower/upper variance columns;
+    the multi-fold spread surfaces in the companion ``cv_scores_chart``.
     """
     del x_field, y_field
-    # ci_style is informational at the mark layer — alpha_selection
-    # renders a single curve without CI bands.
-    del ci_style
     from ferrum.encoding import Y
 
     user_kw = _validate("alpha_selection", mark_kwargs)

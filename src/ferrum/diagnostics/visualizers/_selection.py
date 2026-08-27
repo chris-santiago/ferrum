@@ -41,9 +41,10 @@ class LearningCurveVisualizer(FerrumVisualizer):
         Relative or absolute training-set sizes to evaluate.  Passed
         directly to ``learning_curve``; defaults to ``np.linspace(0.1,
         1.0, 5)`` when ``None``.
-    ci_style : {"band", "bar"}, default "band"
+    ci_style : {"band", "errorbar"}, default "band"
         How to render the cross-validation confidence interval.
-        ``"band"`` draws a shaded ribbon; ``"bar"`` draws error bars.
+        ``"band"`` draws a shaded ribbon; ``"errorbar"`` draws a vertical
+        rule per point.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` and from there to
         ``learning_curve`` for reproducible CV splits (ChaCha8 RNG).
@@ -140,9 +141,10 @@ class ValidationCurveVisualizer(FerrumVisualizer):
         Whether to render the x-axis (param values) on a log scale.
         ``"auto"`` enables log scale when the ratio between the largest
         and smallest value exceeds 100.
-    ci_style : {"band", "bar"}, default "band"
+    ci_style : {"band", "errorbar"}, default "band"
         How to render the cross-validation confidence interval.
-        ``"band"`` draws a shaded ribbon; ``"bar"`` draws error bars.
+        ``"band"`` draws a shaded ribbon; ``"errorbar"`` draws a vertical
+        rule per point.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for reproducible CV splits
         (ChaCha8 RNG).

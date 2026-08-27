@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ferrum.marks._desugar_helpers import _utf8_col
+
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
@@ -33,9 +35,9 @@ class SelectionMarksMixin:
 
         Parameters
         ----------
-        ci_style : {"band", "bars", "none"}, default "band"
+        ci_style : {"band", "errorbar"}, default "band"
             How to display cross-validation variance.  ``"band"`` draws a
-            shaded ribbon; ``"bars"`` draws error bars; ``"none"`` omits CI.
+            shaded ribbon; ``"errorbar"`` draws a vertical rule per point.
         color_field : str or None, optional
             Column name to drive per-split line colour.  Default is
             ``"split"``.
@@ -89,8 +91,9 @@ class SelectionMarksMixin:
             Whether to use a log scale on the x axis.  Useful for parameters
             like regularisation strength that span orders of magnitude.
             Default is ``False``.
-        ci_style : {"band", "bars", "none"}, default "band"
-            How to display cross-validation variance.
+        ci_style : {"band", "errorbar"}, default "band"
+            How to display cross-validation variance.  ``"band"`` draws a
+            shaded ribbon; ``"errorbar"`` draws a vertical rule per point.
         color_field : str or None, optional
             Column name to drive per-split line colour.  Default is
             ``"split"``.
@@ -183,6 +186,14 @@ class SelectionMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_cv_scores
+        from ferrum._validate import validate_choice
+
+        validate_choice("mark_cv_scores", "split", split, ("train", "test", "both"))
+
+        def _cv_scores_filter(df):
+            if split == "both" or "split" not in df.columns:
+                return df
+            return df.filter(_utf8_col("split") == split)
 
         return self._set_composite_mark(
             "cv_scores",
@@ -190,6 +201,7 @@ class SelectionMarksMixin:
             {"kind": kind, "split": split, "color_field": color_field, **mark_kwargs},
             placeholder="point",
             position=position,
+            data_transform=_cv_scores_filter,
         )
 
     def mark_alpha_selection(
@@ -197,17 +209,25 @@ class SelectionMarksMixin:
         *,
         log_scale: bool = True,
         highlight_best: bool = True,
-        ci_style: str = "band",
         position=None,
         **mark_kwargs,
     ) -> "Chart":
         """Render a regularisation-strength (alpha) selection curve.
 
-        Sweeps the regularisation parameter ``alpha`` and plots CV score as a
-        function of alpha, with variance bands.  When ``highlight_best=True``
-        a vertical rule is drawn at the alpha that maximises ``mean_score``.
-        Data must carry the schema emitted by ``ModelSource.alpha_selection()``:
-        ``alpha``, ``mean_score``, ``score_lo``, ``score_hi``, ``split``.
+        Sweeps the regularisation parameter ``alpha`` and plots mean CV
+        score as a single line.  When ``highlight_best=True`` a vertical
+        rule is drawn at the alpha that maximises ``mean_score``.  Data
+        must carry the schema emitted by ``ModelSource.alpha_selection()``:
+        ``alpha``, ``fold``, ``score``, ``mean_score``, ``std_score`` (one
+        row per (alpha, fold), deduped to one line point per alpha by
+        the desugar's ``x``/``y`` encoding).
+
+        Unlike ``mark_learning_curve``/``mark_validation_curve``,
+        ``mark_alpha_selection`` renders a single mean-score line with no
+        CI band -- the data contract carries no lower/upper variance
+        columns (``std_score`` is present but unused for a band; a caller
+        wanting to visualize it can layer its own errorbar) -- so it has
+        no ``ci_style`` parameter; passing one raises ``TypeError``.
 
         Parameters
         ----------
@@ -217,8 +237,6 @@ class SelectionMarksMixin:
         highlight_best : bool, optional
             Whether to draw a vertical reference rule at the optimal alpha.
             Default is ``True``.
-        ci_style : {"band", "bars", "none"}, default "band"
-            How to display CV variance.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -259,7 +277,6 @@ class SelectionMarksMixin:
             {
                 "log_scale": log_scale,
                 "highlight_best": highlight_best,
-                "ci_style": ci_style,
                 **mark_kwargs,
             },
             placeholder="point",

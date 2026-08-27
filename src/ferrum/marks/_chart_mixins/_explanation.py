@@ -145,12 +145,16 @@ class ExplanationMarksMixin:
         """
         from ferrum.marks.diagnostic import desugar_shap_beeswarm
         from ferrum._constant_columns import _inject_constant
+        from ferrum._validate import validate_choice
+
+        validate_choice("mark_shap_beeswarm", "order", order, ("abs_mean", "mean", "none"))
 
         def _shap_beeswarm_prep(df):
             import polars as pl
 
+            has_shap = "shap_value" in df.columns and "feature" in df.columns
             # Filter to top max_display features by mean |SHAP value|.
-            if max_display is not None and "shap_value" in df.columns and "feature" in df.columns:
+            if max_display is not None and has_shap:
                 ranked = (
                     df.group_by("feature")
                     .agg(pl.col("shap_value").abs().mean().alias("_score"))
@@ -159,6 +163,37 @@ class ExplanationMarksMixin:
                 )
                 keep = ranked["feature"].to_list()
                 df = df.filter(pl.col("feature").is_in(keep))
+            # Arrange rows so `feature`'s first-appearance (encounter) order
+            # matches the requested display order -- the ordinal y-domain is
+            # built from row-encounter order (see plots/explanation.py's
+            # matching pl.Enum sort), so reordering rows is how `order`
+            # actually controls the axis. order="none" leaves rows as-is.
+            if order != "none" and has_shap:
+                agg_expr = (
+                    pl.col("shap_value").abs().mean()
+                    if order == "abs_mean"
+                    else pl.col("shap_value").mean()
+                )
+                order_list = (
+                    df.group_by("feature")
+                    .agg(agg_expr.alias("_score"))
+                    .sort("_score", descending=True)["feature"]
+                    .to_list()
+                )
+                # maintain_order=True: this row order feeds the seeded
+                # Jitter(seed=42) below and the point draw order, both of
+                # which land in the rendered SVG. Polars' default
+                # maintain_order=False may permute rows within a tied
+                # `_feature_order` group, which would make the render
+                # depend on an unguaranteed sort property instead of only
+                # on `order`.
+                df = (
+                    df.with_columns(
+                        pl.col("feature").cast(pl.Enum(order_list)).alias("_feature_order")
+                    )
+                    .sort("_feature_order", maintain_order=True)
+                    .drop("_feature_order")
+                )
             if zero_line and "shap_value" in df.columns:
                 df = _inject_constant(df, "_ref_zero", 0.0)
             return df

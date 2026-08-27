@@ -123,14 +123,14 @@ def desugar_shap_beeswarm(
     dashed ``mark_rule`` layer at ``x=0`` so the sign of each feature's
     SHAP impact is immediately legible.
 
-    ``color_bar`` and ``order`` are informational at the mark layer —
-    the chart builder is responsible for any reordering / aggregation
-    before constructing the chart.
+    ``max_display`` and ``order`` are wired via ``data_transform`` in
+    ``Chart.mark_shap_beeswarm`` (feature-set truncation and row-reorder by
+    feature rank, which drives the ordinal y-domain's encounter order);
+    informational at the desugar layer. ``color_bar`` toggles the
+    feature-value colour legend below, since it needs no data access.
     """
     del x_field, y_field
-    # max_display is wired via data_transform in mark_shap_beeswarm;
-    # color_bar and order are consumed upstream by the chart builder.
-    del max_display, color_bar, order
+    del max_display, order
     user_kw = _validate("shap_beeswarm", mark_kwargs)
 
     def _x_channel(field: str) -> Any:
@@ -143,6 +143,7 @@ def desugar_shap_beeswarm(
     from ferrum.encoding import Color
     from ferrum.position import Jitter
 
+    color_legend = {"tickLabels": ["Low", "", "", "", "High"]} if color_bar else None
     layers: list = [
         _Layer(
             name="point",
@@ -154,7 +155,7 @@ def desugar_shap_beeswarm(
                     "feature_value_normalized",
                     scheme="rdbu",
                     title="Feature value",
-                    legend={"tickLabels": ["Low", "", "", "", "High"]},
+                    legend=color_legend,
                 ),
             },
             position=Jitter(axis="y", width=0.6, seed=42),

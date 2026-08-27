@@ -67,12 +67,10 @@ def desugar_pca_scree(
     y_field: str | None,
     *,
     cumulative_line: bool = True,
-    threshold_line: float | None = None,
-    n_components: int | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """PCA scree plot: bar of per-component variance + optional cumulative
-    line and threshold rule.
+    line.
 
     Data contract: ``component`` (Utf8, cast from Int64 by
     ``_pca_scree_prep``), ``explained_variance_ratio`` (Float64),
@@ -84,12 +82,15 @@ def desugar_pca_scree(
     the axis shows integer-only labels ("1", "2", …) with no fractional
     ticks.
 
-    When ``threshold_line`` is non-None the data also carries
-    ``_threshold_line`` (a sentinel single-non-null column for the
-    horizontal reference rule).
+    This desugar has no ``threshold_line``/``n_components`` parameters:
+    ``Chart.mark_pca_scree`` routes a non-None ``threshold_line`` to the
+    sibling ``desugar_pca_scree_with_threshold`` instead (this function is
+    only ever reached when ``threshold_line`` is ``None``), and
+    ``n_components`` belongs to the ``pca_scree_chart`` figure function
+    (consumed by ``ModelSource.pca_variance(n_components=...)`` before the
+    mark ever sees the data) -- neither reaches this mark layer.
     """
-    del x_field, y_field, n_components
-    del threshold_line
+    del x_field, y_field
     from ferrum.encoding import X, Y
 
     user_kw = _validate("pca_scree", mark_kwargs)
@@ -136,13 +137,15 @@ def desugar_pca_scree_with_threshold(
     y_field: str | None,
     *,
     cumulative_line: bool = True,
-    n_components: int | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Variant of ``desugar_pca_scree`` that appends a threshold rule.
 
     Used by ``Chart.mark_pca_scree`` when ``threshold_line`` is non-None;
-    references the injected ``_threshold_line`` sentinel column.
+    references the injected ``_threshold_line`` sentinel column. Like its
+    sibling, this desugar has no ``n_components`` parameter -- that belongs
+    to the ``pca_scree_chart`` figure function and is consumed upstream of
+    the mark layer (see ``desugar_pca_scree``'s docstring).
     """
     # Validate kwargs here so the AST guardrail (test_mark_kwargs_no_silent_drop)
     # sees a call to validate_user_mark_kwargs at this function level. The

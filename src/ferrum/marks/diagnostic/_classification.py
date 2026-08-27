@@ -47,11 +47,11 @@ def desugar_roc(
       annotation through ``_metric_labels`` instead, so this branch is the
       hook for a caller that pre-injects the columns.
 
-    ``average`` is informational at the mark layer — the figure builder is
-    responsible for shaping the data appropriately before constructing the
-    chart.
+    ``average`` is wired via ``data_transform`` in ``Chart.mark_roc`` (filters
+    to the row(s) matching the requested average); informational at the
+    desugar layer.
     """
-    del average  # informational at the mark layer
+    del average
     user_kw = _validate("roc", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
@@ -121,8 +121,12 @@ def desugar_pr(
     grouping key), ``_iso_label_x``, ``_iso_label_y``, and ``_iso_label``; the
     desugar emits a grey dashed line layer grouped by ``_iso_f`` plus a text
     layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
+
+    ``average`` is wired via ``data_transform`` in ``Chart.mark_pr`` (filters
+    to the row(s) matching the requested average); informational at the
+    desugar layer.
     """
-    del average  # informational at the mark layer
+    del average
     user_kw = _validate("pr", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
@@ -182,8 +186,6 @@ def desugar_calibration(
     x_field: str | None,
     y_field: str | None,
     *,
-    n_bins: int = 10,
-    strategy: str = "uniform",
     reference_line: bool = True,
     color_field: str | None = None,
     **mark_kwargs: Any,
@@ -194,8 +196,11 @@ def desugar_calibration(
     emitted by ``ModelSource.calibration_curve()``. When
     ``reference_line=True`` the calling ``Chart.mark_calibration`` method
     pre-sorts data ascending by ``mean_predicted`` so the y=x line is
-    monotonic. ``n_bins``/``strategy`` are informational at the mark layer
-    (the data is already binned).
+    monotonic. The data is already binned by the time it reaches this mark
+    (binning happens in ``ModelSource.calibration_curve(n_bins=, strategy=)``
+    or the ``calibration_chart`` figure function, which forwards those
+    arguments there) -- ``mark_calibration``/``desugar_calibration`` have no
+    ``n_bins``/``strategy`` parameters of their own.
 
     Layer wiring (Phase 8a-compliant). The calibration curve reads from the
     primary input (one row per (model, bin)).  The y=x reference diagonal
@@ -203,10 +208,6 @@ def desugar_calibration(
     rows for the line endpoints — so the diagonal renders once per chart
     regardless of how many models are layered on top.
     """
-    # n_bins and strategy are consumed upstream by the chart builder
-    # (source.calibration_curve(n_bins=..., strategy=...)); informational
-    # at the mark layer — the data is already binned.
-    del n_bins, strategy
     user_kw = _validate("calibration", mark_kwargs)
     line_enc: dict[str, Any] = {
         "x": "mean_predicted",
@@ -256,9 +257,11 @@ def desugar_gain(
     Data contract: ``percent_population``, ``gain``, ``class`` per
     ``ModelSource.cumulative_gain()``. The data already carries
     ``class='baseline'`` rows that render as the diagonal reference when
-    ``color_field='class'``; ``reference_line`` is informational.
+    ``color_field='class'``. ``reference_line`` is wired via
+    ``data_transform`` in ``Chart.mark_gain`` (drops the baseline rows when
+    ``False``); informational at the desugar layer.
     """
-    del reference_line  # baseline already in data
+    del reference_line
     user_kw = _validate("gain", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
@@ -282,10 +285,11 @@ def desugar_lift(
 
     Data contract: ``percent_population``, ``lift``, ``class`` per
     ``ModelSource.lift_curve()``. The ``class='baseline'`` rows render as
-    the lift=1 reference line when ``color_field='class'``;
-    ``reference_line`` is informational.
+    the lift=1 reference line when ``color_field='class'``. ``reference_line``
+    is wired via ``data_transform`` in ``Chart.mark_lift`` (drops the
+    baseline rows when ``False``); informational at the desugar layer.
     """
-    del reference_line  # baseline already in data
+    del reference_line
     user_kw = _validate("lift", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
@@ -327,7 +331,10 @@ def desugar_discrimination_threshold(
     feature works for both chart-API and figure-function entry points
     (Schwabish C7 audit-rework, 2026-05-12).
     """
-    del metrics, n_thresholds  # informational; data is pre-melted
+    # metrics is wired via data_transform in Chart.mark_discrimination_threshold
+    # (filters to the requested metric names when present in the data);
+    # n_thresholds is informational -- data is pre-melted.
+    del metrics, n_thresholds
     user_kw = _validate("discrimination_threshold", mark_kwargs)
     layers: list = [
         _Layer(
