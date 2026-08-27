@@ -530,14 +530,17 @@ def test_point_line_composite_mark_default_shared_y_unaffected():
     explicit_shared_svg = LayerChart(bars, point_line, resolve={"y": "shared"}).to_svg()
     assert default_svg == explicit_shared_svg
 
-    # The shared/default composite overlay tree renders one axis title per
-    # TOP-LEVEL member chart (each member is its own overlay leaf, regardless
-    # of how many internal layers a composite-mark member like
-    # mark_line(point=True) carries -- confirmed above that point_line alone
-    # renders exactly one "y" title). Two members (bars, point_line) -> two
-    # "y" titles; no duplication introduced by the composite-mark shape.
+    # Finding P2 (design review, 2026-08-27; spec §9.5): the shared/default
+    # composite overlay tree used to render one axis title per TOP-LEVEL
+    # member chart -- every overlay leaf drew its own full standalone chrome
+    # sharing one rect, so two members (bars, point_line) produced two
+    # overprinted "y" titles. That was the duplication bug, not the correct
+    # contract: a shared-y LayerChart must match the flat `a + b` merge,
+    # which has always emitted exactly ONE axis title regardless of member
+    # count. So a composite-mark member like mark_line(point=True) must not
+    # introduce any extra title beyond that single one either.
     titles = [t for _, t in _rotated_text(default_svg)]
-    assert titles == ["y", "y"], f"expected one title per member chart, got {titles}"
+    assert titles == ["y"], f"expected exactly one shared y title, got {titles}"
 
 
 # ---------------------------------------------------------------------------
