@@ -1230,6 +1230,12 @@ class _ChartLike(ConfigureMixin):
     def to_svg(self) -> str:  # pragma: no cover - abstract
         raise NotImplementedError(f"{type(self).__name__} must implement to_svg")
 
+    def __or__(self, other):
+        return HConcatChart([self, other])
+
+    def __and__(self, other):
+        return VConcatChart([self, other])
+
     def interactive(self, *, toolbar: bool = True):
         """Return an interactive rendering of this composition.
 
@@ -1645,10 +1651,12 @@ class _CompositeBase(_ChartLike):
     and surfaced for the HTML document title via ``_figure_title_text``.
 
     The symmetric containers also use this class's ``__init__`` to hold an
-    ordered ``charts`` list and a pixel ``spacing`` between panels, plus
-    ``__or__`` / ``__and__`` to chain further compositions.  The asymmetric
-    layouts keep their own slot-based ``__init__`` and ``charts`` property;
-    they call ``_init_figure_chrome`` to wire the chrome fields.
+    ordered ``charts`` list and a pixel ``spacing`` between panels.
+    ``__or__`` / ``__and__`` (chaining further compositions) are inherited
+    from ``_ChartLike`` and apply to every composition, symmetric or not.
+    The asymmetric layouts keep their own slot-based ``__init__`` and
+    ``charts`` property; they call ``_init_figure_chrome`` to wire the
+    chrome fields.
 
     **Symmetric-concat layout strategy.**  ``HConcatChart`` and
     ``VConcatChart`` differ only in their layout axis, so their
@@ -1712,12 +1720,6 @@ class _CompositeBase(_ChartLike):
         if not isinstance(getattr(type(self), "charts", None), property):
             new.charts = list(self.charts)
         return new
-
-    def __or__(self, other):
-        return HConcatChart([self, other])
-
-    def __and__(self, other):
-        return VConcatChart([self, other])
 
     def properties(self, **kwargs):
         """Set figure-level or per-child chart properties.
