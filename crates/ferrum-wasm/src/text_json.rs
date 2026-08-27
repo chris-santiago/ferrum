@@ -224,11 +224,16 @@ pub(crate) fn build_zoomed_text_json(
                     continue;
                 }
             }
+            // R2: forward the tick's OWN anchor instead of a hardcoded
+            // `"center"` — a rotated x tick (label_angle override) is
+            // `End`-anchored (see `render/marks/axis.rs`'s Bottom/Top rotation
+            // fixup), and re-emitting `"center"` here after zoom/pan would
+            // mis-anchor it (root-cause family with the y-branch fix below).
             elements.push(tick_label_json(
                 new_x,
                 te.y,
                 &te.content,
-                "center",
+                text_anchor_str(&te.style.anchor),
                 Some(&te.style),
             ));
         } else if is_y_tick(te) {
@@ -240,11 +245,19 @@ pub(crate) fn build_zoomed_text_json(
                     continue;
                 }
             }
+            // R2: forward the tick's OWN anchor instead of a hardcoded
+            // `"end"`. Before R2, every y tick WAS `End`(Left)/`Start`(Right)
+            // regardless of rotation, so the literal happened to match the
+            // common (Left-axis) case; a rotated y tick still carries the
+            // same `End`/`Start` anchor (see `render/marks/axis.rs`'s
+            // Left/Right arms — rotation does not flip the anchor), but a
+            // Right-oriented axis was always mis-anchored here (`"end"` where
+            // the real anchor is `Start`) until now.
             elements.push(tick_label_json(
                 te.x,
                 new_y,
                 &te.content,
-                "end",
+                text_anchor_str(&te.style.anchor),
                 Some(&te.style),
             ));
         } else if is_secondary_y_tick(te) {
@@ -889,6 +902,162 @@ mod tests {
 
         assert!(contents.contains(&"A"), "label 'A' should be kept");
         assert!(contents.contains(&"B"), "label 'B' should be kept");
+    }
+
+    /// R2: `build_zoomed_text_json`'s x-tick branch must forward the tick's
+    /// OWN anchor (via `text_anchor_str`), not the hardcoded `"center"` that
+    /// pre-R2 code always emitted. A rotated x tick (`label_angle` override)
+    /// is `End`-anchored — re-emitting `"center"` after zoom/pan would
+    /// mis-anchor it even though the pre-zoom SVG got it right.
+    #[test]
+    fn zoomed_x_tick_forwards_its_own_anchor_not_hardcoded_center() {
+        let interaction = ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 100.0,
+                        label: "Rotated".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                y_levels: vec![],
+                y_slot_levels: vec![],
+            }],
+        };
+        // Simulate a rotated (label_angle override) x tick: End-anchored,
+        // non-zero angle — exactly what `render/marks/axis.rs`'s Bottom
+        // rotation fixup produces.
+        let rotated_style = TextStyle { anchor: TextAnchor::End, angle: -45.0, ..make_style() };
+        let all_text = vec![TextElementData {
+            x: 100.0,
+            y: 360.0,
+            content: "Rotated".to_string(),
+            style: rotated_style,
+            slot: None,
+        }];
+        let transform = crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 };
+        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
+        assert_eq!(
+            parsed[0]["anchor"], "end",
+            "rotated x tick must forward its own End anchor, not a hardcoded center"
+        );
+    }
+
+    /// R2: `build_zoomed_text_json`'s y-tick branch must forward the tick's
+    /// OWN anchor, not the hardcoded `"end"` that pre-R2 code always emitted
+    /// (correct for the common Left-oriented y-axis, but wrong for a
+    /// Right-oriented primary y-axis, whose ticks are Start-anchored).
+    #[test]
+    fn zoomed_y_tick_forwards_its_own_anchor_not_hardcoded_end() {
+        let interaction = ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![],
+                y_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 10.0,
+                        label: "R".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                y_slot_levels: vec![],
+            }],
+        };
+        // Simulate a Right-oriented primary y-axis tick: Start-anchored.
+        let right_style = TextStyle { anchor: TextAnchor::Start, ..make_style() };
+        let all_text = vec![TextElementData {
+            x: 460.0,
+            y: 100.0,
+            content: "R".to_string(),
+            style: right_style,
+            slot: None,
+        }];
+        let transform = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
+        assert_eq!(
+            parsed[0]["anchor"], "start",
+            "Right-oriented y tick must forward its own Start anchor, not a hardcoded end"
+        );
+    }
+
+    /// Regression guard: the default (flat Bottom x-tick / flat Left y-tick)
+    /// anchors are byte-identical to the pre-R2 hardcoded literals — `"center"`
+    /// for x, `"end"` for y — since `make_style()`'s default anchor (`Middle`
+    /// for the shared style used by x ticks below) and a Left-axis y tick's
+    /// `End` anchor are exactly what the old hardcoded strings encoded.
+    #[test]
+    fn zoomed_tick_anchor_forwarding_is_byte_identical_for_default_orients() {
+        let interaction = ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 100.0,
+                        label: "X".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                y_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 10.0,
+                        label: "Y".to_string(),
+                        pixel: 200.0,
+                    }],
+                }],
+                y_slot_levels: vec![],
+            }],
+        };
+        let x_style = TextStyle { anchor: TextAnchor::Middle, ..make_style() };
+        let y_style = TextStyle { anchor: TextAnchor::End, ..make_style() };
+        let all_text = vec![
+            TextElementData { x: 100.0, y: 360.0, content: "X".to_string(), style: x_style, slot: None },
+            TextElementData { x: 40.0, y: 200.0, content: "Y".to_string(), style: y_style, slot: None },
+        ];
+        let transform = crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 };
+        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
+        let anchor_of = |content: &str| -> String {
+            parsed
+                .iter()
+                .find(|v| v["content"] == content)
+                .and_then(|v| v["anchor"].as_str())
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(anchor_of("X"), "center", "default x-tick anchor must stay byte-identical");
+        assert_eq!(anchor_of("Y"), "end", "default y-tick anchor must stay byte-identical");
     }
 
     #[test]

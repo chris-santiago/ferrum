@@ -823,13 +823,14 @@ fn resolve_panel_axes(
             .overrides
             .label_font_size
             .unwrap_or(theme.typography.label_font_size);
-        let new_y_layout = crate::layout::axis::layout_y_axis(
+        let (new_y_layout, _warn) = crate::layout::axis::layout_y_axis(
             &y_input,
             panel.plot_area,
             panel_idx,
             y_label_fs,
             theme.typography.title_font_size,
             theme.padding.axis_title_padding,
+            theme.sizes.tick_size,
             facet_metrics,
         );
         Some(new_y_layout)
@@ -3123,14 +3124,14 @@ mod tests {
         let chart_config = super::super::chart_config::ChartConfig::default();
         let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
 
-        let primary_y = crate::layout::axis::layout_y_axis(
+        let (primary_y, _warn) = crate::layout::axis::layout_y_axis(
             &AxisInput::new(
                 AxisOrient::Left,
                 Some("Primary".into()),
                 vec!["0".into(), "5".into(), "10".into()],
                 None,
             ),
-            panel.plot_area, 0, 11.0, 13.0, 8.0, &m,
+            panel.plot_area, 0, 11.0, 13.0, 8.0, 4.0, &m,
         );
 
         let mut secondary_input = AxisInput::new(
@@ -3142,8 +3143,8 @@ mod tests {
             None,
         );
         secondary_input.show_grid = true; // deliberately try to leak into the grid
-        let secondary_y = crate::layout::axis::layout_y_axis(
-            &secondary_input, panel.plot_area, 0, 11.0, 13.0, 8.0, &m,
+        let (secondary_y, _warn2) = crate::layout::axis::layout_y_axis(
+            &secondary_input, panel.plot_area, 0, 11.0, 13.0, 8.0, 4.0, &m,
         );
 
         // Baseline: grid + axis nodes built from the primary alone.

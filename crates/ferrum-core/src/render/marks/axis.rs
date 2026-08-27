@@ -58,8 +58,14 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
     // `None`/`false` keeps every label at its default anchor (byte-identical).
     // Edge ticks are the first and last non-culled ticks in index order (ticks are
     // emitted in axis order). Single-tick axes have first == last; flush still
-    // applies a coherent edge anchor. Only flat labels are flushed — rotated
-    // labels already carry edge anchors via the rotation handling below.
+    // applies a coherent edge anchor.
+    //
+    // Composition with rotation (R2) is orient-dependent, not a blanket
+    // "flat only" rule — see the gate below: on Bottom/Top a rotated label
+    // already computes its own edge anchor (mutually exclusive with flush's
+    // anchor swap, so flush is skipped there); on Left/Right R2's rotation
+    // fixup is a deliberate anchor/position no-op, so flush's `label_y`
+    // baseline shift composes with any rotation angle unconditionally.
     let flush = axis.label_flush.unwrap_or(false);
     let first_label_idx = flush
         .then(|| axis.ticks.iter().position(|t| !t.culled))
@@ -83,15 +89,21 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                 tick.position, r.y - theme.sizes.tick_size - label_pad - 2.0,
                 TextAnchor::Middle, tick.label_angle,
             ),
+            // R2: forward `tick.label_angle` instead of a literal `0.0`. Unlike
+            // Bottom/Top (whose flat anchor is `Middle` and must flip to an edge
+            // anchor when rotated, below), Left/Right's flat anchor is ALREADY
+            // the axis-facing edge (`End`/`Start`), so rotating about this same
+            // pivot swings the label away from the plot with no anchor change —
+            // see `layout::axis::rotated_y_label_extent`'s doc for the geometry.
             AxisOrient::Left => (
                 r.x, tick.position, r.x - theme.sizes.tick_size, tick.position,
                 r.x - theme.sizes.tick_size - label_pad, tick.position + effective_font_size / 3.0,
-                TextAnchor::End, 0.0,
+                TextAnchor::End, tick.label_angle,
             ),
             AxisOrient::Right => (
                 r.x, tick.position, r.x + theme.sizes.tick_size, tick.position,
                 r.x + theme.sizes.tick_size + label_pad, tick.position + effective_font_size / 3.0,
-                TextAnchor::Start, 0.0,
+                TextAnchor::Start, tick.label_angle,
             ),
         };
 
@@ -125,13 +137,46 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                     // from the plot rather than swinging downward into it.
                     anchor = TextAnchor::Start;
                 }
+                // R2: intentional no-op. `label_x`/`label_y`/`anchor` above are
+                // already the flat pivot + edge anchor (`End`/`Start`); the
+                // rotation is carried purely by `angle` (now `tick.label_angle`)
+                // in the `SceneNode::Text` style below. SYNC: this "same pivot,
+                // no anchor flip" contract is exactly what
+                // `layout::axis::rotated_y_label_extent` assumes when it
+                // reserves the y-axis gutter — changing this pivot without
+                // updating that formula (and `layout_y_axis`'s override branch)
+                // will make the reserved band drift from what actually renders.
                 AxisOrient::Left | AxisOrient::Right => {}
             }
         }
 
-        // `label_flush` edge alignment (B5). Applies only to flat labels at the
-        // first/last rendered tick — rotated labels already carry edge anchors.
-        if tick.label_angle == 0.0 && (Some(tick_idx) == first_label_idx || Some(tick_idx) == last_label_idx) {
+        // `label_flush` edge alignment (B5) at the first/last rendered tick.
+        //
+        // Bottom/Top: gated on `label_angle == 0.0`. Flush swaps `anchor` to
+        // Start/End, and a rotated Bottom/Top tick already computed its own
+        // edge anchor above (`AxisOrient::Bottom | AxisOrient::Top` arm,
+        // R2) — the two anchor assignments would conflict, so flush is
+        // deliberately suppressed under rotation on these orients (rotated
+        // labels already sit at an axis-appropriate edge from the rotation
+        // fixup alone).
+        //
+        // Left/Right: unconditional (R2). Flush only rewrites `label_y`, never
+        // `anchor` — and R2's Left/Right rotation fixup is a no-op that
+        // touches neither (see the comment on the `AxisOrient::Left |
+        // AxisOrient::Right => {}` arm above). The two settings are
+        // orthogonal here: flush moves the pivot vertically to a within-bounds
+        // edge, rotation then turns the label about wherever that pivot sits.
+        // Horizontal-extent-neutral, so `rotated_y_label_extent`'s SYNC
+        // contract (`render/marks/axis.rs` Left/Right arms ↔
+        // `layout::axis::rotated_y_label_extent` ↔ `layout_y_axis`'s
+        // override branch) is unaffected.
+        let flush_applies_to_this_orient = match axis.orient {
+            AxisOrient::Bottom | AxisOrient::Top => tick.label_angle == 0.0,
+            AxisOrient::Left | AxisOrient::Right => true,
+        };
+        if flush_applies_to_this_orient
+            && (Some(tick_idx) == first_label_idx || Some(tick_idx) == last_label_idx)
+        {
             let is_first = Some(tick_idx) == first_label_idx;
             match axis.orient {
                 // Horizontal axes: the leftmost (first) label anchors at its start
@@ -144,7 +189,8 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                 // within the plot top; the bottom (last) label baseline rises so its
                 // descender sits within the plot bottom. The default baseline is
                 // tick-centered (`+ font/3`); flush shifts it to a within-bounds
-                // edge alignment.
+                // edge alignment. Composes with rotation (R2): a rotated label pivots
+                // about this shifted baseline instead of the tick-centered one.
                 AxisOrient::Left | AxisOrient::Right => {
                     label_y = if is_first {
                         // Top edge: baseline below the tick by the cap height.
@@ -1221,6 +1267,71 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // R2: y-axis (Left/Right) rotated tick-label anchor tests. Unlike
+    // Bottom/Top (Middle → End/Start flip on rotation), Left/Right's flat
+    // anchor is ALREADY the axis-facing edge, so rotation must NOT change the
+    // anchor — only forward `tick.label_angle` as the rendered angle. Mirrors
+    // `bottom_rotated_tick_labels_use_end_anchor`/`top_rotated_tick_labels_use_start_anchor`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn left_rotated_tick_labels_keep_end_anchor_and_carry_angle() {
+        let axis = AxisLayout {
+            orient: AxisOrient::Left,
+            ..bottom_axis_with_angle(-45.0)
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme, None);
+        let texts = text_anchors_and_angles(&nodes);
+        assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
+        for (anchor, angle) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::End, "rotated left tick must keep End anchor");
+            assert!((angle - (-45.0_f64)).abs() < 0.001, "angle must be -45, got {angle}");
+        }
+    }
+
+    #[test]
+    fn right_rotated_tick_labels_keep_start_anchor_and_carry_angle() {
+        let axis = AxisLayout {
+            orient: AxisOrient::Right,
+            ..bottom_axis_with_angle(-45.0)
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme, None);
+        let texts = text_anchors_and_angles(&nodes);
+        assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
+        for (anchor, angle) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::Start, "rotated right tick must keep Start anchor");
+            assert!((angle - (-45.0_f64)).abs() < 0.001, "angle must be -45, got {angle}");
+        }
+    }
+
+    #[test]
+    fn left_right_rotated_pivot_is_byte_identical_to_flat_pivot() {
+        // SYNC guard: the render fixup for Left/Right rotation is an
+        // INTENTIONAL no-op (see the comment at the `AxisOrient::Left |
+        // AxisOrient::Right => {}` arm in `build_axis`) — rotating must not
+        // move the pivot (label_x/label_y), only change the emitted angle.
+        let flat = AxisLayout { orient: AxisOrient::Left, ..bottom_axis_with_angle(0.0) };
+        let rotated = AxisLayout { orient: AxisOrient::Left, ..bottom_axis_with_angle(-30.0) };
+        let theme = ThemeInputs::default();
+
+        let flat_positions: Vec<(f64, f64)> = build_axis(&flat, &theme, None)
+            .into_iter()
+            .filter_map(|n| if let SceneNode::Text { x, y, .. } = n { Some((x, y)) } else { None })
+            .collect();
+        let rotated_positions: Vec<(f64, f64)> = build_axis(&rotated, &theme, None)
+            .into_iter()
+            .filter_map(|n| if let SceneNode::Text { x, y, .. } = n { Some((x, y)) } else { None })
+            .collect();
+
+        assert_eq!(
+            flat_positions, rotated_positions,
+            "Left-axis rotation must not move the label pivot"
+        );
+    }
+
     #[test]
     fn build_axis_uses_per_axis_title_overrides() {
         // An AxisLayout with title_font_size=20 and title_color_rgba=#ff0000 should
@@ -1418,5 +1529,95 @@ mod tests {
         assert!((flush_ys[0] - base_ys[0]).abs() > 1e-6, "top edge baseline must shift");
         assert!((flush_ys[1] - base_ys[1]).abs() < 1e-9, "interior baseline unchanged");
         assert!((flush_ys[2] - base_ys[2]).abs() > 1e-6, "bottom edge baseline must shift");
+    }
+
+    /// R2 x quality-review fix 1: `label_flush` composes with a rotated y-axis
+    /// instead of silently going inert. Left axis, `label_angle = -45` on every
+    /// tick, `label_flush = true`: the edge baselines must shift EXACTLY like
+    /// the flat-flush case above, while every tick keeps its End anchor and
+    /// -45° angle (rotation is untouched by flush — the two settings compose,
+    /// they do not override each other).
+    #[test]
+    fn build_axis_label_flush_composes_with_rotated_left_axis() {
+        let mut axis = three_tick_bottom_axis();
+        axis.orient = AxisOrient::Left;
+        for t in &mut axis.ticks {
+            t.label_angle = -45.0;
+        }
+        axis.label_flush = Some(true);
+        let theme = ThemeInputs::default();
+
+        let no_flush = {
+            let mut a = axis.clone();
+            a.label_flush = None;
+            build_axis(&a, &theme, None)
+        };
+        let flushed = build_axis(&axis, &theme, None);
+
+        let ys = |nodes: &[SceneNode]| -> Vec<f64> {
+            nodes.iter().filter_map(|n| {
+                if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
+            }).collect()
+        };
+        let base_ys = ys(&no_flush);
+        let flush_ys = ys(&flushed);
+        assert_eq!(base_ys.len(), 3);
+        // Same baseline shifts as the flat case: edges move, interior doesn't.
+        assert!((flush_ys[0] - base_ys[0]).abs() > 1e-6, "rotated top edge baseline must shift under flush");
+        assert!((flush_ys[1] - base_ys[1]).abs() < 1e-9, "rotated interior baseline unchanged by flush");
+        assert!((flush_ys[2] - base_ys[2]).abs() > 1e-6, "rotated bottom edge baseline must shift under flush");
+        // Exact values match the flat-flush formula (`+font` / `+0`), independent of rotation.
+        assert!((flush_ys[0] - (axis.ticks[0].position + theme.typography.label_font_size)).abs() < 1e-9);
+        assert!((flush_ys[2] - axis.ticks[2].position).abs() < 1e-9);
+
+        // Rotation must survive: every tick still carries End anchor and -45°.
+        let texts = text_anchors_and_angles(&flushed);
+        assert_eq!(texts.len(), 3);
+        for (anchor, angle) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::End, "flush must not change the Left rotated anchor");
+            assert!((angle - (-45.0_f64)).abs() < 0.001, "flush must not change the rotation angle");
+        }
+    }
+
+    /// Cycle-2 non-blocking S3 fix: pin the `Bottom | Top => tick.label_angle
+    /// == 0.0` suppression arm — the counterpart to the Left/Right composition
+    /// test above. A rotated Bottom axis with `label_flush = true`: the
+    /// rotation fixup already gave every tick an `End` anchor; if flush's
+    /// gate were wrongly flipped to unconditional (mirroring Left/Right), the
+    /// first tick would be reassigned `Start` and the last would be
+    /// reassigned `End` — a silent conflict with the rotation fixup's own
+    /// uniform-`End` edge anchor. Every tick, including the edges, must stay
+    /// `End` with the rotation angle preserved.
+    #[test]
+    fn build_axis_label_flush_suppressed_on_rotated_bottom_axis() {
+        let mut axis = three_tick_bottom_axis();
+        for t in &mut axis.ticks {
+            t.label_angle = -45.0;
+        }
+        axis.label_flush = Some(true);
+        let theme = ThemeInputs::default();
+
+        let no_flush = {
+            let mut a = axis.clone();
+            a.label_flush = None;
+            build_axis(&a, &theme, None)
+        };
+        let flushed = build_axis(&axis, &theme, None);
+
+        // Flush must be a no-op under Bottom/Top rotation: byte-identical
+        // anchor/angle pairs AND identical label positions to the no-flush case.
+        let texts_no_flush = text_anchors_and_angles(&no_flush);
+        let texts_flushed = text_anchors_and_angles(&flushed);
+        assert_eq!(texts_flushed, texts_no_flush, "flush must not alter anchors/angles on a rotated Bottom axis");
+        for (anchor, angle) in &texts_flushed {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::End, "rotated Bottom ticks must keep the rotation's own End anchor, not flush's Start/End");
+            assert!((angle - (-45.0_f64)).abs() < 0.001);
+        }
+        let ys = |nodes: &[SceneNode]| -> Vec<f64> {
+            nodes.iter().filter_map(|n| {
+                if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
+            }).collect()
+        };
+        assert_eq!(ys(&flushed), ys(&no_flush), "flush must not shift label_y on a rotated Bottom axis either");
     }
 }

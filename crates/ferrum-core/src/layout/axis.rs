@@ -817,18 +817,80 @@ pub(crate) fn estimate_x_label_band(
     )
 }
 
-/// Returns the pixel width of the widest tick label on the y-axis. Used by the
-/// orchestrator to reserve a left gutter before computing the plot rect.
+/// Horizontal extent (px away from the y-axis line) occupied by a y-axis tick
+/// label rotated by `angle` (degrees, may be negative). TRANSPOSE of
+/// `rotated_x_label_extent`: rotating a y label toward vertical SHRINKS its
+/// horizontal footprint (the label's own width stops projecting fully onto the
+/// horizontal axis), where rotating an x label toward vertical GROWS its
+/// vertical footprint.
+///
+/// Mirrors the render pivot in `render/marks/axis.rs`'s `Left`/`Right` arms:
+/// that pivot is the SAME point as the flat (unrotated) label's anchor point
+/// — `TextAnchor::End`/`Start` already sit on the axis-facing edge for y, so
+/// (unlike x's `Bottom`/`Top`, whose flat anchor is `Middle`) rotation needs no
+/// anchor flip and no extra font-size clearance term to keep the label
+/// swinging away from the plot as it rotates. That is why this helper, unlike
+/// `rotated_x_label_extent`, has no `font_size` parameter.
+///
+/// **Caveat (θ ≤ 0 only):** the "no clearance term needed" claim above holds
+/// for the documented convention of negative override angles (everything the
+/// test suite exercises). For a large POSITIVE `angle`, rotating the
+/// `End`-anchored bbox about the flat pivot moves its near edge INWARD by up
+/// to `sin|angle|·ascent`, which can exceed the `tick_size + label_pad`
+/// standoff (e.g. at θ = +90°, ascent ≈ 0.8·font_size can be a few px larger
+/// than a small `tick_size + label_pad`) — a few pixels of the label would
+/// cross the axis line into the plot. This is a known, low-impact gap in the
+/// pivot geometry, not covered by this formula; a future fix would either
+/// clamp/mirror the pivot for `angle > 0` or add the missing clearance term.
+///
+/// SYNC: render (`render/marks/axis.rs` `Left`/`Right` arms), the rotated
+/// branch of `compute_y_label_band_width`, and `layout_y_axis`'s
+/// override-angle branch all depend on this. Change all three together or the
+/// y-axis title / plot region will overlap (or float away from) the rotated
+/// labels.
+fn rotated_y_label_extent(
+    angle: f64,
+    max_label_w: f64,
+    line_h: f64,
+    tick_size: f64,
+    label_pad: f64,
+) -> f64 {
+    let rad = angle.to_radians();
+    let sin_abs = rad.sin().abs();
+    let cos_abs = rad.cos().abs();
+    tick_size + label_pad + cos_abs * max_label_w + sin_abs * line_h
+}
+
+/// Returns the pixel width the y-axis gutter must reserve for tick labels.
+/// Used by the orchestrator to reserve a left (or right) gutter before
+/// computing the plot rect, and by `layout_y_axis` to place the title beyond
+/// the labels.
+///
+/// θ=0 (no override, or an explicit `0.0`) returns the widest tick label's
+/// measured width — bit-for-bit the pre-R2 behavior, which deliberately omits
+/// `tick_size`/`label_pad` (an existing quirk of the y band, preserved here;
+/// see `rotated_y_label_extent`'s doc for why the rotated branch DOES include
+/// them). A non-zero override goes through the transposed rotated-extent
+/// formula instead (SYNC with `rotated_y_label_extent`).
 pub fn compute_y_label_band_width(
     input: &AxisInput,
     label_font_size: f64,
     metrics: &dyn TextMetrics,
+    tick_size: f64,
 ) -> f64 {
-    input
+    let max_label_w = input
         .tick_labels
         .iter()
         .map(|s| metrics.measure_width(s, label_font_size))
-        .fold(0.0_f64, f64::max)
+        .fold(0.0_f64, f64::max);
+    match input.overrides.label_angle {
+        Some(angle) if angle != 0.0 => {
+            let line_h = metrics.line_height(label_font_size);
+            let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
+            rotated_y_label_extent(angle, max_label_w, line_h, tick_size, label_pad)
+        }
+        _ => max_label_w,
+    }
 }
 
 /// Returns the title-row width contribution: title text height (rotated 90°,
@@ -871,8 +933,13 @@ pub fn compute_x_title_width(
 }
 
 /// Build the AxisLayout for the y-axis (Left orient) of a single panel.
-/// Tick positions are uniformly spaced across `panel_area.h`; no collision
-/// policy applies to y-axis (spec §14.4).
+/// Tick positions are uniformly spaced across `panel_area.h`; no graduated
+/// collision cascade applies to the y-axis (spec §14.4). `input.overrides.label_angle`
+/// (R2) is the one exception: when set, it bypasses the (absent) cascade the
+/// same way it bypasses x's cascade, rotating every tick and eliding any label
+/// whose rotated footprint still collides with its neighbor (no cull recovery
+/// on y — see `AxisLabelWarning`).
+#[allow(clippy::too_many_arguments)]
 pub fn layout_y_axis(
     input: &AxisInput,
     panel_area: Rect,
@@ -880,8 +947,9 @@ pub fn layout_y_axis(
     label_font_size: f64,
     title_font_size: f64,
     axis_title_padding: f64,
+    tick_size: f64,
     metrics: &dyn TextMetrics,
-) -> AxisLayout {
+) -> (AxisLayout, Option<AxisLabelWarning>) {
     let n = input.tick_labels.len();
     let slot_h = if n > 0 { panel_area.h / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (top → bottom, in pixel order): slot `i`'s center
@@ -899,24 +967,56 @@ pub fn layout_y_axis(
     // grid lines agree with the marks. Absent (`None`) → the uniform-slot formula,
     // byte-identical to before.
     let band_centers = input.categorical_positions.as_deref();
-    let ticks: Vec<TickLayout> = input
-        .tick_labels
-        .iter()
-        .enumerate()
-        .map(|(i, label)| TickLayout {
-            position: match (&projected, band_centers) {
-                (Some(px), _) => px[i],
-                (None, Some(centers)) => centers[i],
-                (None, None) => slot_axis.uniform_center(i, slot_h),
-            },
-            label: label.clone(),
-            label_angle: 0.0,
-            elided: false,
-            culled: false,
-            label_font_size: None,
-            is_major: true,
-        })
-        .collect();
+    let tick_position = |i: usize| -> f64 {
+        match (&projected, band_centers) {
+            (Some(px), _) => px[i],
+            (None, Some(centers)) => centers[i],
+            (None, None) => slot_axis.uniform_center(i, slot_h),
+        }
+    };
+    // Per-tick vertical budget used to judge whether a rotated label still
+    // collides with its neighbor — the y-dimension transpose of
+    // `layout_x_axis`'s `cascade_slot_w`. Continuous/explicit-range axes use
+    // the minimum adjacent gap between projected/band-center positions (the
+    // tightest pair, worst case); uniform categorical axes use `slot_h`.
+    let cascade_slot_h = match (&projected, band_centers) {
+        (Some(px), _) => min_adjacent_gap(px).unwrap_or(slot_h),
+        (None, Some(centers)) => min_adjacent_gap(centers).unwrap_or(slot_h),
+        (None, None) => slot_h,
+    };
+
+    let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
+        // R2: label_angle_override always applies (there is no cascade to
+        // bypass on y). Shared body (quality-review fix 4): see
+        // `stamp_override_angle_with_elide`'s doc for the x/y transpose
+        // (y's projection factor is `sin|angle|` against `cascade_slot_h`).
+        let sin_factor = override_angle.to_radians().sin().abs();
+        stamp_override_angle_with_elide(
+            &input.tick_labels,
+            override_angle,
+            sin_factor,
+            cascade_slot_h,
+            label_font_size,
+            metrics,
+            tick_position,
+        )
+    } else {
+        let ticks: Vec<TickLayout> = input
+            .tick_labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| TickLayout {
+                position: tick_position(i),
+                label: label.clone(),
+                label_angle: 0.0,
+                elided: false,
+                culled: false,
+                label_font_size: None,
+                is_major: true,
+            })
+            .collect();
+        (ticks, None)
+    };
     // Minors use the SAME inverted base range + padding inset as the major
     // projection above, so a minor at domain `v` coincides with the major
     // projection of `v`.
@@ -938,7 +1038,7 @@ pub fn layout_y_axis(
     let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
 
     let title = input.title.as_ref().map(|text| {
-        let label_band = compute_y_label_band_width(input, label_font_size, metrics);
+        let label_band = compute_y_label_band_width(input, label_font_size, metrics, tick_size);
         let title_h = metrics.line_height(effective_title_font_size);
         // The title sits beyond the tick labels, on the same side as the axis.
         let title_x = if on_right {
@@ -967,16 +1067,18 @@ pub fn layout_y_axis(
 
     // 385: single construction site for the 22-field AxisLayout (shared with
     // layout_x_axis via `AxisLayout::from_input`).
-    AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title)
+    let layout = AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title);
+    (layout, warning)
 }
 
 use crate::layout::{LABEL_OVERLAP_TOLERANCE, ANGLE_CASCADE, FONT_SHRINK_FACTOR};
 use crate::layout::text_metrics::measure_multiline_width;
 
-/// Per-x-axis warning the orchestrator may emit. Internal — consumers translate
-/// to `LayoutWarning`.
+/// Per-axis tick-label warning the orchestrator may emit (x's collision
+/// cascade and y's override-angle elide-to-fit recovery both surface through
+/// this one type — see R2). Internal — consumers translate to `LayoutWarning`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum XAxisWarning {
+pub enum AxisLabelWarning {
     LabelsElided { count: u32 },
 }
 
@@ -1116,6 +1218,73 @@ fn wrap_label(
 
     // No break points found.
     None
+}
+
+/// Shared body for `layout_x_axis`'s and `layout_y_axis`'s `label_angle`
+/// override branch (R2, quality-review fix 4): stamp `override_angle` onto
+/// every tick, then elide-to-fit any label whose rotated footprint still
+/// collides with its neighbor's per-tick budget — no cull recovery, on
+/// either axis (spec SS7 for x; R2 for y).
+///
+/// The two axes differ only in WHICH trig factor turns a label's flat width
+/// into its footprint along the collision dimension, and what that
+/// dimension's per-tick budget is:
+/// - x judges HORIZONTAL collision via `cos|angle|` (rotation SHRINKS the
+///   horizontal footprint as a label tips toward vertical) against
+///   `cascade_slot_w`.
+/// - y judges VERTICAL collision via `sin|angle|` (rotation GROWS the
+///   vertical footprint — the transpose of x) against `cascade_slot_h`.
+///
+/// Callers pass their own `projection_factor` and `budget` for this; see
+/// `rotated_x_label_extent`'s and `rotated_y_label_extent`'s docs for why the
+/// two factors are transposed. `position_fn` resolves each tick's pixel
+/// position (already orient-specific — each caller's own
+/// uniform-slot/projected/band-center closure).
+fn stamp_override_angle_with_elide(
+    tick_labels: &[String],
+    override_angle: f64,
+    projection_factor: f64,
+    budget: f64,
+    label_font_size: f64,
+    metrics: &dyn TextMetrics,
+    position_fn: impl Fn(usize) -> f64,
+) -> (Vec<TickLayout>, Option<AxisLabelWarning>) {
+    let widths: Vec<f64> = tick_labels
+        .iter()
+        .map(|s| metrics.measure_width(s, label_font_size))
+        .collect();
+    let any_still_colliding = widths.iter().any(|w| *w * projection_factor > budget);
+    let mut elided_count: u32 = 0;
+    let ticks: Vec<TickLayout> = tick_labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let w = widths[i];
+            let needs_elide = any_still_colliding && (w * projection_factor > budget);
+            let final_label = if needs_elide {
+                elided_count += 1;
+                let elide_budget = budget / projection_factor.max(1e-6);
+                elide_to_fit(label, elide_budget, label_font_size, metrics)
+            } else {
+                label.clone()
+            };
+            TickLayout {
+                position: position_fn(i),
+                label: final_label,
+                label_angle: override_angle,
+                elided: needs_elide,
+                culled: false,
+                label_font_size: None,
+                is_major: true,
+            }
+        })
+        .collect();
+    let warning = if elided_count > 0 {
+        Some(AxisLabelWarning::LabelsElided { count: elided_count })
+    } else {
+        None
+    };
+    (ticks, warning)
 }
 
 /// Run the graduated collision cascade (spec SS4.1). Tries recovery strategies in
@@ -1362,7 +1531,7 @@ pub fn layout_x_axis(
     cull_threshold: u32,
     tick_size: f64,
     metrics: &dyn TextMetrics,
-) -> (AxisLayout, Option<XAxisWarning>) {
+) -> (AxisLayout, Option<AxisLabelWarning>) {
     let n = input.tick_labels.len();
     let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (left → right, in pixel order): slot `i`'s center
@@ -1401,47 +1570,20 @@ pub fn layout_x_axis(
     };
 
     let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
-        // label_angle_override always bypasses the cascade (spec SS7).
-        // Apply the override angle, then elide if labels still collide.
-        let widths: Vec<f64> = input
-            .tick_labels
-            .iter()
-            .map(|s| metrics.measure_width(s, label_font_size))
-            .collect();
+        // label_angle_override always bypasses the cascade (spec SS7). Shared
+        // body (quality-review fix 4): see `stamp_override_angle_with_elide`'s
+        // doc for the x/y transpose (x's projection factor is `cos|angle|`
+        // against `cascade_slot_w`).
         let cos_factor = override_angle.to_radians().cos().abs();
-        let any_still_colliding = widths.iter().any(|w| *w * cos_factor > cascade_slot_w);
-        let mut elided_count: u32 = 0;
-        let ticks: Vec<TickLayout> = input
-            .tick_labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| {
-                let w = widths[i];
-                let needs_elide = any_still_colliding && (w * cos_factor > cascade_slot_w);
-                let final_label = if needs_elide {
-                    elided_count += 1;
-                    let budget = cascade_slot_w / cos_factor.max(1e-6);
-                    elide_to_fit(label, budget, label_font_size, metrics)
-                } else {
-                    label.clone()
-                };
-                TickLayout {
-                    position: tick_position(i),
-                    label: final_label,
-                    label_angle: override_angle,
-                    elided: needs_elide,
-                    culled: false,
-                    label_font_size: None,
-                    is_major: true,
-                }
-            })
-            .collect();
-        let warning = if elided_count > 0 {
-            Some(XAxisWarning::LabelsElided { count: elided_count })
-        } else {
-            None
-        };
-        (ticks, warning)
+        stamp_override_angle_with_elide(
+            &input.tick_labels,
+            override_angle,
+            cos_factor,
+            cascade_slot_w,
+            label_font_size,
+            metrics,
+            tick_position,
+        )
     } else {
         // Run the graduated collision cascade, biased by any `label_overlap`
         // override (B5 unit 6b).
@@ -1470,7 +1612,7 @@ pub fn layout_x_axis(
             .collect();
         let warning = match cascade.strategy {
             CascadeStrategy::Elided { count } => {
-                Some(XAxisWarning::LabelsElided { count })
+                Some(AxisLabelWarning::LabelsElided { count })
             }
             _ => None,
         };
@@ -1812,7 +1954,7 @@ mod tests {
             None,
         );
         let m = mock(10.0);
-        let band = compute_y_label_band_width(&input, 11.0, &m);
+        let band = compute_y_label_band_width(&input, 11.0, &m, 4.0);
         assert_eq!(band, 50.0);
     }
 
@@ -1820,7 +1962,157 @@ mod tests {
     fn y_axis_label_band_empty_labels_returns_zero() {
         let input = AxisInput::new(AxisOrient::Left, None, vec![], None);
         let m = mock(10.0);
-        assert_eq!(compute_y_label_band_width(&input, 11.0, &m), 0.0);
+        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0), 0.0);
+    }
+
+    // ── R2: y-axis `label_angle` (transpose of the x rotated-extent geometry) ──
+
+    /// TRANSPOSE of `rotated_x_label_extent_hand_computed_values`: rotation
+    /// SHRINKS the y band (the `cos` term carries `max_label_w`, `sin` carries
+    /// `line_h` — the opposite weighting from x, where `sin` carries
+    /// `max_label_w` and rotation GROWS the band).
+    #[test]
+    fn rotated_y_label_extent_hand_computed_values() {
+        // -45°: sin=cos=√2/2≈0.70710678. With max_w=100, line_h=13.2,
+        // tick_size=4, label_pad=2: 4 + 2 + 0.7071·100 + 0.7071·13.2
+        let sin45 = (-45.0_f64).to_radians().sin().abs();
+        let cos45 = (-45.0_f64).to_radians().cos().abs();
+        let expected_45 = 4.0 + 2.0 + cos45 * 100.0 + sin45 * 13.2;
+        let got_45 = rotated_y_label_extent(-45.0, 100.0, 13.2, 4.0, 2.0);
+        assert!(
+            (got_45 - expected_45).abs() < 1e-9,
+            "-45° extent should be {expected_45}, got {got_45}",
+        );
+
+        // -90°: sin=1, cos≈0 → tick_size + label_pad + line_h (the
+        // `cos·max_label_w` term vanishes — the label is fully vertical, so its
+        // own width no longer projects onto the horizontal gutter at all; the
+        // TRANSPOSE of x's -90° case, where it's the `sin·max_label_w` term
+        // that survives and `cos·line_h` that vanishes).
+        let got_90 = rotated_y_label_extent(-90.0, 100.0, 13.2, 4.0, 2.0);
+        let expected_90 = 4.0 + 2.0 + 13.2;
+        assert!(
+            (got_90 - expected_90).abs() < 1e-6,
+            "-90° extent should be ~{expected_90}, got {got_90}",
+        );
+    }
+
+    /// `compute_y_label_band_width` with an explicit override angle routes
+    /// through `rotated_y_label_extent` instead of the flat max-width formula.
+    #[test]
+    fn y_axis_label_band_width_honors_explicit_angle() {
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["abcdefghij".into()], // 10 chars
+            Some(-45.0),
+        );
+        let m = mock(10.0); // 10 px/char → width 100
+        let band = compute_y_label_band_width(&input, 11.0, &m, 4.0);
+        let expected = rotated_y_label_extent(-45.0, 100.0, m.line_height(11.0), 4.0, 2.0);
+        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
+    }
+
+    /// θ=0 bit-parity (spec §6, hard gate): an explicit `label_angle: Some(0.0)`
+    /// override must reserve EXACTLY the pre-R2 flat band (max label width
+    /// only, no `tick_size`/`label_pad`/`line_h` terms) — bit-for-bit equal to
+    /// the `None`-override fixture in `y_axis_label_band_uses_longest_label`.
+    #[test]
+    fn y_axis_label_band_width_zero_angle_is_bit_identical_to_flat() {
+        let labels = vec!["0".into(), "100".into(), "10000".into()];
+        let m = mock(10.0);
+        let no_override = AxisInput::new(AxisOrient::Left, None, labels.clone(), None);
+        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels, Some(0.0));
+        let band_none = compute_y_label_band_width(&no_override, 11.0, &m, 4.0);
+        let band_zero = compute_y_label_band_width(&explicit_zero, 11.0, &m, 4.0);
+        assert_eq!(band_none, 50.0);
+        assert_eq!(band_zero, band_none, "θ=0 must be bit-identical to no override");
+    }
+
+    /// `layout_y_axis` stamps the override angle onto every tick (mirrors
+    /// `layout_x_axis`'s override branch); with ample vertical spacing no
+    /// label collides, so nothing is elided.
+    #[test]
+    fn layout_y_axis_stamps_override_angle_on_every_tick() {
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "1".into(), "2".into(), "3".into()],
+            Some(-45.0),
+        );
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 400.0 };
+        let m = mock(10.0);
+        let (axis, warning) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, -45.0);
+            assert!(!t.culled, "y-axis has no cull recovery (spec §4-R2)");
+            assert!(!t.elided, "short single-char labels should not need elision");
+        }
+        assert!(warning.is_none());
+    }
+
+    /// R2 acceptance #2 / decision-record R2: rotated y labels that still
+    /// collide use elide-to-fit, never cull. Mirrors
+    /// `x_axis_elides_via_override_when_angle_forced`, transposed: y judges
+    /// collision by the rotated label's VERTICAL projection (`sin`) against
+    /// the per-tick vertical budget.
+    #[test]
+    fn layout_y_axis_elides_via_override_when_angle_forced() {
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            (0..20).map(|i| format!("Label_{}", i)).collect(),
+            Some(-45.0),
+        );
+        // 20 ticks packed into a 200px-tall panel → slot_h = 10px. Each ~7-8
+        // char label is 70-80px wide; at -45° the vertical projection
+        // (w * sin(45°) ≈ 49-56px) far exceeds the 10px budget.
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let (axis, warning) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, -45.0);
+            assert!(!t.culled, "y-axis has no cull recovery (spec §4-R2)");
+            assert!(t.elided, "expected all 20 labels to be elided with override");
+            assert!(t.label.ends_with('\u{2026}'), "expected ellipsis suffix; got {:?}", t.label);
+        }
+        match warning {
+            Some(AxisLabelWarning::LabelsElided { count }) => assert_eq!(count, 20),
+            other => panic!("expected LabelsElided{{count: 20}}, got {:?}", other),
+        }
+    }
+
+    /// θ=0 bit-parity (spec §6, hard gate) at the `layout_y_axis` level —
+    /// quality-review fix 3. `None` and an explicit `Some(0.0)` override take
+    /// DIFFERENT code branches (the override branch vs. the flat branch), so
+    /// `y_axis_label_band_width_zero_angle_is_bit_identical_to_flat` (which
+    /// only pins `compute_y_label_band_width`) does not cover this site. A
+    /// dense, long-label fixture is used deliberately: at θ=0 the override
+    /// branch's own collision check (`sin(0) = 0` ⇒ `w * 0 > budget` is always
+    /// false) must produce the SAME "never elides" outcome as the flat
+    /// branch's unconditional "never checks" — proving the equivalence holds
+    /// even in a case that WOULD collide at any other angle, not just a
+    /// trivially-non-colliding one.
+    #[test]
+    fn layout_y_axis_zero_angle_override_is_bit_identical_to_no_override() {
+        let labels: Vec<String> = (0..20).map(|i| format!("Label_{}", i)).collect();
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let no_override = AxisInput::new(AxisOrient::Left, None, labels.clone(), None);
+        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels, Some(0.0));
+
+        let (axis_none, warn_none) =
+            layout_y_axis(&no_override, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (axis_zero, warn_zero) =
+            layout_y_axis(&explicit_zero, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+
+        assert_eq!(
+            axis_zero.ticks, axis_none.ticks,
+            "Some(0.0) must produce a field-for-field identical tick vector to None"
+        );
+        assert_eq!(warn_zero, None, "θ=0 override must never elide");
+        assert_eq!(warn_none, None, "no-override flat path must never elide");
     }
 
     #[test]
@@ -1833,7 +2125,7 @@ mod tests {
         );
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         assert_eq!(axis.orient, AxisOrient::Left);
         assert_eq!(axis.panel_index, 0);
         assert_eq!(axis.ticks.len(), 4);
@@ -1902,7 +2194,7 @@ mod tests {
         input.categorical_positions = Some(vec![67.5, 122.5, 177.5, 232.5]);
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
     }
@@ -1919,7 +2211,7 @@ mod tests {
         assert!(input.categorical_positions.is_none());
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![75.0, 125.0, 175.0, 225.0]);
     }
@@ -1977,7 +2269,7 @@ mod tests {
         input.orient = AxisOrient::Right;
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         assert_eq!(axis.orient, AxisOrient::Right);
         // Axis line on the right edge (x + w), not the left.
         assert!((axis.axis_line.x - (100.0 + 300.0)).abs() < 1e-9);
@@ -1999,7 +2291,7 @@ mod tests {
         input.overrides.title_orient = Some(AxisOrient::Top);
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         // A horizontal title_orient renders the y-axis title flat (angle 0).
         assert_eq!(axis.title.unwrap().angle, 0.0);
     }
@@ -2157,7 +2449,7 @@ mod tests {
             assert!(t.label.ends_with('\u{2026}'), "expected ellipsis suffix; got {:?}", t.label);
         }
         match warning {
-            Some(XAxisWarning::LabelsElided { count }) => assert_eq!(count, 20),
+            Some(AxisLabelWarning::LabelsElided { count }) => assert_eq!(count, 20),
             other => panic!("expected LabelsElided{{count: 20}}, got {:?}", other),
         }
     }
@@ -2304,7 +2596,7 @@ mod tests {
         );
         let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
 
         assert!(axis.minor_ticks.is_empty());
         assert_eq!(axis.ticks.len(), 3);
@@ -2374,7 +2666,7 @@ mod tests {
         );
         let panel = Rect { x: 100.0, y: 40.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
 
         assert_eq!(axis.minor_ticks.len(), 2);
         // base_range = (240, 40), span = -200: 240 - 0.125*200 = 215, 240 - 0.375*200 = 165.
@@ -2889,7 +3181,7 @@ mod tests {
         };
         let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!(
-            matches!(warning, Some(XAxisWarning::LabelsElided { .. })),
+            matches!(warning, Some(AxisLabelWarning::LabelsElided { .. })),
             "expected LabelsElided warning; got {:?}",
             warning,
         );
@@ -3409,7 +3701,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 200.0, h: 600.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
         // inset range (592, 8): t=1 → 8 (top), t=0.5 → 300, t=0 → 592 (bottom).
         assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "top tick; got {}", axis.ticks[0].position);
         assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
@@ -3430,7 +3722,7 @@ mod tests {
         assert!(input.tick_projection.is_none());
         let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
-        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
         assert!((axis.ticks[0].position - 75.0).abs() < 1e-9);
         assert!((axis.ticks[3].position - 225.0).abs() < 1e-9);
     }

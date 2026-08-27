@@ -109,7 +109,34 @@ pub struct ChartTitleLayout {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayoutWarning {
     PanelCollapsed { panel_index: usize },
-    LabelsElided { axis: usize, count: u32 },
+    /// `axis` is a truthful identity, but its NAMESPACE depends on
+    /// `secondary_slot`: when `None`, `axis` is the index this axis was (or
+    /// will be) pushed to in the shared `axis_layouts` stream (x and primary-y
+    /// axes across all panels share that one vec, so the index is unique
+    /// there). When `Some(slot)`, `axis` is instead the 0-based rank of this
+    /// secondary-y axis in `secondary_y_axis_layouts` — GH #52's secondary
+    /// axes live in a SEPARATE vec, so an `axis_layouts`-namespace index would
+    /// be fabricated and could collide with an unrelated x/primary-y warning
+    /// in the same panel. `secondary_slot` disambiguates the namespace so the
+    /// two integer spaces are never conflated, in the field and in the
+    /// rendered message.
+    ///
+    /// `secondary_slot`'s value is the per-panel y-SLOT index (the same
+    /// numbering `build_axis`'s `tick_slot`, `route_panel_axes_and_grid`'s
+    /// `y_slot`, `MarkBatch::y_slot`, and `SceneNode::Text.slot` all use, and
+    /// the loop-local `slot_idx` this axis was built from) — NOT
+    /// `secondary_y_axis_layouts.len()`. In a single-panel chart the two
+    /// happen to coincide (each panel's secondary loop runs once), but in a
+    /// faceted chart with N panels × 1 secondary axis each, panel *k*'s
+    /// secondary axis is slot 0 while its vec rank is *k* — using the vec
+    /// rank here would silently misreport the slot to any consumer that reads
+    /// the field as what its name says.
+    LabelsElided {
+        axis: usize,
+        count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secondary_slot: Option<usize>,
+    },
     LegendOverflowed { entries_dropped: u32 },
     /// One or more facet panels were dropped because the explicit grid
     /// `nrows × ncols` is smaller than the number of facet groups.
@@ -138,9 +165,13 @@ impl std::fmt::Display for LayoutWarning {
                 f,
                 "panel {panel_index} collapsed to zero size and was not drawn"
             ),
-            LayoutWarning::LabelsElided { axis, count } => write!(
+            LayoutWarning::LabelsElided { axis, count, secondary_slot: None } => write!(
                 f,
                 "{count} tick label(s) on axis {axis} were elided to avoid overlap"
+            ),
+            LayoutWarning::LabelsElided { axis, count, secondary_slot: Some(_) } => write!(
+                f,
+                "{count} tick label(s) on secondary y-axis {axis} were elided to avoid overlap"
             ),
             LayoutWarning::LegendOverflowed { entries_dropped } => write!(
                 f,
@@ -710,7 +741,9 @@ fn reserve_axis_bands(
         .overrides
         .label_font_size
         .unwrap_or(theme.typography.label_font_size);
-    let y_label_band = axis::compute_y_label_band_width(&axes.y, y_label_font_size, metrics);
+    let y_label_band = axis::compute_y_label_band_width(
+        &axes.y, y_label_font_size, metrics, theme.sizes.tick_size,
+    );
 
     // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
     // angle the cascade will choose by running a lightweight worst-case check
@@ -787,7 +820,9 @@ fn reserve_axis_bands(
                 .overrides
                 .label_font_size
                 .unwrap_or(theme.typography.label_font_size);
-            let label_band = axis::compute_y_label_band_width(a, label_font_size, metrics);
+            let label_band = axis::compute_y_label_band_width(
+                a, label_font_size, metrics, theme.sizes.tick_size,
+            );
             let title_gutter = axis::compute_y_title_width(
                 a,
                 theme.typography.title_font_size,
@@ -1112,15 +1147,23 @@ fn layout_panel_axes(
                     .overrides
                     .label_font_size
                     .unwrap_or(theme.typography.label_font_size);
-                let y_axis = axis::layout_y_axis(
+                let (y_axis, ywarn) = axis::layout_y_axis(
                     &y_input,
                     rect,
                     panel_index,
                     y_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
+                    theme.sizes.tick_size,
                     metrics,
                 );
+                if let Some(axis::AxisLabelWarning::LabelsElided { count }) = ywarn {
+                    warnings.push(LayoutWarning::LabelsElided {
+                        axis: axis_layouts.len(),
+                        count,
+                        secondary_slot: None,
+                    });
+                }
                 axis_layouts.push(y_axis);
             }
 
@@ -1147,15 +1190,35 @@ fn layout_panel_axes(
                     .overrides
                     .label_font_size
                     .unwrap_or(theme.typography.label_font_size);
-                let sec_axis = axis::layout_y_axis(
+                let (sec_axis, sec_warn) = axis::layout_y_axis(
                     &sec_input,
                     rect,
                     panel_index,
                     sec_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
+                    theme.sizes.tick_size,
                     metrics,
                 );
+                if let Some(axis::AxisLabelWarning::LabelsElided { count }) = sec_warn {
+                    // `axis`: this secondary axis's own 0-based rank in
+                    // `secondary_y_axis_layouts` (the vec it is about to be
+                    // pushed to), NOT an index into `axis_layouts` — that vec
+                    // does not contain secondary axes at all, and a fabricated
+                    // combined index can collide with an unrelated x/primary-y
+                    // warning emitted later in the same panel.
+                    // `secondary_slot`: the loop's own `slot_idx` — the
+                    // established per-panel y-SLOT numbering (matches
+                    // `tick_slot`/`y_slot` elsewhere), NOT the vec rank above.
+                    // The two coincide in a single-panel chart but diverge
+                    // across facet panels (panel k's slot-0 axis has vec rank
+                    // k), so `secondary_slot` must read `slot_idx`, not `axis`.
+                    warnings.push(LayoutWarning::LabelsElided {
+                        axis: secondary_y_axis_layouts.len(),
+                        count,
+                        secondary_slot: Some(slot_idx),
+                    });
+                }
                 secondary_y_axis_layouts.push(sec_axis);
                 cumulative_offset += secondary_y_bands.get(slot_idx).copied().unwrap_or(0.0);
             }
@@ -1186,10 +1249,11 @@ fn layout_panel_axes(
                     theme.sizes.tick_size,
                     metrics,
                 );
-                if let Some(axis::XAxisWarning::LabelsElided { count }) = xwarn {
+                if let Some(axis::AxisLabelWarning::LabelsElided { count }) = xwarn {
                     warnings.push(LayoutWarning::LabelsElided {
                         axis: axis_layouts.len(),
                         count,
+                        secondary_slot: None,
                     });
                 }
                 axis_layouts.push(x_axis);
@@ -1352,7 +1416,8 @@ mod tests {
     fn layout_warning_round_trip_each_variant() {
         for w in [
             LayoutWarning::PanelCollapsed { panel_index: 2 },
-            LayoutWarning::LabelsElided { axis: 0, count: 5 },
+            LayoutWarning::LabelsElided { axis: 0, count: 5, secondary_slot: None },
+            LayoutWarning::LabelsElided { axis: 1, count: 2, secondary_slot: Some(1) },
             LayoutWarning::LegendOverflowed { entries_dropped: 3 },
             LayoutWarning::PanelsDropped { count: 1, keys: vec!["col_cat=c2".into()] },
             LayoutWarning::EmptyPartitions { keys: vec!["col_cat=c2, row_cat=r2".into()] },
@@ -1649,6 +1714,170 @@ mod tests {
         assert!((w0 - w1 - band).abs() < 1e-6, "n=0→1 shrink: {w0} - {w1} should be {band}");
         assert!((w1 - w2 - band).abs() < 1e-6, "n=1→2 shrink: {w1} - {w2} should be {band}");
         assert!((w2 - w3 - band).abs() < 1e-6, "n=2→3 shrink: {w2} - {w3} should be {band}");
+    }
+
+    /// R2 secondary-y: `label_angle` on a secondary-y `Axis(...)` (GH #52) is
+    /// honored exactly like the primary y-axis — `layout_y_axis` is shared by
+    /// both, so this is a wiring check that the override actually reaches the
+    /// secondary-axis call site (`reserve_axis_bands`'s `secondary_y_bands` map
+    /// and the panel-loop's secondary-axis emission both thread it through).
+    #[test]
+    fn compute_layout_secondary_y_axis_honors_label_angle_override() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 800.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        let mut axes = dummy_axes();
+        let mut sec = AxisInput::new(
+            AxisOrient::Right,
+            Some("Sec1".into()),
+            vec!["0".into(), "50".into(), "100".into()],
+            Some(-45.0),
+        );
+        sec.orient = AxisOrient::Right;
+        axes.secondary_y = vec![sec];
+
+        let result = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+        )
+        .expect("layout should succeed with a rotated secondary y axis");
+
+        assert_eq!(result.secondary_y_axes.len(), 1);
+        for t in &result.secondary_y_axes[0].ticks {
+            assert_eq!(t.label_angle, -45.0, "secondary-y override angle must reach every tick");
+        }
+    }
+
+    /// Quality-review fix 2 regression: a secondary-y elision warning and an
+    /// x-axis elision warning emitted in the SAME panel must carry distinct,
+    /// non-colliding identities. Pre-fix, the secondary-y push used
+    /// `axis_layouts.len() + secondary_y_axis_layouts.len()` — an index into
+    /// NEITHER real vec — which could numerically collide with the x-axis
+    /// warning's `axis_layouts.len()` pushed later in the same iteration
+    /// (both read `axis_layouts.len()` before the x push, since secondaries
+    /// never append to `axis_layouts`). Force both a secondary-y elision
+    /// (20 tightly-packed rotated ticks) and an x-axis elision (20
+    /// tightly-packed rotated ticks) in one `compute_layout` call and assert
+    /// the two `LabelsElided` warnings are tagged unambiguously.
+    #[test]
+    fn compute_layout_secondary_y_and_x_elision_warnings_do_not_collide() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 400.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        let mut axes = dummy_axes();
+        // 20 long unsplittable x labels + a forced override angle: the
+        // override branch's own collision check (not the graduated cascade)
+        // deterministically elides regardless of `cull_threshold`.
+        axes.x = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            (0..20).map(|i| format!("Label_{i}")).collect(),
+            Some(-45.0),
+        );
+        let sec = AxisInput::new(
+            AxisOrient::Right,
+            None,
+            (0..20).map(|i| format!("Sec_{i}")).collect(),
+            Some(-45.0),
+        );
+        axes.secondary_y = vec![sec];
+
+        let result = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+        )
+        .expect("layout should succeed with both axes forced to elide");
+
+        let elided: Vec<&LayoutWarning> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, LayoutWarning::LabelsElided { .. }))
+            .collect();
+        assert_eq!(elided.len(), 2, "expected exactly one x and one secondary-y elision warning");
+
+        let secondary_warns: Vec<&LayoutWarning> = elided
+            .iter()
+            .filter(|w| matches!(w, LayoutWarning::LabelsElided { secondary_slot: Some(_), .. }))
+            .copied()
+            .collect();
+        let primary_warns: Vec<&LayoutWarning> = elided
+            .iter()
+            .filter(|w| matches!(w, LayoutWarning::LabelsElided { secondary_slot: None, .. }))
+            .copied()
+            .collect();
+        assert_eq!(secondary_warns.len(), 1, "exactly one secondary-y elision, tagged secondary_slot: Some");
+        assert_eq!(primary_warns.len(), 1, "exactly one x-axis elision, tagged secondary_slot: None");
+
+        // The rendered messages must be distinguishable text, not just an
+        // internal tag — a user reading two warnings must be able to tell
+        // them apart even without inspecting the struct fields.
+        let secondary_msg = secondary_warns[0].to_string();
+        let primary_msg = primary_warns[0].to_string();
+        assert!(secondary_msg.contains("secondary y-axis"), "got: {secondary_msg}");
+        assert!(!primary_msg.contains("secondary y-axis"), "got: {primary_msg}");
+    }
+
+    /// Cycle-2 non-blocking S3 fix: `secondary_slot` must be the per-panel
+    /// y-SLOT index (`slot_idx`), not `secondary_y_axis_layouts`' cross-panel
+    /// vec rank — the two diverge as soon as more than one panel contributes
+    /// a secondary axis. Two facet panels, each with exactly one secondary
+    /// y-axis forced to elide: panel 0's secondary axis lands at vec rank 0,
+    /// panel 1's at vec rank 1 (the shared vec accumulates across panels) —
+    /// but BOTH are slot 0 within their own panel (the inner `slot_idx` loop
+    /// resets every panel). Both warnings must report `secondary_slot:
+    /// Some(0)`, proving the field reads the slot, not the vec rank.
+    #[test]
+    fn compute_layout_secondary_slot_is_per_panel_slot_not_vec_rank_across_facets() {
+        let spec = faceted_spec(2);
+        let groups = vec![
+            FacetGroup { key: FacetKey { field: "species".into(), value: "a".into() }, n_rows: 10, row_key: None },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "b".into() }, n_rows: 10, row_key: None },
+        ];
+        let viewport = Viewport { width: 800.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        let mut axes = dummy_axes();
+        // 20 tightly-packed rotated labels per panel — same forcing recipe as
+        // the collision-identity test above, sized to still collide inside a
+        // single facet cell (roughly half the single-panel width/height).
+        let sec = AxisInput::new(
+            AxisOrient::Right,
+            None,
+            (0..20).map(|i| format!("Sec_{i}")).collect(),
+            Some(-45.0),
+        );
+        axes.secondary_y = vec![sec];
+
+        let result = compute_layout(
+            &spec, &theme, viewport, &axes, &groups, &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+        )
+        .expect("faceted layout should succeed with both panels' secondary axes eliding");
+
+        assert_eq!(result.panels.len(), 2, "expected 2 facet panels");
+        let secondary_slots: Vec<Option<usize>> = result
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                LayoutWarning::LabelsElided { secondary_slot: Some(slot), .. } => Some(Some(*slot)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            secondary_slots.len(), 2,
+            "expected one secondary-y elision warning per panel, got {secondary_slots:?}"
+        );
+        for slot in secondary_slots {
+            assert_eq!(
+                slot, Some(0),
+                "every panel's lone secondary axis is slot 0, regardless of its vec rank across panels"
+            );
+        }
     }
 
     /// Every secondary y-axis renders `Right`-orient and stacks outward: slot
@@ -2357,6 +2586,58 @@ mod tests {
             long_bottom < short_bottom,
             "rotated labels (-45°) must consume more bottom margin than flat labels; \
              long_bottom={long_bottom:.1} should be less than short_bottom={short_bottom:.1}"
+        );
+    }
+
+    /// R2, TRANSPOSE of the x test above: rotating y tick labels SHRINKS the
+    /// reserved left margin (the opposite direction from x), because a y
+    /// label's own width stops projecting fully onto the horizontal gutter as
+    /// it rotates toward vertical. Same labels, flat vs. `-45°` override; a
+    /// smaller left margin means the plot area starts closer to the viewport's
+    /// left edge (`plot_area.x` shrinks).
+    #[test]
+    fn compute_layout_rotated_y_labels_reserve_smaller_left_margin_than_flat() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let y_labels = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into(), "UVWXYZABCD".into()];
+
+        let flat_axes = AxesInput {
+            x: AxisInput::new(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
+            y: AxisInput::new(AxisOrient::Left, None, y_labels.clone(), None),
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        };
+        let rotated_axes = AxesInput {
+            x: AxisInput::new(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
+            y: AxisInput::new(AxisOrient::Left, None, y_labels, Some(-45.0)),
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        };
+
+        let flat_result = compute_layout(
+            &spec, &default_theme_inputs(), viewport,
+            &flat_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            LegendSuppression::default(),
+        ).unwrap();
+        let rotated_result = compute_layout(
+            &spec, &default_theme_inputs(), viewport,
+            &rotated_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            LegendSuppression::default(),
+        ).unwrap();
+
+        let flat_x = flat_result.panels[0].plot_area.x;
+        let rotated_x = rotated_result.panels[0].plot_area.x;
+        assert!(
+            rotated_x < flat_x,
+            "rotated y labels (-45°) must reserve a smaller left margin than flat labels; \
+             rotated_x={rotated_x:.1} should be less than flat_x={flat_x:.1}"
         );
     }
 
