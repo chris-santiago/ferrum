@@ -24,7 +24,8 @@ from ferrum import (
     Jitter,
     Stack,
 )
-from ferrum.plots._helpers import _finalize_chart, _to_polars, _validate_choice
+from ferrum._validate import validate_choice
+from ferrum.plots._helpers import _finalize_chart, _to_polars
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +251,8 @@ def displot(
 
     >>> fm.displot(df, x="tip", hue="sex", multiple="stack", rug=True)
     """
-    _validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
-    _validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
+    validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
+    validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
 
     return _displot_build(
         data,
@@ -659,7 +660,7 @@ def catplot(
 
     >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
-    _validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
+    validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
 
     if native_scale:
         raise ValueError(
@@ -949,7 +950,7 @@ def relplot(
     >>> fm.relplot(df, x="timepoint", y="signal", hue="region",
     ...            style="region", kind="line")
     """
-    _validate_choice("relplot", "kind", kind, _RELPLOT_VALID_KINDS)
+    validate_choice("relplot", "kind", kind, _RELPLOT_VALID_KINDS)
 
     return _relplot_build(
         data,

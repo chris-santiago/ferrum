@@ -21,13 +21,13 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
+from ferrum._validate import validate_choice
 from ferrum.plots._helpers import (
     _field_name,
     _finalize_chart,
     _merge_layers,
     _to_polars,
     _unique_col_name,
-    _validate_choice,
 )
 
 
@@ -189,8 +189,8 @@ def pairplot(
     ...     kind="kde", hue="species",
     ... )
     """
-    _validate_choice("pairplot", "kind", kind, _VALID_PAIR_KINDS)
-    _validate_choice("pairplot", "diag_kind", diag_kind, _VALID_DIAG_KINDS)
+    validate_choice("pairplot", "kind", kind, _VALID_PAIR_KINDS)
+    validate_choice("pairplot", "diag_kind", diag_kind, _VALID_DIAG_KINDS)
 
     # Resolve vars / x_vars / y_vars to (row, column) field lists.
     if vars is not None:

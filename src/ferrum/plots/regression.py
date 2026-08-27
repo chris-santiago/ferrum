@@ -29,6 +29,7 @@ from ferrum import (
     Robust,
     Smooth,
 )
+from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
@@ -43,7 +44,6 @@ from ferrum.plots._helpers import (
     _overlay_metrics_corner,
     _resolve_source,
     _to_polars,
-    _validate_choice,
 )
 
 if TYPE_CHECKING:
@@ -465,7 +465,7 @@ def lmplot(
 
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
-    _validate_choice("lmplot", "method", method, _VALID_METHODS)
+    validate_choice("lmplot", "method", method, _VALID_METHODS)
 
     # Rust Smooth/Robust transforms require Float64 columns. Auto-cast
     # integer columns to Float64, matching catplot's pattern (chart.py).

@@ -27,6 +27,7 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart
 
+from ferrum._validate import validate_choice
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
@@ -34,7 +35,6 @@ from ferrum.plots._helpers import (
     _finalize_chart,
     _resolve_first_param,
     _resolve_source,
-    _validate_choice,
     _warn_deprecated_dispatcher,
     _zero_anchored_domain,
 )
@@ -156,7 +156,7 @@ def rank_chart(
     )
     if data_or_source is _UNSET:
         raise TypeError("rank_chart() missing required argument: 'data_or_source'")
-    _validate_choice("rank_chart", "rank", rank, {"1d", "2d"})
+    validate_choice("rank_chart", "rank", rank, {"1d", "2d"})
 
     _warn_deprecated_dispatcher("rank_chart", "rank", "rank1d_chart / rank2d_chart")
     if rank == "1d":

@@ -26,6 +26,7 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart, ConcatChart, HConcatChart
 
+from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
@@ -35,7 +36,6 @@ from ferrum.plots._helpers import (
     _reject_compare,
     _resolve_first_param,
     _resolve_source,
-    _validate_choice,
 )
 
 
@@ -803,8 +803,8 @@ def cluster_diagnostics(
     if model is _UNSET:
         raise TypeError("cluster_diagnostics() missing required argument: 'model'")
     require_sklearn("cluster_diagnostics")
-    _validate_choice("cluster_diagnostics", "method", method, {"kmeans", "hierarchical"})
-    _validate_choice("cluster_diagnostics", "scoring", scoring, {"elbow", "silhouette", "both"})
+    validate_choice("cluster_diagnostics", "method", method, {"kmeans", "hierarchical"})
+    validate_choice("cluster_diagnostics", "scoring", scoring, {"elbow", "silhouette", "both"})
     return _cluster_diagnostics_chart(
         model,
         ks=ks,

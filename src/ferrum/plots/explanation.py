@@ -27,6 +27,7 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart, ConcatChart
 
+from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
@@ -37,7 +38,6 @@ from ferrum.plots._helpers import (
     _require_positive,
     _resolve_source,
     _should_facet_by_class,
-    _validate_choice,
     _warn_deprecated_dispatcher,
     _zero_anchored_domain,
 )
@@ -311,7 +311,7 @@ def _shap_order_features(
     + ``nulls_last=True`` sorts a NaN-scored feature below every real score
     instead of letting it hijack the top rank.
     """
-    _validate_choice("shap_order_features", "order", order, _SHAP_ORDER_VALUES)
+    validate_choice("shap_order_features", "order", order, _SHAP_ORDER_VALUES)
     expr = pl.col("shap_value").abs()
     agg = expr.mean() if order == "abs_mean" else expr.max()
     ranked = (
@@ -429,7 +429,7 @@ def _shap_bar_chart_from_source(
     hand different feature sets to different class panels or starve a
     low-magnitude class of representation.
     """
-    _validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
+    validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
     import ferrum
 
     expr = pl.col("shap_value").abs()
@@ -499,7 +499,7 @@ def _shap_bar_chart_compare_from_source(
     restore the horizontal visual (spec D2, mirrors the importance compare
     builder).
     """
-    _validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
+    validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
     import ferrum
     from ferrum.coord import CoordFlip
     from ferrum.position import Dodge
@@ -874,7 +874,7 @@ def importance_chart(
     model. Error rules and value labels dodge alongside their bars. The
     single-model path (no ``compare=``) is unchanged.
     """
-    _validate_choice("importance_chart", "orient", orient, _ORIENT_VALUES)
+    validate_choice("importance_chart", "orient", orient, _ORIENT_VALUES)
     _require_positive("importance_chart", "top_k", top_k)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
@@ -1326,7 +1326,7 @@ def shap_chart(
     panel is labeled with the model name. The single-model path (no
     ``compare=``) is unchanged.
     """
-    _validate_choice("shap_chart", "kind", kind, {"beeswarm", "bar", "waterfall"})
+    validate_choice("shap_chart", "kind", kind, {"beeswarm", "bar", "waterfall"})
     _require_positive("shap_chart", "max_display", max_display)
     _warn_deprecated_dispatcher(
         "shap_chart",

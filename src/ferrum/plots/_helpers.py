@@ -388,28 +388,6 @@ def _require_positive(func_name: str, param: str, value: int | None) -> None:
         raise ValueError(f"{func_name}: {param} must be >= 1 or None; got {value!r}.")
 
 
-def _validate_choice(
-    func_name: str,
-    param: str,
-    value: Any,
-    choices: "frozenset[Any] | set[Any] | tuple[Any, ...] | list[Any]",
-) -> None:
-    """Raise ``ValueError`` when ``value`` is not in ``choices``.
-
-    Produces a canonical error message across all figure functions::
-
-        {func_name}: {param} must be one of {sorted(choices)}; got {value!r}
-
-    This replaces three inconsistent idioms that existed across the plots
-    package (``"must be one of …; got"``, ``"Unknown … . Accepted values:"``,
-    and tail-raises with ``"— expected a or b"``).
-    """
-    if value not in choices:
-        raise ValueError(
-            f"{func_name}: {param} must be one of {sorted(str(c) for c in choices)}; got {value!r}"
-        )
-
-
 def _warn_deprecated_dispatcher(old_name: str, param_name: str, replacements: str) -> None:
     """Emit the canonical ``DeprecationWarning`` for a split dispatcher shim.
 
