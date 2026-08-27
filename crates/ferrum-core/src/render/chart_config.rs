@@ -755,4 +755,22 @@ mod tests {
             Some(["#ffffff".to_string(), "#000000".to_string()].as_slice())
         );
     }
+
+    /// R1 port (bug_hunt_render_pipeline.rs): `domain` is `Vec<serde_json::Value>`
+    /// specifically so categorical (string) and mixed-type domains deserialize,
+    /// not just the numeric case the sibling test above covers.
+    #[test]
+    fn color_config_domain_accepts_string_and_mixed_values() {
+        let strings: ChartConfig =
+            serde_json::from_str(r#"{"color": {"domain": ["low", "medium", "high"]}}"#).unwrap();
+        let domain = strings.color.unwrap().domain.unwrap();
+        assert_eq!(domain, vec![Value::from("low"), Value::from("medium"), Value::from("high")]);
+
+        let mixed: ChartConfig =
+            serde_json::from_str(r#"{"color": {"domain": [0, "mid", 100]}}"#).unwrap();
+        let domain = mixed.color.unwrap().domain.unwrap();
+        assert!(domain[0].is_number());
+        assert!(domain[1].is_string());
+        assert!(domain[2].is_number());
+    }
 }

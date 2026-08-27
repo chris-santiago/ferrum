@@ -238,6 +238,72 @@ mod tests {
         assert_eq!(v.into_rect(), r(0.0, 0.0, 600.0, 400.0));
     }
 
+    // ── R1 port (bug_hunt_layout.rs): NaN / Infinity / negative edge cases.
+    // The mirror this ported from called `shrink(top, right, bottom, left)` —
+    // a stale 4-arg signature; the real `Rect::shrink` takes an `Inset`. That
+    // drift is exactly the mirror-decay case finding R1 describes.
+
+    #[test]
+    fn split_top_nan_height_is_absorbed_by_min_max_clamp() {
+        // f64::min/max return the non-NaN argument, so NaN behaves like "no limit".
+        let r0 = r(0.0, 0.0, 100.0, 80.0);
+        let (strip, rest) = r0.split_top(f64::NAN);
+        assert_eq!(strip.h, 80.0, "NaN height clamps to self.h via min/max");
+        assert_eq!(rest.h, 0.0);
+    }
+
+    #[test]
+    fn split_left_nan_width_is_absorbed_by_min_max_clamp() {
+        let r0 = r(0.0, 0.0, 300.0, 200.0);
+        let (strip, rest) = r0.split_left(f64::NAN);
+        assert_eq!(strip.w, 300.0);
+        assert_eq!(rest.w, 0.0);
+        assert_eq!(rest.x, 300.0);
+    }
+
+    #[test]
+    fn split_top_negative_height_clamps_to_zero() {
+        let r0 = r(0.0, 0.0, 100.0, 80.0);
+        let (strip, rest) = r0.split_top(-10.0);
+        assert_eq!(strip.h, 0.0, "negative height must clamp to 0, not go negative");
+        assert_eq!(rest, r0, "remainder must equal the original rect");
+    }
+
+    #[test]
+    fn split_right_infinity_width_clamps_to_self() {
+        let r0 = r(0.0, 0.0, 300.0, 200.0);
+        let (strip, rest) = r0.split_right(f64::INFINITY);
+        assert_eq!(strip.w, 300.0, "INFINITY width must clamp to self.w");
+        assert_eq!(rest.w, 0.0);
+    }
+
+    #[test]
+    fn shrink_nan_inset_fails_open_not_zero() {
+        // `w <= 0.0 || h <= 0.0` is false for NaN (NaN comparisons are always
+        // false), so a NaN inset does NOT collapse to Rect::ZERO — it silently
+        // propagates NaN into the result instead. Pinning this "fails open"
+        // shape, not asserting it is desirable, is the point of the test.
+        let r0 = r(0.0, 0.0, 100.0, 100.0);
+        let result = r0.shrink(Inset { top: f64::NAN, right: 0.0, bottom: 0.0, left: 0.0 });
+        assert!(result.h.is_nan(), "NaN top inset must produce a NaN height, not 0");
+        assert!(result.y.is_nan(), "NaN top inset must also poison y (self.y + inset.top)");
+        assert_ne!(result, Rect::ZERO, "NaN never compares equal to ZERO — the guard fails open");
+    }
+
+    #[test]
+    fn shrink_infinity_inset_collapses_to_zero() {
+        let r0 = r(0.0, 0.0, 100.0, 100.0);
+        let result = r0.shrink(Inset { top: 0.0, right: f64::INFINITY, bottom: 0.0, left: 0.0 });
+        assert_eq!(result, Rect::ZERO, "an infinite inset must collapse to ZERO, not -Infinity dims");
+    }
+
+    #[test]
+    fn shrink_negative_width_rect_is_already_zero_even_with_no_inset() {
+        let r0 = r(0.0, 0.0, -50.0, 100.0);
+        let result = r0.shrink(Inset::uniform(0.0));
+        assert_eq!(result, Rect::ZERO, "a rect with negative width collapses to ZERO on shrink(0)");
+    }
+
     #[test]
     fn rect_serde_round_trip() {
         let r0 = r(1.0, 2.0, 3.0, 4.0);

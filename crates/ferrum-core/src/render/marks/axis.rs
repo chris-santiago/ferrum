@@ -1620,4 +1620,63 @@ mod tests {
         };
         assert_eq!(ys(&flushed), ys(&no_flush), "flush must not shift label_y on a rotated Bottom axis either");
     }
+
+    /// R1 port (bug_hunt_render_pipeline.rs): a negative `label_padding` would
+    /// place tick labels inside the tick-mark area (overlapping or invisible);
+    /// `build_axis`'s `label_pad = axis.label_padding.unwrap_or(2.0).max(0.0)`
+    /// guard must clamp it to 0.0, matching an explicit `Some(0.0)` exactly —
+    /// not the unclamped -10.0 value.
+    #[test]
+    fn build_axis_negative_label_padding_clamped_to_zero() {
+        let base = |label_padding: Option<f64>| AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
+            ticks: vec![major_tick(50.0, "0")],
+            minor_ticks: vec![],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+            offset: None,
+            label_flush: None,
+        };
+        let theme = ThemeInputs::default();
+        let label_y = |label_padding: Option<f64>| -> f64 {
+            let axis = base(label_padding);
+            let nodes = build_axis(&axis, &theme, None);
+            nodes
+                .iter()
+                .find_map(|n| if let SceneNode::Text { y, .. } = n { Some(*y) } else { None })
+                .expect("expected a tick label Text node")
+        };
+
+        let y_default = label_y(None); // label_pad = 2.0
+        let y_negative = label_y(Some(-10.0)); // clamped to 0.0
+        let y_explicit_zero = label_y(Some(0.0)); // 0.0
+
+        assert_eq!(
+            y_negative, y_explicit_zero,
+            "negative label_padding must clamp to the same result as an explicit 0.0"
+        );
+        assert!(
+            (y_default - y_negative - 2.0).abs() < 1e-9,
+            "clamped negative padding must differ from the default 2.0px padding by exactly \
+             2.0px, not 12.0px (which would mean -10.0 was applied unclamped)"
+        );
+    }
 }

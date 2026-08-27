@@ -186,9 +186,56 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, StringArray};
+    use arrow::array::{Float64Array, Int64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
+
+    // ---- R1-relocated coverage (tests/bug_hunt_release_transforms.rs, 2026-08-27) ----
+
+    /// FA-7 contract: an Int64 groupby column defines one stack per distinct
+    /// value (previously int columns fell through to an "unsupported dtype"
+    /// error, which would have merged every row into a single stack). Group 1
+    /// (values [1.0, 2.0]) and group 2 (values [3.0, 4.0]) must accumulate
+    /// independently — group 2's y0 must reset to 0.0 rather than continuing
+    /// group 1's running total.
+    #[test]
+    fn int_groupby_column_separates_stacks() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Int64, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, 1, 2, 2])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+
+        let spec = DataStackSpec {
+            field: "val".into(),
+            groupby: vec!["g".into()],
+            sort: None,
+            as_: ("y0".into(), "y1".into()),
+            offset: "zero".into(),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let y0_col = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let y1_col = out.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+
+        // Group 1: cumsum [1.0, 2.0] → y0=[0,1], y1=[1,3].
+        assert_eq!(y0_col.value(0), 0.0);
+        assert_eq!(y1_col.value(0), 1.0);
+        assert_eq!(y0_col.value(1), 1.0);
+        assert_eq!(y1_col.value(1), 3.0);
+        // Group 2 must restart its own cumsum, NOT continue group 1's total of 3.0.
+        assert_eq!(y0_col.value(2), 0.0, "group 2 must reset y0, not merge with group 1");
+        assert_eq!(y1_col.value(2), 3.0);
+        assert_eq!(y0_col.value(3), 3.0);
+        assert_eq!(y1_col.value(3), 7.0);
+    }
 
     #[test]
     fn stack_zero_offset() {

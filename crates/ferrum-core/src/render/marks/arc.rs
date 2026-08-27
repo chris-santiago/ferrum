@@ -1141,4 +1141,166 @@ mod tests {
         assert_eq!(hrefs[1].as_deref(), Some("http://b"));
         assert_eq!(hrefs[2].as_deref(), Some("http://c"));
     }
+
+    // ── Ported from bug_hunt_marks_rendering(_r2).rs (R1) ──────────────────
+    // These call `wedge_path` and `build` directly instead of reimplementing
+    // the trig/degenerate-sweep logic inline, so a future regression in the
+    // real function fails the test instead of the test's own copy.
+
+    /// A near-full-circle sweep (angle_end - angle_start ~= TAU) takes the
+    /// `full_circle` branch, which emits two half-arc `ArcTo` pairs instead of
+    /// one full-sweep `ArcTo`. All emitted coordinates must stay finite.
+    #[test]
+    fn wedge_path_full_circle_sweep_produces_finite_coords() {
+        let cmds = wedge_path(100.0, 100.0, 0.0, 50.0, 0.0, std::f64::consts::TAU - 1e-10);
+        assert!(matches!(cmds.first(), Some(PathCmd::MoveTo { .. })));
+        assert!(matches!(cmds.last(), Some(PathCmd::Close)));
+        let arc_count = cmds.iter().filter(|c| matches!(c, PathCmd::ArcTo { .. })).count();
+        assert_eq!(arc_count, 2, "full_circle branch must emit two half-arc ArcTo commands");
+        for cmd in &cmds {
+            match cmd {
+                PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => {
+                    assert!(x.is_finite() && y.is_finite(), "MoveTo/LineTo coords must be finite");
+                }
+                PathCmd::ArcTo { rx, ry, x, y, .. } => {
+                    assert!(rx.is_finite() && ry.is_finite() && x.is_finite() && y.is_finite(),
+                        "ArcTo coords/radii must be finite");
+                }
+                PathCmd::Close => {}
+                other => panic!("unexpected PathCmd in wedge_path output: {other:?}"),
+            }
+        }
+    }
+
+    /// When `inner_r == outer_r` the wedge collapses to a zero-width ring:
+    /// the inner and outer arc endpoints must exactly coincide (not merely
+    /// be finite). For the non-full-circle, `inner_r > 0.0` branch, `cmds`
+    /// is exactly `[MoveTo(outer_start), ArcTo(outer_end), LineTo(inner_end),
+    /// ArcTo(inner_start), Close]` (`arc.rs:510,519,527,535,541`) -- so the
+    /// zero-width collapse means `LineTo`'s endpoint must equal the outer
+    /// `ArcTo`'s endpoint (both at `angle_end`), and the inner `ArcTo`'s
+    /// endpoint must equal the initial `MoveTo` (both at `angle_start`).
+    #[test]
+    fn wedge_path_inner_radius_equals_outer_radius_collapses_to_zero_width() {
+        let r = 50.0;
+        let cmds = wedge_path(100.0, 100.0, r, r, 0.0, std::f64::consts::FRAC_PI_2);
+        assert_eq!(cmds.len(), 5, "MoveTo + outer ArcTo + inner LineTo + inner ArcTo + Close");
+
+        let (ox0, oy0) = match cmds[0] { PathCmd::MoveTo { x, y } => (x, y), ref c => panic!("expected MoveTo, got {c:?}") };
+        let (ox1, oy1) = match cmds[1] { PathCmd::ArcTo { x, y, .. } => (x, y), ref c => panic!("expected outer ArcTo, got {c:?}") };
+        let (ix1, iy1) = match cmds[2] { PathCmd::LineTo { x, y } => (x, y), ref c => panic!("expected inner LineTo, got {c:?}") };
+        let (ix0, iy0) = match cmds[3] { PathCmd::ArcTo { x, y, .. } => (x, y), ref c => panic!("expected inner ArcTo, got {c:?}") };
+        assert!(matches!(cmds[4], PathCmd::Close));
+
+        // Outer endpoint at angle_end must coincide with the inner LineTo's
+        // endpoint at angle_end -- zero radial width, not merely "finite".
+        assert!((ox1 - ix1).abs() < 1e-9 && (oy1 - iy1).abs() < 1e-9,
+            "outer end ({ox1}, {oy1}) must coincide with inner end ({ix1}, {iy1}) when inner_r == outer_r");
+        // Inner endpoint at angle_start must coincide with the initial outer
+        // MoveTo at angle_start -- the ring closes back on itself exactly.
+        assert!((ox0 - ix0).abs() < 1e-9 && (oy0 - iy0).abs() < 1e-9,
+            "outer start ({ox0}, {oy0}) must coincide with inner start ({ix0}, {iy0}) when inner_r == outer_r");
+    }
+
+    /// Very large start angles (many full rotations away from zero) must
+    /// place the wedge at the *same* geometry sin/cos periodicity implies,
+    /// not merely produce finite output. Pinned against hand-computed
+    /// coordinates (verified independently in Python's `math.sin`/`cos`,
+    /// not read off a Rust run) rather than a same-function self-comparison:
+    /// a self-comparison against `wedge_path(..., 0.0, sweep)` is blind to a
+    /// sin<->cos swap at `arc.rs:505-506`, because the swap would apply
+    /// identically to *both* calls and periodicity holds for cos as much as
+    /// sin -- confirmed empirically while writing this test (that
+    /// self-comparison design stayed green under the swap mutation).
+    /// `cx=cy=100, outer_r=50, inner_r=0, start=100*TAU, sweep=PI/4`:
+    /// `MoveTo` (`angle_start`) = `(100 + 50*sin(100*TAU), 100 - 50*cos(100*TAU))`
+    ///   ~= `(100.0, 50.0)` (sin/cos of a TAU multiple are 0/1, up to ~2e-13
+    ///   argument-reduction residual measured in Python for this exact value);
+    /// `ArcTo` endpoint (`angle_end = start + PI/4`) =
+    ///   `(100 + 50*sin(PI/4), 100 - 50*cos(PI/4))` ~= `(135.35533906, 64.64466094)`
+    ///   exactly (adding a whole number of periods to the argument before
+    ///   the `+ PI/4` does not change this value); `LineTo` = `(cx, cy)` =
+    ///   `(100.0, 100.0)` (the `inner_r <= 0.0` branch, `arc.rs:538`).
+    #[test]
+    fn wedge_path_very_large_start_angle_matches_hand_computed_geometry() {
+        let sweep = std::f64::consts::FRAC_PI_4;
+        let start = 100.0 * std::f64::consts::TAU;
+        let cmds = wedge_path(100.0, 100.0, 0.0, 50.0, start, start + sweep);
+        assert_eq!(cmds.len(), 4, "MoveTo + outer ArcTo + LineTo(cx,cy) + Close (inner_r <= 0.0)");
+
+        let tol = 1e-6;
+        match cmds[0] {
+            PathCmd::MoveTo { x, y } => {
+                assert!((x - 100.0).abs() < tol && (y - 50.0).abs() < tol,
+                    "MoveTo at a 100*TAU start must land at (100.0, 50.0); got ({x}, {y})");
+            }
+            ref c => panic!("expected MoveTo, got {c:?}"),
+        }
+        match cmds[1] {
+            PathCmd::ArcTo { x, y, .. } => {
+                assert!((x - 135.35533905932738).abs() < tol && (y - 64.64466094067262).abs() < tol,
+                    "outer ArcTo endpoint at start+PI/4 must land at (135.35533906, 64.64466094); got ({x}, {y})");
+            }
+            ref c => panic!("expected outer ArcTo, got {c:?}"),
+        }
+        match cmds[2] {
+            PathCmd::LineTo { x, y } => {
+                assert!((x - 100.0).abs() < tol && (y - 100.0).abs() < tol,
+                    "inner_r <= 0.0 LineTo must land at center (100.0, 100.0); got ({x}, {y})");
+            }
+            ref c => panic!("expected LineTo, got {c:?}"),
+        }
+        assert!(matches!(cmds[3], PathCmd::Close));
+    }
+
+    /// A slice whose `pad_angle` exceeds its own sweep (`angle_end <= angle_start`)
+    /// is skipped entirely by `build`'s per-row guard — it must not appear in
+    /// the output, and the remaining rows must render normally.
+    #[test]
+    fn build_skips_row_whose_pad_angle_exceeds_its_sweep() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                // ~57.3deg pad; the tiny 0.5-value slice's natural sweep
+                // (~0.0347 rad) is far smaller, so angle_end <= angle_start.
+                pad_angle: 1.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, false)]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![0.5, 30.0, 60.0]))],
+        ).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        let paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count();
+        assert_eq!(paths, 2, "the pad-exceeds-sweep row must be skipped, leaving 2 wedges");
+    }
 }

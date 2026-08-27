@@ -1108,6 +1108,177 @@ mod tests {
         assert!((rects[0] - 40.0).abs() < 1e-6, "single-point bar width should be 40.0, got {}", rects[0]);
     }
 
+    // ── Ported from bug_hunt_marks_rendering(_r2).rs (R1) ──────────────────
+    // Auto-width edge cases for `build_quantitative`'s x2-absent branch that
+    // `bar_quantitative_x_no_x2_auto_width`/`_single_point` don't cover: a
+    // duplicate x value, a NaN x value, and an all-identical x column.
+
+    #[test]
+    fn bar_quantitative_x_no_x2_duplicate_x_values_deduped() {
+        // x = [1, 1, 2, 3]: after internal sort+dedup, sorted_xs = [1, 2, 3],
+        // min_step = 1. Manual x-scale (domain [0,10] -> range [0,300], so
+        // to_pixel(v) = v*30) makes the resulting width hand-computable:
+        // p0 = to_pixel(1) = 30, p1 = to_pixel(1+1=2) = 60,
+        // width = |60-30| * 0.8 = 24.0 (the `bar.rs:566-608` auto-width
+        // formula, computed by hand, not read off a run).
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 15.0, 25.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![200.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 4, "expected 4 bars, one per row including the duplicate x");
+        for w in &rects {
+            assert!((w - 24.0).abs() < 1e-6,
+                "duplicate-x min_step must resolve to the deduped step (1), giving width 24.0; got {w}");
+        }
+    }
+
+    #[test]
+    fn bar_quantitative_x_no_x2_nan_x_filtered_from_width_calc() {
+        // x = [1.0, f64::NAN, 2.0, 10.0] -- a real NaN *value*, not an Arrow
+        // null, placed adjacent to the pair that produces the TRUE minimal
+        // step (1, 2) rather than the far pair (2, 10). This placement is
+        // deliberate: `sort_by`'s `partial_cmp(...).unwrap_or(Equal)`
+        // fallback leaves NaN roughly at its original index (verified
+        // empirically -- NaN participates in no real ordering, so it never
+        // moves), so if `bar.rs:591`'s `is_finite()` pre-filter is removed,
+        // NaN survives into `sorted_xs` sitting between 1.0 and 2.0. Both
+        // windows touching it produce a `NaN` diff, which the `> 0.0` guard
+        // at `bar.rs:599` then also filters out (`NaN > 0.0` is `false`) --
+        // silently discarding the *correct* minimal window (1,2)=1 along
+        // with it, leaving only the (2,10)=8 window and moving min_step from
+        // 1 to 8. A fixture with NaN next to the *non-minimal* pair would let
+        // that same `> 0.0` guard mask the mutation entirely (confirmed by
+        // hand: with NaN between 3 and 4 instead, the untouched (1,3)=2
+        // window still wins and the mutation is invisible) -- this is why
+        // the NaN's position relative to the minimal pair matters, not just
+        // its presence. Correct (un-mutated) min_step from finite [1,2,10]
+        // sorted is `min(2-1, 10-2) = 1`. Same manual x-scale as the
+        // duplicate-x sibling (domain [0,10] -> range [0,300]):
+        // p0 = to_pixel(1) = 30, p1 = to_pixel(2) = 60,
+        // width = |60-30| * 0.8 = 24.0. The NaN row itself must be skipped
+        // (bar.rs:664's `Some(v) if v.is_finite()` guard), leaving 3 bars.
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, f64::NAN, 2.0, 10.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 15.0, 25.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![200.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3, "the NaN row must be skipped, leaving 3 bars");
+        for w in &rects {
+            assert!((w - 24.0).abs() < 1e-6,
+                "NaN must be excluded from the min-step calc, leaving min_step=1 and width 24.0; got {w}");
+        }
+    }
+
+    #[test]
+    fn bar_quantitative_x_no_x2_all_identical_x_uses_fallback() {
+        // x = [5, 5, 5]: after dedup, only 1 unique value remains, so the
+        // `sorted_xs.len() >= 2` branch is never taken and the single-point
+        // 20%-of-plot-width fallback applies to every bar.
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 15.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 200.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3);
+        // Fallback width = 20% of 300.0 = 60.0
+        for w in &rects {
+            assert!((w - 60.0).abs() < 1e-6, "all-identical-x bars should use the 20%-of-plot-width fallback, got {w}");
+        }
+    }
+
     #[test]
     fn bar_corner_radius_emitted_when_theme_sets_it() {
         let spec = ChartSpec {
@@ -1311,6 +1482,129 @@ mod tests {
             "rect top {rect_y:.3} should be above baseline {baseline_pixel:.3} (hi=2 side)");
         assert!(rect_bottom > baseline_pixel + 1.0,
             "rect bottom {rect_bottom:.3} should be below baseline {baseline_pixel:.3} (lo=-3 side)");
+    }
+
+    /// Pins the deliberate `abs` (ordinal x + explicit y2, `:360`) vs `clamp`
+    /// (quantitative x + stack base, `:684`) distinction for the SAME
+    /// pixel-inverted scenario: a "bottom" pixel that lands numerically
+    /// *above* (smaller than) the "top" pixel. `build_ordinal` uses `.abs()`
+    /// so the rect still renders with a positive height regardless of which
+    /// of y/y2 is larger; `build_quantitative` uses `.max(0.0)` (no abs) so
+    /// the same inversion — a row whose value pixel lands below its stack
+    /// base — clamps to a zero-height rect instead of mirroring it. Neither
+    /// branch was pinned by any existing test: `bar_ordinal_x_y2_spans_y_to_y2_not_baseline`
+    /// exercises the same abs-triggering data shape but only asserts the bar
+    /// doesn't sit at the baseline, never the exact height or the "abs, not
+    /// clamp" contract; no test drives `build_quantitative`'s stack-base path
+    /// with an inverted base at all.
+    #[test]
+    fn bar_ordinal_abs_vs_quantitative_clamp_on_inverted_y_pixel_ordering() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+
+        // Shared y-scale for both sub-scenarios: domain [0, 10] -> range
+        // [100, 0] (standard inverted-pixel convention: larger data value ->
+        // smaller pixel). value=3 -> 70px, value=8 -> 20px.
+        let y_scale = || ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false));
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+
+        // ── build_ordinal (bar.rs:360): abs -> positive height ─────────────
+        // y="lo"=3 (top_y=70px), y2="hi"=8 (bottom_y=20px): bottom_y < top_y,
+        // so the naive (bottom_y - top_y) is -50. `.abs()` must still yield
+        // a rendered rect with height 50, not zero.
+        {
+            let spec = ChartSpec {
+                data: DataRef::default(), mark: Mark::Bar,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "lo".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                    y2: Some(EncodingSpec { field: "hi".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                    ..Default::default()
+                },
+                transforms: Vec::new(), facet: None, layers: None,
+                coord: None, mark_style: None, position: None, title: None,
+                axis_x: None, axis_y: None,
+                selections: Vec::new(), conditionals: Vec::new(),
+                chart_description: None,
+                params: Vec::new(),
+            };
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("cat", DataType::Utf8, false),
+                Field::new("lo", DataType::Float64, false),
+                Field::new("hi", DataType::Float64, false),
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(Float64Array::from(vec![3.0])),
+                Arc::new(Float64Array::from(vec![8.0])),
+            ]).unwrap();
+            let scales = ResolvedScales {
+                x: ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+                    vec!["a".to_string()], vec![0.0, 100.0], 0.0,
+                )),
+                y: y_scale(),
+                color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            };
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let result = super::build(&ctx);
+            let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
+                if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+            }).collect();
+            assert_eq!(rects.len(), 1, "expected 1 bar");
+            assert!((rects[0] - 50.0).abs() < 1e-6,
+                "build_ordinal must abs() an inverted y/y2 pixel pair into a positive height; got {}", rects[0]);
+        }
+
+        // ── build_quantitative (bar.rs:684): clamp -> zero height ──────────
+        // y="val"=3 (top_y=70px), __stack_y_base__=8 (bottom_y=20px): the
+        // identical inverted-pixel shape, but via the stack-base path. No
+        // `.abs()` here — the comment at :680-683 says this must clamp to
+        // zero (render nothing), not mirror a positive-height rect.
+        {
+            let spec = ChartSpec {
+                data: DataRef::default(), mark: Mark::Bar,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                    ..Default::default()
+                },
+                transforms: Vec::new(), facet: None, layers: None,
+                coord: None, mark_style: None, position: None, title: None,
+                axis_x: None, axis_y: None,
+                selections: Vec::new(), conditionals: Vec::new(),
+                chart_description: None,
+                params: Vec::new(),
+            };
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("val", DataType::Float64, false),
+                Field::new("__stack_y_base__", DataType::Float64, false),
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+                Arc::new(Float64Array::from(vec![5.0])),
+                Arc::new(Float64Array::from(vec![3.0])),
+                Arc::new(Float64Array::from(vec![8.0])),
+            ]).unwrap();
+            let scales = ResolvedScales {
+                x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+                y: y_scale(),
+                color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            };
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let result = super::build(&ctx);
+            let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
+                if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+            }).collect();
+            assert_eq!(rects.len(), 1, "an inverted stack base must still emit a (degenerate) rect, not be skipped");
+            assert_eq!(rects[0], 0.0,
+                "build_quantitative must clamp an inverted stack-base pixel pair to zero height, not mirror it positive");
+        }
     }
 
     /// D7: a stacked bar under CoordPolar renders arc wedges (not rects), and

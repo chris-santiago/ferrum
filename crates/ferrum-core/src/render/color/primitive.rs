@@ -372,6 +372,28 @@ mod tests {
         assert_eq!(c.alpha, 128);
     }
 
+    /// R1 port (bug_hunt_draw.rs): `NaN.clamp(0.0, 1.0)` is NaN in Rust, which
+    /// would otherwise silently zero out an element's alpha (invisible) instead
+    /// of preserving it. `with_opacity` guards this explicitly.
+    #[test]
+    fn opacity_nan_preserves_original_alpha() {
+        let c = with_opacity(from_rgba(0x10, 0x20, 0x30, 0xFF), f64::NAN);
+        assert_eq!(c.alpha, 0xFF, "NaN opacity must preserve alpha, not zero it");
+        let c2 = with_opacity(from_rgba(0x10, 0x20, 0x30, 0x80), f64::NAN);
+        assert_eq!(c2.alpha, 0x80, "NaN opacity must preserve a partial alpha too");
+    }
+
+    /// R1 port: hex parsing must be case-insensitive (upper/lower/mixed all agree).
+    #[test]
+    fn from_hex_str_is_case_insensitive() {
+        let lower = from_hex_str("#aabbcc").unwrap();
+        let upper = from_hex_str("#AABBCC").unwrap();
+        let mixed = from_hex_str("#aAbBcC").unwrap();
+        assert_eq!(lower, upper);
+        assert_eq!(lower, mixed);
+        assert_eq!((lower.red, lower.green, lower.blue), (0xAA, 0xBB, 0xCC));
+    }
+
     #[test]
     fn fmt_svg_opaque_uses_hex() {
         assert_eq!(fmt_svg(from_rgb(0x1f, 0x77, 0xb4)), "#1f77b4");

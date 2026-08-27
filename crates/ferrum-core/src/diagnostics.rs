@@ -915,6 +915,204 @@ mod tests {
         assert!(r.tau.is_nan());
     }
 
+    // ---- R1-relocated coverage (tests/bug_hunt_stats_transforms.rs round2_tests,
+    // 2026-08-27) — every test below calls the real `kendall_tau_b` above rather
+    // than the mirror's inlined copy. `bug_hunt_r2_kendall_all_joint_ties` was
+    // dropped as a duplicate of `kendall_all_tied_both` immediately below (both
+    // assert an all-tied-in-both-columns group produces `tau = NaN` with matching
+    // tie counts).
+
+    #[test]
+    fn kendall_all_tied_both() {
+        // n0 = 6, T_x = 6, T_y = 6 → denom = sqrt(0*0) = 0 → NaN
+        let x = [5.0, 5.0, 5.0, 5.0];
+        let y = [3.0, 3.0, 3.0, 3.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(r.tau.is_nan(), "all-tied tau should be NaN, got {}", r.tau);
+        assert_eq!(r.n_tied_x, 6, "n_tied_x for 4 elements all tied should be C(4,2)=6");
+        assert_eq!(r.n_tied_y, 6, "n_tied_y for 4 elements all tied should be C(4,2)=6");
+        assert_eq!(r.n_tied_both, 6, "n_tied_both should be 6");
+    }
+
+    #[test]
+    fn kendall_tied_x_distinct_y_hand_computed() {
+        // x=[1,1,2,2], y=[1,2,3,4]. n0=6, T_x=2, T_y=0, T_both=0, D=0, C=4.
+        // tau = 4/sqrt(4*6) = 4/sqrt(24).
+        let x = [1.0, 1.0, 2.0, 2.0];
+        let y = [1.0, 2.0, 3.0, 4.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(r.tau.is_finite(), "tau with tied x should be finite, got {}", r.tau);
+        assert_eq!(r.n_tied_x, 2);
+        assert_eq!(r.n_tied_y, 0);
+        let expected = 4.0 / (24.0_f64).sqrt();
+        assert!(approx_eq(r.tau, expected, 1e-10), "tau should be {expected}, got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_heavy_ties_bounds() {
+        // x = [1,1,1,2,2,2], y = [1,1,2,1,2,2]. n0=15, T_x=T_y=6 (C(3,2)*2 each).
+        let x = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let y = [1.0, 1.0, 2.0, 1.0, 2.0, 2.0];
+        let r = kendall_tau_b(&x, &y);
+        assert_eq!(r.n_tied_x, 6, "n_tied_x should be 6, got {}", r.n_tied_x);
+        assert_eq!(r.n_tied_y, 6, "n_tied_y should be 6, got {}", r.n_tied_y);
+        assert!(r.tau.is_finite(), "tau with heavy ties should be finite, got {}", r.tau);
+        assert!(r.tau >= -1.0 && r.tau <= 1.0, "tau must be in [-1,1], got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_identical_arrays_with_ties_is_one() {
+        let x = [3.0, 1.0, 4.0, 1.0, 5.0];
+        let y = [3.0, 1.0, 4.0, 1.0, 5.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(approx_eq(r.tau, 1.0, 1e-10), "identical arrays tau should be 1.0, got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_nan_in_x_no_panic() {
+        // NaN breaks == comparison; partial_cmp falls back to Equal. Contract: no panic.
+        let x = [1.0, f64::NAN, 3.0, 2.0, f64::NAN];
+        let y = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let _ = kendall_tau_b(&x, &y);
+    }
+
+    #[test]
+    fn kendall_nan_in_y_no_panic() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [f64::NAN, 2.0, f64::NAN, 4.0, 5.0];
+        let _ = kendall_tau_b(&x, &y);
+    }
+
+    #[test]
+    fn kendall_infinity_identical_monotonic_is_one() {
+        // +Inf > everything, -Inf < everything → identical monotonic sequences.
+        let x = [f64::NEG_INFINITY, 0.0, 1.0, f64::INFINITY];
+        let y = [f64::NEG_INFINITY, 0.0, 1.0, f64::INFINITY];
+        let r = kendall_tau_b(&x, &y);
+        assert!(approx_eq(r.tau, 1.0, 1e-10), "identical monotonic with Inf: tau should be 1.0, got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_n2_discordant_is_negative_one() {
+        let x = [1.0, 2.0];
+        let y = [2.0, 1.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(approx_eq(r.tau, -1.0, 1e-10), "n=2 discordant pair: tau should be -1.0, got {}", r.tau);
+        assert_eq!(r.n_concordant, 0);
+        assert_eq!(r.n_discordant, 1);
+    }
+
+    #[test]
+    fn kendall_n2_all_tied_is_nan() {
+        // n0=1, T_x=1, T_y=1, T_both=1 → denom = sqrt(0*0) = 0 → NaN.
+        let x = [1.0, 1.0];
+        let y = [2.0, 2.0];
+        let r = kendall_tau_b(&x, &y);
+        assert!(r.tau.is_nan(), "n=2 all-tied: tau should be NaN, got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_joint_ties_subset_of_x_and_y_ties() {
+        // x=[1,1,2,2], y=[3,3,4,4]. T_x=2, T_y=2, T_both=2 (pairs (0,1),(2,3)).
+        // All non-joint-tied pairs are concordant: (0,2),(0,3),(1,2),(1,3) = 4.
+        let x = [1.0, 1.0, 2.0, 2.0];
+        let y = [3.0, 3.0, 4.0, 4.0];
+        let r = kendall_tau_b(&x, &y);
+        assert_eq!(r.n_tied_x, 2);
+        assert_eq!(r.n_tied_y, 2);
+        assert_eq!(r.n_tied_both, 2);
+        assert_eq!(r.n_concordant, 4, "concordant should be 4, got {}", r.n_concordant);
+        assert_eq!(r.n_discordant, 0);
+        assert!(approx_eq(r.tau, 1.0, 1e-10), "tau should be 1.0, got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_mixed_concordant_discordant_hand_computed() {
+        // x=[1,2,3,4], y=[1,3,2,4]. Pairs: (0,1)C,(0,2)C,(0,3)C,(1,2)D,(1,3)C,(2,3)C.
+        // C=5, D=1. tau = (5-1)/6 = 2/3.
+        let x = [1.0, 2.0, 3.0, 4.0];
+        let y = [1.0, 3.0, 2.0, 4.0];
+        let r = kendall_tau_b(&x, &y);
+        assert_eq!(r.n_concordant, 5);
+        assert_eq!(r.n_discordant, 1);
+        let expected = 4.0 / 6.0;
+        assert!(approx_eq(r.tau, expected, 1e-10), "tau should be {expected}, got {}", r.tau);
+    }
+
+    #[test]
+    fn kendall_symmetry_tau_xy_equals_tau_yx() {
+        let x = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0];
+        let y = [2.0, 7.0, 1.0, 8.0, 2.0, 8.0, 1.0, 8.0];
+        let r_xy = kendall_tau_b(&x, &y);
+        let r_yx = kendall_tau_b(&y, &x);
+        assert!(approx_eq(r_xy.tau, r_yx.tau, 1e-10), "tau(x,y) should equal tau(y,x): {} vs {}", r_xy.tau, r_yx.tau);
+    }
+
+    #[test]
+    fn kendall_antisymmetry_under_negation() {
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [2.0, 3.0, 1.0, 5.0, 4.0];
+        let y_neg: Vec<f64> = y.iter().map(|&v| -v).collect();
+        let r = kendall_tau_b(&x, &y);
+        let r_neg = kendall_tau_b(&x, &y_neg);
+        assert!(approx_eq(r.tau, -r_neg.tau, 1e-10), "tau(x,y) should be -tau(x,-y): {} vs {}", r.tau, -r_neg.tau);
+    }
+
+    #[test]
+    fn kendall_bounds_across_tie_patterns() {
+        let test_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+            (vec![1.0, 2.0, 2.0, 3.0, 3.0], vec![5.0, 4.0, 4.0, 3.0, 3.0]),
+            (vec![1.0, 1.0, 1.0, 2.0, 2.0, 3.0], vec![3.0, 2.0, 1.0, 3.0, 2.0, 1.0]),
+            ((0..20).map(|i| (i % 5) as f64).collect(), (0..20).map(|i| (i % 7) as f64).collect()),
+        ];
+        for (idx, (x, y)) in test_cases.iter().enumerate() {
+            let r = kendall_tau_b(x, y);
+            if r.tau.is_finite() {
+                assert!(r.tau >= -1.0 && r.tau <= 1.0, "test case {idx}: tau must be in [-1,1], got {}", r.tau);
+            }
+        }
+    }
+
+    #[test]
+    fn kendall_large_monotonic_n100_is_one() {
+        let x: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let y: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let r = kendall_tau_b(&x, &y);
+        assert!(approx_eq(r.tau, 1.0, 1e-10), "monotonic n=100: tau should be 1.0, got {}", r.tau);
+        assert_eq!(r.n_concordant, 100 * 99 / 2);
+        assert_eq!(r.n_discordant, 0);
+    }
+
+    #[test]
+    fn kendall_large_anti_monotonic_n100_is_negative_one() {
+        let x: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let y: Vec<f64> = (0..100).rev().map(|i| i as f64).collect();
+        let r = kendall_tau_b(&x, &y);
+        assert!(approx_eq(r.tau, -1.0, 1e-10), "anti-monotonic n=100: tau should be -1.0, got {}", r.tau);
+        assert_eq!(r.n_concordant, 0);
+        assert_eq!(r.n_discordant, 100 * 99 / 2);
+    }
+
+    #[test]
+    fn kendall_pair_count_invariant_holds() {
+        // For any input: C + D + T_x + T_y - T_both = n0.
+        let test_cases: Vec<(Vec<f64>, Vec<f64>)> = vec![
+            (vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![5.0, 3.0, 1.0, 4.0, 2.0]),
+            (vec![1.0, 1.0, 2.0, 2.0, 3.0], vec![3.0, 1.0, 2.0, 2.0, 1.0]),
+            (vec![5.0, 5.0, 5.0], vec![1.0, 2.0, 3.0]),
+            (vec![1.0, 2.0, 3.0], vec![1.0, 1.0, 1.0]),
+        ];
+        for (idx, (x, y)) in test_cases.iter().enumerate() {
+            let r = kendall_tau_b(x, y);
+            let n = x.len() as u64;
+            let n0 = n * (n - 1) / 2;
+            let sum = r.n_concordant as i128 + r.n_discordant as i128
+                + r.n_tied_x as i128 + r.n_tied_y as i128
+                - r.n_tied_both as i128;
+            assert_eq!(sum, n0 as i128, "test case {idx}: C+D+T_x+T_y-T_both ({sum}) should equal n0 ({n0})");
+        }
+    }
+
     // ---- Curve kernels (sklearn-parity) ----
 
     fn slices_approx_eq(a: &[f64], b: &[f64], tol: f64) {

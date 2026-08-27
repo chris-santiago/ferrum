@@ -567,6 +567,55 @@ mod tests {
         assert_eq!(fmt_f(-0.0), "0");
     }
 
+    /// R1 port (bug_hunt_draw.rs / bug_hunt_render_pipeline.rs), corrected:
+    /// the mirrors in both bug-hunt files reproduced `fmt_f` *without* its
+    /// `debug_assert!(false, ...)` canary and asserted a silent `"0"` fallback
+    /// — a drifted copy of the real function. The real `fmt_f` is guarded
+    /// upstream so it should never see non-finite input; in debug/test builds
+    /// the canary panics loudly instead of silently emitting "NaN"/"inf" into
+    /// SVG output (the `"0"` fallback only executes in release builds, where
+    /// `debug_assert!` compiles out).
+    #[test]
+    #[should_panic(expected = "non-finite float in SVG output")]
+    #[cfg_attr(not(debug_assertions), ignore = "debug_assert! canary compiles out in release builds")]
+    fn fmt_f_non_finite_panics_via_debug_assert_canary() {
+        fmt_f(f64::NAN);
+    }
+
+    /// R1 port: the extended "-0" guard must catch every tiny-negative value
+    /// that rounds to "-0.000" at the fixed 3-decimal precision, not just a
+    /// bare "-" or literal `-0.0`.
+    #[test]
+    fn fmt_f_tiny_negatives_collapse_to_zero_not_minus_zero() {
+        assert_eq!(fmt_f(-0.0004), "0");
+        assert_eq!(fmt_f(-0.00049), "0");
+        assert_eq!(fmt_f(-1e-10), "0");
+        // A value that survives 3-decimal rounding must NOT be collapsed.
+        assert_eq!(fmt_f(-0.001), "-0.001");
+    }
+
+    /// R1 port: extreme magnitudes (subnormal, MAX) must still produce a
+    /// finite, non-empty, non-NaN/inf string.
+    #[test]
+    fn fmt_f_extreme_magnitudes_stay_finite_strings() {
+        assert_eq!(fmt_f(5e-324), "0", "subnormal rounds to 0 at precision 3");
+        let s = fmt_f(f64::MAX);
+        assert!(!s.is_empty() && !s.contains("NaN") && !s.contains("inf"));
+    }
+
+    /// R1 port: null bytes are invalid in XML and must be stripped (not just
+    /// left in place) before entity substitution, in both the text and
+    /// attribute escapers.
+    #[test]
+    fn escape_text_and_attr_strip_null_bytes() {
+        assert_eq!(escape_text("hello\x00world"), "helloworld");
+        assert_eq!(escape_text("\x00\x00\x00"), "");
+        assert_eq!(escape_attr("data\x00value"), "datavalue");
+        // Null bytes strip independently of entity substitution ordering.
+        assert_eq!(escape_text("a\x00&\x00b<c\x00>d"), "a&amp;b&lt;c&gt;d");
+        assert_eq!(escape_attr("x\x00=\"y\"\x00"), "x=&quot;y&quot;");
+    }
+
     #[test]
     fn empty_buffer_minimal_svg() {
         let buf = SvgBuffer::new(vp(), None, false);

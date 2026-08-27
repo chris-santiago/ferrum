@@ -589,6 +589,30 @@ mod tests {
         let opens = svg.matches("<g transform=\"translate(0,0) scale(2,2)\">").count();
         assert_eq!(opens, 1, "expected exactly one layout_scale wrapper open");
     }
+
+    /// R1 port (bug_hunt_draw.rs / bug_hunt_render_pipeline.rs): `NaN.clamp(0,1)`
+    /// is NaN in Rust, which would otherwise round-trip to `alpha_byte = 0`
+    /// (invisible text). `emit_text` guards NaN opacity to render fully opaque.
+    #[test]
+    fn emit_text_nan_opacity_renders_opaque_not_invisible() {
+        let mut svg = SvgBuffer::new(crate::layout::Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 }, None, false);
+        let style = FsText {
+            font_size: 11.0,
+            font_weight: ferrum_scene::FontWeight::Normal,
+            anchor: ferrum_scene::TextAnchor::Start,
+            baseline: ferrum_scene::TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Color::rgb(0, 0, 0),
+            opacity: f64::NAN,
+            font_family: "Inter".to_string(),
+        };
+        emit_text(&mut svg, 10.0, 10.0, "hi", &style);
+        let out = svg.finish();
+        assert!(
+            out.contains("fill=\"#000000\""),
+            "NaN opacity must render fully opaque (alpha=255), not invisible; got: {out}"
+        );
+    }
 }
 
 fn path_cmds_to_d(cmds: &[PathCmd]) -> String {

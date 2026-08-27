@@ -904,6 +904,157 @@ mod tests {
         }
     }
 
+    // ── Ported from bug_hunt_marks_rendering(_r2).rs (R1) ──────────────────
+    // Path/rect-shape branches of `emit_shape_nodes` that VLine/HLine/Cross's
+    // existing coverage doesn't reach: Diamond, TriangleUp, TriangleDown,
+    // Square, and Cross at r=0.
+
+    #[test]
+    fn emit_diamond_at_origin_produces_closed_4_point_path() {
+        use ferrum_scene::{PathCmd, SceneNode};
+        let nodes = emit_shape_nodes(ShapeKind::Diamond, 0.0, 0.0, 5.0, default_shape_style());
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            SceneNode::Path { commands, closed, .. } => {
+                assert!(*closed);
+                assert_eq!(commands.len(), 5, "Diamond: MoveTo + 3 LineTo + Close");
+                assert!(matches!(commands[4], PathCmd::Close));
+                for cmd in commands {
+                    if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = cmd {
+                        assert!(x.is_finite() && y.is_finite());
+                    }
+                }
+                // Top vertex (index 0) must be above the center at (0, -d).
+                if let PathCmd::MoveTo { x, y } = commands[0] {
+                    assert!((x - 0.0).abs() < 1e-9);
+                    assert!(y < 0.0, "diamond top vertex must be above center, got y={y}");
+                }
+            }
+            other => panic!("Expected SceneNode::Path, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_triangle_up_apex_points_above_center() {
+        use ferrum_scene::{PathCmd, SceneNode};
+        let nodes = emit_shape_nodes(ShapeKind::TriangleUp, 0.0, 0.0, 5.0, default_shape_style());
+        match &nodes[0] {
+            SceneNode::Path { commands, .. } => {
+                assert_eq!(commands.len(), 4, "TriangleUp: MoveTo + 2 LineTo + Close");
+                if let PathCmd::MoveTo { x, y } = commands[0] {
+                    assert!((x - 0.0).abs() < 1e-9);
+                    assert!(y < 0.0, "triangle-up apex must be above center, got y={y}");
+                } else {
+                    panic!("expected MoveTo apex");
+                }
+            }
+            other => panic!("Expected SceneNode::Path, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_triangle_down_apex_points_below_center() {
+        use ferrum_scene::{PathCmd, SceneNode};
+        let nodes = emit_shape_nodes(ShapeKind::TriangleDown, 0.0, 0.0, 5.0, default_shape_style());
+        match &nodes[0] {
+            SceneNode::Path { commands, .. } => {
+                assert_eq!(commands.len(), 4, "TriangleDown: MoveTo + 2 LineTo + Close");
+                if let PathCmd::MoveTo { x, y } = commands[0] {
+                    assert!((x - 0.0).abs() < 1e-9);
+                    assert!(y > 0.0, "triangle-down apex must be below center, got y={y}");
+                } else {
+                    panic!("expected MoveTo apex");
+                }
+            }
+            other => panic!("Expected SceneNode::Path, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_square_at_origin_has_side_1_6x_radius_centered() {
+        use ferrum_scene::SceneNode;
+        let r = 5.0_f64;
+        let nodes = emit_shape_nodes(ShapeKind::Square, 0.0, 0.0, r, default_shape_style());
+        match &nodes[0] {
+            SceneNode::Rect { x, y, w, h, .. } => {
+                let s = r * 1.6;
+                assert!((w - s).abs() < 1e-9, "square side must be r*1.6, got w={w}");
+                assert!((h - s).abs() < 1e-9);
+                assert!((x - (-s / 2.0)).abs() < 1e-9, "square must be centered on cx");
+                assert!((y - (-s / 2.0)).abs() < 1e-9, "square must be centered on cy");
+            }
+            other => panic!("Expected SceneNode::Rect, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_cross_zero_radius_collapses_both_arms_to_center() {
+        use ferrum_scene::SceneNode;
+        let nodes = emit_shape_nodes(ShapeKind::Cross, 50.0, 50.0, 0.0, default_shape_style());
+        assert_eq!(nodes.len(), 2, "Cross always emits 2 Line nodes, even degenerate");
+        for node in &nodes {
+            match node {
+                SceneNode::Line { x1, y1, x2, y2, .. } => {
+                    assert!((x1 - x2).abs() < 1e-12, "zero-radius arm must collapse to a point: x1={x1}, x2={x2}");
+                    assert!((y1 - y2).abs() < 1e-12, "zero-radius arm must collapse to a point: y1={y1}, y2={y2}");
+                    assert!((x1 - 50.0).abs() < 1e-12 && (y1 - 50.0).abs() < 1e-12,
+                        "collapsed arm must sit exactly at center");
+                }
+                other => panic!("Expected SceneNode::Line, got: {other:?}"),
+            }
+        }
+    }
+
+    /// With no size encoding, `build`'s default radius is derived from
+    /// `mark_style.point.point_size` as `sqrt(point_size / PI)` (area-to-radius
+    /// conversion, so doubling point_size doesn't double the visible radius).
+    /// `resolve_mark_style_overrides_point_size` (draw.rs) covers the override
+    /// wiring; this covers the formula actually applied to the emitted circles.
+    #[test]
+    fn default_radius_from_constant_point_size_matches_area_formula() {
+        let spec = three_row_spec();
+        let batch = three_row_batch();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = crate::spec::mark_style::MarkKwargsSpec { size: Some(50.0), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let expected_r = (50.0_f64 / std::f64::consts::PI).sqrt();
+        let radii: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { r, .. } = n { Some(*r) } else { None }
+        }).collect();
+        assert_eq!(radii.len(), 3);
+        for r in radii {
+            assert!((r - expected_r).abs() < 1e-9, "expected radius {expected_r}, got {r}");
+        }
+    }
+
+    /// point_size = 0 is a valid (if invisible) configuration: the formula
+    /// must yield radius 0, not NaN or a panic.
+    #[test]
+    fn default_radius_zero_point_size_yields_zero_radius() {
+        let spec = three_row_spec();
+        let batch = three_row_batch();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = crate::spec::mark_style::MarkKwargsSpec { size: Some(0.0), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let radii: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { r, .. } = n { Some(*r) } else { None }
+        }).collect();
+        assert_eq!(radii.len(), 3);
+        for r in radii {
+            assert_eq!(r, 0.0, "zero point_size must yield exactly zero radius");
+        }
+    }
+
     /// RMARK-01 regression: line-based shapes (Cross, VLine, HLine) must honor
     /// the opacity channel. Before the fix, to_scene_stroke was called with a
     /// hardcoded 1.0, so mark_point(shape="cross", opacity=0.3) rendered fully

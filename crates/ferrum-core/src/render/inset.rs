@@ -384,4 +384,104 @@ mod tests {
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert_eq!(line_count, 0, "no connector lines without connect_to");
     }
+
+    // ── extract_viewbox: R1 port (bug_hunt_render_pipeline.rs) ───────────────
+    // Zero prior in-src coverage of this function.
+
+    #[test]
+    fn extract_viewbox_standard() {
+        let svg = r#"<svg viewBox="0 0 200 150" width="200" height="150"><circle/></svg>"#;
+        assert_eq!(extract_viewbox(svg), "0 0 200 150");
+    }
+
+    #[test]
+    fn extract_viewbox_missing_returns_default() {
+        let svg = r#"<svg width="200" height="150"><circle/></svg>"#;
+        assert_eq!(extract_viewbox(svg), "0 0 640 480");
+    }
+
+    #[test]
+    fn extract_viewbox_empty_and_non_svg_input_return_default() {
+        assert_eq!(extract_viewbox(""), "0 0 640 480");
+        assert_eq!(extract_viewbox("<div>hello</div>"), "0 0 640 480");
+    }
+
+    #[test]
+    fn extract_viewbox_malformed_no_closing_quote_returns_default() {
+        // No closing quote after the viewBox value: after.find('"') is None,
+        // so the parser falls through to the default rather than panicking
+        // or returning a truncated fragment.
+        let svg = r#"<svg viewBox="0 0 200 150><circle/></svg>"#;
+        assert_eq!(extract_viewbox(svg), "0 0 640 480");
+    }
+
+    #[test]
+    fn extract_viewbox_single_quotes_not_detected() {
+        // Only the double-quoted `viewBox="..."` form is recognized; this is a
+        // documented gap, not a panic risk.
+        let svg = "<svg viewBox='0 0 100 100'><rect/></svg>";
+        assert_eq!(extract_viewbox(svg), "0 0 640 480");
+    }
+
+    #[test]
+    fn extract_viewbox_negative_and_decimal_values_preserved() {
+        assert_eq!(
+            extract_viewbox(r#"<svg viewBox="-50 -25 200 150"><rect/></svg>"#),
+            "-50 -25 200 150"
+        );
+        assert_eq!(
+            extract_viewbox(r#"<svg viewBox="0.5 1.5 199.5 148.5"><rect/></svg>"#),
+            "0.5 1.5 199.5 148.5"
+        );
+    }
+
+    // ── strip_svg_wrapper: additional edges (R1 port) ─────────────────────────
+
+    #[test]
+    fn strip_svg_wrapper_no_closing_tag_returns_rest_of_content() {
+        let inner = strip_svg_wrapper("<svg><circle/>");
+        assert_eq!(inner, "<circle/>");
+    }
+
+    #[test]
+    fn strip_svg_wrapper_no_closing_bracket_returns_input_unchanged() {
+        let svg = "<svg malformed";
+        assert_eq!(strip_svg_wrapper(svg), svg);
+    }
+
+    #[test]
+    fn strip_svg_wrapper_self_closing_produces_empty_inner() {
+        assert_eq!(strip_svg_wrapper("<svg/>"), "");
+    }
+
+    // ── build_inset_nodes: bounds/connector edge cases (R1 port) ──────────────
+
+    #[test]
+    fn inset_inverted_bounds_clamp_to_1px_width() {
+        // left > right in normalized bounds produces a negative pixel span,
+        // which `.max(1.0)` clamps to a 1px-wide inset rather than a
+        // negative-width Rect.
+        let spec = InsetSpec { bounds: [0.9, 0.1, 0.1, 0.9], ..basic_spec() };
+        let nodes = build_inset_nodes(&spec, &plot());
+        let raw = nodes.iter().find_map(|n| {
+            if let SceneNode::Raw { svg, .. } = n { Some(svg) } else { None }
+        }).expect("expected a Raw svg node");
+        assert!(raw.contains("width=\"1.000\""), "expected 1px-clamped width; got: {raw}");
+    }
+
+    #[test]
+    fn inset_nan_connect_to_does_not_panic_and_draws_two_lines() {
+        // Corner-distance sorting uses `.partial_cmp(...).unwrap_or(Equal)` so a
+        // NaN connect_to point (e.g. from an unresolved scale) must not panic;
+        // it degrades to an arbitrary (but stable) choice of the first two
+        // corners in sort order.
+        let spec = InsetSpec {
+            connect_to: Some([f64::NAN, f64::NAN]),
+            connect_style: "lines".to_string(),
+            ..basic_spec()
+        };
+        let nodes = build_inset_nodes(&spec, &plot());
+        let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
+        assert_eq!(line_count, 2, "NaN connect_to must still draw exactly 2 connector lines");
+    }
 }

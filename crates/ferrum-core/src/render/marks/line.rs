@@ -703,4 +703,62 @@ mod tests {
         assert!((path.fill_opacity - 1.0).abs() < 1e-12,
             "absent fill_opacity encoding must leave fill_opacity = 1.0; got {}", path.fill_opacity);
     }
+
+    // ── Ported from bug_hunt_marks_rendering_r2.rs (R1) ─────────────────────
+    // `build_line_cmds` command-count contracts per interpolation method,
+    // exercising the real function instead of a hand-copied formula.
+
+    #[test]
+    fn build_line_cmds_step_emits_hvh_triplet_per_segment() {
+        use ferrum_scene::PathCmd;
+        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
+        let cmds = build_line_cmds(&points, Some("step"));
+        // MoveTo + 3 segments * (HLineTo, VLineTo, HLineTo) = 10 commands.
+        assert_eq!(cmds.len(), 10);
+        assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
+        for chunk in cmds[1..].chunks(3) {
+            assert!(matches!(chunk[0], PathCmd::HLineTo { .. }));
+            assert!(matches!(chunk[1], PathCmd::VLineTo { .. }));
+            assert!(matches!(chunk[2], PathCmd::HLineTo { .. }));
+        }
+    }
+
+    #[test]
+    fn build_line_cmds_step_before_emits_vh_pair_per_segment() {
+        use ferrum_scene::PathCmd;
+        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
+        let cmds = build_line_cmds(&points, Some("step-before"));
+        assert_eq!(cmds.len(), 7, "MoveTo + 3 * (VLineTo, HLineTo)");
+        for chunk in cmds[1..].chunks(2) {
+            assert!(matches!(chunk[0], PathCmd::VLineTo { .. }));
+            assert!(matches!(chunk[1], PathCmd::HLineTo { .. }));
+        }
+    }
+
+    #[test]
+    fn build_line_cmds_step_after_emits_hv_pair_per_segment() {
+        use ferrum_scene::PathCmd;
+        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
+        let cmds = build_line_cmds(&points, Some("step-after"));
+        assert_eq!(cmds.len(), 7, "MoveTo + 3 * (HLineTo, VLineTo)");
+        for chunk in cmds[1..].chunks(2) {
+            assert!(matches!(chunk[0], PathCmd::HLineTo { .. }));
+            assert!(matches!(chunk[1], PathCmd::VLineTo { .. }));
+        }
+    }
+
+    #[test]
+    fn build_line_cmds_linear_default_emits_one_lineto_per_segment() {
+        use ferrum_scene::PathCmd;
+        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
+        let unlabeled = build_line_cmds(&points, None);
+        let explicit = build_line_cmds(&points, Some("linear"));
+        for cmds in [unlabeled, explicit] {
+            assert_eq!(cmds.len(), 4, "MoveTo + 3 LineTo");
+            assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
+            for cmd in &cmds[1..] {
+                assert!(matches!(cmd, PathCmd::LineTo { .. }));
+            }
+        }
+    }
 }

@@ -1225,4 +1225,46 @@ mod tests {
         assert!((bottom1.0 - top1.0).abs() < 1e-6, "bottom1.x must equal top1.x (cx, unchanged); got {} vs {}", bottom1.0, top1.0);
         assert!((bottom1.1 - 60.0).abs() < 1e-6, "bottom1.y (base=4.0 via y-scale) must be 60px; got {}", bottom1.1);
     }
+
+    // ── Ported from bug_hunt_marks_rendering_r2.rs (R1) ─────────────────────
+    // Path-command-count contracts for the two closed-path builders, calling
+    // the real functions instead of a hand-copied arithmetic mirror.
+
+    #[test]
+    fn build_area_cmds_closes_top_line_plus_baseline() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)];
+        let cmds = build_area_cmds(&top, 100.0, None);
+        // top: MoveTo + 4 LineTo = 5, + 2 baseline LineTo + Close = 8.
+        assert_eq!(cmds.len(), 8);
+        assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
+        assert!(matches!(cmds.last(), Some(PathCmd::Close)));
+        // Second-to-last LineTo returns to the top's own start x at the baseline.
+        match &cmds[cmds.len() - 2] {
+            PathCmd::LineTo { x, y } => {
+                assert!((x - top[0].0).abs() < 1e-9);
+                assert!((y - 100.0_f64).abs() < 1e-9);
+            }
+            other => panic!("expected closing LineTo to (x0, baseline), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_stacked_area_cmds_walks_top_forward_bottom_reversed() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 10.0), (1.0, 20.0), (2.0, 15.0)];
+        let bottom: Vec<(f64, f64)> = vec![(0.0, 5.0), (1.0, 8.0), (2.0, 6.0)];
+        let cmds = build_stacked_area_cmds(&top, &bottom, None);
+        // top: MoveTo + 2 LineTo = 3, + 3 bottom LineTo (reversed) + Close = 7.
+        assert_eq!(cmds.len(), 7);
+        assert!(matches!(cmds.last(), Some(PathCmd::Close)));
+        // The first bottom LineTo emitted must be `bottom`'s LAST point (walked in reverse).
+        match &cmds[3] {
+            PathCmd::LineTo { x, y } => {
+                assert!((x - bottom[2].0).abs() < 1e-9);
+                assert!((y - bottom[2].1).abs() < 1e-9);
+            }
+            other => panic!("expected first bottom LineTo to be bottom[last], got {other:?}"),
+        }
+    }
 }

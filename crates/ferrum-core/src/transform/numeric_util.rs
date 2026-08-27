@@ -362,6 +362,36 @@ mod tests {
         assert!(msg.contains("'x'"), "err should carry field: {msg}");
     }
 
+    // ---- R1-relocated coverage (tests/bug_hunt_release_transforms.rs, 2026-08-27) ----
+
+    #[test]
+    fn quantile_all_equal_returns_that_value() {
+        let v = [7.0, 7.0, 7.0, 7.0];
+        assert_eq!(quantile_sorted(&v, 0.0), 7.0);
+        assert_eq!(quantile_sorted(&v, 0.5), 7.0);
+        assert_eq!(quantile_sorted(&v, 1.0), 7.0);
+    }
+
+    #[test]
+    fn quantile_with_nan_present_poisons_result() {
+        // quantile_sorted does NOT filter NaN (the caller is responsible via
+        // clean_float64_values). A NaN in the sorted slice at the interpolation
+        // index poisons the output. This documents the contract boundary: the
+        // helper assumes pre-cleaned input.
+        let v = [1.0, f64::NAN, 3.0]; // not actually sorted, but exercises NaN
+        let q = quantile_sorted(&v, 0.5); // h=1.0 → index 1 → NaN
+        assert!(q.is_nan(), "NaN at the interpolation index must propagate");
+    }
+
+    #[test]
+    fn clean_keeps_infinity_drops_null_and_nan() {
+        // Infinity is NOT NaN, so it survives cleaning — a value that then
+        // poisons downstream sum/mean. Documents that clean keeps ±inf.
+        let arr = arr_from_options(vec![Some(1.0), None, Some(f64::NAN), Some(f64::INFINITY)]);
+        let result = clean_float64_values(&arr, None);
+        assert_eq!(result, vec![1.0, f64::INFINITY]);
+    }
+
     #[test]
     fn quantile_linear_interpolation_fractional() {
         // [0.0, 10.0], p=0.3 → h = 0.3*1 = 0.3, lo=0, hi=1, frac=0.3 → 0*(0.7)+10*(0.3) = 3.0

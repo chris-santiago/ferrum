@@ -699,4 +699,72 @@ mod tests {
         assert_eq!(values, vec!["tip_a", "tip_b", "tip_c"],
             "no-skip: tooltips must be in original row order");
     }
+
+    // ── Ported from bug_hunt_marks_rendering_r2.rs (R1) ─────────────────────
+    // `mark_style.text.limit` truncation boundary conditions, exercised via
+    // the real `build` pipeline with an explicit `text` channel.
+
+    fn limit_test_spec() -> ChartSpec {
+        use crate::spec::encoding::DataType as SDT;
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                text: Some(EncodingSpec { field: "label".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    fn build_with_limit(limit: Option<usize>) -> String {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::StringArray;
+        let spec = limit_test_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("label", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0])),
+            Arc::new(Float64Array::from(vec![0.0])),
+            Arc::new(StringArray::from(vec!["Hello"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { limit, ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        result.nodes.iter().find_map(|n| {
+            if let ferrum_scene::SceneNode::Text { content, .. } = n { Some(content.clone()) } else { None }
+        }).expect("expected exactly one Text node")
+    }
+
+    #[test]
+    fn text_limit_equal_to_label_length_does_not_truncate() {
+        // "Hello".chars().count() == 5 == limit -> the `>` comparison is false.
+        assert_eq!(build_with_limit(Some(5)), "Hello");
+    }
+
+    #[test]
+    fn text_limit_one_truncates_to_bare_ellipsis() {
+        // limit=1: saturating_sub(1) keeps 0 chars, so only the ellipsis remains.
+        assert_eq!(build_with_limit(Some(1)), "\u{2026}");
+    }
+
+    #[test]
+    fn text_limit_zero_is_treated_as_unset() {
+        // `limit > 0` is false for limit=0, so no truncation occurs at all.
+        assert_eq!(build_with_limit(Some(0)), "Hello");
+    }
 }

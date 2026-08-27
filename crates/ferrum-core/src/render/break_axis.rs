@@ -483,6 +483,77 @@ mod tests {
         assert!(result.indicator_pixels.is_empty());
     }
 
+    // ── R1 port (bug_hunt_draw.rs): gap clipping edge cases ───────────────────
+
+    #[test]
+    fn gap_entirely_outside_domain_is_ignored() {
+        let result = apply_break_to_scale((0.0, 100.0), &[[200.0, 800.0]], (50.0, 350.0), 12.0);
+        assert_eq!(result.segments.len(), 1, "out-of-domain gap must be ignored");
+        assert!(result.indicator_pixels.is_empty());
+    }
+
+    #[test]
+    fn gap_partially_overlapping_domain_is_clipped() {
+        // Gap [80, 200] clips to [80, 100] against domain [0, 100].
+        let result = apply_break_to_scale((0.0, 100.0), &[[80.0, 200.0]], (50.0, 350.0), 12.0);
+        assert_eq!(result.segments.len(), 1, "clipped gap leaves a single retained segment");
+        assert_eq!(result.segments[0].data_lo, 0.0);
+        assert_eq!(result.segments[0].data_hi, 80.0);
+    }
+
+    #[test]
+    fn multiple_gaps_produce_matching_segment_and_indicator_counts() {
+        let result = apply_break_to_scale(
+            (0.0, 100.0), &[[20.0, 40.0], [60.0, 80.0]], (50.0, 350.0), 12.0,
+        );
+        assert_eq!(result.segments.len(), 3, "two gaps -> three retained segments");
+        assert_eq!(result.indicator_pixels.len(), 2, "two gaps -> two indicators");
+    }
+
+    #[test]
+    fn gap_covering_entire_domain_leaves_no_segments() {
+        let result = apply_break_to_scale((0.0, 100.0), &[[0.0, 100.0]], (50.0, 350.0), 12.0);
+        assert!(result.segments.is_empty(), "gap spanning the whole domain leaves nothing retained");
+    }
+
+    #[test]
+    fn degenerate_domain_with_gap_produces_single_segment() {
+        // lo == hi: the gap clips to an empty range and is discarded.
+        let result = apply_break_to_scale((50.0, 50.0), &[[40.0, 60.0]], (50.0, 350.0), 12.0);
+        assert_eq!(result.segments.len(), 1);
+    }
+
+    #[test]
+    fn zero_break_size_allocates_all_pixels_to_data() {
+        let result = apply_break_to_scale((0.0, 100.0), &[[40.0, 60.0]], (50.0, 350.0), 0.0);
+        let total_seg_px: f64 = result.segments.iter().map(|s| (s.pixel_hi - s.pixel_lo).abs()).sum();
+        assert!((total_seg_px - 300.0).abs() < 1.0, "zero break_size reserves no indicator space");
+    }
+
+    #[test]
+    fn nan_gap_bounds_resolve_to_a_domain_covering_gap() {
+        // Documents a real, pinned edge case rather than an assumed-good one:
+        // `f64::max`/`f64::min` return the *non-NaN* argument (Rust docs), so
+        // `NaN.max(d_lo) == d_lo` and `NaN.min(d_hi) == d_hi` — a NaN gap bound
+        // resolves to `[d_lo, d_hi]`, which clips to a domain-covering gap and
+        // silently erases all data, exactly like an explicit `[d_lo, d_hi]` gap.
+        // Tracked as BRK-1 in design-docs/superpowers/followups/
+        // 2026-05-15-code-archaeology.md (a NaN gap bound should be rejected
+        // loudly, not render a blank chart); this test pins the current
+        // behavior until that lands.
+        let result = apply_break_to_scale((0.0, 100.0), &[[f64::NAN, f64::NAN]], (50.0, 350.0), 12.0);
+        assert!(
+            result.segments.is_empty(),
+            "NaN gap bounds resolve to a domain-covering gap under IEEE max/min semantics"
+        );
+    }
+
+    #[test]
+    fn broken_scale_map_nan_value_returns_none() {
+        let result = apply_break_to_scale((0.0, 100.0), &[[40.0, 60.0]], (50.0, 350.0), 12.0);
+        assert!(broken_scale_map(f64::NAN, &result).is_none());
+    }
+
     // ── build_break_indicators tests ─────────────────────────────────────────
 
     #[test]

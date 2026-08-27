@@ -439,9 +439,37 @@ fn rolling_agg(vals: &[f64], op: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Float64Array;
+    use arrow::array::{Float64Array, Int64Array};
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
+
+    // ---- R1-relocated coverage (tests/bug_hunt_release_transforms.rs, 2026-08-27) ----
+
+    /// FA-7 contract: an Int64 groupby column partitions by value through the
+    /// real `build_partitions`, exercising the shared `group_key::groupby_key_at`
+    /// path this module now delegates to (previously int/uint/bool columns fell
+    /// through to an "unsupported dtype" error here). Two logical groups
+    /// (1,1,2,2,2) must yield two adjacent-run partitions. The mirror's own
+    /// float-dtype sibling test is dropped: it modeled a hand-rolled key
+    /// function rather than calling this module's real partitioning, and
+    /// Float64 groupby coverage already exists in `group_key.rs`.
+    #[test]
+    fn int_groupby_column_partitions_by_value() {
+        let schema = Arc::new(Schema::new(vec![Field::new("g", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1i64, 1, 2, 2, 2]))],
+        )
+        .unwrap();
+        let sorted_indices: Vec<usize> = (0..5).collect();
+        let partitions =
+            build_partitions(&batch, &schema, &Some(vec!["g".into()]), &sorted_indices).unwrap();
+        assert_eq!(
+            partitions,
+            vec![vec![0, 1], vec![2, 3, 4]],
+            "int groupby must partition into 2 adjacent-run groups (values 1 and 2)"
+        );
+    }
 
     #[test]
     fn window_rolling_mean_with_frame() {

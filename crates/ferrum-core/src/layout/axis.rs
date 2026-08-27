@@ -3051,6 +3051,38 @@ mod tests {
         assert_eq!(result.angle, -90.0);
     }
 
+    /// R1 (§9.1 mutation set): the cull predicate `n as u32 > cull_threshold`
+    /// was never truly mirrored — bug_hunt_layout.rs's cull tests re-implemented
+    /// this same comparison locally rather than exercising the real cascade.
+    /// Neither `cascade_s4_culling_direct` (n=20) nor `cascade_s5_elision`
+    /// (n=6) sits at the threshold itself, so a `>` -> `>=` mutation of the
+    /// real predicate would survive both undetected. This test pins the exact
+    /// boundary: n == cull_threshold must NOT enter S4 (falls through to S5
+    /// elision), n == cull_threshold + 1 must.
+    #[test]
+    fn cascade_s4_cull_threshold_boundary_is_strict_greater_than() {
+        let m = MockMetrics { measure: |_text: &str, _fs: f64| 1e18, line_h_factor: 1.2 };
+        let cull_threshold = 8u32;
+
+        let labels_at: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
+        let at_boundary =
+            cascade_collision_recovery(&labels_at, 10.0, 11.0, cull_threshold, None, &m);
+        assert!(
+            matches!(at_boundary.strategy, CascadeStrategy::Elided { .. }),
+            "n == cull_threshold must NOT enter S4 culling; expected Elided, got {:?}",
+            at_boundary.strategy
+        );
+
+        let labels_over: Vec<String> = (0..9).map(|i| format!("VeryLongLabel{i}")).collect();
+        let over_boundary =
+            cascade_collision_recovery(&labels_over, 10.0, 11.0, cull_threshold, None, &m);
+        assert!(
+            matches!(over_boundary.strategy, CascadeStrategy::Culled { .. }),
+            "n == cull_threshold + 1 must enter S4 culling; expected Culled, got {:?}",
+            over_boundary.strategy
+        );
+    }
+
     #[test]
     fn cascade_s5_elision() {
         // Extreme density with few labels (below cull_threshold), so culling

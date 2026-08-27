@@ -412,6 +412,47 @@ mod tests {
         assert_eq!(out.num_rows(), 3, "all 3 rows share the same group key");
     }
 
+    // ---- R1-relocated coverage (tests/bug_hunt_release_transforms.rs, 2026-08-27) ----
+    //
+    // `top_k_sum_ranking_differs_from_count_ranking` was dropped as an exact
+    // duplicate of `top_k_int64_sum_uses_sum_not_count` above (identical
+    // group data and "sum ranking != count ranking" contract).
+
+    /// An empty group (all values NaN-filtered out before `compute_agg` is
+    /// called) ranks last under descending top-k sort via the NEG_INFINITY
+    /// sentinel — and, as a documented asymmetry, ranks FIRST under an
+    /// ascending sort. The ranking claim is verified through the real
+    /// `apply()` path (quality-review finding, cycle 2), not a local
+    /// `Vec::sort_by` — the field doubles as its own groupby key, so two NaN
+    /// rows form an all-filtered "NaN" group (empty -> NEG_INFINITY) while one
+    /// `5.0` row forms a real group (agg = 5.0); ascending top-1 must keep the
+    /// NaN group's 2 rows, not the real group's 1 row.
+    #[test]
+    fn compute_agg_empty_group_uses_neg_infinity_sentinel() {
+        let empty: [f64; 0] = [];
+        assert_eq!(compute_agg(&empty, "sum"), f64::NEG_INFINITY);
+        assert_eq!(compute_agg(&empty, "max"), f64::NEG_INFINITY);
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![5.0, f64::NAN, f64::NAN]))],
+        )
+        .unwrap();
+        let spec = TopKSpec {
+            n: 1,
+            field: "x".into(),
+            op: "sum".into(),
+            sort: "ascending".into(),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(
+            out.num_rows(), 2,
+            "ascending top-1 must surface the empty (NaN) group's 2 rows, not the real 5.0 group's 1 row"
+        );
+    }
+
     /// Regression: Float64 field with op="sum" still works correctly.
     #[test]
     fn top_k_float64_sum_unchanged() {

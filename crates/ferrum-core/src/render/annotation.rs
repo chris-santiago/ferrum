@@ -1050,4 +1050,128 @@ mod tests {
             _ => panic!("expected SceneNode::Raw for image annotation"),
         }
     }
+
+    /// R1 port (bug_hunt_draw.rs / bug_hunt_render_pipeline.rs): `parse_baseline`
+    /// now routes through the single canonical `draw::parse_text_baseline`
+    /// vocabulary instead of an independently hand-rolled match, so the
+    /// previously-divergent aliases (`hanging`, `text-before-edge`,
+    /// `ideographic`) resolve the same way here as they do for mark text.
+    #[test]
+    fn parse_baseline_delegates_to_canonical_vocabulary() {
+        assert_eq!(parse_baseline("hanging"), TextBaseline::Top);
+        assert_eq!(parse_baseline("text-before-edge"), TextBaseline::Top);
+        assert_eq!(parse_baseline("ideographic"), TextBaseline::Bottom);
+        assert_eq!(parse_baseline("unknown-value"), TextBaseline::Middle);
+    }
+
+    /// R1 port: `emit_span` skips emission entirely when either resolved
+    /// coordinate is non-finite (e.g. an out-of-domain scale mapping), rather
+    /// than emitting a rect with a NaN/zero-width dimension.
+    #[test]
+    fn emit_span_skips_on_non_finite_coordinate() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let mut out = Vec::new();
+        emit_span(
+            "x",
+            &CoordValue::Pixel { px: f64::NAN },
+            &CoordValue::Data(50.0),
+            "#ff0000",
+            0.3,
+            None,
+            "middle",
+            &ctx,
+            &mut out,
+        );
+        assert!(out.is_empty(), "non-finite span coordinate must skip emission entirely");
+
+        // A fully finite span does emit.
+        let mut out2 = Vec::new();
+        emit_span(
+            "x", &CoordValue::Data(10.0), &CoordValue::Data(50.0),
+            "#ff0000", 0.3, None, "middle", &ctx, &mut out2,
+        );
+        assert_eq!(out2.len(), 1, "finite span must emit exactly one rect");
+    }
+
+    /// R1 port: `emit_arrow` clamps `head_size` to the shaft length so an
+    /// epsilon-length arrow does not produce an arrowhead triangle that
+    /// vastly overshoots the line's start point.
+    #[test]
+    fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
+        let mut out = Vec::new();
+        emit_arrow(100.0, 100.0, 100.001, 100.0, "#000000", 1.0, 8.0, &mut out);
+        assert_eq!(out.len(), 2, "expected shaft line + arrowhead path");
+        let SceneNode::Path { commands, .. } = &out[1] else {
+            panic!("expected arrowhead Path node");
+        };
+        // The arrowhead's base points must not extend past the shaft's start (x1=100.0).
+        for cmd in commands {
+            if let ferrum_scene::PathCmd::LineTo { x, .. } = cmd {
+                assert!(
+                    *x >= 100.0 - 1e-9,
+                    "clamped arrowhead must not extend past the shaft start; got x={x}"
+                );
+            }
+        }
+    }
+
+    /// R1 port: an unrecognized bracket `direction` defaults to "up" (matching
+    /// the fallthrough arm), rather than silently producing a zero-length tip.
+    #[test]
+    fn emit_bracket_unknown_direction_defaults_to_up() {
+        let mut out_up = Vec::new();
+        emit_bracket(0.0, 100.0, 100.0, 100.0, "", "up", "#000000", 6.0, &mut out_up);
+        let mut out_unknown = Vec::new();
+        emit_bracket(0.0, 100.0, 100.0, 100.0, "", "diagonal", "#000000", 6.0, &mut out_unknown);
+        assert_eq!(out_up.len(), out_unknown.len());
+        // Both must produce identical tip geometry (same Line endpoints).
+        for (a, b) in out_up.iter().zip(out_unknown.iter()) {
+            match (a, b) {
+                (SceneNode::Line { x1: ax1, y1: ay1, x2: ax2, y2: ay2, .. },
+                 SceneNode::Line { x1: bx1, y1: by1, x2: bx2, y2: by2, .. }) => {
+                    assert_eq!((ax1, ay1, ax2, ay2), (bx1, by1, bx2, by2));
+                }
+                _ => panic!("expected Line nodes for both directions"),
+            }
+        }
+    }
+
+    /// R1 port: the callout background box width uses Unicode character count
+    /// (`chars().count()`), not UTF-8 byte length, so multi-byte labels are not
+    /// over-estimated.
+    #[test]
+    fn emit_callout_width_uses_char_count_not_byte_len() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ascii = "resume"; // 6 chars, 6 bytes
+        let unicode = "r\u{00e9}sum\u{00e9}"; // 6 chars, 8 bytes
+        assert_eq!(ascii.chars().count(), unicode.chars().count());
+
+        let build = |text: &str| {
+            let mut out = Vec::new();
+            emit_callout(&ctx, &CoordValue::Data(50.0), &CoordValue::Data(50.0),
+                text, "curved", 4.0, "#fff", "#333", 0.0, None, None, &mut out);
+            let SceneNode::Rect { w, .. } = out[0] else { panic!("expected background Rect") };
+            w
+        };
+        assert_eq!(build(ascii), build(unicode), "equal char count must produce equal box width");
+    }
+
+    /// R1 port: `arrow == "none"` suppresses the callout's leader line; any
+    /// other value (including an empty string) still draws it.
+    #[test]
+    fn emit_callout_arrow_none_suppresses_leader_line() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let count_lines = |arrow: &str| {
+            let mut out = Vec::new();
+            emit_callout(&ctx, &CoordValue::Data(50.0), &CoordValue::Data(50.0),
+                "hi", arrow, 4.0, "#fff", "#333", 0.0, None, None, &mut out);
+            out.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count()
+        };
+        assert_eq!(count_lines("none"), 0, "arrow='none' must suppress the leader line");
+        assert_eq!(count_lines(""), 1, "empty string is not 'none' — leader line still drawn");
+        assert_eq!(count_lines("curved"), 1);
+    }
 }

@@ -1180,6 +1180,59 @@ mod tests {
         assert!(has_b, "output must contain rows tagged 'B'");
     }
 
+    // ---- R1-relocated coverage (tests/bug_hunt_release_transforms.rs, 2026-08-27) ----
+
+    /// FA-8 contract: `level_id` values must be globally unique across grouped
+    /// surfaces, not just within a surface. `contour_one_surface` restarts its
+    /// `seg_idx`/`cell_idx` counters at 0 for every surface; the accumulation
+    /// step in `apply` offsets each surface's ids past the previous surface's
+    /// maximum so the combined output column has no collisions. Ported against
+    /// the real grouped pipeline (`apply`) via the same two-group fixture as
+    /// `contour_grouped_two_groups_both_tagged`, rather than the mirror's
+    /// standalone re-implementation of the offset arithmetic.
+    #[test]
+    fn contour_grouped_level_ids_are_globally_unique() {
+        pyo3::Python::initialize();
+        let n = 4usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        let make_density = |cx: f64, cy: f64| -> Vec<f64> {
+            let mut d = vec![0.0f64; n * n];
+            for gy in 0..n {
+                for gx in 0..n {
+                    let dx = (gx as f64) - cx;
+                    let dy = (gy as f64) - cy;
+                    d[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+                }
+            }
+            d
+        };
+
+        let rows = vec![
+            (grid_x.clone(), grid_y.clone(), make_density(1.0, 1.0)),
+            (grid_x.clone(), grid_y.clone(), make_density(2.0, 2.0)),
+        ];
+        let b = make_grouped_kde2d_batch(rows, "species", vec!["A", "B"]);
+
+        let spec = ContourSpec {
+            thresholds: 2,
+            fill: false,
+            smooth: false,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let ids: Vec<u32> = (0..id_col.len()).map(|i| id_col.value(i)).collect();
+        let distinct: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            ids.len(),
+            "FA-8: level_ids must be globally unique across grouped surfaces (ids = {ids:?})"
+        );
+    }
+
     #[test]
     fn contour_grouped_isoband_two_groups_both_tagged() {
         // Same as above but fill=true (isoband mode).

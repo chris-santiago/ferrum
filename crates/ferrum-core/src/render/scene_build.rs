@@ -3748,4 +3748,115 @@ mod tests {
             "mark_bar: channel 'x2 and y2' is not supported; a 2-D extent (both x2= and y2=) is a rectangle; use mark_rect instead"
         );
     }
+
+    // ── R1 port (bug_hunt_draw.rs / bug_hunt_render_pipeline.rs): break-axis
+    //    coordinate remapping (remap_coord/remap_node/remap_path_cmd) and the
+    //    polar outer-radius helper. Zero prior in-src coverage of these fns.
+
+    fn one_segment_break(d_lo: f64, d_hi: f64, px_lo: f64, px_hi: f64) -> break_axis::BreakResult {
+        break_axis::apply_break_to_scale((d_lo, d_hi), &[], (px_lo, px_hi), 12.0)
+    }
+
+    fn two_segment_break() -> break_axis::BreakResult {
+        // Domain [0,100] with a gap [40,60] -> two retained segments.
+        break_axis::apply_break_to_scale((0.0, 100.0), &[[40.0, 60.0]], (50.0, 350.0), 12.0)
+    }
+
+    #[test]
+    fn remap_coord_identity_maps_pixel_to_pixel() {
+        let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
+        let px = remap_coord(200.0, 0.0, 100.0, 50.0, 350.0, &br).unwrap();
+        assert!((px - 200.0).abs() < 1e-6, "single-segment remap must be identity; got {px}");
+    }
+
+    #[test]
+    fn remap_coord_pixel_in_gap_returns_none() {
+        let br = two_segment_break();
+        // Pixel 200 maps back to data value 50, which falls inside the gap [40, 60].
+        let result = remap_coord(200.0, 0.0, 100.0, 50.0, 350.0, &br);
+        assert!(result.is_none(), "a pixel that reverse-maps into the gap must return None");
+    }
+
+    #[test]
+    fn remap_coord_nan_pixel_returns_none() {
+        let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
+        assert!(remap_coord(f64::NAN, 0.0, 100.0, 50.0, 350.0, &br).is_none());
+    }
+
+    #[test]
+    fn remap_node_circle_hides_at_break_hidden_when_in_gap() {
+        let br = two_segment_break();
+        let mut node = SceneNode::Circle { cx: 200.0, cy: 100.0, r: 4.0, style: default_fill_stroke() };
+        remap_node(&mut node, "x", 0.0, 100.0, 50.0, 350.0, &br);
+        let SceneNode::Circle { cx, .. } = node else { panic!("expected Circle") };
+        assert_eq!(cx, BREAK_HIDDEN, "a mark inside the break gap must be hidden off-screen");
+    }
+
+    /// Discriminating fixture (quality-review kill-switch finding, cycle 2):
+    /// `one_segment_break()` has no gaps, so remapping through it is the
+    /// identity — an assertion of "unchanged" is satisfied whether or not the
+    /// real remap dispatch runs at all, which is exactly how the reviewer's
+    /// mutation (deleting the x-axis remap call) survived undetected the first
+    /// time. `two_segment_break()`'s gap `[40,60]` makes `cx: 110.0` reverse-map
+    /// to data value 20.0 (inside the retained segment `[0,40]`), which the
+    /// broken scale compresses to pixel 122.0 — verified independently:
+    /// `remap_coord(110.0, 0.0, 100.0, 50.0, 350.0, &two_segment_break())
+    /// == Some(122.0)`. A disabled remap would leave `cx` at 110.0 instead.
+    #[test]
+    fn remap_node_circle_moves_to_compressed_pixel_across_a_gap() {
+        let br = two_segment_break();
+        let mut node = SceneNode::Circle { cx: 110.0, cy: 100.0, r: 4.0, style: default_fill_stroke() };
+        remap_node(&mut node, "x", 0.0, 100.0, 50.0, 350.0, &br);
+        let SceneNode::Circle { cx, .. } = node else { panic!("expected Circle") };
+        assert!(
+            (cx - 122.0).abs() < 1e-6,
+            "expected cx compressed to 122.0 across the break gap; got {cx}"
+        );
+    }
+
+    #[test]
+    fn remap_path_cmd_hlineto_only_remapped_on_x_axis() {
+        // Same 110.0 -> 122.0 discriminating fixture as the Circle test above.
+        let br = two_segment_break();
+        let mut on_x = PathCmd::HLineTo { x: 110.0 };
+        remap_path_cmd(&mut on_x, "x", 0.0, 100.0, 50.0, 350.0, &br);
+        let PathCmd::HLineTo { x } = on_x else { panic!() };
+        assert!(
+            (x - 122.0).abs() < 1e-6,
+            "HLineTo.x must compress to 122.0 through the broken scale when axis == x; got {x}"
+        );
+
+        let mut on_y = PathCmd::HLineTo { x: 110.0 };
+        remap_path_cmd(&mut on_y, "y", 0.0, 100.0, 50.0, 350.0, &br);
+        let PathCmd::HLineTo { x } = on_y else { panic!() };
+        assert_eq!(x, 110.0, "HLineTo.x must NOT be touched when axis == y");
+    }
+
+    #[test]
+    fn remap_path_cmd_vlineto_only_remapped_on_y_axis() {
+        // Same 110.0 -> 122.0 discriminating fixture as the Circle test above.
+        let br = two_segment_break();
+        let mut on_y = PathCmd::VLineTo { y: 110.0 };
+        remap_path_cmd(&mut on_y, "y", 0.0, 100.0, 50.0, 350.0, &br);
+        let PathCmd::VLineTo { y } = on_y else { panic!() };
+        assert!(
+            (y - 122.0).abs() < 1e-6,
+            "VLineTo.y must compress to 122.0 through the broken scale when axis == y; got {y}"
+        );
+
+        let mut on_x = PathCmd::VLineTo { y: 110.0 };
+        remap_path_cmd(&mut on_x, "x", 0.0, 100.0, 50.0, 350.0, &br);
+        let PathCmd::VLineTo { y } = on_x else { panic!() };
+        assert_eq!(y, 110.0, "VLineTo.y must NOT be touched when axis == x");
+    }
+
+    #[test]
+    fn polar_outer_radius_uses_smaller_dimension() {
+        assert_eq!(polar_outer_radius(&Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 }), 100.0);
+        assert_eq!(
+            polar_outer_radius(&Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 }), 100.0,
+            "outer radius uses the smaller of width/height"
+        );
+        assert_eq!(polar_outer_radius(&Rect { x: 0.0, y: 0.0, w: 0.0, h: 200.0 }), 0.0);
+    }
 }

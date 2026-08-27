@@ -2052,4 +2052,45 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert!(new_inner.w < inner.w, "size-only legend must reserve gutter width");
     }
+
+    // ── R1 port (bug_hunt_layout.rs): subsample_tick_labels edge cases ────────
+    // Zero prior direct unit coverage of this pub fn (only exercised indirectly
+    // through colorbar layout tests).
+
+    fn labels(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("L{i}")).collect()
+    }
+
+    #[test]
+    fn subsample_max_count_zero_returns_empty() {
+        assert!(subsample_tick_labels(labels(3), 0).is_empty());
+    }
+
+    #[test]
+    fn subsample_empty_labels_returns_empty() {
+        assert!(subsample_tick_labels(Vec::new(), 5).is_empty());
+    }
+
+    #[test]
+    fn subsample_max_count_one_returns_first_only() {
+        assert_eq!(subsample_tick_labels(labels(3), 1), vec!["L0".to_string()]);
+    }
+
+    #[test]
+    fn subsample_max_count_equals_or_exceeds_n_returns_all() {
+        assert_eq!(subsample_tick_labels(labels(3), 3), labels(3));
+        assert_eq!(subsample_tick_labels(labels(2), 100), labels(2));
+    }
+
+    #[test]
+    fn subsample_keeps_first_and_last_evenly_spaced() {
+        let result = subsample_tick_labels(labels(5), 3);
+        assert_eq!(result, vec!["L0".to_string(), "L2".to_string(), "L4".to_string()]);
+    }
+
+    #[test]
+    fn subsample_two_from_ten_keeps_endpoints_only() {
+        let result = subsample_tick_labels(labels(10), 2);
+        assert_eq!(result, vec!["L0".to_string(), "L9".to_string()]);
+    }
 }
