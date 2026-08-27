@@ -255,4 +255,76 @@ mod tests {
         };
         assert!(s.scale_str("z", 0.0, 100.0).is_nan());
     }
+
+    // ── reverse (GH #65) composition corners (ported from
+    // tests/bug_hunt_band_point_range.rs, R1) ────────────────────────────────
+
+    fn point(domain: &[&str], padding: f64, align: f64, reverse: bool) -> PointScaleData {
+        PointScaleData {
+            domain: domain.iter().map(|s| s.to_string()).collect(),
+            padding,
+            align,
+            reverse,
+        }
+    }
+
+    /// `reverse=true` over an INVERTED range is a double reversal: every
+    /// category lands exactly where the forward scale over the forward range
+    /// puts it.
+    #[test]
+    fn point_reverse_composed_with_inverted_range_equals_forward() {
+        let fwd = point(&["a", "b", "c"], 0.0, 0.5, false);
+        let dbl = point(&["a", "b", "c"], 0.0, 0.5, true);
+        for cat in ["a", "b", "c"] {
+            let forward = fwd.scale_str(cat, 0.0, 300.0);
+            let double = dbl.scale_str(cat, 300.0, 0.0);
+            assert!(
+                (forward - double).abs() < 1e-9,
+                "reverse over [300,0] must equal forward over [0,300] for {cat}: {forward} vs {double}"
+            );
+        }
+    }
+
+    /// Single category ignores reverse, padding, and align: always the range
+    /// midpoint (the `n <= 1` early return), across a sweep of combinations.
+    #[test]
+    fn point_single_category_ignores_reverse_padding_align() {
+        for reverse in [false, true] {
+            for padding in [0.0, 0.5, 10.0] {
+                for align in [0.0, 0.5, 1.0] {
+                    let s = point(&["x"], padding, align, reverse);
+                    let p = s.scale_str("x", 40.0, 260.0);
+                    assert_eq!(
+                        p, 150.0,
+                        "single category must sit at midpoint (reverse={reverse}, padding={padding}, align={align})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Zero-extent range: every position collapses to the single pixel, with
+    /// and without reverse (reverse of a constant is the same constant).
+    #[test]
+    fn point_zero_extent_range_positions_collapse() {
+        for reverse in [false, true] {
+            let s = point(&["a", "b", "c"], 0.5, 0.5, reverse);
+            for cat in ["a", "b", "c"] {
+                let p = s.scale_str(cat, 100.0, 100.0);
+                assert_eq!(p, 100.0, "zero-extent position for {cat} (reverse={reverse}) must be 100");
+            }
+        }
+    }
+
+    /// reverse endpoint oracle with padding: n=3, padding=0.5 over [0, 300] →
+    /// step=100, forward a/b/c at 50/150/250; reversed, a mirrors to 250.
+    /// (Mirror about the range midpoint, per the domain-reversal equivalence
+    /// documented in `render/scale_resolve/positional.rs`.)
+    #[test]
+    fn point_reverse_with_padding_mirrors_about_midpoint() {
+        let s = point(&["a", "b", "c"], 0.5, 0.5, true);
+        assert!((s.scale_str("a", 0.0, 300.0) - 250.0).abs() < 1e-9);
+        assert!((s.scale_str("b", 0.0, 300.0) - 150.0).abs() < 1e-9);
+        assert!((s.scale_str("c", 0.0, 300.0) - 50.0).abs() < 1e-9);
+    }
 }

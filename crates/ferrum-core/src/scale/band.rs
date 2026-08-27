@@ -267,4 +267,77 @@ mod tests {
         };
         assert!(s.scale_str("z", 0.0, 100.0).is_nan());
     }
+
+    // ── denominator clamp, degenerate domains, sign (ported from
+    // tests/bug_hunt_band_point_range.rs, R1) ────────────────────────────────
+
+    /// The d3 denominator clamp: n=1, padding_inner=0.9, padding_outer=0 gives
+    /// n - pi + 2*po = 0.1, clamped to 1.0 → step = extent, bandwidth = extent
+    /// * (1 - 0.9). Without the clamp step would be 10x the extent.
+    #[test]
+    fn band_denominator_clamps_below_one() {
+        let s = BandScaleData {
+            domain: vec!["a".into()],
+            padding_inner: 0.9,
+            padding_outer: 0.0,
+            align: 0.5,
+        };
+        let (bw, step) = s.layout(200.0);
+        assert!((step - 200.0).abs() < 1e-9, "denominator must clamp to 1.0; step={step}");
+        assert!((bw - 20.0).abs() < 1e-9, "bandwidth = extent * (1 - pi); got {bw}");
+    }
+
+    /// Empty domain: layout early-returns (0, 0) and `scale_str` returns NaN —
+    /// no division by the n==0 denominator.
+    #[test]
+    fn band_empty_domain_layout_zero_and_nan_lookup() {
+        let s = BandScaleData {
+            domain: Vec::new(),
+            padding_inner: 0.1,
+            padding_outer: 0.1,
+            align: 0.5,
+        };
+        assert_eq!(s.layout(300.0), (0.0, 0.0));
+        assert!(s.scale_str("a", 0.0, 300.0).is_nan());
+    }
+
+    /// Regression test (GH #69): `BandScaleData::layout` used to return a
+    /// NEGATIVE bandwidth for an inverted range (extent < 0 → step < 0 →
+    /// bandwidth = step * (1 - pi) < 0). The pyclass getter
+    /// `BandScale::bandwidth()` shipped that sign to Python; d3 never reports
+    /// a negative bandwidth and `cx - bandwidth/2` consumers would silently
+    /// flip sides. Fixed by taking `.abs()` of the bandwidth (not the signed
+    /// `step`, which still drives `scale_str`'s descending-position
+    /// arithmetic).
+    #[test]
+    fn band_bandwidth_non_negative_for_inverted_range() {
+        let s = BandScaleData {
+            domain: vec!["a".into(), "b".into()],
+            padding_inner: 0.0,
+            padding_outer: 0.0,
+            align: 0.5,
+        };
+        let (bw, _step) = s.layout(40.0 - 260.0); // extent as computed for range=[260, 40]
+        // n=2, pi=po=0 → denom=2, step = -220/2 = -110, bandwidth = |step| = 110.0.
+        assert!((bw - 110.0).abs() < 1e-9, "bandwidth must be |step| = 110.0 for an inverted range; got {bw}");
+        assert!(bw >= 0.0, "bandwidth must be non-negative for an inverted range; got {bw}");
+    }
+
+    /// align leftover activation: the ONLY reachable leftover > 0 case is the
+    /// denominator clamp (denom_raw < 1). n=1, pi=0.5, po=0 over [0, 100]:
+    /// step = 100, leftover = 100 - 0.5*100 = 50. align=0 keeps position at
+    /// pi/2 * step = 25; align=1 shifts by the full leftover to 75.
+    #[test]
+    fn band_align_shifts_within_clamped_leftover() {
+        let mk = |align: f64| BandScaleData {
+            domain: vec!["a".into()],
+            padding_inner: 0.5,
+            padding_outer: 0.0,
+            align,
+        };
+        let p0 = mk(0.0).scale_str("a", 0.0, 100.0);
+        let p1 = mk(1.0).scale_str("a", 0.0, 100.0);
+        assert!((p0 - 25.0).abs() < 1e-9, "align=0 position; got {p0}");
+        assert!((p1 - 75.0).abs() < 1e-9, "align=1 position must shift by the leftover; got {p1}");
+    }
 }

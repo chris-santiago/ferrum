@@ -687,4 +687,79 @@ mod tests {
         assert_eq!(ordinal.scale_internal("c"), Some(177.5));
         assert_eq!(ordinal.scale_internal("d"), Some(232.5));
     }
+
+    // ── explicitness gates: degenerate inputs (ported from
+    // tests/bug_hunt_band_point_range.rs, R1) ────────────────────────────────
+
+    /// A wire range with MORE than 2 entries truncates to the first two and
+    /// still counts as explicit — matching the pyclass constructor's
+    /// `[v[0], v[1]]`.
+    #[test]
+    fn band_point_gate_truncates_extra_entries_still_explicit() {
+        let (r, explicit) = band_point_pixel_range(Some(&[40.0, 260.0, 500.0]), (0.0, 600.0));
+        assert_eq!(r, vec![40.0, 260.0]);
+        assert!(explicit);
+    }
+
+    /// Documents the validation gap the gate does NOT close: non-finite range
+    /// entries pass straight through, still marked explicit. The
+    /// constructor-level gap (no `validate_finite` for Band/Point ranges) is
+    /// proven end-to-end by the Python tests; this pins that the resolver
+    /// gate is not the layer catching it.
+    #[test]
+    fn band_point_gate_passes_non_finite_entries_through() {
+        let (r, explicit) = band_point_pixel_range(Some(&[f64::NAN, 260.0]), (0.0, 600.0));
+        assert!(r[0].is_nan(), "gate does not filter NaN (documented gap)");
+        assert_eq!(r[1], 260.0);
+        assert!(explicit, "a NaN-carrying 2-entry range is still treated as explicit");
+    }
+
+    /// Ordinal gate: a single NUMERIC entry is passed through unchanged but
+    /// NOT marked explicit (`explicit_band_extent` needs 2 entries) — the
+    /// documented asymmetry vs `band_point_pixel_range`, which falls back to
+    /// the panel extent.
+    #[test]
+    fn ordinal_gate_single_number_passthrough_not_explicit() {
+        use crate::scale::ordinal::OrdinalRangeValue;
+        let (r, explicit) = ordinal_pixel_range(Some(&[OrdinalRangeValue::Number(40.0)]), (0.0, 600.0));
+        assert_eq!(r, vec![40.0], "single numeric entry passes through unchanged");
+        assert!(!explicit, "1-entry range must not count as explicit");
+    }
+
+    /// Ordinal gate: an all-string (color) range has no numbers → the panel
+    /// extent fallback, not explicit.
+    #[test]
+    fn ordinal_gate_all_string_range_falls_back() {
+        use crate::scale::ordinal::OrdinalRangeValue;
+        let (r, explicit) = ordinal_pixel_range(
+            Some(&[OrdinalRangeValue::Str("#ccc".into()), OrdinalRangeValue::Str("#e4572e".into())]),
+            (0.0, 600.0),
+        );
+        assert_eq!(r, vec![0.0, 600.0]);
+        assert!(!explicit);
+    }
+
+    /// Ordinal gate: mixed [num, str, num] extracts both numbers and IS
+    /// explicit — the seam the Python mixed-range render test exercises
+    /// end-to-end.
+    #[test]
+    fn ordinal_gate_mixed_range_extracts_numbers_explicit() {
+        use crate::scale::ordinal::OrdinalRangeValue;
+        let (r, explicit) = ordinal_pixel_range(
+            Some(&[OrdinalRangeValue::Number(40.0), OrdinalRangeValue::Str("#ccc".into()), OrdinalRangeValue::Number(260.0)]),
+            (0.0, 600.0),
+        );
+        assert_eq!(r, vec![40.0, 260.0]);
+        assert!(explicit);
+    }
+
+    /// Ordinal gate: an empty range falls back to the panel extent, never
+    /// explicit, never panicking on indexing. (`band_point_pixel_range`'s
+    /// empty-range fallback is already pinned by
+    /// `band_point_pixel_range_falls_back_when_too_short`.)
+    #[test]
+    fn ordinal_gate_empty_range_falls_back_no_panic() {
+        let empty_vals: Vec<crate::scale::ordinal::OrdinalRangeValue> = Vec::new();
+        assert_eq!(ordinal_pixel_range(Some(&empty_vals), (5.0, 95.0)), (vec![5.0, 95.0], false));
+    }
 }

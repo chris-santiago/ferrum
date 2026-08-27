@@ -678,4 +678,331 @@ mod tests {
         let after = scale.ticks_internal(10);
         assert_eq!(before, after);
     }
+
+    // ── nice() negative-domain fix (ported from tests/bug_hunt_scale_layout.rs, R1) ──
+    //
+    // Prior in-src coverage only exercised `nice()` on a positive domain
+    // (`log_nice_rounds_to_decades`); none of these negative-domain, sign, or
+    // ordering cases had any coverage before this port.
+
+    /// nice() on ascending negative domain [-700, -3] -> [-1000, -1], and
+    /// ascending order is preserved.
+    #[test]
+    fn log_nice_negative_ascending_domain() {
+        let s = d([-700.0, -3.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-1000.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-1.0)).abs() < 1e-9, "got {}", n.domain[1]);
+        assert!(n.domain[0] < n.domain[1], "ascending order must be preserved");
+    }
+
+    /// nice() on descending negative domain [-3, -700] (d[0] > d[1]) preserves
+    /// descending order: [-1, -1000].
+    #[test]
+    fn log_nice_negative_descending_domain() {
+        let s = d([-3.0, -700.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-1.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-1000.0)).abs() < 1e-9, "got {}", n.domain[1]);
+        assert!(n.domain[0] > n.domain[1], "descending order must be preserved");
+    }
+
+    /// nice() on negative domain spanning one decade: [-5, -0.5] -> [-10, -0.1].
+    #[test]
+    fn log_nice_negative_single_decade_span() {
+        let s = d([-5.0, -0.5], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-10.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-0.1)).abs() < 1e-9, "got {}", n.domain[1]);
+    }
+
+    /// nice() on very small negatives: [-0.003, -0.0007] -> [-0.01, -0.0001].
+    #[test]
+    fn log_nice_negative_very_small_values() {
+        let s = d([-0.003, -0.0007], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-0.01)).abs() < 1e-12, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-0.0001)).abs() < 1e-12, "got {}", n.domain[1]);
+        assert!(n.domain[0] < n.domain[1]);
+    }
+
+    /// nice() with base 2 and negative domain: [-3, -17] -> [-2, -32], preserving
+    /// the descending order the ascending-magnitude/negative-sign combination produces.
+    #[test]
+    fn log_nice_negative_base2() {
+        let s = d([-3.0, -17.0], [0.0, 1.0], 2.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-2.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-32.0)).abs() < 1e-9, "got {}", n.domain[1]);
+    }
+
+    /// nice() on negative domain where both values are exact powers of 10:
+    /// [-100, -1] is already nice and must round-trip unchanged.
+    #[test]
+    fn log_nice_negative_already_nice() {
+        let s = d([-100.0, -1.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-100.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-1.0)).abs() < 1e-9, "got {}", n.domain[1]);
+    }
+
+    /// Positive descending domain [700, 3] -> [1000, 1]: nice() preserves
+    /// descending order on the positive side too (the ascending case is
+    /// already covered by `log_nice_rounds_to_decades`).
+    #[test]
+    fn log_nice_positive_descending_regression() {
+        let s = d([700.0, 3.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - 1000.0).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - 1.0).abs() < 1e-9, "got {}", n.domain[1]);
+        assert!(n.domain[0] > n.domain[1]);
+    }
+
+    /// Positive domain with a non-decimal base (e): [2, 50] -> [e^0, e^4].
+    #[test]
+    fn log_nice_positive_base_e() {
+        let s = d([2.0, 50.0], [0.0, 1.0], std::f64::consts::E, false);
+        let n = s.nice();
+        assert!((n.domain[0] - 1.0).abs() < 1e-9, "domain[0] should be e^0 = 1, got {}", n.domain[0]);
+        assert!(
+            (n.domain[1] - std::f64::consts::E.powi(4)).abs() < 1e-6,
+            "domain[1] should be e^4, got {}", n.domain[1]
+        );
+    }
+
+    /// nice() on a single-point negative domain: [-5, -5] -> [-10, -1].
+    #[test]
+    fn log_nice_negative_single_point_domain() {
+        let s = d([-5.0, -5.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-10.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-1.0)).abs() < 1e-9, "got {}", n.domain[1]);
+    }
+
+    /// nice() on a degenerate negative domain that's already an exact power:
+    /// [-10, -10] stays [-10, -10] (no crash, no spurious decade widening).
+    #[test]
+    fn log_nice_negative_exact_power_single_point() {
+        let s = d([-10.0, -10.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-10.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-10.0)).abs() < 1e-9, "got {}", n.domain[1]);
+    }
+
+    /// nice() preserves domain order for negative when both endpoints round
+    /// to the same decade: [-5, -7] (d[0] > d[1]) -> [-1, -10].
+    #[test]
+    fn log_nice_negative_same_decade_descending() {
+        let s = d([-5.0, -7.0], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-1.0)).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-10.0)).abs() < 1e-9, "got {}", n.domain[1]);
+        assert!(n.domain[0] > n.domain[1]);
+    }
+
+    /// After nicing a negative domain, `scale()` maps the niced endpoints to
+    /// the range endpoints: nice([-700, -3]) = [-1000, -1]; scale(-1000) = 0.0,
+    /// scale(-1) = 1.0.
+    #[test]
+    fn log_scale_after_nice_negative_endpoints() {
+        let s = d([-700.0, -3.0], [0.0, 1.0], 10.0, false).nice();
+        assert!((s.domain[0] - (-1000.0)).abs() < 1e-9, "pre-check: niced domain[0] = {}", s.domain[0]);
+        let y0 = s.scale(-1000.0);
+        let y1 = s.scale(-1.0);
+        assert!((y0 - 0.0).abs() < 1e-9, "scale(-1000) on niced domain should be 0.0, got {y0}");
+        assert!((y1 - 1.0).abs() < 1e-9, "scale(-1) on niced domain should be 1.0, got {y1}");
+    }
+
+    /// Round-trip: `scale` -> `invert` on a niced negative domain.
+    #[test]
+    fn log_scale_invert_round_trip_niced_negative() {
+        let s = d([-700.0, -3.0], [0.0, 300.0], 10.0, false).nice();
+        for x in [-1000.0, -100.0, -10.0, -1.0] {
+            let y = s.scale(x);
+            assert!(!y.is_nan(), "scale({x}) should not be NaN, got NaN");
+            let back = s.invert(y);
+            assert!((back / x - 1.0).abs() < 1e-9, "round-trip failed at x={x}: got {back}");
+        }
+    }
+
+    /// `scale()` on a niced negative domain: a positive input is out of
+    /// domain and returns NaN (unclamped) — the mirror image of
+    /// `log_zero_input_returns_nan_unclamped` on a positive domain.
+    #[test]
+    fn log_scale_niced_negative_positive_input_nan() {
+        let s = d([-700.0, -3.0], [0.0, 1.0], 10.0, false).nice();
+        let y = s.scale(5.0);
+        assert!(y.is_nan(), "positive input on negative domain should be NaN, got {y}");
+    }
+
+    /// `scale()` on a niced negative domain: zero input is out of domain and
+    /// returns NaN (unclamped).
+    #[test]
+    fn log_scale_niced_negative_zero_input_nan() {
+        let s = d([-700.0, -3.0], [0.0, 1.0], 10.0, false).nice();
+        let y = s.scale(0.0);
+        assert!(y.is_nan(), "zero input on negative domain should be NaN, got {y}");
+    }
+
+    /// `ticks()` on a negative domain produces only negative tick values.
+    #[test]
+    fn log_ticks_negative_domain_all_negative() {
+        let s = d([-1000.0, -1.0], [0.0, 1.0], 10.0, false);
+        let t = s.ticks(4);
+        assert!(!t.is_empty(), "ticks should not be empty on negative domain");
+        for tick in &t {
+            assert!(*tick < 0.0, "tick {tick} should be negative on negative domain");
+        }
+    }
+
+    /// `ticks()` on a descending negative domain [-1, -1000] come out in
+    /// descending order (matching the domain direction), exercising the
+    /// `should_reverse` sign-aware branch for negative domains.
+    #[test]
+    fn log_ticks_negative_descending_order() {
+        let s = d([-1.0, -1000.0], [0.0, 1.0], 10.0, false);
+        let t = s.ticks(4);
+        for i in 1..t.len() {
+            assert!(
+                t[i] <= t[i - 1],
+                "descending domain ticks should be descending: t[{}]={} > t[{}]={}",
+                i, t[i], i - 1, t[i - 1]
+            );
+        }
+    }
+
+    /// nice() on a very large negative domain of exact powers of 10:
+    /// [-1e15, -1e3] must stay unchanged — `snap_exp`'s epsilon tolerance
+    /// absorbs the `ln`-based imprecision (`ln(1e3)/ln(10)` is not exactly
+    /// 3.0 in f64) so the domain doesn't spuriously widen a decade.
+    #[test]
+    fn log_nice_negative_large_values() {
+        let s = d([-1e15, -1e3], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - (-1e15)).abs() / 1e15 < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - (-1e3)).abs() < 1e-6, "got {}", n.domain[1]);
+    }
+
+    /// nice() on a positive domain of exact powers of 10 (same `snap_exp`
+    /// contract as the negative case above): [1e3, 1e6] stays unchanged.
+    #[test]
+    fn log_nice_positive_exact_power_ln_imprecision() {
+        let s = d([1e3, 1e6], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - 1e3).abs() < 1e-6, "got {}", n.domain[0]);
+        assert!((n.domain[1] - 1e6).abs() < 1.0, "got {}", n.domain[1]);
+    }
+
+    /// nice().nice() is idempotent on positive domains.
+    #[test]
+    fn log_nice_positive_idempotent() {
+        let s = d([3.0, 700.0], [0.0, 1.0], 10.0, false);
+        let n1 = s.clone().nice();
+        let n2 = n1.clone().nice();
+        assert_eq!(n1.domain, n2.domain, "nice should be idempotent on positive domain");
+    }
+
+    /// nice().nice() is idempotent on negative domains.
+    #[test]
+    fn log_nice_negative_idempotent() {
+        let s = d([-700.0, -3.0], [0.0, 1.0], 10.0, false);
+        let n1 = s.clone().nice();
+        let n2 = n1.clone().nice();
+        assert_eq!(n1.domain, n2.domain, "nice should be idempotent on negative domain");
+    }
+
+    /// nice() with clamp=true on a negative domain: clamp still works after
+    /// nicing (out-of-domain input is clamped, not NaN).
+    #[test]
+    fn log_nice_negative_with_clamp() {
+        let s = d([-700.0, -3.0], [0.0, 100.0], 10.0, true).nice();
+        let y = s.scale(-0.001);
+        assert!(y.is_finite(), "clamped scale on niced negative should be finite, got {y}");
+        assert!(
+            (y - 100.0).abs() < 1e-6 || (y - 0.0).abs() < 1e-6,
+            "clamped value should be at a range endpoint, got {y}"
+        );
+    }
+
+    /// For any domain, after nice(), scale(domain[0]) == range[0] and
+    /// scale(domain[1]) == range[1] — the fundamental contract, on a positive
+    /// domain.
+    #[test]
+    fn log_nice_contract_endpoints_map_to_range_positive() {
+        let s = d([7.0, 350.0], [0.0, 500.0], 10.0, false).nice();
+        let y0 = s.scale(s.domain[0]);
+        let y1 = s.scale(s.domain[1]);
+        assert!((y0 - s.range[0]).abs() < 1e-9, "y0={y0}, r0={}", s.range[0]);
+        assert!((y1 - s.range[1]).abs() < 1e-9, "y1={y1}, r1={}", s.range[1]);
+    }
+
+    /// Same endpoint-to-range contract for negative domains.
+    #[test]
+    fn log_nice_contract_endpoints_map_to_range_negative() {
+        let s = d([-350.0, -7.0], [0.0, 500.0], 10.0, false).nice();
+        let y0 = s.scale(s.domain[0]);
+        let y1 = s.scale(s.domain[1]);
+        assert!((y0 - s.range[0]).abs() < 1e-9, "y0={y0}, r0={}", s.range[0]);
+        assert!((y1 - s.range[1]).abs() < 1e-9, "y1={y1}, r1={}", s.range[1]);
+    }
+
+    /// Same endpoint-to-range contract for a descending negative domain.
+    #[test]
+    fn log_nice_contract_endpoints_descending_negative() {
+        let s = d([-7.0, -350.0], [0.0, 500.0], 10.0, false).nice();
+        let y0 = s.scale(s.domain[0]);
+        let y1 = s.scale(s.domain[1]);
+        assert!((y0 - s.range[0]).abs() < 1e-9, "y0={y0}, r0={}", s.range[0]);
+        assert!((y1 - s.range[1]).abs() < 1e-9, "y1={y1}, r1={}", s.range[1]);
+    }
+
+    /// base-2 positive regression: nice([3, 17]) = [2, 32].
+    #[test]
+    fn log_nice_positive_base2_regression() {
+        let s = d([3.0, 17.0], [0.0, 1.0], 2.0, false);
+        let n = s.nice();
+        assert!((n.domain[0] - 2.0).abs() < 1e-9, "got {}", n.domain[0]);
+        assert!((n.domain[1] - 32.0).abs() < 1e-9, "got {}", n.domain[1]);
+    }
+
+    /// A NaN domain endpoint must not panic `nice()`. This is pathological
+    /// input that the constructor's `sanitize_domain` would normally
+    /// intercept — bypassing `new()` via a direct struct literal exercises
+    /// `nice()`'s own panic-safety as a defensive backstop.
+    #[test]
+    fn log_nice_nan_domain_no_panic() {
+        let s = LogScaleData { domain: [f64::NAN, 100.0], range: [0.0, 1.0], base: 10.0, clamp: false };
+        let _n = s.nice(); // must not panic; result may contain NaN
+    }
+
+    /// An infinite domain endpoint must not panic `nice()` (same
+    /// sanitize-bypass rationale as the NaN case above).
+    #[test]
+    fn log_nice_infinity_domain_no_panic() {
+        let s = LogScaleData { domain: [1.0, f64::INFINITY], range: [0.0, 1.0], base: 10.0, clamp: false };
+        let _n = s.nice(); // must not panic; result may contain infinity
+    }
+
+    /// The geometric midpoint of a negative log domain maps near the range
+    /// midpoint: for [-1000, -1] base 10, geometric midpoint = -sqrt(1000) ≈
+    /// -31.62, whose log-space position is 1.5 (midpoint of [0,3]) -> t=0.5.
+    #[test]
+    fn log_scale_negative_midpoint() {
+        let s = d([-1000.0, -1.0], [0.0, 300.0], 10.0, false);
+        let midpoint = -(1000.0_f64).sqrt();
+        let y = s.scale(midpoint);
+        assert!((y - 150.0).abs() < 1.0, "geometric midpoint should map near range midpoint: got {y}, expected ~150");
+    }
+
+    /// Domain endpoints that differ by a tiny amount within the same decade:
+    /// [-100.001, -99.999] — nice() must widen to encompass the original
+    /// span and preserve ascending order.
+    #[test]
+    fn log_nice_negative_very_close_endpoints() {
+        let s = d([-100.001, -99.999], [0.0, 1.0], 10.0, false);
+        let n = s.nice();
+        assert!(n.domain[0] < n.domain[1], "ascending order preserved: {} < {}", n.domain[0], n.domain[1]);
+        assert!(n.domain[0] <= -100.001, "niced domain[0] should be <= original min");
+        assert!(n.domain[1] >= -99.999, "niced domain[1] should be >= original max");
+    }
 }

@@ -389,4 +389,161 @@ mod tests {
         assert_eq!(grid.panel_positions().len(), 4);
         assert_eq!(grid.dropped_count(), 0);
     }
+
+    // ── L-1 negative-spacing guard (ported from tests/bug_hunt_scale_layout.rs, R1) ──
+    //
+    // Prior in-src coverage of `compute_wrap`/`compute_grid` only used
+    // non-negative gutters (0.0 or 10.0); none of the negative/NaN/infinite
+    // gutter cases below had any coverage before this port.
+
+    /// Negative spacing is clamped to 0 by the guard. Before the fix,
+    /// negative spacing would increase cell sizes beyond the origin.
+    #[test]
+    fn facet_wrap_negative_spacing_clamped_to_zero() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 6, origin, -50.0, -50.0);
+        assert_eq!(grid.gutter_x, 0.0, "negative gutter_x should be clamped to 0");
+        assert_eq!(grid.gutter_y, 0.0, "negative gutter_y should be clamped to 0");
+        // 3 cols, 2 rows, no gutter => cell_w = 200, cell_h = 200
+        assert!((grid.cell_w - 200.0).abs() < 1e-9, "cell_w should be 200, got {}", grid.cell_w);
+        assert!((grid.cell_h - 200.0).abs() < 1e-9, "cell_h should be 200, got {}", grid.cell_h);
+    }
+
+    /// Negative spacing in grid mode is also clamped.
+    #[test]
+    fn facet_grid_negative_spacing_clamped_to_zero() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_grid(2, 3, 6, origin, -100.0, -100.0);
+        assert_eq!(grid.gutter_x, 0.0, "grid: negative gutter_x clamped to 0");
+        assert_eq!(grid.gutter_y, 0.0, "grid: negative gutter_y clamped to 0");
+        assert!((grid.cell_w - 200.0).abs() < 1e-9);
+        assert!((grid.cell_h - 200.0).abs() < 1e-9);
+    }
+
+    /// Zero spacing passes through unchanged (no clamping artifact).
+    #[test]
+    fn facet_wrap_zero_spacing_unchanged() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, 0.0, 0.0);
+        assert_eq!(grid.gutter_x, 0.0);
+        assert_eq!(grid.gutter_y, 0.0);
+        assert!((grid.cell_w - 200.0).abs() < 1e-9);
+        assert!((grid.cell_h - 400.0).abs() < 1e-9);
+    }
+
+    /// Very small positive spacing is not clamped.
+    #[test]
+    fn facet_wrap_tiny_positive_spacing_not_clamped() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let epsilon = 1e-15;
+        let grid = FacetGrid::compute_wrap(3, 3, origin, epsilon, epsilon);
+        assert_eq!(grid.gutter_x, epsilon, "tiny positive spacing should survive the guard");
+        assert_eq!(grid.gutter_y, epsilon, "tiny positive spacing should survive the guard");
+    }
+
+    /// NaN spacing: `f64::NAN.max(0.0)` returns 0.0 in Rust (IEEE 754-2008:
+    /// `max` returns the non-NaN argument), so NaN spacing is silently
+    /// treated as 0 by the guard.
+    #[test]
+    fn facet_wrap_nan_spacing_becomes_zero() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, f64::NAN, f64::NAN);
+        assert_eq!(grid.gutter_x, 0.0, "NaN.max(0.0) should be 0.0");
+        assert_eq!(grid.gutter_y, 0.0, "NaN.max(0.0) should be 0.0");
+        assert!((grid.cell_w - 200.0).abs() < 1e-9);
+        assert!((grid.cell_h - 400.0).abs() < 1e-9);
+    }
+
+    /// Infinite spacing passes the `>= 0` guard unchanged, but drives cell
+    /// sizes to 0.
+    #[test]
+    fn facet_wrap_infinity_spacing_makes_cells_zero() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, f64::INFINITY, f64::INFINITY);
+        assert!(grid.gutter_x.is_infinite(), "INFINITY passes the max(0.0) guard");
+        assert!(grid.gutter_y.is_infinite(), "INFINITY passes the max(0.0) guard");
+        assert_eq!(grid.cell_w, 0.0, "infinite gutter should make cell_w = 0");
+        assert_eq!(grid.cell_h, 0.0, "infinite gutter should make cell_h = 0");
+    }
+
+    /// Negative-infinity spacing is clamped to 0 by `.max(0.0)`.
+    #[test]
+    fn facet_wrap_neg_infinity_spacing_clamped() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        assert_eq!(grid.gutter_x, 0.0, "NEG_INFINITY.max(0.0) should be 0.0");
+        assert_eq!(grid.gutter_y, 0.0);
+        assert!((grid.cell_w - 200.0).abs() < 1e-9);
+        assert!((grid.cell_h - 400.0).abs() < 1e-9);
+    }
+
+    /// Grid mode: infinite spacing in one dimension only collapses only that
+    /// dimension's cell size.
+    #[test]
+    fn facet_grid_infinity_x_spacing_only() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_grid(2, 3, 6, origin, f64::INFINITY, 10.0);
+        assert!(grid.gutter_x.is_infinite());
+        assert_eq!(grid.gutter_y, 10.0);
+        assert_eq!(grid.cell_w, 0.0, "infinite x gutter collapses cell_w");
+        // cell_h = (400 - 10) / 2 = 195
+        assert!((grid.cell_h - 195.0).abs() < 1e-9, "cell_h with finite gy should be normal: {}", grid.cell_h);
+    }
+
+    /// Negative spacing that would (pre-fix) have caused cells wider than the
+    /// origin: post-fix, the gutter clamps to 0 and cells are exactly
+    /// origin/ncols — never wider than the fair share.
+    #[test]
+    fn facet_wrap_negative_spacing_no_wider_than_origin() {
+        let origin_w = 300.0;
+        let ncols = 3u32;
+        let origin = rect(0.0, 0.0, origin_w, 300.0);
+        let grid = FacetGrid::compute_wrap(ncols, 3, origin, -50.0, 0.0);
+        let fair_share = origin_w / ncols as f64;
+        assert!(
+            grid.cell_w <= fair_share + 1e-9,
+            "negative spacing should not make cells wider than fair share: cell_w={}, fair={fair_share}",
+            grid.cell_w
+        );
+    }
+
+    /// After the guard clamps negative spacing, adjacent cell rects must not
+    /// overlap: each cell's start >= the previous cell's end.
+    #[test]
+    fn facet_wrap_negative_spacing_cells_dont_overlap() {
+        let origin = rect(10.0, 0.0, 600.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, -50.0, 0.0);
+        let r0 = grid.cell_rect(0, 0);
+        let r1 = grid.cell_rect(0, 1);
+        let r2 = grid.cell_rect(0, 2);
+        assert!(r1.x >= r0.x + r0.w, "cell 1 should not overlap cell 0: x1={}, x0+w={}", r1.x, r0.x + r0.w);
+        assert!(r2.x >= r1.x + r1.w, "cell 2 should not overlap cell 1: x2={}, x1+w={}", r2.x, r1.x + r1.w);
+    }
+
+    /// Positive spacing produces a proper gap between adjacent cells.
+    #[test]
+    fn facet_wrap_positive_spacing_proper_gap() {
+        let origin = rect(0.0, 0.0, 630.0, 400.0);
+        let grid = FacetGrid::compute_wrap(3, 3, origin, 15.0, 0.0);
+        // total_x_gutter = 15 * 2 = 30; cell_w = (630 - 30) / 3 = 200
+        assert!((grid.cell_w - 200.0).abs() < 1e-9);
+        assert_eq!(grid.gutter_x, 15.0);
+        let r0 = grid.cell_rect(0, 0);
+        let r1 = grid.cell_rect(0, 1);
+        let gap = r1.x - (r0.x + r0.w);
+        assert!((gap - 15.0).abs() < 1e-9, "gap between cells should be 15: got {gap}");
+    }
+
+    /// With ncols=1 there are 0 inter-column gutters, so gutter_x's sign is
+    /// irrelevant to cell_w — the guard still fires, but the result is the
+    /// same either way.
+    #[test]
+    fn facet_wrap_single_col_spacing_irrelevant() {
+        let origin = rect(0.0, 0.0, 600.0, 400.0);
+        let neg = FacetGrid::compute_wrap(1, 3, origin, -50.0, 0.0);
+        let pos = FacetGrid::compute_wrap(1, 3, origin, 50.0, 0.0);
+        let zero = FacetGrid::compute_wrap(1, 3, origin, 0.0, 0.0);
+        assert_eq!(neg.cell_w, zero.cell_w, "ncols=1: negative spacing clamped to 0 = same as zero spacing");
+        assert_eq!(pos.cell_w, zero.cell_w, "ncols=1: positive spacing also zero-effect because 0 gutters");
+    }
 }

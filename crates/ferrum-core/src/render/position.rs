@@ -1014,6 +1014,7 @@ pub(crate) fn apply_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::Rect;
     use crate::render::scale_resolve::ColorScale;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::position::{JitterAxis, PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
@@ -3273,36 +3274,32 @@ mod tests {
         assert_eq!(BatchPositionMeta::from_batch(&out).dodge_n_groups(), 2, "batch_cat_val_grp has 2 groups (p, q)");
     }
 
-    /// Design-gate finding: the two tests above only exercise
-    /// `apply_dodge_ordinal` → `n_dodge_groups` in isolation. Neither drives the
-    /// REAL production seam — `apply_position` → `dispatch_mark_build` — through
-    /// which the `__dodge_n_groups__` schema metadata must survive unmodified
-    /// for dodged bars to render narrowed. This test walks that full seam,
-    /// mirroring `scene_build.rs`'s `build_panel_mark_batches` wiring exactly
-    /// (`apply_position` output batch → `DrawCtx { batch: adjusted, .. }` →
-    /// `dispatch_mark_build`, see scene_build.rs:795-824), so a future pipeline
-    /// change that rebuilds the batch/schema between those two calls and drops
-    /// the metadata fails this test loudly (bars would revert to full
-    /// sub-band-overlapping width) instead of silently regressing.
-    #[test]
-    fn dodge_narrows_bar_width_through_real_apply_position_to_mark_build_seam() {
-        use crate::layout::{PanelLayout, Rect, ThemeInputs};
+    /// Shared GH #66 dodge-pipeline driver: builds a `ChartSpec`/`PanelLayout`/
+    /// theme/`DrawCtx` around `batch`, applies a `Dodge { by, padding }`
+    /// position adjustment through the real `apply_position ->
+    /// dispatch_mark_build` seam (the same two calls `scene_build.rs`'s
+    /// `build_panel_mark_batches` makes), and returns the adjusted batch
+    /// alongside every emitted bar's `(x, width)` in row order. Extracted
+    /// after the third near-identical inline copy of this ~50-line pipeline
+    /// accumulated across the GH #66 dodge tests below — they now differ only
+    /// in their input batch/scales/panel size and the Dodge `padding`.
+    fn dodge_bar_rects_via_seam(
+        batch: &RecordBatch,
+        enc: Encoding,
+        scales: &ResolvedScales,
+        by: &str,
+        padding: f64,
+        panel_area: Rect,
+    ) -> (RecordBatch, Vec<(f64, f64)>) {
+        use crate::layout::{PanelLayout, ThemeInputs};
         use crate::render::draw::{dispatch_mark_build, resolve_mark_style, DrawCtx};
         use crate::spec::chart::ChartSpec;
         use crate::spec::mark::Mark;
         use ferrum_scene::SceneNode;
 
-        let b = batch_cat_val_grp();
-        let enc = enc_xy("cat", "val", Some("grp"));
-        let s = scales_one_ordinal(true);
-        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-
+        let pos = PositionAdjust::Dodge { by: Some(by.into()), padding };
         // Real producer: same call scene_build.rs makes before mark dispatch.
-        let adjusted = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
-        assert_eq!(
-            BatchPositionMeta::from_batch(&adjusted).dodge_n_groups(), 2,
-            "sanity: real apply_position output must carry the 2-group metadata"
-        );
+        let adjusted = apply_position(batch, Some(&pos), scales, &enc, false, &mut Vec::new()).unwrap();
 
         let spec = ChartSpec {
             data: Default::default(),
@@ -3322,9 +3319,8 @@ mod tests {
             chart_description: None,
             params: Vec::new(),
         };
-        // panel range matches scales_one_ordinal's [0, 100] pixel range.
         let panel = PanelLayout {
-            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            plot_area: panel_area,
             facet_key: None,
             row: 0,
             col: 0,
@@ -3342,22 +3338,86 @@ mod tests {
             spec: &spec,
             panel: &panel,
             theme: &theme,
-            scales: &s,
+            scales,
             batch: &adjusted,
             mark_style: &mark_style,
         };
         let result = dispatch_mark_build(&spec.mark, &ctx);
-
-        let widths: Vec<f64> = result
+        let rects: Vec<(f64, f64)> = result
             .nodes
             .iter()
-            .filter_map(|n| if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None })
+            .filter_map(|n| if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None })
             .collect();
-        assert_eq!(widths.len(), 4, "expected 4 dodged bars (2 categories x 2 groups)");
+        (adjusted, rects)
+    }
+
+    /// Batch with a 3-category band column `cat` (a/b/c), numeric `val`, and a
+    /// two-level grouping column `grp` (p/q interleaved) — the GH #66 dodge
+    /// sub-band fixture shared by the tests below.
+    fn batch_cat3_val_grp() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Ordinal x (3 categories over `[0, 600]`) + linear y `[0, 100]` — the
+    /// GH #66 dodge sub-band fixture's scales, paired with `batch_cat3_val_grp`.
+    fn scales_cat3_ordinal() -> ResolvedScales {
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![0.0, 600.0],
+            0.0,
+        ));
+        let lin = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 100.0], vec![0.0, 100.0], false, false,
+        ));
+        ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default() }
+    }
+
+    /// Design-gate finding: the two tests above only exercise
+    /// `apply_dodge_ordinal` → `n_dodge_groups` in isolation. Neither drives the
+    /// REAL production seam — `apply_position` → `dispatch_mark_build` — through
+    /// which the `__dodge_n_groups__` schema metadata must survive unmodified
+    /// for dodged bars to render narrowed. This test walks that full seam,
+    /// mirroring `scene_build.rs`'s `build_panel_mark_batches` wiring exactly
+    /// (`apply_position` output batch → `DrawCtx { batch: adjusted, .. }` →
+    /// `dispatch_mark_build`, see scene_build.rs:795-824), so a future pipeline
+    /// change that rebuilds the batch/schema between those two calls and drops
+    /// the metadata fails this test loudly (bars would revert to full
+    /// sub-band-overlapping width) instead of silently regressing.
+    #[test]
+    fn dodge_narrows_bar_width_through_real_apply_position_to_mark_build_seam() {
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let s = scales_one_ordinal(true);
+
+        // panel range matches scales_one_ordinal's [0, 100] pixel range.
+        let (adjusted, rects) = dodge_bar_rects_via_seam(
+            &b, enc, &s, "grp", 0.0, Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+        );
+        assert_eq!(
+            BatchPositionMeta::from_batch(&adjusted).dodge_n_groups(), 2,
+            "sanity: real apply_position output must carry the 2-group metadata"
+        );
+
+        assert_eq!(rects.len(), 4, "expected 4 dodged bars (2 categories x 2 groups)");
         // panel.w=100, 2 categories, 2 dodge groups -> bar_width = (100/2/2)*0.8 = 20.0.
         // Full (non-narrowed) width would be (100/2/1)*0.8 = 40.0 — the value this
         // test would see if the metadata were silently dropped in transit.
-        for w in &widths {
+        for (_, w) in &rects {
             assert!(
                 (w - 20.0).abs() < 1e-9,
                 "dodged bar width through the real apply_position -> dispatch_mark_build \
@@ -3371,89 +3431,16 @@ mod tests {
     /// through the same real `apply_position` -> `dispatch_mark_build` seam
     /// as the test above. Pre-fix (0.8-factor width, no sub-band clamp),
     /// adjacent sub-bars within category "a" overlapped by 20px — this test
-    /// pins the real-pipeline fix (`clamp_to_dodge_sub_band`) alongside the
-    /// formula-mirror edge cases in bug_hunt_dodge_subband_overlap.rs.
+    /// pins the real-pipeline fix (`BatchPositionMeta::clamp_width`), covering
+    /// the edge cases ported from the deleted bug_hunt_dodge_subband_overlap.rs.
     #[test]
     fn dodge_sub_band_clamp_prevents_overlap_at_high_padding() {
-        use crate::layout::{PanelLayout, Rect, ThemeInputs};
-        use crate::render::draw::{dispatch_mark_build, resolve_mark_style, DrawCtx};
-        use crate::spec::chart::ChartSpec;
-        use crate::spec::mark::Mark;
-        use crate::scale::linear::LinearScale;
-        use crate::scale::ordinal::OrdinalScale;
-        use ferrum_scene::SceneNode;
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("cat", DataType::Utf8, false),
-            Field::new("val", DataType::Float64, false),
-            Field::new("grp", DataType::Utf8, false),
-        ]));
-        let b = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])),
-                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
-                Arc::new(StringArray::from(vec!["p", "q", "p", "q", "p", "q"])),
-            ],
-        )
-        .unwrap();
+        let b = batch_cat3_val_grp();
         let enc = enc_xy("cat", "val", Some("grp"));
-        let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
-            vec!["a".into(), "b".into(), "c".into()],
-            vec![0.0, 600.0],
-            0.0,
-        ));
-        let lin = ScaleKind::Linear(LinearScale::new_internal(
-            vec![0.0, 100.0], vec![0.0, 100.0], false, false,
-        ));
-        let s = ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default() };
-        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.2 };
-
-        let adjusted = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
-
-        let spec = ChartSpec {
-            data: Default::default(),
-            mark: Mark::Bar,
-            encoding: enc,
-            transforms: Vec::new(),
-            facet: None,
-            layers: None,
-            coord: None,
-            mark_style: None,
-            position: Some(pos),
-            title: None,
-            axis_x: None,
-            axis_y: None,
-            selections: Vec::new(),
-            conditionals: Vec::new(),
-            chart_description: None,
-            params: Vec::new(),
-        };
-        let panel = PanelLayout {
-            plot_area: Rect { x: 0.0, y: 0.0, w: 600.0, h: 100.0 },
-            facet_key: None,
-            row: 0,
-            col: 0,
-            strip_title: None,
-            row_strip_title: None,
-            row_facet_key: None,
-        };
-        let theme = ThemeInputs::default();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
-        let ctx = DrawCtx {
-            spec: &spec,
-            panel: &panel,
-            theme: &theme,
-            scales: &s,
-            batch: &adjusted,
-            mark_style: &mark_style,
-        };
-        let result = dispatch_mark_build(&spec.mark, &ctx);
-        let rects: Vec<(f64, f64)> = result
-            .nodes
-            .iter()
-            .filter_map(|n| if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None })
-            .collect();
+        let s = scales_cat3_ordinal();
+        let (_, rects) = dodge_bar_rects_via_seam(
+            &b, enc, &s, "grp", 0.2, Rect { x: 0.0, y: 0.0, w: 600.0, h: 100.0 },
+        );
         assert_eq!(rects.len(), 6, "expected 6 dodged bars (3 categories x 2 groups)");
         // Category "a" is the first two rects (row order preserved by MarkNodes).
         // bandwidth_px = 600/3 = 200; sub_band = 200*(1 - 2*0.2)/2 = 60; the
@@ -3471,6 +3458,85 @@ mod tests {
              [{x0}, {}], group1 starts at {x1} — overlap of {}",
             x0 + w0, (x0 + w0) - x1
         );
+        // GH #66 (ported from tests/bug_hunt_dodge_subband_overlap.rs, R1): the
+        // clamp is per-category, not a special-case for "a" — every category's
+        // adjacent sub-bars must clamp to the same 60px sub-band and sit
+        // edge-to-edge, since bandwidth/sub_band depend only on band index.
+        for (cat_idx, cat) in ["a", "b", "c"].iter().enumerate() {
+            let (xg0, wg0) = rects[cat_idx * 2];
+            let (xg1, wg1) = rects[cat_idx * 2 + 1];
+            assert!((wg0 - 60.0).abs() < 1e-9, "category {cat}: clamped width must be 60.0; got {wg0}");
+            assert!((wg1 - 60.0).abs() < 1e-9, "category {cat}: clamped width must be 60.0; got {wg1}");
+            assert!(
+                xg0 + wg0 <= xg1 + 1e-9,
+                "category {cat}: adjacent dodge sub-bars must not overlap: group0 spans \
+                 [{xg0}, {}], group1 starts at {xg1}",
+                xg0 + wg0
+            );
+        }
+    }
+
+    /// GH #66's refuted premise: the issue as filed blamed `BandScale(padding_inner=)`
+    /// for dodge overlap. `OrdinalScale::bandwidth()` and the render-side band
+    /// centers never read `padding` — it only feeds `invert_band` hit-testing,
+    /// never the dodge geometry seam. Pins that inertness directly against the
+    /// real `OrdinalScale`: bandwidth and every category's `scale_internal`
+    /// center are byte-identical whether `padding` is 0.0 or 0.9 (ported from
+    /// tests/bug_hunt_dodge_subband_overlap.rs `dodge_padding_inner_is_geometrically_inert`, R1).
+    #[test]
+    fn dodge_padding_inner_is_geometrically_inert() {
+        use crate::scale::ordinal::OrdinalScale;
+        let domain = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let low_padding = OrdinalScale::new_internal(domain.clone(), vec![0.0, 600.0], 0.0);
+        let high_padding = OrdinalScale::new_internal(domain.clone(), vec![0.0, 600.0], 0.9);
+
+        assert_eq!(low_padding.bandwidth(), 200.0);
+        assert_eq!(low_padding.bandwidth(), high_padding.bandwidth(), "padding must not perturb bandwidth");
+
+        for cat in &domain {
+            assert_eq!(
+                low_padding.scale_internal(cat),
+                high_padding.scale_internal(cat),
+                "padding must not perturb the band center for {cat}"
+            );
+        }
+        assert_eq!(
+            domain.iter().map(|c| low_padding.scale_internal(c)).collect::<Vec<_>>(),
+            vec![Some(100.0), Some(300.0), Some(500.0)],
+        );
+    }
+
+    /// Default Dodge `padding=0.05` (E=600, n=3 categories, g=2 groups): the
+    /// 0.8-factor raw bar width (80.0) already fits inside the sub-band
+    /// (90.0), so the GH #66 clamp (`BatchPositionMeta::clamp_width`) is a
+    /// documented no-op and every emitted rect matches the pre-fix geometry
+    /// byte-for-byte — no golden churn at default padding (ported from
+    /// tests/bug_hunt_dodge_subband_overlap.rs `dodge_default_padding_output_unchanged`, R1).
+    #[test]
+    fn dodge_default_padding_bar_width_clamp_is_noop() {
+        let b = batch_cat3_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let s = scales_cat3_ordinal();
+        let (_, rects) = dodge_bar_rects_via_seam(
+            &b, enc, &s, "grp", 0.05, Rect { x: 0.0, y: 0.0, w: 600.0, h: 100.0 },
+        );
+        // Rows in (category, group) order a/p, a/q, b/p, b/q, c/p, c/q —
+        // mirroring `MarkNodes`' row-order-preserving accumulator.
+        let expected = [
+            (15.0, 80.0),
+            (105.0, 80.0),
+            (215.0, 80.0),
+            (305.0, 80.0),
+            (415.0, 80.0),
+            (505.0, 80.0),
+        ];
+        assert_eq!(rects.len(), expected.len());
+        for (i, (rect, exp)) in rects.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (rect.0 - exp.0).abs() < 1e-9 && (rect.1 - exp.1).abs() < 1e-9,
+                "row {i}: expected {exp:?}, got {rect:?}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

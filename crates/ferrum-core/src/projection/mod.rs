@@ -248,28 +248,9 @@ fn albers_usa_inv(x: f64, y: f64) -> (f64, f64) {
 }
 
 
+// Test coverage lives in `tests.rs` (precedent: `render/scale_resolve/tests.rs`) — the
+// module grew too large for an inline `mod tests { ... }` block once the mirror-coupled
+// coverage from `tests/bug_hunt_projection.rs` (R1) was relocated in-crate to exercise
+// the real forward/inverse functions directly instead of a duplicated-formula copy.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn round_trip(proj: GeoProjection, lon: f64, lat: f64, tol: f64) {
-        let (x, y) = forward(proj, lon, lat);
-        if !x.is_finite() || !y.is_finite() { return; }
-        let (lon2, lat2) = inverse(proj, x, y);
-        assert!(
-            (lon2 - lon).abs() < tol,
-            "{:?} lon: {} → {} (diff {})", proj, lon, lon2, (lon2-lon).abs()
-        );
-        assert!(
-            (lat2 - lat).abs() < tol,
-            "{:?} lat: {} → {} (diff {})", proj, lat, lat2, (lat2-lat).abs()
-        );
-    }
-
-    #[test] fn mercator_round_trip() { round_trip(GeoProjection::Mercator, -73.98, 40.74, 1e-10); }
-    #[test] fn equirectangular_round_trip() { round_trip(GeoProjection::Equirectangular, 20.0, 45.0, 1e-10); }
-    #[test] fn equal_earth_round_trip() { round_trip(GeoProjection::EqualEarth, 30.0, 45.0, 1e-10); }
-    #[test] fn natural_earth_round_trip() { round_trip(GeoProjection::NaturalEarth, -30.0, 20.0, 1e-10); }
-    #[test] fn orthographic_round_trip() { round_trip(GeoProjection::Orthographic, 0.0, 45.0, 1e-10); }
-    #[test] fn albers_usa_round_trip() { round_trip(GeoProjection::AlbersUsa, -87.6, 41.8, 1e-4); }
-}
+mod tests;

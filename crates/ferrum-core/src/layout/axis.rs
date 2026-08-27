@@ -3904,4 +3904,138 @@ mod tests {
         assert!(axis.ticks.iter().all(|t| !t.culled), "ShowAll must cull nothing");
         assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0), "ShowAll stays flat");
     }
+
+    // ── compute_x_title_width per-axis title_font_size/title_padding override
+    // (ported from tests/bug_hunt_scale_layout.rs, R1) ───────────────────────
+    //
+    // `compute_x_title_width` and `compute_y_title_width` had zero direct
+    // coverage before this port — every assertion below calls the real
+    // functions instead of the mirror's inlined `fs * 1.2 + padding` formula.
+
+    fn titled_input(title_font_size: Option<f64>, title_padding: Option<f64>) -> AxisInput {
+        let mut input = AxisInput::new(AxisOrient::Bottom, Some("Title".into()), vec!["a".into()], None);
+        input.overrides.title_font_size = title_font_size;
+        input.overrides.title_padding = title_padding;
+        input
+    }
+
+    /// No per-axis override: `compute_x_title_width` uses the theme font size.
+    /// With an override, it uses the per-axis font size instead, producing a
+    /// larger gutter for a larger override.
+    #[test]
+    fn x_title_gutter_uses_per_axis_font_size() {
+        let m = mock(0.0);
+        let theme_fs = 13.0;
+        let theme_pad = 8.0;
+
+        let default_input = titled_input(None, None);
+        let gutter_default = compute_x_title_width(&default_input, theme_fs, theme_pad, &m);
+        assert!((gutter_default - 23.6).abs() < 1e-9, "got {gutter_default}");
+
+        let override_input = titled_input(Some(30.0), None);
+        let gutter_override = compute_x_title_width(&override_input, theme_fs, theme_pad, &m);
+        assert!((gutter_override - 44.0).abs() < 1e-9, "got {gutter_override}");
+
+        assert!(
+            gutter_override > gutter_default,
+            "per-axis override of 30 should produce a larger gutter than the theme default 13"
+        );
+    }
+
+    /// Both `title_font_size` and `title_padding` overrides compose additively.
+    #[test]
+    fn x_title_gutter_uses_per_axis_font_size_and_padding() {
+        let m = mock(0.0);
+        let input = titled_input(Some(24.0), Some(16.0));
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        assert!((gutter - 44.8).abs() < 1e-9, "24*1.2+16 = 44.8, got {gutter}");
+    }
+
+    /// No title: `compute_x_title_width` returns 0.0 regardless of font size.
+    #[test]
+    fn x_title_gutter_no_title_is_zero() {
+        let m = mock(0.0);
+        let mut input = AxisInput::new(AxisOrient::Bottom, None, vec!["a".into()], None);
+        input.overrides.title_font_size = Some(100.0);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        assert_eq!(gutter, 0.0, "no title should mean zero gutter");
+    }
+
+    /// Zero per-axis font size: gutter reduces to the padding term alone.
+    #[test]
+    fn x_title_gutter_zero_font_size() {
+        let m = mock(0.0);
+        let input = titled_input(Some(0.0), None);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        assert!((gutter - 8.0).abs() < 1e-9, "zero font size means gutter = padding only, got {gutter}");
+    }
+
+    /// Very large per-axis font size scales the gutter proportionally.
+    #[test]
+    fn x_title_gutter_very_large_font_size() {
+        let m = mock(0.0);
+        let input = titled_input(Some(1000.0), None);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        assert!((gutter - 1208.0).abs() < 1e-9, "huge font: gutter = 1000*1.2+8 = 1208, got {gutter}");
+    }
+
+    /// A NaN per-axis font size propagates to a NaN gutter — `compute_x_title_width`
+    /// applies no defensive `is_finite` guard, so NaN user input reaches layout
+    /// arithmetic unchanged.
+    #[test]
+    fn x_title_gutter_nan_font_size_propagates() {
+        let m = mock(0.0);
+        let input = titled_input(Some(f64::NAN), None);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        assert!(gutter.is_nan(), "NaN font size should propagate to a NaN gutter");
+    }
+
+    /// An unset per-axis font size falls back to the theme font size passed in.
+    #[test]
+    fn x_title_gutter_none_falls_back_to_theme() {
+        let m = mock(0.0);
+        let input = titled_input(None, None);
+        let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        assert!((gutter - 23.6).abs() < 1e-9, "13*1.2+8 = 23.6, got {gutter}");
+    }
+
+    /// `compute_x_title_width` and `compute_y_title_width` are parity-equal
+    /// for the same input and overrides — the doc comment's stated
+    /// "byte-identical to compute_y_title_width" claim, pinned against the
+    /// real functions rather than two copies of the same local formula.
+    #[test]
+    fn title_gutter_x_y_parity_with_overrides() {
+        let m = mock(0.0);
+        let input = titled_input(Some(20.0), Some(12.0));
+        let x_gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
+        let y_gutter = compute_y_title_width(&input, 13.0, 8.0, &m);
+        assert_eq!(x_gutter, y_gutter, "x and y title gutters must match for identical overrides");
+    }
+
+    /// A larger per-axis title font size drives a strictly larger real
+    /// `compute_x_title_width` gutter, monotonically shrinking a downstream
+    /// plot-region-height computation by exactly the gutter's growth.
+    #[test]
+    fn x_title_gutter_large_font_reduces_plot_region() {
+        let m = mock(0.0);
+        let inner_h = 400.0;
+        let x_label_band = 20.0;
+
+        let gutter_default = compute_x_title_width(&titled_input(None, None), 13.0, 8.0, &m);
+        let gutter_large = compute_x_title_width(&titled_input(Some(50.0), None), 13.0, 8.0, &m);
+        assert!(gutter_large > gutter_default, "a larger font must produce a larger gutter");
+
+        let plot_h_default = inner_h - x_label_band - gutter_default;
+        let plot_h_large = inner_h - x_label_band - gutter_large;
+        assert!(
+            plot_h_large < plot_h_default,
+            "larger x_title_gutter should reduce plot height: large={plot_h_large}, default={plot_h_default}"
+        );
+        let gutter_diff = gutter_large - gutter_default;
+        let height_diff = plot_h_default - plot_h_large;
+        assert!(
+            (height_diff - gutter_diff).abs() < 1e-9,
+            "the plot-region shrink must equal the gutter's growth exactly"
+        );
+    }
 }

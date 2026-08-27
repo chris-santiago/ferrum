@@ -837,4 +837,125 @@ mod tests {
             .with_explicit_range(false);
         assert_eq!(plain.range_provenance, explicit_false.range_provenance);
     }
+
+    // ── OrdinalScaleData degenerate / signed-extent cases (ported from
+    // tests/bug_hunt_band_point_range.rs, R1) ────────────────────────────────
+
+    /// Zero-width explicit range [150, 150]: step = 0, every center collapses
+    /// to 150, no NaN anywhere, bandwidth 0. Exercises the division
+    /// `(r_hi - r_lo)/n` with a zero numerator (a user-reachable state via
+    /// `BandScale(range=[c, c])`).
+    #[test]
+    fn ordinal_zero_width_range_centers_collapse_finitely() {
+        let s = d(vec!["a", "b", "c"], vec![150.0, 150.0], 0.0);
+        for cat in ["a", "b", "c"] {
+            let p = s.scale_str(cat);
+            assert!(p.is_finite(), "center for {cat} must be finite, got {p}");
+            assert_eq!(p, 150.0, "all centers must collapse to the range pixel");
+        }
+        let ord = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![150.0, 150.0],
+            0.0,
+        );
+        assert_eq!(ord.bandwidth(), 0.0);
+    }
+
+    /// Zero-width range + invert: the `step == 0.0` guard must return `None`
+    /// (not divide by zero into a bogus index).
+    #[test]
+    fn ordinal_zero_width_range_invert_returns_none() {
+        let s = d(vec!["a", "b"], vec![150.0, 150.0], 0.0);
+        assert_eq!(s.invert_band(150.0), None, "step==0 invert must refuse, not divide by 0");
+        assert_eq!(s.invert_band(0.0), None);
+    }
+
+    /// Inverted explicit range [260, 40] (hi < lo): 4 categories, step = -55,
+    /// centers descend 232.5 / 177.5 / 122.5 / 67.5 — the signed-extent oracle
+    /// consumed by `explicit_band_centers` — and `OrdinalScale::bandwidth()`
+    /// stays positive (55).
+    #[test]
+    fn ordinal_inverted_range_descending_centers_positive_bandwidth() {
+        let s = d(vec!["a", "b", "c", "d"], vec![260.0, 40.0], 0.0);
+        assert_eq!(s.scale_str("a"), 232.5);
+        assert_eq!(s.scale_str("b"), 177.5);
+        assert_eq!(s.scale_str("c"), 122.5);
+        assert_eq!(s.scale_str("d"), 67.5);
+        let ord = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![260.0, 40.0],
+            0.0,
+        );
+        assert_eq!(ord.bandwidth(), 55.0, "bandwidth must be |step| under a reversed range");
+    }
+
+    /// Inverted range + inner padding: `invert(scale(cat))` round-trips for
+    /// every category. The `half_band` term uses `step.abs()`, so a negative
+    /// step must not make the acceptance window empty.
+    #[test]
+    fn ordinal_inverted_range_invert_round_trip_with_padding() {
+        let s = d(vec!["a", "b", "c", "d"], vec![260.0, 40.0], 0.4);
+        for cat in ["a", "b", "c", "d"] {
+            let y = s.scale_str(cat);
+            assert_eq!(
+                s.invert_band(y).as_deref(),
+                Some(cat),
+                "invert(scale({cat})) must round-trip under an inverted range"
+            );
+        }
+    }
+
+    /// Inverted range invert: a pixel just outside the band gap (between
+    /// bands) returns `None` even with the negative step (the
+    /// `|y - center| <= half_band` window must be evaluated symmetrically).
+    #[test]
+    fn ordinal_inverted_range_invert_rejects_gap_pixels() {
+        // padding 0.5 → half_band = 55 * 0.5 / 2 = 13.75. Band "a" center
+        // 232.5, band "b" center 177.5; midpoint 205.0 sits in the padding gap.
+        let s = d(vec!["a", "b", "c", "d"], vec![260.0, 40.0], 0.5);
+        assert_eq!(s.invert_band(205.0), None, "gap pixel must not resolve to a category");
+    }
+
+    /// Single category over an explicit range: center = midpoint of the range
+    /// (step = extent, first_center = lo + extent/2), and bandwidth equals the
+    /// full extent regardless of range order.
+    #[test]
+    fn ordinal_single_category_explicit_range_center_is_midpoint() {
+        let s = d(vec!["only"], vec![40.0, 260.0], 0.0);
+        assert_eq!(s.scale_str("only"), 150.0);
+        let ord = OrdinalScale::new_internal(vec!["only".into()], vec![40.0, 260.0], 0.0);
+        assert_eq!(ord.bandwidth(), 220.0);
+        // Under the inverted form the midpoint is the same pixel.
+        let inv = d(vec!["only"], vec![260.0, 40.0], 0.0);
+        assert_eq!(inv.scale_str("only"), 150.0);
+    }
+
+    /// Empty domain (0-row data resolved with an explicit range): step is
+    /// `extent / 0` = ±inf internally, but every public lookup stays safe —
+    /// `scale_str` returns NaN (category can't be found), invert returns
+    /// `None`, bandwidth returns 0. Pins that the inf never escapes.
+    #[test]
+    fn ordinal_empty_domain_lookups_are_contained() {
+        let s = d(Vec::new(), vec![40.0, 260.0], 0.0);
+        assert!(s.scale_str("anything").is_nan());
+        let ord = OrdinalScale::new_internal(Vec::new(), vec![40.0, 260.0], 0.0);
+        assert_eq!(ord.bandwidth(), 0.0);
+        // invert on the inf-step layout: raw = (y - inf)/inf = NaN; NaN.round()
+        // as i64 saturates to 0; 0 >= domain.len()==0 → None. Must not panic.
+        assert_eq!(s.invert_band(150.0), None);
+        assert_eq!(s.invert_band(f64::NAN), None);
+    }
+
+    /// Extreme range magnitudes (1e300 span): centers stay finite for a small
+    /// domain (no overflow in `(r_hi - r_lo) / n` or `first_center + i * step`).
+    #[test]
+    fn ordinal_huge_range_no_overflow() {
+        let s = d(vec!["a", "b"], vec![-1e300, 1e300], 0.0);
+        let a = s.scale_str("a");
+        let b = s.scale_str("b");
+        assert!(a.is_finite() && b.is_finite(), "centers must be finite: a={a}, b={b}");
+        assert!(a < b);
+        assert_eq!(a, -5e299);
+        assert_eq!(b, 5e299);
+    }
 }
