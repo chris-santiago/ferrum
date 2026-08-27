@@ -4469,6 +4469,213 @@ fn positional_diverging_scale_uses_full_lo_hi_extent_not_lo_mid() {
     }
 }
 
+// --- P8: Arc single-axis (theta-only) exemption ---
+
+/// An arc spec under `CoordPolar` with only the theta-mapped positional
+/// encoding present (no radius channel) must resolve — not error with
+/// `EncodingTypeMismatch` — mirroring the Tick|Rule single-axis exemption.
+/// Pre-fix (RED): `Mark::Arc` was absent from the exemption block, so the
+/// unconditional `spec.encoding.y.ok_or(EncodingTypeMismatch)` fired.
+#[test]
+fn arc_theta_only_resolves_via_dummy_radius_scale() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Arc,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            y: None,
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: Some(CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }),
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+            .expect("theta-only arc spec must resolve, not error");
+    // `make_batch_q_q_n`'s "x" column is `[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]`; the
+    // default (no explicit `enc.scale`) auto-inferred quantitative domain is
+    // the raw data extent with no padding/nice (`positional::build_axis_scale`).
+    // Asserting the exact domain — not just `ScaleKind::Linear(_)` — is what
+    // discriminates a real data-driven scale from `dummy_unit_scale`, which is
+    // also `ScaleKind::Linear` with domain `[0.0, 1.0]`.
+    match scales.x {
+        ScaleKind::Linear(l) => {
+            assert_eq!(l.domain_pair(), [1.0, 6.0], "theta axis (x) must be the real data-driven scale, not the dummy unit scale");
+        }
+        other => panic!("expected data-driven Linear x scale, got {other:?}"),
+    }
+    match scales.y {
+        ScaleKind::Linear(l) => {
+            assert_eq!(l.domain_pair(), [0.0, 1.0], "absent radius axis (y) must be the dummy unit scale");
+        }
+        other => panic!("expected dummy Linear y scale, got {other:?}"),
+    }
+    assert!(warnings.is_empty());
+}
+
+/// The theta channel is mandatory, unlike radius: an arc spec that binds only
+/// the *non*-theta axis (radius, without the theta-mapped channel) must keep
+/// erroring with `EncodingTypeMismatch`, not silently resolve via the
+/// single-axis exemption. Guards against a gate that keys on "exactly one of
+/// x/y is present" without checking *which* one — that would let
+/// `mark_arc().encode(radius=...)` (theta unset) through to
+/// `render/marks/arc.rs`, which returns an empty mark for a `None` theta
+/// field, turning today's loud `EncodingTypeMismatch` into a silently blank
+/// chart.
+#[test]
+fn arc_missing_theta_still_errors() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    // theta="x", but only "y" (radius) is bound — the theta channel itself is missing.
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Arc,
+        encoding: Encoding {
+            x: None,
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: Some(CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }),
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("arc with a missing theta channel must still error, not resolve via the single-axis exemption");
+    match err {
+        RenderError::EncodingTypeMismatch { channel, .. } => assert_eq!(channel, "x"),
+        other => panic!("expected EncodingTypeMismatch{{channel: \"x\", ..}}, got {other:?}"),
+    }
+}
+
+/// Mirror of `arc_theta_only_resolves_via_dummy_radius_scale` for the other
+/// theta direction: `theta="y"`, only the `y` positional encoding present,
+/// `x` absent. Must resolve with a real y scale and a dummy unit x scale.
+/// Pre-fix (RED) for the same reason as the x-direction test: the
+/// unconditional `spec.encoding.x.ok_or(EncodingTypeMismatch)` fired.
+#[test]
+fn arc_theta_y_only_resolves_via_dummy_radius_scale() {
+    use crate::spec::coord::CoordKind;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Arc,
+        encoding: Encoding {
+            x: None,
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: Some(CoordKind::Polar {
+            theta: PolarThetaChannel::Y,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }),
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+            .expect("theta-only arc spec (theta=y) must resolve, not error");
+    // `make_batch_q_q_n`'s "y" column is `[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]`;
+    // same rationale as the theta="x" test above — an exact domain assertion
+    // discriminates the real data-driven scale from `dummy_unit_scale`.
+    match scales.y {
+        ScaleKind::Linear(l) => {
+            assert_eq!(l.domain_pair(), [10.0, 60.0], "theta axis (y) must be the real data-driven scale, not the dummy unit scale");
+        }
+        other => panic!("expected data-driven Linear y scale, got {other:?}"),
+    }
+    match scales.x {
+        ScaleKind::Linear(l) => {
+            assert_eq!(l.domain_pair(), [0.0, 1.0], "absent radius axis (x) must be the dummy unit scale");
+        }
+        other => panic!("expected dummy Linear x scale, got {other:?}"),
+    }
+    assert!(warnings.is_empty());
+}
+
 mod positional_extent_classification {
     use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
 

@@ -1349,12 +1349,31 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         ));
     }
 
-    // Tick and Rule marks support single-axis mode: only x or only y is encoded.
+    // Tick, Rule, and Arc marks support single-axis mode: only x or only y is
+    // encoded, and the mark builder can proceed using just the present
+    // channel.
     // Tick: x-only = x-rug, y-only = y-rug.
     // Rule: y-only = horizontal span, x-only = vertical span.
+    // Arc (pie/donut/coxcomb/sunburst under CoordPolar): the coord's *theta*
+    // channel is mandatory but the *radius* channel is optional — an absent
+    // radius means "full radius", not a missing encoding. Only the coord's
+    // theta axis may be the sole positional channel here; a missing theta
+    // channel, or a non-polar coord, is not single-axis-eligible and falls
+    // through to the unconditional x/y check below, which errors as before.
     // Synthesize a dummy unit scale for the absent axis so the mark builder
-    // can access its present scale without scale_resolve erroring.
-    if matches!(spec.mark, crate::spec::mark::Mark::Tick | crate::spec::mark::Mark::Rule) {
+    // can access the present scale without scale_resolve erroring.
+    let single_axis_eligible = match spec.mark {
+        crate::spec::mark::Mark::Tick | crate::spec::mark::Mark::Rule => true,
+        crate::spec::mark::Mark::Arc => match &spec.coord {
+            Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => match theta {
+                ferrum_scene::PolarThetaChannel::X => spec.encoding.x.is_some(),
+                ferrum_scene::PolarThetaChannel::Y => spec.encoding.y.is_some(),
+            },
+            _ => false,
+        },
+        _ => false,
+    };
+    if single_axis_eligible {
         let has_x = spec.encoding.x.is_some();
         let has_y = spec.encoding.y.is_some();
         if has_x && !has_y {
