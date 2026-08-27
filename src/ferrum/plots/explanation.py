@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
+from ferrum.marks._desugar_helpers import SHAP_ORDER_VALUES
 from ferrum.plots._helpers import (
     _compose_compare,
     _finalize_chart,
@@ -47,7 +48,11 @@ from ferrum.plots._helpers import (
 # Constants
 # ---------------------------------------------------------------------------
 
-_SHAP_ORDER_VALUES: frozenset[str] = frozenset({"abs_mean", "max"})
+#: Figure-side alias of the vocabulary canonically defined in
+#: ``ferrum.marks._desugar_helpers.SHAP_ORDER_VALUES`` and shared with
+#: ``Chart.mark_shap_beeswarm(order=)`` -- see that module for the
+#: 2026-08-27 close-out note on the sibling-drift finding this resolves.
+_SHAP_ORDER_VALUES: frozenset[str] = frozenset(SHAP_ORDER_VALUES)
 _ORIENT_VALUES: frozenset[str] = frozenset({"horizontal", "vertical"})
 
 
@@ -310,10 +315,28 @@ def _shap_order_features(
     top-``max_display`` cut -- on every identical build). ``fill_nan(None)``
     + ``nulls_last=True`` sorts a NaN-scored feature below every real score
     instead of letting it hijack the top rank.
+
+    ``order`` shares its vocabulary and per-value aggregation with
+    ``Chart.mark_shap_beeswarm(order=)`` (2026-08-27 close-out: the two were
+    previously different closed vocabularies -- ``{"abs_mean", "max"}`` here
+    vs. ``{"abs_mean", "mean", "none"}`` on the mark -- a sibling-drift
+    finding from the findings-remediation design review; unified to the
+    **union** of both). ``"abs_mean"`` ranks by descending
+    ``mean(|shap_value|)``; ``"max"`` by descending ``max(|shap_value|)``
+    (the original, pre-batch behavior of this function -- surfaces features
+    with high-impact outliers); ``"mean"`` by descending signed
+    ``mean(shap_value)``; ``"none"`` performs no ranking and simply keeps
+    the first ``max_display`` features in row-encounter order.
     """
     validate_choice("shap_order_features", "order", order, _SHAP_ORDER_VALUES)
-    expr = pl.col("shap_value").abs()
-    agg = expr.mean() if order == "abs_mean" else expr.max()
+    if order == "none":
+        return sv["feature"].unique(maintain_order=True).to_list()[:max_display]
+    if order == "abs_mean":
+        agg = pl.col("shap_value").abs().mean()
+    elif order == "max":
+        agg = pl.col("shap_value").abs().max()
+    else:  # "mean"
+        agg = pl.col("shap_value").mean()
     ranked = (
         sv.group_by("feature", maintain_order=True)
         .agg(agg.alias("score"))
@@ -376,14 +399,14 @@ def _shap_beeswarm_chart_from_source(
     pad = max(abs(x_min), abs(x_max)) * 0.05 if (x_min < x_max) else 1.0
     domain = (x_min - pad, x_max + pad)
 
-    # `order` here (`{"abs_mean", "max"}`) is the figure-level feature
-    # *selection* ranking already applied above via `_shap_order_features` +
-    # the `pl.Enum(keep)` row sort; it is a different, unrelated vocabulary
-    # from `mark_shap_beeswarm`'s own display-`order` (`{"abs_mean", "mean",
-    # "none"}`), so it is not forwarded. `order="none"` tells the mark to
-    # respect the row order already established above rather than
-    # re-deriving it from `shap_value` under its own (possibly different)
-    # ranking criterion.
+    # `order` here selects the figure-level feature *selection* ranking,
+    # already applied above via `_shap_order_features` + the `pl.Enum(keep)`
+    # row sort. `mark_shap_beeswarm` shares the same
+    # `{"abs_mean", "mean", "max", "none"}` vocabulary with the same
+    # per-value aggregation (2026-08-27 close-out), so passing `order="none"`
+    # below is not a vocabulary workaround -- both mean exactly "leave row
+    # order as-is" -- it simply tells the mark not to redundantly re-derive
+    # a ranking this function already computed and applied.
     chart = ferrum.Chart(plot_df).mark_shap_beeswarm(
         max_display=max_display,
         order="none",
@@ -417,12 +440,14 @@ def _shap_bar_chart_from_source(
 ):
     """SHAP aggregated bar chart: mean(|shap_value|) per feature.
 
-    ``order`` selects the aggregation used both for sorting and as the
-    bar's x-value. ``"abs_mean"`` aggregates by ``mean(|shap_value|)``
-    (the conventional summary); ``"max"`` aggregates by
-    ``max(|shap_value|)`` to emphasize features with high-impact outliers.
-    The output column is named ``abs_mean_shap`` regardless of the
-    aggregation so the downstream mark's data contract stays stable.
+    ``order`` selects both the feature *ranking* (via
+    ``_shap_order_features`` -- see that function for the vocabulary,
+    shared with ``Chart.mark_shap_beeswarm(order=)``) and, for
+    ``order="max"`` specifically, the bar's x-value aggregation:
+    ``order="max"`` plots ``max(|shap_value|)`` (pre-batch, original
+    behavior of this builder -- surfaces high-impact-outlier features);
+    every other ``order`` value plots ``mean(|shap_value|)``, matching the
+    ``abs_mean_shap`` output column name.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
     ``class_label`` (one bar panel per class). ``per_class=False``
@@ -440,8 +465,9 @@ def _shap_bar_chart_from_source(
     validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
     import ferrum
 
-    expr = pl.col("shap_value").abs()
-    agg_expr = expr.mean() if order == "abs_mean" else expr.max()
+    agg_expr = (
+        pl.col("shap_value").abs().max() if order == "max" else pl.col("shap_value").abs().mean()
+    )
     sv = source.shap_values(background=background)
     sv = _shap_select_class(sv, per_class=per_class)
     keep = _shap_order_features(sv, order=order, max_display=max_display)
@@ -499,7 +525,10 @@ def _shap_bar_chart_compare_from_source(
     across classes, extended across models (spec D4). Every model shares
     that top-``max_display`` feature set; each model's ``abs_mean_shap`` is
     aggregated per feature and drawn as one bar per (feature, model) with
-    ``color="model"`` + ``Dodge(by="model")``.
+    ``color="model"`` + ``Dodge(by="model")``. ``order`` selects the feature
+    ranking (via ``_shap_order_features``) and, for ``order="max"``, also
+    the bar-value aggregation -- see the single-model builder's docstring
+    for the exact rule, mirrored here.
 
     SHAP bar's single-model layout is always horizontal (value on x, feature
     on ordinal y); dodge requires an ordinal-x band axis, so this builder
@@ -518,8 +547,9 @@ def _shap_bar_chart_compare_from_source(
     )
     keep = _shap_order_features(combined_sv, order=order, max_display=max_display)
 
-    expr = pl.col("shap_value").abs()
-    agg_expr = expr.mean() if order == "abs_mean" else expr.max()
+    agg_expr = (
+        pl.col("shap_value").abs().max() if order == "max" else pl.col("shap_value").abs().mean()
+    )
     agg = (
         combined_sv.filter(pl.col("feature").is_in(keep))
         .group_by(["feature", "model"])
@@ -565,12 +595,11 @@ def _shap_waterfall_chart_from_source(
 ):
     """Waterfall chart for a single sample's SHAP contributions.
 
-    Feature display order follows the global aggregation chosen by
-    ``order``: ``"abs_mean"`` ranks features by ``mean(|shap_value|)``
-    across the full dataset (matching the beeswarm and bar paths);
-    ``"max"`` ranks by ``max(|shap_value|)``. The top ``max_display``
-    features are kept and rendered in descending rank order; the
-    waterfall's cumulative sum follows that same order.
+    Feature display order follows the global ranking chosen by ``order``
+    (see ``_shap_order_features`` for the shared vocabulary), computed
+    across the full dataset (matching the beeswarm and bar paths). The top
+    ``max_display`` features are kept and rendered in descending rank
+    order; the waterfall's cumulative sum follows that same order.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
     ``class_label`` (one waterfall panel per class for the same sample).
@@ -942,9 +971,13 @@ def shap_beeswarm_chart(
         Target vector.  Required when ``model`` is a raw estimator.
     max_display : int, default 20
         Maximum number of features to display.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ranking criterion.  ``"abs_mean"`` ranks by mean absolute
-        SHAP value; ``"max"`` by max absolute SHAP value.
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ranking criterion (shared vocabulary with
+        ``Chart.mark_shap_beeswarm(order=)``). ``"abs_mean"`` ranks by
+        descending mean absolute SHAP value; ``"max"`` by descending max
+        absolute SHAP value (surfaces high-impact-outlier features);
+        ``"mean"`` by descending signed mean SHAP value; ``"none"`` keeps
+        the first ``max_display`` features in row-encounter order, unranked.
     background : array-like or None, default None
         Background dataset for kernel SHAP explainers.  Ignored for
         tree SHAP.
@@ -1048,9 +1081,13 @@ def shap_bar_chart(
         Target vector.  Required when ``model`` is a raw estimator.
     max_display : int, default 20
         Maximum number of features to display.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ranking criterion.  ``"abs_mean"`` ranks by mean absolute
-        SHAP value; ``"max"`` by max absolute SHAP value.
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ranking criterion (shared vocabulary with
+        ``Chart.mark_shap_beeswarm(order=)``). ``"abs_mean"`` ranks by
+        descending mean absolute SHAP value; ``"max"`` by descending max
+        absolute SHAP value (surfaces high-impact-outlier features);
+        ``"mean"`` by descending signed mean SHAP value; ``"none"`` keeps
+        the first ``max_display`` features in row-encounter order, unranked.
     background : array-like or None, default None
         Background dataset for kernel SHAP explainers.  Ignored for
         tree SHAP.
@@ -1163,9 +1200,13 @@ def shap_waterfall_chart(
         Row index (0-based) of the sample to explain.  Required.
     max_display : int, default 20
         Maximum number of features to display.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ranking criterion.  ``"abs_mean"`` ranks by mean absolute
-        SHAP value; ``"max"`` by max absolute SHAP value.
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ranking criterion (shared vocabulary with
+        ``Chart.mark_shap_beeswarm(order=)``). ``"abs_mean"`` ranks by
+        descending mean absolute SHAP value; ``"max"`` by descending max
+        absolute SHAP value (surfaces high-impact-outlier features);
+        ``"mean"`` by descending signed mean SHAP value; ``"none"`` keeps
+        the first ``max_display`` features in row-encounter order, unranked.
     background : array-like or None, default None
         Background dataset for kernel SHAP explainers.  Ignored for
         tree SHAP.
@@ -1283,12 +1324,18 @@ def shap_chart(
     sample_idx : int or None, default None
         Row index (0-based) of the sample to explain. Required when
         ``kind="waterfall"``; ignored for other kinds.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ranking criterion across all three kinds. ``"abs_mean"``
-        ranks by mean absolute SHAP value; ``"max"`` by max absolute
-        SHAP value. Drives both the top-``max_display`` selection and
-        the bar/waterfall layout order so all three chart types agree
-        on "most important".
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ranking criterion across all three kinds (shared
+        vocabulary with ``Chart.mark_shap_beeswarm(order=)``).
+        ``"abs_mean"`` ranks by descending mean absolute SHAP value;
+        ``"max"`` by descending max absolute SHAP value (surfaces
+        high-impact-outlier features; also the bar chart's x-value
+        aggregation for this one setting -- see `_shap_bar_chart_from_source`);
+        ``"mean"`` by descending signed mean SHAP value; ``"none"`` keeps
+        the first ``max_display`` features in row-encounter order,
+        unranked. Drives the top-``max_display`` selection and the
+        bar/waterfall layout order so all three chart types agree on
+        "most important".
     background : array-like or None, default None
         Background dataset for kernel SHAP explainers. When ``None``,
         the full training set is used. Ignored for tree SHAP.

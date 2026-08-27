@@ -126,14 +126,19 @@ class SHAPVisualizer(FerrumVisualizer):
     sample_idx : int or None, optional
         Row index of the sample to explain. Required when ``kind="waterfall"``;
         ignored for ``"beeswarm"`` and ``"bar"``.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ordering strategy applied to all three ``kind`` values.
-        ``"abs_mean"`` ranks features by ``mean(|shap_value|)`` across
-        the dataset; ``"max"`` ranks by ``max(|shap_value|)`` to surface
-        features with high-impact outliers. For ``kind="bar"`` the same
-        aggregation drives both the bar's x-value and the sort order;
-        for ``kind="waterfall"`` it selects which features are shown
-        for the single sample and the order they appear in.
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ordering strategy applied to all three ``kind`` values
+        (shared vocabulary with ``Chart.mark_shap_beeswarm(order=)``).
+        ``"abs_mean"`` ranks features by descending ``mean(|shap_value|)``
+        across the dataset; ``"max"`` ranks by descending
+        ``max(|shap_value|)`` (surfaces high-impact-outlier features; also
+        the ``kind="bar"`` x-value aggregation for this one setting);
+        ``"mean"`` ranks by descending signed ``mean(shap_value)``;
+        ``"none"`` keeps the first ``max_display`` features in
+        row-encounter order, unranked. For ``kind="bar"`` with any other
+        ``order``, the bar's x-value is ``mean(|shap_value|)``; for
+        ``kind="waterfall"`` ``order`` selects which features are shown for
+        the single sample and the order they appear in.
     background : Any or None, optional
         Background dataset passed to the SHAP explainer for models that
         require a reference distribution (e.g. kernel SHAP). Pass ``None``
@@ -235,14 +240,22 @@ def _top_abs_shap(
 ) -> float:
     """Headline SHAP metric for a long-form ``shap_values`` frame.
 
-    The single home for the abs-mean / max aggregation that the deprecated
-    ``SHAPVisualizer`` and the three dedicated SHAP visualizers all need.
+    The single home for the abs-mean / abs-max aggregation that the
+    deprecated ``SHAPVisualizer`` and the three dedicated SHAP visualizers
+    all need. ``order="max"`` restores this function's original pre-batch
+    behavior byte-for-byte (2026-08-27 close-out: `order`'s vocabulary was
+    briefly narrowed to drop `"max"`, which broke this; restored to the
+    union `{"abs_mean", "mean", "max", "none"}` -- see
+    ``_shap_order_features``). Every other ``order`` value aggregates by
+    mean, matching this class's own docstring ("the maximum **mean**
+    absolute SHAP value").
 
     - ``sample_idx is None`` (beeswarm / bar): aggregate ``|shap_value|`` per
-      feature by mean (``order="abs_mean"``) or max (``order="max"``), then
-      return the largest per-feature value across all features.
+      feature by mean (default, and every ``order`` except ``"max"``) or max
+      (``order="max"``), then return the largest per-feature value across
+      all features.
     - ``sample_idx`` given (waterfall): return the max ``|shap_value|`` over
-      the single explained sample's rows.
+      the single explained sample's rows, regardless of ``order``.
 
     Returns ``0.0`` when the relevant rows are empty (no features, or the
     requested ``sample_idx`` is absent), matching the prior per-visualizer
@@ -252,7 +265,7 @@ def _top_abs_shap(
         one = frame.filter(pl.col("sample_id") == sample_idx)
         return float(one["shap_value"].abs().max()) if one.height else 0.0
     expr = pl.col("shap_value").abs()
-    agg_expr = expr.mean() if order == "abs_mean" else expr.max()
+    agg_expr = expr.max() if order == "max" else expr.mean()
     agg = frame.group_by("feature").agg(agg_expr.alias("v"))
     return float(agg["v"].max()) if agg.height else 0.0
 
@@ -289,9 +302,13 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         library (e.g. tree ensembles, linear models).
     max_display : int, default 20
         Maximum number of features ranked by ``order``.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ranking criterion.  ``"abs_mean"`` ranks by mean
-        absolute SHAP; ``"max"`` by max absolute SHAP.
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ranking criterion (shared vocabulary with
+        ``Chart.mark_shap_beeswarm(order=)``).  ``"abs_mean"`` ranks by
+        descending mean absolute SHAP; ``"max"`` by descending max
+        absolute SHAP (surfaces high-impact-outlier features); ``"mean"``
+        by descending signed mean SHAP; ``"none"`` keeps the first
+        ``max_display`` features in row-encounter order, unranked.
     background : Any, optional
         Background dataset passed to the SHAP explainer for kernel-
         SHAP models.  Tree SHAP ignores this.
@@ -395,9 +412,10 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
     max_display : int, default 20
         Maximum number of features to include in the waterfall, ranked
         by ``order``.
-    order : {"abs_mean", "max"}, default "abs_mean"
-        Feature ranking criterion (drives both the top-``max_display``
-        selection and the bar order).
+    order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+        Feature ranking criterion (shared vocabulary with
+        ``Chart.mark_shap_beeswarm(order=)``; drives both the
+        top-``max_display`` selection and the bar order).
     background : Any, optional
         Background dataset passed to the SHAP explainer.
     per_class : bool, default False

@@ -544,7 +544,7 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 | `mark_gain(...)` | Cumulative gain curve | `reference_lines` |
 | `mark_lift(...)` | Lift curve | `reference_line` |
 | `mark_importance(...)` | Feature importance bar | `orient`, `error_bars`, `top_k` |
-| `mark_shap_beeswarm(...)` | SHAP beeswarm | `max_display`, `color_bar`, `order` (`"abs_mean"`, `"max_abs"`) |
+| `mark_shap_beeswarm(...)` | SHAP beeswarm | `max_display`, `color_bar`, `order` (`"abs_mean"`, `"mean"`, `"max"`, `"none"`) — see 2026-08-27 close-out note below: unified with the `shap_chart` figure-function family's `order=` vocabulary (union, not a narrowing) |
 | `mark_shap_bar(...)` | SHAP mean absolute bar | `max_display`, `layered` |
 | `mark_shap_waterfall(...)` | SHAP waterfall (single prediction) | `max_display`, `show_data` |
 | `mark_pdp(...)` | Partial dependence + ICE | `kind` (`"average"`, `"individual"`, `"both"`), `ice_alpha`, `center` — see 2026-08-27 note below: informational-only at the mark layer, now warns |
@@ -626,7 +626,12 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > `mark_roc`/`mark_pr`, `split` on `mark_cv_scores`, `reference_line` on
 > `mark_gain`/`mark_lift`, `metrics` on `mark_discrimination_threshold`,
 > `order`/`color_bar` on `mark_shap_beeswarm`) — those already matched
-> this spec's Key Parameters columns and needed no table edit.
+> this spec's Key Parameters columns and needed no table edit. **Correction
+> (2026-08-27 close-out):** `order` did not in fact match this spec's table
+> (which read `"max_abs"`, a value the implementation never accepted), and
+> `color_bar=False` was accepted and validated but never wired to suppress
+> the beeswarm's color bar/legend — both are now real; see the two
+> close-out notes below.
 
 > **2026-08-27 (P9 AST guard, findings-remediation batch — Task 14):**
 > closing the P9 desugar-parameter guard's own blind spot (a `del` on a
@@ -656,6 +661,60 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > Both were previously silent no-ops (`del <param>` with neither wiring
 > nor a warning); they now match the "works or rejects/warns loudly"
 > contract every other P9 site above already meets.
+
+> **2026-08-27 (close-out, findings-remediation batch):** two further gaps
+> closed on `mark_shap_beeswarm`/`shap_chart`, found by the closing design
+> and intent reviews.
+>
+> - **`data_transform` silently no-op'd on non-polars charts.**
+>   `_set_composite_mark` (`chart.py`) applied every P9 "become functional"
+>   `data_transform` closure (`average` on `mark_roc`/`mark_pr`, `split` on
+>   `mark_cv_scores`, `reference_line` on `mark_gain`/`mark_lift`, `metrics`
+>   on `mark_discrimination_threshold`, `order` on `mark_shap_beeswarm`)
+>   only when `isinstance(new._data, pl.DataFrame)` -- a pandas- or
+>   pyarrow-backed `Chart` silently skipped the filter/reorder entirely,
+>   with no error and no warning. Now routed through the batch's own
+>   `ferrum._coerce.to_polars` at that seam, so every supported input type
+>   is coerced before the closure runs; already-polars input is an identity
+>   passthrough (`to_polars` returns the same object), so this is byte-
+>   identical for the previously-working polars path.
+> - **`mark_shap_beeswarm(order=)` and `shap_chart`'s feature-ranking
+>   `order=` carried two different closed vocabularies.** The mark accepted
+>   `{"abs_mean", "mean", "none"}` (row *display* order); the figure-side
+>   `_shap_order_features` accepted `{"abs_mean", "max"}` (feature
+>   *selection* ranking, pre-existing, documented, implemented behavior --
+>   `"max"` ranks by descending `max(|shap_value|)` to surface
+>   high-impact-outlier features) -- `"abs_mean"` meant the same thing on
+>   both, `"mean"`/`"max"` each raised on the other, and
+>   `shap_beeswarm_chart` papered over the mismatch with a hardcoded
+>   `order="none"` mark call. Unified to the **union** of both
+>   vocabularies (not a narrowing -- an earlier pass of this fix wrongly
+>   retired `"max"`, breaking working pre-batch behavior; corrected),
+>   canonically defined once in
+>   `ferrum.marks._desugar_helpers.SHAP_ORDER_VALUES = {"abs_mean", "mean",
+>   "max", "none"}` and imported by both sides: `"abs_mean"` ranks by
+>   descending `mean(|shap_value|)`; `"max"` ranks by descending
+>   `max(|shap_value|)` (now implemented on the mark side too, via the same
+>   `expr.max()` branch `_shap_order_features` always had); `"mean"` by
+>   descending signed `mean(shap_value)`; `"none"` performs no ranking.
+>   `_shap_bar_chart_from_source`'s bar value follows the same rule it had
+>   at merge-base: `order="max"` plots `max(|shap_value|)` (byte-identical
+>   to pre-batch behavior); every other `order` plots `mean(|shap_value|)`,
+>   matching the `abs_mean_shap` column name.
+> - **`mark_shap_beeswarm(color_bar=False)` accepted, validated, and
+>   silently discarded the kwarg.** The desugar's own per-layer
+>   `Color(..., legend=...)` was correct, but the Rust renderer's
+>   colorbar-legend construction for a layered/composite chart reads its
+>   `legend=` config from the *chart-level* `encoding.color`, never from a
+>   per-layer color channel -- so neither `color_bar=False`'s suppression
+>   nor `color_bar=True`'s documented `"Low"`/`"High"` tick labels ever
+>   reached the rendered SVG; a plain numeric-tick colorbar rendered
+>   unconditionally. `Chart.mark_shap_beeswarm` now also mirrors the same
+>   `Color(...)` config onto the chart-level encoding, verified by
+>   rendering (not merely by inspecting the emitted spec JSON). This
+>   changes the *default* (`color_bar=True`) rendered output too -- the
+>   `shap_chart_beeswarm` golden was regenerated and visually confirmed to
+>   show the "Low"/"High" tick labels the mark always claimed to render.
 
 > **2026-08-27 (P9 AST guard extension, findings-remediation batch —
 > Task 14, quality-review cycle 3):** extending the guard in the paragraph
@@ -1165,6 +1224,21 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 > `x` stays shared across every layer regardless of `resolve`; per-layer
 > independent x (dual-x) remains a typed `ValueError` naming GH #55. See
 > `SecondaryY` below for the sugar built on top of this mechanism.
+
+> **2026-08-27 (P2 chrome dedup, findings remediation):** static shared-`y`
+> `LayerChart` output previously drew every axis line, tick label, grid
+> line, and title once **per layer**, overprinting at identical
+> coordinates (2 layers = 2x every chrome element; layers binding
+> different y fields overprinted both axis titles). It now emits exactly
+> one set of chrome — layer 0's, matching the flat `a + b` merge — via
+> per-leaf geometry imposition in the Rust composite renderer, gated by a
+> per-leaf safety check (`overlay_imposition_safe`). A non-primary layer
+> that carries its own color/size legend, an axis drawn above marks
+> (`zindex=1`), or a `z="below_marks"` text annotation deliberately keeps
+> the pre-fix per-layer chrome at its own rect (visibly layered, never a
+> silent chrome/marks mismatch); retiring that residual via a unified
+> overlay layout pass is tracked as a follow-up issue. Interactive
+> LayerChart (merged flat path) and independent-y are unchanged.
 
 #### `JointChart`
 

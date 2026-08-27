@@ -9,6 +9,52 @@ import re
 
 import polars as pl
 
+#: Feature-ranking / display-ordering vocabulary shared by
+#: ``Chart.mark_shap_beeswarm(order=)`` and the ``shap_chart`` figure-function
+#: family (``ferrum.plots.explanation._shap_order_features`` and siblings),
+#: so both sides of that pair validate one closed set with one meaning per
+#: value instead of two independently-drifting vocabularies (2026-08-27
+#: close-out -- previously ``{"abs_mean", "max"}`` on the figure side vs.
+#: ``{"abs_mean", "mean", "none"}`` on the mark side, a sibling-drift finding
+#: from the findings-remediation design review; unified to the **union** of
+#: both, not a narrowing -- ``"max"`` was pre-existing, documented,
+#: implemented figure-side behavior and dropping it would have broken it).
+#: ``"abs_mean"`` ranks by descending ``mean(|shap_value|)``; ``"max"`` by
+#: descending ``max(|shap_value|)`` (surfaces high-impact-outlier features);
+#: ``"mean"`` by descending signed ``mean(shap_value)``; ``"none"`` performs
+#: no reordering.
+SHAP_ORDER_VALUES: tuple[str, ...] = ("abs_mean", "mean", "max", "none")
+
+#: Presentable name for the SHAP beeswarm's per-point feature-value color
+#: field. ``Chart.mark_shap_beeswarm``'s ``data_transform`` renames the raw
+#: ``ModelSource.shap_values()`` column (``feature_value_normalized``) to
+#: this label before the chart holds the data (2026-08-27 close-out). The
+#: rename exists because the Rust colorbar-legend construction falls back to
+#: the field name when ``Color(title=)`` is dropped -- a pre-existing,
+#: package-wide gap (see ``design-docs/superpowers/followups/2026-05-15-code-archaeology.md``)
+#: that this mark cannot fix from Python. Renaming the column is the
+#: proportionate workaround: it makes the fallback render something a user
+#: would want to see instead of an internal schema name.
+SHAP_BEESWARM_COLOR_FIELD = "Feature value"
+
+
+def shap_beeswarm_color_channel(*, color_bar: bool):
+    """Return the ``Color(...)`` channel shared by both places that need it.
+
+    ``desugar_shap_beeswarm`` sets this on the point layer to drive per-point
+    fill; ``Chart.mark_shap_beeswarm`` mirrors the identical config onto the
+    chart-level encoding because the Rust colorbar-legend construction for a
+    layered chart reads ``legend=`` from ``encoding.color`` at the chart
+    level, not from any per-layer color channel. One factory keeps both call
+    sites from drifting out of sync (2026-08-27 close-out).
+    """
+    from ferrum.encoding import Color
+
+    legend = {"tickLabels": ["Low", "", "", "", "High"]} if color_bar else None
+    return Color(
+        SHAP_BEESWARM_COLOR_FIELD, scheme="rdbu", title=SHAP_BEESWARM_COLOR_FIELD, legend=legend
+    )
+
 
 def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
     """Sort the frame ascending by `col` so a downstream ``mark_line`` over
@@ -87,6 +133,24 @@ def _filter_class_average(df: pl.DataFrame, average: str | None, *, mark_name: s
             "average= (expected one of 'macro', 'micro', 'weighted', or a "
             "value actually present in the data).",
         )
+    return df
+
+
+def _roc_render_frame(
+    df: pl.DataFrame, average: str | None, *, reference_line: bool, mark_name: str = "mark_roc"
+) -> pl.DataFrame:
+    """Return the exact frame ``mark_roc`` renders: class-filtered, then
+    ``fpr``-sorted when ``reference_line`` is set.
+
+    Shared by ``Chart.mark_roc``'s ``data_transform`` closure and
+    ``roc_chart``'s post-filter AUC title (``plots/classification.py``), so
+    the figure builder derives the rendered frame from this one function
+    instead of reading ``Chart._data`` and depending on
+    ``_set_composite_mark``'s internal ordering guarantee.
+    """
+    df = _filter_class_average(df, average, mark_name=mark_name)
+    if reference_line:
+        df = _sort_by(df, "fpr")
     return df
 
 

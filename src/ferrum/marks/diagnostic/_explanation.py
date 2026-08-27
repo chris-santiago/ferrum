@@ -112,7 +112,11 @@ def desugar_shap_beeswarm(
     to the top ``max_display`` features. When ``zero_line=True`` the
     data must also carry a sentinel ``_ref_zero`` Float64 column (one
     ``0.0`` value, rest null) — ``Chart.mark_shap_beeswarm`` injects
-    that column via its ``data_transform``.
+    that column via its ``data_transform``. That same ``data_transform``
+    also renames ``feature_value_normalized`` to
+    ``SHAP_BEESWARM_COLOR_FIELD`` (a presentable label) before this
+    desugar runs, so the color channel built below reads that renamed
+    column, not the raw schema name (2026-08-27 close-out).
 
     Renders one point per (sample, feature) cell with feature on the
     ordinal y-axis, shap_value on the quantitative x-axis, and the
@@ -126,8 +130,14 @@ def desugar_shap_beeswarm(
     ``max_display`` and ``order`` are wired via ``data_transform`` in
     ``Chart.mark_shap_beeswarm`` (feature-set truncation and row-reorder by
     feature rank, which drives the ordinal y-domain's encounter order);
-    informational at the desugar layer. ``color_bar`` toggles the
-    feature-value colour legend below, since it needs no data access.
+    informational at the desugar layer. ``color_bar`` sets this layer's
+    own point-color legend config, which drives the per-point fill
+    correctly but is **not** what the rendered colorbar's legend (shown/
+    hidden, tick labels) actually reads (2026-08-27 close-out): the Rust
+    renderer's colorbar-legend construction for a layered chart consults
+    the *chart-level* `encoding.color`, not any per-layer color channel,
+    so `Chart.mark_shap_beeswarm` also mirrors this same `Color(...)`
+    config onto the chart-level encoding after calling this function.
     """
     del x_field, y_field
     del max_display, order
@@ -140,10 +150,9 @@ def desugar_shap_beeswarm(
 
         return X(field, scale={"type": "linear", "domain": list(x_scale_domain)})
 
-    from ferrum.encoding import Color
+    from ferrum.marks._desugar_helpers import shap_beeswarm_color_channel
     from ferrum.position import Jitter
 
-    color_legend = {"tickLabels": ["Low", "", "", "", "High"]} if color_bar else None
     layers: list = [
         _Layer(
             name="point",
@@ -151,12 +160,7 @@ def desugar_shap_beeswarm(
             encoding={
                 "x": _x_channel("shap_value"),
                 "y": "feature",
-                "color": Color(
-                    "feature_value_normalized",
-                    scheme="rdbu",
-                    title="Feature value",
-                    legend=color_legend,
-                ),
+                "color": shap_beeswarm_color_channel(color_bar=color_bar),
             },
             position=Jitter(axis="y", width=0.6, seed=42),
         ),
@@ -200,7 +204,9 @@ def desugar_shap_bar(
     (spec D2, mirrors ``desugar_importance``).
     """
     del x_field, y_field
-    # max_display is wired via data_transform in mark_shap_bar.
+    # max_display is wired via data_transform in mark_shap_bar (re-keyed on
+    # `abs_mean_shap`, this mark's actual data contract, 2026-08-27
+    # close-out); informational at the desugar layer.
     del max_display
     user_kw = _validate("shap_bar", mark_kwargs)
     validate_choice("mark_shap_bar", "orient", orient, _ORIENT_CHOICES)
@@ -251,7 +257,10 @@ def desugar_shap_waterfall(
     bar path.
     """
     del x_field, y_field
-    # max_display is wired via data_transform in mark_shap_waterfall.
+    # max_display is wired via data_transform in mark_shap_waterfall
+    # (re-keyed on `|x1 - x0|` contribution magnitude, this mark's actual
+    # data contract, 2026-08-27 close-out); informational at the desugar
+    # layer.
     del max_display
     user_kw = _validate("shap_waterfall", mark_kwargs)
     if sample_idx < 0:

@@ -213,6 +213,7 @@ def _roc_chart_from_source(
 
     import ferrum
     from ferrum._metric_labels import _apply_metric_label_explicit, _trapezoid_auc
+    from ferrum.marks._desugar_helpers import _roc_render_frame
 
     df = source.roc_curve(average=None if per_class else average)
     color_field = _color_field_for(df, "class")
@@ -243,16 +244,21 @@ def _roc_chart_from_source(
         y=Y("tpr", title="True Positive Rate"),
     )
 
-    # Count curves and compute the title's AUC from the *post-filter* frame
-    # (chart._data -- the new frame mark_roc's average data_transform
-    # produced and rebound onto the cloned chart; `df` above is untouched),
-    # not the pre-filter `df` -- for multiclass per_class=False, `df` still
+    # Count curves and compute the title's AUC from the same post-filter
+    # frame mark_roc renders, derived independently via the shared
+    # `_roc_render_frame` helper (not by reading `chart._data`, which would
+    # couple this figure builder to `_set_composite_mark`'s internal
+    # rebind-ordering guarantee). For multiclass per_class=False, `df` still
     # carries every per-class row plus the average row (ModelSource.roc_curve
     # appends a summary row rather than replacing the per-class ones), while
-    # the rendered chart shows exactly the one filtered curve. Using `df`
-    # here would count every leftover class and title the single rendered
-    # curve as unlabeled "ROC Curve" instead of "ROC Curve — AUC {v:.3f}".
-    curve_df = chart._data
+    # the rendered chart shows exactly the one filtered curve -- using the
+    # unfiltered `df` here would count every leftover class and title the
+    # single rendered curve as unlabeled "ROC Curve" instead of
+    # "ROC Curve — AUC {v:.3f}". The `average`/`reference_line` values below
+    # mirror exactly what the `mark_roc(...)` call above passes.
+    curve_df = _roc_render_frame(
+        df, None if per_class else average, reference_line=True, mark_name="mark_roc"
+    )
     n_curves = len(set(curve_df[color_field].to_list())) if color_field is not None else 1
     if n_curves == 1:
         fpr = np.asarray(curve_df["fpr"].to_list(), dtype=float)

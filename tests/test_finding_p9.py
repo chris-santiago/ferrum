@@ -119,6 +119,105 @@ def test_mark_roc_average_typo_on_multiclass_data_warns_once():
     assert set(chart._data["class"].unique().to_list()) == {"0", "1", "macro"}
 
 
+def test_mark_roc_average_integer_class_column_does_not_raise():
+    """Mutation-testing gap close: ``_utf8_col`` (``marks/_desugar_helpers.py``)
+    casts the discriminator column to ``Utf8`` before comparing it against
+    a Python string literal, per its own docstring contract ("an
+    out-of-contract numeric/categorical dtype produces a normal empty-match
+    miss instead of polars' ComputeError"). No existing test exercised a
+    non-Utf8 ``class`` column, so dropping that cast (which
+    ``ferrum._filter_class_average``/``mark_roc``'s ``average=`` filter
+    depends on) went undetected: without it, polars raises
+    ``InvalidOperationError: cannot compare string with numeric type``
+    instead of the documented, non-crashing fallback."""
+    reset_warnings()
+    df = pl.DataFrame(
+        {
+            "fpr": [0.0, 0.5, 1.0, 0.0, 0.5, 1.0],
+            "tpr": [0.0, 0.6, 1.0, 0.0, 0.7, 1.0],
+            "class": [0, 0, 0, 1, 1, 1],
+        }
+    )
+    chart = ferrum.Chart(df).mark_roc(average="macro", reference_line=False)
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    # No int value ever equals the string "macro", and this is a
+    # multiclass column, so this hits the multiclass-mismatch fallback
+    # (unfiltered, all 6 rows kept) -- the same documented behavior as the
+    # Utf8-typo case above, just reached through a non-Utf8 column.
+    assert chart._data.height == 6
+
+
+def _roc_average_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "fpr": [0.0, 0.5, 1.0, 0.0, 0.5, 1.0, 0.0, 0.5, 1.0],
+            "tpr": [0.0, 0.6, 1.0, 0.0, 0.7, 1.0, 0.0, 0.65, 1.0],
+            "class": ["0", "0", "0", "1", "1", "1", "macro", "macro", "macro"],
+        }
+    )
+
+
+def test_mark_roc_average_filters_to_requested_row_pandas_backed():
+    """S4 close-out regression (RED pre-fix): ``_set_composite_mark`` applied
+    ``data_transform`` only when ``isinstance(new._data, pl.DataFrame)``, so
+    every P9 ``data_transform``-wired mark parameter -- ``average`` here --
+    silently no-op'd on a pandas-backed ``Chart``: the filter never ran and
+    all 9 rows stayed unfiltered, with no error and no warning. Now routed
+    through ``ferrum._coerce.to_polars`` at that seam, so the filter fires
+    for every supported input type, not just polars."""
+    pd = pytest.importorskip("pandas")
+    df = _roc_average_frame().to_pandas()
+    assert isinstance(df, pd.DataFrame)
+    chart = ferrum.Chart(df).mark_roc(average="macro", reference_line=False)
+    assert isinstance(chart._data, pl.DataFrame)
+    classes = set(chart._data["class"].unique().to_list())
+    assert classes == {"macro"}
+
+
+def test_mark_roc_average_filters_to_requested_row_pyarrow_backed():
+    """S4 close-out regression (RED pre-fix): same silent no-op as the
+    pandas case above, for a pyarrow.Table-backed ``Chart``."""
+    pa = pytest.importorskip("pyarrow")
+    tbl = _roc_average_frame().to_arrow()
+    assert isinstance(tbl, pa.Table)
+    chart = ferrum.Chart(tbl).mark_roc(average="macro", reference_line=False)
+    assert isinstance(chart._data, pl.DataFrame)
+    classes = set(chart._data["class"].unique().to_list())
+    assert classes == {"macro"}
+
+
+def test_mark_roc_average_polars_backed_data_transform_is_byte_identical():
+    """Global constraint: routing ``data_transform`` through
+    ``to_polars`` must not change already-working polars behavior.
+    ``to_polars`` is a pure passthrough for a ``pl.DataFrame`` input (same
+    object, not a copy), so the polars path is provably unaffected -- this
+    pins that as an executable assertion: the resolved frame equals the
+    naive expected filter exactly (not just "same set of classes"), and the
+    rendered SVG for a polars-backed chart matches a chart built directly
+    from the pre-filtered frame."""
+    df = _roc_average_frame()
+    chart = ferrum.Chart(df).mark_roc(average="macro", reference_line=False)
+    expected = df.filter(pl.col("class") == "macro")
+    assert chart._data.equals(expected)
+
+    direct = ferrum.Chart(expected).mark_roc(reference_line=False)
+    assert chart.encode(x="fpr", y="tpr").to_svg() == direct.encode(x="fpr", y="tpr").to_svg()
+
+
+def test_roc_chart_figure_path_unaffected_by_data_transform_seam():
+    """Confirm figure-function paths (``roc_chart``, always polars-sourced
+    via ``ModelSource.roc_curve``) render unaffected by the
+    ``_set_composite_mark`` seam fix."""
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], random_state=0)
+    svg = ferrum.roc_chart(source, per_class=False).to_svg()
+    assert "<svg" in svg
+    assert "AUC" in svg
+
+
 # ---------------------------------------------------------------------------
 # Become functional: split (mark_cv_scores)
 # ---------------------------------------------------------------------------
@@ -340,6 +439,39 @@ def test_mark_shap_beeswarm_order_mean_uses_signed_average():
     assert mean_order == ["pos", "neg"]
 
 
+def test_mark_shap_beeswarm_order_max_orders_by_max_abs_shap():
+    """``order="max"`` (2026-08-27 close-out: union-vocabulary restoration
+    -- ``mark_shap_beeswarm`` gains ``"max"`` for the first time here, on
+    the same ``expr.max()`` aggregation branch the figure-side
+    ``_shap_order_features`` always had) ranks by descending
+    ``max(|shap_value|)``, not ``mean(|shap_value|)``. Feature "spike" has
+    a lower mean-|shap| (0.5) than "steady" (0.6) but a higher max-|shap|
+    (0.9 vs 0.6, a single outlier sample), so the two orders disagree."""
+    df = pl.DataFrame(
+        {
+            "feature": ["spike", "spike", "steady", "steady"],
+            "shap_value": [0.1, 0.9, 0.6, 0.6],
+            "feature_value_normalized": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    abs_mean_order = (
+        ferrum.Chart(df)
+        .mark_shap_beeswarm(order="abs_mean", zero_line=False)
+        ._data["feature"]
+        .unique(maintain_order=True)
+        .to_list()
+    )
+    max_order = (
+        ferrum.Chart(df)
+        .mark_shap_beeswarm(order="max", zero_line=False)
+        ._data["feature"]
+        .unique(maintain_order=True)
+        .to_list()
+    )
+    assert abs_mean_order == ["steady", "spike"]
+    assert max_order == ["spike", "steady"]
+
+
 def test_mark_shap_beeswarm_order_none_preserves_row_order():
     """Keep-case: ``order="none"`` leaves the incoming row order untouched
     even though ``abs_mean``/``mean`` would reorder this data."""
@@ -387,6 +519,88 @@ def test_mark_shap_beeswarm_color_bar_true_sets_tick_label_legend():
 def test_mark_shap_beeswarm_color_bar_false_disables_legend():
     legend = _shap_beeswarm_color_legend(color_bar=False)
     assert legend == {"disabled": True}
+
+
+def _shap_beeswarm_chart(*, color_bar: bool) -> "ferrum.Chart":
+    df = pl.DataFrame(
+        {
+            "feature": ["f0", "f0", "f1", "f1", "f2", "f2"],
+            "shap_value": [0.1, -0.2, 0.3, 0.4, -0.1, 0.05],
+            "feature_value_normalized": [0.5, -0.5, 1.0, -1.0, 0.2, -0.2],
+        }
+    )
+    return (
+        ferrum.Chart(df).mark_shap_beeswarm(color_bar=color_bar).encode(x="shap_value", y="feature")
+    )
+
+
+def test_mark_shap_beeswarm_color_bar_false_actually_disables_rendered_colorbar():
+    """The per-layer ``legend={"disabled": True}`` dict asserted by
+    ``test_mark_shap_beeswarm_color_bar_false_disables_legend`` above is
+    necessary but not sufficient: it only proves the *spec* carries the
+    right value, not that the renderer honors it. This is the discriminating
+    regression -- pre-fix, ``color_bar=False`` was accepted, validated, and
+    silently discarded: the rendered SVG was byte-identical to the default
+    and a colorbar still appeared (a design-review / intent-review finding).
+    The Rust renderer's colorbar-legend construction for a layered chart
+    reads its ``legend=`` config from the *chart-level* ``encoding.color``,
+    not from any per-layer color channel -- ``Chart.mark_shap_beeswarm`` now
+    mirrors the layer's ``Color(...)`` config onto the chart-level encoding
+    for exactly this reason (see that method's docstring)."""
+    svg_on = _shap_beeswarm_chart(color_bar=True).to_svg()
+    svg_off = _shap_beeswarm_chart(color_bar=False).to_svg()
+
+    assert svg_on != svg_off
+    assert "ferrum-colorbar" in svg_on
+    assert "ferrum-colorbar" not in svg_off
+    # The default (color_bar=True) also renders the mark's documented custom
+    # "Low"/"High" tick labels, not raw numeric scale ticks -- proving the
+    # chart-level legend mirror carries the *content* of the config, not
+    # merely its presence/absence.
+    assert ">Low<" in svg_on
+    assert ">High<" in svg_on
+    assert ">Low<" not in svg_off
+    assert ">High<" not in svg_off
+
+
+def test_mark_shap_bar_max_display_truncates_documented_contract():
+    """``mark_shap_bar``'s documented direct-call contract is ``feature`` +
+    ``abs_mean_shap`` (see ``desugar_shap_bar``'s data contract), one row
+    per feature -- not the long-form ``shap_value`` schema. Pre-fix,
+    ``_shap_bar_filter`` guarded on ``"shap_value" in df.columns``, a column
+    this contract never carries, so the truncation silently never fired on
+    documented input (RED pre-fix: this frame keeps all 5 features instead
+    of the requested 2)."""
+    df = pl.DataFrame(
+        {
+            "feature": ["a", "b", "c", "d", "e"],
+            "abs_mean_shap": [0.5, 0.1, 0.9, 0.3, 0.2],
+        }
+    )
+    chart = ferrum.Chart(df).mark_shap_bar(max_display=2)
+    kept = set(chart._data["feature"].unique().to_list())
+    assert kept == {"c", "a"}, f"expected the top-2 abs_mean_shap features, got {kept}"
+
+
+def test_mark_shap_waterfall_max_display_truncates_documented_contract():
+    """``mark_shap_waterfall``'s documented direct-call contract is
+    ``feature`` + ``x0``/``x1`` + ``shap_sign`` (see
+    ``desugar_shap_waterfall``'s data contract) -- not the long-form
+    ``shap_value`` schema. Pre-fix, ``_shap_waterfall_filter`` guarded on
+    ``"shap_value" in df.columns``, a column this contract never carries, so
+    the truncation silently never fired on documented input (RED pre-fix:
+    this frame keeps all 5 features instead of the requested 2)."""
+    df = pl.DataFrame(
+        {
+            "feature": ["a", "b", "c", "d", "e"],
+            "x0": [0.0, 0.5, 0.1, 1.0, 0.3],
+            "x1": [0.5, 0.6, 1.1, 1.2, 0.5],
+            "shap_sign": ["positive"] * 5,
+        }
+    )
+    chart = ferrum.Chart(df).mark_shap_waterfall(sample_idx=0, max_display=2)
+    kept = set(chart._data["feature"].unique().to_list())
+    assert kept == {"c", "a"}, f"expected the top-2 |x1 - x0| features, got {kept}"
 
 
 # ---------------------------------------------------------------------------

@@ -119,9 +119,11 @@ class ExplanationMarksMixin:
         color_bar : bool, optional
             Whether to render a colour bar for the feature-value scale.
             Default is ``True``.
-        order : {"abs_mean", "mean", "none"}, default "abs_mean"
-            Feature ordering: by mean absolute SHAP (``"abs_mean"``), signed
-            mean SHAP (``"mean"``), or original order (``"none"``).
+        order : {"abs_mean", "mean", "max", "none"}, default "abs_mean"
+            Feature ordering: by mean absolute SHAP (``"abs_mean"``), max
+            absolute SHAP (``"max"``, surfaces high-impact-outlier
+            features), signed mean SHAP (``"mean"``), or original order
+            (``"none"``).
         zero_line : bool, optional
             Whether to overlay a dashed vertical reference rule at
             ``shap_value = 0``.  Default is ``True`` (Schwabish SB-followup
@@ -146,8 +148,13 @@ class ExplanationMarksMixin:
         from ferrum.marks.diagnostic import desugar_shap_beeswarm
         from ferrum._constant_columns import _inject_constant
         from ferrum._validate import validate_choice
+        from ferrum.marks._desugar_helpers import (
+            SHAP_BEESWARM_COLOR_FIELD,
+            SHAP_ORDER_VALUES,
+            shap_beeswarm_color_channel,
+        )
 
-        validate_choice("mark_shap_beeswarm", "order", order, ("abs_mean", "mean", "none"))
+        validate_choice("mark_shap_beeswarm", "order", order, SHAP_ORDER_VALUES)
 
         def _shap_beeswarm_prep(df):
             import polars as pl
@@ -169,11 +176,12 @@ class ExplanationMarksMixin:
             # matching pl.Enum sort), so reordering rows is how `order`
             # actually controls the axis. order="none" leaves rows as-is.
             if order != "none" and has_shap:
-                agg_expr = (
-                    pl.col("shap_value").abs().mean()
-                    if order == "abs_mean"
-                    else pl.col("shap_value").mean()
-                )
+                if order == "abs_mean":
+                    agg_expr = pl.col("shap_value").abs().mean()
+                elif order == "max":
+                    agg_expr = pl.col("shap_value").abs().max()
+                else:  # "mean"
+                    agg_expr = pl.col("shap_value").mean()
                 order_list = (
                     df.group_by("feature")
                     .agg(agg_expr.alias("_score"))
@@ -196,9 +204,21 @@ class ExplanationMarksMixin:
                 )
             if zero_line and "shap_value" in df.columns:
                 df = _inject_constant(df, "_ref_zero", 0.0)
+            # Rename the internal `feature_value_normalized` schema column
+            # to a presentable label before the chart holds the data, so
+            # the colorbar-legend title fallback (Rust ignores
+            # `Color(title=)` for legends -- a pre-existing, package-wide
+            # gap; see design-docs/superpowers/followups/2026-05-15-code-archaeology.md)
+            # renders something a user would want to see instead of the
+            # raw schema name (2026-08-27 close-out). `desugar_shap_beeswarm`
+            # and the chart-level mirror below both read
+            # `SHAP_BEESWARM_COLOR_FIELD`, so the rename and the field
+            # reference cannot drift apart.
+            if "feature_value_normalized" in df.columns:
+                df = df.rename({"feature_value_normalized": SHAP_BEESWARM_COLOR_FIELD})
             return df
 
-        return self._set_composite_mark(
+        chart = self._set_composite_mark(
             "shap_beeswarm",
             desugar_shap_beeswarm,
             {
@@ -212,6 +232,25 @@ class ExplanationMarksMixin:
             position=position,
             data_transform=_shap_beeswarm_prep,
         )
+        # 2026-08-27 close-out: also mirror the point layer's color channel
+        # onto the *chart-level* encoding. `desugar_shap_beeswarm` already
+        # sets this exact `Color(...)` (field, scheme, and `legend=`) on the
+        # layer itself, which drives the point fill correctly -- but the
+        # Rust renderer's colorbar-legend construction for a layered/composite
+        # chart reads its `legend=` config from the chart-level
+        # `encoding.color`, not from any per-layer color channel. Without
+        # this, `color_bar=False` was silently discarded (a colorbar
+        # rendered regardless) and the `color_bar=True` "Low"/"High" tick
+        # labels never appeared either -- both are wired to a real Rust
+        # colorbar decision now, verified by rendering, not merely by
+        # inspecting the emitted spec JSON. This mark has no user-facing
+        # `color_field=` parameter, so nothing else can set this key; a
+        # caller's own later `.encode(color=...)` still wins normally, as
+        # with any chart-level channel. `shap_beeswarm_color_channel` is the
+        # single authority for this config -- `desugar_shap_beeswarm` calls
+        # the same factory for the layer-level copy, so the two cannot
+        # diverge.
+        return chart.encode(color=shap_beeswarm_color_channel(color_bar=color_bar))
 
     def mark_shap_bar(
         self,
@@ -225,13 +264,16 @@ class ExplanationMarksMixin:
         """Render a SHAP aggregated-bar feature importance chart.
 
         Shows mean absolute SHAP values per feature as a horizontal bar chart.
-        Data must carry the long-form schema from ``ModelSource.shap_values()``
-        pre-filtered to the top ``max_display`` features by the chart builder.
+        Data must carry ``feature`` (Utf8) and ``abs_mean_shap`` (Float64) --
+        the aggregated schema ``desugar_shap_bar`` renders, one row per
+        feature. ``max_display`` truncates to the top-scoring features by
+        descending ``abs_mean_shap`` (2026-08-27 close-out).
 
         Parameters
         ----------
         max_display : int, optional
-            Maximum number of top features to show.  Default is ``20``.
+            Maximum number of top features to show, ranked by descending
+            ``abs_mean_shap``.  Default is ``20``.
         orient : {"horizontal", "vertical"}, default "horizontal"
             Bar orientation.  ``"horizontal"`` (default) places the value on
             x and feature on the ordinal y axis, matching the single-model
@@ -264,10 +306,19 @@ class ExplanationMarksMixin:
         def _shap_bar_filter(df):
             import polars as pl
 
-            if max_display is not None and "shap_value" in df.columns and "feature" in df.columns:
+            # Re-keyed on this mark's actual data contract, `abs_mean_shap`
+            # (2026-08-27 close-out) -- the prior `"shap_value" in df.columns`
+            # guard checked a long-form column this mark's documented input
+            # never carries (see `desugar_shap_bar`'s data contract), so the
+            # truncation silently never fired on documented input.
+            if (
+                max_display is not None
+                and "abs_mean_shap" in df.columns
+                and "feature" in df.columns
+            ):
                 ranked = (
                     df.group_by("feature")
-                    .agg(pl.col("shap_value").abs().mean().alias("_score"))
+                    .agg(pl.col("abs_mean_shap").max().alias("_score"))
                     .sort("_score", descending=True)
                     .head(max_display)
                 )
@@ -301,8 +352,11 @@ class ExplanationMarksMixin:
 
         Shows how each feature pushes the model output from the base value
         toward the final prediction for a single observation.  Data must carry
-        the long-form schema from ``ModelSource.shap_values()`` for the chosen
-        ``sample_idx``.
+        ``feature`` (Utf8), ``x0``/``x1`` (cumulative start/end, Float64), and
+        ``shap_sign`` (Utf8) -- the schema ``desugar_shap_waterfall`` renders,
+        one row per feature for the chosen sample. ``max_display`` truncates
+        to the top-scoring features by descending contribution magnitude
+        ``|x1 - x0|`` (2026-08-27 close-out).
 
         Parameters
         ----------
@@ -312,8 +366,8 @@ class ExplanationMarksMixin:
             immediately so callers get a clear error at call time rather than
             at render time.
         max_display : int, optional
-            Maximum number of features to show (smallest-magnitude features
-            are collapsed into an ``"other"`` row).  Default is ``20``.
+            Maximum number of features to show, ranked by descending
+            contribution magnitude ``|x1 - x0|``.  Default is ``20``.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -346,10 +400,16 @@ class ExplanationMarksMixin:
         def _shap_waterfall_filter(df):
             import polars as pl
 
-            if max_display is not None and "shap_value" in df.columns and "feature" in df.columns:
+            # Re-keyed on this mark's actual data contract, `x0`/`x1`
+            # (2026-08-27 close-out) -- the prior `"shap_value" in df.columns`
+            # guard checked a column this mark's documented input never
+            # carries (see `desugar_shap_waterfall`'s data contract), so the
+            # truncation silently never fired on documented input. Ranks by
+            # descending contribution magnitude `|x1 - x0|`.
+            if max_display is not None and {"feature", "x0", "x1"} <= set(df.columns):
                 ranked = (
                     df.group_by("feature")
-                    .agg(pl.col("shap_value").abs().mean().alias("_score"))
+                    .agg((pl.col("x1") - pl.col("x0")).abs().max().alias("_score"))
                     .sort("_score", descending=True)
                     .head(max_display)
                 )

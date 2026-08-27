@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ferrum.marks._desugar_helpers import (
     _filter_class_average,
     _normalize_names,
+    _roc_render_frame,
     _sort_by,
     _utf8_col,
 )
@@ -84,10 +85,9 @@ class ClassificationMarksMixin:
         from ferrum.marks.diagnostic import desugar_roc
 
         def _roc_prep(df):
-            df = _filter_class_average(df, average, mark_name="mark_roc")
-            if reference_line:
-                df = _sort_by(df, "fpr")
-            return df
+            return _roc_render_frame(
+                df, average, reference_line=reference_line, mark_name="mark_roc"
+            )
 
         return self._set_composite_mark(
             "roc",

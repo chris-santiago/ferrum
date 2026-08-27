@@ -575,13 +575,15 @@ def test_annotate_text_anchor_left_still_reachable_and_renders_as_start():
 # ---------------------------------------------------------------------------
 
 
-def _roc_data_with_null_endpoint(label: str, n: int = 30) -> pl.DataFrame:
+def _roc_data_with_null_endpoint(label: str, n: int = 30, scale: float = 1.0) -> pl.DataFrame:
     """Like ``_roc_data`` but nulls out the row that would otherwise be the
     endpoint (max-x) row, reproducing the exact shape polars' default
-    descending sort mis-selects (nulls sort first)."""
-    fpr = np.linspace(0, 1, n).tolist()
+    descending sort mis-selects (nulls sort first). ``scale`` (default 1.0,
+    matching every pre-existing caller) controls this group's own x-range,
+    independently of any other group it's concatenated with."""
+    fpr = np.linspace(0, scale, n).tolist()
     fpr[-1] = None
-    tpr = np.sqrt(np.linspace(0, 1, n)).tolist()
+    tpr = (np.sqrt(np.linspace(0, scale, n) / scale) if scale else np.zeros(n)).tolist()
     return pl.DataFrame({"fpr": fpr, "tpr": tpr, "class": [label] * n})
 
 
@@ -613,6 +615,47 @@ def test_null_x_endpoint_selects_highest_non_null_x_for_end_position():
     base_trimmed = Chart(df_trimmed).encode(x="fpr", y="tpr", color="class").mark_line()
     svg_trimmed = (base_trimmed + AUCLabel(position="end")).to_svg()
     assert xs == _text_x_positions(svg_trimmed, "AUC = ")
+
+
+def test_null_x_endpoint_uses_own_group_range_not_dataset_wide_max():
+    """Mutation-testing gap close: the two null-endpoint tests above use a
+    single color group, so the group's own highest non-null x always
+    happens to equal the dataset-wide max -- a wrong selection (falling
+    through to the ``x_top`` dataset-wide-max fallback because
+    ``nulls_last=True`` was flipped/dropped) is indistinguishable from a
+    correct one there. This uses two groups where the null-bearing
+    group's own x-range is strictly narrower than the other group's, so a
+    fallback-to-global-max selection is visibly wrong: under the mutation
+    the narrow group's label collapses onto the wide group's endpoint
+    position instead of its own.
+    """
+    df = pl.concat(
+        [
+            _roc_data_with_null_endpoint("narrow", n=30, scale=0.5),
+            _roc_data("wide", scale=1.0),
+        ]
+    )
+    base = Chart(df).encode(x="fpr", y="tpr", color="class").mark_line()
+    svg = (base + AUCLabel(position="end")).to_svg()
+    xs = _text_x_positions(svg, "AUC = ")
+    assert len(xs) == 2
+    narrow_x, wide_x = xs
+
+    # Reference: drop the null row entirely so "narrow"'s true non-null
+    # endpoint is selected the ordinary way, never touching the null guard.
+    df_trimmed = pl.concat(
+        [
+            _roc_data_with_null_endpoint("narrow", n=30, scale=0.5).head(29),
+            _roc_data("wide", scale=1.0),
+        ]
+    )
+    base_trimmed = Chart(df_trimmed).encode(x="fpr", y="tpr", color="class").mark_line()
+    svg_trimmed = (base_trimmed + AUCLabel(position="end")).to_svg()
+    assert [narrow_x, wide_x] == _text_x_positions(svg_trimmed, "AUC = ")
+    # The narrow group's own (correct) endpoint must differ from the wide
+    # group's -- proves it was NOT selected via the dataset-wide-max
+    # fallback (which would collapse both onto the same pixel position).
+    assert narrow_x != wide_x
 
 
 # ---------------------------------------------------------------------------

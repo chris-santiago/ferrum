@@ -757,13 +757,15 @@ class Chart(
         new = self._clone()
         new._mark = placeholder
         if data_transform is not None and new._data is not None:
-            try:
-                import polars as pl
-
-                if isinstance(new._data, pl.DataFrame):
-                    new._data = data_transform(new._data)
-            except ImportError:
-                pass
+            # Coerce through the canonical to-polars entry point before
+            # applying the row-filter closure, so `data_transform` runs for
+            # every supported input type (pandas, pyarrow, dict, etc.), not
+            # just polars-backed charts. The render path (`_render.py`)
+            # coerces `_data` lazily via `to_arrow_table` regardless of its
+            # concrete type, so holding a polars frame here downstream is
+            # safe -- it is the same shape already produced by `.layer()`
+            # and `+` concatenation (chart.py:1516, 1749).
+            new._data = data_transform(to_polars(new._data))
         new._pending_stat_mark = _PendingMark(name, dict(kwargs), desugar_fn, prior_mark=prior_mark)
         new._position = position
         new._composite_kind = name

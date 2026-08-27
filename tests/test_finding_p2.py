@@ -71,6 +71,16 @@ def _df():
     )
 
 
+def _grouped_df():
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [2.0, 4.0, 1.0, 5.0, 3.0],
+            "g": ["a", "b", "a", "b", "a"],
+        }
+    )
+
+
 def _dual_y_df():
     return pl.DataFrame(
         {
@@ -98,15 +108,13 @@ def test_layer_chart_matches_flat_merge_element_counts():
     layered_lines = _line_elements(layered_svg)
     flat_lines = _line_elements(flat_svg)
     assert len(layered_lines) == len(flat_lines), (
-        f"LayerChart drew {len(layered_lines)} <line> elements; "
-        f"flat merge drew {len(flat_lines)}"
+        f"LayerChart drew {len(layered_lines)} <line> elements; flat merge drew {len(flat_lines)}"
     )
 
     layered_texts = _text_contents(layered_svg)
     flat_texts = _text_contents(flat_svg)
     assert len(layered_texts) == len(flat_texts), (
-        f"LayerChart drew {len(layered_texts)} <text> elements; "
-        f"flat merge drew {len(flat_texts)}"
+        f"LayerChart drew {len(layered_texts)} <text> elements; flat merge drew {len(flat_texts)}"
     )
 
     coord_tuples = _line_coord_tuples(layered_svg)
@@ -197,3 +205,48 @@ def test_layer_chart_independent_y_unaffected():
     interactive = fm.LayerChart(layer0, layer1, resolve={"y": "independent"}).interactive()
     assert interactive._scene_json
     assert isinstance(interactive._packed_data, bytes)
+
+
+def test_layer_chart_per_leaf_legend_refuses_imposition_keeps_both_chromes():
+    """A leaf carrying its own legend must refuse the imposition-safety
+    gate (``overlay_imposition_safe``) and keep its own rect/chrome -- the
+    documented refusal shape (module docstring above: "A leaf the gate
+    refuses (per-leaf legend, above-marks axis, below-marks annotation)
+    keeps its own rect and chrome -- the pre-fix behavior, never a silent
+    mismatch.").
+
+    Mutation-testing gap close (2026-08-27 close-out): every test above is
+    a leaf where imposition *succeeds*, so a mutation that always sets
+    ``chrome_suppressed[i] = true`` regardless of whether imposition was
+    actually applied is indistinguishable from correct code on all four.
+    ``mark_point().encode(color="g:N")`` carries a per-leaf legend, which
+    the gate must refuse -- under correct code this leaf keeps its own
+    full chrome (its axis/grid duplicates layer 0's, since both compute
+    the same domain independently), so ``<line>`` elements are *not*
+    fully deduplicated the way every gate-succeeds test above asserts.
+    Under the always-suppress mutation, this leaf's chrome collapses away
+    regardless of the refusal, producing a smaller, fully-deduplicated
+    line count indistinguishable from a normal imposition-succeeds merge.
+    """
+    df = _grouped_df()
+    line = fm.Chart(df).encode(x="x:Q", y="y:Q").mark_line()
+    points = fm.Chart(df).encode(x="x:Q", y="y:Q").mark_point().encode(color="g:N")
+
+    svg = fm.LayerChart(line, points).to_svg()
+    coord_tuples = _line_coord_tuples(svg)
+    texts = _text_contents(svg)
+
+    # Structural discriminator, robust to unrelated rendering-detail drift:
+    # duplication IS present (contrast with every gate-succeeds test above,
+    # which asserts len(coord_tuples) == len(set(coord_tuples))) -- proving
+    # the legend-bearing leaf kept its own chrome instead of being
+    # suppressed.
+    assert len(coord_tuples) > len(set(coord_tuples)), (
+        "the legend-bearing leaf's chrome must not be suppressed -- expected "
+        "duplicate <line> coordinates from both leaves keeping their own "
+        f"axis/grid, got {len(coord_tuples)} lines / {len(set(coord_tuples))} unique"
+    )
+    # The legend itself must have rendered -- confirms the refusal really
+    # was triggered by the per-leaf legend, not some unrelated leaf property.
+    assert "g" in texts, "the color legend's title ('g') must render"
+    assert "a" in texts and "b" in texts, "the color legend's category swatches must render"

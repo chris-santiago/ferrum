@@ -267,6 +267,47 @@ def test_shap_chart_waterfall_bad_sample_idx():
         ferrum.shap_chart(source, kind="waterfall", sample_idx=999_999)
 
 
+def test_mark_shap_beeswarm_order_vocabulary_matches_shap_order_features():
+    """Sibling-agreement pin (2026-08-27 close-out): `Chart.mark_shap_beeswarm`
+    and the `shap_chart` figure-function family's `_shap_order_features` must
+    accept and reject the exact same `order=` vocabulary -- both defer to
+    the single canonical `ferrum.marks._desugar_helpers.SHAP_ORDER_VALUES`.
+    Regression test for a design-review finding: they previously carried two
+    different closed vocabularies (`{"abs_mean", "max"}` on the figure side,
+    `{"abs_mean", "mean", "none"}` on the mark side). Unified to the
+    **union** of both -- `"max"` is pre-existing, documented,
+    figure-side behavior and must remain valid (a narrowing to the mark's
+    3-value set was tried and reverted).
+    """
+    from ferrum.marks._desugar_helpers import SHAP_ORDER_VALUES
+    from ferrum.plots.explanation import _SHAP_ORDER_VALUES
+
+    assert set(SHAP_ORDER_VALUES) == set(_SHAP_ORDER_VALUES) == {"abs_mean", "mean", "max", "none"}
+
+    df = pl.DataFrame(
+        {
+            "feature": ["a", "a", "b", "b"],
+            "shap_value": [0.1, -0.2, 0.3, 0.4],
+            "feature_value_normalized": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    for value in SHAP_ORDER_VALUES:
+        # Every value valid for the figure-side ranking helper must also be
+        # valid for the mark, and vice versa (both accept without raising).
+        ferrum.Chart(df).mark_shap_beeswarm(order=value)
+        from ferrum.plots.explanation import _shap_order_features
+
+        _shap_order_features(df, order=value, max_display=5)
+
+    # A value valid on neither side must be rejected identically by both.
+    with pytest.raises(ValueError, match="must be one of"):
+        ferrum.Chart(df).mark_shap_beeswarm(order="bogus")
+    with pytest.raises(ValueError, match="must be one of"):
+        from ferrum.plots.explanation import _shap_order_features
+
+        _shap_order_features(df, order="bogus", max_display=5)
+
+
 def _multiclass_source():
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
@@ -560,8 +601,14 @@ def test_shap_visualizer_invalid_kind():
 
 def test_shap_visualizer_order_affects_bar_and_waterfall():
     """Regression test: `order` must materially affect bar and waterfall
-    output, not just beeswarm. Bar values differ between mean / max
-    aggregation; waterfall feature ordering follows the global ranking
+    output, not just beeswarm. Bar *values* differ between mean / max
+    aggregation (2026-08-27 close-out: `order="max"` restores this
+    function's original pre-batch byte-for-byte behavior -- an earlier pass
+    of the sibling-drift fix wrongly retired `order="max"`, which broke
+    this; `SHAP_ORDER_VALUES` is now the union `{"abs_mean", "mean", "max",
+    "none"}`). Bar *row order* (feature ranking/selection) differs between
+    abs_mean / signed-mean aggregation, a new capability from the same
+    unification. Waterfall feature ordering follows the global ranking
     chosen by `order` (matching beeswarm), not per-sample |shap|.
     """
     model = load_fixture("regression_ridge")
@@ -584,6 +631,20 @@ def test_shap_visualizer_order_affects_bar_and_waterfall():
     # strictly larger under order="max" once features are sorted.
     assert all(b >= a for a, b in zip(sorted(bar_mean_vals), sorted(bar_max_vals)))
     assert any(b > a for a, b in zip(sorted(bar_mean_vals), sorted(bar_max_vals)))
+
+    # --- bar: order="mean" (signed) changes the row order/selection, not
+    # the plotted value's formula (still mean(|shap_value|), like abs_mean)
+    bar_signed = ferrum.SHAPVisualizer(model, kind="bar", order="mean").fit(
+        X,
+        df["y"],
+    )
+    bar_signed_data = bar_signed.show()._data
+    bar_mean_features = bar_mean.show()._data["feature"].to_list()
+    bar_signed_features = bar_signed_data["feature"].to_list()
+    assert bar_mean_features != bar_signed_features
+    assert sorted(bar_mean_vals) == pytest.approx(
+        sorted(bar_signed_data["abs_mean_shap"].to_list())
+    )
 
     # --- waterfall: feature order must follow the global ranking, not
     # the per-sample |shap| ordering. Sample 6 is a fixture where the
@@ -823,18 +884,49 @@ def test_shap_order_features_unknown_order_raises():
 
 
 def test_shap_order_features_accepted_orders_work():
-    """Accepted order values must not raise."""
+    """Accepted order values must not raise, and each must rank/select
+    features by its own distinct, documented criterion (2026-08-27
+    close-out: `_SHAP_ORDER_VALUES` unified to the **union**
+    `{"abs_mean", "mean", "max", "none"}`, shared with
+    `Chart.mark_shap_beeswarm(order=)`).
+
+    Four features, each with a distinct per-feature |shap| distribution, so
+    all four ranking criteria disagree with each other:
+
+    - ``w``: ``[3, 3]`` -- abs_mean=3, max=3, mean=3 (constant).
+    - ``x``: ``[1, 9]`` -- abs_mean=5, max=9, mean=5 (a high-impact outlier;
+      max(|shap|) diverges from mean(|shap|) here).
+    - ``y``: ``[-8, -8]`` -- abs_mean=8, max=8, mean=-8 (constant negative).
+    - ``z``: ``[2, 2]`` -- abs_mean=2, max=2, mean=2 (constant, smallest).
+
+    Rows are ordered ``z, z, w, w, x, x, y, y`` so row-encounter order is
+    ``z, w, x, y``, distinct from every ranking-based order too.
+    """
     from ferrum.plots.explanation import _shap_order_features
 
     sv = pl.DataFrame(
         {
-            "feature": ["a", "a", "b", "b"],
-            "shap_value": [0.1, -0.2, 0.3, 0.4],
-            "feature_value": [1.0, 2.0, 3.0, 4.0],
-            "sample": [0, 1, 0, 1],
+            "feature": ["z", "z", "w", "w", "x", "x", "y", "y"],
+            "shap_value": [2.0, 2.0, 3.0, 3.0, 1.0, 9.0, -8.0, -8.0],
+            "feature_value": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            "sample": [0, 1, 0, 1, 0, 1, 0, 1],
         }
     )
-    result_mean = _shap_order_features(sv, order="abs_mean", max_display=5)
+    result_abs_mean = _shap_order_features(sv, order="abs_mean", max_display=5)
     result_max = _shap_order_features(sv, order="max", max_display=5)
-    assert set(result_mean) == {"a", "b"}
-    assert set(result_max) == {"a", "b"}
+    result_mean = _shap_order_features(sv, order="mean", max_display=5)
+    result_none = _shap_order_features(sv, order="none", max_display=5)
+
+    assert result_abs_mean == ["y", "x", "w", "z"]
+    assert result_max == ["x", "y", "w", "z"]
+    assert result_mean == ["x", "w", "z", "y"]
+    assert result_none == ["z", "w", "x", "y"]
+    # All four rankings are pairwise distinct -- proves each criterion is
+    # doing genuinely different work, not just "doesn't raise".
+    assert (
+        len({tuple(result_abs_mean), tuple(result_max), tuple(result_mean), tuple(result_none)})
+        == 4
+    )
+
+    # `max_display` still truncates under "none" (no ranking, but still a cut).
+    assert _shap_order_features(sv, order="none", max_display=2) == ["z", "w"]

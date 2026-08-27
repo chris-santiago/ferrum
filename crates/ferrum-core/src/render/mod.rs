@@ -137,7 +137,28 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         RenderError::InvalidAxisOrient { channel, orient, .. } => {
             RenderError::InvalidAxisOrient { channel, orient, coord_flipped }
         }
-        other => other,
+        // Every other variant is listed explicitly (rather than a catch-all)
+        // so that a future variant added to `RenderError` is a compile error
+        // here, not a silent no-op. `EncodingTypeMismatch` and
+        // `UnsupportedChannelCombination` also carry a `coord_flipped` field,
+        // but each is patched at its own construction site, not through this
+        // boundary-correction fn — see their field docs on `RenderError`. The
+        // remaining variants carry no user-channel token at all.
+        other @ (RenderError::InvalidViewport { .. }
+        | RenderError::EmptyBatch
+        | RenderError::UnknownColumn { .. }
+        | RenderError::InvalidColor(_)
+        | RenderError::EncodingTypeMismatch { .. }
+        | RenderError::TransformFailed(_)
+        | RenderError::ScaleResolutionFailed(_)
+        | RenderError::LayoutFailed(_)
+        | RenderError::ResvgFailed(_)
+        | RenderError::PositionAdjustFailed { .. }
+        | RenderError::UnsupportedDtype { .. }
+        | RenderError::EmptyDomain { .. }
+        | RenderError::SceneConstruction(_)
+        | RenderError::HtmlBundleAssembly(_)
+        | RenderError::UnsupportedChannelCombination { .. }) => other,
     }
 }
 
