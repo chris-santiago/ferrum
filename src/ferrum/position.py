@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+from ferrum._validate import validate_choice
+
 
 # ---- Mark stack capability (two distinct questions; see CHART-08) -------------
 #
@@ -101,13 +103,15 @@ _VALID_STACK_VALUE_AXES = {"x", "y", None}
 STACK_OFFSETS = frozenset({"zero", "normalize", "center"})
 
 
-def _validate_stack_offset(value: str, *, where: str) -> None:
+def _validate_stack_offset(value: str, *, func_name: str, param: str = "offset") -> None:
     """Raise ``ValueError`` if *value* is not a real stack offset.
 
     Single canonical validator for the three stack-offset entry points
-    (``Stack``, ``transform_stack``, and the encoding ``stack=`` path). The
-    error text is identical across all three callers apart from the *where*
-    prefix that names the failing site.
+    (``Stack``, ``transform_stack``, and the encoding ``stack=`` path). Each
+    caller supplies its own ``func_name``/``param`` pair (``"Stack.offset"``/
+    ``"offset"``, ``"transform_stack"``/``"offset"``, and the channel class
+    name/``"stack"`` respectively) so the message names the real keyword the
+    caller wrote, per the ``validate_choice`` ``func_name`` convention.
 
     Parameters
     ----------
@@ -115,19 +119,20 @@ def _validate_stack_offset(value: str, *, where: str) -> None:
         The candidate offset (already known to be one of the real-offset
         spellings or an unrecognized string — bool/falsy normalization happens
         before this call on the encoding path).
-    where : str
-        Caller label used as the message prefix (e.g. ``"Stack"``,
-        ``"transform_stack"``, or a channel name like ``"Y"``).
+    func_name : str
+        Public callable name or ``Class.attr`` label for the failing site
+        (e.g. ``"Stack.offset"``, ``"transform_stack"``, or a channel name
+        like ``"Y"``).
+    param : str, default "offset"
+        The real keyword name at the call site (``"offset"`` for ``Stack``/
+        ``transform_stack``, ``"stack"`` for the encoding channel path).
 
     Raises
     ------
     ValueError
         When *value* is not one of :data:`STACK_OFFSETS`.
     """
-    if value not in STACK_OFFSETS:
-        raise ValueError(
-            f"{where}: stack offset {value!r} is not valid; expected one of {sorted(STACK_OFFSETS)}"
-        )
+    validate_choice(func_name, param, value, STACK_OFFSETS)
 
 
 # ---- Value classes -----------------------------------------------------------
@@ -242,8 +247,7 @@ class Jitter:
     seed: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.axis not in _VALID_JITTER_AXES:
-            raise ValueError(f"Jitter: axis must be 'x'|'y'|'both'; got '{self.axis}'")
+        validate_choice("Jitter.axis", "axis", self.axis, _VALID_JITTER_AXES)
         if self.width <= 0.0:
             raise ValueError(f"Jitter: width must be > 0; got {self.width}")
 
@@ -315,11 +319,9 @@ class Stack:
     value_axis: Optional[str] = None
 
     def __post_init__(self) -> None:
-        _validate_stack_offset(self.offset, where="Stack")
-        if self.anchor not in _VALID_STACK_ANCHORS:
-            raise ValueError(f"Stack: anchor must be 'top'|'mid'; got '{self.anchor}'")
-        if self.value_axis not in _VALID_STACK_VALUE_AXES:
-            raise ValueError(f"Stack: value_axis must be 'x'|'y'|None; got '{self.value_axis}'")
+        _validate_stack_offset(self.offset, func_name="Stack.offset", param="offset")
+        validate_choice("Stack.anchor", "anchor", self.anchor, _VALID_STACK_ANCHORS)
+        validate_choice("Stack.value_axis", "value_axis", self.value_axis, _VALID_STACK_VALUE_AXES)
 
     def to_spec_dict(self) -> dict:
         """Return the serialized spec dict for this position adjustment."""

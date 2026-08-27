@@ -7,6 +7,7 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._validate import validate_choice
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -54,6 +55,7 @@ def desugar_learning_curve(
     the axis does not read "lower" (the bottom-edge column name).
     """
     del x_field, y_field
+    validate_choice("mark_learning_curve", "ci_style", ci_style, ("band", "errorbar"))
     from ferrum.encoding import X, Y
 
     user_kw = _validate("learning_curve", mark_kwargs)
@@ -71,7 +73,8 @@ def desugar_learning_curve(
             },
             mark_kwargs={"opacity": 0.3},
         )
-    elif ci_style == "errorbar":
+    else:
+        # ci_style == "errorbar" (validated above)
         ci_layer = _Layer(
             name="band",
             mark="rule",
@@ -81,10 +84,6 @@ def desugar_learning_curve(
                 "y2": "upper",
                 "color": color_field,
             },
-        )
-    else:
-        raise ValueError(
-            f"mark_learning_curve(ci_style={ci_style!r}) — expected 'band' or 'errorbar'."
         )
     line_enc: dict[str, Any] = {
         "x": "train_size",
@@ -121,6 +120,7 @@ def desugar_validation_curve(
     generic ``param_value`` column name.
     """
     del x_field, y_field
+    validate_choice("mark_validation_curve", "ci_style", ci_style, ("band", "errorbar"))
     from ferrum.encoding import X, Y
 
     user_kw = _validate("validation_curve", mark_kwargs)
@@ -144,7 +144,8 @@ def desugar_validation_curve(
             },
             mark_kwargs={"opacity": 0.3},
         )
-    elif ci_style == "errorbar":
+    else:
+        # ci_style == "errorbar" (validated above)
         ci_layer = _Layer(
             name="band",
             mark="rule",
@@ -154,10 +155,6 @@ def desugar_validation_curve(
                 "y2": "upper",
                 "color": color_field,
             },
-        )
-    else:
-        raise ValueError(
-            f"mark_validation_curve(ci_style={ci_style!r}) — expected 'band' or 'errorbar'."
         )
     layers = [
         ci_layer,
@@ -205,6 +202,7 @@ def desugar_cv_scores(
     # split is consumed upstream by the chart builder (filters DataFrame
     # to the requested split); informational at the mark layer.
     del split
+    validate_choice("mark_cv_scores", "kind", kind, ("box", "bar", "strip"))
     from ferrum.encoding import Y
 
     user_kw = _validate("cv_scores", mark_kwargs)
@@ -239,26 +237,25 @@ def desugar_cv_scores(
             ),
         ]
         return MarkDesugarResult(layers=_apply(layers, user_kw))
-    if kind == "strip":
-        color_ch = color_field if color_field is not None else "split"
-        point_enc = {"x": "split", "y": Y("score", title="score"), "color": color_ch}
-        if color_field is not None:
-            # Compare/dodge path: the chart-level position=Dodge(by=color_field)
-            # set by mark_cv_scores(...) handles the offset; no per-layer position.
-            layers = [_Layer(name="point", mark="point", encoding=point_enc)]
-        else:
-            from ferrum.position import Jitter
+    # kind == "strip" (validated above)
+    color_ch = color_field if color_field is not None else "split"
+    point_enc = {"x": "split", "y": Y("score", title="score"), "color": color_ch}
+    if color_field is not None:
+        # Compare/dodge path: the chart-level position=Dodge(by=color_field)
+        # set by mark_cv_scores(...) handles the offset; no per-layer position.
+        layers = [_Layer(name="point", mark="point", encoding=point_enc)]
+    else:
+        from ferrum.position import Jitter
 
-            layers = [
-                _Layer(
-                    name="point",
-                    mark="point",
-                    encoding=point_enc,
-                    position=Jitter(axis="x", width=0.3, seed=42),
-                ),
-            ]
-        return MarkDesugarResult(layers=_apply(layers, user_kw))
-    raise ValueError(f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'.")
+        layers = [
+            _Layer(
+                name="point",
+                mark="point",
+                encoding=point_enc,
+                position=Jitter(axis="x", width=0.3, seed=42),
+            ),
+        ]
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 # cv_scores registers the UNION of all three kinds' sub-layer names so a valid

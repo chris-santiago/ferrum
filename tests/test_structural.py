@@ -118,7 +118,7 @@ class TestBreakAxis:
             b.axis = "x"  # type: ignore[misc]
 
     def test_invalid_axis_raises(self):
-        with pytest.raises(ValueError, match="'x' or 'y'"):
+        with pytest.raises(ValueError, match=r"BreakAxis.axis: axis must be one of"):
             BreakAxis(axis="z", gap=(0, 1))
 
     def test_invalid_break_style_raises(self):

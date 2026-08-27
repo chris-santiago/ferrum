@@ -841,7 +841,7 @@ def transform_stack(
     >>> t["as_"]
     ['y0', 'y1']
     """
-    _validate_stack_offset(offset, where="transform_stack")
+    _validate_stack_offset(offset, func_name="transform_stack", param="offset")
     as_list = _validate_as_pair(as_, where="transform_stack")
     spec: dict = {
         "type": "data_stack",

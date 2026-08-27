@@ -64,7 +64,7 @@ def test_importances_permutation_populates_std(rf_source):
 
 
 def test_importances_invalid_method(rf_source):
-    with pytest.raises(ValueError, match="importances\\(method="):
+    with pytest.raises(ValueError, match="ModelSource.importances.*must be one of"):
         rf_source.importances(method="not_a_method")
 
 
@@ -136,7 +136,7 @@ def test_mark_importance_invalid_orient():
             "rank": [1, 2],
         }
     )
-    with pytest.raises(ValueError, match="orient="):
+    with pytest.raises(ValueError, match="mark_importance.*orient.*must be one of"):
         ferrum.Chart(df).mark_importance(orient="diagonal").to_svg()
 
 
@@ -554,7 +554,7 @@ def test_shap_visualizer_invalid_kind():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     viz = ferrum.SHAPVisualizer(model, kind="not_a_kind")
-    with pytest.raises(ValueError, match="kind="):
+    with pytest.raises(ValueError, match="SHAPVisualizer.*must be one of"):
         viz.fit(X, df["y"])
 
 
@@ -677,7 +677,7 @@ def test_partial_dependence_caches():
 def test_partial_dependence_invalid_kind():
     model, X, y = _rf_xy()
     src = ferrum.ModelSource(model, X, y)
-    with pytest.raises(ValueError, match="kind="):
+    with pytest.raises(ValueError, match="ModelSource.partial_dependence.*must be one of"):
         src.partial_dependence(["f0"], kind="not_a_kind")
 
 
@@ -789,7 +789,7 @@ def test_pdp_chart_center_starts_at_zero():
 
 def test_pdp_chart_kind_invalid_raises():
     model, X, y = _rf_xy()
-    with pytest.raises(ValueError, match="'average', 'individual', or 'both'"):
+    with pytest.raises(ValueError, match="ModelSource.partial_dependence.*must be one of"):
         ferrum.pdp_chart(
             model,
             X,

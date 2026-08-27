@@ -92,7 +92,7 @@ class TestHConcatChartResolve:
 
     def test_hconcat_invalid_resolve_mode_raises(self, chart_left, chart_right):
         """HConcatChart rejects unknown resolve mode values."""
-        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+        with pytest.raises(ValueError, match=r"HConcatChart: resolve\['color'\] must be one of"):
             HConcatChart([chart_left, chart_right], resolve={"color": "bad"})
 
     def test_hconcat_invalid_resolve_type_raises(self, chart_left, chart_right):
@@ -162,7 +162,7 @@ class TestVConcatChartResolve:
 
     def test_vconcat_invalid_resolve_mode_raises(self, chart_top, chart_bottom):
         """VConcatChart rejects unknown resolve mode values."""
-        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+        with pytest.raises(ValueError, match=r"VConcatChart: resolve\['color'\] must be one of"):
             VConcatChart([chart_top, chart_bottom], resolve={"color": "bad"})
 
     def test_vconcat_invalid_resolve_type_raises(self, chart_top, chart_bottom):

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 
+from ferrum._validate import validate_choice
 from .._internal.deps import require_shap, require_sklearn
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ class FeatureImportanceMixin(_MixinBase):
             Seed for the permutation shuffles. Falls back to the source's
             ``random_state`` when omitted.
         """
+        validate_choice("ModelSource.importances", "method", method, ("builtin", "permutation"))
         rs = random_state if random_state is not None else self._random_state
         key = self._cache_key(
             "importances",
@@ -63,15 +65,12 @@ class FeatureImportanceMixin(_MixinBase):
 
         if method == "builtin":
             imp, std = self._importances_builtin()
-        elif method == "permutation":
+        else:
+            # method == "permutation" (validated above)
             imp, std = self._importances_permutation(
                 n_repeats=n_repeats,
                 scoring=scoring,
                 random_state=rs,
-            )
-        else:
-            raise ValueError(
-                f"ModelSource.importances(method={method!r}) — expected 'builtin' or 'permutation'."
             )
 
         order = np.argsort(-np.abs(imp))
@@ -248,11 +247,9 @@ class FeatureImportanceMixin(_MixinBase):
             with the ``detail`` encoding channel on ``sample_id`` to render
             one polyline per sample.
         """
-        if kind not in ("average", "individual", "both"):
-            raise ValueError(
-                f"ModelSource.partial_dependence(kind={kind!r}) — expected "
-                "'average', 'individual', or 'both'."
-            )
+        validate_choice(
+            "ModelSource.partial_dependence", "kind", kind, ("average", "individual", "both")
+        )
         key = self._cache_key(
             "partial_dependence",
             features=tuple(features),

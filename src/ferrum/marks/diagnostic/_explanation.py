@@ -6,10 +6,13 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._validate import validate_choice
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
 )
+
+_ORIENT_CHOICES = ("horizontal", "vertical")
 
 # --- 10d: feature importance / SHAP / PDP -----------------------------
 
@@ -51,10 +54,7 @@ def desugar_importance(
     # at the desugar layer.
     del top_k
     user_kw = _validate("importance", mark_kwargs)
-    if orient not in ("horizontal", "vertical"):
-        raise ValueError(
-            f"mark_importance(orient={orient!r}) — expected 'horizontal' or 'vertical'."
-        )
+    validate_choice("mark_importance", "orient", orient, _ORIENT_CHOICES)
 
     if orient == "horizontal":
         value_axis, group_axis, err_axis2 = "x", "y", "x2"
@@ -202,8 +202,7 @@ def desugar_shap_bar(
     # max_display is wired via data_transform in mark_shap_bar.
     del max_display
     user_kw = _validate("shap_bar", mark_kwargs)
-    if orient not in ("horizontal", "vertical"):
-        raise ValueError(f"mark_shap_bar(orient={orient!r}) — expected 'horizontal' or 'vertical'.")
+    validate_choice("mark_shap_bar", "orient", orient, _ORIENT_CHOICES)
 
     if orient == "horizontal":
         value_axis, group_axis = "x", "y"
@@ -325,6 +324,7 @@ def desugar_pdp(
     every polyline starts at 0.
     """
     del x_field, y_field
+    validate_choice("mark_pdp", "kind", kind, ("average", "individual", "both"))
     user_kw = _validate("pdp", mark_kwargs)
 
     if kind == "average":
@@ -360,42 +360,40 @@ def desugar_pdp(
         ]
         return MarkDesugarResult(layers=_apply(layers, user_kw))
 
-    if kind == "both":
-        # ICE layer: y = _pd_ice_value (null on average row → skipped).
-        # Override the y-axis title to 'pd_value' since the underlying
-        # column name is a layer-internal artifact.
-        ice_enc = {
-            "x": "feature_value",
-            "y": _Y("_pd_ice_value", title="pd_value"),
-        }
-        if color_field is not None:
-            ice_enc["color"] = color_field
-        avg_enc: dict[str, Any] = {
-            "x": "feature_value",
-            "y": "_pd_avg_value",
-        }
-        if color_field is not None:
-            avg_enc["color"] = color_field
-        layers = [
-            _Layer(
-                name="ice",
-                mark="line",
-                encoding=ice_enc,
-                mark_kwargs={
-                    "detail": "_sample_id_str",
-                    "opacity": float(ice_alpha),
-                },
-            ),
-            _Layer(
-                name="average",
-                mark="line",
-                encoding=avg_enc,
-                mark_kwargs={"stroke_width": 2.5},
-            ),
-        ]
-        return MarkDesugarResult(layers=_apply(layers, user_kw))
-
-    raise ValueError(f"mark_pdp(kind={kind!r}) — expected 'average', 'individual', or 'both'.")
+    # kind == "both" (validated above)
+    # ICE layer: y = _pd_ice_value (null on average row → skipped).
+    # Override the y-axis title to 'pd_value' since the underlying
+    # column name is a layer-internal artifact.
+    ice_enc = {
+        "x": "feature_value",
+        "y": _Y("_pd_ice_value", title="pd_value"),
+    }
+    if color_field is not None:
+        ice_enc["color"] = color_field
+    avg_enc: dict[str, Any] = {
+        "x": "feature_value",
+        "y": "_pd_avg_value",
+    }
+    if color_field is not None:
+        avg_enc["color"] = color_field
+    layers = [
+        _Layer(
+            name="ice",
+            mark="line",
+            encoding=ice_enc,
+            mark_kwargs={
+                "detail": "_sample_id_str",
+                "opacity": float(ice_alpha),
+            },
+        ),
+        _Layer(
+            name="average",
+            mark="line",
+            encoding=avg_enc,
+            mark_kwargs={"stroke_width": 2.5},
+        ),
+    ]
+    return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 
 register_layer_names("pdp", frozenset({"line", "ice", "average"}))

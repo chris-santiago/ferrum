@@ -151,13 +151,13 @@ def test_cluster_diagnostics_hierarchical():
 
 def test_cluster_diagnostics_rejects_dbscan():
     df = load_dataset("clustering")
-    with pytest.raises(ValueError, match="must be one of"):
+    with pytest.raises(ValueError, match=r"cluster_diagnostics: method must be one of"):
         ferrum.cluster_diagnostics(df, ks=[2, 3], method="dbscan")
 
 
 def test_cluster_diagnostics_rejects_bad_scoring():
     df = load_dataset("clustering")
-    with pytest.raises(ValueError, match="must be one of"):
+    with pytest.raises(ValueError, match=r"cluster_diagnostics: scoring must be one of"):
         ferrum.cluster_diagnostics(df, ks=[2, 3], scoring="invalid")
 
 
@@ -221,7 +221,7 @@ def test_embeddings_uses_model_labels_when_y_absent():
 def test_embeddings_rejects_bad_method():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(load_fixture("pca_4comp"), df)
-    with pytest.raises(ValueError, match="expected"):
+    with pytest.raises(ValueError, match=r"ModelSource.embeddings: method must be one of"):
         source.embeddings(method="badmethod")
 
 

@@ -9,6 +9,7 @@ import pyarrow as pa
 import polars as pl
 
 from ferrum import _core
+from ferrum._validate import validate_choice
 
 if TYPE_CHECKING:
     from ._protocols import _SourceState as _MixinBase
@@ -138,6 +139,7 @@ class ClusteringMixin(_MixinBase):
             ``"tsne"`` accepts ``perplexity``, ``learning_rate``,
             ``n_iter``; ``"pca"`` takes none.
         """
+        validate_choice("ModelSource.embeddings", "method", method, ("umap", "tsne", "pca"))
         key = self._cache_key(
             "embeddings",
             embed_method=method,
@@ -169,14 +171,11 @@ class ClusteringMixin(_MixinBase):
                 method_kwargs.get("n_iter"),
             )
             df = pl.from_arrow(result)
-        elif method == "pca":
+        else:
+            # method == "pca" (validated above)
             x_arrow = self._x_record_batch()
             scores_batch = _core.pca_scores(x_arrow, n_components)
             df = pl.from_arrow(scores_batch)
-        else:
-            raise ValueError(
-                f"ModelSource.embeddings(method={method!r}) — expected 'umap', 'tsne', or 'pca'."
-            )
         if self._y is not None:
             label_arr = np.asarray(self._y)
         elif hasattr(self._model, "labels_"):
@@ -211,6 +210,7 @@ class ClusteringMixin(_MixinBase):
             ``"tsne"`` requires at least 4 clusters; use ``"mds"`` for small
             ``k``.
         """
+        validate_choice("ModelSource.intercluster_distance", "method", method, ("mds", "tsne"))
         key = self._cache_key(
             "intercluster_distance",
             k=int(k),
@@ -235,7 +235,8 @@ class ClusteringMixin(_MixinBase):
                     mds_df["dim_1"].to_numpy(),
                 ]
             )
-        elif method == "tsne":
+        else:
+            # method == "tsne" (validated above)
             if int(k) < 4:
                 raise ValueError(
                     f"intercluster_distance(method='tsne') requires at least 4 "
@@ -257,10 +258,6 @@ class ClusteringMixin(_MixinBase):
                     tsne_df["dim_0"].to_numpy(),
                     tsne_df["dim_1"].to_numpy(),
                 ]
-            )
-        else:
-            raise ValueError(
-                f"ModelSource.intercluster_distance(method={method!r}) — expected 'mds' or 'tsne'."
             )
         if "labels_" in self._capabilities:
             labels = np.asarray(self._model.labels_)

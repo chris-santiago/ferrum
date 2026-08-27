@@ -122,18 +122,18 @@ def test_repeat_share_scale_accepts_independent(repeat_chart: RepeatChart) -> No
 
 def _invalid_mode_message(ch: str, mode: str) -> str:
     """The canonical error message produced by _validate_share_modes."""
-    return f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'"
+    return f"share_scale: {ch} must be one of ['independent', 'shared']; got {mode!r}"
 
 
 def test_validate_share_modes_produces_canonical_message() -> None:
     """_validate_share_modes is the single source of the error message."""
-    with pytest.raises(ValueError, match="share_scale: x='bad'"):
+    with pytest.raises(ValueError, match=r"share_scale: x must be one of .*; got 'bad'"):
         _validate_share_modes({"x": "bad"})
 
 
 def test_chart_share_scale_invalid_mode_uses_shared_validator(faceted: Chart) -> None:
     """Chart.share_scale invalid mode raises via _validate_share_modes (same message)."""
-    with pytest.raises(ValueError, match="share_scale: x='together'"):
+    with pytest.raises(ValueError, match=r"share_scale: x must be one of .*; got 'together'"):
         faceted.share_scale(x="together")
 
 
@@ -141,13 +141,13 @@ def test_composition_share_scale_invalid_mode_uses_shared_validator(
     composition: fm.LayerChart,
 ) -> None:
     """_ChartLike.share_scale invalid mode raises via _validate_share_modes (same message)."""
-    with pytest.raises(ValueError, match="share_scale: x='together'"):
+    with pytest.raises(ValueError, match=r"share_scale: x must be one of .*; got 'together'"):
         composition.share_scale(x="together")
 
 
 def test_repeat_share_scale_invalid_mode_uses_shared_validator(repeat_chart: RepeatChart) -> None:
     """RepeatChart.share_scale invalid mode raises via _validate_share_modes (same message)."""
-    with pytest.raises(ValueError, match="share_scale: x='together'"):
+    with pytest.raises(ValueError, match=r"share_scale: x must be one of .*; got 'together'"):
         repeat_chart.share_scale(x="together")
 
 

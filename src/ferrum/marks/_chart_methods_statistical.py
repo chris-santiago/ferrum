@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum._layer import _PRIMITIVE_MARKS
+from ferrum._validate import validate_choice
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.composite import _MISSING
 from ferrum.marks.statistical import (
@@ -19,8 +20,10 @@ from ferrum.marks.statistical import (
     _resolve_smooth,
 )
 
+_ORIENT_CHOICES = ("horizontal", "vertical")
 
-def _normalize_orient(orient: str | None, horizontal: bool) -> bool:
+
+def _normalize_orient(func_name: str, orient: str | None, horizontal: bool) -> bool:
     """Return the effective ``horizontal`` flag from the canonical ``orient`` kwarg.
 
     ``orient`` is the canonical spelling across the mark family.  ``horizontal``
@@ -30,30 +33,31 @@ def _normalize_orient(orient: str | None, horizontal: bool) -> bool:
     Valid values for ``orient``: ``"vertical"`` (default) or ``"horizontal"``.
     Any other string raises ``ValueError`` immediately so the error surfaces at
     the call site rather than silently being absorbed as a style kwarg.
+    ``func_name`` is the public ``mark_*`` method the caller invoked, used as
+    the validator's error-message prefix.
     """
     if orient is not None:
-        if orient not in ("vertical", "horizontal"):
-            raise ValueError(f"orient must be 'vertical' or 'horizontal'; got {orient!r}")
+        validate_choice(func_name, "orient", orient, _ORIENT_CHOICES)
         return orient == "horizontal"
     return bool(horizontal)
 
 
-def _normalize_orient_to_orientation(kwargs: dict) -> dict:
+def _normalize_orient_to_orientation(func_name: str, kwargs: dict) -> dict:
     """Normalize ``orient=`` to ``orientation=`` for density/histogram desugars.
 
     ``desugar_density`` and ``desugar_histogram`` use ``orientation`` as their
     internal parameter name (historical spelling).  This helper pops ``orient``
     from a copy of *kwargs* and injects ``orientation`` so the desugar receives
     its expected param name.  ``orient`` wins over ``orientation`` when both are
-    present.
+    present. ``func_name`` is the public ``mark_*`` method the caller invoked,
+    used as the validator's error-message prefix.
 
     Returns a new dict; the caller's original dict is not mutated.
     """
     if "orient" not in kwargs:
         return kwargs
     orient_val = kwargs["orient"]
-    if orient_val not in ("vertical", "horizontal"):
-        raise ValueError(f"orient must be 'vertical' or 'horizontal'; got {orient_val!r}")
+    validate_choice(func_name, "orient", orient_val, _ORIENT_CHOICES)
     new_kwargs = {k: v for k, v in kwargs.items() if k != "orient"}
     new_kwargs["orientation"] = orient_val
     return new_kwargs
@@ -118,7 +122,7 @@ class StatisticalMarksMixin:
         """
         # Normalize orient= → orientation= so the desugar's existing param name
         # is used.  orient= wins over orientation= when both are present.
-        kwargs = _normalize_orient_to_orientation(kwargs)
+        kwargs = _normalize_orient_to_orientation("mark_density", kwargs)
         return self._set_composite_mark(
             "density",
             _resolve_density,
@@ -181,7 +185,7 @@ class StatisticalMarksMixin:
         """
         # Normalize orient= → orientation= so the desugar's existing param name
         # is used.  orient= wins over orientation= when both are present.
-        kwargs = _normalize_orient_to_orientation(kwargs)
+        kwargs = _normalize_orient_to_orientation("mark_histogram", kwargs)
         return self._set_composite_mark(
             "histogram",
             _resolve_histogram,
@@ -329,7 +333,7 @@ class StatisticalMarksMixin:
         effective_size = size if size is not None else width
         # Normalize orient/horizontal: orient= is canonical; horizontal= is a legacy
         # alias. When orient is given explicitly, it overrides horizontal.
-        effective_horizontal = _normalize_orient(orient, horizontal)
+        effective_horizontal = _normalize_orient("mark_boxplot", orient, horizontal)
         # Resolve the deprecated extent= alias at the public API level using the
         # shared resolver from composite.py.  Sentinel-based detection ensures that
         # whisker_mult=1.5 (the default value, passed explicitly) is correctly
@@ -419,7 +423,7 @@ class StatisticalMarksMixin:
         """
         from ferrum.marks.composite import desugar_boxen
 
-        effective_horizontal = _normalize_orient(orient, horizontal)
+        effective_horizontal = _normalize_orient("mark_boxen", orient, horizontal)
 
         return self._set_composite_mark(
             "boxen",
@@ -750,7 +754,7 @@ class StatisticalMarksMixin:
         """
         from ferrum.marks.heavy_stat import desugar_violin
 
-        effective_horizontal = _normalize_orient(orient, horizontal)
+        effective_horizontal = _normalize_orient("mark_violin", orient, horizontal)
 
         return self._set_composite_mark(
             "violin",
@@ -1049,7 +1053,7 @@ class StatisticalMarksMixin:
         # When orient is not None it wins unconditionally (consistent with
         # boxplot/boxen/violin which call _normalize_orient).  When orient is
         # None, fall back to horizontal (or default to "vertical").
-        effective_horizontal = _normalize_orient(orient, horizontal or False)
+        effective_horizontal = _normalize_orient("mark_swarm", orient, horizontal or False)
         effective_orient = "horizontal" if effective_horizontal else "vertical"
 
         return self._set_composite_mark(

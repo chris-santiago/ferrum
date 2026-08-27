@@ -8,6 +8,10 @@ from typing import Any
 from ferrum import Bin, Kde, Smooth
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._validate import validate_choice
+
+_ORIENTATIONS = ("horizontal", "vertical")
+_MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
 
 
 def desugar_density(
@@ -145,19 +149,10 @@ def desugar_density(
             )
 
     _VALID_KERNELS = {"gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine"}
-    if kernel is not None and kernel not in _VALID_KERNELS:
-        raise ValueError(
-            f"mark_density(kernel={kernel!r}) is not supported; valid: {sorted(_VALID_KERNELS)}"
-        )
-    if multiple not in ("layer", "stack", "fill", "dodge"):
-        raise ValueError(
-            f"mark_density(multiple={multiple!r}) must be one of 'layer', 'stack', 'fill', 'dodge'"
-        )
-
-    if orientation not in ("vertical", "horizontal"):
-        raise ValueError(
-            f"desugar_density: orientation must be 'vertical' or 'horizontal'; got {orientation!r}"
-        )
+    if kernel is not None:
+        validate_choice("mark_density", "kernel", kernel, _VALID_KERNELS)
+    validate_choice("mark_density", "multiple", multiple, _MULTIPLE_MODES)
+    validate_choice("mark_density", "orientation", orientation, _ORIENTATIONS)
     kde_kwargs: dict = dict(
         bandwidth=bandwidth,
         bw_adjust=float(bw_adjust),
@@ -295,16 +290,8 @@ def desugar_histogram(
             "mark_histogram(right=True) is not supported; "
             "bins are always left-closed, right-open [lo, hi)"
         )
-    if multiple not in ("layer", "stack", "fill", "dodge"):
-        raise ValueError(
-            f"mark_histogram(multiple={multiple!r}) is not supported; "
-            "expected one of 'layer', 'stack', 'fill', 'dodge'"
-        )
-    if orientation not in ("vertical", "horizontal"):
-        raise ValueError(
-            f"desugar_histogram: orientation must be 'vertical' or "
-            f"'horizontal'; got {orientation!r}"
-        )
+    validate_choice("mark_histogram", "multiple", multiple, _MULTIPLE_MODES)
+    validate_choice("mark_histogram", "orientation", orientation, _ORIENTATIONS)
     bin_kwargs: dict = dict(
         bin_count=bin_count,
         bin_width=bin_width,

@@ -732,6 +732,7 @@ def _apply_pc_rescale(
     rescale: str | None,
 ) -> pl.DataFrame:
     """Apply per-feature minmax / zscore rescale (or pass through on None)."""
+    validate_choice("parallel_coordinates", "rescale", rescale, ("minmax", "zscore", None))
     if rescale is None:
         return df
     if rescale == "minmax":
@@ -745,20 +746,17 @@ def _apply_pc_rescale(
                 ((pl.col(c) - float(vmin)) / (float(vmax) - float(vmin))).alias(c),
             )
         return df
-    if rescale == "zscore":
-        for c in features:
-            col = df[c]
-            mu = col.mean()
-            sd = col.std()
-            if sd is None or sd == 0.0:
-                continue
-            df = df.with_columns(
-                ((pl.col(c) - float(mu)) / float(sd)).alias(c),
-            )
-        return df
-    raise ValueError(
-        f"parallel_coordinates(rescale={rescale!r}) -- expected 'minmax', 'zscore', or None."
-    )
+    # rescale == "zscore" (validated above)
+    for c in features:
+        col = df[c]
+        mu = col.mean()
+        sd = col.std()
+        if sd is None or sd == 0.0:
+            continue
+        df = df.with_columns(
+            ((pl.col(c) - float(mu)) / float(sd)).alias(c),
+        )
+    return df
 
 
 def _parallel_coords_chart_from_dataframe(

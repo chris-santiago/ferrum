@@ -6,6 +6,7 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._validate import validate_choice
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -30,8 +31,7 @@ def desugar_rank1d(
     """
     del x_field, y_field
 
-    if orient not in ("horizontal", "vertical"):
-        raise ValueError(f"mark_rank1d(orient={orient!r}) — expected 'horizontal' or 'vertical'.")
+    validate_choice("mark_rank1d", "orient", orient, ("horizontal", "vertical"))
     user_kw = _validate("rank1d", mark_kwargs)
     if orient == "horizontal":
         enc: dict[str, Any] = {"x": "score", "y": "feature"}

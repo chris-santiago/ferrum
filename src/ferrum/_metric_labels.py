@@ -31,6 +31,8 @@ from typing import Any, Callable, ClassVar, Literal, Optional
 
 import polars as pl
 
+from ferrum._validate import validate_choice
+
 
 def _resolve_field(enc_value: Any) -> Optional[str]:
     """Extract the field name from an encoding value.
@@ -410,11 +412,7 @@ def _apply_metric_label_explicit(
     direct-mark ``__radd__`` path, so a value-function or prefix change is
     observed identically by both surfaces.
     """
-    if label_kind not in _METRIC_LABEL_SPECS:
-        raise ValueError(
-            f"_apply_metric_label_explicit(label_kind={label_kind!r}): "
-            f"expected one of {sorted(_METRIC_LABEL_SPECS)}"
-        )
+    validate_choice("_apply_metric_label_explicit", "label_kind", label_kind, _METRIC_LABEL_SPECS)
     metric_fn, default_prefix = _METRIC_LABEL_SPECS[label_kind]
     pos_lit: Any = position
     prefix_str = prefix if prefix is not None else default_prefix

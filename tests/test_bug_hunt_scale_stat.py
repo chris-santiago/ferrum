@@ -1868,7 +1868,7 @@ def test_secondary_y_frozen_dataclass():
 
 def test_break_axis_invalid_axis_raises():
     """BreakAxis with invalid axis should raise ValueError."""
-    with pytest.raises(ValueError, match="must be 'x' or 'y'"):
+    with pytest.raises(ValueError, match=r"BreakAxis.axis: axis must be one of"):
         fr.BreakAxis(axis="z", gap=(10, 20))
 
 

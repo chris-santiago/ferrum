@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from typing import Optional, Tuple
 
+from ferrum._validate import validate_choice
+
 _VALID_TYPES = frozenset(["Q", "N", "O", "T"])
 _FIELD = r"[^:()]+"
 _PATTERN = re.compile(
@@ -90,8 +92,8 @@ def parse_shorthand(s: str) -> Tuple[Optional[str], Optional[str], Optional[str]
         raise ValueError(f"could not parse shorthand: {s!r}")
 
     type_ = m.group("type")
-    if type_ is not None and type_ not in _VALID_TYPES:
-        raise ValueError(f"unknown type {type_!r} in {s!r}; expected one of Q, N, O, T")
+    if type_ is not None:
+        validate_choice("parse_shorthand", "type", type_, _VALID_TYPES)
 
     agg = m.group("agg")
     if agg is not None:

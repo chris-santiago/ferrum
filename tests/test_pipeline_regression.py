@@ -520,7 +520,7 @@ class TestDesugarsRaiseValueError:
     def test_density_invalid_kernel_raises_value_error(self):
         """mark_density(kernel='banana') should raise ValueError."""
         df = _numeric_df()
-        with pytest.raises(ValueError, match="not supported"):
+        with pytest.raises(ValueError, match=r"mark_density: kernel must be one of"):
             fm.Chart(df).mark_density(kernel="banana").encode(x="x").to_svg()
 
     def test_histogram_right_true_raises_value_error(self):

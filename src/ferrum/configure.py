@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
+from ferrum._validate import validate_choice
 
 
 _VALID_LEGEND_ORIENTS = frozenset({"right", "left", "top", "bottom", "none"})
@@ -364,11 +365,8 @@ class LegendConfig:
     zindex: int | None = None
 
     def __post_init__(self) -> None:
-        if self.orient is not None and self.orient not in _VALID_LEGEND_ORIENTS:
-            raise ValueError(
-                f"LegendConfig.orient must be one of {sorted(_VALID_LEGEND_ORIENTS)!r}; "
-                f"got {self.orient!r}."
-            )
+        if self.orient is not None:
+            validate_choice("LegendConfig.orient", "orient", self.orient, _VALID_LEGEND_ORIENTS)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""
@@ -406,11 +404,8 @@ class TitleConfig:
     subtitle_color: str | None = None
 
     def __post_init__(self) -> None:
-        if self.anchor is not None and self.anchor not in _VALID_TITLE_ANCHORS:
-            raise ValueError(
-                f"TitleConfig.anchor must be one of {sorted(_VALID_TITLE_ANCHORS)!r}; "
-                f"got {self.anchor!r}."
-            )
+        if self.anchor is not None:
+            validate_choice("TitleConfig.anchor", "anchor", self.anchor, _VALID_TITLE_ANCHORS)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""

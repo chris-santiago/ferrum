@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, ClassVar
 
+from ferrum._validate import validate_choice
 from ferrum._warn import warn_once
 from ferrum.axis import _normalize_axis
 from ferrum.legend import _normalize_legend
@@ -271,11 +272,7 @@ class ChannelBase:
         """Enforce kwarg-value constraints; subclasses may override."""
         type_ = self._kwargs.get("type")
         if type_ is not None:
-            if type_ not in _TYPE_NORMALIZE:
-                raise ValueError(
-                    f"{self.__class__.__name__}(type={type_!r}): "
-                    f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
-                )
+            validate_choice(self.__class__.__name__, "type", type_, _TYPE_NORMALIZE)
             # Normalize the long spellings to their single-letter codes so a
             # channel built with ``type_="quantitative"`` compares, hashes, and
             # serializes identically to one built with ``type_="Q"`` (ENC-08).
@@ -338,7 +335,7 @@ class ChannelBase:
         if lowered not in STACK_OFFSETS:
             # Surface the user's original spelling, but route through the single
             # canonical validator so all three entry points fail identically.
-            _validate_stack_offset(value, where=channel)
+            _validate_stack_offset(value, func_name=channel, param="stack")
         return value
 
     def to_encoding_spec_dict(self) -> dict:

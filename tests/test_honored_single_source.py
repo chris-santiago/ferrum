@@ -254,7 +254,7 @@ def test_all_long_type_spellings_normalize(long, short):
 def test_invalid_type_still_rejected():
     """An unrecognized type spelling still raises ValueError."""
     reset_warnings()
-    with pytest.raises(ValueError, match="expected one of"):
+    with pytest.raises(ValueError, match=r"X: type must be one of"):
         fm.X("a", type_="bogus")
 
 

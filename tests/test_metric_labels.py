@@ -123,7 +123,9 @@ def test_metric_label_explicit_rejects_unknown_kind():
     from ferrum._metric_labels import _apply_metric_label_explicit
 
     base = Chart(_roc_data()).encode(x="fpr", y="tpr").mark_line()
-    with pytest.raises(ValueError, match="expected one of"):
+    with pytest.raises(
+        ValueError, match=r"_apply_metric_label_explicit: label_kind must be one of"
+    ):
         _apply_metric_label_explicit(base, "f1", x_col="fpr", y_col="tpr")
 
 

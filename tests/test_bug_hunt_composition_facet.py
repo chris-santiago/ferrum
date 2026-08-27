@@ -268,7 +268,7 @@ def test_break_axis_invalid_axis_raises():
 
     Targets structural.py __post_init__ line 65.
     """
-    with pytest.raises(ValueError, match="'x' or 'y'"):
+    with pytest.raises(ValueError, match=r"BreakAxis.axis: axis must be one of"):
         BreakAxis(axis="z", gap=(1, 2))
 
 

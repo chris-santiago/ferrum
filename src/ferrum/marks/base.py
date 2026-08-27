@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ferrum._validate import validate_choice
 
 # Marks whose primary visual channel is stroke rather than fill.
 # For these marks, the user-facing ``color=`` alias resolves to ``stroke``
@@ -163,11 +164,7 @@ class MarkBase:
         # an unknown name would silently default to circle at render time.
         shape_val = resolved.get("shape")
         if shape_val is not None and isinstance(shape_val, str):
-            if shape_val not in _VALID_POINT_SHAPES:
-                raise ValueError(
-                    f"mark_{mark_name}: unknown shape {shape_val!r}. "
-                    f"Valid shapes: {sorted(_VALID_POINT_SHAPES)}"
-                )
+            validate_choice(f"mark_{mark_name}", "shape", shape_val, _VALID_POINT_SHAPES)
         self._kwargs = resolved
 
     @property

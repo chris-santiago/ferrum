@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ferrum._validate import validate_choice
 
 _VALID_BREAK_STYLES = frozenset({"slash", "zigzag", "wave", "gap"})
 _VALID_CONNECT_STYLES = frozenset({"bracket", "lines", "none"})
@@ -89,13 +90,10 @@ class BreakAxis:
     break_style: str = "slash"
 
     def __post_init__(self) -> None:
-        if self.axis not in ("x", "y"):
-            raise ValueError(f"BreakAxis.axis must be 'x' or 'y'; got {self.axis!r}.")
-        if self.break_style not in _VALID_BREAK_STYLES:
-            raise ValueError(
-                f"BreakAxis.break_style must be one of {sorted(_VALID_BREAK_STYLES)!r}; "
-                f"got {self.break_style!r}."
-            )
+        validate_choice("BreakAxis.axis", "axis", self.axis, ("x", "y"))
+        validate_choice(
+            "BreakAxis.break_style", "break_style", self.break_style, _VALID_BREAK_STYLES
+        )
 
 
 @dataclass(frozen=True)
@@ -140,8 +138,6 @@ class Inset:
     connect_style: str = "lines"
 
     def __post_init__(self) -> None:
-        if self.connect_style not in _VALID_CONNECT_STYLES:
-            raise ValueError(
-                f"Inset.connect_style must be one of {sorted(_VALID_CONNECT_STYLES)!r}; "
-                f"got {self.connect_style!r}."
-            )
+        validate_choice(
+            "Inset.connect_style", "connect_style", self.connect_style, _VALID_CONNECT_STYLES
+        )

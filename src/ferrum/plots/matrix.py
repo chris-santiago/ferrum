@@ -1129,15 +1129,8 @@ def jointplot(
     ...     kind="hist", marginal_kind="kde", hue="species",
     ... )
     """
-    if kind not in _VALID_CENTER_KINDS:
-        raise ValueError(
-            f"jointplot: kind must be one of {sorted(_VALID_CENTER_KINDS)}; got {kind!r}"
-        )
-    if marginal_kind not in _VALID_MARGINAL_KINDS:
-        raise ValueError(
-            f"jointplot: marginal_kind must be one of {sorted(_VALID_MARGINAL_KINDS)}; "
-            f"got {marginal_kind!r}"
-        )
+    validate_choice("jointplot", "kind", kind, _VALID_CENTER_KINDS)
+    validate_choice("jointplot", "marginal_kind", marginal_kind, _VALID_MARGINAL_KINDS)
 
     return _jointplot_build(
         data,

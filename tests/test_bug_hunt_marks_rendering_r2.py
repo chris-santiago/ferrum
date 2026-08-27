@@ -151,7 +151,7 @@ def test_axis_config_title_font_size_propagates():
 def test_break_axis_invalid_axis_raises():
     """BreakAxis(axis='z') must raise ValueError.
     Targets structural.py BreakAxis.__post_init__ line 65."""
-    with pytest.raises(ValueError, match="must be 'x' or 'y'"):
+    with pytest.raises(ValueError, match=r"BreakAxis.axis: axis must be one of"):
         fr.BreakAxis(axis="z", gap=(10, 20))
 
 

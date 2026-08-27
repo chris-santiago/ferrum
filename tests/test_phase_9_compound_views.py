@@ -311,7 +311,7 @@ class TestRepeatChart:
 
     def test_resolve_rejects_unknown_mode(self, iris_like):
         tpl = fe.Chart(iris_like).mark_point().encode(x=Repeat.column, y="sepal_width")
-        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+        with pytest.raises(ValueError, match=r"RepeatChart: resolve\['x'\] must be one of"):
             fe.RepeatChart(tpl, column=["sepal_length"], resolve={"x": "smart"})
 
     def test_resolve_independent_is_noop(self, iris_like):
@@ -464,7 +464,7 @@ class TestShareScale:
     def test_rejects_unknown_mode(self):
         df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
         c = fe.Chart(df).mark_point().encode(x="x", y="y")
-        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+        with pytest.raises(ValueError, match=r"share_scale: x must be one of"):
             (c | c).share_scale(x="smart")
 
     def test_no_shared_channels_returns_self(self):

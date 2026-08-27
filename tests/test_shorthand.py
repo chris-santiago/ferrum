@@ -35,7 +35,7 @@ def test_field_name_with_underscores_and_digits():
 def test_invalid_type_raises():
     import pytest
 
-    with pytest.raises(ValueError, match="unknown type"):
+    with pytest.raises(ValueError, match=r"parse_shorthand: type must be one of"):
         parse_shorthand("price:Z")
 
 

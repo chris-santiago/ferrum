@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 
+from ferrum._validate import validate_choice
 from .._internal import _curve_frames
 from .._internal.deps import require_sklearn
 
@@ -108,10 +109,9 @@ class ClassificationCurvesMixin(_MixinBase):
             Multiclass averaging strategy. Accepted but inert for binary
             classifiers, which have only one curve to draw.
         """
-        if average is not None and average not in ("micro", "macro", "weighted"):
-            raise ValueError(
-                f"pr_curve(average={average!r}) — expected one of "
-                "'micro', 'macro', 'weighted', or None."
+        if average is not None:
+            validate_choice(
+                "ModelSource.pr_curve", "average", average, ("micro", "macro", "weighted")
             )
         key = self._cache_key("pr_curve", average=average)
         if key in self._cache:

@@ -206,7 +206,7 @@ def test_pr_curve_bad_average_raises():
     df = load_dataset("binary_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
     source = ferrum.ModelSource(model, X, df["y"])
-    with pytest.raises(ValueError, match="expected one of"):
+    with pytest.raises(ValueError, match=r"ModelSource.pr_curve: average must be one of"):
         source.pr_curve(average="not-a-real-mode")
 
 

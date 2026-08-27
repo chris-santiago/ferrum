@@ -44,7 +44,7 @@ def test_type_underscore_and_type_are_equivalent():
 
 def test_type_underscore_validation_fires():
     """type_ with an invalid value raises ValueError (same as type=)."""
-    with pytest.raises(ValueError, match="expected one of Q, N, O, T"):
+    with pytest.raises(ValueError, match=r"X: type must be one of"):
         fm.X("hp", type_="BAD")
 
 
@@ -770,5 +770,5 @@ def test_kde_kernel_gaussian_still_default():
 def test_kde_kernel_invalid_rejected():
     """Regression: unknown kernel names should raise ValueError."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0]})
-    with pytest.raises(ValueError, match="not supported"):
+    with pytest.raises(ValueError, match=r"mark_density: kernel must be one of"):
         fm.Chart(df).mark_density(kernel="banana").encode(x="val:Q").to_svg()

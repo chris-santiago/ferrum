@@ -12,6 +12,9 @@ from typing import Dict, List, Optional, Union
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
 from ferrum._overrides import _FIGURE_CHROME_KEYS
+from ferrum._validate import validate_choice
+
+_SHARE_MODES = ("shared", "independent")
 
 
 def _embed_chart_spec(c) -> Optional[dict]:
@@ -143,10 +146,7 @@ def _validate_scale_modes(modes: Optional[Dict[str, str]], label: str, *, field:
             f"to 'shared' or 'independent'; got {type(modes).__name__}"
         )
     for ch, mode in modes.items():
-        if mode not in ("shared", "independent"):
-            raise ValueError(
-                f"{label}: {field}[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
-            )
+        validate_choice(label, f"{field}[{ch!r}]", mode, _SHARE_MODES)
 
 
 def _legend_channel_unsupported_error(label: str, channel: str) -> ValueError:
@@ -185,10 +185,7 @@ def _validate_legend_modes(legend: Optional[Dict[str, str]], label: str) -> None
     for ch, mode in legend.items():
         if ch not in _LEGEND_RESOLVE_CHANNELS:
             raise _legend_channel_unsupported_error(label, ch)
-        if mode not in ("shared", "independent"):
-            raise ValueError(
-                f"{label}: resolve.legend[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
-            )
+        validate_choice(label, f"resolve.legend[{ch!r}]", mode, _SHARE_MODES)
 
 
 def _validate_resolve(resolve: ResolveArg, label: str) -> None:
@@ -278,8 +275,7 @@ def _validate_share_modes(channels: Dict[str, str]) -> None:
         Channel name → mode mapping from a ``share_scale`` call.
     """
     for ch, mode in channels.items():
-        if mode not in ("shared", "independent"):
-            raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
+        validate_choice("share_scale", ch, mode, _SHARE_MODES)
 
 
 def _unsupported_resolve_error(kind: str) -> ValueError:

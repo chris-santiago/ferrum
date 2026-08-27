@@ -6,6 +6,7 @@ from typing import Any
 
 import polars as pl
 
+from ferrum._validate import validate_choice
 from ferrum.plots.explanation import (
     _importance_chart_from_source,
     _shap_bar_chart_from_source,
@@ -196,6 +197,7 @@ class SHAPVisualizer(FerrumVisualizer):
         self._metrics["top_abs_shap"] = _top_abs_shap(sv, self.order, sample_idx=sample_idx)
 
     def _build_chart(self) -> Any:
+        validate_choice("SHAPVisualizer", "kind", self.kind, ("beeswarm", "bar", "waterfall"))
         if self.kind == "beeswarm":
             return _shap_beeswarm_chart_from_source(
                 self._source,
@@ -212,19 +214,16 @@ class SHAPVisualizer(FerrumVisualizer):
                 background=self.background,
                 theme=self.theme,
             )
-        if self.kind == "waterfall":
-            if self.sample_idx is None:
-                raise ValueError("SHAPVisualizer(kind='waterfall') requires sample_idx=<int>.")
-            return _shap_waterfall_chart_from_source(
-                self._source,
-                sample_idx=self.sample_idx,
-                max_display=self.max_display,
-                order=self.order,
-                background=self.background,
-                theme=self.theme,
-            )
-        raise ValueError(
-            f"SHAPVisualizer(kind={self.kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'."
+        # kind == "waterfall" (validated above)
+        if self.sample_idx is None:
+            raise ValueError("SHAPVisualizer(kind='waterfall') requires sample_idx=<int>.")
+        return _shap_waterfall_chart_from_source(
+            self._source,
+            sample_idx=self.sample_idx,
+            max_display=self.max_display,
+            order=self.order,
+            background=self.background,
+            theme=self.theme,
         )
 
 

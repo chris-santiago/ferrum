@@ -369,7 +369,7 @@ class TestOrientAliasBoxplot:
 
     def test_orient_invalid_raises(self, grouped_df):
         """orient with an invalid value raises ValueError at call time."""
-        with pytest.raises(ValueError, match="orient must be 'vertical' or 'horizontal'"):
+        with pytest.raises(ValueError, match=r"mark_boxplot: orient must be one of"):
             fm.Chart(grouped_df).mark_boxplot(orient="diagonal")
 
 
@@ -386,7 +386,7 @@ class TestOrientAliasBoxen:
         assert svg_orient == svg_h, "orient='horizontal' and horizontal=True must be byte-identical"
 
     def test_orient_invalid_raises(self, grouped_df):
-        with pytest.raises(ValueError, match="orient must be 'vertical' or 'horizontal'"):
+        with pytest.raises(ValueError, match=r"mark_boxen: orient must be one of"):
             fm.Chart(grouped_df).mark_boxen(orient="upward")
 
 
@@ -444,7 +444,7 @@ class TestOrientAliasDensity:
 
     def test_orient_invalid_raises(self):
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0]})
-        with pytest.raises(ValueError, match="orient must be 'vertical' or 'horizontal'"):
+        with pytest.raises(ValueError, match=r"mark_density: orient must be one of"):
             fm.Chart(df).mark_density(orient="sideways").encode(x="val").to_svg()
 
 
@@ -471,7 +471,7 @@ class TestOrientAliasHistogram:
 
     def test_orient_invalid_raises(self):
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0]})
-        with pytest.raises(ValueError, match="orient must be 'vertical' or 'horizontal'"):
+        with pytest.raises(ValueError, match=r"mark_histogram: orient must be one of"):
             fm.Chart(df).mark_histogram(orient="diagonal").encode(x="val").to_svg()
 
 
@@ -485,7 +485,7 @@ class TestOrientAliasViolin:
         assert c_explicit.to_svg() == c_default.to_svg()
 
     def test_orient_invalid_raises(self, grouped_df):
-        with pytest.raises(ValueError, match="orient must be 'vertical' or 'horizontal'"):
+        with pytest.raises(ValueError, match=r"mark_violin: orient must be one of"):
             fm.Chart(grouped_df).mark_violin(orient="sideways").encode(x="cat", y="val")
 
     def test_horizontal_true_and_orient_horizontal_are_equivalent_at_desugar(self):

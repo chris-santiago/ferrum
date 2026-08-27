@@ -19,6 +19,7 @@ from ferrum import (
 )
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import resolve_color_groupby
 
 
@@ -307,10 +308,7 @@ def desugar_violin(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_violin() requires .encode(x=..., y=...)")
-    if inner not in ("box", "quartile", "point", None):
-        raise ValueError(
-            f"mark_violin inner must be one of 'box', 'quartile', 'point', or None; got {inner!r}"
-        )
+    validate_choice("mark_violin", "inner", inner, ("box", "quartile", "point", None))
 
     from ferrum.encoding import X, Y
 
@@ -523,10 +521,7 @@ def desugar_qq(
     >>> [layer.mark for layer in result.layers]
     ['point', 'rule']
     """
-    if distribution not in ("normal", "uniform", "exponential"):
-        raise ValueError(
-            f"mark_qq distribution must be 'normal', 'uniform', or 'exponential'; got {distribution!r}"
-        )
+    validate_choice("mark_qq", "distribution", distribution, ("normal", "uniform", "exponential"))
     transforms = [
         QQ(
             field=field,
@@ -778,8 +773,7 @@ def desugar_hex(
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
     _VALID_AGGREGATES = ("count", "mean", "sum", "min", "max", "median", "std", "var")
-    if aggregate not in _VALID_AGGREGATES:
-        raise ValueError(f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}")
+    validate_choice("mark_hex", "aggregate", aggregate, _VALID_AGGREGATES)
     if aggregate != "count" and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     from ferrum.encoding import X, Y

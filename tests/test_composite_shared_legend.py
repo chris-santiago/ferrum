@@ -267,7 +267,9 @@ def test_legend_unsupported_channel_shape_raises(chart_a, chart_b):
 
 
 def test_legend_invalid_mode_string_raises_at_construction(chart_a, chart_b):
-    with pytest.raises(ValueError, match="'shared' or 'independent'"):
+    with pytest.raises(
+        ValueError, match=r"HConcatChart: resolve\.legend\['color'\] must be one of"
+    ):
         HConcatChart([chart_a, chart_b], resolve=Resolve(legend={"color": "loud"}))
 
 

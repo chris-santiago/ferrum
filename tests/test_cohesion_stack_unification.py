@@ -2,9 +2,13 @@
 
 ENC-02: valid stack offsets were hard-coded three times with divergent
 memberships and three error formats. They are now unified onto one canonical
-``STACK_OFFSETS`` frozenset + ``_validate_stack_offset(value, *, where)`` in
-``position.py``. The three entry points (encoding ``stack=``, ``transform_stack``,
-``position.Stack``) all route through it. The encoding path layers bool/falsy
+``STACK_OFFSETS`` frozenset + ``_validate_stack_offset(value, *, func_name, param)``
+in ``position.py``, which routes through the P7 canonical ``validate_choice``.
+The three entry points (encoding ``stack=``, ``transform_stack``,
+``position.Stack``) all route through it, each naming its own real keyword
+(``"stack"`` on the encoding channel, ``"offset"`` on ``transform_stack`` and
+``Stack``) and its own ``func_name`` (the channel class, ``"transform_stack"``,
+and ``"Stack.offset"`` respectively). The encoding path layers bool/falsy
 normalization on top; transform/position accept only the three real offsets.
 
 ENC-07: X/Y/Theta/Radius no longer each override ``_validate`` with an
@@ -35,13 +39,17 @@ def test_canonical_offset_set_is_the_three_real_offsets():
     assert STACK_OFFSETS == frozenset({"zero", "normalize", "center"})
 
 
-def _canonical_core(value: str) -> str:
-    """The message body all three sites share (sans the per-site prefix)."""
-    return f"stack offset {value!r} is not valid; expected one of {sorted(STACK_OFFSETS)}"
+def _expected_message(func_name: str, param: str, value: str) -> str:
+    """The exact ``validate_choice`` template for a given call site."""
+    return (
+        f"{func_name}: {param} must be one of "
+        f"{sorted(str(c) for c in STACK_OFFSETS)}; got {value!r}"
+    )
 
 
-def test_all_three_entry_points_share_one_canonical_message():
-    """encode / transform_stack / Stack all fail with the same canonical body."""
+def test_all_three_entry_points_share_one_canonical_validator():
+    """encode / transform_stack / Stack all fail through the same validator,
+    each naming its own real keyword and call-site label."""
     bad = "streamgraph"
 
     with pytest.raises(ValueError) as enc_exc:
@@ -51,34 +59,24 @@ def test_all_three_entry_points_share_one_canonical_message():
     with pytest.raises(ValueError) as pos_exc:
         fm.Stack(offset=bad)
 
-    core = _canonical_core(bad)
-    enc_msg = str(enc_exc.value)
-    xform_msg = str(xform_exc.value)
-    pos_msg = str(pos_exc.value)
-
-    # The shared canonical body is byte-identical across all three sites.
-    assert core in enc_msg
-    assert core in xform_msg
-    assert core in pos_msg
-
-    # Each site prefixes the body with its own label, so the full messages
-    # differ only by that ``where`` prefix.
-    assert enc_msg == f"Y: {core}"
-    assert xform_msg == f"transform_stack: {core}"
-    assert pos_msg == f"Stack: {core}"
+    # Each site names its own real keyword (encoding: "stack"; the other two:
+    # "offset") and its own func_name label, per the P7 func_name convention.
+    assert str(enc_exc.value) == _expected_message("Y", "stack", bad)
+    assert str(xform_exc.value) == _expected_message("transform_stack", "offset", bad)
+    assert str(pos_exc.value) == _expected_message("Stack.offset", "offset", bad)
 
 
 def test_validator_message_format_is_stable():
     """``_validate_stack_offset`` produces the documented template."""
     with pytest.raises(ValueError) as exc:
-        position._validate_stack_offset("nope", where="Frob")
-    assert str(exc.value) == f"Frob: {_canonical_core('nope')}"
+        position._validate_stack_offset("nope", func_name="Frob", param="offset")
+    assert str(exc.value) == _expected_message("Frob", "offset", "nope")
 
 
 def test_validator_accepts_real_offsets():
     """All three real offsets pass the canonical validator silently."""
     for off in ("zero", "normalize", "center"):
-        position._validate_stack_offset(off, where="anywhere")  # no raise
+        position._validate_stack_offset(off, func_name="anywhere", param="offset")  # no raise
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +143,7 @@ def test_stacking_channels_bad_offset_names_channel(channel_cls):
     """A bad offset raises ValueError prefixed with the channel name."""
     with pytest.raises(ValueError) as exc:
         channel_cls("v", stack="bogus")
-    assert str(exc.value) == f"{channel_cls.__name__}: {_canonical_core('bogus')}"
+    assert str(exc.value) == _expected_message(channel_cls.__name__, "stack", "bogus")
 
 
 @pytest.mark.parametrize("channel_cls", [fm.X, fm.Y, fm.Theta, fm.Radius])

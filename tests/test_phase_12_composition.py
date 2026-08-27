@@ -111,7 +111,7 @@ class TestLayerChart:
 
     def test_invalid_resolve_raises(self, chart_a):
         """LayerChart with invalid resolve value raises ValueError."""
-        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+        with pytest.raises(ValueError, match=r"LayerChart: resolve\['x'\] must be one of"):
             fm.LayerChart(chart_a, resolve={"x": "bad"})
 
     def test_charts_property(self, chart_a, chart_b):
@@ -236,7 +236,7 @@ class TestConcatChart:
 
     def test_invalid_resolve_raises(self, chart_a):
         """ConcatChart with invalid resolve value raises ValueError."""
-        with pytest.raises(ValueError, match="expected 'shared' or 'independent'"):
+        with pytest.raises(ValueError, match=r"ConcatChart: resolve\['x'\] must be one of"):
             fm.ConcatChart(chart_a, resolve={"x": "wrong"})
 
     def test_spacing_parameter(self, chart_a, chart_b):

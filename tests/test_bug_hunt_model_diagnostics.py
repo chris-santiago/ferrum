@@ -957,7 +957,7 @@ def test_pr_curve_invalid_average_raises():
     X = pl.DataFrame({"f0": [1.0, 2.0], "f1": [3.0, 4.0]})
     y = pl.Series("y", [0, 1])
     source = ferrum.ModelSource(_PredictProba(), X, y)
-    with pytest.raises(ValueError, match="expected one of"):
+    with pytest.raises(ValueError, match=r"ModelSource.pr_curve: average must be one of"):
         source.pr_curve(average="bogus")
 
 
@@ -966,7 +966,7 @@ def test_importances_invalid_method_raises():
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0]})
     y = pl.Series("y", [1.0, 2.0, 3.0])
     source = ferrum.ModelSource(_MinimalPredict(), X, y)
-    with pytest.raises(ValueError, match="expected 'builtin' or 'permutation'"):
+    with pytest.raises(ValueError, match=r"ModelSource.importances: method must be one of"):
         source.importances(method="bogus")
 
 
@@ -984,7 +984,7 @@ def test_embeddings_invalid_method_raises():
     """embeddings(method='invalid') should raise ValueError."""
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0], "f1": [4.0, 5.0, 6.0]})
     source = ferrum.ModelSource(_MinimalPredict(), X)
-    with pytest.raises(ValueError, match="expected 'umap', 'tsne', or 'pca'"):
+    with pytest.raises(ValueError, match=r"ModelSource.embeddings: method must be one of"):
         source.embeddings(method="bogus")
 
 
@@ -993,7 +993,7 @@ def test_partial_dependence_invalid_kind_raises():
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0]})
     y = pl.Series("y", [1.0, 2.0, 3.0])
     source = ferrum.ModelSource(_MinimalPredict(), X, y)
-    with pytest.raises(ValueError, match="expected"):
+    with pytest.raises(ValueError, match=r"ModelSource.partial_dependence: kind must be one of"):
         source.partial_dependence(["f0"], kind="bogus")
 
 
@@ -1543,7 +1543,9 @@ def test_intercluster_distance_invalid_method_raises():
     """intercluster_distance with invalid method should raise ValueError."""
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0, 4.0, 5.0], "f1": [1.0, 2.0, 3.0, 4.0, 5.0]})
     source = ferrum.ModelSource(_ClustererModel(), X)
-    with pytest.raises(ValueError, match="expected 'mds' or 'tsne'"):
+    with pytest.raises(
+        ValueError, match=r"ModelSource.intercluster_distance: method must be one of"
+    ):
         source.intercluster_distance(k=3, method="bogus")
 
 
