@@ -379,6 +379,56 @@ All positional and appearance channels accept:
 > Href, Description, Key, XError, YError, XError2, YError2, Theta,
 > Radius); X2, Y2, and the existing `text` slot now render and were
 > moved to the honored set.
+>
+> **2026-08-27 (P1 remediation, findings-remediation batch):** the
+> Phase 9 amendment above is stale — most of the listed channels now
+> render, and `encode()` is a total function over
+> `ferrum.encoding._channel_class_map()`: every channel falls into
+> exactly one of five disjoint, test-enforced buckets
+> (`tests/test_finding_p1.py`).
+>
+> - **Honored** (own `EncodingSpec`, both chart-level and per-layer):
+>   `x`, `y`, `x2`, `y2`, `color`, `size`, `shape`, `opacity`, `text`,
+>   `tooltip`, `href`, `description`, `url`, `stroke_opacity`,
+>   `stroke_width`, `stroke_dash`, `angle`, `fill_opacity`, and — newly
+>   promoted — `key` (the Rust wire already existed via
+>   `ChartSpec(key=...)` and `scene_build::extract_keys`; Python simply
+>   never passed it through before this fix). **`key` reaches the scene
+>   graph (`MarkBatch.keys`) on both paths but has no renderer consumer
+>   yet** — static SVG output does not change with or without it, and the
+>   WASM runtime does not read it; it is bucketed Honored because it does
+>   reach its own `EncodingSpec` and the scene graph, not because it is
+>   visually rendered.
+> - **Alias** (redirect to another channel or to mark-style kwargs, no
+>   warning unless noted): `fill`/`stroke` alias to `color`
+>   (`stroke` warns once if `color` is already bound); `detail` aliases
+>   to `mark_style.detail` on every mark, but only `mark_line`,
+>   `mark_area`, and `mark_polygon`'s Rust builders read it — on any
+>   other mark it now warns once (chart-level and per-layer both; a
+>   layer's own `detail` previously reached no alias logic at all and
+>   was dropped silently).
+> - **Warn** (accepted, `warn_once`, absent from the resulting spec and
+>   output — never reaches an `EncodingSpec` or a Rust `Encoding` field):
+>   `x_error`, `y_error`, `x_error2`, `y_error2` (no
+>   explicit-error-column feature exists for `mark_errorbar`; it
+>   computes its own extents), and `tooltip_field` used as a top-level
+>   channel (it is documented as valid only inside `Tooltip(*fields)`).
+> - **Polar** (`theta`, `radius`, `theta2`, `radius2`): on the
+>   **chart-level** encoding, remapped to `x`/`y` and rendered when
+>   `CoordPolar` is set on the chart; when it is not set, they now warn
+>   once instead of being silently dropped (the prior safety-net
+>   whitelist that exempted them from any warning regardless of coord is
+>   gone). On a **layer's own** encoding (`Chart + Chart`, `Chart.layer()`),
+>   there is no per-layer `CoordPolar` remap, so a layer's own polar
+>   channel warns once and is never rendered *regardless of whether the
+>   chart's coord is `CoordPolar`* — only the chart-level channel
+>   participates in the remap.
+> - **Facet** (`facet`, `facet_row`, `facet_col`): unchanged — resolved
+>   through `resolved._facet`, never through the encoding-warn path.
+>
+> All warn messages use `ferrum._warn.warn_once("encoding", <channel>)`;
+> dedupe key is the channel name, scoped per-context via
+> `reset_warnings()` in tests exactly as before.
 
 ---
 
@@ -487,7 +537,7 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 | `mark_confusion(...)` | Confusion matrix heatmap + text | `normalize` (`None`, `"true"`, `"pred"`, `"all"`), `text_fmt` |
 | `mark_roc(...)` | ROC curve line | `average` (`None`, `"micro"`, `"macro"`, `"weighted"`), `reference_line`, `annotate_auc` |
 | `mark_pr(...)` | Precision-recall curve | `average`, `annotate_ap`, `iso_lines` |
-| `mark_calibration(...)` | Calibration curve | `n_bins`, `strategy`, `reference_line` |
+| `mark_calibration(...)` | Calibration curve | `reference_line` (see 2026-08-27 note below: `n_bins`/`strategy` removed) |
 | `mark_gain(...)` | Cumulative gain curve | `reference_lines` |
 | `mark_lift(...)` | Lift curve | `reference_line` |
 | `mark_importance(...)` | Feature importance bar | `orient`, `error_bars`, `top_k` |
@@ -502,12 +552,12 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 | `mark_discrimination_threshold(...)` | Precision, recall, F1, and queue rate vs decision threshold for binary classifiers. Useful for threshold selection under class imbalance. | `metrics` (list of metrics to display, default all four), `n_thresholds`, `threshold_line` (bool, marks estimated optimal threshold) |
 | `mark_parallel_coordinates(...)` | Parallel coordinates plot. Each sample is a polyline drawn across vertically-arranged feature axes. General-purpose: accepts any tabular data, not only model output. | `rescale` (`"minmax"`\|`"zscore"`\|`None`), `alpha`, `highlight_selection` (bool) |
 | `mark_class_prediction_error(...)` | Stacked bar chart of predicted class counts, colored by actual class. Distinct from confusion matrix: shows absolute prediction volume per class and reveals systematic over/under-prediction. | `orient`, `normalize` (bool) |
-| `mark_pca_scree(...)` | Bar chart of explained variance ratio per principal component with optional cumulative variance line overlay. | `n_components`, `cumulative_line` (bool, default `True`), `threshold_line` (float, draws a horizontal line at this cumulative variance level, e.g. 0.95) |
+| `mark_pca_scree(...)` | Bar chart of explained variance ratio per principal component with optional cumulative variance line overlay. | `cumulative_line` (bool, default `True`), `threshold_line` (float, draws a horizontal line at this cumulative variance level, e.g. 0.95) — see 2026-08-27 note below: `n_components` removed |
 | `mark_rank1d(...)` | Horizontal bar chart of feature scores from a univariate ranking algorithm. | `algorithm` (`"shapiro"`\|`"variance"`\|`"covariance"`), `orient`, `top_k` |
 | `mark_rank2d(...)` | Heatmap of pairwise feature correlations or covariances. | `algorithm` (`"pearson"`\|`"spearman"`\|`"kendall"`\|`"covariance"`), `annot` (bool), `cmap` |
 | `mark_intercluster_distance(...)` | MDS or t-SNE projection of cluster centers, with each center sized proportionally to its membership count. Completes the clustering diagnostic suite alongside `mark_silhouette`. | `method` (`"mds"`\|`"tsne"`), `min_size`, `max_size`, `label_clusters` (bool) |
 | `mark_cv_scores(...)` | Box, bar, or strip plot of cross-validation score distributions per fold. | `kind` (`"box"`\|`"bar"`\|`"strip"`), `split` (`"test"`\|`"train"`\|`"both"`) |
-| `mark_alpha_selection(...)` | CV score vs regularization parameter curve with CI band. Intended for Ridge, Lasso, ElasticNet. Distinct from `mark_validation_curve` in that it assumes a log-spaced alpha domain by default. | `log_scale` (bool, default `True`), `ci_style` (`"band"`\|`"errorbar"`), `highlight_best` (bool) |
+| `mark_alpha_selection(...)` | Mean CV score vs regularization parameter, single line (no CI band). Intended for Ridge, Lasso, ElasticNet. Distinct from `mark_validation_curve` in that it assumes a log-spaced alpha domain by default. | `log_scale` (bool, default `True`), `highlight_best` (bool) — see 2026-08-27 note below: `ci_style` removed |
 
 > **2026-05-11 (Phase 10 — Model Diagnostics):** Per-mark clarifications surfaced during
 > the 10a–10g implementation:
@@ -546,6 +596,34 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > from a single source — the metric-kind table in `ferrum._metric_labels`
 > (`_METRIC_LABEL_SPECS`), shared by both the direct-mark `AUCLabel`/`APLabel`/
 > `BrierLabel` `__radd__` path and the figure-function explicit-field path.
+
+> **2026-08-27 (P9 remediation, findings-remediation batch):** three
+> mark-level parameters listed above were accepted and silently dropped
+> (`del <param>` with no wiring); each is now either implemented or
+> removed, never a silent no-op. Removed — passing any of these now raises
+> `TypeError` naming the argument:
+>
+> - `mark_calibration(n_bins=..., strategy=...)` — removed. The mark
+>   receives already-binned curve rows (`mean_predicted`,
+>   `fraction_positive`, `count`); binning happens in
+>   `ModelSource.calibration_curve(n_bins=, strategy=)` (or the
+>   `calibration_chart` figure function, which forwards them there), so no
+>   raw prediction column ever reaches the mark layer to rebin.
+> - `mark_pca_scree(n_components=...)` — removed. Never real: no desugar
+>   ever declared it as a wired parameter, and `pca_scree_chart`'s own
+>   `n_components` is consumed entirely by
+>   `ModelSource.pca_variance(n_components=)` upstream of the mark.
+> - `mark_alpha_selection(ci_style=...)` — removed. The data contract
+>   (`alpha`, `mean_score`) carries no lower/upper variance columns, so
+>   there is no CI band to style; unlike `mark_learning_curve`/
+>   `mark_validation_curve` (both keep `ci_style`, real `{"band",
+>   "errorbar"}` vocabulary), this mark renders a single curve.
+>
+> Other P9 sites became functional rather than removed (`average` on
+> `mark_roc`/`mark_pr`, `split` on `mark_cv_scores`, `reference_line` on
+> `mark_gain`/`mark_lift`, `metrics` on `mark_discrimination_threshold`,
+> `order`/`color_bar` on `mark_shap_beeswarm`) — those already matched
+> this spec's Key Parameters columns and needed no table edit.
 
 ---
 
