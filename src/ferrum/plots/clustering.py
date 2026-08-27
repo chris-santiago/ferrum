@@ -26,6 +26,7 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart, ConcatChart, HConcatChart
 
+from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
@@ -642,7 +643,7 @@ def pca_scree_chart(
         elif isinstance(model, np.ndarray):
             x_df = pl.from_numpy(model, schema=[f"f{i}" for i in range(model.shape[1])])
         else:
-            x_df = pl.from_pandas(model)
+            x_df = to_polars(model)
 
         x_arrow = pa.RecordBatch.from_pydict({c: x_df[c].to_arrow() for c in x_df.columns})
         var_batch = _core.pca_variance(x_arrow, n_components)

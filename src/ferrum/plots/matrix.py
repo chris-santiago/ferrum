@@ -21,12 +21,12 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
+from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.plots._helpers import (
     _field_name,
     _finalize_chart,
     _merge_layers,
-    _to_polars,
     _unique_col_name,
 )
 
@@ -67,7 +67,7 @@ def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any
     import polars as pl
     from ferrum._coerce import to_arrow_table
 
-    pdf = _to_polars(data)
+    pdf = to_polars(data)
     pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
     return pdf, to_arrow_table(pdf), "_row_id"
 
@@ -219,7 +219,7 @@ def pairplot(
 
     # dropna: drop rows with any null in the selected variable columns.
     if dropna:
-        data = _to_polars(data)
+        data = to_polars(data)
         all_vars = list(dict.fromkeys(rows + cols))  # deduplicate, preserve order
         data = data.drop_nulls(subset=all_vars)
 
@@ -563,7 +563,7 @@ def _heatmap_build(
     if mask is not None:
         import polars as pl
 
-        pdf = _to_polars(data)
+        pdf = to_polars(data)
         # Build a long-form DataFrame: (id_col, "column", "value").
         n_rows = pdf.height
         n_cols = len(value_cols)
@@ -1280,7 +1280,7 @@ def _jointplot_build(
     if marginal_kind == "box":
         import polars as pl
 
-        box_data = _to_polars(data)
+        box_data = to_polars(data)
         # Guard against a user column that happens to share the synthetic
         # name -- with_columns() would otherwise silently overwrite it with
         # the constant placeholder, corrupting that column's real data
@@ -1378,7 +1378,7 @@ def _jointplot_build(
         from ferrum.encoding import Color as _Color
 
         hue_field = _field_name(hue)
-        hue_domain = sorted(_to_polars(data)[hue_field].drop_nulls().unique().to_list())
+        hue_domain = sorted(to_polars(data)[hue_field].drop_nulls().unique().to_list())
         # "type": "ordinal" is required here -- a string-only domain with no
         # explicit scale type makes the Rust scale resolver assume a
         # quantitative (f64) domain and reject the category strings (same

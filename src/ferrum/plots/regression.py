@@ -29,6 +29,7 @@ from ferrum import (
     Robust,
     Smooth,
 )
+from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
@@ -43,7 +44,6 @@ from ferrum.plots._helpers import (
     _merge_layers,
     _overlay_metrics_corner,
     _resolve_source,
-    _to_polars,
 )
 
 if TYPE_CHECKING:
@@ -479,7 +479,7 @@ def lmplot(
         pl.UInt32,
         pl.UInt64,
     )
-    data = _to_polars(data)
+    data = to_polars(data)
     casts = []
     for fld in (x, y):
         col_name = _field_name(fld)
@@ -765,7 +765,7 @@ def residplot(
 
     >>> fm.residplot(df, x="size", y="tip", robust=True)
     """
-    data = _to_polars(data)
+    data = to_polars(data)
     if dropna:
         data = data.drop_nulls(subset=[x, y])
 

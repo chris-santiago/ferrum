@@ -151,6 +151,26 @@ def normalize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
     return pa.table(new_cols, names=[tbl.schema.field(i).name for i in range(len(tbl.schema))])
 
 
+def to_polars(data: Any) -> "polars.DataFrame":
+    """Coerce any supported input to a ``polars.DataFrame``.
+
+    Backed by :func:`to_arrow_table`, so every input type accepted by
+    ``Chart(data=...)`` is accepted here: polars, pyarrow, narwhals-compatible
+    (pandas/modin/cuDF/dask/ibis), dict, list, numpy 2D. Passing a
+    ``polars.DataFrame`` returns it unchanged; everything else routes through
+    ``to_arrow_table`` and inherits its normalization (datetime unit
+    canonicalization, categorical/dictionary decoding, etc.).
+
+    This is the single canonical to-polars entry point; do not reimplement
+    this dispatch elsewhere.
+    """
+    import polars as pl
+
+    if isinstance(data, pl.DataFrame):
+        return data
+    return pl.from_arrow(to_arrow_table(data))
+
+
 def to_arrow_table(data: Any) -> "pyarrow.Table":
     """Normalize any supported input to a ``pyarrow.Table``.
 

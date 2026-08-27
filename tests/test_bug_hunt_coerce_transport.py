@@ -355,63 +355,58 @@ def test_polars_datetime_with_timezone():
 
 
 # ================================================================
-# Category: _to_polars helper (chart composition boundary)
+# Category: to_polars helper (chart composition boundary)
+#
+# Finding P4 (2026-08-27 batch) consolidated the three "coerce to polars"
+# authorities (chart.py::_to_polars, plots/_helpers.py::_to_polars,
+# plots/_helpers.py::_coerce_to_polars) into one canonical
+# ferrum._coerce.to_polars; these tests target that entry point.
 # ================================================================
 
 
 def test_to_polars_from_dict():
-    """_to_polars with dict input goes through to_arrow_table then pl.from_arrow.
-    Targets chart.py line 206: pl.from_arrow(to_arrow_table(data)).
-    """
-    from ferrum.chart import _to_polars
+    """to_polars with dict input goes through to_arrow_table then pl.from_arrow."""
+    from ferrum._coerce import to_polars
 
-    result = _to_polars({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
+    result = to_polars({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
     assert isinstance(result, pl.DataFrame)
     assert result.shape == (3, 2)
 
 
 def test_to_polars_from_pyarrow():
-    """_to_polars with pyarrow.Table input.
-    Targets chart.py line 206.
-    """
-    from ferrum.chart import _to_polars
+    """to_polars with pyarrow.Table input."""
+    from ferrum._coerce import to_polars
 
     tbl = pa.table({"x": [1, 2], "y": [3.0, 4.0]})
-    result = _to_polars(tbl)
+    result = to_polars(tbl)
     assert isinstance(result, pl.DataFrame)
     assert result.shape == (2, 2)
 
 
 def test_to_polars_from_polars_passthrough():
-    """_to_polars with polars DataFrame returns same object.
-    Targets chart.py line 204: isinstance check.
-    """
-    from ferrum.chart import _to_polars
+    """to_polars with polars DataFrame returns same object."""
+    from ferrum._coerce import to_polars
 
     df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
-    result = _to_polars(df)
+    result = to_polars(df)
     assert result is df
 
 
 def test_to_polars_from_list_of_dicts():
-    """_to_polars with list-of-dicts input.
-    Targets chart.py line 206 -> to_arrow_table -> from_pylist.
-    """
-    from ferrum.chart import _to_polars
+    """to_polars with list-of-dicts input."""
+    from ferrum._coerce import to_polars
 
-    result = _to_polars([{"x": 1, "y": 2}, {"x": 3, "y": 4}])
+    result = to_polars([{"x": 1, "y": 2}, {"x": 3, "y": 4}])
     assert isinstance(result, pl.DataFrame)
     assert result.shape == (2, 2)
 
 
 def test_to_polars_from_recordbatch():
-    """_to_polars with pyarrow RecordBatch.
-    Targets chart.py line 206 -> to_arrow_table -> from_batches.
-    """
-    from ferrum.chart import _to_polars
+    """to_polars with pyarrow RecordBatch."""
+    from ferrum._coerce import to_polars
 
     rb = pa.RecordBatch.from_pydict({"x": [1, 2], "y": [3.0, 4.0]})
-    result = _to_polars(rb)
+    result = to_polars(rb)
     assert isinstance(result, pl.DataFrame)
     assert result.shape == (2, 2)
 

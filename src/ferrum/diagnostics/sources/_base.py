@@ -41,19 +41,22 @@ _PROTOCOL_ATTRS: tuple[str, ...] = (
 
 
 def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, "pl.Series | None"]:
-    """Coerce X to polars.DataFrame and y to polars.Series (or None)."""
-    if isinstance(X, pl.DataFrame):
-        X_df = X
-    elif isinstance(X, np.ndarray):
+    """Coerce X to polars.DataFrame and y to polars.Series (or None).
+
+    ``X``'s 2D-ndarray arm uses the sklearn-style ``f0, f1, ...`` feature
+    naming (distinct from ``ferrum._coerce.to_polars``'s ``col_0, col_1,
+    ...`` chart-data convention), so it stays local; every other input
+    shape (``pl.DataFrame`` passthrough, narwhals-compatible frames, dict,
+    list[dict]) delegates to the canonical ``to_polars`` coercion.
+    """
+    if isinstance(X, np.ndarray):
         if X.ndim != 2:
             raise ValueError(f"X must be 2D; got shape {X.shape}")
         X_df = pl.from_numpy(X, schema=[f"f{i}" for i in range(X.shape[1])])
     else:
-        # Route through ferrum's existing input-normalization to a pyarrow Table,
-        # then convert to polars.
-        from ferrum._coerce import to_arrow_table
+        from ferrum._coerce import to_polars
 
-        X_df = pl.from_arrow(to_arrow_table(X))
+        X_df = to_polars(X)
         if not isinstance(X_df, pl.DataFrame):
             raise TypeError(f"Could not coerce X to a polars DataFrame; got {type(X_df).__name__}")
 

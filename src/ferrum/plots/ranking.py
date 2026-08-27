@@ -27,11 +27,11 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart
 
+from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
-    _coerce_to_polars,
     _finalize_chart,
     _resolve_first_param,
     _resolve_source,
@@ -705,6 +705,50 @@ def _rank2d_chart_from_dataframe(
 # ---------------------------------------------------------------------------
 # Parallel coordinates helpers
 # ---------------------------------------------------------------------------
+
+
+def _coerce_to_polars(data: Any) -> pl.DataFrame:
+    """Coerce ``parallel_coordinates``' data argument into a polars DataFrame.
+
+    Every input type :func:`ferrum._coerce.to_polars` accepts (polars,
+    pyarrow, narwhals-compatible pandas/modin/cuDF/dask/ibis, dict,
+    list[dict], numpy 2D) is normalized identically to every other coercion
+    call site — including the datetime/categorical normalization
+    ``to_arrow_table`` applies, which a pandas frame would otherwise skip.
+
+    A bare ``list``/``tuple`` input (list-of-lists) carries no column
+    metadata, and ``to_arrow_table`` rejects it outright (it requires a list
+    of dicts), so those two types alone get a ``col_0, col_1, ...`` fallback
+    frame — matching the ``to_arrow_table`` numpy-2D naming convention, so
+    those names become the parallel-coordinates axis labels when
+    ``features=None``. Every other input, including a 2D numpy array (which
+    ``to_arrow_table`` already accepts directly, column-name-free), goes
+    through ``to_polars`` alone.
+
+    The fallback is gated on *input type*, not on "``to_polars`` raised a
+    ``TypeError``": ``pyarrow.lib.ArrowTypeError`` (and narwhals' own failure
+    surface) are both ``TypeError`` subclasses, so a genuinely named frame
+    whose conversion fails (e.g. a pandas frame with an extension dtype
+    ``to_arrow_table`` can't natively convert) must raise loudly instead of
+    silently discarding its real column names for ``col_0, col_1, ...``.
+    """
+    if isinstance(data, (list, tuple)):
+        try:
+            return to_polars(data)
+        except TypeError as exc:
+            import numpy as np
+
+            try:
+                arr = np.asarray(data, dtype=np.float64)
+            except (ValueError, TypeError):
+                # Re-raise the original to_polars failure (not `from None`),
+                # so this numpy attempt's own exception stays visible on
+                # __context__ for diagnosis rather than being suppressed.
+                raise exc
+            if arr.ndim != 2:
+                raise exc
+            return pl.DataFrame({f"col_{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+    return to_polars(data)
 
 
 def _resolve_pc_features(

@@ -24,8 +24,9 @@ from ferrum import (
     Jitter,
     Stack,
 )
+from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
-from ferrum.plots._helpers import _finalize_chart, _to_polars
+from ferrum.plots._helpers import _finalize_chart
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +59,7 @@ def _count_facet_levels(data: Any, field: str) -> int:
     degrades gracefully to the default size rather than raising.
     """
     try:
-        df = _to_polars(data)
+        df = to_polars(data)
         if field not in df.columns:
             return 1
         return df[field].n_unique()

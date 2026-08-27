@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 if TYPE_CHECKING:
     from ferrum._interactive import InteractiveChart
 
-from ferrum._coerce import to_arrow_table
+from ferrum._coerce import to_arrow_table, to_polars
 from ferrum._desugar import _resolve_pending_impl
 from ferrum._layer import _Layer, _PendingMark
 from ferrum._layer_transforms import (
@@ -370,19 +370,6 @@ def _check_param_collision(
         f"Reactive-parameter name collision ({context}): {detail}. "
         f"A name must resolve to a single reactive-object kind. Rename one of them."
     )
-
-
-def _to_polars(data):
-    """Convert arbitrary chart data to a polars DataFrame.
-
-    Used by ``__add__`` to null-pad merge when two charts have
-    different data.
-    """
-    import polars as pl
-
-    if isinstance(data, pl.DataFrame):
-        return data
-    return pl.from_arrow(to_arrow_table(data))
 
 
 def _coalesce_facet_rhs_columns(chart: "Chart") -> "Chart":
@@ -1486,12 +1473,12 @@ class Chart(
                     # becomes the chart's data.
                     import polars as pl
 
-                    layer_df = _to_polars(ly.data)
+                    layer_df = to_polars(ly.data)
                     if new._data is None:
                         new._data = layer_df
                     else:
                         try:
-                            chart_df = _to_polars(new._data)
+                            chart_df = to_polars(new._data)
                             new._data = pl.concat([chart_df, layer_df], how="diagonal")
                         except (TypeError, ValueError):
                             new._data = layer_df
@@ -1724,8 +1711,8 @@ class Chart(
         if not self._shares_data_with(other):
             import polars as pl
 
-            lhs_df = _to_polars(self._data)
-            rhs_df = _to_polars(other._data)
+            lhs_df = to_polars(self._data)
+            rhs_df = to_polars(other._data)
             overlap = set(lhs_df.columns) & set(rhs_df.columns)
 
             if overlap:
