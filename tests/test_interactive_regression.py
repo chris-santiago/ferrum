@@ -1022,7 +1022,18 @@ def _find_raw_nodes(scene: dict) -> list[dict]:
     for region in ("title", "legend", "decorations"):
         _walk(scene.get(region, []))
     for panel in scene.get("panels", []):
-        for region in ("grid", "axes", "annotations", "strip_title"):
+        # Every node-bearing panel slot, in paint order. `below_marks` and
+        # `chrome_above` are the typed chrome/content slots added by GH #89B;
+        # omitting them here would let a Raw node hide in one of them and this
+        # regression pass vacuously.
+        for region in (
+            "grid",
+            "below_marks",
+            "axes",
+            "chrome_above",
+            "annotations",
+            "strip_title",
+        ):
             _walk(panel.get(region, []))
         for batch in panel.get("marks", []):
             _walk(batch.get("nodes", []))

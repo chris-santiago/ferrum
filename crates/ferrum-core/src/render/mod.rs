@@ -272,6 +272,16 @@ pub enum RenderWarning {
     /// no-op-ing. `adjustment` is the adjustment name (e.g. `"dodge"`); `reason`
     /// explains which column failed and why.
     PositionAdjustSkipped { adjustment: String, reason: String },
+    /// An overlay group's layers reserved chrome gutters (legend strips, axis
+    /// bands, title band) that between them leave no common plot area, so the
+    /// per-side-max intersection degenerated and no shared rect could be
+    /// imposed (GH #89A). Every layer then keeps its own geometry AND its own
+    /// chrome — the honest degradation, since deduplicating chrome would leave
+    /// the surviving axes describing a rect the other layers' marks never
+    /// used. `layers` is the size of the affected group. Emitted because a
+    /// doubled-chrome chart is otherwise hard to attribute: the cause is the
+    /// layers' own gutter requests, not the overlay.
+    OverlayGuttersDiverged { layers: usize },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -320,6 +330,10 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "{adjustment} could not be applied ({reason}); marks were not offset"
             ),
+            RenderWarning::OverlayGuttersDiverged { layers } => write!(
+                f,
+                "overlay gutters diverged; {layers} layers render with independent chrome"
+            ),
         }
     }
 }
@@ -360,6 +374,7 @@ mod tests {
                 adjustment: "dodge".into(),
                 reason: "by-column 'grp' not found in data".into(),
             },
+            RenderWarning::OverlayGuttersDiverged { layers: 2 },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -401,6 +416,13 @@ mod tests {
         let dropped_text = format!("{dropped}");
         assert!(dropped_text.contains("facet panel(s) were dropped"));
         assert!(dropped_text.contains("col_cat=c2"));
+
+        // GH #89A: names the CAUSE (the layers' own gutters), not the symptom.
+        let diverged = RenderWarning::OverlayGuttersDiverged { layers: 2 };
+        let diverged_text = format!("{diverged}");
+        assert!(diverged_text.contains("overlay gutters diverged"), "{diverged_text}");
+        assert!(diverged_text.contains("independent chrome"), "{diverged_text}");
+        assert!(!diverged_text.contains("OverlayGuttersDiverged"), "{diverged_text}");
     }
 
     #[test]
@@ -572,7 +594,7 @@ mod axis_style_fill_from_tests {
 // Task 20 — render_svg full pipeline orchestration (spec §6).
 // ---------------------------------------------------------------------------
 
-use crate::layout::{compute_layout, LegendDirection, LegendOrient, LegendOverrides, LegendSuppression, TextAnchor, ThemeInputs, Viewport};
+use crate::layout::{compute_layout, CompositeLayoutSeam, LegendDirection, LegendOrient, LegendOverrides, LegendSuppression, TextAnchor, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use chart_config::{AxisConfigSpec, ChartConfig};
@@ -1355,16 +1377,30 @@ fn prepare_and_layout(
     // Apply configure_legend overrides (level 3) — only fills in None fields.
     apply_chart_config_to_legend_overrides(&mut legend_overrides, chart_config);
     let metrics = font::FontdueMetrics::new();
-    // Composite-shared-legend seam (design §6, 2026-07-12): a composite
-    // threads per-channel legend suppression through the same `leaf_scales`
-    // context it already uses for shared-domain resolution (D4b). `prep`
-    // above was built from the SAME `leaf_scales`, so its legend bundle
-    // (`legend_entries`/`colorbar`/`legend_title`/`aux_legends`/overrides) is
-    // always fully populated here regardless of suppression — only this
-    // layout call's reservation/draw behavior is gated. `None` (every
-    // standalone render) reproduces today's layout byte-for-byte.
-    let legend_suppression = leaf_scales
-        .map(|ctx| LegendSuppression { color: ctx.suppress_color_legend, size: ctx.suppress_size_legend })
+    // Composite → layout seam: everything a composite parent imposes on this
+    // leaf's layout, threaded through the same `leaf_scales` context the
+    // composite already uses for shared-domain resolution (D4b).
+    //
+    //   - legend suppression (design §6, 2026-07-12): `prep` above was built
+    //     from the SAME `leaf_scales`, so its legend bundle
+    //     (`legend_entries`/`colorbar`/`legend_title`/`aux_legends`/overrides)
+    //     is always fully populated here regardless of suppression — only
+    //     this layout call's reservation/draw behavior is gated.
+    //   - the overlay group's shared plot region (GH #89A): replaces the
+    //     region this leaf's own axis-band reservation would produce, so
+    //     every layout product below is computed against the group's one
+    //     rect.
+    //   - chart-title suppression (GH #89A): set for a leaf whose title the
+    //     composite clears, so the band it would reserve cannot inflate that
+    //     shared rect.
+    //
+    // `None` (every standalone render) reproduces today's layout byte-for-byte.
+    let seam = leaf_scales
+        .map(|ctx| CompositeLayoutSeam {
+            legend: LegendSuppression { color: ctx.suppress_color_legend, size: ctx.suppress_size_legend },
+            plot_region: ctx.imposed_plot_region,
+            suppress_chart_title: ctx.suppress_chart_title,
+        })
         .unwrap_or_default();
     let layout = compute_layout(
         spec,
@@ -1378,7 +1414,7 @@ fn prepare_and_layout(
         &metrics,
         &legend_overrides,
         &prep.aux_legends,
-        legend_suppression,
+        seam,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
     for w in &layout.warnings {
@@ -1707,7 +1743,7 @@ mod orchestration_tests {
             effective_legend_title, prep.colorbar.as_ref(), &metrics,
             &legend_overrides,
             &prep.aux_legends,
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
         for w in &layout.warnings {
             warnings.push(RenderWarning::Layout(w.clone()));

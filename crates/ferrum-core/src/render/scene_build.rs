@@ -2908,6 +2908,7 @@ mod tests {
             }),
             warnings: Vec::new(),
             secondary_y_axes: Vec::new(),
+            plot_region: Rect::ZERO,
         }
     }
 
@@ -3323,7 +3324,7 @@ mod tests {
             &metrics,
             &crate::layout::legend::LegendOverrides::default(),
             &prep.aux_legends,
-            crate::layout::legend::LegendSuppression::default(),
+            crate::layout::CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -3903,7 +3904,7 @@ mod tests {
             &metrics,
             &crate::layout::legend::LegendOverrides::default(),
             &prep.aux_legends,
-            crate::layout::legend::LegendSuppression::default(),
+            crate::layout::CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -4148,7 +4149,7 @@ mod tests {
             &metrics,
             &crate::layout::legend::LegendOverrides::default(),
             &prep.aux_legends,
-            crate::layout::legend::LegendSuppression::default(),
+            crate::layout::CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -4262,7 +4263,7 @@ mod tests {
             &metrics,
             &crate::layout::legend::LegendOverrides::default(),
             &prep.aux_legends,
-            crate::layout::legend::LegendSuppression::default(),
+            crate::layout::CompositeLayoutSeam::default(),
         )
         .unwrap();
         let scene = build_scene(

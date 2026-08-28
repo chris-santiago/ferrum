@@ -139,7 +139,7 @@ pub fn compute_layout(
         spec, &theme, viewport, &axes, &groups, &entries, None, None, &metrics,
         &super::legend::LegendOverrides::default(),
         &[],
-        super::legend::LegendSuppression::default(),
+        super::CompositeLayoutSeam::default(),
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 

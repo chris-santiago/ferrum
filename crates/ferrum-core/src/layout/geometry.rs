@@ -69,7 +69,7 @@ impl Axis1D {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -140,6 +140,34 @@ impl Rect {
         };
         (strip, remainder)
     }
+
+    /// The rectangle common to `self` and `other` — per side, the larger
+    /// gutter of the two. Returns `Rect::ZERO` when they do not overlap.
+    ///
+    /// Used by the overlay shared-rect pre-pass (GH #89A,
+    /// `render::composite_render`): folding a group's leaves through this
+    /// yields the one plot region every leaf can lay out against without any
+    /// leaf's marks spilling across another leaf's reserved legend or axis
+    /// band.
+    ///
+    /// Two identical rects return the receiver unchanged rather than going
+    /// through the edge arithmetic below, which reconstructs `w` as
+    /// `(x + w) - x` and so may perturb it by an ulp. That keeps an overlay
+    /// whose leaves all reserve the same gutters byte-identical to a
+    /// pre-#89A render (design §7).
+    pub(crate) fn intersect(&self, other: Rect) -> Rect {
+        if *self == other {
+            return *self;
+        }
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let w = (self.x + self.w).min(other.x + other.w) - x;
+        let h = (self.y + self.h).min(other.y + other.h) - y;
+        if w <= 0.0 || h <= 0.0 {
+            return Rect::ZERO;
+        }
+        Rect { x, y, w, h }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -196,6 +224,49 @@ mod tests {
         let r0 = r(0.0, 0.0, 10.0, 100.0);
         let r1 = r0.shrink(Inset { top: 5.0, right: 6.0, bottom: 5.0, left: 6.0 });
         assert_eq!(r1, Rect::ZERO);
+    }
+
+    #[test]
+    fn rect_intersect_takes_the_larger_gutter_per_side() {
+        // Two overlay leaves' natural plot regions: the first reserves a
+        // wider left gutter, the second a taller bottom gutter. The shared
+        // rect must keep BOTH reservations (GH #89A).
+        let wide_left = r(60.0, 10.0, 200.0, 180.0);
+        let tall_bottom = r(40.0, 10.0, 220.0, 150.0);
+        assert_eq!(
+            wide_left.intersect(tall_bottom),
+            r(60.0, 10.0, 200.0, 150.0)
+        );
+        // Commutative.
+        assert_eq!(
+            tall_bottom.intersect(wide_left),
+            wide_left.intersect(tall_bottom)
+        );
+    }
+
+    #[test]
+    fn rect_intersect_disjoint_is_zero() {
+        assert_eq!(r(0.0, 0.0, 10.0, 10.0).intersect(r(20.0, 0.0, 10.0, 10.0)), Rect::ZERO);
+        // Touching edges share no area either.
+        assert_eq!(r(0.0, 0.0, 10.0, 10.0).intersect(r(10.0, 0.0, 10.0, 10.0)), Rect::ZERO);
+    }
+
+    #[test]
+    fn rect_intersect_with_self_is_bit_for_bit_identity() {
+        // Byte-stability rail (GH #89A): a homogeneous overlay group folds
+        // identical regions through `intersect`, and must come out with the
+        // members' own rect unchanged — including coordinates whose
+        // `(x + w) - w` reconstruction is not exact.
+        for r0 in [
+            r(12.5, 7.25, 300.0, 180.5),
+            r(59.5439453125, 16.0, 262.052734375, 224.9609375),
+            r(0.1, 0.2, 0.3, 0.7000000000000001),
+        ] {
+            let hit = r0.intersect(r0);
+            assert_eq!(hit, r0);
+            assert_eq!(hit.w.to_bits(), r0.w.to_bits());
+            assert_eq!(hit.h.to_bits(), r0.h.to_bits());
+        }
     }
 
     #[test]

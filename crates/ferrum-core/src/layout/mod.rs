@@ -65,6 +65,53 @@ pub struct LayoutResult {
     /// byte-identical to the pre-#52 shared path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secondary_y_axes: Vec<AxisLayout>,
+    /// The region `panels` were split from — `inner` less the chart-title
+    /// band, the legend strip, and the axis margin bands (or the region a
+    /// composite parent imposed, see [`CompositeLayoutSeam::plot_region`]).
+    ///
+    /// In-process only: `#[serde(skip)]` keeps `fm.compute_layout`'s returned
+    /// dict byte-identical, and no consumer reads this off a *deserialized*
+    /// `LayoutResult` — its one reader, the overlay shared-rect pre-pass
+    /// (`render::composite_render`), always reads it from a layout it just
+    /// computed. A deserialized value is therefore `Rect::ZERO`.
+    #[serde(skip)]
+    pub(crate) plot_region: Rect,
+}
+
+/// What a composite parent imposes on ONE leaf's own layout: legend
+/// suppression, an imposed plot region, and chart-title suppression. Bundled
+/// so a new composite-driven constraint adds a field here instead of another
+/// positional parameter on [`compute_layout`], and so all three travel
+/// together through the same seam
+/// (`render::scale_resolve::LeafScaleContext` → `render::prepare_and_layout`
+/// → here).
+///
+/// `Default` — no suppression of either kind, no imposed region — reproduces
+/// a standalone chart's layout byte-for-byte, and is what every non-composite
+/// render passes.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CompositeLayoutSeam {
+    /// Per-channel legend suppression: this leaf's color/size legend reserves
+    /// no gutter and draws nothing because the composite renders one
+    /// figure-level legend for the channel (GH #16, design §6). See
+    /// [`LegendSuppression`].
+    pub legend: LegendSuppression,
+    /// The one plot region every leaf of an all-leaves `Overlay` group lays
+    /// out against (GH #89A). `Some` replaces the region this leaf's own
+    /// axis-band reservation produced, so every later stage — facet split,
+    /// panel clamp, axis tick pixel positions, strip bands — is computed
+    /// against the group's shared rect instead of the leaf's own. The
+    /// compositor derives it as the intersection of the group leaves'
+    /// natural regions (per side, the largest gutter any leaf reserves), so
+    /// no leaf's marks can spill across another leaf's legend or axis band.
+    pub plot_region: Option<Rect>,
+    /// Reserve no chart-title band and lay out no chart title, because the
+    /// composite clears this leaf's scene title when it merges (GH #89A). Set
+    /// for exactly the non-primary overlay leaves whose chrome is dropped:
+    /// their title is never drawn, so its band must not narrow the group's
+    /// shared rect. Legends are NOT suppressed this way — they render, so
+    /// their gutters keep participating.
+    pub suppress_chart_title: bool,
 }
 
 /// Clamp a dynamically-estimated axis margin band to the per-axis
@@ -1291,12 +1338,19 @@ fn layout_panel_axes(
     (panels, axis_layouts, secondary_y_axis_layouts, warnings)
 }
 
-/// `legend_suppression` is the composite-shared-legend seam (design §6):
-/// per-channel signal that a leaf's color/size legend must reserve no gutter
-/// and draw no nodes, even though the caller still supplies its fully-built
-/// legend inputs — a composite renderer captures those for its own
-/// figure-level legend. `LegendSuppression::default()` reproduces the
-/// pre-suppression layout byte-for-byte.
+/// `seam` is what a composite parent imposes on this leaf (see
+/// [`CompositeLayoutSeam`]), all three fields:
+///
+/// - `legend` — per-channel legend suppression: reserve no gutter and draw
+///   nothing for a channel the composite renders one figure-level legend for
+///   (design §6).
+/// - `plot_region` — the overlay group's shared plot rect, replacing the one
+///   this leaf's own axis-band reservation produces (GH #89A).
+/// - `suppress_chart_title` — reserve no title band and lay out no title,
+///   for a leaf whose scene title the composite clears when it merges
+///   (GH #89A), so an undrawn title cannot inflate that shared rect.
+///
+/// `Default` reproduces a standalone chart's layout byte-for-byte.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_layout(
     spec: &crate::spec::chart::ChartSpec,
@@ -1310,7 +1364,7 @@ pub fn compute_layout(
     metrics: &dyn TextMetrics,
     legend_overrides: &legend::LegendOverrides,
     aux_legend_inputs: &[legend::AuxLegendInput],
-    legend_suppression: legend::LegendSuppression,
+    seam: CompositeLayoutSeam,
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
@@ -1354,7 +1408,14 @@ pub fn compute_layout(
     // 2b. Reserve chart-level title band (Themes-T2.5a; Schwabish SB1 adds subtitle).
     // Band height ≈ title_font_size * 1.4 + (subtitle_font_size * 1.4 if subtitle)
     //   + title_offset. Without a subtitle, layout is byte-identical to T2.5a.
-    let (chart_title_layout, inner) = reserve_chart_title(inner, spec, theme, metrics);
+    // A composite that will clear this leaf's title (GH #89A) reserves nothing
+    // and lays out no title — the same state a title-less chart is in, so the
+    // band cannot become a gutter nothing is ever drawn in.
+    let (chart_title_layout, inner) = if seam.suppress_chart_title {
+        (None, inner)
+    } else {
+        reserve_chart_title(inner, spec, theme, metrics)
+    };
 
     // 3 + 3b. Reserve the color legend strip (categorical or colorbar) plus any
     //    stacked size/shape aux blocks. Both consume the same legend gutter.
@@ -1367,15 +1428,29 @@ pub fn compute_layout(
         metrics,
         legend_overrides,
         aux_legend_inputs,
-        legend_suppression,
+        seam.legend,
     );
 
     // 4 + 5. Reserve the x/y axis margin bands, yielding the plot region. The
     //    `x_label_band` is also needed for the inter-row facet gutter below;
     //    `secondary_y_bands` (secondary-y-axis, GH #52) is one band width per
     //    `axes.secondary_y` entry, threaded to per-panel placement below.
-    let (plot_region, x_label_band, secondary_y_bands) =
+    let (natural_plot_region, x_label_band, secondary_y_bands) =
         reserve_axis_bands(inner_after_legend, axes, theme, metrics);
+
+    // 5b. Overlay shared-rect imposition (GH #89A). The ONE point where a
+    //     composite parent replaces this leaf's own plot region — placed
+    //     exactly where that region is born, so every stage after it (facet
+    //     split, degenerate-panel clamp, CoordFixed correction, axis tick
+    //     pixel positions, strip bands) is computed against the imposed rect
+    //     and no layout product is left describing a rect the marks don't
+    //     use. That is the whole point of imposing here rather than
+    //     overwriting `panels[0].plot_area` after this function returns, which
+    //     is what the pre-#89A compositor did: the overwrite left the axis
+    //     tick positions, title, and legend placement stale, so the
+    //     compositor could only dedup chrome for leaves it could prove the
+    //     staleness invisible for.
+    let plot_region = seam.plot_region.unwrap_or(natural_plot_region);
 
     // 6 + 7. Split into facet cells, then lay out each panel's strips + axes.
     //    840: compute the strip band size once and thread it to both stages.
@@ -1412,6 +1487,7 @@ pub fn compute_layout(
         chart_title: chart_title_layout,
         warnings,
         secondary_y_axes,
+        plot_region,
     })
 }
 
@@ -1430,6 +1506,7 @@ mod tests {
             chart_title: None,
             warnings: vec![],
             secondary_y_axes: vec![],
+            plot_region: Rect::ZERO,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
@@ -1437,6 +1514,9 @@ mod tests {
         assert!(!json.contains("legend"));
         assert!(!json.contains("warnings"));
         assert!(!json.contains("secondary_y_axes"));
+        // `plot_region` is in-process only (GH #89A): serializing it would
+        // add a key to `fm.compute_layout`'s returned dict.
+        assert!(!json.contains("plot_region"));
     }
 
     #[test]
@@ -1542,7 +1622,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed on minimal spec");
 
@@ -1585,14 +1665,14 @@ mod tests {
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes, &[],
             &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with no legend at all");
 
         let with_legend = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes, &[],
             &entries, None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with an active legend");
         assert!(with_legend.legend.is_some(), "unsuppressed legend must be laid out");
@@ -1605,7 +1685,7 @@ mod tests {
             &spec, &default_theme_inputs(), viewport, &axes, &[],
             &entries, None, None, &m,
             &legend::LegendOverrides::default(), &[],
-            LegendSuppression { color: true, size: false },
+            CompositeLayoutSeam { legend: LegendSuppression { color: true, size: false }, ..Default::default() },
         )
         .expect("layout should succeed with a suppressed legend");
         assert!(suppressed.legend.is_none(), "suppressed color legend must not be laid out/drawn");
@@ -1640,7 +1720,7 @@ mod tests {
         let shape_only = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes, &[],
             &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[shape_entry.clone()], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[shape_entry.clone()], CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with only a shape aux legend");
         assert_eq!(shape_only.aux_legends.len(), 1, "shape-only baseline must lay out one block");
@@ -1650,7 +1730,7 @@ mod tests {
             &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[size_entry, shape_entry],
-            LegendSuppression { color: false, size: true },
+            CompositeLayoutSeam { legend: LegendSuppression { color: false, size: true }, ..Default::default() },
         )
         .expect("layout should succeed with a suppressed size aux legend");
 
@@ -1716,7 +1796,7 @@ mod tests {
             axes.secondary_y = n_secondary_axes(n);
             compute_layout(
                 &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-                &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+                &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
             )
             .expect("layout should succeed with secondary y axes")
         };
@@ -1767,7 +1847,7 @@ mod tests {
 
         let result = compute_layout(
             &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with a rotated secondary y axis");
 
@@ -1815,7 +1895,7 @@ mod tests {
 
         let result = compute_layout(
             &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed with both axes forced to elide");
 
@@ -1882,7 +1962,7 @@ mod tests {
 
         let result = compute_layout(
             &spec, &theme, viewport, &axes, &groups, &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("faceted layout should succeed with both panels' secondary axes eliding");
 
@@ -1923,7 +2003,7 @@ mod tests {
         axes.secondary_y = n_secondary_axes(3);
         let result = compute_layout(
             &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -1963,7 +2043,7 @@ mod tests {
         baseline_axes.secondary_y = n_secondary_axes(2);
         let baseline = compute_layout(
             &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -1973,7 +2053,7 @@ mod tests {
         widened_axes.secondary_y[0].overrides.min_band = Some(widened_min);
         let widened = compute_layout(
             &spec, &theme, viewport, &widened_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2009,7 +2089,7 @@ mod tests {
         baseline_axes.secondary_y = n_secondary_axes(2);
         let baseline = compute_layout(
             &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2019,7 +2099,7 @@ mod tests {
         capped_axes.secondary_y[0].overrides.max_band = Some(capped_max);
         let capped = compute_layout(
             &spec, &theme, viewport, &capped_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2054,7 +2134,7 @@ mod tests {
 
         let result = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("layout should succeed on minimal spec");
 
@@ -2088,7 +2168,7 @@ mod tests {
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &dummy_axes(),
             &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("baseline layout");
 
@@ -2097,7 +2177,7 @@ mod tests {
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes_big,
             &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         )
         .expect("widened layout");
 
@@ -2149,14 +2229,14 @@ mod tests {
 
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &dummy_axes(),
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         ).unwrap();
 
         let mut axes = dummy_axes();
         axes.y.overrides.min_band = Some(200.0);
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         ).unwrap();
 
         let base_x = baseline.panels[0].plot_area.x;
@@ -2181,7 +2261,7 @@ mod tests {
         bottom_axes.x.title = Some("x title".into());
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &bottom_axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         ).unwrap();
         let base_plot = baseline.panels[0].plot_area;
 
@@ -2190,7 +2270,7 @@ mod tests {
         top_axes.x.orient = AxisOrient::Top;
         let result = compute_layout(
             &spec, &default_theme_inputs(), viewport, &top_axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
         ).unwrap();
         let plot = result.panels[0].plot_area;
 
@@ -2229,7 +2309,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap_err();
         match err {
@@ -2256,7 +2336,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap_err();
         match err {
@@ -2282,12 +2362,18 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, result);
+        // `plot_region` is deliberately off the wire (GH #89A): serializing it
+        // would add a key to `fm.compute_layout`'s returned dict for a purely
+        // in-process reader. It is the ONE field a round trip may drop, and
+        // this asserts exactly that — every other field survives byte-for-byte.
+        assert!(result.plot_region.w > 0.0, "the computed layout has a real plot region");
+        assert_eq!(parsed.plot_region, Rect::ZERO, "plot_region does not round-trip by design");
+        assert_eq!(parsed, LayoutResult { plot_region: Rect::ZERO, ..result });
     }
 
     use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
@@ -2337,7 +2423,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2382,7 +2468,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2413,7 +2499,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
 
         assert_eq!(result.panels.len(), 3);
@@ -2446,7 +2532,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
         assert!(result.panels[0].strip_title.is_none());
     }
@@ -2507,7 +2593,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2595,7 +2681,7 @@ mod tests {
             &short_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
 
         let long_result = compute_layout(
@@ -2603,7 +2689,7 @@ mod tests {
             &long_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
 
         let short_bottom = short_result.panels[0].plot_area.y + short_result.panels[0].plot_area.h;
@@ -2649,14 +2735,14 @@ mod tests {
             &flat_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
         let rotated_result = compute_layout(
             &spec, &default_theme_inputs(), viewport,
             &rotated_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
 
         let flat_x = flat_result.panels[0].plot_area.x;
@@ -2699,14 +2785,14 @@ mod tests {
             &axes_no_x, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
         let with_x_result = compute_layout(
             &spec, &default_theme_inputs(), viewport,
             &axes_with_x, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         ).unwrap();
 
         let no_x_bottom = no_x_result.panels[0].plot_area.y + no_x_result.panels[0].plot_area.h;
@@ -2822,7 +2908,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2900,7 +2986,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -2937,7 +3023,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -3027,7 +3113,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 
@@ -3100,7 +3186,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
-            LegendSuppression::default(),
+            CompositeLayoutSeam::default(),
         )
         .unwrap();
 

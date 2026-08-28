@@ -16,6 +16,11 @@
 //!    every leaf scene — hconcat/vconcat (linear + spacing), grid (row-major with
 //!    F20 ratio math absorbed from the deleted `grid_compose.rs`), wrap (`ncols`),
 //!    and overlay (children share one region, z-order = child order).
+//!    An overlay group's leaves additionally share one PLOT rect: a pre-pass
+//!    ([`impose_shared_overlay_rects`]) intersects their natural plot regions
+//!    and threads the result back through the same per-leaf context, so every
+//!    layer's layout products describe one geometry and the merge below can
+//!    drop the duplicate chrome (GH #89A).
 //! 3. **Scene** (here): the placed leaf scenes are merged into one graph —
 //!    panels renumbered `0..N` flat in pre-order (D4c), clip ids uniquified,
 //!    figure chrome injected via [`super::figure_chrome::title_nodes`].
@@ -281,21 +286,27 @@ pub(crate) fn render_composite_scene(
     // byte-identical to today (design §7 byte-stability invariant).
     let band_plan = plan_legend_bands(tree, &mut contexts);
 
-    // Overlay geometry-parity planning (P2 fix, S2 per design-review
-    // 2026-08-27): for a `layout: Overlay` composite node whose DIRECT
-    // children are ALL leaves (LayerChart's actual shape — every layer is one
-    // leaf), `overlay_rect_groups[i] = Some(group_start)` for every non-primary
-    // child leaf index `i`, naming the group's first (`group_start`) leaf. The
-    // per-leaf render loop below uses this to override child `i`'s OWN
-    // independently-computed `plot_area` with child `group_start`'s REAL
-    // rendered one before child `i`'s marks are built — see `render_leaf`'s
-    // doc for why this is geometry-safe. `None` (a mixed leaf/composite
-    // Overlay, or a singleton Overlay) leaves that leaf's own geometry
-    // untouched; `merge_children`'s chrome suppression below only fires where
-    // this imposition actually succeeded (`chrome_suppressed`), so an
-    // un-imposed child's axes/grid/title are never hidden without proven
-    // mark-position parity.
-    let overlay_rect_groups = plan_overlay_rect_groups(tree, n);
+    // Overlay shared-rect planning (GH #89A): for a `layout: Overlay`
+    // composite node whose DIRECT children are ALL leaves (LayerChart's actual
+    // shape — every layer is one leaf), `overlay_groups[i] = Some(group_start)`
+    // for every non-primary child leaf index `i`, naming the group's first
+    // (`group_start`) leaf. [`impose_shared_overlay_rects`] then lays every
+    // group member out once to learn its natural plot region, intersects them,
+    // and writes the result into each member's `LeafScaleContext` so the real
+    // render below computes EVERY layout product against that one rect — and
+    // PRUNES `overlay_groups` for any group it could not equalize. The merge
+    // seam reads that same (pruned) map to decide chrome suppression, so the
+    // group that shares a rect is exactly the group that dedups its chrome.
+    // A cleared entry (a mixed leaf/composite Overlay, a singleton Overlay, or
+    // a group whose intersection degenerated) leaves that leaf laying out on
+    // its own terms and keeping its chrome.
+    //
+    // `warnings` is opened here rather than with the render loop below because
+    // the pre-pass is the first stage that can produce one (a group whose
+    // gutters diverge); leaf warnings still follow in leaf pre-order after it.
+    let mut warnings: Vec<RenderWarning> = Vec::new();
+    let mut overlay_groups = plan_overlay_groups(tree, n);
+    impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
 
     // Pass 2/3 (per-leaf render): re-render each leaf with its resolved-domain
     // context so composite-shared channels land on the auto scale path (D4b). A
@@ -304,37 +315,15 @@ pub(crate) fn render_composite_scene(
     // legend bundle so the compositor can build the figure legend from it.
     let mut leaf_scenes: Vec<SceneGraph> = Vec::with_capacity(n);
     let mut bundles: Vec<Option<LeafLegendBundle>> = Vec::with_capacity(n);
-    let mut chrome_suppressed: Vec<bool> = vec![false; n];
-    let mut warnings: Vec<RenderWarning> = Vec::new();
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
         let ctx_opt = (!ctx.is_empty()).then_some(ctx);
-        // `group_start` always precedes `i` (children[0] of its Overlay node),
-        // so `leaf_scenes[group_start]` is already populated by this point in
-        // the pre-order loop.
-        let impose_plot_area = overlay_rect_groups[i].and_then(|group_start| {
-            let group_scene = &leaf_scenes[group_start];
-            (group_scene.panels.len() == 1)
-                .then(|| scene_rect_to_layout_rect(group_scene.panels[0].plot_area))
-        });
-        let (mut scene, leaf_warnings, bundle, imposition_applied) =
-            render_leaf(leaf, ctx_opt, impose_plot_area).map_err(|source| {
-                CompositeRenderError::LeafRender {
-                    kind: "leaf",
-                    index: i,
-                    source,
-                }
+        let (mut scene, leaf_warnings, bundle) =
+            render_leaf(leaf, ctx_opt).map_err(|source| CompositeRenderError::LeafRender {
+                kind: "leaf",
+                index: i,
+                source,
             })?;
-        // Geometry parity was ESTABLISHED for this leaf iff `render_leaf`
-        // itself reports it applied the override — `render_leaf` is the only
-        // place with the two gates that decide that (single-panel AND
-        // `overlay_imposition_safe`, see its doc), so this reads that
-        // decision directly rather than re-deriving it from a downstream
-        // quantity that can disagree (fixed per cycle-2 review: the prior
-        // `scene.panels.len() == 1` re-derivation missed `build_scene`'s own
-        // panel-dropping paths — a degenerate or all-empty panel — which
-        // could report success without the override ever having applied).
-        chrome_suppressed[i] = imposition_applied;
         // Uniquify each leaf's raw-fragment clip ids exactly once, keyed by the
         // leaf's global pre-order index so colorbar/legend-clip/inset def ids stay
         // disjoint across the composite (panel clips are auto-unique via the
@@ -347,11 +336,11 @@ pub(crate) fn render_composite_scene(
         warnings.extend(leaf_warnings);
     }
 
-    let band_ctx = LegendBandCtx {
+    let merge_ctx = MergeCtx {
         plan: &band_plan,
         contexts: &contexts,
         bundles: &bundles,
-        chrome_suppressed: &chrome_suppressed,
+        overlay_groups: &overlay_groups,
     };
 
     // Pass 2/3 (place + merge): walk the tree, placing each leaf scene into the
@@ -372,7 +361,7 @@ pub(crate) fn render_composite_scene(
         &mut leaf_cursor,
         &mut node_cursor,
         call_theme,
-        &band_ctx,
+        &merge_ctx,
         None,
     );
 
@@ -407,99 +396,19 @@ pub(crate) fn render_composite_scene(
 /// alongside its scene rather than dropping `PipelineOutput::warnings` when
 /// its owning `po` goes out of scope (the bug this fix closes).
 ///
-/// `impose_plot_area`, when `Some`, is a non-primary Overlay child's group
-/// leader's REAL rendered `plot_area` (P2 fix, S2 per design-review
-/// 2026-08-27, `plan_overlay_rect_groups`). When applied — strictly BETWEEN
-/// `prepare_and_layout` and `scene_build::build_scene`, by overwriting this
-/// leaf's own (independently-gutter-computed) `plot_area` before any mark is
-/// built — every remaining layout product this leaf's scene draws from is
-/// consistent with the imposed rect, not merely "harmless if stale":
-///
-/// - **Marks, annotations, clip, strip titles, the polar transform** are all
-///   re-derived FRESH from `panel.plot_area` at scene-build time (e.g.
-///   `resolve_scales_with_leaf_context`'s `(panel.plot_area.x, panel.plot_area.x
-///   + panel.plot_area.w)`, scene_build.rs:584-585; also :278, :361, :98,
-///   :1122) — nothing about their screen position is baked earlier, during
-///   `compute_layout`, so they automatically track the override.
-/// - **`AxisLayout`/grid tick positions** ARE computed during `compute_layout`
-///   against this leaf's OWN un-imposed rect, and are left stale — but
-///   [`overlay_imposition_safe`] (below) refuses the override for any leaf
-///   whose axis/grid would draw ABOVE marks (`AxisLayout::draws_above_marks`,
-///   `zindex >= 1`), which is the ONLY routing that leaks stale axis/grid
-///   content into `Panel.chrome_above` (a typed sibling of
-///   `Panel.annotations`, GH #89B/task 2) — a slot this function's caller
-///   does NOT clear. For every leaf this override actually applies to, the
-///   stale below-marks axis/grid nodes therefore land exclusively in
-///   `Panel.axes`/`Panel.grid` — see the third bullet below for the
-///   below-marks-annotation refusal's now-historical rationale.
-/// - **`layout.legend`/`layout.aux_legends`** are ALSO left un-recomputed by
-///   this override, and the merge seam never suppresses a leaf's legend (it
-///   is owned by the separate shared/per-leaf legend machinery) — so
-///   [`overlay_imposition_safe`] additionally refuses the override for any
-///   leaf that reserved legend/aux-legend gutter, since an imposed (and
-///   possibly widened) rect would otherwise place this leaf's marks across
-///   its own untouched legend box.
-/// - **`Panel.grid` IS gridlines-only, as of GH #89B (task 2).** Before that
-///   task, `scene_build.rs` folded `AnnotationSpec::Text { z: "below_marks",
-///   .. }` user-annotation nodes into the SAME below-marks bucket that
-///   became `Panel.grid` — a leaf carrying one of those (`fa.text(..., z=
-///   "below_marks")`, a public, documented annotation option) would have had
-///   that annotation's node silently deleted by the merge seam's
-///   `panel.grid.clear()`, not just its gridlines (found in review cycle 3:
-///   the same slot-commingling class as the axis/legend hazards above, with
-///   content in the chrome slot instead of chrome in the content slot). GH
-///   #89B split below-marks text annotations into a separate typed
-///   `Panel.below_marks` slot (a sibling of `Panel.grid`, not a sub-bucket of
-///   it) — `panel.grid.clear()` cannot reach one anymore, so this specific
-///   hazard is closed. [`overlay_imposition_safe`]'s refusal condition below
-///   is UNCHANGED, however: it still refuses the override for any leaf whose
-///   `chart_config.annotations` carries a below-marks entry, on the same
-///   trigger as before. That refusal is therefore now conservative rather
-///   than load-bearing — the residuals-batch design spec (§4.2) names it as
-///   one of the three former refusal shapes a later task (Task 4) retires;
-///   not touched here.
-///
-/// A leaf failing any safety check, or resolving to more than one panel,
-/// keeps its own natively-computed `plot_area` — this function reports
-/// `false` for the returned `applied` flag, and the caller
-/// (`render_composite_scene`) must NOT suppress that leaf's chrome, since
-/// nothing here re-based its geometry. That is the only two-state contract
-/// this function offers: `applied == true` iff EVERY layout product this
-/// leaf's scene draws from is safe to render with the imposed rect (so
-/// dropping its axes/grid/title at the merge seam is correct), `applied ==
-/// false` iff nothing was touched (so the leaf's own chrome must survive) —
-/// there is no state in between.
-///
-/// **Residual (named, not silently absorbed):** these three refusal doors
-/// mean P2's chrome dedup does not fire — the overlay keeps its pre-fix
-/// dual/multi chrome at each leaf's own (non-identical) rect — for any
-/// non-primary layer carrying a legend, an above-marks axis, or a
-/// below-marks text annotation. The common `fm.LayerChart(line, points.encode
-/// (color=...))` shape is exactly this: the colored layer's legend gutter
-/// makes its native rect differ from the line layer's, so imposition (and
-/// therefore dedup) never applies there, and the chart still emits both
-/// layers' axes. This is not a regression — those charts were ALREADY
-/// visibly divergent before this task (two different-length axis sets, the
-/// original P2-adjacent cue), never the identical-coordinate duplication P2
-/// was filed against — so P2-as-filed is closed for the case it targets. The
-/// gate exists BECAUSE closing the identical-coordinate case cannot also
-/// silently equalize a genuinely different geometry. Retiring the gate
-/// (equalizing every overlay leaf's chrome gutters before layout, so
-/// imposition — and dedup — could apply universally) is real follow-up work,
-/// logged to the orchestrator, not attempted here.
+/// A leaf in an all-leaves Overlay group carries its group's shared plot rect
+/// on `ctx` ([`LeafScaleContext::imposed_plot_region`], written by
+/// [`impose_shared_overlay_rects`]); `super::prepare_and_layout` hands it to
+/// `compute_layout`, which lays the leaf out against that rect from the axis
+/// -band stage onward. Nothing is patched afterwards here (GH #89A retired the
+/// post-layout `panels[0].plot_area` overwrite this function used to perform),
+/// so every layout product the leaf's scene draws from — panel rects, tick
+/// pixel positions, axis titles, strip bands, legend placement — describes the
+/// rect the marks actually land in.
 fn render_leaf(
     leaf: &CompositeLeafInput<'_>,
     ctx: Option<&LeafScaleContext>,
-    impose_plot_area: Option<LayoutRect>,
-) -> Result<
-    (
-        SceneGraph,
-        Vec<RenderWarning>,
-        Option<LeafLegendBundle>,
-        bool,
-    ),
-    RenderError,
-> {
+) -> Result<(SceneGraph, Vec<RenderWarning>, Option<LeafLegendBundle>), RenderError> {
     // `prepare_and_layout` has no viewport guard of its own — `render_svg`/
     // `render_scene_json` each check this before calling it; a composite leaf
     // bypasses those entries, so the check is repeated here.
@@ -517,13 +426,6 @@ fn render_leaf(
         leaf.chart_config,
         ctx,
     )?;
-    let mut imposition_applied = false;
-    if let Some(rect) = impose_plot_area {
-        if po.layout.panels.len() == 1 && overlay_imposition_safe(&po.layout, leaf.chart_config) {
-            po.layout.panels[0].plot_area = rect;
-            imposition_applied = true;
-        }
-    }
     // A leaf whose color and/or size legend the compositor is suppressing (design
     // §6 seam) carries a figure-legend candidate bundle: the prepared legend
     // inputs (still fully built by `prepare_render_inputs` regardless of
@@ -546,54 +448,7 @@ fn render_leaf(
         leaf.chart_config,
         ctx,
     )?;
-    Ok((scene, po.warnings, bundle, imposition_applied))
-}
-
-/// The overlay geometry-imposition safety gate (P2 fix, S2 per design-review
-/// 2026-08-27, cycle 3). `true` iff overriding `layout.panels[0].plot_area`
-/// leaves NO other layout product stale in a user-visible way — see
-/// [`render_leaf`]'s doc for the full accounting of which products are safe
-/// (re-derived fresh at scene-build time) versus which two this gate exists
-/// to rule out:
-///
-/// 1. Any axis whose `zindex` routes it to draw ABOVE marks
-///    (`AxisLayout::draws_above_marks`) — that routing lands the axis/grid
-///    nodes in `Panel.chrome_above` (a typed sibling of `Panel.annotations`,
-///    GH #89B/task 2), a slot the merge seam does not clear, so a
-///    stale-position axis would survive suppression undetected.
-/// 2. Any reserved legend/aux-legend gutter (`layout.legend`/
-///    `layout.aux_legends`) — the merge seam never suppresses a leaf's
-///    legend, so an imposed (possibly wider) rect would place marks across
-///    an unmoved legend box.
-/// 3. Any `AnnotationSpec::Text` with `z == "below_marks"` on
-///    `chart_config.annotations`. Before GH #89B (task 2), `scene_build.rs`
-///    folded those nodes into the SAME below-marks bucket that became
-///    `Panel.grid`, so `merge_children`'s `panel.grid.clear()` would
-///    silently delete the user's annotation, not just gridlines — this check
-///    existed to prevent exactly that. As of GH #89B, below-marks text
-///    annotations route into a separate typed `Panel.below_marks` slot
-///    instead, which `panel.grid.clear()` cannot reach — the hazard this
-///    check guards against no longer occurs. The refusal below is UNCHANGED
-///    and still fires on the same trigger, so it is now conservative rather
-///    than load-bearing (spec §4.2 names it as one of three former refusal
-///    shapes retired by a later task, Task 4).
-///
-/// Checked against `secondary_y_axes` too (empty for every leaf without an
-/// independent-y layer — vacuously safe there).
-fn overlay_imposition_safe(
-    layout: &crate::layout::LayoutResult,
-    chart_config: &ChartConfig,
-) -> bool {
-    let no_above_marks_axis = layout
-        .axes
-        .iter()
-        .chain(layout.secondary_y_axes.iter())
-        .all(|a| !a.draws_above_marks());
-    let no_legend_gutter = layout.legend.is_none() && layout.aux_legends.is_empty();
-    let no_below_marks_annotation = !chart_config.annotations.iter().any(
-        |a| matches!(a, super::annotation::AnnotationSpec::Text { z, .. } if z == "below_marks"),
-    );
-    no_above_marks_axis && no_legend_gutter && no_below_marks_annotation
+    Ok((scene, po.warnings, bundle))
 }
 
 /// Capture a suppressed leaf's prepared legend bundle as a figure-legend
@@ -681,20 +536,25 @@ struct LegendBandPlan {
     band_nodes: HashMap<usize, BandFlags>,
 }
 
-/// Everything the place/merge walk needs to draw a figure legend band: the plan
-/// (which nodes band which channels), the per-leaf resolved contexts (to test
-/// participation), and the per-leaf captured bundles (the legend content).
-/// `chrome_suppressed` (P2/S2 fix) is the per-leaf, leaf-index-space ground
-/// truth of whether [`render_leaf`]'s overlay rect imposition actually
-/// applied for that leaf — [`build_placed`]'s `Composite` arm consults it
-/// (via each direct child's leaf index at entry) to decide, per DIRECT child,
-/// whether dropping that child's grid/axes/title at the merge seam is
-/// geometry-safe.
-struct LegendBandCtx<'a> {
+/// The two pre-passes' output, as the place/merge walk consumes it.
+///
+/// For the figure legend band (GH #16): the plan (which nodes band which
+/// channels), the per-leaf resolved contexts (to test participation), and the
+/// per-leaf captured bundles (the legend content).
+///
+/// For overlay chrome dedup (GH #89A): `overlay_groups`, the leaf-index-space
+/// map [`plan_overlay_groups`] produced **and [`impose_shared_overlay_rects`]
+/// pruned**. [`build_placed`]'s `Composite` arm reads it (via each direct
+/// child's leaf index at entry) to decide, per DIRECT child, whether that
+/// child is a non-primary member of THIS node's overlay group. Because the
+/// pre-pass equalized exactly the groups this map still names — clearing the
+/// entries of any it could not — a child marked here has provably laid out
+/// against the rect the surviving chrome describes.
+struct MergeCtx<'a> {
     plan: &'a LegendBandPlan,
     contexts: &'a [LeafScaleContext],
     bundles: &'a [Option<LeafLegendBundle>],
-    chrome_suppressed: &'a [bool],
+    overlay_groups: &'a [Option<usize>],
 }
 
 /// A participating leaf's captured legend inputs — the figure legend's content
@@ -855,7 +715,7 @@ fn plan_legend_walk(
 }
 
 // ---------------------------------------------------------------------------
-// Overlay geometry-parity planning (P2 fix, S2 — design review 2026-08-27)
+// Overlay shared-rect planning (GH #89A)
 // ---------------------------------------------------------------------------
 
 /// For every `layout: Overlay` composite node whose DIRECT children are ALL
@@ -863,24 +723,37 @@ fn plan_legend_walk(
 /// `result[i] = Some(group_start)` for each non-primary child leaf index `i`,
 /// naming the leaf index of that Overlay node's first child. `None` for a
 /// primary (index-0) child, a leaf outside any Overlay node, a singleton
-/// Overlay (nothing to align against), or a leaf under an Overlay whose
-/// children are NOT uniformly direct leaves (a nested composite child spans
-/// more than one leaf, so "child 0's rect" isn't one value — left unhandled
-/// rather than guessed at; that Overlay's own chrome suppression then never
-/// fires either, since [`render_composite_scene`] only suppresses where this
-/// map produced an entry AND the imposition actually applied).
+/// Overlay (nothing to share with), or a leaf under an Overlay whose children
+/// are NOT uniformly direct leaves.
+///
+/// That last case — a nested composite child — is the one shape this pass
+/// leaves alone: such a child spans a whole subtree of leaves laid out in its
+/// own frame, so there is no single "this child's plot rect" to intersect or
+/// impose, and the node keeps every child's own rect and chrome (pre-#89A
+/// behavior). It is unreachable from Python lowering: `LayerChart`, the sole
+/// producer of an Overlay node (`composition.py`, `LayerChart._composite_tree`),
+/// rejects any layer that is not a plain leaf `Chart` (`_is_leaf_chart`) with a
+/// typed `ValueError` before a tree is ever built. The guard is kept because a
+/// directly-constructed wire spec can still express it, and degrading to
+/// per-child chrome is the honest response.
+///
+/// This map is the single source of truth for BOTH halves of the overlay
+/// unification: [`impose_shared_overlay_rects`] equalizes exactly these
+/// groups' plot rects, and [`build_placed`]'s merge arm suppresses chrome for
+/// exactly the leaves this map marks non-primary — so a leaf can never have
+/// its chrome dropped without having shared the rect that chrome describes.
 ///
 /// Mirrors [`plan_legend_bands`]'s leaf-index pre-pass idiom: walked once,
 /// entirely before any leaf is rendered, over the same tree shape
 /// [`build_placed`] later re-walks.
-fn plan_overlay_rect_groups(tree: &CompositeNode, n_leaves: usize) -> Vec<Option<usize>> {
+fn plan_overlay_groups(tree: &CompositeNode, n_leaves: usize) -> Vec<Option<usize>> {
     let mut groups = vec![None; n_leaves];
     let mut leaf_cursor = 0usize;
-    plan_overlay_rect_walk(tree, &mut leaf_cursor, &mut groups);
+    plan_overlay_group_walk(tree, &mut leaf_cursor, &mut groups);
     groups
 }
 
-fn plan_overlay_rect_walk(
+fn plan_overlay_group_walk(
     node: &CompositeNode,
     leaf_cursor: &mut usize,
     groups: &mut [Option<usize>],
@@ -905,24 +778,156 @@ fn plan_overlay_rect_walk(
                 }
             }
             for c in children {
-                plan_overlay_rect_walk(c, leaf_cursor, groups);
+                plan_overlay_group_walk(c, leaf_cursor, groups);
             }
         }
     }
 }
 
-/// Field-by-field conversion between the two structurally-identical `Rect`
-/// types this crate carries (`ferrum_scene::Rect` on a rendered [`Panel`],
-/// `crate::layout::Rect` on a [`crate::layout::PanelLayout`]) — no shared
-/// `From` impl exists between the two crates (scene_build.rs:259-264
-/// constructs the reverse direction the same field-by-field way).
-fn scene_rect_to_layout_rect(r: Rect) -> LayoutRect {
-    LayoutRect {
-        x: r.x,
-        y: r.y,
-        w: r.w,
-        h: r.h,
+/// Give every leaf of every overlay group ONE plot rect to lay out against
+/// (GH #89A), by writing it into each member's
+/// [`LeafScaleContext::imposed_plot_region`] before pass 2 renders anything.
+///
+/// The shared rect is the INTERSECTION of the group members' natural plot
+/// regions: per side, the largest gutter any member reserves for its legend
+/// or axis bands. Intersecting (rather than adopting the primary leaf's rect)
+/// is what lets the merge seam drop chrome at all — a non-primary leaf's own
+/// legend box, which the seam never suppresses, always sits outside the
+/// shared rect, so no leaf's marks can render across another leaf's chrome.
+///
+/// **Suppression-aware** (spec §4.2): a non-primary member's scene title WILL
+/// be cleared at the merge seam, so its title band is excluded from its
+/// natural region ([`LeafScaleContext::suppress_chart_title`], set here before
+/// the region is measured and kept set for the real render). Reserving it
+/// would push the whole group's chrome down by a band nothing is ever drawn
+/// in. Legends get the opposite treatment for the same reason: they DO
+/// render, so their gutters stay in.
+///
+/// **Coupled to the merge seam** (spec §4.2): this function mutates `groups`,
+/// the map [`build_placed`] later reads to decide chrome suppression. Any
+/// group it cannot equalize — a member whose layout failed, or an
+/// intersection that degenerates to nothing — has its entries cleared here,
+/// so those leaves keep BOTH their own geometry and their own chrome. Chrome
+/// is never dropped for a leaf that did not lay out against the shared rect;
+/// one decision, one source of truth, no re-derivation downstream.
+///
+/// Learning a member's natural region costs one extra `prepare_and_layout`
+/// per overlay leaf: the region is the product of the leaf's own data, ticks,
+/// theme and (composite-resolved) context, so it cannot be predicted without
+/// running the layout that produces it. This runs only for leaves in an
+/// all-leaves overlay group — LayerChart's two or three layers in practice,
+/// never a grid/concat composite's leaves.
+///
+/// A degenerate intersection pushes a [`RenderWarning::OverlayGuttersDiverged`]
+/// onto `warnings` (surfaced to Python by `binding::emit_warnings` like every
+/// other render warning): the resulting doubled chrome is visible but hard to
+/// attribute, and the cause — the layers' own gutter requests — is only known
+/// here.
+///
+/// A member whose layout FAILS here produces no diagnostic beyond dropping
+/// its group: `render_leaf` re-runs the identical `prepare_and_layout` call
+/// for that leaf moments later, and surfaces the identical error at its
+/// canonical position in leaf pre-order. Reporting from this pre-pass instead
+/// would change WHICH leaf's error a multi-failure tree reports — and a
+/// warning about chrome would be noise next to a render that is about to
+/// fail outright.
+fn impose_shared_overlay_rects(
+    leaves: &[CompositeLeafInput<'_>],
+    groups: &mut [Option<usize>],
+    contexts: &mut [LeafScaleContext],
+    warnings: &mut Vec<RenderWarning>,
+) {
+    // Each group's member leaf indices, leader (`group_start`) first, in leaf
+    // order. One group's members are always consecutive leaf indices — an
+    // all-leaves Overlay node's children are walked in order and each
+    // contributes exactly one leaf — so a run of equal `Some(group_start)`
+    // entries is exactly one group. Collected first so the natural-region
+    // probes below can borrow `contexts` immutably.
+    let mut members: Vec<Vec<usize>> = Vec::new();
+    for (i, group) in groups.iter().enumerate() {
+        let Some(group_start) = *group else { continue };
+        match members.last_mut() {
+            Some(g) if g[0] == group_start => g.push(i),
+            _ => members.push(vec![group_start, i]),
+        }
     }
+
+    for group in members {
+        // Measure every member as it will actually be RENDERED: the
+        // non-primary ones without the chart-title band the merge seam is
+        // about to clear. Set before the probes below, and left set for the
+        // real render, so probe and render agree.
+        for &i in &group[1..] {
+            contexts[i].suppress_chart_title = true;
+        }
+
+        let mut rect: Option<LayoutRect> = None;
+        for &i in &group {
+            let Some(natural) = natural_plot_region(&leaves[i], &contexts[i]) else {
+                rect = None;
+                break;
+            };
+            rect = Some(match rect {
+                Some(shared) => shared.intersect(natural),
+                None => natural,
+            });
+        }
+
+        // A collapsed intersection (disjoint regions — reachable when two
+        // members reserve opposite-side gutters that together exceed the
+        // viewport) would lay every member out on a zero rect.
+        match rect {
+            Some(rect) if rect.w > 0.0 && rect.h > 0.0 => {
+                for i in group {
+                    contexts[i].imposed_plot_region = Some(rect);
+                }
+            }
+            // Nothing was equalized, so nothing may be suppressed: drop the
+            // group from the map the merge seam reads, and undo the title
+            // suppression that anticipated it. Every member keeps its own
+            // geometry AND its own chrome, exactly as a nested-composite
+            // overlay child does.
+            //
+            // `Some(degenerate)` warns, `None` does not: a degenerate
+            // intersection is a real layout outcome the user can act on
+            // (narrow the gutters, widen the canvas), whereas `None` means a
+            // member's layout failed and `render_leaf` is about to raise that
+            // failure as a typed error.
+            outcome => {
+                if outcome.is_some() {
+                    warnings.push(RenderWarning::OverlayGuttersDiverged {
+                        layers: group.len(),
+                    });
+                }
+                for &i in &group[1..] {
+                    contexts[i].suppress_chart_title = false;
+                    groups[i] = None;
+                }
+            }
+        }
+    }
+}
+
+/// One leaf's plot region as it lays itself out under `ctx` — the region left
+/// by its own chart-title, legend and axis-band reservations, minus whatever
+/// `ctx` already suppresses (a non-primary overlay leaf's title band). `None`
+/// when the leaf's layout fails (see [`impose_shared_overlay_rects`]'s error
+/// contract).
+fn natural_plot_region(
+    leaf: &CompositeLeafInput<'_>,
+    ctx: &LeafScaleContext,
+) -> Option<LayoutRect> {
+    let ctx_opt = (!ctx.is_empty()).then_some(ctx);
+    super::prepare_and_layout(
+        leaf.spec,
+        leaf.batch,
+        leaf.theme,
+        leaf.viewport,
+        leaf.chart_config,
+        ctx_opt,
+    )
+    .ok()
+    .map(|po| po.layout.plot_region)
 }
 
 /// Advance one channel's [`ChannelWalk`] across a composite node, returning the
@@ -972,18 +977,18 @@ fn descend_channel(
 /// bundles empty) no band is emitted, matching design §4.
 fn apply_legend_band(
     scene: &mut SceneGraph,
-    band_ctx: &LegendBandCtx<'_>,
+    merge_ctx: &MergeCtx<'_>,
     leaf_range: std::ops::Range<usize>,
     flags: BandFlags,
 ) {
     let captured = leaf_range.into_iter().find_map(|i| {
-        let ctx = &band_ctx.contexts[i];
+        let ctx = &merge_ctx.contexts[i];
         let participates =
             (flags.color && ctx.color.is_some()) || (flags.size && ctx.size.is_some());
         if !participates {
             return None;
         }
-        match &band_ctx.bundles[i] {
+        match &merge_ctx.bundles[i] {
             Some(b) if !b.is_empty() => Some(b),
             _ => None,
         }
@@ -1259,7 +1264,7 @@ fn build_placed(
     leaf_cursor: &mut usize,
     node_cursor: &mut usize,
     call_theme: &ThemeInputs,
-    band_ctx: &LegendBandCtx<'_>,
+    merge_ctx: &MergeCtx<'_>,
     parent_layout: Option<CompositeLayout>,
 ) -> Placed {
     let mut placed = match node {
@@ -1326,9 +1331,9 @@ fn build_placed(
             // subtree is walked) — captured alongside `build_placed` so
             // `child_leaf_starts[j]` names child `j`'s own leaf index (a
             // nested-composite child's is its FIRST descendant leaf's, which
-            // never carries a `chrome_suppressed` entry — see
-            // `plan_overlay_rect_groups` — so such a child is correctly never
-            // chosen for suppression below).
+            // never carries an overlay-group entry — see `plan_overlay_groups`
+            // — so such a child is correctly never chosen for suppression
+            // below).
             let mut child_leaf_starts: Vec<usize> = Vec::with_capacity(children.len());
             let child_placed: Vec<Placed> = children
                 .iter()
@@ -1341,7 +1346,7 @@ fn build_placed(
                         leaf_cursor,
                         node_cursor,
                         call_theme,
-                        band_ctx,
+                        merge_ctx,
                         Some(*layout),
                     )
                 })
@@ -1356,54 +1361,34 @@ fn build_placed(
                 *ncols,
                 *nrows,
             );
-            // Overlay chrome suppression (P2, design §6 merge contract): child
-            // 0's grid/axes/title always wins; a non-primary child `j` is only
-            // safe to drop chrome for when its MARK geometry was actually
-            // imposed onto child 0's real rect (S2 fix — see `render_leaf`'s
-            // doc). `band_ctx.chrome_suppressed` is that per-leaf ground truth
-            // — `render_leaf`'s own `applied` return value, set alongside the
-            // imposition attempt in `render_composite_scene` — NOT re-derived
-            // here from anything downstream (cycle-2 review: a re-derived
-            // proxy can disagree with what actually happened). `render_leaf`
-            // itself refuses the override (`overlay_imposition_safe`, cycle-3
-            // review) for a leaf whose axis/grid would draw ABOVE marks
-            // (leaks stale chrome into `Panel.chrome_above`, a typed sibling
-            // of `Panel.annotations` as of GH #89B/task 2 — a slot this seam
-            // never clears), that reserves its own legend/aux-legend gutter
-            // (never suppressed here, so an imposed wider rect would run
-            // marks across it), or that carries a below-marks text
-            // annotation (before GH #89B, folded into the SAME `Panel.grid`
-            // bucket this seam clears, so clearing it would have deleted the
-            // annotation; as of GH #89B that content lives in the separate
-            // `Panel.below_marks` slot instead, which this seam's
-            // `panel.grid.clear()` cannot reach — the refusal below fires on
-            // the same trigger regardless, now conservative rather than
-            // load-bearing) — so consulting the flag (rather than suppressing
-            // unconditionally whenever `layout == Overlay`) means EVERY
-            // un-provable case — a nested composite child, an
-            // above-marks-axis child, a legend-gutter child, a below-marks-
-            // annotation child, or any other leaf the imposition genuinely
-            // could not apply to — keeps BOTH its own chrome AND the other
-            // children's, exactly today's pre-suppression cue that the
-            // panels diverge, rather than one axis silently overrun by
-            // misaligned marks, a legend a leaf's marks now render across,
-            // or a deleted annotation.
-            let suppress_chrome: Vec<bool> = if *layout == CompositeLayout::Overlay {
-                child_leaf_starts
-                    .iter()
-                    .enumerate()
-                    .map(|(j, &leaf_idx)| {
-                        j > 0
-                            && band_ctx
-                                .chrome_suppressed
-                                .get(leaf_idx)
-                                .copied()
-                                .unwrap_or(false)
-                    })
-                    .collect()
-            } else {
-                vec![false; child_placed.len()]
-            };
+            // Overlay chrome dedup (GH #89A, design §4.2): child 0's
+            // grid/axes/above-marks chrome/title is the group's chrome; every
+            // other member's duplicate of it is dropped. The condition is
+            // exactly "this direct child is a non-primary leaf of THIS node's
+            // overlay group", read off the overlay-group map AS THE
+            // SHARED-RECT PRE-PASS LEFT IT — `impose_shared_overlay_rects`
+            // clears the entries of any group it could not equalize, so a
+            // child's chrome can only be dropped when its marks and the marks
+            // under the surviving chrome were laid out against one identical
+            // rect (spec §4.2, "suppression is coupled to imposition"). There
+            // is no separate per-leaf "was it safe" flag: one decision, made
+            // where the geometry is known, read here without re-derivation.
+            // A child whose entry the pre-pass never set (a nested composite
+            // child) or cleared (a member whose layout failed, an intersection
+            // that degenerated) keeps its own chrome, matching the rect it
+            // kept.
+            //
+            // Comparing against this node's own `leaf_start` needs no
+            // `layout == Overlay` guard: a group entry exists only for the
+            // direct leaf children of an all-leaves Overlay node, and a leaf
+            // has exactly one parent — so `Some(leaf_start)` can only match at
+            // the very node that owns the group.
+            let suppress_chrome: Vec<bool> = child_leaf_starts
+                .iter()
+                .map(|&leaf_idx| {
+                    merge_ctx.overlay_groups.get(leaf_idx) == Some(&Some(leaf_start))
+                })
+                .collect();
             let mut merged = merge_children(child_placed, plan, &suppress_chrome);
             // Figure-legend band (design §5 pass 3): if this composite node
             // resolved a channel as a shared figure legend, grow the merged scene
@@ -1412,10 +1397,10 @@ fn build_placed(
             // placed and BEFORE the per-child label / root chrome below, so a
             // title band stacks above the legend exactly as it does for a
             // per-panel legend.
-            if let Some(flags) = band_ctx.plan.band_nodes.get(&node_idx) {
+            if let Some(flags) = merge_ctx.plan.band_nodes.get(&node_idx) {
                 apply_legend_band(
                     &mut merged.scene,
-                    band_ctx,
+                    merge_ctx,
                     leaf_start..*leaf_cursor,
                     *flags,
                 );
@@ -1687,48 +1672,42 @@ fn prefix_offsets(extents: &[f64], spacing: f64) -> Vec<f64> {
 /// their placement applied; non-panel nodes are translate-baked; interaction
 /// state is unioned (panel refs are already global from [`renumber_panels`]).
 ///
-/// `suppress_chrome[i]` (P2 chrome suppression, design §6 merge contract;
-/// gated for correctness by the S2 geometry-parity fix below) drops child
-/// `i`'s per-panel `grid`/`axes` and scene-level `title` when `true`, keeping
-/// every other field. **`panel.grid` IS gridlines-only, as of GH #89B (task
-/// 2).** Before that task, `scene_build.rs` folded any
-/// `AnnotationSpec::Text { z: "below_marks" }` USER annotation into the same
-/// bucket, so clearing it could delete real content, not just chrome
-/// (cycle-3 review) — this function could not, absent per-node provenance on
-/// `SceneNode` (out of scope here), distinguish a gridline from a
-/// below-marks annotation once they were both sitting in `panel.grid`; that
-/// is why `render_leaf`'s own `overlay_imposition_safe` gate refuses
-/// suppression+imposition entirely for any leaf carrying one, rather than
-/// this function trying to sort them out post hoc. GH #89B moved below-marks
-/// text annotations into a separate typed `Panel.below_marks` slot instead,
-/// so `panel.grid.clear()` below cannot reach one anymore and the original
-/// hazard this paragraph describes is closed — `overlay_imposition_safe`'s
-/// refusal is unchanged and still fires on the same trigger, now
-/// conservative rather than load-bearing (spec §4.2 names it as one of three
-/// former refusal shapes a later task, Task 4, retires). The caller
-/// ([`build_placed`]'s `Composite` arm) is the ONLY
-/// place `suppress_chrome` is decided: it is `true` exclusively for a
-/// non-primary direct-leaf child of an `Overlay` node whose marks were
-/// actually re-based onto child 0's real rendered rect (`render_leaf`'s
-/// `impose_plot_area`, [`plan_overlay_rect_groups`]) — never inferred here
-/// from `layout` alone, and never true for a leaf `render_leaf`'s own
-/// `overlay_imposition_safe` gate refused (an above-marks axis, a reserved
-/// legend/aux-legend gutter, or a below-marks text annotation — see
-/// `render_leaf`'s doc for the full accounting, including the residual this
-/// leaves: P2's dedup does not fire for a non-primary layer carrying any of
-/// the three, which keeps its own pre-fix chrome at its own rect instead).
+/// `suppress_chrome[i]` drops child `i`'s duplicate overlay chrome — the
+/// per-panel `grid`, `axes` and `chrome_above` slots plus the scene-level
+/// `title` — keeping every other field (GH #89A, design §4.2). The caller
+/// ([`build_placed`]'s `Composite` arm) is the ONLY place it is decided, and
+/// decides it structurally: `true` exactly for a non-primary direct-leaf child
+/// of an all-leaves `Overlay` node, i.e. exactly the leaves
+/// [`impose_shared_overlay_rects`] laid out against ONE shared plot rect. That
+/// coupling is what makes clearing sound — the surviving chrome describes the
+/// same rect the dropped chrome did, so this is deduplication and not a
+/// silent geometry mismatch.
+///
+/// The four cleared slots are chrome; every content slot is kept for every
+/// child. `marks`/`strip_title` (panel content — the whole point of layering),
+/// `below_marks` and `annotations` (user annotations at both z's, typed
+/// siblings of the chrome slots as of GH #89B), `legend` (owned by the
+/// separate shared/per-leaf legend machinery), `decorations`, `selections`,
+/// `background`, `chart_description`, and the interaction fold all survive.
+/// `chrome_above` is cleared BECAUSE it is chrome: GH #89B routes a
+/// `zindex >= 1` axis and its gridlines there rather than leaving them
+/// interleaved in `annotations`, so an above-marks axis on a non-primary leaf
+/// dedups exactly like a below-marks one instead of surviving as a second
+/// visible axis (the pre-#89A refusal door).
+///
 /// Overlay children do NOT share one panel rect "by construction": only their
 /// PLACEMENT ORIGIN is (`plan_overlay` translates every child by `(0, 0)`);
-/// their `plot_area` naturally differs whenever one child reserves a chrome
+/// their natural `plot_area` differs whenever one child reserves a chrome
 /// gutter (a legend, a title) another doesn't — even though composite-shared
 /// x/y forces identical DOMAINS, the reviewed defect measured real divergence
 /// (e.g. `w=520.466` vs `w=567.201` with a legend on one layer only; a
-/// `y`-offset shift with a title on one layer only). For every non-`Overlay`
-/// layout, and for any `Overlay` child this task cannot prove parity for,
-/// `suppress_chrome[i]` is `false` and every child's fields merge exactly as
-/// they did before this seam existed — the only invariant this function
-/// itself relies on is that a cleared `Vec<SceneNode>` moves nothing, which is
-/// unconditionally true regardless of geometry.
+/// `y`-offset shift with a title on one layer only). The shared-rect pre-pass,
+/// not this function, is what removes that divergence. For every non-`Overlay`
+/// layout, and for any `Overlay` node the pre-pass skipped, `suppress_chrome[i]`
+/// is `false` and every child's fields merge exactly as they did before this
+/// seam existed — the only invariant this function itself relies on is that a
+/// cleared `Vec<SceneNode>` moves nothing, which is unconditionally true
+/// regardless of geometry.
 fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bool]) -> Placed {
     let mut merged = empty_scene(plan.width, plan.height);
     let mut zoom = true;
@@ -1738,37 +1717,16 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
     for (i, (child, t)) in children.into_iter().zip(plan.placements).enumerate() {
         let mut scene = child.scene;
 
-        // Every other per-child field below is enumerated and kept for every
-        // child regardless of suppression: `marks`/`strip_title` (panel
-        // content — the whole point of layering), `legend` (owned by the
-        // existing shared/per-leaf legend-suppression machinery, untouched
-        // here), `decorations`, `selections`, `background`,
-        // `chart_description`, and the interaction fold below.
-        // `below_marks`, `annotations`, and `chrome_above` (GH #89B/task 2's
-        // typed slots) are ALSO always kept here — never cleared.
-        // `annotations` is not purely "never duplicates": an above-marks
-        // axis/grid (zindex >= 1) routes into `chrome_above` (a typed
-        // sibling of `annotations`, not the same bucket), which WOULD
-        // duplicate visually if this branch ran for such a leaf. That case
-        // never reaches this branch with `suppress_chrome[i] == true`:
-        // `render_leaf`'s `overlay_imposition_safe` gate refuses
-        // imposition+suppression for any leaf with an above-marks axis (or a
-        // reserved legend gutter, or a below-marks text annotation — see
-        // this function's doc). Before GH #89B, `panel.grid` itself was
-        // likewise not gridlines-only (the same pre-#89B routing folded
-        // below-marks TEXT ANNOTATIONS into it), which would have made
-        // clearing it here real content deletion for a leaf carrying one —
-        // exactly the third thing the safety gate exists to keep out of this
-        // branch. As of GH #89B, below-marks annotations live in the
-        // separate `panel.below_marks` slot (untouched by the
-        // `panel.grid.clear()` below), so clearing `panel.grid` itself no
-        // longer risks deleting one — the gate's refusal condition is
-        // unchanged and still fires on the same trigger regardless (spec
-        // §4.2 names this refusal shape as one Task 4 retires).
+        // The chrome slots, and only those: `grid` is gridlines-only and
+        // `chrome_above` is axis/grid-only as of GH #89B, so clearing them
+        // cannot reach a user annotation (`below_marks`/`annotations`, their
+        // typed siblings, are content and always survive). See this
+        // function's doc for the full kept/cleared enumeration.
         if suppress_chrome.get(i).copied().unwrap_or(false) {
             for panel in &mut scene.panels {
                 panel.grid.clear();
                 panel.axes.clear();
+                panel.chrome_above.clear();
             }
             scene.title.clear();
         }
@@ -3873,28 +3831,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn overlay_merge_imposes_child0_rect_on_heterogeneous_chrome_geometry() {
-        // S2 fix (rust-quality-reviewer, 2026-08-27 findings batch): the
-        // suppression above is only geometry-safe when every overlay child's
-        // MARKS actually land in the same rect child 0's surviving axis
-        // describes. A color-encoded layer 0 reserves a legend gutter a plain
-        // layer 1 does not, so their STANDALONE `plot_area`s diverge even
-        // though composite-shared x/y forces identical DOMAINS — this is the
-        // exact repro the reviewer measured pre-fix (panel widths ~520 vs
-        // ~567, a ~47px cx divergence for the same datum). Both leaves here
-        // share the SAME x/y data (`[1,2,3]`/`[10,20,30]`) so any pixel
-        // divergence can only come from the legend gutter, not the domain.
+    /// Build a 2-leaf shared-x/y Overlay tree from two specs.
+    fn overlay_tree(spec0: ChartSpec, spec1: ChartSpec) -> CompositeNode {
         let mut tree = composite(
             CompositeLayout::Overlay,
             vec![
                 CompositeNode::Leaf {
-                    spec: Box::new(color_spec()),
+                    spec: Box::new(spec0),
                     data: 0,
                     label: None,
                 },
                 CompositeNode::Leaf {
-                    spec: Box::new(scatter_spec()),
+                    spec: Box::new(spec1),
                     data: 1,
                     label: None,
                 },
@@ -3904,6 +3852,153 @@ mod tests {
             resolve.x = crate::layout::facet::ResolveMode::Shared;
             resolve.y = crate::layout::facet::ResolveMode::Shared;
         }
+        tree
+    }
+
+    #[test]
+    fn plan_overlay_groups_names_non_primary_leaves_only_under_all_leaf_overlays() {
+        // The map both halves of #89A read: rect sharing and chrome dedup.
+        let overlay = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(0), leaf_node(1), leaf_node(2)],
+        );
+        assert_eq!(
+            plan_overlay_groups(&overlay, 3),
+            vec![None, Some(0), Some(0)],
+            "every non-primary leaf names the group leader"
+        );
+
+        // Nested composite child: the whole node is left alone.
+        let nested = composite(
+            CompositeLayout::Overlay,
+            vec![
+                composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]),
+                leaf_node(2),
+            ],
+        );
+        assert_eq!(plan_overlay_groups(&nested, 3), vec![None; 3]);
+
+        // Singleton overlay: nothing to share with.
+        let singleton = composite(CompositeLayout::Overlay, vec![leaf_node(0)]);
+        assert_eq!(plan_overlay_groups(&singleton, 1), vec![None]);
+
+        // Non-overlay layouts are never grouped, and an overlay nested inside
+        // one is numbered from its own first leaf.
+        let mixed = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                leaf_node(0),
+                composite(CompositeLayout::Overlay, vec![leaf_node(1), leaf_node(2)]),
+            ],
+        );
+        assert_eq!(plan_overlay_groups(&mixed, 3), vec![None, None, Some(1)]);
+    }
+
+    #[test]
+    fn impose_shared_overlay_rects_writes_the_intersection_to_every_member() {
+        // Unit-level statement of the shared-rect contract: BOTH members —
+        // leader included — receive one identical rect, and it is the
+        // intersection (the color leaf's legend gutter narrows it), not the
+        // leader's own region.
+        let tree = overlay_tree(color_spec(), scatter_spec());
+        let h0 = LeafHold {
+            spec: color_spec(),
+            batch: xyc_batch(&[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0], &[1.0, 2.0, 3.0]),
+            ..hold()
+        };
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+
+        let mut groups = plan_overlay_groups(&tree, 2);
+        let mut contexts = vec![LeafScaleContext::default(); 2];
+        let natural: Vec<_> = (0..2)
+            .map(|i| natural_plot_region(&leaves[i], &contexts[i]).expect("leaf lays out"))
+            .collect();
+        assert_ne!(
+            natural[0], natural[1],
+            "the two leaves' natural regions must differ, or this test proves nothing"
+        );
+
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        impose_shared_overlay_rects(&leaves, &mut groups, &mut contexts, &mut warnings);
+
+        assert!(
+            warnings.is_empty(),
+            "an equalized group is the normal path and must warn about nothing: {warnings:?}"
+        );
+        let expected = natural[0].intersect(natural[1]);
+        assert_eq!(contexts[0].imposed_plot_region, Some(expected));
+        assert_eq!(
+            contexts[1].imposed_plot_region, contexts[0].imposed_plot_region,
+            "the leader shares the group's rect too — it is not the reference"
+        );
+        assert!(
+            expected.w < natural[1].w,
+            "the intersection keeps the color leaf's legend gutter for the whole group"
+        );
+        assert_eq!(
+            groups,
+            vec![None, Some(0)],
+            "an equalized group survives in the map the merge seam reads"
+        );
+    }
+
+    #[test]
+    fn impose_shared_overlay_rects_clears_the_group_it_cannot_equalize() {
+        // The coupling itself, stated at the unit level (spec §4.2): when the
+        // intersection degenerates, the pre-pass imposes nothing AND removes
+        // the group from the map `build_placed` reads — so suppression cannot
+        // fire for a leaf that kept its own geometry.
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![color_leaf(0), color_leaf(1)],
+        );
+        let labels = [
+            "a-very-long-category-label-one",
+            "a-very-long-category-label-two",
+            "a-very-long-category-label-one",
+        ];
+        let h0 = color_hold_oriented(&labels, LegendOrient::Left);
+        let h1 = color_hold_oriented(&labels, LegendOrient::Right);
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+
+        let mut groups = plan_overlay_groups(&tree, 2);
+        assert_eq!(groups, vec![None, Some(0)], "planned as one group first");
+        let mut contexts = vec![LeafScaleContext::default(); 2];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        impose_shared_overlay_rects(&leaves, &mut groups, &mut contexts, &mut warnings);
+
+        assert_eq!(
+            groups,
+            vec![None, None],
+            "the un-equalized group must be cleared from the merge seam's map"
+        );
+        // The degradation is visible (doubled chrome) but hard to attribute,
+        // so it is announced through the normal render-warning channel.
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::OverlayGuttersDiverged { layers: 2 }],
+            "a collapsed intersection must warn, naming the group size"
+        );
+        assert!(contexts.iter().all(|c| c.imposed_plot_region.is_none()));
+        assert!(
+            contexts.iter().all(|c| !c.suppress_chart_title),
+            "the title suppression that anticipated the dedup must be undone too"
+        );
+    }
+
+    #[test]
+    fn overlay_shared_rect_equalizes_heterogeneous_chrome_geometry() {
+        // GH #89A: every leaf of an overlay group lays out against ONE shared
+        // plot rect — the intersection of the leaves' natural regions. A
+        // color-encoded layer 0 reserves a legend gutter a plain layer 1 does
+        // not, so their STANDALONE `plot_area`s diverge even though
+        // composite-shared x/y forces identical DOMAINS (the reviewer's pre-fix
+        // repro: panel widths ~520 vs ~567, a ~47px cx divergence for the same
+        // datum). Both leaves here share the SAME x/y data
+        // (`[1,2,3]`/`[10,20,30]`) so any pixel divergence can only come from
+        // the legend gutter, not the domain.
+        let tree = overlay_tree(color_spec(), scatter_spec());
         let h0 = LeafHold {
             spec: color_spec(),
             batch: xyc_batch(&[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0], &[1.0, 2.0, 3.0]),
@@ -3921,8 +4016,7 @@ mod tests {
         );
         assert_eq!(
             scene.panels[0].plot_area, scene.panels[1].plot_area,
-            "child 1's plot_area must be re-based onto child 0's real rect, \
-             not its own (legend-gutter-free, therefore wider) standalone one"
+            "both children must lay out against the group's one shared rect"
         );
 
         // Pixel-parity: the same datum (x=3, the third/last point in both
@@ -3939,141 +4033,30 @@ mod tests {
         let cx1 = cx_of(&scene.panels[1]);
         assert!(
             (cx0 - cx1).abs() < 1e-9,
-            "same datum (x=3) must render at the same cx in both panels post-imposition, \
+            "same datum (x=3) must render at the same cx in both panels, \
              got panel0 cx={cx0}, panel1 cx={cx1}"
         );
 
-        // Chrome suppression must still have fired for child 1 (imposition
-        // succeeded — both leaves are single-panel), confirming this test
-        // exercises the fix, not an accidental fallback to no-suppression.
         assert!(
             !scene.panels[0].axes.is_empty(),
             "child 0's axes must survive"
         );
         assert!(
             scene.panels[1].axes.is_empty(),
-            "child 1's axes must still be dropped"
+            "child 1's duplicate axes must be dropped"
         );
     }
 
     #[test]
-    fn overlay_degrades_when_non_primary_child_axis_draws_above_marks() {
-        // S2 fix, cycle 3 (rust-quality-reviewer 2026-08-27 findings batch).
-        // GH #89B (typed chrome/content slots, task 2): a non-primary child
-        // whose x-axis carries `zindex >= 1` (`fm.Axis(zindex=1)` /
-        // `configure_axis(zindex=1)`) routes that axis's nodes into the typed
-        // `Panel.chrome_above` slot at scene-build time (scene_build.rs), a
-        // sibling of `Panel.annotations` rather than a prefix within it — and
-        // still a slot the merge seam (untouched here) never clears —
-        // suppressing this child's `panel.axes`/`panel.grid` would leave a
-        // SECOND, stale-position axis surviving in `chrome_above`. The safety
-        // gate (`overlay_imposition_safe`) must refuse BOTH imposition and
-        // suppression for this child: it keeps its own natural rect (never
-        // equal to child 0's, since nothing was imposed) AND its own chrome
-        // (axes/grid never suppressed) — the "degrade to pre-fix" door, not a
-        // partial state where one is dropped and not the other.
-        use crate::render::chart_config::AxisStyleSpec;
-
-        let mut spec1 = scatter_spec();
-        spec1.encoding.x = Some(EncodingSpec {
-            field: "x".into(),
-            axis: Some(Box::new(AxisStyleSpec {
-                zindex: Some(1),
-                ..Default::default()
-            })),
-            ..Default::default()
-        });
-
-        let mut tree = composite(
-            CompositeLayout::Overlay,
-            vec![
-                CompositeNode::Leaf {
-                    spec: Box::new(scatter_spec()),
-                    data: 0,
-                    label: None,
-                },
-                CompositeNode::Leaf {
-                    spec: Box::new(spec1.clone()),
-                    data: 1,
-                    label: None,
-                },
-            ],
-        );
-        if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.x = crate::layout::facet::ResolveMode::Shared;
-            resolve.y = crate::layout::facet::ResolveMode::Shared;
-        }
-        let h0 = hold();
-        let h1 = LeafHold {
-            spec: spec1,
-            ..hold()
-        };
-        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
-        let (scene, _warnings) =
-            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-
-        assert_eq!(scene.panels.len(), 2);
-        // Degraded, not a third state: child 1 keeps BOTH its own chrome AND
-        // its own (un-imposed) geometry — never one without the other. Y's
-        // axis (zindex unset) stays in `panel.axes` (below-marks bucket)
-        // unsuppressed; X's axis + the whole grid block route ABOVE marks
-        // into `panel.chrome_above` (GH #89B) regardless of suppression (that
-        // routing is intrinsic to `zindex >= 1`, not a P2 artifact —
-        // `panel.grid` ends up empty for this spec on ANY render path,
-        // suppressed or not, so asserting on it would not discriminate this
-        // fix). The `chrome_above` assertion below is what proves this leaf
-        // really carries the hazard the gate exists to catch.
-        assert!(
-            !scene.panels[1].axes.is_empty(),
-            "hazard child must keep its own below-marks axis (no suppression without proven parity)"
-        );
-        assert!(
-            !scene.panels[1].chrome_above.is_empty(),
-            "hazard child's above-marks axis+grid must be present in chrome_above — otherwise \
-             this test isn't exercising the routing the safety gate exists to catch"
-        );
-        assert_eq!(
-            scene.panels[0].plot_area, scene.panels[1].plot_area,
-            "same x/y data + no legend gutter on either side means the two leaves' NATIVE \
-             rects already coincide here — this test's hazard gate must fire on the axis \
-             zindex alone, not ride along on an accidental width difference (see the \
-             zindex-free heterogeneous-chrome test above for the imposed-and-differing case)"
-        );
-    }
-
-    #[test]
-    fn overlay_degrades_when_non_primary_child_reserves_legend_gutter() {
-        // S3 fix, cycle 3 (rust-quality-reviewer 2026-08-27 findings batch):
-        // the MIRRORED direction from `overlay_merge_imposes_child0_rect_on_
-        // heterogeneous_chrome_geometry` above — there the legend sat on the
-        // PRIMARY child (imposing onto its narrower rect is safe, since the
-        // non-primary child carries no legend of its own to misplace). Here
-        // the legend sits on the NON-PRIMARY child (`color_spec` as child 1),
-        // so imposing child 0's wider, gutter-free rect onto it would place
-        // child 1's marks across its own unmoved legend box
-        // (`overlay_imposition_safe`'s `no_legend_gutter` check). Must
-        // degrade: child 1 keeps its own (narrower) natural rect AND its own
-        // chrome — never a state where its axis is dropped but its rect
-        // still reflects its own legend gutter (or vice versa).
-        let mut tree = composite(
-            CompositeLayout::Overlay,
-            vec![
-                CompositeNode::Leaf {
-                    spec: Box::new(scatter_spec()),
-                    data: 0,
-                    label: None,
-                },
-                CompositeNode::Leaf {
-                    spec: Box::new(color_spec()),
-                    data: 1,
-                    label: None,
-                },
-            ],
-        );
-        if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.x = crate::layout::facet::ResolveMode::Shared;
-            resolve.y = crate::layout::facet::ResolveMode::Shared;
-        }
+    fn overlay_totality_non_primary_legend_gutter_narrows_the_shared_rect() {
+        // GH #89A, former refusal door 1 (per-leaf legend). The legend sits on
+        // the NON-PRIMARY child, the mirrored direction of the test above:
+        // pre-#89A this refused imposition (a wider child-0 rect would have run
+        // child 1's marks across its own unmoved legend box) and therefore
+        // refused dedup too, leaving two full chromes. Now the shared rect is
+        // the INTERSECTION, so child 0 adopts child 1's legend gutter, child 1's
+        // duplicate chrome drops, AND the legend still renders.
+        let tree = overlay_tree(scatter_spec(), color_spec());
         let h0 = hold();
         let h1 = LeafHold {
             spec: color_spec(),
@@ -4085,62 +4068,125 @@ mod tests {
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
-        assert_ne!(
+        assert_eq!(
             scene.panels[0].plot_area, scene.panels[1].plot_area,
-            "child 1 reserves a legend gutter child 0 does not — imposition must be refused, \
-             so the two rects stay genuinely different (degrade), not silently equalized \
-             while child 1's legend stays put"
+            "both children lay out against the group's one shared rect"
         );
         assert!(
-            !scene.panels[1].axes.is_empty(),
-            "legend-gutter child must keep its own axes (no suppression without proven parity)"
+            !scene.panels[0].axes.is_empty() && !scene.panels[0].grid.is_empty(),
+            "child 0's chrome is the group's chrome and must survive"
         );
         assert!(
-            !scene.panels[1].grid.is_empty(),
-            "legend-gutter child must keep its own grid (no suppression without proven parity)"
+            scene.panels[1].axes.is_empty() && scene.panels[1].grid.is_empty(),
+            "the legend-bearing child's duplicate chrome must be dropped (no refusal door)"
+        );
+        assert!(
+            !scene.legend.is_empty(),
+            "the non-primary child's own legend is content, not chrome — it must still render"
+        );
+
+        // The shared rect is the INTERSECTION, not child 0's rect: against a
+        // legend-free overlay of the same two viewports, the rect here must be
+        // narrower by child 1's legend gutter. This is what makes suppression
+        // sound — child 1's legend box sits outside the rect BOTH children's
+        // marks use, so nothing renders across it.
+        let plain_tree = overlay_tree(scatter_spec(), scatter_spec());
+        let p0 = hold();
+        let p1 = hold();
+        let plain_leaves = [leaf_input(&p0, 400.0, 300.0), leaf_input(&p1, 400.0, 300.0)];
+        let (plain, _) =
+            render_composite_scene(&plain_tree, &plain_leaves, &ThemeInputs::default()).unwrap();
+        assert!(
+            scene.panels[0].plot_area.w < plain.panels[0].plot_area.w,
+            "the primary child must adopt the group's largest gutter per side: shared w={} \
+             must be narrower than the legend-free overlay's w={}",
+            scene.panels[0].plot_area.w,
+            plain.panels[0].plot_area.w
         );
     }
 
     #[test]
-    fn overlay_degrades_when_non_primary_child_has_below_marks_text_annotation() {
-        // S3 fix, cycle 3 round 2 (rust-quality-reviewer 2026-08-27 findings
-        // batch). GH #89B (typed chrome/content slots, task 2) split the
-        // below-marks bucket this comment originally described: a
-        // `z="below_marks"` text annotation now routes into the typed
-        // `Panel.below_marks` slot, a sibling of `Panel.grid` rather than a
-        // sub-bucket of it — `merge_children`'s `panel.grid.clear()` (the
-        // merge seam, untouched here) can no longer reach it at all. This
-        // test's `overlay_imposition_safe` gate (checked below) still guards
-        // the ORIGINAL hazard independently, since it inspects
-        // `chart_config.annotations` directly rather than the built scene —
-        // so the gate's refusal behavior is unaffected by the slot split, and
-        // this test still asserts on the surviving content, now via its new
-        // typed slot. Same
-        // data/encoding on both leaves (only the annotation differs), so the
-        // two leaves' NATIVE rects already coincide — proving this test's
-        // hazard gate fires on the annotation alone, not an incidental width
-        // difference (same discrimination shape as the zindex test above).
+    fn overlay_totality_non_primary_above_marks_axis_renders_once() {
+        // GH #89A, former refusal door 2 (zindex >= 1 axis). A child whose
+        // x-axis carries `zindex >= 1` routes that axis's nodes into the typed
+        // `Panel.chrome_above` slot (GH #89B). Pre-#89A the merge seam did not
+        // clear that slot, so suppressing the child's `axes`/`grid` would have
+        // left a second, stale-position axis visible — the gate refused both,
+        // and the overlay kept two full chromes. Now `chrome_above` is cleared
+        // with the rest of the chrome: the axis renders exactly once, from the
+        // primary child.
+        use crate::render::chart_config::AxisStyleSpec;
+
+        let mut zindex_spec = scatter_spec();
+        zindex_spec.encoding.x = Some(EncodingSpec {
+            field: "x".into(),
+            axis: Some(Box::new(AxisStyleSpec {
+                zindex: Some(1),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+
+        let tree = overlay_tree(scatter_spec(), zindex_spec.clone());
+        let h0 = hold();
+        let h1 = LeafHold {
+            spec: zindex_spec.clone(),
+            ..hold()
+        };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(scene.panels.len(), 2);
+        assert!(
+            scene.panels[1].axes.is_empty() && scene.panels[1].grid.is_empty(),
+            "the non-primary child's below-marks chrome must be dropped"
+        );
+        assert!(
+            scene.panels[1].chrome_above.is_empty(),
+            "and so must its ABOVE-marks axis chrome — otherwise the overlay draws a second axis"
+        );
+        assert!(
+            !scene.panels[0].axes.is_empty(),
+            "the primary child's axis is the one that renders"
+        );
+        assert!(
+            !scene.panels[0].marks.is_empty() && !scene.panels[1].marks.is_empty(),
+            "dedup must not drop either layer's marks"
+        );
+
+        // Control: the same leaf as the PRIMARY child really does populate
+        // `chrome_above`, so the emptiness asserted above is this seam's
+        // clearing and not an absence of above-marks routing.
+        let primary_tree = overlay_tree(zindex_spec.clone(), scatter_spec());
+        let c0 = LeafHold {
+            spec: zindex_spec,
+            ..hold()
+        };
+        let c1 = hold();
+        let control_leaves = [leaf_input(&c0, 400.0, 300.0), leaf_input(&c1, 400.0, 300.0)];
+        let (control, _) =
+            render_composite_scene(&primary_tree, &control_leaves, &ThemeInputs::default())
+                .unwrap();
+        assert!(
+            !control.panels[0].chrome_above.is_empty(),
+            "control: an unsuppressed zindex>=1 leaf routes its axis into chrome_above"
+        );
+    }
+
+    #[test]
+    fn overlay_totality_non_primary_below_marks_annotation_survives_dedup() {
+        // GH #89A, former refusal door 3 (below-marks annotation). Pre-#89B
+        // `scene_build` folded a `z="below_marks"` text annotation into the same
+        // bucket that became `Panel.grid`, so the merge seam's
+        // `panel.grid.clear()` would have deleted the user's annotation along
+        // with the gridlines; the gate refused imposition+dedup for any leaf
+        // carrying one. GH #89B gave that content its own typed
+        // `Panel.below_marks` slot, which this seam never clears — so the
+        // chrome dedups and the annotation survives, both at once.
         use crate::render::annotation::{AnnotationSpec, CoordValue};
 
-        let mut tree = composite(
-            CompositeLayout::Overlay,
-            vec![
-                CompositeNode::Leaf {
-                    spec: Box::new(scatter_spec()),
-                    data: 0,
-                    label: None,
-                },
-                CompositeNode::Leaf {
-                    spec: Box::new(scatter_spec()),
-                    data: 1,
-                    label: None,
-                },
-            ],
-        );
-        if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.x = crate::layout::facet::ResolveMode::Shared;
-            resolve.y = crate::layout::facet::ResolveMode::Shared;
-        }
+        let tree = overlay_tree(scatter_spec(), scatter_spec());
         let cc1 = ChartConfig {
             annotations: vec![AnnotationSpec::Text {
                 x: CoordValue::Norm { norm: 0.5 },
@@ -4169,25 +4215,198 @@ mod tests {
         assert_eq!(scene.panels.len(), 2);
         assert_eq!(
             scene.panels[0].plot_area, scene.panels[1].plot_area,
-            "same x/y data + no legend + no zindex hazard means the two leaves' native rects \
-             already coincide — this test's gate must fire on the annotation alone"
+            "both children lay out against the group's one shared rect"
         );
         assert!(
-            !scene.panels[1].axes.is_empty(),
-            "annotation-hazard child must keep its own axes (no suppression without proven parity)"
+            scene.panels[1].axes.is_empty() && scene.panels[1].grid.is_empty(),
+            "the annotation-bearing child's duplicate chrome must be dropped"
         );
-        // GH #89B: below-marks text annotations route into the typed
-        // `Panel.below_marks` slot, not `Panel.grid` — see this test's
-        // updated doc comment above.
         let annotation_survived = scene.panels[1]
             .below_marks
             .iter()
             .any(|n| matches!(n, SceneNode::Text { content, .. } if content == "below marks note"));
         assert!(
             annotation_survived,
-            "the below-marks text annotation must survive in panel.below_marks — a suppressed \
-             child would have had panel.grid.clear() silently delete it under the pre-#89B schema"
+            "the below-marks text annotation is content: it must survive in panel.below_marks"
         );
+    }
+
+    #[test]
+    fn overlay_group_whose_shared_rect_collapses_keeps_every_childs_chrome() {
+        // Spec §4.2 "suppression is coupled to imposition" (amended
+        // 2026-08-28). Two leaves whose legend gutters sit on OPPOSITE sides
+        // of a narrow viewport reserve more than the whole inner width
+        // between them, so their natural regions do not overlap and the
+        // per-side-max intersection degenerates. The pre-pass declines to
+        // impose there — and because it is the single source of truth for
+        // BOTH halves, the merge seam must decline to suppress too. Dropping
+        // chrome here would be the exact silent mismatch (chrome describing a
+        // rect the marks never used) the retired gate existed to prevent.
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![color_leaf(0), color_leaf(1)],
+        );
+        // Labels long enough that each leaf's legend strip hits its
+        // half-the-inner-extent cap, so the two plot regions land on opposite
+        // halves of the viewport and share no area. Each leaf still lays out
+        // healthily on its own (both contribute a panel below) — it is only
+        // their INTERSECTION that degenerates.
+        let labels = [
+            "a-very-long-category-label-one",
+            "a-very-long-category-label-two",
+            "a-very-long-category-label-one",
+        ];
+        let h0 = color_hold_oriented(&labels, LegendOrient::Left);
+        let h1 = color_hold_oriented(&labels, LegendOrient::Right);
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let (scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(scene.panels.len(), 2);
+        // End to end, the degradation reaches the caller's warning channel
+        // (`binding::emit_warnings` forwards it to `warnings.warn`).
+        assert!(
+            warnings.contains(&RenderWarning::OverlayGuttersDiverged { layers: 2 }),
+            "the doubled chrome must be announced, not silent: {warnings:?}"
+        );
+        // The shape really is the collapse case: nothing was imposed, so the
+        // two leaves kept their own (non-overlapping) regions.
+        assert_ne!(
+            scene.panels[0].plot_area, scene.panels[1].plot_area,
+            "this test must exercise the collapse path — if the rects are equal the \
+             intersection succeeded and it proves nothing"
+        );
+        for (i, panel) in scene.panels.iter().enumerate() {
+            assert!(
+                !panel.axes.is_empty(),
+                "panel {i} must keep its own chrome: no leaf here laid out against a shared rect"
+            );
+        }
+    }
+
+    #[test]
+    fn overlay_non_primary_title_band_does_not_inflate_the_shared_rect() {
+        // Spec §4.2, suppression-aware pre-pass (amended 2026-08-28). Child 1
+        // carries a chart title the merge seam CLEARS, so reserving its title
+        // band into the shared rect would push both children's chrome down by
+        // a band nothing is ever drawn in — a phantom top gutter. The
+        // suppressed leaf's band must not participate: the group's geometry
+        // must equal the same overlay with no title at all.
+        use crate::spec::title::TitleSpec;
+
+        let mut titled = scatter_spec();
+        titled.title = Some(TitleSpec {
+            text: "LAYER2".into(),
+            ..Default::default()
+        });
+
+        let tree = overlay_tree(scatter_spec(), titled.clone());
+        let h0 = hold();
+        let h1 = LeafHold {
+            spec: titled,
+            ..hold()
+        };
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let plain_tree = overlay_tree(scatter_spec(), scatter_spec());
+        let p0 = hold();
+        let p1 = hold();
+        let plain_leaves = [leaf_input(&p0, 400.0, 300.0), leaf_input(&p1, 400.0, 300.0)];
+        let (plain, _) =
+            render_composite_scene(&plain_tree, &plain_leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(
+            scene.title.is_empty(),
+            "child 1's title is cleared by the merge seam — that is what makes its band phantom"
+        );
+        assert_eq!(
+            scene.panels[0].plot_area, plain.panels[0].plot_area,
+            "a title on a NON-PRIMARY layer must not move the group's geometry at all, since \
+             the title is never drawn"
+        );
+        assert_eq!(scene.panels[0].plot_area, scene.panels[1].plot_area);
+    }
+
+    #[test]
+    fn overlay_primary_title_band_still_reserved_for_the_group() {
+        // The other half of the same rule: the PRIMARY child's title IS drawn,
+        // so its band must still be reserved — and, through the shared rect,
+        // every other layer lays out below it.
+        use crate::spec::title::TitleSpec;
+
+        let mut titled = scatter_spec();
+        titled.title = Some(TitleSpec {
+            text: "LAYER1".into(),
+            ..Default::default()
+        });
+
+        let tree = overlay_tree(titled.clone(), scatter_spec());
+        let h0 = LeafHold {
+            spec: titled,
+            ..hold()
+        };
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let plain_tree = overlay_tree(scatter_spec(), scatter_spec());
+        let p0 = hold();
+        let p1 = hold();
+        let plain_leaves = [leaf_input(&p0, 400.0, 300.0), leaf_input(&p1, 400.0, 300.0)];
+        let (plain, _) =
+            render_composite_scene(&plain_tree, &plain_leaves, &ThemeInputs::default()).unwrap();
+
+        let title_text: Vec<&str> = scene
+            .title
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(title_text, vec!["LAYER1"], "the primary child's title renders");
+        assert!(
+            scene.panels[0].plot_area.y > plain.panels[0].plot_area.y,
+            "a drawn title reserves a real band: the group's rect must start below it"
+        );
+        assert_eq!(scene.panels[0].plot_area, scene.panels[1].plot_area);
+    }
+
+    #[test]
+    fn overlay_with_nested_composite_child_keeps_every_childs_chrome() {
+        // The one guarded shape (spec §4.2): an Overlay node with a nested
+        // composite child spans more than one leaf per child, so there is no
+        // single "this child's plot rect" to intersect or impose — the pre-pass
+        // skips it and NO child's chrome is dropped. Unreachable from Python
+        // (`LayerChart._composite_tree` rejects a non-leaf layer with a typed
+        // ValueError), reachable from a directly-constructed wire spec, which is
+        // why the guard exists.
+        let inner = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(0), leaf_node(1)],
+        );
+        let tree = composite(CompositeLayout::Overlay, vec![inner, leaf_node(2)]);
+        let h0 = hold();
+        let h1 = hold();
+        let h2 = hold();
+        let leaves = [
+            leaf_input(&h0, 300.0, 200.0),
+            leaf_input(&h1, 300.0, 200.0),
+            leaf_input(&h2, 300.0, 200.0),
+        ];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(scene.panels.len(), 3);
+        for (i, panel) in scene.panels.iter().enumerate() {
+            assert!(
+                !panel.axes.is_empty(),
+                "panel {i} must keep its own chrome under an unequalized Overlay"
+            );
+        }
     }
 
     #[test]

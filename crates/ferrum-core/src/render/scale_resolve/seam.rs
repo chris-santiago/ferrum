@@ -56,12 +56,13 @@ pub(crate) enum SharedDomain {
     Ordinal(Vec<String>),
 }
 
-/// The resolved shared domains for one leaf's shared channels (positional x/y
-/// plus non-positional color/size), plus the composite-shared-legend
-/// suppression signal (design §6 seam contract, 2026-07-12). `None` on a
-/// domain field means "no composite sharing applies" — the leaf resolves that
-/// channel exactly as it would standalone (its own data, its own explicit
-/// scale, or its own internal facet resolution).
+/// Everything a composite parent imposes on ONE leaf: the resolved shared
+/// domains for its shared channels (positional x/y plus non-positional
+/// color/size), the composite-shared-legend suppression signal (design §6
+/// seam contract, 2026-07-12), and the overlay group's shared plot region
+/// (GH #89A). `None` on a domain field means "no composite sharing applies" —
+/// the leaf resolves that channel exactly as it would standalone (its own
+/// data, its own explicit scale, or its own internal facet resolution).
 ///
 /// For `color`, a [`SharedDomain::Numeric`] is a continuous (colorbar) extent and
 /// a [`SharedDomain::Ordinal`] is the categorical (swatch) domain; for `size`,
@@ -84,6 +85,25 @@ pub(crate) struct LeafScaleContext {
     /// `false` (the default) reproduces today's per-panel legend rendering.
     pub(crate) suppress_color_legend: bool,
     pub(crate) suppress_size_legend: bool,
+    /// Layout-stage-only signal (GH #89A): the one plot region every leaf of
+    /// an all-leaves `Overlay` group lays out against, computed by the
+    /// compositor's shared-rect pre-pass as the intersection of the group
+    /// leaves' natural regions. `render::mod::prepare_and_layout` forwards it
+    /// into [`crate::layout::CompositeLayoutSeam::plot_region`], which
+    /// replaces the region this leaf's own axis-band reservation produced —
+    /// so the leaf's panels, tick pixel positions, and axis titles all
+    /// describe the group's rect, and the compositor can drop the duplicate
+    /// chrome of every non-primary leaf without leaving a stale layout
+    /// product behind. `None` (the default) leaves the leaf laying out
+    /// entirely on its own terms.
+    pub(crate) imposed_plot_region: Option<crate::layout::Rect>,
+    /// Layout-stage-only signal (GH #89A): this leaf's chart-title band must
+    /// not be reserved, because the compositor clears its scene title at the
+    /// merge seam. Set for exactly the non-primary overlay leaves whose
+    /// chrome is dropped, so a title that is never drawn cannot reserve a
+    /// phantom top gutter in the group's shared rect. `false` (the default)
+    /// reserves the band exactly as a standalone chart does.
+    pub(crate) suppress_chart_title: bool,
 }
 
 impl LeafScaleContext {
