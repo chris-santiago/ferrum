@@ -17,11 +17,11 @@
 //! - Otherwise: one polyline over all rows in batch order.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::build_color_detail_groups;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::ScaleKind;
+use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
 /// given interpolation method. Mirrors `build_line_path` but emits structured
@@ -112,7 +112,28 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     let cf = color_field(ctx, spec);
-    let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
+    // col_as_ordinal_category_str (not col_as_str), gated on the resolved
+    // color scale being category-keyed (Categorical) or absent — mirrors
+    // channels.rs::color_column_loader's `ColorInput::Category | None` gate.
+    // Unlike `area` (which always force-resolves ColorScale::Categorical,
+    // scale_resolve/mod.rs), line does not: a Quantitative-typed/-inferred
+    // color column resolves ColorScale::Continuous or ::Discretizing
+    // (ColorInput::Numeric), and must NOT be grouped here — grouping by every
+    // distinct numeric value fragments the series into (mostly) single-point
+    // groups, which the `points.len() < 2` gate below then drops, silently
+    // blanking the plot under a still-drawn colorbar legend (NF-A3 follow-up).
+    // For a Category-keyed (or scale-less) color column, Int*/Float*/Bool
+    // dtypes still split into per-category polylines matching the legend
+    // domain built by the dtype-wide distinct_values_in_order — `col_as_str`
+    // returns `Err` for non-Utf8, which previously collapsed every category
+    // into one merged polyline.
+    let color_input = ctx.scales.color.as_ref().map(|s| s.input());
+    let color_values = cf.and_then(|f| {
+        match color_input {
+            Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
+            Some(ColorInput::Numeric) => None,
+        }
+    });
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
@@ -702,6 +723,208 @@ mod tests {
         }).expect("basis interpolation must emit a Path node");
         assert!((path.fill_opacity - 1.0).abs() < 1e-12,
             "absent fill_opacity encoding must leave fill_opacity = 1.0; got {}", path.fill_opacity);
+    }
+
+    // ── NF-A3: non-Utf8 color grouping matches the legend (batch-A task 5) ──
+    // area.rs already used `col_as_ordinal_category_str`; line.rs used
+    // `col_as_str`, which returns `Err` for any non-Utf8 dtype and silently
+    // collapsed every color category into a single merged polyline.
+
+    /// Shared 3-group / 4-rows-per-group fixture, mirroring
+    /// `area.rs::make_grouped_color_batch_and_spec` so the two marks are
+    /// pinned by the same layout: x cycles 0..4, y is the row index, and the
+    /// `g` column carries the color group (dtype supplied by the caller).
+    fn make_grouped_color_batch_and_spec(
+        group_col: Arc<dyn arrow::array::Array>,
+        group_dtype: DataType,
+    ) -> (arrow::record_batch::RecordBatch, ChartSpec) {
+        use crate::spec::encoding::DataType as SDT;
+        let n = 12usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", group_dtype, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            group_col,
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        (batch, spec)
+    }
+
+    /// Regression (NF-A3): an Int64 color column must split into one
+    /// polyline per distinct value, and each polyline's stroke must be the
+    /// legend-resolved color for its group (not the theme-default fallback
+    /// every group collapsed to under the old `col_as_str` bug).
+    #[test]
+    fn line_int64_color_splits_into_n_polylines_with_legend_parity() {
+        use arrow::array::Int64Array;
+        let groups: Vec<i64> = (0..12).map(|i| (i / 4) as i64).collect();
+        let group_col: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(groups));
+        let (batch, spec) = make_grouped_color_batch_and_spec(group_col, DataType::Int64);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let color_scale = ctx.scales.color.as_ref().expect("Int64 ordinal color must resolve a categorical color scale");
+        let domain = match color_scale {
+            crate::render::scale_resolve::ColorScale::Categorical { domain, .. } => domain.clone(),
+            other => panic!("expected a Categorical color scale, got {other:?}"),
+        };
+        assert_eq!(domain.len(), 3,
+            "legend domain must carry 3 distinct group values (\"0\", \"1\", \"2\"); got {domain:?}");
+
+        let result = super::build(&ctx);
+        let polylines: Vec<&ferrum_scene::StrokeStyle> = result.nodes.iter()
+            .filter_map(|n| if let SceneNode::Polyline { style, .. } = n { Some(style) } else { None })
+            .collect();
+        assert_eq!(polylines.len(), 3,
+            "Int64 ordinal color must emit one polyline per group (3 groups); got {}. \
+             Old bug: col_as_str failed on Int64 → color_values=None → single merged polyline.",
+            polylines.len());
+
+        // Legend parity: every polyline's stroke color must be one of the
+        // legend-resolved colors for the 3 domain keys, not the fallback
+        // fill color every group collapsed to under the old bug.
+        // (`ferrum_scene::Color` derives `Eq` but not `Hash`, so dedup by
+        // linear scan rather than `HashSet`.)
+        let expected_colors: Vec<ferrum_scene::Color> = domain.iter()
+            .map(|k| crate::render::draw::to_scene_color(color_scale.lookup(k).expect("domain key must resolve via lookup")))
+            .collect();
+        for style in &polylines {
+            assert!(expected_colors.contains(&style.color),
+                "polyline stroke {:?} is not a legend-resolved color for any of {domain:?}", style.color);
+        }
+        let mut distinct_strokes: Vec<ferrum_scene::Color> = Vec::new();
+        for style in &polylines {
+            if !distinct_strokes.contains(&style.color) { distinct_strokes.push(style.color); }
+        }
+        assert_eq!(distinct_strokes.len(), 3,
+            "3 color groups must paint 3 distinct stroke colors, matching the legend; got {distinct_strokes:?}");
+    }
+
+    /// Byte-identity guard (NF-A3): Utf8 color columns must produce the same
+    /// grouping and legend-parity behavior after the `col_as_ordinal_category_str`
+    /// swap, since that helper is an identity pass-through for Utf8.
+    #[test]
+    fn line_utf8_color_splits_into_n_polylines_with_legend_parity() {
+        use arrow::array::StringArray;
+        let groups: Vec<&str> = (0..12).map(|i| match i / 4 { 0 => "a", 1 => "b", _ => "c" }).collect();
+        let group_col: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(groups));
+        let (batch, spec) = make_grouped_color_batch_and_spec(group_col, DataType::Utf8);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let color_scale = ctx.scales.color.as_ref().expect("Utf8 color must resolve a categorical color scale");
+        let domain = match color_scale {
+            crate::render::scale_resolve::ColorScale::Categorical { domain, .. } => domain.clone(),
+            other => panic!("expected a Categorical color scale, got {other:?}"),
+        };
+        assert_eq!(domain, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+        let result = super::build(&ctx);
+        let polylines: Vec<&ferrum_scene::StrokeStyle> = result.nodes.iter()
+            .filter_map(|n| if let SceneNode::Polyline { style, .. } = n { Some(style) } else { None })
+            .collect();
+        assert_eq!(polylines.len(), 3, "Utf8 color must still emit one polyline per group");
+
+        let mut distinct_strokes: Vec<ferrum_scene::Color> = Vec::new();
+        for style in &polylines {
+            if !distinct_strokes.contains(&style.color) { distinct_strokes.push(style.color); }
+        }
+        assert_eq!(distinct_strokes.len(), 3,
+            "Utf8 grouping must remain unaffected: 3 distinct stroke colors matching the legend");
+    }
+
+    /// Shared fixture for the two tests below: 5 rows, all-distinct x/y/color
+    /// values (mirrors a realistic `color=<Float64>` quantitative encoding),
+    /// so a per-distinct-value grouping bug would fragment into near-all
+    /// singleton groups rather than coincidentally re-merging via repeats.
+    fn quantitative_color_batch_and_spec(color_type: Option<crate::spec::encoding::DataType>) -> (arrow::record_batch::RecordBatch, ChartSpec) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![0.0, 10.0, 20.0, 30.0, 40.0])),
+            Arc::new(Float64Array::from(vec![0.1, 0.2, 0.3, 0.4, 0.5])),
+        ]).unwrap();
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: color_type, ..Default::default() });
+        (batch, spec)
+    }
+
+    /// Regression: a `color=<Float64>` field explicitly typed Quantitative
+    /// resolves a numeric-keyed (`Continuous`) color scale, which must NOT be
+    /// grouped by distinct color value — grouping fragments 5 all-distinct
+    /// rows into 5 singleton groups, every one of which the `points.len() < 2`
+    /// gate then drops, silently blanking the plot under a still-drawn
+    /// colorbar legend. The correct behavior is the pre-NF-A3-fix baseline:
+    /// one merged polyline over all rows (color grouping is Categorical-only).
+    #[test]
+    fn line_quantitative_float_color_explicit_type_merges_into_one_polyline() {
+        use crate::spec::encoding::DataType as SDT;
+        let (batch, spec) = quantitative_color_batch_and_spec(Some(SDT::Quantitative));
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        // Test premise: an explicit :Q color field must resolve a numeric-keyed
+        // scale, not Categorical (otherwise this test isn't exercising the hazard).
+        assert!(matches!(ctx.scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),
+            "explicit Quantitative color must resolve ColorScale::Continuous; got {:?}", ctx.scales.color);
+
+        let result = super::build(&ctx);
+        let polylines = result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count();
+        assert_eq!(polylines, 1,
+            "quantitative color must emit exactly 1 merged polyline over all rows, not fragment per distinct value; got {polylines}");
+    }
+
+    /// Same hazard as above, but via the type-inference path: no explicit
+    /// `type_` on a Float64 color column. `infer_spec_type` infers
+    /// Quantitative for numeric dtypes, so this must resolve the same
+    /// numeric-keyed scale and the same single-merged-polyline behavior.
+    #[test]
+    fn line_quantitative_float_color_inferred_type_merges_into_one_polyline() {
+        let (batch, spec) = quantitative_color_batch_and_spec(None);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        assert!(matches!(ctx.scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),
+            "inferred Float64 color must resolve ColorScale::Continuous; got {:?}", ctx.scales.color);
+
+        let result = super::build(&ctx);
+        let polylines = result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count();
+        assert_eq!(polylines, 1,
+            "inferred quantitative color must emit exactly 1 merged polyline over all rows, not fragment per distinct value; got {polylines}");
     }
 
     // ── Ported from bug_hunt_marks_rendering_r2.rs (R1) ─────────────────────

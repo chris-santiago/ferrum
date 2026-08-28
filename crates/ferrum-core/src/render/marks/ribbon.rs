@@ -18,10 +18,10 @@
 //!
 //! When `encoding.y2` is unset the drawer silently skips — ribbon requires y2.
 
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::build_color_detail_groups;
-use crate::render::scale_resolve::ScaleKind;
+use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
     // For ordinal x scales, stringify the column (works for Utf8 and integer
@@ -93,7 +93,29 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let cf = color_field(ctx, spec);
     // Ribbon only uses color (no detail channel); the helper's detail=None path
     // resolves to the color-only or fallback arm as appropriate.
-    let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
+    //
+    // col_as_ordinal_category_str (not col_as_str), gated on the resolved
+    // color scale being category-keyed (Categorical) or absent — mirrors
+    // channels.rs::color_column_loader's `ColorInput::Category | None` gate.
+    // Unlike `area` (which always force-resolves ColorScale::Categorical,
+    // scale_resolve/mod.rs), ribbon does not: a Quantitative-typed/-inferred
+    // color column resolves ColorScale::Continuous or ::Discretizing
+    // (ColorInput::Numeric), and must NOT be grouped here — grouping by every
+    // distinct numeric value fragments the band into (mostly) single-point
+    // groups, which the `indices.len() < 2` / `pixels.len() < 2` gates below
+    // then drop, silently blanking the plot under a still-drawn colorbar
+    // legend (NF-A3 follow-up). For a Category-keyed (or scale-less) color
+    // column, Int*/Float*/Bool dtypes still split into per-category bands
+    // matching the legend domain built by the dtype-wide
+    // distinct_values_in_order — `col_as_str` returns `Err` for non-Utf8,
+    // which previously collapsed every category into one merged polygon.
+    let color_input = ctx.scales.color.as_ref().map(|s| s.input());
+    let color_values = cf.and_then(|f| {
+        match color_input {
+            Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
+            Some(ColorInput::Numeric) => None,
+        }
+    });
     let groups = build_color_detail_groups(
         color_values.as_ref(),
         None,
@@ -391,6 +413,183 @@ mod tests {
             2,
             "expected one polygon per color group"
         );
+    }
+
+    // ── NF-A3: non-Utf8 color grouping matches the legend (batch-A task 5) ──
+    // area.rs already used `col_as_ordinal_category_str`; ribbon.rs used
+    // `col_as_str`, which returns `Err` for any non-Utf8 dtype and silently
+    // collapsed every color category into one merged zigzag polygon.
+
+    /// Regression (NF-A3): an Int64 color column must split into one closed
+    /// polygon per distinct value, and each polygon's fill must be the
+    /// legend-resolved color for its group (not the theme-default fallback
+    /// every group collapsed to under the old `col_as_str` bug).
+    #[test]
+    fn ribbon_int64_color_splits_into_n_polygons_with_legend_parity() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::Int64Array;
+        let mut spec = ribbon_spec(true);
+        spec.encoding.color = Some(EncodingSpec {
+            field: "g".into(),
+            type_: Some(SDT::Ordinal),
+            ..Default::default()
+        });
+        // 3 groups (0,1,2) x 3 rows each, sharing an x axis (like the Utf8
+        // 2-group fixture above but with an integer group column).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        let n = 9usize;
+        let xs: Vec<f64> = (0..n).map(|i| (i % 3) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let y2s: Vec<f64> = (0..n).map(|i| i as f64 + 1.0).collect();
+        let groups: Vec<i64> = (0..n).map(|i| (i / 3) as i64).collect();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(Float64Array::from(y2s)),
+                Arc::new(Int64Array::from(groups)),
+            ],
+        )
+        .unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let color_scale = scales.color.clone().expect("Int64 ordinal color must resolve a categorical color scale");
+        let domain = match &color_scale {
+            crate::render::scale_resolve::ColorScale::Categorical { domain, .. } => domain.clone(),
+            other => panic!("expected a Categorical color scale, got {other:?}"),
+        };
+        assert_eq!(domain.len(), 3,
+            "legend domain must carry 3 distinct group values (\"0\", \"1\", \"2\"); got {domain:?}");
+
+        let result = render(&spec, &batch);
+        let polygons: Vec<Option<ferrum_scene::Color>> = result.nodes.iter()
+            .filter_map(|n| if let ferrum_scene::SceneNode::Path { style, closed: true, .. } = n { Some(style.fill) } else { None })
+            .collect();
+        assert_eq!(polygons.len(), 3,
+            "Int64 ordinal color must emit one polygon per group (3 groups); got {}. \
+             Old bug: col_as_str failed on Int64 → color_values=None → single merged polygon.",
+            polygons.len());
+
+        // Legend parity: 3 color groups must paint 3 distinct fills (not the
+        // theme-default fallback every group collapsed to under the old bug).
+        let mut distinct_fills: Vec<Option<ferrum_scene::Color>> = Vec::new();
+        for fill in &polygons {
+            if !distinct_fills.contains(fill) { distinct_fills.push(*fill); }
+        }
+        assert_eq!(distinct_fills.len(), 3,
+            "3 color groups must paint 3 distinct fills, matching the legend; got {distinct_fills:?}");
+    }
+
+    /// Byte-identity guard (NF-A3): Utf8 color columns must keep producing
+    /// distinct per-group fills after the `col_as_ordinal_category_str` swap,
+    /// since that helper is an identity pass-through for Utf8. Extends
+    /// `ribbon_emits_one_polygon_per_color_group` (group *count* only) with a
+    /// legend-parity check on the fills themselves.
+    #[test]
+    fn ribbon_utf8_color_polygons_have_distinct_legend_fills() {
+        use arrow::array::StringArray;
+        let mut spec = ribbon_spec(true);
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 5.0, 2.0, 6.0, 4.0, 7.0])),
+                Arc::new(Float64Array::from(vec![1.0, 6.0, 3.0, 7.0, 5.0, 8.0])),
+                Arc::new(StringArray::from(vec!["A", "B", "A", "B", "A", "B"])),
+            ],
+        )
+        .unwrap();
+        let result = render(&spec, &batch);
+        let polygons: Vec<Option<ferrum_scene::Color>> = result.nodes.iter()
+            .filter_map(|n| if let ferrum_scene::SceneNode::Path { style, closed: true, .. } = n { Some(style.fill) } else { None })
+            .collect();
+        assert_eq!(polygons.len(), 2, "Utf8 color must still emit one polygon per group");
+        assert_ne!(polygons[0], polygons[1],
+            "2 Utf8 color groups must paint 2 distinct fills, matching the legend");
+    }
+
+    /// Shared fixture for the two tests below: 5 rows, all-distinct x/y/y2/color
+    /// values (mirrors a realistic `color=<Float64>` quantitative encoding), so
+    /// a per-distinct-value grouping bug would fragment into near-all singleton
+    /// groups rather than coincidentally re-merging via repeats.
+    fn quantitative_color_batch_and_spec(color_type: Option<crate::spec::encoding::DataType>) -> (ChartSpec, RecordBatch) {
+        let mut spec = ribbon_spec(true);
+        spec.encoding.color = Some(EncodingSpec { field: "c".into(), type_: color_type, ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("c", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 6.0, 8.0])),
+                Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 7.0, 8.0])),
+                Arc::new(Float64Array::from(vec![0.1, 0.2, 0.3, 0.4, 0.5])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// Regression: a `color=<Float64>` field explicitly typed Quantitative
+    /// resolves a numeric-keyed (`Continuous`) color scale, which must NOT be
+    /// grouped by distinct color value — grouping fragments 5 all-distinct
+    /// rows into 5 singleton bands, every one of which the `indices.len() < 2`
+    /// gate then drops, silently blanking the plot under a still-drawn
+    /// colorbar legend. The correct behavior is the pre-NF-A3-fix baseline:
+    /// one merged closed polygon over all rows (color grouping is
+    /// Categorical-only).
+    #[test]
+    fn ribbon_quantitative_float_color_explicit_type_merges_into_one_polygon() {
+        use crate::spec::encoding::DataType as SDT;
+        let (spec, batch) = quantitative_color_batch_and_spec(Some(SDT::Quantitative));
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        assert!(matches!(scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),
+            "explicit Quantitative color must resolve ColorScale::Continuous; got {:?}", scales.color);
+
+        let result = render(&spec, &batch);
+        let polygons = result.nodes.iter()
+            .filter(|n| matches!(n, ferrum_scene::SceneNode::Path { closed: true, .. }))
+            .count();
+        assert_eq!(polygons, 1,
+            "quantitative color must emit exactly 1 merged polygon over all rows, not fragment per distinct value; got {polygons}");
+    }
+
+    /// Same hazard as above, but via the type-inference path: no explicit
+    /// `type_` on a Float64 color column. `infer_spec_type` infers
+    /// Quantitative for numeric dtypes, so this must resolve the same
+    /// numeric-keyed scale and the same single-merged-polygon behavior.
+    #[test]
+    fn ribbon_quantitative_float_color_inferred_type_merges_into_one_polygon() {
+        let (spec, batch) = quantitative_color_batch_and_spec(None);
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        assert!(matches!(scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),
+            "inferred Float64 color must resolve ColorScale::Continuous; got {:?}", scales.color);
+
+        let result = render(&spec, &batch);
+        let polygons = result.nodes.iter()
+            .filter(|n| matches!(n, ferrum_scene::SceneNode::Path { closed: true, .. }))
+            .count();
+        assert_eq!(polygons, 1,
+            "inferred quantitative color must emit exactly 1 merged polygon over all rows, not fragment per distinct value; got {polygons}");
     }
 
     // ── #6 metadata/node alignment (group marks) ─────────────────────────────
