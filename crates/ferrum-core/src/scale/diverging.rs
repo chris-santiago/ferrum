@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{scale_spec_to_py_dict, validate_finite};
+use super::core::{scale_spec_to_py_dict, validate_finite, DEGENERATE_DOMAIN_MESSAGE};
 use crate::spec::encoding::ScaleSpec;
 
 /// Diverging color-mapping scale.
@@ -78,16 +78,12 @@ impl DivergingScale {
                 // in `positional_extent`'s downstream consumers.
                 if v.len() >= 3 {
                     if v[0] == v[2] {
-                        return Err(PyValueError::new_err(
-                            "domain endpoints must differ (lo != hi)",
-                        ));
+                        return Err(PyValueError::new_err(DEGENERATE_DOMAIN_MESSAGE));
                     }
                     Some([v[0], v[1], v[2]])
                 } else {
                     if v[0] == v[1] {
-                        return Err(PyValueError::new_err(
-                            "domain endpoints must differ (lo != hi)",
-                        ));
+                        return Err(PyValueError::new_err(DEGENERATE_DOMAIN_MESSAGE));
                     }
                     Some([v[0], (v[0] + v[1]) / 2.0, v[1]])
                 }

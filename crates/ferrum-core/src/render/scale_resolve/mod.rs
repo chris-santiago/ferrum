@@ -525,12 +525,119 @@ impl ScaleKind {
     }
 }
 
+/// Ordered numeric buckets, each painted a single flat color.
+///
+/// The shared resolution of the four discretizing color-scale specs —
+/// `Quantize` (uniform buckets over an extent), `Quantile` (buckets at sample
+/// quantiles), `Threshold` (explicit boundaries), and `BinOrdinal` (explicit
+/// bin edges). All four reduce to the same thing: ascending boundaries plus one
+/// color per bucket.
+///
+/// [`bounds`](Self::bounds) holds `colors.len() + 1` ascending values. The
+/// interior entries are the scale's own thresholds and decide bucket
+/// membership; the outer two are only a *labeling* extent (the colorbar's end
+/// labels). [`lookup`](Self::lookup) never reads them, so the end buckets stay
+/// open on both sides — a value below the first threshold is bucket 0 and a
+/// value above the last is the top bucket, regardless of what the labeling
+/// extent says.
+#[derive(Debug, Clone)]
+pub struct DiscretizedColors {
+    bounds: Vec<f64>,
+    colors: Vec<Color>,
+}
+
+impl DiscretizedColors {
+    /// Build from ascending `bounds` and one color per bucket.
+    ///
+    /// Returns `None` when the two do not describe a partition
+    /// (`bounds.len() != colors.len() + 1`) or when there is no bucket at all.
+    /// Every caller derives `colors` from the same bucket count it derived
+    /// `bounds` from, so `None` means the *scale spec itself* declared nothing
+    /// to discretize (e.g. a `Quantize` with an empty range) and the caller
+    /// resolves the channel as a plain continuous scale instead.
+    pub(super) fn new(bounds: Vec<f64>, colors: Vec<Color>) -> Option<Self> {
+        if colors.is_empty() || bounds.len() != colors.len() + 1 {
+            return None;
+        }
+        Some(Self { bounds, colors })
+    }
+
+    /// The bucket color for `value`, or `None` when `value` is not finite.
+    pub fn lookup(&self, value: f64) -> Option<Color> {
+        if !value.is_finite() {
+            return None;
+        }
+        // Interior boundaries only: `partition_point` counts how many
+        // thresholds `value` has passed, which is exactly its bucket index
+        // (d3's `scaleThreshold` convention — a boundary belongs to the bucket
+        // above it).
+        let interior = &self.bounds[1..self.bounds.len() - 1];
+        let idx = interior.partition_point(|b| *b <= value);
+        self.colors.get(idx).copied()
+    }
+
+    /// One color per bucket, low → high.
+    pub fn colors(&self) -> &[Color] {
+        &self.colors
+    }
+
+    /// The `colors().len() + 1` ascending bucket boundaries used for labeling.
+    pub fn bounds(&self) -> &[f64] {
+        &self.bounds
+    }
+
+    /// Replace the per-bucket colors.
+    ///
+    /// The bucket count is fixed by the boundaries, so a `colors` of any other
+    /// length cannot describe this partition: the swatches are left untouched
+    /// and the two counts are returned so the caller can report the refusal
+    /// (spec §4.2, amended 2026-08-28 — never a silent drop).
+    pub(crate) fn set_colors(&mut self, colors: Vec<Color>) -> Result<(), SwatchCountMismatch> {
+        if colors.len() != self.colors.len() {
+            return Err(SwatchCountMismatch {
+                expected: self.colors.len(),
+                received: colors.len(),
+            });
+        }
+        self.colors = colors;
+        Ok(())
+    }
+}
+
+/// A swatch-color replacement that did not match the partition it was applied
+/// to. Carries both counts so the caller's warning can name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwatchCountMismatch {
+    /// Buckets the scale actually has.
+    pub expected: usize,
+    /// Colors the override named.
+    pub received: usize,
+}
+
+/// Which per-row column representation a mark builder must load to resolve
+/// color through a given [`ColorScale`].
+///
+/// The single place a `ColorScale` variant is classified as string-keyed or
+/// numeric: mark builders ask [`ColorScale::input`] rather than matching
+/// variants themselves, so a new variant is classified once, here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorInput {
+    /// Category strings (`col_as_str`), resolved via [`ColorScale::lookup`].
+    Category,
+    /// Numeric values (`col_as_f64`), resolved via [`ColorScale::lookup_f64`].
+    Numeric,
+}
+
 #[derive(Debug, Clone)]
 pub enum ColorScale {
     Categorical {
         domain: Vec<String>,
         palette: Cow<'static, [Color]>,
     },
+    /// Discretizing color scale: `Quantize` / `Quantile` / `Threshold` /
+    /// `BinOrdinal` all bucket a numeric value and paint it a flat swatch
+    /// color. Renders as a k-swatch colorbar rather than a gradient.
+    Discretizing(DiscretizedColors),
     /// Continuous color scale: maps a numeric value to a color via a
     /// ContinuousScheme. Used by heatmap, raster, and any chart with an
     /// explicit linear color scale spec.
@@ -556,33 +663,41 @@ impl ColorScale {
                 .iter()
                 .position(|v| v == value)
                 .map(|i| palette[i % palette.len()]),
-            Self::Continuous { domain, scheme, midpoint } => {
-                let v: f64 = value.parse().ok()?;
-                let t = normalize_continuous(*domain, *midpoint, v);
-                Some(scheme.sample(t))
+            Self::Continuous { .. } | Self::Discretizing(_) => {
+                self.lookup_f64(value.parse().ok()?)
             }
         }
     }
 
     /// Categorical domain order (== legend category order), if this is a
-    /// categorical scale. `None` for continuous scales. Used by the dodge
+    /// categorical scale. `None` for the numeric scales. Used by the dodge
     /// position adjustment to order sub-band slots so they match the legend.
     pub(crate) fn categorical_domain(&self) -> Option<&[String]> {
         match self {
             Self::Categorical { domain, .. } => Some(domain),
-            Self::Continuous { .. } => None,
+            Self::Continuous { .. } | Self::Discretizing(_) => None,
         }
     }
 
-    /// Sample at numeric value (Continuous variant only). Returns None for
-    /// Categorical scales.
+    /// Sample at a numeric value (the [`ColorInput::Numeric`] variants).
+    /// Returns `None` for categorical scales.
     pub fn lookup_f64(&self, value: f64) -> Option<Color> {
         match self {
             Self::Continuous { domain, scheme, midpoint } => {
                 let t = normalize_continuous(*domain, *midpoint, value);
                 Some(scheme.sample(t))
             }
-            _ => None,
+            Self::Discretizing(buckets) => buckets.lookup(value),
+            Self::Categorical { .. } => None,
+        }
+    }
+
+    /// Which per-row column a mark builder must load to resolve color through
+    /// this scale. See [`ColorInput`].
+    pub fn input(&self) -> ColorInput {
+        match self {
+            Self::Categorical { .. } => ColorInput::Category,
+            Self::Continuous { .. } | Self::Discretizing(_) => ColorInput::Numeric,
         }
     }
 }
@@ -989,17 +1104,20 @@ pub(in crate::render) fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, 
     super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
-/// Select the batch for categorical domain resolution in faceted charts.
+/// Select the batch a *shared* domain is resolved from in faceted charts.
 ///
 /// When `facet_shared` is true, returns the global `FINAL_OUTPUT_KEY` batch
-/// (so every panel uses global first-appearance order, matching the legend).
+/// (so every panel resolves against the same rows, matching the legend).
 /// Falls back to `primary_batch` when:
 /// - `facet_shared` is false (non-faceted chart)
 /// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
 /// - The field is absent from the global batch
 ///
-/// Used by both `color.rs` (categorical color) and `auxiliary.rs` (shape) so
-/// that the same global-domain guarantee applies to all categorical channels.
+/// Used by `color.rs` for categorical color's first-appearance domain **and**
+/// for the discretizing `Quantile` sample (whose cut-points must likewise be
+/// global, or the same value would paint differently per panel), and by
+/// `auxiliary.rs` for shape. The name predates the numeric caller; the contract
+/// is "which batch does a shared domain come from", not a categorical-only one.
 pub(super) fn shared_categorical_batch<'a>(
     primary_batch: &'a RecordBatch,
     field: &str,

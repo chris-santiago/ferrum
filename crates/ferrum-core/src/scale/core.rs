@@ -55,6 +55,58 @@ pub(crate) fn scale_spec_to_py_dict(py: Python<'_>, spec: ScaleSpec) -> PyResult
         .ok_or_else(|| PyValueError::new_err("scale spec failed to serialize"))
 }
 
+/// The rejection sentence for a degenerate `[lo, hi]` domain whose endpoints
+/// coincide.
+///
+/// One vocabulary, exactly like [`not_strictly_ascending_message`]: every scale
+/// constructor that rejects a zero-width domain (`QuantizeScale`,
+/// `DivergingScale`, and [`validate_continuous_domain`]'s continuous family)
+/// raises this text, and the render-side discretizing color resolver quotes the
+/// same sentence when a raw-dict scale reaches it having bypassed them.
+pub(crate) const DEGENERATE_DOMAIN_MESSAGE: &str = "domain endpoints must differ (lo != hi)";
+
+/// `true` when `values` is strictly ascending (every element greater than its
+/// predecessor). Empty and single-element slices are trivially ascending.
+///
+/// The shared predicate behind every "boundary list must be sorted" check:
+/// `ThresholdScale`'s and `BinOrdinalScale`'s constructors and the render-side
+/// discretizing color resolver all ask this, so a list one of them accepts is
+/// exactly the set the others accept.
+pub(crate) fn is_strictly_ascending(values: &[f64]) -> bool {
+    values.windows(2).all(|w| w[0] < w[1])
+}
+
+/// The rejection sentence for a boundary list that is not strictly ascending,
+/// naming `field` (`"domain"`, `"bins"`, …).
+///
+/// One vocabulary: the `ThresholdScale`/`BinOrdinalScale` constructors raise
+/// this text as a `ValueError`, and the render-side resolver quotes the same
+/// sentence when a raw-dict scale reaches it having bypassed those constructors.
+/// A user who gets the message from either path reads identical words.
+pub(crate) fn not_strictly_ascending_message(field: &str) -> String {
+    format!("{field} must be strictly sorted ascending")
+}
+
+/// The `n - 1` interior boundaries of `n` equal-width bins spanning
+/// `[lo, hi]` — quantize bin geometry, defined once.
+///
+/// Companion to [`compute_quantile_cuts`]: same shape (`n` bins → `n - 1`
+/// interior cuts, empty for `n <= 1`), different rule (equal *width* rather
+/// than equal *probability*). Shared by `QuantizeScale`'s own `thresholds()`
+/// and by the render-side discretizing color resolver
+/// (`render::scale_resolve::color`), so the two cannot drift.
+///
+/// `lo > hi` is not rejected here: it yields descending boundaries, which is
+/// what `QuantizeScale::thresholds()` has always returned for a descending
+/// domain. Callers that need ascending output normalize the endpoints first.
+pub(crate) fn uniform_bin_thresholds(lo: f64, hi: f64, n: usize) -> Vec<f64> {
+    if n <= 1 {
+        return Vec::new();
+    }
+    let step = (hi - lo) / n as f64;
+    (1..n).map(|i| lo + i as f64 * step).collect()
+}
+
 /// R-7 / numpy default quantile cut-points: linear interpolation between
 /// order statistics. Returns `k-1` cut points dividing the sorted sample
 /// into `k` equal-probability bins.
@@ -193,12 +245,8 @@ pub(crate) fn validate_threshold(domain: &[f64], range: &[f64]) -> PyResult<()> 
     }
     validate_finite("domain", domain)?;
     validate_finite("range", range)?;
-    for w in domain.windows(2) {
-        if w[0] >= w[1] {
-            return Err(PyValueError::new_err(
-                "domain must be strictly sorted ascending",
-            ));
-        }
+    if !is_strictly_ascending(domain) {
+        return Err(PyValueError::new_err(not_strictly_ascending_message("domain")));
     }
     Ok(())
 }
@@ -233,9 +281,7 @@ pub(crate) fn validate_continuous_domain(domain: &[f64]) -> PyResult<()> {
     }
     validate_finite("domain", domain)?;
     if domain[0] == domain[1] {
-        return Err(PyValueError::new_err(
-            "domain endpoints must differ (lo != hi)",
-        ));
+        return Err(PyValueError::new_err(DEGENERATE_DOMAIN_MESSAGE));
     }
     Ok(())
 }

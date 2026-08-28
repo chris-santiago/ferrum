@@ -8,7 +8,7 @@ use crate::render::draw::{
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::opacity::resolve_scaled_opacity;
-use crate::render::scale_resolve::ColorScale;
+use crate::render::scale_resolve::{ColorInput, ColorScale};
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 use crate::spec::encoding::DataType as SpecDataType;
 
@@ -162,12 +162,13 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
     // Per-slice color: read color encoding field and look up in the color scale.
     let cfield = ctx.spec.encoding.color.as_ref().map(|e| e.field.as_str());
-    let color_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let color_str: Option<Vec<Option<String>>> = match (color_input, cfield) {
+        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
-    let color_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+    let color_f64: Option<Vec<Option<f64>>> = match (color_input, cfield) {
+        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
         _ => None,
     };
 
@@ -287,12 +288,13 @@ fn build_nominal_theta(
 
     // Per-row color columns.
     let cfield = color_field(ctx, ctx.spec);
-    let color_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let color_str: Option<Vec<Option<String>>> = match (color_input, cfield) {
+        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
-    let color_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+    let color_f64: Option<Vec<Option<f64>>> = match (color_input, cfield) {
+        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
         _ => None,
     };
     let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity
@@ -400,12 +402,13 @@ fn build_annular(
 
     // Per-slice color (mirrors the legacy path).
     let cfield = ctx.spec.encoding.color.as_ref().map(|e| e.field.as_str());
-    let color_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let color_str: Option<Vec<Option<String>>> = match (color_input, cfield) {
+        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
-    let color_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+    let color_f64: Option<Vec<Option<f64>>> = match (color_input, cfield) {
+        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
         _ => None,
     };
     let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity

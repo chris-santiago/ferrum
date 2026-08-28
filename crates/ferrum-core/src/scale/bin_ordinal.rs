@@ -1,7 +1,9 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{scale_spec_to_py_dict, validate_finite};
+use super::core::{
+    is_strictly_ascending, not_strictly_ascending_message, scale_spec_to_py_dict, validate_finite,
+};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,12 +77,8 @@ impl BinOrdinalScale {
             return Err(PyValueError::new_err("bins must be non-empty"));
         }
         validate_finite("bins", &bins)?;
-        for w in bins.windows(2) {
-            if w[0] >= w[1] {
-                return Err(PyValueError::new_err(
-                    "bins must be strictly sorted ascending"
-                ));
-            }
+        if !is_strictly_ascending(&bins) {
+            return Err(PyValueError::new_err(not_strictly_ascending_message("bins")));
         }
         Ok(BinOrdinalScale(BinOrdinalScaleData { bins, scheme }))
     }

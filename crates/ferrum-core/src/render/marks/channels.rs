@@ -26,7 +26,7 @@
 //!   left as ten copies of the same `.map(f64::abs).unwrap_or(..)` line.
 
 use crate::render::draw::{col_as_f64, col_as_str, color_field, DrawCtx};
-use crate::render::scale_resolve::{ColorScale, ResolvedScales, ScaleKind};
+use crate::render::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind};
 use crate::spec::coord::PolarThetaChannel;
 use crate::spec::encoding::Encoding;
 
@@ -52,18 +52,19 @@ pub(crate) fn band_extent_or(scale: &ScaleKind, fallback: f64) -> f64 {
 /// Load the per-row color-encoding columns for fill resolution (C9).
 ///
 /// Mirrors `point`/`bar`: the categorical string column is read for
-/// `Categorical` (and scale-less) charts; the numeric column for `Continuous`
-/// charts. The continuous branch reads `col_as_f64` so the caller can sample via
-/// `lookup_f64` without an `f64 → String → f64` round-trip.
+/// [`ColorInput::Category`] (and scale-less) charts; the numeric column for
+/// [`ColorInput::Numeric`] ones. The numeric branch reads `col_as_f64` so the
+/// caller can sample via `lookup_f64` without an `f64 → String → f64`
+/// round-trip.
 pub(crate) fn color_column_loader(ctx: &DrawCtx) -> ColorColumns {
     let field = color_field(ctx, ctx.spec);
-    let categorical = match (&ctx.scales.color, field) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        (None, Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let categorical = match (input, field) {
+        (Some(ColorInput::Category) | None, Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
-    let numeric = match (&ctx.scales.color, field) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+    let numeric = match (input, field) {
+        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
         _ => None,
     };
     (categorical, numeric)
@@ -120,10 +121,23 @@ pub(crate) fn polar_channel_resolver<'a>(
 /// (area, line, ribbon).
 ///
 /// The partitioning algorithm is shared verbatim across all three builders;
-/// only the *color-values loading* differs (area uses
-/// `col_as_ordinal_category_str`, line uses `col_as_str`, ribbon uses
-/// `col_as_str`) and stays in each caller. This helper receives the already-
-/// loaded optional value slices and applies the common 4-way split:
+/// only the *color-values loading* differs by caller and stays in each one.
+/// All three (area, line, ribbon) load color via `col_as_ordinal_category_str`
+/// so Int*/Float*/Bool color columns split into groups matching the legend
+/// domain, not just Utf8 (NF-A3: `col_as_str` returns `Err` for any other
+/// dtype, which used to collapse non-Utf8 color columns into one group on
+/// line/ribbon) — **but only when the resolved color scale is category-keyed**
+/// (`ColorScale::input() == ColorInput::Category`, or no scale at all).
+/// `area` always force-resolves a `Categorical` scale regardless of column
+/// dtype (scale_resolve/mod.rs), so its caller can load unconditionally; a
+/// `Continuous`/`Discretizing` (numeric-keyed) color scale must NOT be grouped
+/// by distinct value — line/ribbon gate their load on `ColorInput` for exactly
+/// this reason (mirrors `color_column_loader` below), otherwise a quantitative
+/// color column fragments into near-all singleton groups that this helper's
+/// callers then drop via their `len() < 2` connectivity gates, silently
+/// blanking the plot under a still-drawn colorbar legend. This helper
+/// receives the already-loaded optional value slices and applies the common
+/// 4-way split:
 ///
 /// - Color only (scale present): one group per distinct color key; each group
 ///   retains its key for downstream color resolution.

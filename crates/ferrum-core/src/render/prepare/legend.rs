@@ -121,6 +121,14 @@ pub(crate) fn build_color_legend(
         .and_then(|c| c.legend.as_ref())
         .and_then(|l| l.disabled)
         .unwrap_or(false);
+    // Colorbar label overrides, shared by the continuous (gradient) and the
+    // discretizing (k-swatch) arms: an explicit `tickLabels` list replaces the
+    // computed labels outright, and `format=` applies a Python-style format spec
+    // to each computed value.
+    let color_legend = spec.encoding.color.as_ref().and_then(|c| c.legend.as_ref());
+    let custom_tick_labels: Option<Vec<String>> = color_legend.and_then(|l| l.tick_labels.clone());
+    let format_spec: Option<&str> = color_legend.and_then(|l| l.format.as_deref());
+
     let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) = if legend_disabled {
         (Vec::new(), None)
     } else {
@@ -151,10 +159,7 @@ pub(crate) fn build_color_legend(
                 // typed legend spec (e.g. ["Low", "High"] for SHAP beeswarm),
                 // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
                 // When `format=` is set, apply a Python-style format spec to each tick value.
-                let color_legend = spec.encoding.color.as_ref().and_then(|c| c.legend.as_ref());
-                let custom_tick_labels: Option<Vec<String>> =
-                    color_legend.and_then(|l| l.tick_labels.clone());
-                let format_spec: Option<&str> = color_legend.and_then(|l| l.format.as_deref());
+                let custom_tick_labels = custom_tick_labels.clone();
                 // `cb_domain` is the numeric span the labels cover — carried for
                 // `tick_min_step` thinning in `compute_layout`. `None` for explicit
                 // non-numeric label overrides (their step is undefined).
@@ -183,6 +188,41 @@ pub(crate) fn build_color_legend(
                         domain: cb_domain,
                     }),
                 )
+            }
+            Some(ColorScale::Discretizing(buckets)) => {
+                // Discrete colorbar: emit each swatch as a pair of gradient
+                // stops at its own edges, so the `linearGradient` paints k flat
+                // bands instead of interpolating between them. Reusing the
+                // gradient carrier (rather than a second colorbar shape) keeps
+                // the layout, SVG, and WASM colorbar paths single-sourced.
+                let swatches = buckets.colors();
+                let k = swatches.len() as f64;
+                let stops: Vec<(f64, String)> = swatches
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, c)| {
+                        let hex = super::super::color::fmt_svg(*c);
+                        [(i as f64 / k, hex.clone()), ((i + 1) as f64 / k, hex)]
+                    })
+                    .collect();
+                // One label per boundary (k + 1 of them) — the layout
+                // distributes labels linearly over the bar, which lands each on
+                // its own band edge.
+                let bounds = buckets.bounds();
+                let (lo, hi) = (bounds[0], bounds[bounds.len() - 1]);
+                let tick_labels = custom_tick_labels.unwrap_or_else(|| {
+                    bounds
+                        .iter()
+                        .map(|&v| match format_spec {
+                            Some(s) => crate::render::format::format_with_spec(v, Some(s)),
+                            None => format_colorbar_tick(v, lo, hi),
+                        })
+                        .collect()
+                });
+                // `domain: None`: `tick_min_step` thinning assumes labels
+                // sampled evenly across a span, but bucket boundaries are
+                // spaced by the scale's thresholds, not by the bar.
+                (Vec::new(), Some(ColorbarInput { stops, tick_labels, domain: None }))
             }
             None => {
                 // #9 [FA-15]: when no base color encoding is set, check whether
@@ -372,11 +412,15 @@ fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegend
     use crate::render::format::format_with_spec;
     use crate::scale::ticks::nice_ticks;
 
+    use super::super::scale_resolve::{ColorInput, ColorScale};
+
     let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
-    let color_is_continuous = matches!(
-        scales.color,
-        Some(super::super::scale_resolve::ColorScale::Continuous { .. })
-    );
+    // Numeric color (continuous or discretizing): the size legend can sample it
+    // per value via `lookup_f64`, so a shared field merges into one block.
+    // Categorical color enumerates the field itself, so the aux legend is
+    // suppressed instead.
+    let color_is_numeric =
+        scales.color.as_ref().map(ColorScale::input) == Some(ColorInput::Numeric);
 
     let mut out = Vec::new();
 
@@ -385,7 +429,7 @@ fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegend
         let disabled = legend_channel_disabled(spec.encoding.size.as_ref());
         let same_field_as_color = color_field == Some(size_enc.field.as_str());
         // Merge into a categorical color legend → suppress (color labels it).
-        let suppressed = disabled || (same_field_as_color && !color_is_continuous);
+        let suppressed = disabled || (same_field_as_color && !color_is_numeric);
         if !suppressed {
             let format_spec = size_enc.legend.as_ref().and_then(|l| l.format.as_deref());
             if let Some((lo, hi)) = size_scale.inner.data_domain() {
@@ -404,7 +448,7 @@ fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegend
                         // Merge color+size on the same continuous field: sample
                         // the color scale at the value so the symbol varies in
                         // both radius and color.
-                        let color_hex = if same_field_as_color && color_is_continuous {
+                        let color_hex = if same_field_as_color && color_is_numeric {
                             scales
                                 .color
                                 .as_ref()
@@ -492,6 +536,7 @@ fn format_colorbar_tick(value: f64, lo: f64, hi: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::scale_resolve::ColorScale;
     use crate::spec::mark::Mark;
     use ferrum_scene::{ConditionalEncoding, EncodingValue};
 
@@ -554,6 +599,98 @@ mod tests {
             resolve_conditional_field_names(&spec, ChannelName::Color),
             vec!["cat".to_string(), "other".to_string()]
         );
+    }
+
+    /// A `ResolvedScales` carrying only the given color scale.
+    fn scales_with_color(color: ColorScale) -> ResolvedScales {
+        use crate::render::scale_resolve::ScaleKind;
+        use crate::scale::linear::LinearScale;
+        ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1.0],
+                vec![0.0, 1.0],
+                false,
+                false,
+            )),
+            y: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1.0],
+                vec![0.0, 1.0],
+                false,
+                false,
+            )),
+            color: Some(color),
+            size: None,
+            shape: None,
+            opacity: None,
+            x2: None,
+            y2: None,
+            y_slots: Default::default(),
+        }
+    }
+
+    /// A spec whose color channel names `field`, so the legend has a title
+    /// source and the colorbar arm is reachable.
+    fn spec_with_color_field(field: &str) -> ChartSpec {
+        let mut spec = empty_spec();
+        spec.encoding.color = Some(crate::spec::encoding::EncodingSpec {
+            field: field.into(),
+            ..Default::default()
+        });
+        spec
+    }
+
+    fn empty_batch() -> RecordBatch {
+        RecordBatch::new_empty(std::sync::Arc::new(arrow::datatypes::Schema::empty()))
+    }
+
+    /// A discretizing color scale renders k flat swatches — two gradient stops
+    /// per bucket at its own edges — plus one label per bucket boundary, so the
+    /// labels the layout distributes linearly land on the band edges.
+    #[test]
+    fn discretizing_color_builds_a_k_swatch_colorbar() {
+        use crate::render::color::from_rgba;
+        use crate::render::scale_resolve::DiscretizedColors;
+        let buckets = DiscretizedColors::new(
+            vec![0.0, 10.0, 20.0],
+            vec![from_rgba(255, 0, 0, 255), from_rgba(0, 0, 255, 255)],
+        )
+        .unwrap();
+        let scales = scales_with_color(ColorScale::Discretizing(buckets));
+        let bundle =
+            build_color_legend(&spec_with_color_field("v"), &empty_batch(), &scales);
+
+        assert!(bundle.legend_entries.is_empty(), "buckets render as a colorbar");
+        let cb = bundle.colorbar.expect("discretizing color must build a colorbar");
+        assert_eq!(
+            cb.stops,
+            vec![
+                (0.0, "#ff0000".to_string()),
+                (0.5, "#ff0000".to_string()),
+                (0.5, "#0000ff".to_string()),
+                (1.0, "#0000ff".to_string()),
+            ],
+            "each swatch spans its own band with hard stops at both edges"
+        );
+        assert_eq!(cb.tick_labels, vec!["0", "10", "20"]);
+        assert_eq!(cb.domain, None, "bucket boundaries are not an evenly-sampled span");
+    }
+
+    /// The continuous colorbar is untouched: 11 interpolated stops and 5 evenly
+    /// spaced tick labels across the domain (§7 byte-identity invariant).
+    #[test]
+    fn continuous_color_still_builds_an_11_stop_gradient() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let bundle =
+            build_color_legend(&spec_with_color_field("v"), &empty_batch(), &scales);
+        let cb = bundle.colorbar.expect("continuous color must build a colorbar");
+        assert_eq!(cb.stops.len(), 11);
+        assert_eq!(cb.tick_labels.len(), 5);
+        assert_eq!(cb.domain, Some((0.0, 100.0)));
     }
 
     #[test]

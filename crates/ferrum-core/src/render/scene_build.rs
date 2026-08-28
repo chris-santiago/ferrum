@@ -671,7 +671,10 @@ fn resolve_panel_scales(
     // provisional override applied to `prep.provisional_scales` in
     // `prepare_and_layout`.
     if let Some(ref cfg) = chart_config.color {
-        super::apply_color_config_to_color_scale(&mut scales.color, cfg);
+        // Warnings are emitted once, by the chart-level application in
+        // `prepare_and_layout`; this is the same config against the same scale,
+        // so reporting here would duplicate one warning per panel.
+        let _ = super::apply_color_config_to_color_scale(&mut scales.color, cfg);
     }
 
     // Per-layer independent y-scale slots (secondary-y-axis, GH #52). Byte-stable
@@ -1497,7 +1500,9 @@ pub(crate) fn resolve_legend_color_scale(
         None
     };
     if let Some(ref cfg) = chart_config.color {
-        super::apply_color_config_to_color_scale(&mut color_scale, cfg);
+        // See the per-panel site above: the chart-level application already
+        // reported any refusal, so this legend-only re-application is silent.
+        let _ = super::apply_color_config_to_color_scale(&mut color_scale, cfg);
     }
     Ok(color_scale)
 }

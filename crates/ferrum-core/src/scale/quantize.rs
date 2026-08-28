@@ -1,7 +1,10 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{degenerate_ratio, scale_spec_to_py_dict, validate_finite};
+use super::core::{
+    degenerate_ratio, scale_spec_to_py_dict, uniform_bin_thresholds, validate_finite,
+    DEGENERATE_DOMAIN_MESSAGE,
+};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,12 +47,13 @@ impl QuantizeScaleData {
     }
 
     /// Return the bin thresholds (n-1 interior break points for n range values).
+    ///
+    /// Delegates to [`uniform_bin_thresholds`] so this scale and the render-side
+    /// discretizing color resolver share one definition of quantize bin
+    /// geometry.
     fn thresholds(&self) -> Vec<f64> {
         let [d0, d1] = self.domain;
-        let n = self.range.len();
-        if n <= 1 { return Vec::new(); }
-        let step = (d1 - d0) / n as f64;
-        (1..n).map(|i| d0 + i as f64 * step).collect()
+        uniform_bin_thresholds(d0, d1, self.range.len())
     }
 }
 
@@ -101,9 +105,7 @@ impl QuantizeScale {
         }
         validate_finite("domain", &domain)?;
         if domain[0] == domain[1] {
-            return Err(PyValueError::new_err(
-                "domain endpoints must differ (lo != hi)"
-            ));
+            return Err(PyValueError::new_err(DEGENERATE_DOMAIN_MESSAGE));
         }
         if range.is_empty() {
             return Err(PyValueError::new_err("range must be non-empty"));

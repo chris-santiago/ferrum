@@ -72,7 +72,7 @@ fn color_encoding_builds_categorical_in_encounter_order() {
         ColorScale::Categorical { domain, .. } => {
             assert_eq!(domain, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
         }
-        ColorScale::Continuous { .. } => panic!("expected Categorical, got Continuous"),
+        other => panic!("expected Categorical, got {other:?}"),
     }
 }
 
@@ -4930,4 +4930,829 @@ fn yslot_plan_assigns_slots_in_layer_order() {
     assert_eq!(plan.slot_for_layer(3), 2);
     // Out-of-range layer indices fall back to the primary slot.
     assert_eq!(plan.slot_for_layer(9), 0);
+}
+
+// ── Batch A §4.2: discretizing color scales (Quantize/Quantile/Threshold/BinOrdinal) ──
+
+/// A rect chart whose `color` channel is the numeric column `v`, carrying the
+/// given scale spec JSON. Used by the discretizing-color tests below.
+fn spec_with_color_scale_json(scale_json: serde_json::Value) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec, ScaleSpec};
+    use crate::spec::mark::Mark;
+    let scale: ScaleSpec = serde_json::from_value(scale_json).unwrap();
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Rect,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec {
+                field: "v".into(),
+                type_: Some(SDT::Quantitative),
+                scale: Some(scale),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Categorical x/y with a numeric `v` color column spanning `values`.
+fn batch_with_numeric_color(values: Vec<f64>) -> RecordBatch {
+    let n = values.len();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Utf8, false),
+        Field::new("y", ArrowDataType::Utf8, false),
+        Field::new("v", ArrowDataType::Float64, true),
+    ]));
+    let labels: Vec<String> = (0..n).map(|i| format!("c{i}")).collect();
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(refs.clone())),
+            Arc::new(StringArray::from(refs)),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+fn resolve_color(spec: &ChartSpec, batch: &RecordBatch) -> (ColorScale, Vec<crate::render::RenderWarning>) {
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(spec, batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    (scales.color.expect("color scale must be resolved"), warnings)
+}
+
+fn buckets_of(scale: &ColorScale) -> &DiscretizedColors {
+    match scale {
+        ColorScale::Discretizing(b) => b,
+        other => panic!("expected a Discretizing color scale, got {other:?}"),
+    }
+}
+
+fn rgb(c: crate::render::color::Color) -> (u8, u8, u8) {
+    (c.red, c.green, c.blue)
+}
+
+/// Quantize with an explicit `domain` divides *that* extent — not the data
+/// extent — into `len(range)` uniform buckets, each painted its range color.
+#[test]
+fn quantize_explicit_domain_buckets_values_into_range_colors() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "quantize",
+        "domain": [0.0, 100.0],
+        "range": ["#ff0000", "#00ff00", "#0000ff", "#ffffff"],
+    }));
+    // Data covers only 0..10 — the declared domain must win.
+    let batch = batch_with_numeric_color(vec![0.0, 5.0, 10.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+    assert!(warnings.is_empty(), "clean spec must not warn: {warnings:?}");
+
+    let buckets = buckets_of(&scale);
+    assert_eq!(buckets.bounds(), &[0.0, 25.0, 50.0, 75.0, 100.0]);
+    assert_eq!(buckets.colors().len(), 4);
+    for (value, expected) in [
+        (10.0, (0xff, 0x00, 0x00)),
+        (30.0, (0x00, 0xff, 0x00)),
+        (60.0, (0x00, 0x00, 0xff)),
+        (90.0, (0xff, 0xff, 0xff)),
+        // Open ends: outside the declared domain still lands in the end bucket.
+        (-5.0, (0xff, 0x00, 0x00)),
+        (500.0, (0xff, 0xff, 0xff)),
+        // A boundary belongs to the bucket above it.
+        (25.0, (0x00, 0xff, 0x00)),
+    ] {
+        assert_eq!(
+            rgb(scale.lookup_f64(value).expect("finite value has a bucket")),
+            expected,
+            "value {value} landed in the wrong bucket"
+        );
+    }
+}
+
+/// Quantize with no declared `domain` buckets the *data* extent instead.
+#[test]
+fn quantize_without_explicit_domain_buckets_data_extent() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "quantize",
+        "range": ["#ff0000", "#0000ff"],
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 4.0, 10.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    let buckets = buckets_of(&scale);
+    assert_eq!(buckets.bounds(), &[0.0, 5.0, 10.0]);
+    assert_eq!(rgb(scale.lookup_f64(4.0).unwrap()), (0xff, 0x00, 0x00));
+    assert_eq!(rgb(scale.lookup_f64(6.0).unwrap()), (0x00, 0x00, 0xff));
+}
+
+/// Spec §4.2 (amended 2026-08-28): a descending Quantize `domain=[hi, lo]`
+/// normalizes to ascending bounds with the swatch order reversed, so the first
+/// `range` entry stays on the declared `lo` end — the reversed-colormap reading.
+/// Deterministic and exactly the mirror of the ascending spelling: this pins
+/// both directions of the same 3-color partition against each other.
+#[test]
+fn quantize_descending_domain_reverses_swatch_order() {
+    let palette = ["#ff0000", "#00ff00", "#0000ff"];
+    let batch = batch_with_numeric_color(vec![0.0, 50.0, 100.0]);
+    let resolve = |domain: [f64; 2]| {
+        let spec = spec_with_color_scale_json(serde_json::json!({
+            "type": "quantize",
+            "domain": domain,
+            "range": palette,
+        }));
+        resolve_color(&spec, &batch).0
+    };
+
+    let ascending = resolve([0.0, 100.0]);
+    let descending = resolve([100.0, 0.0]);
+
+    // Identical bucket geometry either way — only the swatch order flips.
+    let bounds: Vec<f64> = vec![0.0, 100.0 / 3.0, 200.0 / 3.0, 100.0];
+    assert_eq!(buckets_of(&ascending).bounds(), bounds.as_slice());
+    assert_eq!(buckets_of(&descending).bounds(), bounds.as_slice());
+    assert_eq!(
+        buckets_of(&descending).colors().iter().rev().map(|c| rgb(*c)).collect::<Vec<_>>(),
+        buckets_of(&ascending).colors().iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+        "descending swatches are the ascending swatches reversed"
+    );
+
+    // Per-value: the first range entry (#ff0000) sits on the declared lo end.
+    for (value, asc, desc) in [
+        (10.0, (0xff, 0x00, 0x00), (0x00, 0x00, 0xff)),
+        (50.0, (0x00, 0xff, 0x00), (0x00, 0xff, 0x00)),
+        (90.0, (0x00, 0x00, 0xff), (0xff, 0x00, 0x00)),
+    ] {
+        assert_eq!(rgb(ascending.lookup_f64(value).unwrap()), asc, "ascending at {value}");
+        assert_eq!(rgb(descending.lookup_f64(value).unwrap()), desc, "descending at {value}");
+    }
+}
+
+/// Threshold: `k` declared boundaries partition the line into `k + 1` buckets,
+/// both ends open. The labeling bounds widen to bracket the data.
+#[test]
+fn threshold_k_boundaries_produce_k_plus_one_buckets() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "threshold",
+        "domain": [10.0, 20.0],
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 15.0, 30.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    let buckets = buckets_of(&scale);
+    assert_eq!(buckets.colors().len(), 3, "2 thresholds → 3 buckets");
+    assert_eq!(buckets.bounds(), &[0.0, 10.0, 20.0, 30.0]);
+
+    let low = scale.lookup_f64(5.0).unwrap();
+    let mid = scale.lookup_f64(15.0).unwrap();
+    let high = scale.lookup_f64(25.0).unwrap();
+    assert_ne!(rgb(low), rgb(mid));
+    assert_ne!(rgb(mid), rgb(high));
+    // Boundaries belong to the bucket above; the end buckets are open.
+    assert_eq!(rgb(scale.lookup_f64(10.0).unwrap()), rgb(mid));
+    assert_eq!(rgb(scale.lookup_f64(20.0).unwrap()), rgb(high));
+    assert_eq!(rgb(scale.lookup_f64(-999.0).unwrap()), rgb(low));
+    assert_eq!(rgb(scale.lookup_f64(999.0).unwrap()), rgb(high));
+}
+
+/// Quantile buckets at the sample's quantile cut-points: with two buckets the
+/// single cut is the sample median, so the split is by rank, not by extent.
+#[test]
+fn quantile_buckets_split_at_sample_quantiles() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "quantile",
+        "domain": [1.0, 2.0, 3.0, 100.0],
+        "range": [0.0, 1.0],
+    }));
+    let batch = batch_with_numeric_color(vec![1.0, 2.0, 3.0, 100.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    let buckets = buckets_of(&scale);
+    assert_eq!(buckets.colors().len(), 2);
+    // Median of [1, 2, 3, 100] is 2.5 — an extent split would have cut at 50.5.
+    assert_eq!(buckets.bounds(), &[1.0, 2.5, 100.0]);
+    let lower = scale.lookup_f64(2.0).unwrap();
+    let upper = scale.lookup_f64(3.0).unwrap();
+    assert_ne!(rgb(lower), rgb(upper));
+}
+
+/// With no declared sample, Quantile computes its cut-points from the encoded
+/// column itself.
+#[test]
+fn quantile_without_domain_uses_the_data_column_as_its_sample() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "quantile",
+        "range": [0.0, 1.0],
+    }));
+    let batch = batch_with_numeric_color(vec![1.0, 2.0, 3.0, 100.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    assert_eq!(buckets_of(&scale).bounds(), &[1.0, 2.5, 100.0]);
+}
+
+/// BinOrdinal: bin edges become bucket boundaries and its `scheme` names the
+/// colormap the swatches are sampled from.
+#[test]
+fn bin_ordinal_bins_become_buckets_and_scheme_is_honored() {
+    let batch = batch_with_numeric_color(vec![5.0, 15.0, 25.0, 35.0]);
+    let blues = spec_with_color_scale_json(serde_json::json!({
+        "type": "bin-ordinal",
+        "bins": [10.0, 20.0, 30.0],
+        "scheme": "blues",
+    }));
+    let reds = spec_with_color_scale_json(serde_json::json!({
+        "type": "bin-ordinal",
+        "bins": [10.0, 20.0, 30.0],
+        "scheme": "reds",
+    }));
+    let (blues_scale, _) = resolve_color(&blues, &batch);
+    let (reds_scale, _) = resolve_color(&reds, &batch);
+
+    let blue_buckets = buckets_of(&blues_scale);
+    assert_eq!(blue_buckets.colors().len(), 4, "3 edges → 4 bins");
+    assert_eq!(blue_buckets.bounds(), &[5.0, 10.0, 20.0, 30.0, 35.0]);
+    assert_ne!(
+        rgb(blues_scale.lookup_f64(15.0).unwrap()),
+        rgb(reds_scale.lookup_f64(15.0).unwrap()),
+        "scheme= must change the swatch colors"
+    );
+}
+
+/// A *categorical* scheme name on BinOrdinal contributes its palette entries
+/// directly rather than being dropped in favor of the theme colormap.
+#[test]
+fn bin_ordinal_categorical_scheme_uses_palette_entries() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "bin-ordinal",
+        "bins": [10.0, 20.0],
+        "scheme": "tableau10",
+    }));
+    let batch = batch_with_numeric_color(vec![5.0, 15.0, 25.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+    let expected = crate::render::color::palette::categorical_palette("tableau10");
+    let colors = buckets_of(&scale).colors();
+    assert_eq!(colors.len(), 3);
+    for (i, c) in colors.iter().enumerate() {
+        assert_eq!(rgb(*c), rgb(expected[i]), "bucket {i} must take palette entry {i}");
+    }
+    assert!(warnings.is_empty(), "3 buckets fit tableau10: {warnings:?}");
+}
+
+/// Spec §4.2 (amended 2026-08-28): when the bucket count exceeds a categorical
+/// scheme's palette, the entries cycle **and** the recycling is reported —
+/// mirroring `build_default_categorical_scale`'s `ColorPaletteOverflowed`
+/// contract rather than degrading silently. The colors still render.
+#[test]
+fn categorical_scheme_overflow_warns_and_cycles_the_palette() {
+    // `dark2` has 8 entries; 9 bin edges → 10 buckets forces two wraps.
+    let bins: Vec<f64> = (1..=9).map(|i| i as f64).collect();
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "bin-ordinal",
+        "bins": bins,
+        "scheme": "dark2",
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 5.0, 10.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+
+    let entries = crate::render::color::palette::categorical_palette("dark2");
+    let colors = buckets_of(&scale).colors();
+    assert_eq!(colors.len(), 10);
+    assert!(colors.len() > entries.len(), "test must actually overflow the palette");
+    assert_eq!(
+        warnings,
+        vec![crate::render::RenderWarning::ColorPaletteOverflowed { categories: 10 }],
+        "palette recycling must be reported, not silent"
+    );
+    // Cycling, not truncation: every bucket still has a color, and bucket
+    // `entries.len()` wraps back to entry 0.
+    for (i, c) in colors.iter().enumerate() {
+        assert_eq!(rgb(*c), rgb(entries[i % entries.len()]), "bucket {i}");
+    }
+    assert!(scale.lookup_f64(9.5).is_some(), "the top bucket still paints");
+}
+
+/// The categorical-scheme branch is keyed on the resolved scheme name, so it is
+/// reachable from any discretizing variant through the top-level
+/// `encoding.scheme` — not only from `BinOrdinal`'s own `scheme` field.
+/// (`Threshold`'s `range` is numeric outputs, so its swatches always come from
+/// a scheme.)
+#[test]
+fn categorical_scheme_branch_applies_to_threshold_via_encoding_scheme() {
+    use crate::spec::encoding::EncodingSpec;
+    let mut spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "threshold",
+        "domain": [3.0, 7.0],
+    }));
+    let color = spec.encoding.color.take().expect("color encoding");
+    spec.encoding.color = Some(EncodingSpec { scheme: Some("set1".into()), ..color });
+
+    let batch = batch_with_numeric_color(vec![0.0, 5.0, 10.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    let entries = crate::render::color::palette::categorical_palette("set1");
+    let colors = buckets_of(&scale).colors();
+    assert_eq!(colors.len(), 3);
+    for (i, c) in colors.iter().enumerate() {
+        assert_eq!(rgb(*c), rgb(entries[i]), "bucket {i} takes set1 entry {i}");
+    }
+}
+
+/// An unparseable entry in a Quantize `range` discards the whole range, warns
+/// naming the offending entry, and falls back to scheme-sampled swatches.
+#[test]
+fn quantize_range_parse_failure_warns_and_falls_back_to_scheme() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "quantize",
+        "domain": [0.0, 10.0],
+        "range": ["#ff0000", "not-a-color"],
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 10.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            crate::render::RenderWarning::ColorRangeParseFailure { entry } if entry == "not-a-color"
+        )),
+        "expected a ColorRangeParseFailure naming the bad entry, got {warnings:?}"
+    );
+    let buckets = buckets_of(&scale);
+    assert_eq!(buckets.colors().len(), 2, "bucket count still comes from the range");
+    assert_ne!(
+        rgb(buckets.colors()[0]),
+        (0xff, 0x00, 0x00),
+        "the whole range is discarded, not just the bad entry"
+    );
+}
+
+/// Null and NaN rows resolve to no bucket color, so the mark falls back exactly
+/// as it does on the continuous path.
+#[test]
+fn discretizing_color_has_no_bucket_for_non_finite_values() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "threshold",
+        "domain": [10.0],
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, f64::NAN, 20.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    assert!(scale.lookup_f64(f64::NAN).is_none());
+    assert!(scale.lookup_f64(f64::INFINITY).is_none());
+    assert!(scale.lookup_f64(5.0).is_some());
+    // Non-finite rows must not poison the labeling bounds.
+    assert!(buckets_of(&scale).bounds().iter().all(|b| b.is_finite()));
+}
+
+/// Discretizing scales read the numeric column, so mark builders load
+/// `col_as_f64` for them exactly as they do for continuous color.
+#[test]
+fn discretizing_color_reads_the_numeric_column() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "threshold",
+        "domain": [10.0],
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 20.0]);
+    let (scale, _) = resolve_color(&spec, &batch);
+    assert_eq!(scale.input(), ColorInput::Numeric);
+    assert!(scale.categorical_domain().is_none());
+    // String lookup routes through the numeric parse, matching Continuous.
+    assert_eq!(
+        rgb(scale.lookup("20").unwrap()),
+        rgb(scale.lookup_f64(20.0).unwrap())
+    );
+}
+
+/// Sequential and Diverging color specs are untouched by the discretizing
+/// path: both still resolve to `Continuous` with their declared domain and
+/// midpoint (the §7 byte-identity invariant for the absent case).
+#[test]
+fn sequential_and_diverging_specs_still_resolve_to_continuous() {
+    let batch = batch_with_numeric_color(vec![-5.0, 0.0, 5.0]);
+
+    let seq = spec_with_color_scale_json(serde_json::json!({
+        "type": "sequential",
+        "scheme": "blues",
+        "domain": [0.0, 50.0],
+    }));
+    let (seq_scale, _) = resolve_color(&seq, &batch);
+    match seq_scale {
+        ColorScale::Continuous { domain, midpoint, .. } => {
+            assert_eq!(domain, (0.0, 50.0));
+            assert_eq!(midpoint, None);
+        }
+        other => panic!("expected Continuous, got {other:?}"),
+    }
+
+    let div = spec_with_color_scale_json(serde_json::json!({
+        "type": "diverging",
+        "scheme": "rdbu",
+        "domain": [-10.0, 2.0, 10.0],
+    }));
+    let (div_scale, _) = resolve_color(&div, &batch);
+    match div_scale {
+        ColorScale::Continuous { domain, midpoint, .. } => {
+            assert_eq!(domain, (-10.0, 10.0));
+            assert_eq!(midpoint, Some(2.0));
+        }
+        other => panic!("expected Continuous, got {other:?}"),
+    }
+}
+
+/// The heatmap `vmin=`/`vmax=` path: a Linear color scale's `common.domain`
+/// pins the continuous extent instead of being dropped for the data extent.
+#[test]
+fn linear_common_domain_pins_the_continuous_color_extent() {
+    let batch = batch_with_numeric_color(vec![0.0, 5.0, 10.0]);
+    let pinned = spec_with_color_scale_json(serde_json::json!({
+        "type": "linear",
+        "domain": [0.0, 100.0],
+    }));
+    let (scale, _) = resolve_color(&pinned, &batch);
+    match scale {
+        ColorScale::Continuous { domain, .. } => assert_eq!(domain, (0.0, 100.0)),
+        other => panic!("expected Continuous, got {other:?}"),
+    }
+
+    // No declared domain → the data extent, unchanged.
+    let auto = spec_with_color_scale_json(serde_json::json!({ "type": "linear" }));
+    let (auto_scale, _) = resolve_color(&auto, &batch);
+    match auto_scale {
+        ColorScale::Continuous { domain, .. } => assert_eq!(domain, (0.0, 10.0)),
+        other => panic!("expected Continuous, got {other:?}"),
+    }
+}
+
+/// A discretizing spec that declares no bucket count at all (hand-written JSON;
+/// the Python constructors make `range`/`domain`/`bins` mandatory) resolves as
+/// a plain continuous scale rather than an empty partition.
+#[test]
+fn discretizing_spec_without_a_bucket_count_falls_back_to_continuous() {
+    let batch = batch_with_numeric_color(vec![0.0, 10.0]);
+    for json in [
+        serde_json::json!({ "type": "quantize", "domain": [0.0, 10.0] }),
+        serde_json::json!({ "type": "quantile" }),
+        serde_json::json!({ "type": "threshold" }),
+        serde_json::json!({ "type": "bin-ordinal" }),
+    ] {
+        let spec = spec_with_color_scale_json(json.clone());
+        let (scale, _) = resolve_color(&spec, &batch);
+        assert!(
+            matches!(scale, ColorScale::Continuous { .. }),
+            "{json} should resolve to Continuous, got {scale:?}"
+        );
+    }
+}
+
+/// `DiscretizedColors` refuses any (bounds, colors) pair that is not a
+/// partition — the invariant `lookup` relies on lives in the constructor.
+#[test]
+fn discretized_colors_requires_one_more_bound_than_colors() {
+    let c = crate::render::color::from_rgba(0, 0, 0, 255);
+    assert!(DiscretizedColors::new(vec![0.0, 1.0], vec![c]).is_some());
+    assert!(DiscretizedColors::new(vec![0.0, 1.0], vec![c, c]).is_none());
+    assert!(DiscretizedColors::new(vec![0.0, 1.0, 2.0], vec![c]).is_none());
+    assert!(DiscretizedColors::new(vec![0.0], Vec::new()).is_none());
+}
+
+/// `set_colors` (the `configure_color(range=…)` seam) only applies a
+/// replacement that matches the bucket count, and *reports* the refusal with
+/// both counts rather than no-op-ing silently (spec §4.2, amended 2026-08-28).
+#[test]
+fn discretized_colors_set_colors_requires_matching_bucket_count() {
+    let black = crate::render::color::from_rgba(0, 0, 0, 255);
+    let white = crate::render::color::from_rgba(255, 255, 255, 255);
+    let mut buckets = DiscretizedColors::new(vec![0.0, 1.0, 2.0], vec![black, black]).unwrap();
+
+    assert_eq!(
+        buckets.set_colors(vec![white]),
+        Err(SwatchCountMismatch { expected: 2, received: 1 }),
+        "a wrong-length range is refused, naming both counts"
+    );
+    assert_eq!(rgb(buckets.colors()[0]), rgb(black), "the swatches are untouched");
+
+    assert_eq!(buckets.set_colors(vec![white, white]), Ok(()));
+    assert_eq!(rgb(buckets.colors()[0]), rgb(white), "matching-length range is applied");
+}
+
+/// A `Quantile` color spec with no declared sample derives its cut-points from
+/// the data, so under facet sharing it must read the GLOBAL batch — otherwise
+/// each panel cuts at its own quantiles while the colorbar stays global, and the
+/// same value paints differently per panel with no diagnostic.
+#[test]
+fn t3_shared_facet_quantile_sample_uses_the_global_batch() {
+    use crate::spec::encoding::ScaleSpec;
+
+    // Panel A's values are all in the global lower half; panel B's in the upper
+    // half. Per-panel quantiles would split each panel at its own median (2.5
+    // and 6.5); the global median of 1..8 is 4.5.
+    let panel_a = t3_c_batch(vec![0.0; 4], vec![0.0; 4], vec![1.0, 2.0, 3.0, 4.0]);
+    let panel_b = t3_c_batch(vec![0.0; 4], vec![0.0; 4], vec![5.0, 6.0, 7.0, 8.0]);
+    let global = t3_c_batch(
+        vec![0.0; 8],
+        vec![0.0; 8],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    );
+    let outputs = final_outputs(global);
+
+    let mut spec = faceted_continuous_color_spec();
+    spec.encoding.color.as_mut().unwrap().scale = Some(
+        serde_json::from_value::<ScaleSpec>(serde_json::json!({
+            "type": "quantile",
+            "range": [0.0, 1.0],
+        }))
+        .unwrap(),
+    );
+
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    let (color_a, color_b) = (
+        scales_a.color.expect("panel A color"),
+        scales_b.color.expect("panel B color"),
+    );
+
+    // Both panels cut at the GLOBAL median (4.5), not their own (2.5 / 6.5).
+    assert_eq!(buckets_of(&color_a).bounds(), &[1.0, 4.5, 8.0]);
+    assert_eq!(buckets_of(&color_b).bounds(), &[1.0, 4.5, 8.0]);
+
+    // The discriminating consequence: every value paints the same in both
+    // panels. Under per-panel sampling, 4.0 would be panel A's TOP bucket and
+    // panel B's bottom one.
+    for v in [1.0, 4.0, 5.0, 8.0] {
+        assert_eq!(
+            rgb(color_a.lookup_f64(v).unwrap()),
+            rgb(color_b.lookup_f64(v).unwrap()),
+            "value {v} must paint identically in both panels"
+        );
+    }
+    assert_ne!(
+        rgb(color_a.lookup_f64(4.0).unwrap()),
+        rgb(color_a.lookup_f64(5.0).unwrap()),
+        "the global median must still separate the two buckets"
+    );
+}
+
+/// The render-side discretizing resolver derives its interior bounds from the
+/// shared `uniform_bin_thresholds` helper rather than re-deriving the formula,
+/// including on spans whose step is not exactly representable.
+///
+/// This is one half of the drift guard: the other half — that
+/// `QuantizeScale::thresholds()` still routes through the same helper — is
+/// `scale::quantize::tests::quantize_thresholds`. Together they pin the single
+/// definition; neither asserts it alone.
+#[test]
+fn quantize_bucket_bounds_come_from_the_shared_bin_threshold_helper() {
+    for (lo, hi, n) in [(0.0, 100.0, 4), (0.0, 10.0, 3), (-1.0, 1.0, 7), (2.5, 3.5, 6)] {
+        let range: Vec<String> = (0..n).map(|i| format!("#00000{i}")).collect();
+        let spec = spec_with_color_scale_json(serde_json::json!({
+            "type": "quantize",
+            "domain": [lo, hi],
+            "range": range,
+        }));
+        let batch = batch_with_numeric_color(vec![lo, hi]);
+        let (scale, _) = resolve_color(&spec, &batch);
+
+        let interior = &buckets_of(&scale).bounds()[1..n];
+        let expected = crate::scale::core::uniform_bin_thresholds(lo, hi, n);
+        assert_eq!(interior, expected.as_slice(), "domain [{lo},{hi}] into {n} bins");
+    }
+}
+
+// ── Batch A §4.2 (amended 2026-08-28): declared boundary ordering ─────────────
+//
+// `Color(scale={...})` accepts a raw dict, bypassing the `ThresholdScale` /
+// `BinOrdinalScale` constructors' "strictly sorted ascending" validation, so a
+// non-ascending list reaches the resolver. Fully descending normalizes like
+// Quantize; non-monotonic is a typed refusal.
+
+/// Try to resolve the color scale, surfacing the resolver's error instead of
+/// unwrapping it.
+fn try_resolve_color(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+) -> Result<Option<ColorScale>, crate::render::RenderError> {
+    let theme = ThemeInputs::default();
+    resolve_scales(spec, batch, (0.0, 100.0), (0.0, 80.0), &theme).map(|(s, _)| s.color)
+}
+
+/// A fully descending `Threshold` domain is the mirror of its ascending
+/// spelling: identical (monotonic) bounds, identical bucket membership, and the
+/// swatches reversed — exactly `Quantize`'s descending contract, so the same
+/// user intent reads the same way on every discretizing variant.
+#[test]
+fn threshold_descending_domain_mirrors_the_ascending_spelling() {
+    let batch = batch_with_numeric_color(vec![5.0, 15.0, 25.0]);
+    let resolve = |domain: Vec<f64>| {
+        let spec = spec_with_color_scale_json(serde_json::json!({
+            "type": "threshold",
+            "domain": domain,
+        }));
+        resolve_color(&spec, &batch).0
+    };
+    let ascending = resolve(vec![10.0, 20.0]);
+    let descending = resolve(vec![20.0, 10.0]);
+
+    // Bounds are monotonic either way — the bug this pins produced
+    // `[5, 20, 10, 25]`, which `partition_point` cannot partition.
+    assert_eq!(buckets_of(&ascending).bounds(), &[5.0, 10.0, 20.0, 25.0]);
+    assert_eq!(buckets_of(&descending).bounds(), &[5.0, 10.0, 20.0, 25.0]);
+    assert!(
+        buckets_of(&descending).bounds().windows(2).all(|w| w[0] < w[1]),
+        "bounds must be strictly ascending after normalization"
+    );
+
+    // Swatches reversed, mirroring `quantize_descending_domain_reverses_swatch_order`.
+    assert_eq!(
+        buckets_of(&descending).colors().iter().rev().map(|c| rgb(*c)).collect::<Vec<_>>(),
+        buckets_of(&ascending).colors().iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+    );
+
+    // Middle-bucket membership is the symptom the reviewer reproduced: 12 and 18
+    // belong to the MIDDLE bucket, and must not paint the top bucket's color.
+    let mid = rgb(ascending.lookup_f64(15.0).unwrap());
+    let top = rgb(ascending.lookup_f64(25.0).unwrap());
+    let bottom = rgb(ascending.lookup_f64(5.0).unwrap());
+    assert!(mid != top && mid != bottom, "the three buckets must be distinguishable");
+    for v in [12.0, 18.0] {
+        assert_eq!(rgb(ascending.lookup_f64(v).unwrap()), mid, "ascending: {v} is middle");
+        assert_eq!(
+            rgb(descending.lookup_f64(v).unwrap()),
+            rgb(buckets_of(&descending).colors()[1]),
+            "descending: {v} must land in the middle bucket, not the top"
+        );
+    }
+    // Every swatch is reachable (the bug left the middle one unpaintable).
+    let painted: std::collections::HashSet<_> =
+        [0.0, 15.0, 30.0].iter().map(|v| rgb(descending.lookup_f64(*v).unwrap())).collect();
+    assert_eq!(painted.len(), 3, "all three swatches must be reachable");
+}
+
+/// A fully descending `BinOrdinal` bin list normalizes the same way.
+#[test]
+fn bin_ordinal_descending_bins_normalize_and_reverse_swatches() {
+    let batch = batch_with_numeric_color(vec![5.0, 15.0, 25.0]);
+    let resolve = |bins: Vec<f64>| {
+        let spec = spec_with_color_scale_json(serde_json::json!({
+            "type": "bin-ordinal",
+            "bins": bins,
+            "scheme": "blues",
+        }));
+        resolve_color(&spec, &batch).0
+    };
+    let ascending = resolve(vec![10.0, 20.0]);
+    let descending = resolve(vec![20.0, 10.0]);
+
+    assert_eq!(buckets_of(&descending).bounds(), buckets_of(&ascending).bounds());
+    assert_eq!(
+        buckets_of(&descending).colors().iter().rev().map(|c| rgb(*c)).collect::<Vec<_>>(),
+        buckets_of(&ascending).colors().iter().map(|c| rgb(*c)).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        rgb(descending.lookup_f64(15.0).unwrap()),
+        rgb(buckets_of(&descending).colors()[1]),
+        "a middle value must land in the middle bucket"
+    );
+}
+
+/// A non-monotonic boundary list has no defensible bucket assignment, so it is a
+/// typed refusal quoting the matching constructor's own rejection sentence —
+/// never a silent mis-bucketing and never a quiet fallback to continuous color.
+#[test]
+fn non_monotonic_declared_boundaries_are_a_typed_error() {
+    use crate::render::RenderError;
+    let batch = batch_with_numeric_color(vec![5.0, 15.0, 25.0]);
+
+    for (json, field) in [
+        (serde_json::json!({ "type": "threshold", "domain": [10.0, 30.0, 20.0] }), "domain"),
+        (serde_json::json!({ "type": "bin-ordinal", "bins": [10.0, 30.0, 20.0] }), "bins"),
+        // A repeated boundary is an empty bucket, rejected by the constructors
+        // (`w[0] >= w[1]`) and rejected identically here.
+        (serde_json::json!({ "type": "threshold", "domain": [10.0, 10.0] }), "domain"),
+    ] {
+        let scale_type = json["type"].as_str().unwrap().to_string();
+        let spec = spec_with_color_scale_json(json.clone());
+        let err = try_resolve_color(&spec, &batch)
+            .expect_err(&format!("{json} must be refused, not silently mis-bucketed"));
+
+        // The message quotes the constructor vocabulary verbatim — one
+        // vocabulary across the pyclass and render paths.
+        let expected_tail = crate::scale::core::not_strictly_ascending_message(field);
+        match &err {
+            RenderError::ScaleResolutionFailed(msg) => {
+                assert!(
+                    msg.contains(&expected_tail) && msg.contains(&scale_type),
+                    "message must name the scale type and quote {expected_tail:?}; got {msg:?}"
+                );
+            }
+            other => panic!("expected ScaleResolutionFailed, got {other:?}"),
+        }
+    }
+}
+
+/// The refusal message is word-for-word what the `ThresholdScale` /
+/// `BinOrdinalScale` constructors raise, so a user hitting either path reads the
+/// same sentence.
+#[test]
+fn boundary_rejection_message_matches_the_constructor_vocabulary() {
+    assert_eq!(
+        crate::scale::core::not_strictly_ascending_message("domain"),
+        "domain must be strictly sorted ascending",
+    );
+    assert_eq!(
+        crate::scale::core::not_strictly_ascending_message("bins"),
+        "bins must be strictly sorted ascending",
+    );
+}
+
+/// Ascending declared lists — every list the constructors would have accepted —
+/// resolve exactly as before the ordering check was added.
+#[test]
+fn ascending_declared_boundaries_are_unchanged() {
+    let batch = batch_with_numeric_color(vec![0.0, 15.0, 30.0]);
+    let threshold = spec_with_color_scale_json(serde_json::json!({
+        "type": "threshold",
+        "domain": [10.0, 20.0],
+    }));
+    let (scale, warnings) = resolve_color(&threshold, &batch);
+    assert!(warnings.is_empty(), "an ascending list must not warn: {warnings:?}");
+    assert_eq!(buckets_of(&scale).bounds(), &[0.0, 10.0, 20.0, 30.0]);
+
+    // Single-boundary lists are trivially ascending and must NOT read as
+    // descending (which would reverse their two swatches).
+    let single = spec_with_color_scale_json(serde_json::json!({
+        "type": "threshold",
+        "domain": [10.0],
+    }));
+    let (single_scale, _) = resolve_color(&single, &batch);
+    let colors = buckets_of(&single_scale).colors();
+    assert_eq!(colors.len(), 2);
+    assert_eq!(
+        rgb(single_scale.lookup_f64(0.0).unwrap()),
+        rgb(colors[0]),
+        "the low bucket keeps the first swatch"
+    );
+}
+
+/// `QuantizeScale::new` rejects a zero-width domain, but `Color(scale={...})`
+/// takes a raw dict and bypasses it — so the resolver refuses `domain=[5, 5]`
+/// with the constructor's own sentence rather than collapsing every boundary
+/// onto one value (`[5, 5, 5, 5]` for three buckets: middle swatches
+/// unreachable, no diagnostic). An ordinary two-point domain is untouched.
+#[test]
+fn degenerate_quantize_domain_is_a_typed_error() {
+    use crate::render::RenderError;
+    let batch = batch_with_numeric_color(vec![0.0, 5.0, 10.0]);
+    let quantize = |domain: Vec<f64>| {
+        spec_with_color_scale_json(serde_json::json!({
+            "type": "quantize",
+            "domain": domain,
+            "range": ["#ff0000", "#00ff00", "#0000ff"],
+        }))
+    };
+
+    let err = try_resolve_color(&quantize(vec![5.0, 5.0]), &batch)
+        .expect_err("a zero-width declared domain must be refused");
+    match &err {
+        RenderError::ScaleResolutionFailed(msg) => assert!(
+            msg.contains(crate::scale::core::DEGENERATE_DOMAIN_MESSAGE)
+                && msg.contains("quantize"),
+            "message must name the scale type and quote the constructor sentence; got {msg:?}"
+        ),
+        other => panic!("expected ScaleResolutionFailed, got {other:?}"),
+    }
+    // Word-for-word what `QuantizeScale(domain=[5, 5], ...)` raises.
+    assert_eq!(
+        crate::scale::core::DEGENERATE_DOMAIN_MESSAGE,
+        "domain endpoints must differ (lo != hi)",
+    );
+
+    // A non-degenerate two-point domain resolves exactly as before.
+    let (scale, warnings) = resolve_color(&quantize(vec![0.0, 30.0]), &batch);
+    assert!(warnings.is_empty(), "a well-formed domain must not warn: {warnings:?}");
+    assert_eq!(buckets_of(&scale).bounds(), &[0.0, 10.0, 20.0, 30.0]);
+    assert_eq!(rgb(scale.lookup_f64(15.0).unwrap()), (0x00, 0xff, 0x00));
+
+    // A constant data column still resolves (its degenerate extent is
+    // data-derived, not user-declared, so it is not an error).
+    let flat = batch_with_numeric_color(vec![7.0, 7.0]);
+    let no_domain = spec_with_color_scale_json(serde_json::json!({
+        "type": "quantize",
+        "range": ["#ff0000", "#0000ff"],
+    }));
+    assert!(
+        try_resolve_color(&no_domain, &flat).is_ok(),
+        "a constant column must still render, not error"
+    );
 }

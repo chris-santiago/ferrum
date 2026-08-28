@@ -354,6 +354,19 @@ pub enum RenderWarning {
     /// discarded and the default theme palette is used instead.
     /// `entry` is the offending color string.
     ColorRangeParseFailure { entry: String },
+    /// A chart-level `configure_color(range=…)` named a different number of
+    /// colors than the discretizing (Quantize/Quantile/Threshold/BinOrdinal)
+    /// color scale has buckets. The bucket count is fixed by the scale's own
+    /// thresholds, so the override cannot describe the partition and the
+    /// resolved swatches stand (spec §4.2, amended 2026-08-28: reported, never
+    /// silently dropped).
+    ColorRangeBucketCountMismatch { expected: u32, received: u32 },
+    /// A chart-level `configure_color(domain=…)` left some of the data's
+    /// categories unlisted. Their marks still draw — in the theme mark color,
+    /// with no legend entry — which is the sanctioned behavior but is otherwise
+    /// indistinguishable from a rendering bug, so the omitted categories are
+    /// named here (spec §4.2, amended 2026-08-28).
+    ColorDomainOmitsCategories { categories: Vec<String> },
     /// A data-aware `sort` spec (channel shorthand `"-y"` or a sort-field
     /// object) could not be resolved — the referenced field is missing from the
     /// batch, has an unsupported dtype, or the spec is otherwise malformed. The
@@ -415,6 +428,17 @@ impl std::fmt::Display for RenderWarning {
                 "could not parse color '{entry}'; the explicit color range was \
                  discarded in favor of the theme palette"
             ),
+            RenderWarning::ColorRangeBucketCountMismatch { expected, received } => write!(
+                f,
+                "color range names {received} color(s) but the binned color scale has \
+                 {expected} bucket(s); the range was not applied"
+            ),
+            RenderWarning::ColorDomainOmitsCategories { categories } => write!(
+                f,
+                "color domain does not list {}; those marks paint in the default mark \
+                 color with no legend entry",
+                categories.join(", ")
+            ),
             RenderWarning::SortSpecIgnored { reason } => write!(
                 f,
                 "sort spec could not be applied ({reason}); categories fall back \
@@ -463,6 +487,8 @@ mod tests {
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::EmptyPanel { panel_index: 1 },
             RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
+            RenderWarning::ColorRangeBucketCountMismatch { expected: 3, received: 2 },
+            RenderWarning::ColorDomainOmitsCategories { categories: vec!["c".into()] },
             RenderWarning::SortSpecIgnored { reason: "missing field".into() },
             RenderWarning::PositionAdjustSkipped {
                 adjustment: "dodge".into(),
@@ -1286,14 +1312,41 @@ fn sync_projected_fractions_to_tick_values(
 /// Continuous scales: `domain` pins the data extent; `range` builds an evenly
 /// spaced gradient from the provided hex stops.
 ///
-/// Categorical scales: `range` replaces the palette with a heap-allocated
-/// `Cow::Owned` slice of parsed hex colors. Invalid hex strings are silently
-/// skipped; the override is a no-op when no valid colors are parsed.
+/// Categorical scales: `domain` (a list of strings) replaces the resolved
+/// category order — entries are drawn in the listed order, categories absent
+/// from the list are dropped from the scale, and listed values absent from the
+/// data are kept (an empty legend entry, matching positional explicit-domain
+/// behavior). A dropped category's *marks still draw*, in the theme mark color
+/// with no legend entry; the omitted names are reported as a
+/// [`RenderWarning::ColorDomainOmitsCategories`] so that sanctioned degradation
+/// is distinguishable from a rendering bug (spec §4.2, amended 2026-08-28).
+/// `range` replaces the palette with a heap-allocated `Cow::Owned` slice of
+/// parsed hex colors.
+///
+/// Discretizing scales: `range` replaces the bucket swatches, all-or-nothing —
+/// one unparseable entry discards the whole range and reports
+/// [`RenderWarning::ColorRangeParseFailure`], matching `bucket_colors` and the
+/// categorical explicit-range path. The bucket count is fixed by the scale's own
+/// thresholds, so a range of any other length cannot describe the partition; it
+/// is left unapplied and reported as a
+/// [`RenderWarning::ColorRangeBucketCountMismatch`] naming both counts (spec
+/// §4.2, amended 2026-08-28 — never a silent drop). `domain` is inapplicable
+/// here: the boundaries come from the scale spec.
+///
+/// On the Continuous and Categorical arms, invalid color strings are silently
+/// skipped and an override is a no-op when nothing valid is parsed — a
+/// pre-existing convention kept as-is, since a dropped entry there only shortens
+/// a gradient or a cycling palette rather than shifting a fixed bucket mapping.
+///
+/// Returns the warnings the override produced, for the caller to fold into its
+/// accumulator. Empty for every chart with no `configure_color(...)`.
+#[must_use]
 pub(crate) fn apply_color_config_to_color_scale(
     color_scale: &mut Option<scale_resolve::ColorScale>,
     cfg: &chart_config::ColorConfigSpec,
-) {
-    let Some(ref mut scale) = color_scale else { return };
+) -> Vec<RenderWarning> {
+    let mut warnings = Vec::new();
+    let Some(ref mut scale) = color_scale else { return warnings };
     match scale {
         scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme, .. } => {
             if let Some(ref d) = cfg.domain {
@@ -1323,7 +1376,28 @@ pub(crate) fn apply_color_config_to_color_scale(
                 }
             }
         }
-        scale_resolve::ColorScale::Categorical { ref mut palette, .. } => {
+        scale_resolve::ColorScale::Categorical { ref mut domain, ref mut palette } => {
+            if let Some(ref d) = cfg.domain {
+                let categories: Vec<String> =
+                    d.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+                if !categories.is_empty() {
+                    // Categories the override leaves unlisted keep rendering —
+                    // in the theme mark color, with no legend entry (spec §4.2,
+                    // amended 2026-08-28). Sanctioned, but indistinguishable
+                    // from a rendering bug on sight, so name them.
+                    let omitted: Vec<String> = domain
+                        .iter()
+                        .filter(|c| !categories.contains(c))
+                        .cloned()
+                        .collect();
+                    if !omitted.is_empty() {
+                        warnings.push(RenderWarning::ColorDomainOmitsCategories {
+                            categories: omitted,
+                        });
+                    }
+                    *domain = categories;
+                }
+            }
             if let Some(ref range) = cfg.range {
                 let colors: Vec<color::Color> = range
                     .iter()
@@ -1334,7 +1408,73 @@ pub(crate) fn apply_color_config_to_color_scale(
                 }
             }
         }
+        scale_resolve::ColorScale::Discretizing(ref mut buckets) => {
+            if let Some(ref range) = cfg.range {
+                // All-or-nothing, mirroring every other explicit-range parse in
+                // the crate (`bucket_colors`, the categorical explicit-range
+                // path). Dropping unparseable entries first would make the
+                // count check see a post-filter length: a 4-entry range with one
+                // bad entry would "fit" a 3-bucket scale and silently repaint it
+                // with a shifted mapping, and a 3-entry range with one bad entry
+                // would report a count mismatch for what is really a parse
+                // failure.
+                let parsed: Result<Vec<color::Color>, &String> = range
+                    .iter()
+                    .map(|s| color::from_hex_str(s).map_err(|_| s))
+                    .collect();
+                match parsed {
+                    Ok(colors) => {
+                        if let Err(mismatch) = buckets.set_colors(colors) {
+                            warnings.push(RenderWarning::ColorRangeBucketCountMismatch {
+                                expected: mismatch.expected as u32,
+                                received: mismatch.received as u32,
+                            });
+                        }
+                    }
+                    Err(entry) => warnings.push(RenderWarning::ColorRangeParseFailure {
+                        entry: entry.clone(),
+                    }),
+                }
+            }
+        }
     }
+    warnings
+}
+
+/// Re-derive the color legend's entry labels from the categorical scale domain.
+///
+/// `prepare_render_inputs` builds the entries from the domain as resolved, but
+/// `configure_color(domain=[…])` reorders/subsets that domain afterwards
+/// ([`apply_color_config_to_color_scale`]), so without this the swatch colors
+/// would follow the new order while the labels kept the old one. Entry symbols
+/// are preserved (a category that survives keeps its symbol; a newly listed one
+/// takes the first entry's).
+///
+/// A no-op — and therefore byte-identical — whenever the domain still matches
+/// the entries, which is every chart that does not set `configure_color(domain=)`
+/// on a categorical color scale.
+fn resync_categorical_legend_entries(
+    entries: &mut Vec<crate::layout::LegendEntry>,
+    color_scale: Option<&scale_resolve::ColorScale>,
+) {
+    let Some(domain) = color_scale.and_then(scale_resolve::ColorScale::categorical_domain) else {
+        return;
+    };
+    let Some(first) = entries.first() else { return };
+    if entries.len() == domain.len() && entries.iter().zip(domain).all(|(e, d)| &e.label == d) {
+        return;
+    }
+    let default_symbol = first.symbol;
+    *entries = domain
+        .iter()
+        .map(|label| crate::layout::LegendEntry {
+            label: label.clone(),
+            symbol: entries
+                .iter()
+                .find(|e| &e.label == label)
+                .map_or(default_symbol, |e| e.symbol),
+        })
+        .collect();
 }
 
 /// Output of the shared prepare-and-layout pipeline, consumed by both
@@ -1453,8 +1593,18 @@ fn prepare_and_layout(
     sync_projected_fractions_to_tick_values(&mut prep.axes.x, &prep.provisional_scales.x);
     sync_projected_fractions_to_tick_values(&mut prep.axes.y, &prep.provisional_scales.y);
     // Apply color domain/range overrides (level 3) to resolved color scale.
+    // This is the ONE reporting application: `scene_build`'s per-panel and
+    // per-legend re-applications run the same config against the same scale, so
+    // they discard their (identical) warnings rather than emit one per panel.
     if let Some(ref cfg) = chart_config.color {
-        apply_color_config_to_color_scale(&mut prep.provisional_scales.color, cfg);
+        warnings.extend(apply_color_config_to_color_scale(
+            &mut prep.provisional_scales.color,
+            cfg,
+        ));
+        resync_categorical_legend_entries(
+            &mut prep.legend_entries,
+            prep.provisional_scales.color.as_ref(),
+        );
     }
 
     // Build effective_theme: start from the caller-supplied theme, then layer in
@@ -3200,7 +3350,8 @@ mod chart_config_application_tests {
             midpoint: None,
         });
         let cfg = ColorConfigSpec { domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]), ..Default::default() };
-        apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
         if let Some(ColorScale::Continuous { domain, .. }) = color_scale {
             assert_eq!(domain, (10.0, 90.0));
         } else {
@@ -3221,7 +3372,8 @@ mod chart_config_application_tests {
             range: Some(vec!["#ffffff".to_string(), "#000000".to_string()]),
             ..Default::default()
         };
-        apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
         if let Some(ColorScale::Continuous { scheme: ContinuousScheme::Gradient(stops), .. }) = color_scale {
             assert_eq!(stops.len(), 2);
             // First stop at t=0, last at t=1.
@@ -3235,5 +3387,284 @@ mod chart_config_application_tests {
     /// Helper: build a zero-filled LegendOverrides (as if no per-encoding overrides existed).
     fn legend_overrides_from_prep_default() -> LegendOverrides {
         LegendOverrides::default()
+    }
+
+    /// A categorical color scale over `domain`, painted from the tableau10
+    /// palette (the shape `build_color_scale` produces).
+    fn categorical_scale(domain: &[&str]) -> scale_resolve::ColorScale {
+        scale_resolve::ColorScale::Categorical {
+            domain: domain.iter().map(|s| s.to_string()).collect(),
+            palette: std::borrow::Cow::Borrowed(color::palette::categorical_palette("tableau10")),
+        }
+    }
+
+    /// `configure_color(domain=[…])` on a categorical scale reorders the
+    /// category order (and therefore which palette color each category takes).
+    #[test]
+    fn color_config_domain_reorders_categorical_scale() {
+        use scale_resolve::ColorScale;
+        let mut color_scale = Some(categorical_scale(&["a", "b", "c"]));
+        let before = color_scale.as_ref().unwrap().lookup("c").unwrap();
+
+        let cfg = ColorConfigSpec {
+            domain: Some(vec![serde_json::json!("c"), serde_json::json!("a")]),
+            ..Default::default()
+        };
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        // Dropping "b" is a reportable degradation — see
+        // `color_config_domain_omitting_a_data_category_warns` for the contract.
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::ColorDomainOmitsCategories { categories: vec!["b".into()] }],
+        );
+
+        let scale = color_scale.expect("scale survives the override");
+        match &scale {
+            ColorScale::Categorical { domain, .. } => {
+                assert_eq!(domain, &["c", "a"], "listed order wins; unlisted 'b' is dropped");
+            }
+            other => panic!("expected Categorical, got {other:?}"),
+        }
+        assert!(scale.lookup("b").is_none(), "'b' is no longer in the domain");
+        assert_ne!(
+            (scale.lookup("c").unwrap().red, scale.lookup("c").unwrap().green),
+            (before.red, before.green),
+            "'c' moved to palette slot 0, so its color must change"
+        );
+    }
+
+    /// Spec §4.2 (amended 2026-08-28): a `configure_color(domain=…)` that omits
+    /// a data category keeps that category's marks rendering — in the theme mark
+    /// color, with no legend entry — and *names the omission* so the gap is
+    /// diagnosable rather than looking like a rendering bug. A domain that
+    /// covers every data category is silent.
+    #[test]
+    fn color_config_domain_omitting_a_data_category_warns() {
+        use crate::layout::{LegendEntry, SymbolKind};
+
+        let entry = |label: &str| LegendEntry { label: label.into(), symbol: SymbolKind::Circle };
+        let theme_fallback = color::from_rgba(1, 2, 3, 255);
+        let data_categories = ["a", "b", "c"];
+
+        // ── Partial domain: two of three categories listed ───────────────────
+        let mut color_scale = Some(categorical_scale(&data_categories));
+        let mut legend_entries: Vec<LegendEntry> =
+            data_categories.iter().map(|c| entry(c)).collect();
+        let warnings = apply_color_config_to_color_scale(
+            &mut color_scale,
+            &ColorConfigSpec {
+                domain: Some(vec![serde_json::json!("a"), serde_json::json!("c")]),
+                ..Default::default()
+            },
+        );
+
+        // (1) The warning names the omitted category — and only it.
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::ColorDomainOmitsCategories { categories: vec!["b".into()] }],
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "color domain does not list b; those marks paint in the default mark color \
+             with no legend entry",
+        );
+
+        // (2) "b"'s marks still render: the fill resolver falls back to the
+        //     theme mark color rather than dropping the row or panicking.
+        let scale = color_scale.as_ref().expect("scale survives");
+        assert_eq!(
+            draw::resolve_fill_color(Some(scale), Some("b"), None, theme_fallback),
+            theme_fallback,
+            "an omitted category must still paint, in the fallback color"
+        );
+        // The listed categories keep a real scale color, distinct from fallback.
+        assert_ne!(
+            draw::resolve_fill_color(Some(scale), Some("a"), None, theme_fallback),
+            theme_fallback,
+        );
+
+        // (3) The legend carries exactly the two listed categories.
+        resync_categorical_legend_entries(&mut legend_entries, color_scale.as_ref());
+        assert_eq!(legend_entries, vec![entry("a"), entry("c")]);
+
+        // ── Full domain: nothing omitted, nothing reported ───────────────────
+        let mut full = Some(categorical_scale(&data_categories));
+        let warnings = apply_color_config_to_color_scale(
+            &mut full,
+            &ColorConfigSpec {
+                domain: Some(
+                    data_categories.iter().map(|c| serde_json::json!(c)).collect(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(warnings.is_empty(), "a domain covering every category is silent: {warnings:?}");
+    }
+
+    /// A category listed in `configure_color(domain=…)` but absent from the data
+    /// is kept, matching positional explicit-domain behavior.
+    #[test]
+    fn color_config_domain_keeps_categories_absent_from_data() {
+        use scale_resolve::ColorScale;
+        let mut color_scale = Some(categorical_scale(&["a"]));
+        let cfg = ColorConfigSpec {
+            domain: Some(vec![serde_json::json!("a"), serde_json::json!("ghost")]),
+            ..Default::default()
+        };
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
+        match color_scale.as_ref().unwrap() {
+            ColorScale::Categorical { domain, .. } => assert_eq!(domain, &["a", "ghost"]),
+            other => panic!("expected Categorical, got {other:?}"),
+        }
+    }
+
+    /// A numeric `configure_color(domain=…)` (the continuous form) leaves a
+    /// categorical domain untouched rather than replacing it with junk.
+    #[test]
+    fn color_config_numeric_domain_leaves_categorical_domain_alone() {
+        use scale_resolve::ColorScale;
+        let mut color_scale = Some(categorical_scale(&["a", "b"]));
+        let cfg = ColorConfigSpec {
+            domain: Some(vec![serde_json::json!(0.0), serde_json::json!(1.0)]),
+            ..Default::default()
+        };
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
+        match color_scale.as_ref().unwrap() {
+            ColorScale::Categorical { domain, .. } => assert_eq!(domain, &["a", "b"]),
+            other => panic!("expected Categorical, got {other:?}"),
+        }
+    }
+
+    /// The legend entries follow the reordered domain, so labels and swatch
+    /// colors stay in agreement after a `configure_color(domain=…)` override.
+    /// The resync is inert when the entries already match the domain.
+    #[test]
+    fn legend_entries_resync_to_the_overridden_categorical_domain() {
+        use crate::layout::{LegendEntry, SymbolKind};
+        let entry = |label: &str, symbol| LegendEntry { label: label.into(), symbol };
+        let mut entries = vec![
+            entry("a", SymbolKind::Square),
+            entry("b", SymbolKind::Circle),
+            entry("c", SymbolKind::Circle),
+        ];
+        let unchanged = entries.clone();
+
+        let scale = categorical_scale(&["a", "b", "c"]);
+        resync_categorical_legend_entries(&mut entries, Some(&scale));
+        assert_eq!(entries, unchanged, "matching domain must leave entries untouched");
+
+        let reordered = categorical_scale(&["c", "a"]);
+        resync_categorical_legend_entries(&mut entries, Some(&reordered));
+        assert_eq!(
+            entries,
+            vec![entry("c", SymbolKind::Circle), entry("a", SymbolKind::Square)],
+            "entries follow the new domain and each keeps its own symbol"
+        );
+
+        // No color scale (conditional-color legends) and no entries: both inert.
+        let mut conditional_entries = vec![entry("x", SymbolKind::Circle)];
+        resync_categorical_legend_entries(&mut conditional_entries, None);
+        assert_eq!(conditional_entries, vec![entry("x", SymbolKind::Circle)]);
+        let mut empty: Vec<LegendEntry> = Vec::new();
+        resync_categorical_legend_entries(&mut empty, Some(&reordered));
+        assert!(empty.is_empty(), "a suppressed legend stays suppressed");
+    }
+
+    /// `configure_color(range=…)` repaints a discretizing scale's swatches when
+    /// the range describes the same partition. A count mismatch leaves the
+    /// swatches alone and is **reported**, naming both counts — spec §4.2
+    /// (amended 2026-08-28) forbids a silent drop here.
+    #[test]
+    fn color_config_range_repaints_discretizing_swatches() {
+        use scale_resolve::{ColorScale, DiscretizedColors};
+        let black = color::from_rgba(0, 0, 0, 255);
+        let buckets = DiscretizedColors::new(vec![0.0, 1.0, 2.0], vec![black, black]).unwrap();
+        let mut color_scale = Some(ColorScale::Discretizing(buckets));
+
+        // One color for a 2-bucket partition: swatches stand, and the refusal
+        // is warned with both counts.
+        let warnings = apply_color_config_to_color_scale(
+            &mut color_scale,
+            &ColorConfigSpec { range: Some(vec!["#ffffff".into()]), ..Default::default() },
+        );
+        assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::ColorRangeBucketCountMismatch { expected: 2, received: 1 }],
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "color range names 1 color(s) but the binned color scale has 2 bucket(s); \
+             the range was not applied",
+        );
+
+        let warnings = apply_color_config_to_color_scale(
+            &mut color_scale,
+            &ColorConfigSpec {
+                range: Some(vec!["#ffffff".into(), "#ffffff".into()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 255);
+        assert!(warnings.is_empty(), "a matching range must not warn: {warnings:?}");
+    }
+
+    /// The discretizing `range` parse is all-or-nothing. Filtering unparseable
+    /// entries out *before* the count check would let a too-long range "fit"
+    /// after the bad entry is dropped — silently repainting the buckets with a
+    /// shifted mapping — and would misreport a too-short one as a count
+    /// mismatch. Both shapes must report the parse failure and leave the
+    /// swatches untouched.
+    #[test]
+    fn color_config_range_on_discretizing_scale_parses_all_or_nothing() {
+        use scale_resolve::{ColorScale, DiscretizedColors};
+        let black = color::from_rgba(0, 0, 0, 255);
+        let three_buckets = || {
+            Some(ColorScale::Discretizing(
+                DiscretizedColors::new(vec![0.0, 1.0, 2.0, 3.0], vec![black; 3]).unwrap(),
+            ))
+        };
+        let parse_failure = |entry: &str| {
+            vec![RenderWarning::ColorRangeParseFailure { entry: entry.to_string() }]
+        };
+
+        // 4 entries, one unparseable: the survivors would number exactly 3 and
+        // would have been accepted, repainting bucket 2 with the 4th color.
+        let mut scale = three_buckets();
+        let warnings = apply_color_config_to_color_scale(
+            &mut scale,
+            &ColorConfigSpec {
+                range: Some(vec![
+                    "#ff0000".into(),
+                    "bogus".into(),
+                    "#0000ff".into(),
+                    "#00ff00".into(),
+                ]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(warnings, parse_failure("bogus"), "must report the parse, not repaint");
+        for probe in [0.5, 1.5, 2.5] {
+            assert_eq!(
+                scale.as_ref().unwrap().lookup_f64(probe).unwrap().red,
+                0,
+                "bucket at {probe} must keep its resolved swatch"
+            );
+        }
+
+        // 3 entries, one unparseable: a post-filter count check would call this
+        // a 2-vs-3 mismatch, misattributing a parse failure.
+        let mut scale = three_buckets();
+        let warnings = apply_color_config_to_color_scale(
+            &mut scale,
+            &ColorConfigSpec {
+                range: Some(vec!["#ff0000".into(), "nope".into(), "#0000ff".into()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(warnings, parse_failure("nope"));
+        assert_eq!(scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
     }
 }

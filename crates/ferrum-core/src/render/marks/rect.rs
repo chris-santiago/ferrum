@@ -11,7 +11,7 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_effective_stroke, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::{ColorScale, ScaleKind};
+use crate::render::scale_resolve::{ColorInput, ColorScale, ScaleKind};
 
 fn count_distinct(values: &[Option<String>]) -> usize {
     let mut seen = std::collections::HashSet::<&str>::new();
@@ -66,12 +66,13 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     if x2s.len() != n || ys.len() != n || y2s.len() != n { return empty_result(); }
 
     let cfield = color_field(ctx, spec);
-    let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let color_numeric: Option<Vec<Option<f64>>> = match (color_input, cfield) {
+        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
         _ => None,
     };
-    let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let color_strings: Option<Vec<Option<String>>> = match (color_input, cfield) {
+        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
@@ -183,8 +184,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let panel = ctx.panel.plot_area;
 
     let cfield = color_field(ctx, spec);
-    let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let color_strings: Option<Vec<Option<String>>> = match (ctx.scales.color.as_ref().map(ColorScale::input), cfield) {
+        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
@@ -419,12 +420,13 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let cell_h = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h) / n_y as f64;
 
     let cfield = color_field(ctx, spec);
-    let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
+    let color_numeric: Option<Vec<Option<f64>>> = match (color_input, cfield) {
+        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
         _ => None,
     };
-    let color_strings: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+    let color_strings: Option<Vec<Option<String>>> = match (color_input, cfield) {
+        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
         _ => None,
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);

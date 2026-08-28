@@ -12,7 +12,7 @@ use ferrum_scene::{
 };
 
 use super::color::{from_hex_str, with_opacity, Color};
-use super::scale_resolve::{ColorScale, ResolvedScales};
+use super::scale_resolve::{ColorInput, ColorScale, ResolvedScales};
 
 pub struct DrawCtx<'a> {
     pub spec: &'a crate::spec::chart::ChartSpec,
@@ -597,26 +597,27 @@ pub(crate) fn resolve_stroke_color(ms: &MarkStyle, row_color: Option<Color>) -> 
 /// value, falling back to the constant mark-style `fill` when no color encoding
 /// applies.
 ///
-/// The continuous branch consumes the numeric value directly via `lookup_f64`
-/// (correct-by-construction: no `f64 → String → f64` round-trip), matching the
-/// point renderer. The categorical branch maps the row's category string via
-/// `lookup`. `scale` is `None` when the chart has no color scale.
+/// The [`ColorInput::Numeric`] branch (continuous and discretizing scales)
+/// consumes the numeric value directly via `lookup_f64` (correct-by-
+/// construction: no `f64 → String → f64` round-trip), matching the point
+/// renderer. The [`ColorInput::Category`] branch maps the row's category string
+/// via `lookup`. `scale` is `None` when the chart has no color scale.
 pub(crate) fn resolve_fill_color(
     scale: Option<&ColorScale>,
     cat_value: Option<&str>,
     num_value: Option<f64>,
     fallback: Color,
 ) -> Color {
-    match scale {
-        Some(s @ ColorScale::Continuous { .. }) => match num_value {
+    let Some(s) = scale else { return fallback };
+    match s.input() {
+        ColorInput::Numeric => match num_value {
             Some(v) if v.is_finite() => s.lookup_f64(v).unwrap_or(fallback),
             _ => fallback,
         },
-        Some(s @ ColorScale::Categorical { .. }) => match cat_value {
+        ColorInput::Category => match cat_value {
             Some(v) => s.lookup(v).unwrap_or(fallback),
             None => fallback,
         },
-        None => fallback,
     }
 }
 

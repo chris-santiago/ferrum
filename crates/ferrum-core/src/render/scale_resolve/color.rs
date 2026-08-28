@@ -13,7 +13,7 @@ use crate::render::color::palette;
 use crate::render::RenderError;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};
-use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, SharedDomain};
+use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
 /// Resolve the color encoding into a `ColorScale`.
 ///
@@ -139,40 +139,35 @@ pub fn build_color_scale(
         } else {
             panel_extent
         };
-        // D1: honor explicit domain from Sequential/Diverging scale specs.
-        // When the spec carries domain=[lo, hi] or domain=[lo, mid, hi], use
-        // those bounds instead of auto-inferring from the data column. When the
-        // spec domain is absent, a 10-pre-b composite shared extent wins over the
-        // per-leaf data extent; otherwise fall back to the data extent.
+        // Quantize/Quantile/Threshold/BinOrdinal bucket the value instead of
+        // interpolating it. Resolved before the continuous path because they
+        // reuse the same numeric column and scheme precedence; `None` means the
+        // spec is not (or declares no usable) discretization and the continuous
+        // path below applies unchanged.
+        //
+        // T3: a `Quantile` spec with no declared sample derives its cut-points
+        // from the data, so it takes the global FINAL_OUTPUT_KEY batch under
+        // facet sharing for the same reason the extent above is unioned — per-
+        // panel quantiles would paint the same value differently in each panel
+        // while the colorbar stayed global.
+        let sample_batch =
+            shared_categorical_batch(located.batch, &c_enc.field, transform_outputs, facet_shared);
+        if let Some((buckets, warnings)) =
+            build_discretizing_color_scale(c_enc, sample_batch, data_extent, theme)?
+        {
+            return Ok((Some(ColorScale::Discretizing(buckets)), warnings));
+        }
+
+        // D1: honor explicit domain from the scale spec. When the spec carries
+        // an extent (`positional_extent`), use those bounds instead of
+        // auto-inferring from the data column. When the spec domain is absent, a
+        // 10-pre-b composite shared extent wins over the per-leaf data extent;
+        // otherwise fall back to the data extent.
         let (lo, hi) = scale_explicit_domain(c_enc)
             .or_else(|| composite_numeric_extent(composite_domain))
             .unwrap_or(data_extent);
-        use crate::render::color::{ContinuousScheme, NamedContinuous};
 
-        // D1/D4: resolve scheme from (1) encoding.scheme, (2) encoding.scale
-        // Sequential/Diverging scheme field OR common.scheme on other variants,
-        // (3) theme, (4) Viridis fallback.
-        let scale_scheme: Option<&str> = scale_common_scheme(c_enc);
-        let mut scheme = c_enc
-            .scheme
-            .as_deref()
-            .or(scale_scheme)
-            .and_then(NamedContinuous::from_name)
-            .map(ContinuousScheme::Named)
-            .unwrap_or_else(|| {
-                let theme_scheme = if lo < 0.0 && hi > 0.0 {
-                    &theme.palette.diverging_scheme
-                } else {
-                    &theme.palette.sequential_scheme
-                };
-                NamedContinuous::from_name(theme_scheme)
-                    .map(ContinuousScheme::Named)
-                    .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
-            });
-        // D1: honor the `reverse` flag on Sequential scale specs.
-        if scale_spec_is_reversed(c_enc) {
-            scheme = ContinuousScheme::Reverse(Box::new(scheme));
-        }
+        let scheme = resolve_continuous_scheme(c_enc, theme, (lo, hi));
         // Gap 2: resolve the diverging midpoint.  Priority:
         //   1. explicit `domain_mid`/`domainMid` field on DivergingScale spec
         //   2. middle element of a 3-tuple domain=[lo, mid, hi]
@@ -270,6 +265,339 @@ pub fn build_color_scale(
     }
 }
 
+/// Resolve the continuous color scheme for an encoding (D1/D4 precedence):
+///   1. `encoding.scheme` (top-level field on `EncodingSpec`)
+///   2. the scale spec's own scheme ([`scale_common_scheme`])
+///   3. the theme's diverging scheme when `(lo, hi)` straddles zero, else its
+///      sequential scheme
+///   4. hard fallback: Viridis
+///
+/// A `Sequential { reverse: true }` spec wraps the result in
+/// [`ContinuousScheme::Reverse`]. Shared by the continuous and the discretizing
+/// paths so both honor the same precedence.
+fn resolve_continuous_scheme(
+    enc: &crate::spec::encoding::EncodingSpec,
+    theme: &ThemeInputs,
+    (lo, hi): (f64, f64),
+) -> crate::render::color::ContinuousScheme {
+    use crate::render::color::{ContinuousScheme, NamedContinuous};
+    let mut scheme = enc
+        .scheme
+        .as_deref()
+        .or(scale_common_scheme(enc))
+        .and_then(NamedContinuous::from_name)
+        .map(ContinuousScheme::Named)
+        .unwrap_or_else(|| {
+            let theme_scheme = if lo < 0.0 && hi > 0.0 {
+                &theme.palette.diverging_scheme
+            } else {
+                &theme.palette.sequential_scheme
+            };
+            NamedContinuous::from_name(theme_scheme)
+                .map(ContinuousScheme::Named)
+                .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
+        });
+    if scale_spec_is_reversed(enc) {
+        scheme = ContinuousScheme::Reverse(Box::new(scheme));
+    }
+    scheme
+}
+
+/// The bucket partition a discretizing scale spec declares.
+struct BucketPartition {
+    /// Ascending interior boundaries; the scale has `thresholds.len() + 1`
+    /// buckets.
+    thresholds: Vec<f64>,
+    /// Ascending `(lo, hi)` labeling extent for the colorbar's end labels.
+    extent: (f64, f64),
+    /// The spec's declared domain runs high → low, so the resolved colors are
+    /// reversed to keep the first `range` entry on the declared `lo` end.
+    ///
+    /// Spec §4.2 (amended 2026-08-28): a descending `Quantize` domain
+    /// `[hi, lo]` normalizes to `[lo, hi]` with the swatch order reversed —
+    /// deterministic, and the reading that matches reversed-colormap intent.
+    /// This is knowingly asymmetric with the continuous path, whose
+    /// `normalize_continuous` collapses `hi <= lo` to a flat 0.5; the asymmetry
+    /// is a logged campaign follow-up, not resolved in this batch.
+    descending: bool,
+}
+
+/// Resolve a `Quantize`/`Quantile`/`Threshold`/`BinOrdinal` color encoding into
+/// bucket boundaries plus one flat color per bucket (spec §4.2).
+///
+/// Returns `Ok(None)` — leaving the caller on the continuous path,
+/// byte-identically to the pre-discretizing behavior — for every
+/// non-discretizing scale spec and for a discretizing spec that declares no
+/// bucket count at all (a `Quantize` or `Quantile` with no `range`, a
+/// `Threshold` with no `domain`, a `BinOrdinal` with no `bins`). The Python
+/// constructors make all four mandatory, so those are hand-written-JSON shapes.
+///
+/// Returns `Err` for a `Threshold`/`BinOrdinal` boundary list that is neither
+/// ascending nor descending — see [`declared_boundaries`].
+///
+/// `sample_batch` is the batch a `Quantile` spec reads its cut-point sample from
+/// when it declares no explicit one — the caller picks it via
+/// [`shared_categorical_batch`], so faceted panels agree.
+fn build_discretizing_color_scale(
+    enc: &crate::spec::encoding::EncodingSpec,
+    sample_batch: &RecordBatch,
+    data_extent: (f64, f64),
+    theme: &ThemeInputs,
+) -> Result<Option<(DiscretizedColors, Vec<crate::render::RenderWarning>)>, RenderError> {
+    let Some(partition) = bucket_partition(enc, sample_batch, data_extent)? else {
+        return Ok(None);
+    };
+    let n_buckets = partition.thresholds.len() + 1;
+    let mut warnings = Vec::new();
+    let mut colors = bucket_colors(enc, theme, n_buckets, partition.extent, &mut warnings);
+    if partition.descending {
+        colors.reverse();
+    }
+    let (lo, hi) = partition.extent;
+    let mut bounds = Vec::with_capacity(n_buckets + 1);
+    bounds.push(lo);
+    bounds.extend_from_slice(&partition.thresholds);
+    bounds.push(hi);
+    Ok(DiscretizedColors::new(bounds, colors).map(|scale| (scale, warnings)))
+}
+
+/// Extract the bucket partition from a discretizing scale spec. See
+/// [`build_discretizing_color_scale`] for the `Ok(None)` and `Err` contracts.
+fn bucket_partition(
+    enc: &crate::spec::encoding::EncodingSpec,
+    sample_batch: &RecordBatch,
+    data_extent: (f64, f64),
+) -> Result<Option<BucketPartition>, RenderError> {
+    use crate::spec::encoding::ScaleSpec;
+    let Some(scale) = enc.scale.as_ref() else { return Ok(None) };
+    match scale {
+        // Uniform buckets over the declared extent (or the data extent when the
+        // spec omits one); the color `range` fixes the bucket count.
+        ScaleSpec::Quantize { domain, range } => {
+            let Some(colors) = non_empty(range.as_deref()) else { return Ok(None) };
+            let n = colors.len();
+            let ((lo, hi), descending) = declared_extent(domain.as_deref(), data_extent)?;
+            // Endpoints already normalized ascending, so the shared formula
+            // yields ascending boundaries.
+            let thresholds = crate::scale::core::uniform_bin_thresholds(lo, hi, n);
+            Ok(Some(BucketPartition { thresholds, extent: (lo, hi), descending }))
+        }
+        // Equal-frequency buckets at the sample's quantile cut-points; the
+        // `range` fixes the bucket count. The sample is the declared `domain`
+        // when present, else the encoded column itself.
+        ScaleSpec::Quantile { domain, range } => {
+            let Some(outputs) = non_empty(range.as_deref()) else { return Ok(None) };
+            let n = outputs.len();
+            let sample = match non_empty(domain.as_deref()) {
+                Some(d) => d.to_vec(),
+                None => column_sample(sample_batch, &enc.field),
+            };
+            let mut sorted: Vec<f64> = sample.into_iter().filter(|v| v.is_finite()).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let extent = match (sorted.first(), sorted.last()) {
+                (Some(lo), Some(hi)) => (*lo, *hi),
+                _ => data_extent,
+            };
+            let thresholds = crate::scale::core::compute_quantile_cuts(&sorted, n);
+            Ok(Some(BucketPartition { thresholds, extent, descending: false }))
+        }
+        // Explicit boundaries: k thresholds → k + 1 buckets, both end buckets
+        // open. The labeling extent comes from the data, widened to cover the
+        // outermost threshold so `bounds` stays ascending.
+        ScaleSpec::Threshold { domain, .. } => {
+            let Some(declared) = non_empty(domain.as_deref()) else { return Ok(None) };
+            declared_boundaries(declared, "threshold", "domain", data_extent).map(Some)
+        }
+        ScaleSpec::BinOrdinal { bins, .. } => {
+            let Some(declared) = non_empty(bins.as_deref()) else { return Ok(None) };
+            declared_boundaries(declared, "bin-ordinal", "bins", data_extent).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Turn a `Quantize` spec's declared `domain` into an ascending `(lo, hi)`
+/// extent plus the swatch-reversal flag (spec §4.2, amended 2026-08-28).
+///
+/// The `Quantize` sibling of [`declared_boundaries`], meeting the same
+/// constructor-bypass problem at the same boundary: `QuantizeScale::new` rejects
+/// `lo == hi`, but `Color(scale={...})` accepts a raw dict, so a zero-width
+/// declared domain would otherwise collapse every boundary onto one value
+/// (`[5, 5, 5, 5]` for three buckets) — middle swatches unreachable, no
+/// diagnostic. Refused with the constructor's own sentence
+/// ([`DEGENERATE_DOMAIN_MESSAGE`]). A descending domain normalizes and reverses
+/// the swatches, exactly as a descending boundary list does.
+///
+/// Only a **declared** domain is validated. With no declared domain the extent
+/// comes from the data, where a constant column legitimately yields `lo == hi`;
+/// that is pre-existing data-derived behavior (and mirrors the continuous path's
+/// degenerate handling), not user error, so it is left alone.
+fn declared_extent(
+    declared: Option<&[f64]>,
+    data_extent: (f64, f64),
+) -> Result<((f64, f64), bool), RenderError> {
+    use crate::scale::core::DEGENERATE_DOMAIN_MESSAGE;
+
+    let Some(d) = declared.filter(|d| d.len() >= 2) else {
+        return Ok((data_extent, false));
+    };
+    let (lo, hi) = (d[0], d[d.len() - 1]);
+    if lo == hi {
+        return Err(RenderError::ScaleResolutionFailed(format!(
+            "color scale of type 'quantize': {DEGENERATE_DOMAIN_MESSAGE}"
+        )));
+    }
+    let descending = hi < lo;
+    Ok((if descending { (hi, lo) } else { (lo, hi) }, descending))
+}
+
+/// Turn a `Threshold`/`BinOrdinal` spec's declared boundary list into an
+/// ascending partition (spec §4.2, amended 2026-08-28).
+///
+/// The `ThresholdScale`/`BinOrdinalScale` constructors reject anything but a
+/// strictly ascending list, but `Color(scale={...})` accepts a raw dict and
+/// bypasses them, so this is the boundary where an unvalidated list is met:
+///
+/// - **strictly ascending** — used as declared (every list a constructor would
+///   have accepted takes this path, so those renders are byte-identical);
+/// - **strictly descending** — normalized to ascending with the swatches
+///   reversed, exactly as [`ScaleSpec::Quantize`]'s descending domain is
+///   handled, so the same user intent reads the same way on all three variants;
+/// - **anything else** (non-monotonic, or repeated boundaries) — a typed
+///   refusal quoting the constructors' own rejection sentence
+///   ([`not_strictly_ascending_message`]), never a silent mis-bucketing. An
+///   unordered list has no defensible bucket assignment: `lookup`'s
+///   `partition_point` would be well-defined but arbitrary, painting
+///   middle-bucket values the top bucket and leaving swatches unreachable.
+///
+/// `scale_type` is the wire tag (`"threshold"`, `"bin-ordinal"`) and `field`
+/// the list's spelling in that spec (`"domain"`, `"bins"`) — the same word the
+/// matching constructor names in its own error.
+fn declared_boundaries(
+    declared: &[f64],
+    scale_type: &str,
+    field: &str,
+    data_extent: (f64, f64),
+) -> Result<BucketPartition, RenderError> {
+    use crate::scale::core::{is_strictly_ascending, not_strictly_ascending_message};
+
+    // An empty or single-element list is trivially ascending, so it never reads
+    // as "descending" and never reverses its swatches.
+    let ascending = is_strictly_ascending(declared);
+    let descending = !ascending && declared.windows(2).all(|w| w[0] > w[1]);
+    if !ascending && !descending {
+        return Err(RenderError::ScaleResolutionFailed(format!(
+            "color scale of type '{scale_type}': {}",
+            not_strictly_ascending_message(field)
+        )));
+    }
+    let thresholds: Vec<f64> = if descending {
+        declared.iter().rev().copied().collect()
+    } else {
+        declared.to_vec()
+    };
+    let extent = widen_to_cover(data_extent, &thresholds);
+    Ok(BucketPartition { thresholds, extent, descending })
+}
+
+/// `Some(slice)` when the option holds a non-empty slice, else `None`.
+fn non_empty<T>(values: Option<&[T]>) -> Option<&[T]> {
+    values.filter(|v| !v.is_empty())
+}
+
+/// The encoded column's values in `batch`, used as the quantile sample when a
+/// `Quantile` spec declares no explicit sample domain.
+///
+/// `batch` is the caller's [`shared_categorical_batch`] selection: the global
+/// `FINAL_OUTPUT_KEY` rows under facet sharing (so every panel cuts at the same
+/// quantiles as the global colorbar), the panel's own rows otherwise.
+///
+/// Nulls are dropped; an unsupported dtype yields an empty sample (the caller
+/// then falls back to the data extent with no cut-points), which the
+/// numeric-dtype guard in `build_color_scale` already makes unreachable.
+fn column_sample(batch: &RecordBatch, field: &str) -> Vec<f64> {
+    crate::render::arrow_cast::col_as_f64(batch, field)
+        .map(|values| values.into_iter().flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Widen `(lo, hi)` so it covers every threshold — the outer labeling bounds
+/// must bracket the interior boundaries for `bounds` to stay ascending.
+fn widen_to_cover((lo, hi): (f64, f64), thresholds: &[f64]) -> (f64, f64) {
+    let mut lo = lo;
+    let mut hi = hi;
+    for t in thresholds {
+        lo = lo.min(*t);
+        hi = hi.max(*t);
+    }
+    (lo, hi)
+}
+
+/// The `n_buckets` swatch colors for a discretizing color scale (spec §4.2
+/// precedence): an explicit string `range` wins, then the resolved scheme, then
+/// the theme default scheme.
+///
+/// The scheme name is whatever [`scale_common_scheme`] resolves for *this*
+/// encoding — `enc.scheme` or the spec's own `scheme` field — so the categorical
+/// branch below is reachable from every discretizing variant, not just
+/// `BinOrdinal` (which is merely the only one with a `scheme` field of its own;
+/// the rest reach it through the top-level `encoding.scheme`).
+///
+/// Per spec §4.2 (amended 2026-08-28): a **categorical** scheme name (e.g.
+/// `"tableau10"`) contributes its palette entries in declaration order rather
+/// than being sampled, and when `n_buckets` exceeds the palette length the
+/// entries cycle *and* a `ColorPaletteOverflowed` warning is emitted — mirroring
+/// [`build_default_categorical_scale`]'s recycling contract, never a silent
+/// degrade. Every other scheme is sampled at `n_buckets` evenly spaced points.
+///
+/// The explicit range parse is all-or-nothing, mirroring the categorical path:
+/// one unparseable entry discards the whole range, pushes a
+/// `ColorRangeParseFailure` warning naming it, and falls through to the scheme.
+fn bucket_colors(
+    enc: &crate::spec::encoding::EncodingSpec,
+    theme: &ThemeInputs,
+    n_buckets: usize,
+    extent: (f64, f64),
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Vec<Color> {
+    if let Some(strings) = explicit_string_range(enc) {
+        let parsed: Result<Vec<Color>, String> = strings
+            .iter()
+            .map(|s| crate::render::color::parse_color(s).map_err(|_| s.clone()))
+            .collect();
+        match parsed {
+            Ok(colors) if colors.len() == n_buckets => return colors,
+            // A range of the wrong length cannot describe this partition; the
+            // bucket count is derived from the range for every spec that can
+            // carry one, so this is unreachable for a well-formed spec.
+            Ok(_) => {}
+            Err(entry) => warnings
+                .push(crate::render::RenderWarning::ColorRangeParseFailure { entry }),
+        }
+    }
+    let scheme_name = enc.scheme.as_deref().or_else(|| scale_common_scheme(enc));
+    if let Some(name) = scheme_name.filter(|n| palette::is_categorical_scheme(n)) {
+        let entries = palette::categorical_palette(name);
+        if n_buckets > entries.len() {
+            warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
+                categories: n_buckets as u32,
+            });
+        }
+        return (0..n_buckets).map(|i| entries[i % entries.len()]).collect();
+    }
+    let scheme = resolve_continuous_scheme(enc, theme, extent);
+    (0..n_buckets)
+        .map(|i| {
+            let t = if n_buckets <= 1 {
+                0.5
+            } else {
+                i as f64 / (n_buckets - 1) as f64
+            };
+            scheme.sample(t)
+        })
+        .collect()
+}
+
 /// The `(lo, hi)` extent of a 10-pre-b composite shared color domain, when it is
 /// the continuous ([`SharedDomain::Numeric`]) variant. `None` otherwise.
 fn composite_numeric_extent(domain: Option<&SharedDomain>) -> Option<(f64, f64)> {
@@ -318,16 +646,18 @@ fn build_default_categorical_scale(
 
 /// Extract the `scheme` string from a `ScaleSpec`.
 ///
-/// Covers both the `Sequential`/`Diverging` variants (which carry their own
-/// `scheme` field) and the `ContinuousScaleCommon`-bearing variants (Linear,
+/// Covers the `Sequential`/`Diverging`/`BinOrdinal` variants (which carry their
+/// own `scheme` field) and the `ContinuousScaleCommon`-bearing variants (Linear,
 /// Log, Time, Symlog, Pow, Sqrt, Utc). Returns `None` for ordinal/categorical
 /// variants and when no scheme is set.
 fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str> {
     use crate::spec::encoding::ScaleSpec;
     match enc.scale.as_ref()? {
-        // D1: Sequential and Diverging carry their own scheme field.
+        // D1: Sequential and Diverging carry their own scheme field;
+        // BinOrdinal names the scheme its bin swatches are drawn from.
         ScaleSpec::Sequential { scheme, .. }
-        | ScaleSpec::Diverging { scheme, .. } => scheme.as_deref(),
+        | ScaleSpec::Diverging { scheme, .. }
+        | ScaleSpec::BinOrdinal { scheme, .. } => scheme.as_deref(),
         // D4 (pre-existing): Linear and friends embed scheme in ContinuousScaleCommon.
         ScaleSpec::Linear   { common, .. }
         | ScaleSpec::Log    { common, .. }
@@ -340,33 +670,25 @@ fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str
     }
 }
 
-/// Extract the explicit numeric domain from a `Sequential` or `Diverging`
-/// scale spec.
+/// Extract the explicit `(lo, hi)` color extent a scale spec declares.
 ///
-/// For `Sequential`: returns `Some((domain[0], domain[1]))` when a 2-element
-/// (or longer) domain is declared.
+/// Delegates the extent-vs-binning classification to
+/// [`ScaleSpec::positional_extent`], the single place a scale variant declares
+/// whether its `domain` is an extent (`Sequential`/`Diverging` outer bounds, a
+/// `Linear` and friends `common.domain`) or a binning artifact (`Quantile`
+/// sample lists, `Threshold` boundaries, `BinOrdinal` edges — resolved by
+/// [`bucket_partition`] instead). Honoring the continuous variants' `common`
+/// domain here is what makes `heatmap(vmin=, vmax=)` take effect.
 ///
-/// For `Diverging`: accepts both 2-element `[lo, hi]` and 3-element
-/// `[lo, mid, hi]` domains; always returns the outer bounds `(lo, hi)`.
-/// The midpoint is carried separately by `scale_diverging_midpoint` and
-/// threaded into `ColorScale::Continuous { midpoint }` for piecewise-linear
+/// A `Diverging` midpoint is carried separately by `scale_diverging_midpoint`
+/// and threaded into `ColorScale::Continuous { midpoint }` for piecewise-linear
 /// normalization.
 ///
-/// Returns `None` for all other scale types and when no domain is declared,
-/// allowing the caller to fall back to the auto-inferred data extent.
+/// Returns `None` when the spec declares no extent, allowing the caller to fall
+/// back to the auto-inferred data extent.
 fn scale_explicit_domain(enc: &crate::spec::encoding::EncodingSpec) -> Option<(f64, f64)> {
-    use crate::spec::encoding::ScaleSpec;
-    match enc.scale.as_ref()? {
-        ScaleSpec::Sequential { domain: Some(d), .. } if d.len() >= 2 => {
-            Some((d[0], d[d.len() - 1]))
-        }
-        ScaleSpec::Diverging { domain: Some(d), .. } if d.len() >= 2 => {
-            // 3-element [lo, mid, hi]: take the outer bounds.
-            // 2-element [lo, hi]: use directly.
-            Some((d[0], d[d.len() - 1]))
-        }
-        _ => None,
-    }
+    let extent = enc.scale.as_ref()?.positional_extent()?;
+    (extent.len() >= 2).then(|| (extent[0], extent[extent.len() - 1]))
 }
 
 /// Extract the diverging midpoint from a `Diverging` scale spec.
@@ -400,15 +722,19 @@ fn scale_spec_is_reversed(enc: &crate::spec::encoding::EncodingSpec) -> bool {
 
 /// Extract an explicit color-string range from a color `EncodingSpec`.
 ///
-/// Returns `Some(Vec<String>)` when the encoding has `scale = ScaleSpec::Ordinal`
-/// with a string-array `range` (D1 path).  Returns `None` for all other scale
-/// types and when the range is absent or numeric.
+/// Returns `Some(Vec<String>)` for `ScaleSpec::Ordinal` with a string-array
+/// `range` (D1 path) and for `ScaleSpec::Quantize`, whose `range` is typed as
+/// color strings — the one discretizing variant that can carry explicit
+/// swatches (`Quantile`/`Threshold` ranges are numeric outputs and `BinOrdinal`
+/// names a scheme instead). Returns `None` for all other scale types and when
+/// the range is absent or numeric.
 fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
     use crate::spec::encoding::ScaleSpec;
     match enc.scale.as_ref()? {
         ScaleSpec::Ordinal { range, .. } => {
             crate::scale::ordinal::OrdinalRangeValue::all_strings(range.as_deref()?)
         }
+        ScaleSpec::Quantize { range, .. } => range.clone(),
         _ => None,
     }
 }

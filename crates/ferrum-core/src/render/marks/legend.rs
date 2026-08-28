@@ -2,7 +2,7 @@
 
 use crate::layout::{LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style};
-use crate::render::scale_resolve::ColorScale;
+use crate::render::scale_resolve::{ColorInput, ColorScale};
 use crate::render::svg::fmt_f;
 use ferrum_scene::{RawAnchor, SceneNode};
 
@@ -161,9 +161,10 @@ pub fn build_legend(
             .as_deref()
             .and_then(|hex| crate::render::color::from_hex_str(hex).ok())
             .or_else(|| {
-                color_scale.and_then(|s| match s {
-                    ColorScale::Categorical { .. } => s.lookup(&entry.label),
-                    ColorScale::Continuous { .. } => None,
+                color_scale.and_then(|s| match s.input() {
+                    ColorInput::Category => s.lookup(&entry.label),
+                    // Numeric scales render as a colorbar, never as entries.
+                    ColorInput::Numeric => None,
                 })
             })
             .unwrap_or(theme.colors.mark_color);
