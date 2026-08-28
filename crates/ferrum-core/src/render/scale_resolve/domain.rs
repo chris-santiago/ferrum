@@ -491,13 +491,22 @@ pub(in crate::render) fn numeric_domain_union(
         return Ok((0.0, 1.0));
     }
     // Degenerate domain: a single row or all-equal values produce mn == mx.
-    // A zero-span domain collapses every data point to the same pixel, which
-    // causes `to_pixel_f64` to return NaN (0/0 in the linear formula) and the
-    // mark renderer silently drops every row. Expand to a symmetric band so the
-    // mark renders at the centre of the plot area. Guard fires only here because
-    // `numeric_domain_union` is called exclusively from the auto-inferred
-    // (no explicit ScaleSpec) path in `build_axis_scale`; explicit domains go
-    // through `build_from_scale_spec` → `resolve_continuous_domain_and_range`.
+    // As of GH #104, `scale::core::degenerate_ratio` already makes every
+    // continuous scale's `scale()` finite (a centered midpoint) for a
+    // zero-span domain, so this expansion is no longer needed to keep marks
+    // from vanishing — `to_pixel_f64` no longer returns NaN there. It stays
+    // for a reason #104 doesn't touch: this is the *domain itself* (the
+    // axis's displayed extent, tick generation, "nice" rounding), not the
+    // per-value pixel projection. A literal `[d, d]` domain still collapses
+    // `nice_ticks`/tick generation to a single degenerate tick and gives the
+    // axis no visible span to lay out against; expanding to a symmetric band
+    // around `mn == mx` gives the auto-inferred axis a real (if synthetic)
+    // extent to tick and label, which #104's per-value guard has no way to
+    // provide. Guard fires only here because `numeric_domain_union` is called
+    // exclusively from the auto-inferred (no explicit ScaleSpec) path in
+    // `build_axis_scale`; explicit domains go through `build_from_scale_spec`
+    // → `resolve_continuous_domain_and_range`, where #104's per-scale guard
+    // is what keeps a degenerate explicit domain finite instead.
     if mn == mx {
         if mn == 0.0 {
             mn = -1.0;

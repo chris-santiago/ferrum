@@ -1175,6 +1175,33 @@ fn fractions_on_zero_span_domain_are_empty_not_nan() {
     assert!(explicit.iter().all(|f| f.is_finite()));
 }
 
+/// GH #104 quality-review remediation (S3-1): `tick_data` and
+/// `project_values_to_fractions` (the test above) are sibling accessors on
+/// the same `ScaleKind` and must agree on what a degenerate (zero-span)
+/// domain renders. Before the `degenerate_ratio` fix, `scale_internal`
+/// returned NaN for a degenerate domain, and every `tick_data` arm's
+/// `is_finite()` filter dropped it — zero ticks. This pins that outcome
+/// deliberately (rather than the alternative of emitting one tick at the
+/// range midpoint) so a degenerate-domain axis's SVG output is unchanged by
+/// #104's `scale()` fix — no golden re-bless required for this consequence.
+#[test]
+fn tick_data_on_zero_span_domain_returns_no_ticks() {
+    use crate::scale::linear::LinearScale;
+    // Degenerate domain: lo == hi (all-equal column / single distinct value).
+    let scale = ScaleKind::Linear(LinearScale::new_internal(
+        vec![3.0, 3.0],
+        vec![0.0, 100.0],
+        false,
+        false,
+    ));
+    let ticks = scale.tick_data(10);
+    assert!(
+        ticks.is_empty(),
+        "tick_data on a zero-span domain must stay empty (matching the pre-#104 \
+         outcome and the project_values_to_fractions sibling policy), got {ticks:?}"
+    );
+}
+
 /// Companion to the zero-span case: on a normal linear domain the projection is
 /// finite and index-aligned with the input values (the path that must keep
 /// working for `configure_axis(tick_values=[...])`).
