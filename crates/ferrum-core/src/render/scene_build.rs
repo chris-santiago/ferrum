@@ -1183,10 +1183,30 @@ fn build_panel_mark_batches(
         )?;
         let layer_batch: &RecordBatch = &adjusted_owned;
 
-        // Synthetic ChartSpec for this layer
+        // Synthetic ChartSpec for this layer. The `encoding` here is a
+        // DrawCtx-LOCAL copy — everything else in this loop (position
+        // grouping just above, key extraction below, and the legend's own
+        // separate resolution in `resolve_legend_color_scale`) reads
+        // `layer.encoding` directly and is never touched by what follows.
+        //
+        // Text-mark exemption (spec §4.4, 2026-08-28 T4 amendment, cycle-4
+        // finding): a `Mark::Text` layer whose `color` channel came purely
+        // from chart-level inheritance (`!layer.color_is_own`) must not have
+        // it reach the mark builder's per-row color read — only the layer's
+        // OWN declared `color=` may color text. Clearing it on this
+        // DrawCtx-local copy (not on `layer.encoding` itself) is what makes
+        // `resolve_fill_color` fall through to the fill/font-color
+        // precedence in `marks/text.rs`, without starving the legend or
+        // dodge/stack position grouping the way an earlier revision did by
+        // deleting the channel from `LayerPrepared.encoding` itself (see
+        // `Encoding::inherit_from`'s doc comment for the full history).
+        let mut layer_spec_encoding = layer.encoding.clone();
+        if layer.mark == crate::spec::mark::Mark::Text && !layer.color_is_own {
+            layer_spec_encoding.color = None;
+        }
         let layer_spec = ChartSpec {
             mark: layer.mark,
-            encoding: layer.encoding.clone(),
+            encoding: layer_spec_encoding,
             ..spec.clone()
         };
         let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
@@ -2906,6 +2926,7 @@ mod tests {
             position: None,
             blend: None,
             independent_y,
+            color_is_own: false,
         }
     }
 
@@ -3424,6 +3445,696 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    // ── Task 4 remediation (spec §4.4, 2026-08-28 T4 amendment): layered
+    // mark_text color honesty ────────────────────────────────────────────────
+    //
+    // These exercise the FULL `prepare → layout → build_scene` pipeline (not
+    // `marks::text::build` directly) because the bug lived at the layer-
+    // inheritance seam (`LayerPrepared::from_chart_and_layer`,
+    // `render/prepare/mod.rs`) and the mark_style-resolution seam
+    // (`scene_build.rs`'s synthetic per-layer `ChartSpec`, whose `mark_style`
+    // field is NOT overridden per layer) — a unit test that builds `DrawCtx`
+    // by hand cannot see either seam.
+
+    /// Two-layer (bar + text) spec/batch. `bar_fill`/`text_fill` map to each
+    /// layer's own `mark_style.fill=`. `bar_own_color_field`/
+    /// `text_own_color_field` each bind that layer's OWN `encoding.color`.
+    /// `chart_color_field` sets the CHART-level `encoding.color` (inherited by
+    /// whichever layer declares no color of its own, under normal
+    /// `inherit_from` rules — mirrors `heatmap(annot=True)`'s colored-cells +
+    /// colorless-annotation-labels shape). `chart_level_fill` sets the
+    /// CHART-level `mark_style.fill=` directly, independently of `bar_fill`/
+    /// `text_fill` — lets a test isolate the chart-level `mark_style`
+    /// fallback (`LayerPrepared::from_chart_and_layer`'s `or_else`) from a
+    /// layer's own `mark_style`.
+    ///
+    /// **What Python's `LayerChart` lowering actually emits** for
+    /// `mark_bar(fill=...) + mark_text()`: it COPIES layer 0's own mark
+    /// kwargs up onto `ChartSpec.mark_style` — layer 0 keeps its own
+    /// `mark_style` too, both carry the fill (verified against the built
+    /// extension's lowered JSON). So the real combined shape is `bar_fill`
+    /// AND `chart_level_fill` both set to the same value, not
+    /// `chart_level_fill` alone; a test wanting the actual Python-emittable
+    /// shape must pass both.
+    ///
+    /// Panel-wide scale resolution (`resolve_panel_scales` in this module)
+    /// only builds `ctx.scales.color` from the chart level merged with
+    /// **layer 0's** (the bar layer's) encoding — a non-primary layer's color
+    /// channel alone, with no chart-level or layer-0 counterpart, never gets
+    /// a scale built for it at all. This is a real limitation at the Rust
+    /// seam, but Python's `Chart.__add__` mirrors the mark_style-kwargs copy
+    /// above: a layer's own `encode(color=...)` is ALSO copied up to the
+    /// chart-level `encoding.color` (verified: `mark_bar() +
+    /// mark_text().encode(color="cat")` lowers with chart-level `color="cat"`
+    /// and renders correctly), so this Rust-only limitation is never actually
+    /// reachable through Python's `+` — a test for "the text layer's own
+    /// color IS honored" should use `chart_color_field` (mirroring what `+`
+    /// really produces), not `bar_own_color_field`. `bar_own_color_field`
+    /// stays available for directly exercising the Rust-seam-only shape
+    /// (color declared on a non-primary layer with no chart-level
+    /// counterpart at all), which is a real code path even though `+` cannot
+    /// currently construct it.
+    fn bar_text_layered_spec(
+        bar_fill: Option<&str>,
+        text_fill: Option<&str>,
+        bar_own_color_field: Option<&str>,
+        text_own_color_field: Option<&str>,
+        chart_color_field: Option<&str>,
+        chart_level_fill: Option<&str>,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let fill_style = |hex: Option<&str>| {
+            hex.map(|h| MarkKwargsSpec { fill: Some(h.into()), ..Default::default() })
+        };
+        let xy_encoding = || Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            ..Default::default()
+        };
+
+        let bar_layer = Layer {
+            mark: Mark::Bar,
+            encoding: Encoding {
+                color: bar_own_color_field.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+                ..xy_encoding()
+            },
+            transforms: Vec::new(),
+            mark_style: fill_style(bar_fill),
+            data_source: None, position: None, blend: None, name: None, independent_y: false,
+        };
+        let text_layer = Layer {
+            mark: Mark::Text,
+            encoding: Encoding {
+                color: text_own_color_field.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+                ..xy_encoding()
+            },
+            transforms: Vec::new(),
+            mark_style: fill_style(text_fill),
+            data_source: None, position: None, blend: None, name: None, independent_y: false,
+        };
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                color: chart_color_field.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![bar_layer, text_layer]),
+            coord: None,
+            mark_style: fill_style(chart_level_fill),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// Every `SceneNode::Text`'s resolved color, across every panel/mark-batch
+    /// in the scene, in emission order.
+    fn text_node_colors(scene: &ferrum_scene::SceneGraph) -> Vec<ferrum_scene::Color> {
+        scene.panels.iter()
+            .flat_map(|p| p.marks.iter())
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Text)
+            .flat_map(|m| m.nodes.iter())
+            .filter_map(|n| if let SceneNode::Text { style, .. } = n { Some(style.color) } else { None })
+            .collect()
+    }
+
+    /// `mark_bar() + mark_text(fill="#ff0000")`: the text layer's OWN
+    /// `fill=` must be honored even though it is layer 1 of a `LayerChart`
+    /// (the finding: `ctx.spec.mark_style` reads the CHART-level kwargs in a
+    /// layered chart, not this layer's, so the old raw-kwarg gate silently
+    /// dropped this).
+    #[test]
+    fn layered_bar_text_own_fill_is_honored() {
+        let (spec, batch) = bar_text_layered_spec(None, Some("#ff0000"), None, None, None, None);
+        let scene = build_scene_for(&spec, &batch);
+        let colors = text_node_colors(&scene);
+        assert_eq!(colors.len(), 2, "expected 2 text nodes");
+        let red = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0x00, a: 255 };
+        assert!(colors.iter().all(|c| *c == red),
+            "text layer's own fill='#ff0000' must be honored inside a LayerChart; got {colors:?}");
+    }
+
+    /// `mark_bar(fill="#00aa00") + mark_text()`, with the bar's fill placed
+    /// on the BAR LAYER's own `mark_style` (not the chart level): the bar
+    /// layer's fill must never leak into the text layer's color. Before the
+    /// `fill_is_user_set` flag moved onto the layer-resolved `MarkPaint`,
+    /// `ctx.spec.mark_style` (the chart-level kwargs) reported "fill was set"
+    /// for every layer, wrongly triggering `ctx.mark_style.paint.fill` (the
+    /// TEXT layer's own resolved paint, which theme-defaults to `mark_color`,
+    /// not `font_color`) for a text layer that set no fill at all.
+    ///
+    /// NOTE: this shape alone does not discriminate the cycle-2 finding
+    /// (`prepare/mod.rs`'s chart-level `mark_style` fallback) — see
+    /// `layered_chart_level_hoisted_fill_does_not_leak_into_text` below for
+    /// the shape Python's `LayerChart` lowering actually produces.
+    #[test]
+    fn layered_bar_fill_does_not_leak_into_text_color() {
+        let (spec, batch) = bar_text_layered_spec(Some("#00aa00"), None, None, None, None, None);
+        let scene = build_scene_for(&spec, &batch);
+        let colors = text_node_colors(&scene);
+        assert_eq!(colors.len(), 2);
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert!(colors.iter().all(|c| *c == font_color),
+            "the bar layer's fill must not leak into text's color; expected theme font color, got {colors:?}");
+        let green = ferrum_scene::Color { r: 0x00, g: 0xaa, b: 0x00, a: 255 };
+        assert!(colors.iter().all(|c| *c != green), "text must not render the bar's green fill");
+    }
+
+    /// The REAL Python-lowered shape for `mark_bar(fill="#00aa00") +
+    /// mark_text()`: `LayerChart` lowering COPIES layer 0's (the bar's) mark
+    /// kwargs up onto the CHART-level `ChartSpec.mark_style` — layer 0 keeps
+    /// its own `mark_style` too, so BOTH `bar_fill` and `chart_level_fill`
+    /// are set here (only the TEXT layer's own `mark_style` stays `None`).
+    /// Cycle-2 finding: `LayerPrepared::from_chart_and_layer`'s
+    /// `layer.mark_style.clone().or_else(|| spec.mark_style.clone())`
+    /// fallback let a kwarg-less text layer resolve that copied chart-level
+    /// fill — passing `fill_is_user_set = true` with the BAR's green — even
+    /// though `layered_bar_fill_does_not_leak_into_text_color` above (which
+    /// sets ONLY `bar_fill`, with chart-level `mark_style` absent — a shape
+    /// `+` never actually produces) already passed. This is the shape that
+    /// must stay theme font color.
+    #[test]
+    fn layered_chart_level_hoisted_fill_does_not_leak_into_text() {
+        let (spec, batch) =
+            bar_text_layered_spec(Some("#00aa00"), None, None, None, None, Some("#00aa00"));
+        let scene = build_scene_for(&spec, &batch);
+        let colors = text_node_colors(&scene);
+        assert_eq!(colors.len(), 2);
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert!(colors.iter().all(|c| *c == font_color),
+            "the chart-level (hoisted-from-layer-0) fill must not leak into a kwarg-less text layer's color; expected theme font color, got {colors:?}");
+        let green = ferrum_scene::Color { r: 0x00, g: 0xaa, b: 0x00, a: 255 };
+        assert!(colors.iter().all(|c| *c != green),
+            "text must not render the hoisted bar fill via the chart-level mark_style fallback");
+    }
+
+    /// Chart-level `color=` + a colorless text layer (the `heatmap(annot=True)`
+    /// shape: colored cells, annotation labels with no color of their own):
+    /// the inherited chart-level color channel must NOT color the text layer.
+    /// Every label stays theme font color, not each row's inherited-legend
+    /// color (which, for `heatmap`, sits the label on its own cell's fill —
+    /// often invisible).
+    #[test]
+    fn layered_chart_level_color_does_not_inherit_into_text() {
+        let (spec, batch) = bar_text_layered_spec(None, None, None, None, Some("cat"), None);
+        let scene = build_scene_for(&spec, &batch);
+        let colors = text_node_colors(&scene);
+        assert_eq!(colors.len(), 2);
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert!(colors.iter().all(|c| *c == font_color),
+            "an inherited chart-level color channel must not color a text layer with no color of its own; got {colors:?}");
+        // Sanity: the two rows differ in `cat`, so if inheritance HAD leaked
+        // through, the two labels would differ from each other too.
+        assert_eq!(colors[0], colors[1]);
+    }
+
+    /// A text layer's OWN `encode(color=...)` — declared directly on that
+    /// layer — IS honored: distinct categories resolve to distinct colors,
+    /// none of them the font-color fallback. Uses the Python-emittable shape
+    /// (`chart_color_field` + matching `text_own_color_field`, not
+    /// `bar_own_color_field`): `Chart.__add__` copies a layer's own
+    /// `encode(color=...)` up to the chart level too (see
+    /// `bar_text_layered_spec`'s doc comment), so the chart-level channel is
+    /// always present alongside the text layer's own declaration in
+    /// practice. This guards the current exemption seam
+    /// (`build_panel_mark_batches`, scene_build.rs:~1203-1206): the text
+    /// layer's own `color` declaration means `LayerPrepared.color_is_own` is
+    /// `true`, so the `!layer.color_is_own` branch that clears `color` on
+    /// the DrawCtx-local encoding copy must NOT fire here — the per-row color
+    /// read has to see the field and resolve it normally, not fall back to
+    /// theme font color the way an over-eager exemption (one that fired
+    /// regardless of `color_is_own`) would.
+    #[test]
+    fn layered_text_own_color_encoding_is_honored() {
+        let (spec, batch) = bar_text_layered_spec(None, None, None, Some("cat"), Some("cat"), None);
+        let scene = build_scene_for(&spec, &batch);
+        let colors = text_node_colors(&scene);
+        assert_eq!(colors.len(), 2);
+        assert_ne!(colors[0], colors[1],
+            "the text layer's own color-channel rows (distinct categories) must resolve to distinct colors; got {colors:?}");
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert!(colors.iter().all(|c| *c != font_color),
+            "the text layer's own color channel must not fall back to theme font color; got {colors:?}");
+    }
+
+    // ── Cycle-4 quality-review findings: the Text color-inheritance
+    // exemption must gate the mark builder's per-row color READ only — never
+    // delete `color` from the prepared `LayerPrepared.encoding` itself, which
+    // the legend and dodge/stack position grouping also consume directly.
+    // These two pipeline tests are what an earlier revision (which DID
+    // delete the channel) lacked, per the quality-reviewer's coverage-gap
+    // finding: no test placed text at layer 0, and none exercised a position
+    // adjustment.
+
+    /// `mark_text() + mark_bar().encode(color="cat")`, TEXT as layer 0: the
+    /// legend must still render. `resolve_legend_color_scale` builds the
+    /// legend's color scale from `prep.layers[0].encoding.color` — an
+    /// earlier revision's exemption deleted that channel from the PREPARED
+    /// encoding for any kwarg-less-color Text layer, so with text at index 0
+    /// the legend silently vanished even though the bars stayed colored
+    /// (their fill comes from the panel-wide scale, built from the chart
+    /// level, not from `layers[0]`). Chart-level `color="cat"` mirrors what
+    /// Python's `Chart.__add__` actually produces when the bar layer
+    /// declares its own `color=` (see `bar_text_layered_spec`'s doc comment).
+    #[test]
+    fn layered_text_as_layer_zero_with_colored_sibling_still_renders_legend() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let xy_encoding = || Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let text_layer = Layer {
+            mark: Mark::Text,
+            encoding: xy_encoding(), // layer 0; NO own color
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: None, blend: None, name: None, independent_y: false,
+        };
+        let bar_layer = Layer {
+            mark: Mark::Bar,
+            encoding: Encoding {
+                color: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                ..xy_encoding()
+            },
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: None, blend: None, name: None, independent_y: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                // Chart-level color, mirroring Python's `+` copy-up of the
+                // bar layer's own `encode(color="cat")`.
+                color: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None,
+            layers: Some(vec![text_layer, bar_layer]),
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let scene = build_scene_for(&spec, &batch);
+        assert!(!scene.legend.is_empty(),
+            "the legend must still render when the colored layer is NOT layer 0 \
+             (text, which has no color of its own, is layer 0 here); legend was empty");
+    }
+
+    /// Shared bar+text spec/batch for the dodge/stack position-grouping
+    /// regression tests. The bar layer OWNS `color="g"`; chart-level
+    /// `color="g"` mirrors Python's `+` copy-up (see `bar_text_layered_spec`'s
+    /// doc comment); the text layer declares NO color of its own — it only
+    /// gets "g" through inheritance. `x="cat"` is ordinal with two
+    /// categories, each holding one row per `g` group, so dodge/stack both
+    /// have real grouping work to do. `position` is applied identically to
+    /// both layers (the canonical value-labels-on-grouped-bars shape).
+    fn text_over_bar_position_spec(
+        position: crate::spec::position::PositionAdjust,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let xy_ordinal_encoding = || Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let bar_layer = Layer {
+            mark: Mark::Bar,
+            encoding: Encoding {
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..xy_ordinal_encoding()
+            },
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: Some(position.clone()), blend: None, name: None, independent_y: false,
+        };
+        let text_layer = Layer {
+            mark: Mark::Text,
+            encoding: xy_ordinal_encoding(), // no own color
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: Some(position), blend: None, name: None, independent_y: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                color: Some(EncodingSpec { field: "g".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None,
+            layers: Some(vec![bar_layer, text_layer]),
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["A", "A", "B", "B"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(StringArray::from(vec!["L1", "L2", "L1", "L2"])),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// `mark_bar(position=Dodge()).encode(color="g") +
+    /// mark_text(position=Dodge())`: each label must sit at its OWN bar's
+    /// dodged x position, not the undodged group center. `apply_dodge`'s
+    /// grouping resolver (`resolve_group_channel`, `position.rs`) falls back
+    /// to `encoding.color.field` when no explicit `by=` is given — an
+    /// earlier revision's exemption deleted `color` from the text layer's
+    /// PREPARED encoding whenever it was inherited-only, so the text layer's
+    /// own dodge call saw no grouping channel at all and every label
+    /// collapsed to the undodged band center (verified live by the
+    /// quality-reviewer: labels at x=191.089/191.089 instead of
+    /// 133.163/249.015, matching the bars).
+    #[test]
+    fn layered_dodged_text_over_colored_bar_tracks_bar_position() {
+        use crate::spec::position::PositionAdjust;
+
+        let position = PositionAdjust::Dodge { by: None, padding: 0.05 };
+        let (spec, batch) = text_over_bar_position_spec(position);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+
+        let bar_centers: Vec<f64> = panel.marks[0].nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some(x + w / 2.0) } else { None }
+        }).collect();
+        let text_xs: Vec<f64> = panel.marks[1].nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { x, .. } = n { Some(*x) } else { None }
+        }).collect();
+        assert_eq!(bar_centers.len(), 4, "expected 4 dodged bars");
+        assert_eq!(text_xs.len(), 4, "expected 4 text labels");
+
+        // Sanity: dodge actually separated the two groups within category
+        // "A" — collapsed grouping (the regression) would put both at the
+        // same undodged band center.
+        assert_ne!(text_xs[0], text_xs[1],
+            "dodged labels within the same x-category must land at different x; got {text_xs:?}");
+
+        // The real assertion: each label tracks its own bar's dodge slot.
+        for (i, (&bar_cx, &text_x)) in bar_centers.iter().zip(text_xs.iter()).enumerate() {
+            assert!((bar_cx - text_x).abs() < 1e-6,
+                "label {i} must sit at its own bar's dodged x position; bar center {bar_cx}, label x {text_x}");
+        }
+    }
+
+    /// `mark_bar(position=Stack()).encode(color="g") +
+    /// mark_text(position=Stack())`: each label must land at its OWN bar
+    /// segment's stacked y position, not an unstacked/collapsed value.
+    /// `apply_stack` has the identical `encoding.color.field` grouping
+    /// fallback as dodge, and the identical S3 regression: an inherited-only
+    /// `color` deleted from the text layer's prepared encoding meant its own
+    /// stack call saw no grouping channel and every label used its raw
+    /// (unstacked) y instead of the cumulative segment position.
+    /// `StackAnchor::Top` for both layers so the resolved `y` column value
+    /// (the segment TOP) is identical for the bar's rect and the text node —
+    /// no anchor-specific geometry translation needed to compare them.
+    #[test]
+    fn layered_stacked_text_over_colored_bar_tracks_bar_position() {
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+
+        let position = PositionAdjust::Stack {
+            by: None,
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let (spec, batch) = text_over_bar_position_spec(position);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+
+        let bar_tops: Vec<f64> = panel.marks[0].nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { y, .. } = n { Some(*y) } else { None }
+        }).collect();
+        let text_ys: Vec<f64> = panel.marks[1].nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
+        }).collect();
+        assert_eq!(bar_tops.len(), 4, "expected 4 stacked bar segments");
+        assert_eq!(text_ys.len(), 4, "expected 4 text labels");
+
+        // Sanity: stacking actually separated the two segments within
+        // category "A" — collapsed grouping (the regression) would leave
+        // both labels at their raw (unstacked) y.
+        assert_ne!(text_ys[0], text_ys[1],
+            "stacked labels within the same x-category must land at different y; got {text_ys:?}");
+
+        // The real assertion: each label tracks its own bar segment's
+        // stacked (cumulative-top) position.
+        for (i, (&bar_top, &text_y)) in bar_tops.iter().zip(text_ys.iter()).enumerate() {
+            assert!((bar_top - text_y).abs() < 1e-6,
+                "label {i} must sit at its own bar segment's stacked y position; bar top {bar_top}, label y {text_y}");
+        }
+    }
+
+    // ── Scope extension (spec §4.0, 2026-08-28 user direction): the
+    // hoisted-paint fix generalizes from Text-only to EVERY layered mark ────
+
+    /// The mirror of `layered_chart_level_hoisted_fill_does_not_leak_into_text`:
+    /// `mark_text(fill="#ff0000") + mark_bar()` — the TEXT layer's fill
+    /// (present on its own `mark_style` AND hoisted to the chart level,
+    /// matching Python's real lowered shape) must not leak into the BAR
+    /// layer, which has no `mark_style` of its own. Before this scope
+    /// extension, `without_paint()` was applied only for `Mark::Text`
+    /// kwarg-less layers, so a kwarg-less BAR layer still inherited the
+    /// hoisted-from-text fill in full — verified live pre-fix:
+    /// `mark_text(fill='#ff0000') + mark_bar()` rendered red bars.
+    #[test]
+    fn layered_text_fill_hoisted_does_not_leak_into_bar_color() {
+        let (spec, batch) = bar_text_layered_spec(None, Some("#ff0000"), None, None, None, Some("#ff0000"));
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+        let bar_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[0].nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style.fill) } else { None }
+        }).collect();
+        assert_eq!(bar_fills.len(), 2, "expected 2 bars");
+        let mark_color = to_scene_color(ThemeInputs::default().colors.mark_color);
+        assert!(bar_fills.iter().all(|c| *c == Some(mark_color)),
+            "bars must render the theme default fill; expected {mark_color:?}, got {bar_fills:?}");
+        let red = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0x00, a: 255 };
+        assert!(bar_fills.iter().all(|c| *c != Some(red)),
+            "the text layer's hoisted fill must not leak into the bar layer's color; got {bar_fills:?}");
+    }
+
+    /// Two-layer (bar + point) spec/batch, mirroring `bar_text_layered_spec`
+    /// but for `Mark::Point` — needed because point fill defaults differ
+    /// from bar/text and the existing helper is bar+text-specific.
+    /// `bar_fill`/`point_fill` map to each layer's own `mark_style.fill=`;
+    /// `chart_level_fill` sets the CHART-level `mark_style.fill=` directly
+    /// (the hoisted-paint shape).
+    fn bar_point_layered_spec(
+        bar_fill: Option<&str>,
+        point_fill: Option<&str>,
+        chart_level_fill: Option<&str>,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let fill_style = |hex: Option<&str>| {
+            hex.map(|h| MarkKwargsSpec { fill: Some(h.into()), ..Default::default() })
+        };
+        let xy_encoding = || Encoding {
+            x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let bar_layer = Layer {
+            mark: Mark::Bar,
+            encoding: xy_encoding(),
+            transforms: Vec::new(),
+            mark_style: fill_style(bar_fill),
+            data_source: None, position: None, blend: None, name: None, independent_y: false,
+        };
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: xy_encoding(),
+            transforms: Vec::new(),
+            mark_style: fill_style(point_fill),
+            data_source: None, position: None, blend: None, name: None, independent_y: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![bar_layer, point_layer]),
+            coord: None,
+            mark_style: fill_style(chart_level_fill),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// `mark_bar(fill="#00aa00") + mark_point()`: the sanctioned behavior
+    /// change (spec §4.0) — a kwarg-less POINT layer must now render
+    /// default-colored, not the bar's hoisted-to-chart-level fill. Before
+    /// this scope extension the Text-only gate meant every OTHER mark
+    /// (point, line, area, ...) still leaked sibling paint; this pins the
+    /// point case as the representative non-Text example.
+    #[test]
+    fn layered_bar_fill_hoisted_does_not_leak_into_point_color() {
+        let (spec, batch) = bar_point_layered_spec(Some("#00aa00"), None, Some("#00aa00"));
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[1].nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None }
+        }).collect();
+        assert_eq!(point_fills.len(), 2, "expected 2 points");
+        let mark_color = to_scene_color(ThemeInputs::default().colors.mark_color);
+        assert!(point_fills.iter().all(|c| *c == Some(mark_color)),
+            "points must render the theme default fill; expected {mark_color:?}, got {point_fills:?}");
+        let green = ferrum_scene::Color { r: 0x00, g: 0xaa, b: 0x00, a: 255 };
+        assert!(point_fills.iter().all(|c| *c != Some(green)),
+            "the bar layer's hoisted fill must not leak into the point layer's color; got {point_fills:?}");
+    }
+
+    /// Own-paint-wins for a NON-Text layer: `mark_bar(fill="#00aa00") +
+    /// mark_point(fill="#0000ff")` — the point layer's OWN `mark_style`
+    /// short-circuits the `or_else` chart-level fallback entirely (the
+    /// `without_paint()` strip only ever applies to the FALLBACK value, never
+    /// to a layer's own declared `mark_style`), so the point renders its own
+    /// blue, not the bar's green and not a paint-stripped fallback.
+    #[test]
+    fn layered_point_own_fill_wins_over_hoisted_bar_fill() {
+        let (spec, batch) = bar_point_layered_spec(Some("#00aa00"), Some("#0000ff"), Some("#00aa00"));
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[1].nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None }
+        }).collect();
+        assert_eq!(point_fills.len(), 2);
+        let blue = ferrum_scene::Color { r: 0x00, g: 0x00, b: 0xff, a: 255 };
+        assert!(point_fills.iter().all(|c| *c == Some(blue)),
+            "the point layer's own fill must win over the hoisted chart-level fallback; got {point_fills:?}");
+    }
+
+    /// Flat (no-`layers`) chart byte-identity: a single-mark
+    /// `mark_point(fill=...)` chart never reaches `from_chart_and_layer`'s
+    /// `or_else` fallback at all (`LayerPrepared::from_chart_only` uses
+    /// `spec.mark_style` directly), so the scope extension must not change
+    /// anything about a flat chart's own paint.
+    #[test]
+    fn flat_point_chart_fill_unaffected_by_hoisted_paint_scope_extension() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: Some(MarkKwargsSpec { fill: Some("#ff00ff".into()), ..Default::default() }),
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+        ]).unwrap();
+
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let point_fills: Vec<Option<ferrum_scene::Color>> = panel.marks[0].nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style.fill) } else { None }
+        }).collect();
+        assert_eq!(point_fills.len(), 2);
+        let magenta = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0xff, a: 255 };
+        assert!(point_fills.iter().all(|c| *c == Some(magenta)),
+            "a flat chart's own mark_style.fill must render unaffected by the layered-only scope extension; got {point_fills:?}");
     }
 
     /// A non-primary layer's mark batch must carry ITS OWN tooltip_fields —

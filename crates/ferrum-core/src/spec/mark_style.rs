@@ -100,9 +100,61 @@ pub struct MarkKwargsSpec {
     pub height: Option<f64>,
 }
 
+impl MarkKwargsSpec {
+    /// Returns a copy with `fill`/`stroke` cleared; every other field is
+    /// unchanged. Used when a chart-level `mark_style` cascades to ANY
+    /// kwarg-less layer of a `LayerChart` (spec §4.0/§4.4, 2026-08-28 T4
+    /// amendment; extended from Text-only to every mark 2026-08-28 per user
+    /// direction): Python's `LayerChart` lowering COPIES layer 0's own mark
+    /// kwargs up onto the chart-level `ChartSpec.mark_style` (a
+    /// serialization convenience, not a genuine chart-wide default) — layer 0
+    /// keeps its own `mark_style` too, both carry the same value — so
+    /// `render/prepare/mod.rs`'s `LayerPrepared::from_chart_and_layer`
+    /// falling back to that copied-up value for a sibling layer with no
+    /// kwargs of its own would otherwise silently repaint that layer in the
+    /// PRIMARY layer's fill/stroke, whatever mark either layer is (e.g.
+    /// `mark_bar(fill=...) + mark_text()` repainting labels, or
+    /// `mark_bar(fill=...) + mark_point()` repainting points — the same
+    /// hoist-residue leak, mark-agnostic). Non-paint fields (`font_size`,
+    /// `dx`, `dy`, `align`, `opacity`, ...) still cascade normally — only the
+    /// two paint channels are stripped. Flat (no-`layers`) charts never
+    /// reach this fallback (`LayerPrepared::from_chart_only` uses
+    /// `spec.mark_style` directly, no `or_else`), so a layer's own paint —
+    /// or a genuinely flat chart's chart-level paint — is always honored in
+    /// full.
+    pub(crate) fn without_paint(&self) -> Self {
+        Self { fill: None, stroke: None, ..self.clone() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_paint_clears_fill_and_stroke_only() {
+        let m = MarkKwargsSpec {
+            fill: Some("#ff0000".into()),
+            stroke: Some("#00ff00".into()),
+            opacity: Some(0.5),
+            font_size: Some(14.0),
+            dx: Some(2.0),
+            ..Default::default()
+        };
+        let stripped = m.without_paint();
+        assert_eq!(stripped.fill, None);
+        assert_eq!(stripped.stroke, None);
+        // Every other field is untouched.
+        assert_eq!(stripped.opacity, Some(0.5));
+        assert_eq!(stripped.font_size, Some(14.0));
+        assert_eq!(stripped.dx, Some(2.0));
+    }
+
+    #[test]
+    fn without_paint_on_already_paintless_spec_is_a_noop() {
+        let m = MarkKwargsSpec { font_size: Some(11.0), ..Default::default() };
+        assert_eq!(m.without_paint(), m);
+    }
 
     #[test]
     fn mark_kwargs_default_omits_all_fields() {

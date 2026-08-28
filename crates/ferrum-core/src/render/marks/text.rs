@@ -6,9 +6,10 @@
 //! `format_numeric(y)`.
 
 use crate::layout::TextAnchor;
-use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, resolve_fill_color, x_field, y_field, DrawCtx};
 use crate::render::format::{format_numeric, format_time, format_with_spec};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::color_column_loader;
 use crate::render::scale_resolve::ScaleKind;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -105,6 +106,38 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
+    // Per-row fill color (NF-A2 / spec §4.4, 2026-08-28 T4 amendment): color
+    // channel via `ctx.scales.color` when bound on the text layer's OWN
+    // encoding (never an inherited chart-level channel — see
+    // `scene_build.rs::build_panel_mark_batches`'s per-layer `DrawCtx`
+    // construction, which clears `ctx.spec.encoding.color` for a Text layer
+    // whose color was purely inherited, on a copy local to this draw call
+    // only; `LayerPrepared.encoding.color` itself — read by the legend and
+    // dodge/stack position grouping — stays fully inherited), else
+    // `mark_style.paint.fill` when the user set it explicitly,
+    // else the theme's font color — mirroring `label.rs`'s constant-fill
+    // precedence but defaulting to `font_color` (not `mark_color`) since
+    // text's baseline theme style carries no mark-aware fill override (see
+    // `resolve_mark_style`'s `Mark::Text` arm).
+    //
+    // The "fill set by user" gate reads `ctx.mark_style.paint.fill_is_user_set`
+    // — the *layer-resolved* flag — rather than `ctx.spec.mark_style` (the raw
+    // `MarkKwargsSpec`). `ctx.spec` is `scene_build.rs`'s synthetic per-layer
+    // `ChartSpec`, whose `mark_style` field is NOT overridden per layer (it
+    // stays the chart-level kwargs via `..spec.clone()`), so a
+    // `ctx.spec.mark_style` read would report the WRONG layer's `fill=` inside
+    // a `LayerChart` (e.g. `mark_bar(fill=...) + mark_text()` would wrongly
+    // read the bar's fill as "the text layer's fill was set"). `ctx.mark_style`
+    // is always built via `resolve_mark_style(layer.mark_style.as_ref(), ...)`
+    // for THIS layer, so its `fill_is_user_set` is correct in both flat and
+    // layered charts.
+    let base_text_color = if ctx.mark_style.paint.fill_is_user_set {
+        ctx.mark_style.paint.fill
+    } else {
+        ctx.theme.colors.font_color
+    };
+    let (color_values_str, color_values_f64) = color_column_loader(ctx);
+
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -195,13 +228,22 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .filter(|v| v.is_finite())
             .unwrap_or(base_angle);
 
+        // Resolve per-row fill color: color channel wins when bound, else the
+        // resolved constant (`base_text_color`, see above).
+        let row_color = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+            color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+            base_text_color,
+        );
+
         acc.push(SceneNode::Text {
             x: px + dx,
             y: py + dy,
             content: label,
             slot: None,
             style: to_scene_text_style(
-                ctx.theme.colors.font_color,
+                row_color,
                 row_font_size,
                 anchor,
                 row_angle,
@@ -766,5 +808,116 @@ mod tests {
     fn text_limit_zero_is_treated_as_unset() {
         // `limit > 0` is false for limit=0, so no truncation occurs at all.
         assert_eq!(build_with_limit(Some(0)), "Hello");
+    }
+
+    // ── Task 4: fill=/encode(color=) precedence (spec §4.4) ─────────────────
+    //
+    // Precedence: color channel via `ctx.scales.color` when bound, else
+    // `mark_style.paint.fill` when the user set it explicitly, else the theme's
+    // font color (mirrors `label.rs`'s constant-fill resolution, but text's
+    // fallback is `font_color` rather than `mark_color` — see the comment on
+    // `base_text_color` in `build`).
+
+    use crate::render::draw::to_scene_color;
+    use crate::spec::mark_style::MarkKwargsSpec;
+
+    /// Two-row spec/batch with quantitative x/y and an optional Utf8 `c`
+    /// (color) column. `fill_override` maps to `mark_style.fill=`;
+    /// `with_color_channel` binds `encoding.color` to the `c` field.
+    fn color_precedence_ctx_colors(
+        fill_override: Option<&str>,
+        with_color_channel: bool,
+    ) -> Vec<ferrum_scene::Color> {
+        use arrow::array::StringArray;
+
+        let overrides = fill_override.map(|hex| MarkKwargsSpec { fill: Some(hex.into()), ..Default::default() });
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: if with_color_channel {
+                    Some(EncodingSpec { field: "c".into(), type_: None, ..Default::default() })
+                } else {
+                    None
+                },
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: overrides.clone(), position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("c", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(overrides.as_ref(), &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Text { style, .. } = n { Some(style.color) } else { None }
+        }).collect()
+    }
+
+    /// NF-A2: no `fill=` override and no `color` channel — every row's text
+    /// color must stay exactly the theme's font color (byte-identical default).
+    #[test]
+    fn text_default_color_is_theme_font_color() {
+        let colors = color_precedence_ctx_colors(None, false);
+        let expected = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert_eq!(colors.len(), 2);
+        assert!(colors.iter().all(|c| *c == expected),
+            "default mark_text color must equal theme.colors.font_color; got {colors:?}, expected {expected:?}");
+    }
+
+    /// `fill=` honored: with no color channel bound, an explicit `fill=`
+    /// override wins over the theme font color for every row.
+    #[test]
+    fn text_fill_kwarg_sets_constant_color() {
+        let colors = color_precedence_ctx_colors(Some("#ff0000"), false);
+        let red = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0x00, a: 255 };
+        assert_eq!(colors.len(), 2);
+        assert!(colors.iter().all(|c| *c == red),
+            "fill='#ff0000' must set every row's text color to red; got {colors:?}");
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert_ne!(red, font_color, "test fixture sanity: red must differ from the theme font color");
+    }
+
+    /// `encode(color=)` honored: with a bound color channel and no `fill=`
+    /// override, distinct category values resolve to distinct colors (not the
+    /// theme font color).
+    #[test]
+    fn text_color_channel_sets_per_row_color() {
+        let colors = color_precedence_ctx_colors(None, true);
+        assert_eq!(colors.len(), 2);
+        assert_ne!(colors[0], colors[1],
+            "rows with distinct color-channel categories must resolve to distinct colors; got {colors:?}");
+        let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
+        assert!(colors.iter().all(|c| *c != font_color),
+            "color-channel rows must not fall back to the theme font color; got {colors:?}");
+    }
+
+    /// Precedence: a bound color channel wins over an explicit `fill=`
+    /// override (channel is checked first).
+    #[test]
+    fn text_color_channel_overrides_fill_kwarg() {
+        let colors = color_precedence_ctx_colors(Some("#ff0000"), true);
+        let red = ferrum_scene::Color { r: 0xff, g: 0x00, b: 0x00, a: 255 };
+        assert_eq!(colors.len(), 2);
+        assert!(colors.iter().all(|c| *c != red),
+            "a bound color channel must override fill='#ff0000'; got {colors:?}");
+        assert_ne!(colors[0], colors[1],
+            "channel-resolved colors must still vary per category; got {colors:?}");
     }
 }

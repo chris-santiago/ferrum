@@ -58,6 +58,27 @@ pub struct LayerPrepared {
     /// [`crate::spec::layer::Layer::independent_y`]; always `false` for a
     /// single-layer (chart-only) chart, whose sole layer is the primary.
     pub independent_y: bool,
+    /// Whether THIS layer's own (pre-merge) encoding declared a `color`
+    /// channel, as opposed to `encoding.color` (above) having been filled in
+    /// purely by [`Encoding::inherit_from`](crate::spec::encoding::Encoding::inherit_from)
+    /// from the chart level (spec §4.4, 2026-08-28 T4 amendment, cycle-4
+    /// finding). `encoding.color` itself is ALWAYS fully inherited — never
+    /// stripped — so every consumer that reads it directly (the legend,
+    /// `resolve_legend_color_scale`; dodge/stack grouping,
+    /// `position::resolve_group_channel`) sees exactly what `main` sees.
+    /// This flag exists only so `scene_build.rs`'s per-mark dispatch can
+    /// decide, for a `Mark::Text` layer specifically, whether a per-row
+    /// color READ is honoring the layer's own declaration or would otherwise
+    /// silently color labels from an inherited legend channel that isn't
+    /// theirs — see the comment at that call site in
+    /// `build_panel_mark_batches`. For `from_chart_only` (a chart with no
+    /// `layers`) there is no parent to inherit from, so "own" and "declared
+    /// at all" coincide: the flag is simply whether the chart-level encoding
+    /// has a `color` channel (`spec.encoding.color.is_some()`) — `false`,
+    /// not `true`, when it doesn't, matching `encoding.color` being `None`
+    /// there too (the exemption is a no-op on an already-absent channel
+    /// either way).
+    pub color_is_own: bool,
 }
 
 impl LayerPrepared {
@@ -72,15 +93,25 @@ impl LayerPrepared {
             position: spec.position.clone(),
             blend: None,
             independent_y: false,
+            color_is_own: spec.encoding.color.is_some(),
         }
     }
 
     /// Build a layer by inheriting unset encoding channels from chart-level.
-    /// See [`crate::spec::encoding::Encoding::inherit_from`] for the policy.
+    /// See [`crate::spec::encoding::Encoding::inherit_from`] for the policy —
+    /// this is the plain (mark-agnostic) merge; `encoding.color` on the
+    /// result is always fully inherited (see `color_is_own`'s doc comment on
+    /// [`LayerPrepared`] for why a Text-mark exemption does NOT live here).
     pub(crate) fn from_chart_and_layer(
         spec: &crate::spec::chart::ChartSpec,
         layer: &crate::spec::layer::Layer,
     ) -> Self {
+        // Captured BEFORE the merge below: whether THIS layer declared its
+        // own `color` channel, independent of whatever `inherit_from`/
+        // `inherit_non_positional` then does to `encoding.color` (spec §4.4,
+        // 2026-08-28 T4 amendment, cycle-4 finding — see `color_is_own`'s doc
+        // comment on [`LayerPrepared`]).
+        let color_is_own = layer.encoding.color.is_some();
         let mut encoding = layer.encoding.clone();
         // Layers routed to their own data via data_source are self-contained —
         // only inherit non-positional channels (color, size, etc.) from the
@@ -92,15 +123,37 @@ impl LayerPrepared {
         } else {
             encoding.inherit_from(&spec.encoding);
         }
+        // Chart-level `mark_style` fallback (spec §4.0/§4.4, 2026-08-28 T4
+        // amendment; extended to every mark 2026-08-28 per user direction —
+        // spec §4.0's first bullet): Python's `LayerChart` lowering copies
+        // layer 0's own mark kwargs up onto `spec.mark_style` (layer 0 keeps
+        // its own copy too), so this fallback — meant for genuine chart-wide
+        // style defaults — often actually holds the PRIMARY layer's own
+        // paint. ANY kwarg-less layer, whatever its mark, must not inherit
+        // fill/stroke through it — only a layer's own declared `mark_style`
+        // may paint it; every other field (font_size, dx, dy, align,
+        // opacity, ...) still cascades normally. Originally gated to
+        // `Mark::Text` only (matching spec §4.4's narrower original scope);
+        // the cycle-3 remediation established that Python's lowering COPIES
+        // (not moves) a layer's own kwargs up to chart level for every real
+        // layer, so chart-level paint is reachable only as hoist residue for
+        // ANY mark, not just Text — `mark_bar(fill=...) + mark_point()`
+        // leaked the bar's fill into the points exactly the way
+        // `mark_bar(fill=...) + mark_text()` leaked it into labels. Flat
+        // (`from_chart_only`, no `layers`) charts never reach this fallback
+        // at all — untouched. See `MarkKwargsSpec::without_paint`'s doc
+        // comment.
+        let mark_style = layer.mark_style.clone().or_else(|| spec.mark_style.clone().map(|s| s.without_paint()));
         Self {
             mark: layer.mark,
             encoding,
             transforms: layer.transforms.clone(),
-            mark_style: layer.mark_style.clone().or_else(|| spec.mark_style.clone()),
+            mark_style,
             data_source: layer.data_source.clone(),
             position: layer.position.clone().or_else(|| spec.position.clone()),
             blend: layer.blend,
             independent_y: layer.independent_y,
+            color_is_own,
         }
     }
 }

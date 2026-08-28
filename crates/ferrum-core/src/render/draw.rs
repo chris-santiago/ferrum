@@ -33,6 +33,19 @@ pub struct DrawCtx<'a> {
 /// inherited from the mark's theme default. Used by rule/segment renderers to
 /// enforce the precedence: explicit constant stroke > per-row color encoding >
 /// fill fallback.
+///
+/// `fill_is_user_set` is the `fill` analog (spec §4.4, 2026-08-28 T4
+/// amendment): `true` only when `fill` actually resolved from an explicit user
+/// `mark_kwargs` override (the `"theme:label"` sentinel, or a hex string that
+/// parses), never merely inherited from the mark's theme-aware default. Set on
+/// the *layer-resolved* `MarkPaint` (each layer calls `resolve_mark_style`
+/// independently), so it is correct in both flat and layered charts — unlike
+/// reading the raw chart-level `mark_kwargs` off `ChartSpec.mark_style`, which
+/// a layered chart's synthetic per-layer `ChartSpec` does NOT override (it
+/// stays the chart-level value via `..spec.clone()` in
+/// `scene_build.rs::build_panel_mark_batches`). Used by `text.rs` to decide
+/// whether its constant color fallback is the resolved `fill` or the theme
+/// font color.
 #[derive(Debug, Clone)]
 pub struct MarkPaint {
     pub fill: Color,
@@ -42,6 +55,7 @@ pub struct MarkPaint {
     pub corner_radius: f64,
     pub stroke_dash: Option<Vec<f64>>,
     pub stroke_is_user_set: bool,
+    pub fill_is_user_set: bool,
 }
 
 /// Text/label-mark overrides (`mark_text`, `mark_label`). `None` = fall back to
@@ -155,6 +169,7 @@ impl MarkStyle {
                 corner_radius: 0.0,
                 stroke_dash: None,
                 stroke_is_user_set: false,
+                fill_is_user_set: false,
             },
             text: TextStyle::default(),
             line: LineStyle::default(),
@@ -255,9 +270,15 @@ pub fn resolve_mark_style(
     if let Some(ref hex) = o.fill {
         if hex == "theme:label" {
             style.paint.fill = theme.colors.label_color;
+            style.paint.fill_is_user_set = true;
         } else if let Ok(c) = from_hex_str(hex) {
             style.paint.fill = c;
+            style.paint.fill_is_user_set = true;
         }
+        // other parse failure (including "none", until Task 1's explicit-clear
+        // handling lands in this same block): silently skip — fill_is_user_set
+        // stays false, so a downstream consumer's constant-fallback path (e.g.
+        // text.rs) is not told the user successfully set a fill.
     }
 
     // Text-mark-specific fields
@@ -924,6 +945,44 @@ mod tests {
         assert_eq!(style.paint.fill.red,   0x44, "sentinel fill.red must be label_color.red");
         assert_eq!(style.paint.fill.green, 0x55, "sentinel fill.green must be label_color.green");
         assert_eq!(style.paint.fill.blue,  0x66, "sentinel fill.blue must be label_color.blue");
+    }
+
+    // --- fill_is_user_set (Task 4 remediation, spec §4.4, 2026-08-28 T4
+    // amendment) ---
+
+    #[test]
+    fn resolve_mark_style_no_fill_override_leaves_fill_is_user_set_false() {
+        let theme = ThemeInputs::default();
+        let style = resolve_mark_style(None, &theme, &Mark::Text);
+        assert!(!style.paint.fill_is_user_set);
+    }
+
+    #[test]
+    fn resolve_mark_style_hex_fill_sets_fill_is_user_set_true() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { fill: Some("#ff0000".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text);
+        assert!(style.paint.fill_is_user_set);
+        assert_eq!(style.paint.fill.red, 0xff);
+    }
+
+    #[test]
+    fn resolve_mark_style_theme_label_fill_sentinel_sets_fill_is_user_set_true() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { fill: Some("theme:label".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text);
+        assert!(style.paint.fill_is_user_set);
+    }
+
+    /// An unparseable `fill=` value never sets `fill_is_user_set` — a
+    /// downstream constant-fallback consumer (e.g. `text.rs`) must not be told
+    /// the user successfully set a fill when parsing silently failed.
+    #[test]
+    fn resolve_mark_style_invalid_fill_leaves_fill_is_user_set_false() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { fill: Some("notacolor".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text);
+        assert!(!style.paint.fill_is_user_set);
     }
 
     #[test]

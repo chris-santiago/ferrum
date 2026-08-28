@@ -849,7 +849,24 @@ impl Encoding {
     /// shape/opacity/x2/y2/text fell through with no merge. F7 applies the
     /// merge uniformly so the policy is symmetric and predictable — the
     /// per-channel asymmetry was an undocumented accident.
-    pub fn inherit_from(&mut self, parent: &Encoding) {
+    ///
+    /// `encoding.color` (like every other channel here) is always fully
+    /// inherited — a `Mark::Text` layer's per-row color READ is instead
+    /// gated downstream, at `scene_build.rs`'s per-layer `DrawCtx`
+    /// construction, using [`LayerPrepared::color_is_own`](crate::render::prepare::LayerPrepared::color_is_own)
+    /// (spec §4.4, 2026-08-28 T4 amendment, cycle-4 finding). An earlier
+    /// revision gated the exemption HERE instead, by deleting `color` from
+    /// the merged `Encoding` for kwarg-less Text layers — but `encoding`
+    /// (via [`crate::render::prepare::LayerPrepared`]) also feeds the legend
+    /// (`resolve_legend_color_scale`, which reads layer 0's `encoding.color`
+    /// directly) and dodge/stack position grouping
+    /// (`position::resolve_group_channel`, same read), so deleting the
+    /// channel here silently broke both for any Text layer with an
+    /// inherited-only color: the legend vanished when text was layer 0, and
+    /// dodged/stacked value labels collapsed to the group center instead of
+    /// tracking their bar. Keeping this merge mark-agnostic (matching `main`)
+    /// and gating only the mark-specific CONSUMER fixes both regressions.
+    pub(crate) fn inherit_from(&mut self, parent: &Encoding) {
         inherit_encoding_spec(&mut self.x, &parent.x);
         inherit_encoding_spec(&mut self.y, &parent.y);
         inherit_encoding_spec(&mut self.color, &parent.color);
@@ -876,8 +893,10 @@ impl Encoding {
 
     /// Like `inherit_from` but skips positional channels (x, y, x2, y2).
     /// Used for layers routed to their own data via `data_source` — they
-    /// should not inherit the primary batch's positional fields.
-    pub fn inherit_non_positional(&mut self, parent: &Encoding) {
+    /// should not inherit the primary batch's positional fields. `color`
+    /// inheritance is unconditional here too — see `inherit_from`'s doc
+    /// comment for why a Text-mark exemption does not belong in this merge.
+    pub(crate) fn inherit_non_positional(&mut self, parent: &Encoding) {
         // Skip x, y, x2, y2 — positional channels belong to the layer's own data.
         inherit_encoding_spec(&mut self.color, &parent.color);
         inherit_encoding_spec(&mut self.size, &parent.size);
