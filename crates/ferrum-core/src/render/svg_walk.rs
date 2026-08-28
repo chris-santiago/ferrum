@@ -866,6 +866,92 @@ mod tests {
             "NaN opacity must render fully opaque (alpha=255), not invisible; got: {out}"
         );
     }
+
+    // #99 residue: `emit_text`'s alpha-compositing formula
+    // (`effective_alpha = (color.a/255 * opacity).clamp(0,1)`, then
+    // `* 255).round()`) must be pinned by tests that call the real function,
+    // at the boundary and endpoint values spec §4.6 names: opacity 0 → alpha
+    // 0, opacity 1 → alpha 255, `color.a=128, opacity=0.5` → alpha 64, and
+    // opacity outside `[0, 1]` clamps to the same 255/0 endpoints. Fully
+    // opaque colors render as `fill="#rrggbb"`; any other alpha renders as
+    // `fill="rgba(r,g,b,a)"` (see `fmt_svg`). `text_style`/`emit_text_svg`
+    // below are shared construction helpers for the test group that follows.
+
+    /// Build an `FsText` style with the given color/opacity, all other
+    /// fields fixed at a plain default (used by the `emit_text_*` group).
+    fn text_style(color: Color, opacity: f64) -> FsText {
+        FsText {
+            font_size: 11.0,
+            font_weight: ferrum_scene::FontWeight::Normal,
+            anchor: ferrum_scene::TextAnchor::Start,
+            baseline: ferrum_scene::TextBaseline::Alphabetic,
+            angle: 0.0,
+            color,
+            opacity,
+            font_family: "Inter".to_string(),
+        }
+    }
+
+    fn emit_text_svg(style: &FsText) -> String {
+        let mut svg = SvgBuffer::new(
+            crate::layout::Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 },
+            None,
+            false,
+        );
+        emit_text(&mut svg, 10.0, 10.0, "hi", style);
+        svg.finish()
+    }
+
+    #[test]
+    fn emit_text_opacity_zero_yields_zero_alpha() {
+        let style = text_style(Color::rgb(10, 20, 30), 0.0);
+        let out = emit_text_svg(&style);
+        assert!(
+            out.contains("fill=\"rgba(10,20,30,0.000)\""),
+            "opacity=0 must composite to alpha=0; got: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_text_opacity_one_yields_full_alpha() {
+        let style = text_style(Color::rgb(10, 20, 30), 1.0);
+        let out = emit_text_svg(&style);
+        assert!(
+            out.contains("fill=\"#0a141e\""),
+            "opacity=1 must composite to alpha=255 (opaque hex fill); got: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_text_color_alpha_128_opacity_half_yields_alpha_64() {
+        let style = text_style(Color::rgba(10, 20, 30, 128), 0.5);
+        let out = emit_text_svg(&style);
+        // (128/255) * 0.5 * 255 = 64.0 exactly. 64/255 = 0.250980... -> "0.251".
+        assert!(
+            out.contains("fill=\"rgba(10,20,30,0.251)\""),
+            "color.a=128, opacity=0.5 must composite to alpha=64; got: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_text_opacity_above_one_clamps_to_full_alpha() {
+        let style = text_style(Color::rgb(10, 20, 30), 2.0);
+        let out = emit_text_svg(&style);
+        assert!(
+            out.contains("fill=\"#0a141e\""),
+            "opacity > 1 must clamp to alpha=255, not overflow; got: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_text_negative_opacity_clamps_to_zero_alpha() {
+        let style = text_style(Color::rgb(10, 20, 30), -0.5);
+        let out = emit_text_svg(&style);
+        assert!(
+            out.contains("fill=\"rgba(10,20,30,0.000)\""),
+            "negative opacity must clamp to alpha=0, not underflow; got: {out}"
+        );
+    }
 }
 
 fn path_cmds_to_d(cmds: &[PathCmd]) -> String {

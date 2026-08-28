@@ -321,6 +321,20 @@ mod tests {
         assert!((back - mid).abs() < 1e-3, "round-trip failed: got {back}");
     }
 
+    /// #99/#104 residue: `TimeScale` reuses `LinearScaleData` verbatim (see
+    /// the struct doc above), so the shared degenerate-domain guard covers
+    /// it for free — pinned directly here so the coverage isn't only
+    /// inferable from `linear.rs`'s own test. A single-instant domain (all
+    /// rows share one timestamp) must scale to a finite pixel, not NaN.
+    #[test]
+    fn test_time_scale_degenerate_single_instant_domain_returns_range_midpoint() {
+        let instant = 1_767_225_600_000.0; // 2026-01-01 00:00:00 UTC
+        let t = TimeScale::new_internal(vec![instant, instant], vec![0.0, 1000.0], false, false);
+        let px = t.scale_internal(instant);
+        assert!(px.is_finite(), "degenerate time domain must scale to a finite pixel, got NaN");
+        assert_eq!(px, 500.0, "degenerate time domain must map to the range midpoint");
+    }
+
     #[test]
     fn test_time_ticks_returns_some_ticks_for_year_span() {
         let t = TimeScale::new(

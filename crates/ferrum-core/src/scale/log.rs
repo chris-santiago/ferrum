@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict};
+use super::core::{continuous_common, degenerate_ratio, resolve_continuous, scale_spec_to_py_dict};
 use super::ticks::{minor_ticks_log, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
 
@@ -95,7 +95,10 @@ impl LogScaleData {
         let lx = (x * sign).max(f64::MIN_POSITIVE).ln() / log_base;
         let ld0 = (d0 * sign).ln() / log_base;
         let ld1 = (d1 * sign).ln() / log_base;
-        let t = (lx - ld0) / (ld1 - ld0);
+        // Degenerate domain (d0 == d1, e.g. a constant-valued data column):
+        // see `degenerate_ratio`'s doc comment (GH #104) for why this must
+        // resolve to the range midpoint rather than 0/0 = NaN.
+        let t = degenerate_ratio(lx - ld0, ld1 - ld0);
         let mapped = r0 + t * (r1 - r0);
         if self.clamp {
             let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
@@ -441,6 +444,35 @@ mod tests {
         let y = s.scale(-10.0);
         let back = s.invert(y);
         assert!((back / -10.0 - 1.0).abs() < 1e-9, "negative round-trip failed: got {back}");
+    }
+
+    /// #99/#104 residue: a degenerate equal-endpoint domain (`d0 == d1`,
+    /// e.g. a constant-valued data column) used to divide by zero
+    /// (`0/0 = NaN`) in the `t` ratio (`ld1 - ld0` collapses to 0 when both
+    /// endpoints log to the same value). It must instead resolve to the
+    /// range midpoint — finite, never NaN — on both `clamp` arms.
+    /// Positive-domain edge (log's own defining constraint — domains must
+    /// stay strictly one-signed) plus a negative-domain shape to confirm
+    /// the sign-flip path is unaffected.
+    #[test]
+    fn log_scale_degenerate_positive_domain_returns_range_midpoint_not_nan() {
+        let unclamped = d([5.0, 5.0], [0.0, 100.0], 10.0, false);
+        let mapped = unclamped.scale(5.0);
+        assert!(mapped.is_finite(), "degenerate positive log domain must be finite, got NaN");
+        assert_eq!(mapped, 50.0, "degenerate positive log domain must map to the range midpoint");
+
+        let clamped = d([5.0, 5.0], [0.0, 100.0], 10.0, true);
+        let mapped_clamped = clamped.scale(5.0);
+        assert!(mapped_clamped.is_finite(), "clamp=true must also be finite for a degenerate log domain");
+        assert_eq!(mapped_clamped, 50.0, "clamp=true degenerate log domain must also map to the midpoint");
+    }
+
+    #[test]
+    fn log_scale_degenerate_negative_domain_returns_range_midpoint_not_nan() {
+        let s = d([-5.0, -5.0], [0.0, 100.0], 10.0, false);
+        let mapped = s.scale(-5.0);
+        assert!(mapped.is_finite(), "degenerate negative log domain must be finite, got NaN");
+        assert_eq!(mapped, 50.0, "degenerate negative log domain must map to the range midpoint");
     }
 
     #[test]

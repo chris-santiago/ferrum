@@ -363,6 +363,18 @@ impl ScaleKind {
         if span == 0.0 {
             return Vec::new();
         }
+        // GH #104: every continuous scale's `scale()` now resolves a
+        // degenerate (zero-span) DOMAIN to a finite range midpoint instead
+        // of NaN (see `scale::core::degenerate_ratio`), so this function can
+        // no longer detect "degenerate domain" by relying on the projected
+        // fraction coming out non-finite — it must check the domain
+        // directly to preserve the doc comment's "always empty on a
+        // degenerate domain, fall back to uniform-slot placement" contract.
+        if let Some((d0, d1)) = self.data_domain() {
+            if d0 == d1 {
+                return Vec::new();
+            }
+        }
         let fractions = values
             .iter()
             .map(|&v| {
@@ -404,6 +416,22 @@ impl ScaleKind {
     }
 
     pub fn tick_data(&self, count_hint: usize) -> Vec<ferrum_scene::Tick> {
+        // GH #104: every continuous scale's `scale()` now resolves a
+        // degenerate (zero-span) domain to a finite range midpoint instead
+        // of NaN, so the per-arm `is_finite()` filters below can no longer
+        // detect "degenerate domain" implicitly the way they used to. This
+        // preserves the pre-#104 outcome (zero ticks on a degenerate
+        // domain) deliberately, to stay consistent with the sibling policy
+        // in `project_values_to_fractions` just above ("always empty on a
+        // degenerate domain, fall back to uniform-slot placement") — the
+        // two accessors must agree on what a degenerate axis renders, not
+        // silently diverge just because one of them happens to filter on
+        // finiteness and the other doesn't.
+        if let Some((d0, d1)) = self.data_domain() {
+            if d0 == d1 {
+                return Vec::new();
+            }
+        }
         match self {
             Self::Ordinal(_) => Vec::new(),
             Self::Linear(s) => s

@@ -372,6 +372,38 @@ mod tests {
         assert_eq!(c.alpha, 128);
     }
 
+    /// #99 residue: `with_opacity`'s clamp-boundary and endpoint contract,
+    /// pinned against the real function (spec §4.6). Endpoints: opacity 0
+    /// zeroes the alpha; opacity 1 leaves it unchanged. Clamp arms: negative
+    /// opacity clamps to the 0 endpoint, opacity > 1 clamps to the 1
+    /// endpoint (never scales past the color's own alpha).
+    #[test]
+    fn with_opacity_endpoint_zero_zeroes_alpha() {
+        let c = with_opacity(from_rgba(0x10, 0x20, 0x30, 200), 0.0);
+        assert_eq!(c.alpha, 0);
+    }
+
+    #[test]
+    fn with_opacity_endpoint_one_preserves_alpha() {
+        let c = with_opacity(from_rgba(0x10, 0x20, 0x30, 200), 1.0);
+        assert_eq!(c.alpha, 200);
+    }
+
+    #[test]
+    fn with_opacity_negative_clamps_to_zero_endpoint() {
+        let c = with_opacity(from_rgba(0x10, 0x20, 0x30, 200), -0.5);
+        assert_eq!(c.alpha, 0, "negative opacity must clamp to the same result as opacity=0");
+    }
+
+    #[test]
+    fn with_opacity_above_one_clamps_to_original_alpha() {
+        // alpha=100, opacity=2.0: unclamped this would multiply to 200 —
+        // clamping opacity to 1.0 first must instead leave alpha at 100
+        // (its own, unscaled value), never overshoot past it.
+        let c = with_opacity(from_rgba(0x10, 0x20, 0x30, 100), 2.0);
+        assert_eq!(c.alpha, 100, "opacity > 1 must clamp to the 1.0 endpoint, not scale past the original alpha");
+    }
+
     /// R1 port (bug_hunt_draw.rs): `NaN.clamp(0.0, 1.0)` is NaN in Rust, which
     /// would otherwise silently zero out an element's alpha (invisible) instead
     /// of preserving it. `with_opacity` guards this explicitly.

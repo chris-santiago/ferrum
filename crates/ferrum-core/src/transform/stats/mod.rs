@@ -1183,5 +1183,10 @@ fn embedding_to_record_batch(
 // Tests
 // ---------------------------------------------------------------------------
 
+// Test coverage lives in `tests.rs` (precedent: `render/scale_resolve/tests.rs`,
+// `projection/mod.rs`) — the module grew too large for an inline
+// `mod tests { ... }` block once the mirror-coupled coverage from the R1
+// bug-hunt suites was relocated in-crate to exercise these real stats
+// transforms directly instead of a duplicated-formula copy.
 #[cfg(test)]
 mod tests;

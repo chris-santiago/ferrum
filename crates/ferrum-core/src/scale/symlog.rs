@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict};
+use super::core::{continuous_common, degenerate_ratio, resolve_continuous, scale_spec_to_py_dict};
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
 
@@ -27,7 +27,10 @@ impl SymlogScaleData {
         let [d0, d1] = self.domain;
         let [r0, r1] = self.range;
         let f = |v: f64| symlog_fwd(v, self.constant);
-        let t = (f(x) - f(d0)) / (f(d1) - f(d0));
+        // Degenerate domain (d0 == d1, e.g. a constant-valued data column):
+        // see `degenerate_ratio`'s doc comment (GH #104) for why this must
+        // resolve to the range midpoint rather than 0/0 = NaN.
+        let t = degenerate_ratio(f(x) - f(d0), f(d1) - f(d0));
         let mapped = r0 + t * (r1 - r0);
         if self.clamp {
             let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
@@ -300,6 +303,23 @@ mod tests {
         let y = s.scale(0.0);
         assert!(y.is_finite(), "scale(0) returned {y}");
         assert!((y - 0.5).abs() < 1e-12, "expected 0.5, got {y}");
+    }
+
+    /// #99/#104 residue: a degenerate equal-endpoint domain (`d0 == d1`,
+    /// e.g. a constant-valued data column) used to divide by zero
+    /// (`0/0 = NaN`) in the `t` ratio. It must instead resolve to the range
+    /// midpoint — finite, never NaN — on both `clamp` arms.
+    #[test]
+    fn symlog_scale_degenerate_domain_returns_range_midpoint_not_nan() {
+        let unclamped = d([5.0, 5.0], [0.0, 100.0], 1.0, false);
+        let mapped = unclamped.scale(5.0);
+        assert!(mapped.is_finite(), "degenerate-domain scale() must be finite, got NaN");
+        assert_eq!(mapped, 50.0, "degenerate domain must map to the range midpoint");
+
+        let clamped = d([5.0, 5.0], [0.0, 100.0], 1.0, true);
+        let mapped_clamped = clamped.scale(5.0);
+        assert!(mapped_clamped.is_finite(), "clamp=true must also be finite for a degenerate domain");
+        assert_eq!(mapped_clamped, 50.0, "clamp=true degenerate domain must also map to the midpoint");
     }
 
     #[test]

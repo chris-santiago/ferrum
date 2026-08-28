@@ -10,6 +10,8 @@
 //!   binning helper that needs equal-frequency cut points.
 //! - `validate_*` functions — argument validators called from each
 //!   PyO3 constructor; centralised so the error messages stay uniform.
+//! - `degenerate_ratio` — the shared 0/0 guard for a zero-span domain,
+//!   used by every affine-continuous scale's `scale()` (GH #104).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::{Py, PyAny, PyResult, Python};
@@ -70,6 +72,47 @@ pub(crate) fn compute_quantile_cuts(sorted_sample: &[f64], k: usize) -> Vec<f64>
         cuts.push(v);
     }
     cuts
+}
+
+/// Shared degenerate-domain guard for every affine-continuous scale's
+/// `t = (numerator) / (denom)` ratio (Linear/Time, Log, Symlog, Pow/Sqrt).
+///
+/// `denom` is the domain-space span (e.g. `d1 - d0`, or the same after a
+/// scale-specific forward transform — `pow_fwd(d1) - pow_fwd(d0)`,
+/// `ld1 - ld0`, `symlog_fwd(d1) - symlog_fwd(d0)`); `numerator` is the same
+/// transform applied to `(x, d0)` (e.g. `x - d0`, `pow_fwd(x) - pow_fwd(d0)`).
+/// This only overrides the ratio when the domain is **actually** degenerate:
+/// `denom == 0.0` (`d0 == d1`, e.g. every value in a data column is
+/// identical) *and* `numerator == 0.0`, which happens precisely when `x` is
+/// the one point inside the collapsed domain (`x == d0 == d1`, so the
+/// scale-specific transform of `x` and `d0` are the exact same
+/// floating-point computation twice — bit-identical, not merely close).
+/// That is `0/0 = NaN`, which then survives both the `clamp` arm
+/// (`NaN.clamp(lo, hi)` returns `NaN` unchanged in Rust's stdlib
+/// implementation) and the out-of-domain arm (`x == d0 == d1` is never "out
+/// of domain", so that branch never fires to rescue it) — a value that
+/// should render at a deterministic pixel silently disappears instead.
+/// Returning `0.5` (the range midpoint) instead is finite by construction
+/// and matches the "center a degenerate domain rather than drop it"
+/// convention already used for the auto-inferred-domain path
+/// (`render::scale_resolve::domain::numeric_domain_union`'s symmetric-band
+/// expansion) — this is the same convention applied at the scale-formula
+/// level, so it holds for every construction path, not only the one that
+/// pre-expands the domain upstream. GH #104.
+///
+/// A `denom == 0.0` with a **nonzero** `numerator` is a different case —
+/// `x` outside the collapsed domain (`x != d0` while `d0 == d1`) — and this
+/// function deliberately does *not* touch it: `k/0 = ±inf` propagates
+/// through unchanged, exactly as it did before this guard existed. That
+/// keeps the `clamp == true` arm's pre-existing behavior for that input
+/// (`(+inf).clamp(lo, hi) == hi`, `(-inf).clamp(lo, hi) == lo` — the
+/// range-endpoint result every affine-continuous scale already gave for an
+/// out-of-domain value on a degenerate domain), rather than silently
+/// widening this guard's scope to override a case it was never meant to
+/// touch.
+#[inline]
+pub(super) fn degenerate_ratio(numerator: f64, denom: f64) -> f64 {
+    if denom == 0.0 && numerator == 0.0 { 0.5 } else { numerator / denom }
 }
 
 // ---------- validators (used by pyclass facades) ----------

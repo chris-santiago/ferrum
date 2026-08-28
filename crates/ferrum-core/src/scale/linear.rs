@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict};
+use super::core::{continuous_common, degenerate_ratio, resolve_continuous, scale_spec_to_py_dict};
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
 
@@ -24,7 +24,11 @@ impl LinearScaleData {
         if x.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
         let [r0, r1] = self.range;
-        let t = (x - d0) / (d1 - d0);
+        // Degenerate domain (d0 == d1, e.g. a constant-valued data column):
+        // see `degenerate_ratio`'s doc comment (GH #104) for why this must
+        // resolve to the range midpoint rather than 0/0 = NaN. `TimeScale`
+        // shares this exact struct/method, so this guard covers it too.
+        let t = degenerate_ratio(x - d0, d1 - d0);
         let mapped = r0 + t * (r1 - r0);
         if self.clamp {
             let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
@@ -340,6 +344,51 @@ mod tests {
         let s = d([0.0, 10.0], [0.0, 1.0], false);
         assert!(s.scale(f64::NAN).is_nan());
         assert!(s.invert(f64::NAN).is_nan());
+    }
+
+    /// #99/#104 residue: a degenerate equal-endpoint domain (`d0 == d1`,
+    /// e.g. a constant-valued data column) used to divide by zero
+    /// (`0/0 = NaN`) in the `t` ratio. It must instead resolve to the range
+    /// midpoint — finite, never NaN — on both `clamp` arms. `TimeScale`
+    /// reuses this exact struct, so this guard covers it too (see
+    /// `time.rs::test_time_scale_degenerate_single_instant_domain_returns_range_midpoint`
+    /// for a dedicated pin at that call site).
+    #[test]
+    fn linear_scale_degenerate_domain_returns_range_midpoint_not_nan() {
+        let unclamped = d([5.0, 5.0], [0.0, 100.0], false);
+        let mapped = unclamped.scale(5.0);
+        assert!(mapped.is_finite(), "degenerate-domain scale() must be finite, got NaN");
+        assert_eq!(mapped, 50.0, "degenerate domain must map to the range midpoint");
+
+        let clamped = d([5.0, 5.0], [0.0, 100.0], true);
+        let mapped_clamped = clamped.scale(5.0);
+        assert!(mapped_clamped.is_finite(), "clamp=true must also be finite for a degenerate domain");
+        assert_eq!(mapped_clamped, 50.0, "clamp=true degenerate domain must also map to the midpoint");
+    }
+
+    /// GH #104 quality-review remediation (S2-3): `degenerate_ratio` must key
+    /// on *actual* degeneracy — both the numerator AND the denominator being
+    /// zero (`x == d0 == d1`) — not a bare `denom == 0.0`. A degenerate
+    /// domain (`d0 == d1`) queried at a DIFFERENT point (`x != d0`) is a
+    /// genuine `k/0 = ±inf`, not a `0/0`, and must keep its pre-guard
+    /// clamped-endpoint behavior on the `clamp == true` arm: `(+inf).clamp`
+    /// saturates to the range's high endpoint, `(-inf).clamp` to the low
+    /// endpoint — exactly what every affine-continuous scale already did for
+    /// an out-of-domain value before `degenerate_ratio` existed. Tests both
+    /// arms (`x` above and below the collapsed domain point) so a future
+    /// widening of the `denom == 0.0` check alone (dropping the numerator
+    /// half) breaks this immediately.
+    #[test]
+    fn linear_scale_degenerate_domain_off_point_keeps_clamped_endpoint_not_midpoint() {
+        let clamped = d([5.0, 5.0], [0.0, 100.0], true);
+        assert_eq!(
+            clamped.scale(10.0), 100.0,
+            "x above the collapsed domain point must clamp to the range's high endpoint (+inf.clamp), not the midpoint"
+        );
+        assert_eq!(
+            clamped.scale(0.0), 0.0,
+            "x below the collapsed domain point must clamp to the range's low endpoint (-inf.clamp), not the midpoint"
+        );
     }
 
     #[test]
