@@ -411,6 +411,10 @@ fn resolve_axis_title(value: Option<&str>, fallback: Option<String>) -> Option<S
 /// `spec_enc` is the user-facing spec-level encoding (its title wins). Returns
 /// the assembled `AxisInput` plus the resolved show-axis-band toggle inputs are
 /// kept on the `AxisInput` itself.
+///
+/// Errors propagate as [`crate::render::UnflippedRenderError`] (R3): this fn
+/// has no `coord_flipped` of its own — its two callers (`build_axes`,
+/// `build_secondary_y_axis_inputs`) do, and resolve at their own boundary.
 fn build_axis_input(
     channel: Channel,
     rendering_enc: Option<&crate::spec::encoding::EncodingSpec>,
@@ -418,7 +422,7 @@ fn build_axis_input(
     scale: &crate::render::scale_resolve::ScaleKind,
     tick_count: usize,
     theme: &crate::layout::ThemeInputs,
-) -> Result<AxisInput, RenderError> {
+) -> Result<AxisInput, crate::render::UnflippedRenderError> {
     // Axis title resolution priority:
     //   1. Spec-level encoding title (set by user via .encode(y=Y(..., title=...)))
     //   2. Layer-0 encoding title (set by desugar for internal column names)
@@ -838,9 +842,9 @@ fn build_axes(
     let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
 
     // R3: `build_axis_input`'s per-channel `Axis(orient=...)` validation has no
-    // flip context of its own (see `with_coord_flipped`'s doc); patch it in here,
-    // the boundary that DOES know it, so a rejected orient names the axis the
-    // user actually wrote instead of the resolved (post-flip) one.
+    // flip context of its own (it returns `UnflippedRenderError`); resolve it
+    // in here, the boundary that DOES know it, so a rejected orient names the
+    // axis the user actually wrote instead of the resolved (post-flip) one.
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
 
     let axes = AxesInput {
@@ -852,7 +856,7 @@ fn build_axes(
             x_tick_count,
             theme,
         )
-        .map_err(|e| crate::render::with_coord_flipped(e, coord_flipped))?,
+        .map_err(|e| e.resolve(coord_flipped))?,
         y: build_axis_input(
             Channel::Y,
             rendering_encoding.y.as_ref(),
@@ -861,7 +865,7 @@ fn build_axes(
             y_tick_count,
             theme,
         )
-        .map_err(|e| crate::render::with_coord_flipped(e, coord_flipped))?,
+        .map_err(|e| e.resolve(coord_flipped))?,
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
         secondary_y: build_secondary_y_axis_inputs(
@@ -943,7 +947,7 @@ fn build_secondary_y_axis_inputs(
             )?;
         warnings.extend(layer_warnings);
         let y_tick_count = encoding_axis_tick_count(layer_encoding.y.as_ref()).unwrap_or(10);
-        // R3: one of the two chains that PATCH `coord_flipped` (the other is
+        // R3: one of the two chains that RESOLVE `coord_flipped` (the other is
         // `build_axes`, just above; the third production chain to
         // `InvalidAxisOrient` — the chart-level `configure_axis` apply block in
         // `render::mod::prepare_and_layout` — is a deliberate EXEMPTION, not a
@@ -954,7 +958,10 @@ fn build_secondary_y_axis_inputs(
         // themselves), but `layer_encoding` is the post-`CoordFlip` layer
         // encoding (`build_layers`) — the `EncodingSpec` carrying the user's
         // override traveled through the swap — so the same boundary correction
-        // `build_axes` applies is needed here too.
+        // `build_axes` applies is needed here too. `build_axis_input` returns
+        // `UnflippedRenderError`, so this `.resolve(coord_flipped)` is not
+        // optional — the compiler forces it before `?` can propagate a
+        // `RenderError`.
         let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
         let axis_input = build_axis_input(
             Channel::Y,
@@ -964,7 +971,7 @@ fn build_secondary_y_axis_inputs(
             y_tick_count,
             theme,
         )
-        .map_err(|e| crate::render::with_coord_flipped(e, coord_flipped))?;
+        .map_err(|e| e.resolve(coord_flipped))?;
         out.push(axis_input);
     }
     Ok(out)
@@ -1128,47 +1135,51 @@ fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -
 /// per-channel (here) and chart-level (`render::mod`) apply paths so the two
 /// cannot drift on the accepted token set or the dimension check.
 ///
-/// R3 / MAINTENANCE: both `InvalidAxisOrient` constructions below hardcode
-/// `coord_flipped: false` as a PLACEHOLDER — this function has no flip
-/// context of its own (it only ever sees the RESOLVED `channel`). It is the
-/// caller's job to decide, at ITS OWN boundary, whether that placeholder is
-/// correct or needs patching via [`crate::render::with_coord_flipped`]:
-/// - patch it when the caller's `channel` reached this function by way of a
-///   user-written `EncodingSpec` that traveled through `build_layers`' swap
-///   (e.g. `build_axes`'s per-channel `fm.Axis(orient=...)`,
-///   `build_secondary_y_axis_inputs`'s per-layer one) — there the resolved
-///   token needs translating back to what the user actually wrote;
-/// - do NOT patch it when `channel` is resolved-slot/physical vocabulary the
-///   user's own config key already names directly (the chart-level
-///   `configure_axis` chain — see the field doc on
+/// R3: the `InvalidAxisOrient` constructions below always build
+/// `coord_flipped: false` — this function has no flip context of its own (it
+/// only ever sees the RESOLVED `channel`) — but the result is wrapped in
+/// [`UnflippedRenderError`], whose sole exit,
+/// [`resolve`](UnflippedRenderError::resolve), forces the caller to decide,
+/// at ITS OWN boundary, whether `false` is correct or needs patching to the
+/// real flip flag:
+/// - `.resolve(coord_flipped)` when the caller's `channel` reached this
+///   function by way of a user-written `EncodingSpec` that traveled through
+///   `build_layers`' swap (e.g. `build_axes`'s per-channel
+///   `fm.Axis(orient=...)`, `build_secondary_y_axis_inputs`'s per-layer one)
+///   — there the resolved token needs translating back to what the user
+///   actually wrote;
+/// - `.resolve(false)` explicitly when `channel` is resolved-slot/physical
+///   vocabulary the user's own config key already names directly (the
+///   chart-level `configure_axis` chain — see the field doc on
 ///   [`crate::render::RenderError::InvalidAxisOrient`] for the full
 ///   three-chain account and why that one is a deliberate exemption, not a
 ///   gap).
 ///
-/// **This decision is NOT compiler-enforced** — a new call chain reaching
-/// this function silently gets `coord_flipped: false` whether or not that is
-/// correct for it. This is standing evidence, not hypothetical: cycle 1 of
-/// this task shipped `build_axes` and the chart-level chain but missed
+/// **This decision is compiler-enforced**: [`UnflippedRenderError`] has no
+/// `From` conversion to [`RenderError`], so a new call chain reaching this
+/// function cannot propagate the error via `?` without an explicit
+/// `.resolve(...)` somewhere in the chain — it fails to compile instead of
+/// silently defaulting. This closes a real near-miss: cycle 1 of this task
+/// shipped `build_axes` and the chart-level chain but missed
 /// `build_secondary_y_axis_inputs`, which went unpatched (silently wrong
-/// under flip) until cycle 2 caught it. Any reviewer adding or auditing a
-/// call chain to `parse_axis_orient`/`parse_title_orient` must make this call
-/// explicitly, not assume the default is safe.
+/// under flip) until cycle 2 caught it, back when this discipline was
+/// prose-only.
 pub(crate) fn parse_axis_orient(
     value: &str,
     channel: &'static str,
-) -> Result<AxisOrient, RenderError> {
+) -> Result<AxisOrient, crate::render::UnflippedRenderError> {
     let orient = match value.trim().to_ascii_lowercase().as_str() {
         "top" => AxisOrient::Top,
         "bottom" => AxisOrient::Bottom,
         "left" => AxisOrient::Left,
         "right" => AxisOrient::Right,
-        // Placeholder — see the MAINTENANCE note on this function's doc comment.
+        // Placeholder — see the doc comment on this function.
         _ => {
-            return Err(RenderError::InvalidAxisOrient {
+            return Err(crate::render::UnflippedRenderError::new(RenderError::InvalidAxisOrient {
                 channel,
                 orient: value.to_owned(),
                 coord_flipped: false,
-            })
+            }))
         }
     };
     let ok = match channel {
@@ -1178,8 +1189,12 @@ pub(crate) fn parse_axis_orient(
     if ok {
         Ok(orient)
     } else {
-        // Placeholder — see the MAINTENANCE note on this function's doc comment.
-        Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned(), coord_flipped: false })
+        // Placeholder — see the doc comment on this function.
+        Err(crate::render::UnflippedRenderError::new(RenderError::InvalidAxisOrient {
+            channel,
+            orient: value.to_owned(),
+            coord_flipped: false,
+        }))
     }
 }
 
@@ -1215,19 +1230,19 @@ pub(crate) fn parse_label_overlap(value: &str) -> Option<crate::layout::LabelOve
 pub(crate) fn parse_title_orient(
     value: &str,
     channel: &'static str,
-) -> Result<AxisOrient, RenderError> {
+) -> Result<AxisOrient, crate::render::UnflippedRenderError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "top" => Ok(AxisOrient::Top),
         "bottom" => Ok(AxisOrient::Bottom),
         "left" => Ok(AxisOrient::Left),
         "right" => Ok(AxisOrient::Right),
-        // Placeholder — see the MAINTENANCE note on `parse_axis_orient`'s doc
-        // comment above (this function shares the exact same contract).
-        _ => Err(RenderError::InvalidAxisOrient {
+        // Placeholder — see the doc comment on `parse_axis_orient` above
+        // (this function shares the exact same contract).
+        _ => Err(crate::render::UnflippedRenderError::new(RenderError::InvalidAxisOrient {
             channel,
             orient: value.to_owned(),
             coord_flipped: false,
-        }),
+        })),
     }
 }
 
@@ -1244,10 +1259,14 @@ pub(crate) fn parse_title_orient(
 /// unparseable color hex string yields `None` (theme fallback) rather than
 /// failing. `orient` is the validated override input; the concrete axis side is
 /// resolved into `AxisInput.orient` once all override layers merge.
+///
+/// Returns [`crate::render::UnflippedRenderError`] (R3), not `RenderError`
+/// directly: this fn has no `coord_flipped` of its own — it's `build_axes`
+/// (via [`build_axis_input`]) that knows it and resolves at that boundary.
 fn encoding_axis_style_overrides(
     axis: Option<&crate::render::chart_config::AxisStyleSpec>,
     channel: &'static str,
-) -> Result<crate::layout::AxisStyleOverrides, RenderError> {
+) -> Result<crate::layout::AxisStyleOverrides, crate::render::UnflippedRenderError> {
     let mut overrides = crate::layout::AxisStyleOverrides::default();
     if let Some(a) = axis {
         crate::render::axis_style_fill_from(&mut overrides, a, channel, false)?;
@@ -1879,6 +1898,43 @@ mod tests {
         assert_eq!(parse_label_overlap(""), None);
         // Unrecognized → bounded to the cascade default (greedy), not an error.
         assert_eq!(parse_label_overlap("nonsense"), Some(LabelOverlap::Greedy));
+    }
+
+    // --- R3 (#89 part C): `UnflippedRenderError` compile-enforcement --------------
+    //
+    // `parse_axis_orient`/`parse_title_orient` return `UnflippedRenderError`, not
+    // `RenderError` — there is no `From<UnflippedRenderError> for RenderError`, so
+    // a bare `?` on their result cannot compile into a `RenderError`-returning fn
+    // (manually verified during implementation: a probe fn doing exactly that was
+    // inserted, confirmed to fail with E0277 "the trait `From<UnflippedRenderError>`
+    // is not implemented for `RenderError`", then removed — trybuild-style
+    // automated coverage is not available in this crate: `ferrum-core`'s `[lib]`
+    // is `crate-type = ["cdylib"]` only, and `UnflippedRenderError` is
+    // `pub(crate)`, so no external test crate can name it). These two tests pin
+    // the RUNTIME half of the contract: `.resolve(coord_flipped)` is the sole way
+    // to reach a `RenderError`, and it applies the correction requested.
+    #[test]
+    fn unflipped_render_error_resolve_applies_requested_flag() {
+        let err = parse_axis_orient("nonsense", "x").unwrap_err();
+        match err.resolve(true) {
+            RenderError::InvalidAxisOrient { channel, coord_flipped, .. } => {
+                assert_eq!(channel, "x");
+                assert!(coord_flipped, "resolve(true) must patch coord_flipped in");
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unflipped_render_error_resolve_false_is_the_exempt_chains_explicit_choice() {
+        let err = parse_title_orient("nonsense", "y").unwrap_err();
+        match err.resolve(false) {
+            RenderError::InvalidAxisOrient { channel, coord_flipped, .. } => {
+                assert_eq!(channel, "y");
+                assert!(!coord_flipped, "resolve(false) is the exempt chart-level chain's explicit choice");
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
     }
 
     // --- SPINE-08: build_axis_input + resolve_axis_title -------------------------

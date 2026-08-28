@@ -36,6 +36,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout::LayoutWarning;
 
+/// The user-facing detail carried by [`RenderError::PositionAdjustFailed`]
+/// (R3 restructure, #89 part C). Most Dodge/Jitter/Stack failures carry a
+/// free-form [`Message`](Self::Message) with no positional channel token to
+/// un-flip. Stack's four failure modes that DO name a resolved `x`/`y`
+/// channel (missing category/value encoding, bad value/category dtype)
+/// carry the RESOLVED token structurally instead, so `Display` — not the
+/// `position::apply_stack` constructor — un-flips it via
+/// `prepare::user_facing_channel` using the `coord_flipped` carried
+/// alongside on the error. This replaces the former construction-time bake,
+/// where `apply_stack` computed already-un-flipped `cat_token`/`value_token`
+/// strings via `user_facing_channel` before building the message.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PositionAdjustReason {
+    /// "<role> (<channel>) encoding required" — Stack's missing
+    /// category/value encoding pair. `role` is `"category"` or `"value"`.
+    MissingEncoding { role: &'static str, channel: &'static str },
+    /// "<channel> must be Float64, UInt64, or a signed integer type
+    /// (Int8/Int16/Int32/Int64); got <dtype>" — Stack's value-dtype check.
+    /// `dtype` is pre-formatted (`{:?}` of the Arrow `DataType`) since it
+    /// carries no channel token to un-flip.
+    ValueDtype { channel: &'static str, dtype: String },
+    /// "<channel> column must be Float64 or Utf8" — Stack's category-dtype
+    /// check.
+    CategoryDtype { channel: &'static str },
+    /// A free-form reason with no positional channel token — every
+    /// Dodge/Jitter message, plus Stack's column-not-found and
+    /// `RecordBatch`-construction failures.
+    Message(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
@@ -51,8 +81,19 @@ pub enum RenderError {
     LayoutFailed(String),
     ResvgFailed(String),
     /// A position-adjustment pass (Dodge/Jitter/Stack) rejected its inputs.
-    /// `adjustment` names the adjustment; `reason` is the user-facing detail.
-    PositionAdjustFailed { adjustment: &'static str, reason: String },
+    /// `adjustment` names the adjustment; `reason` is the user-facing detail
+    /// (see [`PositionAdjustReason`]). `coord_flipped` (R3) is a
+    /// `Display`-time-only correction: it is read only by
+    /// [`PositionAdjustReason::MissingEncoding`],
+    /// [`PositionAdjustReason::ValueDtype`], and
+    /// [`PositionAdjustReason::CategoryDtype`] (which carry a channel token
+    /// to un-flip) and is inert for [`PositionAdjustReason::Message`] (no
+    /// token). Every construction site sets it to the real `coord_flipped`
+    /// where that context is available (`apply_dodge`, `apply_stack`) and to
+    /// `false` where it isn't (`apply_dodge_ordinal`, `apply_jitter` — both
+    /// only ever construct token-free `Message` reasons, so the field is
+    /// structurally inert there).
+    PositionAdjustFailed { adjustment: &'static str, reason: PositionAdjustReason, coord_flipped: bool },
     /// A column carried an Arrow dtype the renderer cannot interpret.
     /// `field` is the column name; `context` is an optional channel /
     /// scale tag (e.g. `"size"`, `"opacity"`, `"scale"`) used to
@@ -114,24 +155,29 @@ pub enum RenderError {
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
 /// is constructed deep inside `prepare::parse_axis_orient`/`parse_title_orient`,
-/// which have no access to whether the chart is flipped. See the field doc on
+/// which have no access to whether the chart is flipped — they return it
+/// wrapped in [`UnflippedRenderError`], whose sole exit,
+/// [`UnflippedRenderError::resolve`], calls this fn. See the field doc on
 /// [`RenderError::InvalidAxisOrient`] for the full three-chain account: TWO of
-/// the three production call chains apply this at their own boundary
+/// the three production call chains resolve this at their own boundary
 /// (`prepare::build_axes`, `prepare::build_secondary_y_axis_inputs`); the third
 /// (the chart-level `configure_axis` apply block) is a deliberate exemption and
-/// must NOT call this — `channel`/`orient` (the resolved token validation
-/// acted on) are untouched either way; only the `Display`-time un-flip flag is
-/// corrected. A no-op for every other variant.
+/// resolves with `false` explicitly — `channel`/`orient` (the resolved token
+/// validation acted on) are untouched either way; only the `Display`-time
+/// un-flip flag is corrected. A no-op for every other variant.
 ///
-/// MAINTENANCE: any NEW call chain reaching `parse_axis_orient`/
-/// `parse_title_orient` ships `coord_flipped: false` by default (see the
-/// placeholder note on those two functions) — decide explicitly whether that
-/// chain's `channel` names a user-written encoding channel (patch it, like the
-/// two above) or a resolved/physical/user-typed-literal token (leave it, like
-/// the chart-level chain and `SortSpecIgnored`). This decision was missed once
-/// already (the `build_secondary_y_axis_inputs` chain went unpatched through
-/// cycle 1) — there is no compiler check forcing it, so it must be made
-/// deliberately at review time, not assumed.
+/// MAINTENANCE: [`UnflippedRenderError`] compile-enforces that every call
+/// chain reaching `parse_axis_orient`/`parse_title_orient` makes this
+/// decision explicitly — it cannot become a `RenderError` (and so cannot
+/// propagate via `?`) without a `.resolve(coord_flipped)` call somewhere in
+/// the chain. Decide whether that chain's `channel` names a user-written
+/// encoding channel (patch it with the real flag, like the two chains above)
+/// or a resolved/physical/user-typed-literal token (resolve with `false`,
+/// like the chart-level chain and `SortSpecIgnored`). This decision was
+/// missed once already (the `build_secondary_y_axis_inputs` chain went
+/// unpatched through cycle 1, when the placeholder discipline was prose-only)
+/// — it must still be made deliberately at review time, not assumed, but a
+/// missed call chain now fails to compile instead of silently defaulting.
 pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> RenderError {
     match err {
         RenderError::InvalidAxisOrient { channel, orient, .. } => {
@@ -139,11 +185,12 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
-        // here, not a silent no-op. `EncodingTypeMismatch` and
-        // `UnsupportedChannelCombination` also carry a `coord_flipped` field,
-        // but each is patched at its own construction site, not through this
-        // boundary-correction fn — see their field docs on `RenderError`. The
-        // remaining variants carry no user-channel token at all.
+        // here, not a silent no-op. `EncodingTypeMismatch`,
+        // `UnsupportedChannelCombination`, and `PositionAdjustFailed` also
+        // carry a `coord_flipped` field, but each is patched at its own
+        // construction site, not through this boundary-correction fn — see
+        // their field docs on `RenderError`. The remaining variants carry no
+        // user-channel token at all.
         other @ (RenderError::InvalidViewport { .. }
         | RenderError::EmptyBatch
         | RenderError::UnknownColumn { .. }
@@ -159,6 +206,36 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::SceneConstruction(_)
         | RenderError::HtmlBundleAssembly(_)
         | RenderError::UnsupportedChannelCombination { .. }) => other,
+    }
+}
+
+/// Wrapper forcing every call chain reaching
+/// [`prepare::parse_axis_orient`]/[`prepare::parse_title_orient`] to
+/// explicitly decide the `coord_flipped` `Display` correction (R3) before the
+/// error can become a [`RenderError`] — compile-enforcing what the
+/// MAINTENANCE note on [`with_coord_flipped`] used to police only as prose
+/// (see that note for the cycle-1 near-miss this closes). `#[must_use]` and
+/// the deliberate absence of `From<UnflippedRenderError> for RenderError`
+/// both matter: a new call chain cannot propagate the error via `?` until it
+/// calls [`resolve`](Self::resolve).
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct UnflippedRenderError(RenderError);
+
+impl UnflippedRenderError {
+    /// Wrap a freshly constructed [`RenderError`] whose `coord_flipped`
+    /// field has not yet been decided at this boundary.
+    pub(crate) fn new(err: RenderError) -> Self {
+        Self(err)
+    }
+
+    /// The sole exit. `coord_flipped` is the real flip flag for a call chain
+    /// whose `EncodingSpec` traveled through `build_layers`' swap (patches
+    /// the un-flip); `false` for a call chain whose channel is already
+    /// resolved-slot/physical vocabulary the user typed directly — see the
+    /// three-chain account on [`RenderError::InvalidAxisOrient`].
+    pub(crate) fn resolve(self, coord_flipped: bool) -> RenderError {
+        with_coord_flipped(self.0, coord_flipped)
     }
 }
 
@@ -185,8 +262,25 @@ impl std::fmt::Display for RenderError {
                 write!(f, "layout failed: {s}"),
             Self::ResvgFailed(s) =>
                 write!(f, "PNG rasterization failed: {s}"),
-            Self::PositionAdjustFailed { adjustment, reason } =>
-                write!(f, "{adjustment}: {reason}"),
+            Self::PositionAdjustFailed { adjustment, reason, coord_flipped } => match reason {
+                PositionAdjustReason::Message(s) => write!(f, "{adjustment}: {s}"),
+                PositionAdjustReason::MissingEncoding { role, channel } => {
+                    let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                    write!(f, "{adjustment}: {role} ({channel}) encoding required")
+                }
+                PositionAdjustReason::ValueDtype { channel, dtype } => {
+                    let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                    write!(
+                        f,
+                        "{adjustment}: {channel} must be Float64, UInt64, or a signed integer \
+                         type (Int8/Int16/Int32/Int64); got {dtype}"
+                    )
+                }
+                PositionAdjustReason::CategoryDtype { channel } => {
+                    let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                    write!(f, "{adjustment}: {channel} column must be Float64 or Utf8")
+                }
+            },
             Self::UnsupportedDtype { field, dtype, context } => match context {
                 Some(ctx) => write!(f, "{ctx}: column '{field}' has unsupported dtype: {dtype}"),
                 None => write!(f, "column '{field}' has unsupported dtype: {dtype}"),
@@ -1002,12 +1096,19 @@ fn axis_channel(orient: crate::layout::AxisOrient) -> &'static str {
 /// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
 /// [`RenderError::InvalidAxisOrient`]; an unparseable color hex string leaves the
 /// slot `None` (theme fallback) on both paths.
+///
+/// Returns [`UnflippedRenderError`] (R3), not `RenderError` directly: neither
+/// this fn nor `parse_axis_orient`/`parse_title_orient` beneath it has access
+/// to `coord_flipped` (this fn is shared by both the flip-patched per-channel
+/// path and the flip-exempt chart-level path — see the field doc on
+/// [`RenderError::InvalidAxisOrient`]), so the decision is deferred to each
+/// caller's own boundary via `.resolve(coord_flipped)`.
 pub(crate) fn axis_style_fill_from(
     o: &mut crate::layout::AxisStyleOverrides,
     style: &chart_config::AxisStyleSpec,
     channel: &'static str,
     fill_only_if_none: bool,
-) -> Result<(), RenderError> {
+) -> Result<(), UnflippedRenderError> {
     // One merge predicate for every field: on the fresh-build (per-channel) path
     // (`fill_only_if_none == false`) the value is written unconditionally; on the
     // chart-level path it is written only when the slot is still `None` so a
@@ -1107,7 +1208,12 @@ pub(crate) fn apply_axis_style_to_axis_input(
     style: &chart_config::AxisStyleSpec,
 ) -> Result<(), RenderError> {
     let channel = axis_channel(axis.orient);
-    axis_style_fill_from(&mut axis.overrides, style, channel, true)
+    // R3 EXEMPT chain: `channel` here is the axis's PHYSICAL orientation
+    // (`axis_channel`), not a channel that traveled through `build_layers`'
+    // swap — resolve with `false` explicitly. See the three-chain account on
+    // `RenderError::InvalidAxisOrient` and the `chart_level_orient_error_names_resolved_axis_under_flip`
+    // test pinning this.
+    axis_style_fill_from(&mut axis.overrides, style, channel, true).map_err(|e| e.resolve(false))
 }
 
 /// Re-format tick label strings using a d3-format string override.

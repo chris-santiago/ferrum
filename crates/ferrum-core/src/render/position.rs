@@ -461,13 +461,27 @@ fn apply_dodge(
     };
     let (band_enc, band_scale) = if band_on_y { (encoding.y.as_ref(), &scales.y) } else { (encoding.x.as_ref(), &scales.x) };
 
-    // Resolve the band column (the axis being dodged).
+    // Resolve the band column (the axis being dodged). None of Dodge's
+    // messages name a positional channel token, so `coord_flipped` (carried
+    // for struct-field uniformity across `PositionAdjustFailed`, R3) is
+    // never read by `Display` here — the real value is passed anyway since
+    // it's already in scope.
     let band_field = band_enc.ok_or_else(|| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "band-axis encoding required".into() }
+        crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Dodge",
+            reason: crate::render::PositionAdjustReason::Message("band-axis encoding required".into()),
+            coord_flipped,
+        }
     })?;
     let band_col_idx = batch.schema().index_of(&band_field.field).map_err(|_| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("band column '{}' not found",
-            band_field.field) }
+        crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Dodge",
+            reason: crate::render::PositionAdjustReason::Message(format!(
+                "band column '{}' not found",
+                band_field.field
+            )),
+            coord_flipped,
+        }
     })?;
     let is_ordinal_band = batch.schema().field(band_col_idx).data_type() != &DataType::Float64;
     if is_ordinal_band {
@@ -477,8 +491,10 @@ fn apply_dodge(
         .column(band_col_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "band axis must be Float64".into() }
+        .ok_or_else(|| crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Dodge",
+            reason: crate::render::PositionAdjustReason::Message("band axis must be Float64".into()),
+            coord_flipped,
         })?;
 
     // 1. Compute median spacing of unique band values (bandwidth proxy for a
@@ -523,8 +539,11 @@ fn apply_dodge(
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
     cols[band_col_idx] = Arc::new(Float64Array::from(new_band));
     let schema = batch.schema();
-    RecordBatch::try_new(schema, cols)
-        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("{e}") })
+    RecordBatch::try_new(schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Dodge",
+        reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
+        coord_flipped,
+    })
 }
 
 /// Ordinal-band Dodge — operates in pixel space because the categorical band
@@ -621,8 +640,14 @@ fn apply_dodge_ordinal(
     BatchPositionMeta::stamp_dodge(&mut metadata, n_groups, Some(sub_band));
     let new_schema = Arc::new(Schema::new(fields).with_metadata(metadata));
 
-    RecordBatch::try_new(new_schema, cols)
-        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("ordinal: {e}") })
+    RecordBatch::try_new(new_schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Dodge",
+        reason: crate::render::PositionAdjustReason::Message(format!("ordinal: {e}")),
+        // No positional channel token in this message and no `coord_flipped`
+        // in scope (this fn resolves the band axis purely from `band_scale`)
+        // — structurally inert, see the field doc on `PositionAdjustFailed`.
+        coord_flipped: false,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -708,8 +733,14 @@ fn apply_jitter(
     let need_offsets = (do_x && x_is_ordinal) || (do_y && y_is_ordinal);
     if !need_offsets {
         let schema = batch.schema();
-        return RecordBatch::try_new(schema, cols)
-            .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Jitter", reason: format!("{e}") });
+        // No positional channel token in this message and no `coord_flipped`
+        // in scope (`apply_jitter` doesn't take it) — structurally inert,
+        // see the field doc on `PositionAdjustFailed`.
+        return RecordBatch::try_new(schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Jitter",
+            reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
+            coord_flipped: false,
+        });
     }
 
     cols.push(Arc::new(Float64Array::from(x_pixel_offsets)));
@@ -718,8 +749,11 @@ fn apply_jitter(
     fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
     fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
     let new_schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(new_schema, cols)
-        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Jitter", reason: format!("ordinal: {e}") })
+    RecordBatch::try_new(new_schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Jitter",
+        reason: crate::render::PositionAdjustReason::Message(format!("ordinal: {e}")),
+        coord_flipped: false,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -816,38 +850,50 @@ pub(crate) fn apply_stack(
     } else {
         (encoding.y.as_ref(), encoding.x.as_ref())
     };
-    // R3: the resolved slot each role reads from swaps with `value_on_x` (which
-    // itself already factors in `coord_flipped` — see `resolve_stack_value_on_x`
-    // above), so the "(x)"/"(y)" annotation in these messages must swap with it
-    // too, rather than staying hardcoded to the pre-#77 x=category/y=value
-    // assumption. `user_facing_channel` un-flips the RESOLVED token back to the
-    // one the user actually wrote; identity when `!coord_flipped` (byte-identical
-    // default), including for the `value_axis` override case (unrelated to
-    // `CoordFlip`, so nothing to un-flip there).
-    let cat_token = crate::render::prepare::user_facing_channel(
-        if value_on_x { "y" } else { "x" },
-        coord_flipped,
-    );
-    let value_token = crate::render::prepare::user_facing_channel(
-        if value_on_x { "x" } else { "y" },
-        coord_flipped,
-    );
+    // R3 (restructured, #89 part C): the resolved slot each role reads from
+    // swaps with `value_on_x` (which itself already factors in
+    // `coord_flipped` — see `resolve_stack_value_on_x` above), so the
+    // "(x)"/"(y)" annotation in these messages must swap with it too, rather
+    // than staying hardcoded to the pre-#77 x=category/y=value assumption.
+    // These are the RESOLVED tokens `apply_stack` actually checked — NOT
+    // un-flipped here. `Display` (not this constructor) un-flips them back
+    // to what the user wrote via `user_facing_channel`, reading the
+    // `coord_flipped` carried alongside on the error itself; identity when
+    // `!coord_flipped` (byte-identical default), including for the
+    // `value_axis` override case (unrelated to `CoordFlip`, so nothing to
+    // un-flip there).
+    let cat_token: &'static str = if value_on_x { "y" } else { "x" };
+    let value_token: &'static str = if value_on_x { "x" } else { "y" };
 
-    let cat_field = cat_enc.ok_or_else(|| crate::render::RenderError::PositionAdjustFailed {
+    let cat_field = cat_enc.ok_or(crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Stack",
-        reason: format!("category ({cat_token}) encoding required"),
+        reason: crate::render::PositionAdjustReason::MissingEncoding { role: "category", channel: cat_token },
+        coord_flipped,
     })?;
-    let value_field = value_enc.ok_or_else(|| crate::render::RenderError::PositionAdjustFailed {
+    let value_field = value_enc.ok_or(crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Stack",
-        reason: format!("value ({value_token}) encoding required"),
+        reason: crate::render::PositionAdjustReason::MissingEncoding { role: "value", channel: value_token },
+        coord_flipped,
     })?;
     let xi = batch.schema().index_of(&cat_field.field).map_err(|_| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("category col '{}' not found",
-            cat_field.field) }
+        crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Stack",
+            reason: crate::render::PositionAdjustReason::Message(format!(
+                "category col '{}' not found",
+                cat_field.field
+            )),
+            coord_flipped,
+        }
     })?;
     let yi = batch.schema().index_of(&value_field.field).map_err(|_| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("value col '{}' not found",
-            value_field.field) }
+        crate::render::RenderError::PositionAdjustFailed {
+            adjustment: "Stack",
+            reason: crate::render::PositionAdjustReason::Message(format!(
+                "value col '{}' not found",
+                value_field.field
+            )),
+            coord_flipped,
+        }
     })?;
     // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column)
     // and all signed integer types (Int8/Int16/Int32/Int64 — common for Polars
@@ -874,10 +920,11 @@ pub(crate) fn apply_stack(
         // resolution this dtype check is downstream of.
         return Err(crate::render::RenderError::PositionAdjustFailed {
             adjustment: "Stack",
-            reason: format!(
-                "{value_token} must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); got {:?}",
-                y_col.data_type()
-            ),
+            reason: crate::render::PositionAdjustReason::ValueDtype {
+                channel: value_token,
+                dtype: format!("{:?}", y_col.data_type()),
+            },
+            coord_flipped,
         });
     };
     let ya_len = ya_vals.len();
@@ -899,7 +946,8 @@ pub(crate) fn apply_stack(
         // resolved `cat_field` index) — see `cat_token` above.
         return Err(crate::render::RenderError::PositionAdjustFailed {
             adjustment: "Stack",
-            reason: format!("{cat_token} column must be Float64 or Utf8"),
+            reason: crate::render::PositionAdjustReason::CategoryDtype { channel: cat_token },
+            coord_flipped,
         });
     };
 
@@ -1007,8 +1055,11 @@ pub(crate) fn apply_stack(
     } else {
         Arc::new(Schema::new(new_fields))
     };
-    RecordBatch::try_new(new_schema, cols)
-        .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("{e}") })
+    RecordBatch::try_new(new_schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
+        adjustment: "Stack",
+        reason: crate::render::PositionAdjustReason::Message(format!("{e}")),
+        coord_flipped,
+    })
 }
 
 #[cfg(test)]
@@ -2055,6 +2106,135 @@ mod tests {
         assert!(
             text.starts_with("Stack: y must be Float64, UInt64, or a signed integer type"),
             "post-flip x's bad dtype must be reported as the user's own y; got: {text}"
+        );
+    }
+
+    /// R3 (#89 part C restructure): the Stack CATEGORY-dtype check
+    /// ("{channel} column must be Float64 or Utf8") also swaps with the
+    /// value/category role under flip — sibling coverage to
+    /// `stack_dtype_error_messages_name_users_channel_under_flip` above, which
+    /// only pins the VALUE-dtype message. `PositionAdjustReason::CategoryDtype`
+    /// was not previously exercised by any test.
+    ///
+    /// Also pins the VALUE-dtype message's FULL rendered string (quality-review
+    /// cycle 2 required fix): `ValueDtype`'s literal was reshaped into a
+    /// `\`-continuation join in `render/mod.rs`'s `Display` impl, and
+    /// `stack_dtype_error_messages_name_users_channel_under_flip`'s
+    /// `starts_with("Stack: y must be Float64, UInt64, or a signed integer type")`
+    /// stops one character before that join, leaving
+    /// `(Int8/Int16/Int32/Int64); got Boolean` — the exact part a lost or
+    /// doubled space in the reformatted join would corrupt — entirely
+    /// unpinned. The two `assert_eq!` blocks at the end of this fn (unflipped,
+    /// then flipped) close that gap, matching HEAD's `format!` output verified
+    /// byte-identical under `rustc`.
+    #[test]
+    fn stack_category_dtype_error_message_names_users_channel_under_flip() {
+        use arrow::array::BooleanArray;
+
+        // Unflipped: the resolved category slot IS the user's own x — Boolean
+        // "x" is directly the bad column.
+        let schema_unflipped = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Boolean, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch_unflipped = RecordBatch::try_new(
+            schema_unflipped,
+            vec![
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let err = apply_position(&batch_unflipped, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(format!("{err}"), "Stack: x column must be Float64 or Utf8");
+
+        // Flipped: the resolved category slot is post-flip y — Boolean "y" is
+        // the bad column, but it must still be reported as the user's own x
+        // (the same message text as the unflipped case above).
+        let schema_flipped = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Boolean, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch_flipped = RecordBatch::try_new(
+            schema_flipped,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let err = apply_position(&batch_flipped, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: x column must be Float64 or Utf8",
+            "post-flip y (category) dtype failure must be reported as the user's own x"
+        );
+
+        // Required fix (quality review cycle 2): pin the VALUE-dtype
+        // message's FULL rendered string, exactly, in both arms — the
+        // `\`-continuation join in the `ValueDtype` `Display` arm
+        // (`render/mod.rs`) had no exact-match test; only `starts_with`,
+        // which stops before the `(Int8/Int16/Int32/Int64); got <dtype>` tail.
+
+        // Unflipped: value_enc resolves to encoding.y ("y"); Boolean "y" is
+        // the bad value column, reported under its own (identity) name.
+        let schema_value_unflipped = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, false),
+            Field::new("y", DataType::Boolean, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch_value_unflipped = RecordBatch::try_new(
+            schema_value_unflipped,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let err = apply_position(&batch_value_unflipped, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: y must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); \
+             got Boolean",
+            "unflipped: exact VALUE-dtype message, verified byte-identical to HEAD's format! output"
+        );
+
+        // Flipped: the same scenario `stack_dtype_error_messages_name_users_channel_under_flip`
+        // above exercises via `starts_with` — Boolean "x", coord_flipped=true,
+        // reported as the user's own y — pinned here with an exact match.
+        let schema_value_flipped = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Boolean, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch_value_flipped = RecordBatch::try_new(
+            schema_value_flipped,
+            vec![
+                Arc::new(BooleanArray::from(vec![true, false])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let err = apply_position(&batch_value_flipped, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "Stack: y must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); \
+             got Boolean",
+            "post-flip x's bad dtype must be reported as the user's own y — exact match"
         );
     }
 
