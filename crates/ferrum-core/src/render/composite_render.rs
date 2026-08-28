@@ -3617,6 +3617,138 @@ mod tests {
         );
     }
 
+    /// A minimal pre-rendered inset body: one `clipPath` def + its consuming
+    /// `clip-path` reference, exactly the shape `render/inset.rs::build_inset_nodes`
+    /// receives as `InsetSpec.svg` (a fully independent chart rendered on its
+    /// own, so it always numbers its own ids from zero).
+    fn inset_svg_fixture() -> String {
+        concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150">"#,
+            r#"<defs><clipPath id="ferrum-clip-0"><rect width="200" height="150"/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-0)"><circle cx="100" cy="75" r="50"/></g>"#,
+            r#"</svg>"#,
+        )
+        .to_string()
+    }
+
+    fn inset_chart_config(svgs: &[String]) -> ChartConfig {
+        use crate::render::chart_config::{InsetSpec, StructuralSpec};
+        ChartConfig {
+            structural: svgs
+                .iter()
+                .map(|svg| {
+                    StructuralSpec::Inset(InsetSpec {
+                        svg: svg.clone(),
+                        bounds: [0.6, 0.1, 0.95, 0.55],
+                        border: true,
+                        border_color: "#999999".to_string(),
+                        border_dash: None,
+                        background: None,
+                        shadow: false,
+                        connect_to: None,
+                        connect_style: "lines".to_string(),
+                    })
+                })
+                .collect(),
+            ..ChartConfig::default()
+        }
+    }
+
+    fn raw_svgs_in(scene: &SceneGraph, panel_idx: usize) -> Vec<&str> {
+        scene.panels[panel_idx]
+            .annotations
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Raw { svg, .. } => Some(svg.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// S4 regression (closing rust-design-review finding): two composite
+    /// leaves EACH embedding an inset must not collide with each other once
+    /// merged. `render/inset.rs::build_inset_nodes` namespaces each leaf's
+    /// inset under its own `inset_idx` (`inset0-ferrum-clip-0`), but that
+    /// counter restarts at 0 independently per leaf (`scene_build.rs`'s
+    /// `build_structural_nodes` is called once per leaf's own `build_scene`).
+    /// Before the fix, `uniquify_scene_raw_clips`'s per-leaf `cellN` pass only
+    /// matched the BARE `id="ferrum-clip-` literal, so it silently skipped
+    /// the already-`inset0-`-prefixed ids — leaf 0's and leaf 1's insets both
+    /// stayed `id="inset0-ferrum-clip-0"` and collided in the merged
+    /// document, reopening the exact defect class the inset fix was written
+    /// to close, just one level up.
+    #[test]
+    fn two_leaves_each_embedding_an_inset_stay_disjoint_end_to_end() {
+        let fixture = inset_svg_fixture();
+        let h0 = LeafHold { chart_config: inset_chart_config(&[fixture.clone()]), ..hold() };
+        let h1 = LeafHold { chart_config: inset_chart_config(&[fixture]), ..hold() };
+
+        let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let panel0_raw = raw_svgs_in(&scene, 0);
+        let panel1_raw = raw_svgs_in(&scene, 1);
+        assert_eq!(panel0_raw.len(), 1, "leaf 0 must embed exactly one inset fragment");
+        assert_eq!(panel1_raw.len(), 1, "leaf 1 must embed exactly one inset fragment");
+
+        assert!(
+            panel0_raw[0].contains(r#"id="inset0-cell0-ferrum-clip-0""#)
+                && panel0_raw[0].contains("url(#inset0-cell0-ferrum-clip-0)"),
+            "leaf 0's inset def+ref must compose inset0- and cell0-: {panel0_raw:?}"
+        );
+        assert!(
+            panel1_raw[0].contains(r#"id="inset0-cell1-ferrum-clip-0""#)
+                && panel1_raw[0].contains("url(#inset0-cell1-ferrum-clip-0)"),
+            "leaf 1's inset def+ref must compose inset0- and cell1-: {panel1_raw:?}"
+        );
+        assert_ne!(
+            panel0_raw[0], panel1_raw[0],
+            "the two leaves' inset fragments must not be byte-identical after namespacing"
+        );
+        // Neither the bare id nor the single-layer inset0- id (i.e. as if the
+        // cell pass had skipped it) may survive into the merged document.
+        for raw in panel0_raw.iter().chain(&panel1_raw) {
+            assert!(!raw.contains(r#"id="ferrum-clip-0""#), "un-namespaced id leaked: {raw}");
+            assert!(
+                !raw.contains(r#"id="inset0-ferrum-clip-0""#),
+                "cell pass skipped an already-namespaced inset id: {raw}"
+            );
+        }
+    }
+
+    /// Control for the test above: TWO insets inside the SAME (single, non-
+    /// composite) chart must already stay disjoint from each other via their
+    /// own `inset_idx` counter — no composite/cell-level pass involved at
+    /// all. Pins that this simpler, older-fixed case still works after the
+    /// `uniquify_clip_ids_with_prefix` rewrite above (composing instead of
+    /// skipping) — it never depended on the skip behavior in the first place,
+    /// since two insets in one chart get DIFFERENT `inset_idx` values
+    /// (`inset0-...`, `inset1-...`), so neither ever collides with the other
+    /// pre-cell-pass.
+    #[test]
+    fn two_insets_in_one_chart_stay_disjoint_without_any_composite_pass() {
+        let fixture = inset_svg_fixture();
+        let h = LeafHold {
+            chart_config: inset_chart_config(&[fixture.clone(), fixture]),
+            ..hold()
+        };
+        let (scene, _warnings, _bundle) = render_leaf(&leaf_input(&h, 300.0, 200.0), None).unwrap();
+
+        let raw = raw_svgs_in(&scene, 0);
+        assert_eq!(raw.len(), 2, "expected one Raw fragment per inset");
+        assert!(
+            raw.iter().any(|s| s.contains(r#"id="inset0-ferrum-clip-0""#)),
+            "first inset must be namespaced inset0-: {raw:?}"
+        );
+        assert!(
+            raw.iter().any(|s| s.contains(r#"id="inset1-ferrum-clip-0""#)),
+            "second inset must be namespaced inset1-: {raw:?}"
+        );
+        assert_ne!(raw[0], raw[1], "the two insets' fragments must not be byte-identical");
+    }
+
     #[test]
     fn shared_channel_unknown_field_surfaces_through_render_composite_scene() {
         // A leaf's spec encodes x on a field its batch does not carry, with the

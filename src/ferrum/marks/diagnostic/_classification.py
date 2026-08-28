@@ -363,10 +363,10 @@ def desugar_discrimination_threshold(
         # it self-contained, so only its own x survives and the vertical-
         # span branch fires. Mirrors the ``data_source="calibration_ref"``
         # pattern in ``desugar_calibration`` above.
-        from ferrum._core import PyIdentity
+        from ferrum.marks._desugar_helpers import identity_transform
 
         identity_name = "_threshold_line_data"
-        transforms.append(PyIdentity(identity_name))
+        transforms.append(identity_transform(identity_name))
         layers.append(
             _Layer(
                 name="threshold",

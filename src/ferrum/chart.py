@@ -1672,8 +1672,9 @@ class Chart(
                 # RHS layers through a named Identity transform with
                 # data_source so inherit_non_positional prevents the Rust
                 # renderer from injecting chart-level positional channels.
-                from ferrum._core import PyIdentity as _RustIdentity
                 from dataclasses import replace as _dc_replace
+
+                from ferrum.marks._desugar_helpers import identity_transform
 
                 # Deterministic, collision-free per-merge suffix (GH #71 defect 2).
                 # Start from the number of layers already accumulated on the LHS at
@@ -1700,7 +1701,7 @@ class Chart(
                 rhs_df = rhs_df.rename(col_renames)
 
                 auto_name = f"_ident_{id(other) & 0xFFFFFFFF:08x}"
-                identity_xform = _NamedTransform(_RustIdentity(auto_name), auto_name)
+                identity_xform = _NamedTransform(identity_transform(auto_name), auto_name)
                 rhs_layers = [
                     _dc_replace(
                         l,

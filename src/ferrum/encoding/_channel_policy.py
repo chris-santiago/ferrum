@@ -13,6 +13,15 @@ Relocated 2026-08-27 (#103) from ``ferrum.chart`` to this zero-import leaf
 ``chart.py``/``_spec_build.py`` are consumers, not the source of truth. This
 is a pure relocation — bucket membership, tuple order, and every provenance
 comment are unchanged.
+
+Role: this module answers "what does ``Chart.encode()`` *do* with a given
+channel *name*" (render it into its own ``EncodingSpec``, alias it to
+another channel, warn-and-drop it, remap it under polar, or route it
+through faceting) — a per-channel ROUTING disposition. Its sibling
+``ferrum.encoding._honored`` answers a different question, "which *kwargs*
+does one channel *instance* honor" (e.g. does ``X(...)`` accept ``sort=``)
+— a per-channel-type KWARG scope. Both modules use "honored" for their own
+vocabulary; the overlap in name is deliberate, not an accidental collision.
 """
 
 from __future__ import annotations

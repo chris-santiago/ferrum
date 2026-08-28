@@ -454,9 +454,9 @@ def _displot_build(
             )
 
         if rug and kind != "rug" and x_field is not None:
-            from ferrum._core import PyIdentity as _IdentityTransform
+            from ferrum.marks._desugar_helpers import identity_transform
 
-            rug_xform = _IdentityTransform("rug_data")
+            rug_xform = identity_transform("rug_data")
             # Prepend the named Identity before the unnamed Bin so it
             # captures the original data for the rug tick marks.
             chart._transforms = [rug_xform] + list(chart._transforms or [])

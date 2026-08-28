@@ -162,6 +162,36 @@ def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
     assert y1 != y2, f"threshold line must span a non-zero height; got y1={y1}, y2={y2}"
 
 
+def test_mark_discrimination_threshold_metrics_filter_matches_relabeled_names():
+    """metrics=("f1",) must select the relabeled "F1" row, not silently
+    render every metric.
+
+    Regression for the loose-match gap left over from the #96 fix: the F1-
+    optimum lookup in `_disc_threshold_prep` was fixed to match loosely via
+    `_normalized_col` (case/spacing-insensitive), but the `metrics=` filter
+    one block above it still exact-matched a Python `set`. A caller that
+    relabels the metric column for display ("f1" -> "F1", exactly what
+    `discrimination_threshold_chart` does) got that filter silently
+    no-op'd -- `keep` came back empty, the loose-overlap check suppressed
+    the warning, and every metric rendered unfiltered instead of just the
+    requested one.
+    """
+    import polars as pl
+
+    long_df = pl.DataFrame(
+        {
+            "threshold": [0.1, 0.2, 0.3, 0.4],
+            "metric": ["Precision", "Recall", "F1", "Queue rate"],
+            "value": [0.5, 0.6, 0.7, 0.2],
+        }
+    )
+    chart = ferrum.Chart(long_df).mark_discrimination_threshold(metrics=("f1",))
+    assert chart._data["metric"].to_list() == ["F1"], (
+        f"metrics=('f1',) must filter down to the relabeled 'F1' row only; "
+        f"got {chart._data['metric'].to_list()!r}"
+    )
+
+
 def test_discrimination_threshold_chart_optimum_label_present_vs_absent(binary_source):
     """optimum_label=True renders the max-F1 annotation text on the
     figure-function path; optimum_label=False renders none of it.

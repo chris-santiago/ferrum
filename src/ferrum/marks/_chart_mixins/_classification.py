@@ -452,19 +452,24 @@ class ClassificationMarksMixin:
                 # already unpivoted to just the selected (and possibly
                 # relabeled) metrics has nothing left to restrict, and
                 # filtering to zero rows would blank the chart instead of
-                # leaving its upstream-consumed selection alone.
-                present = set(df["metric"].unique().to_list())
-                keep = present & set(metrics)
-                if keep:
-                    df = df.filter(pl.col("metric").is_in(keep))
-                elif not (_normalize_names(present) & _normalize_names(metrics)):
-                    # No overlap even loosened for case/spacing (e.g. the
-                    # discrimination_threshold_chart figure builder relabels
-                    # "queue_rate" -> "Queue rate" before calling this mark,
-                    # which *is* recognized here and stays silent). Zero
-                    # overlap by any reading is most likely a typo in
-                    # metrics=, so warn instead of silently rendering every
-                    # metric.
+                # leaving its upstream-consumed selection alone. Matched
+                # loosely via `_normalized_col` (the same rule the F1
+                # lookup below uses) so a figure builder that relabels
+                # metric names for display ("f1" -> "F1", exactly what
+                # `discrimination_threshold_chart` does) is actually
+                # filtered, not just silently left unfiltered -- driving
+                # both the filter and the fallback warning off one
+                # normalized comparison is what keeps them from drifting
+                # the way the earlier exact-match filter + loose-match
+                # warning pairing did.
+                keep_mask = _normalized_col("metric").is_in(_normalize_names(metrics))
+                filtered = df.filter(keep_mask)
+                if filtered.height > 0:
+                    df = filtered
+                else:
+                    # No overlap even loosened for case/spacing. Most
+                    # likely a typo in metrics=, so warn instead of
+                    # silently rendering every metric.
                     from ferrum._warn import warn_once
 
                     warn_once(

@@ -216,6 +216,33 @@ def resolve_cmap_alias(
     return scheme if scheme is not None else cmap
 
 
+def identity_transform(name: str):
+    """Construct a named ``PyIdentity`` pass-through transform.
+
+    Three sites route a layer through its own named identity transform
+    (same data, new name) specifically so the layer does NOT inherit a
+    chart-level or top-level encoding it should not have: ``Chart.__add__``'s
+    column-collision path (``chart.py``), the rug-overlay layer in
+    ``plots/distribution.py``, and the threshold-line rule layer in
+    ``desugar_discrimination_threshold`` (``marks/diagnostic/_classification.py``).
+    Each site still builds its own name and wires the resulting transform
+    into its own transform list / ``_NamedTransform`` wrapper / layer
+    ``data_source=`` differently -- this hoists only the shared
+    construction step, which previously had three different import
+    aliases (``_RustIdentity``, ``_IdentityTransform``, bare ``PyIdentity``)
+    for the same class.
+
+    Named ``identity_transform`` rather than re-exporting the bare
+    ``PyIdentity`` name some call sites used to import directly: the
+    public ``ferrum.Identity`` is the unrelated *position adjustment*
+    (``fm.Identity()`` for ``position=``), and a bare re-export invites
+    exactly that mix-up.
+    """
+    from ferrum._core import PyIdentity
+
+    return PyIdentity(name)
+
+
 def resolve_color_groupby(
     cat_field: str | None,
     color_field: str | None,

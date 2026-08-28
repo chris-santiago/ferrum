@@ -538,6 +538,11 @@ pub(crate) fn write_svg_open(out: &mut String, w: f64, h: f64) {
 /// colorbar gradients and `ferrum-legend-clip-0` legend `clip_height` clips.
 /// Prefixing each cell's IDs with `cellNN-` makes them disjoint while
 /// preserving each body's internal `id` ↔ `url(#id)` references.
+///
+/// Composes with any namespace a body already carries (e.g. an inset body
+/// pre-namespaced `insetN-ferrum-clip-0` by
+/// [`uniquify_clip_ids_with_prefix`]): see that function's doc for why this
+/// pass must not skip already-prefixed ids.
 pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
     uniquify_clip_ids_with_prefix(body, &format!("cell{cell_idx}"))
 }
@@ -549,22 +554,26 @@ pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
 /// needs its own disjoint namespace) can uniquify without borrowing "cell"
 /// terminology that doesn't describe what they're doing.
 ///
-/// Safe to compose with a later `uniquify_clip_ids` pass over the same
-/// document: once an id has been rewritten to `{prefix}-ferrum-clip-N`, it no
-/// longer matches the literal `id="ferrum-clip-` / `url(#ferrum-clip-`
-/// patterns a subsequent pass searches for, so re-prefixing only touches
-/// still-bare ids and never double-mangles an already-namespaced one.
+/// Matches the bare token (`ferrum-clip-`, `ferrum-colorbar-`,
+/// `ferrum-legend-clip-`) wherever it appears, not just immediately after
+/// `id="`/`url(#` — so a body whose ids are ALREADY namespaced (e.g. an inset
+/// embedded into a leaf that a composite is about to merge, carrying
+/// `id="inset0-ferrum-clip-0"`) gets a new prefix layer composed in front
+/// (`id="inset0-cell1-ferrum-clip-0"`) rather than being skipped. Composite
+/// leaves each restart their own per-leaf namespace counters (`inset_idx`,
+/// `cell_idx`) independently, so without this a second leaf's inset would
+/// collide with the first leaf's inset even though each leaf's inset no
+/// longer collides with its own host — the composed-namespace bug an earlier
+/// version of this function had (skipping already-prefixed ids kept the
+/// per-chart fix from generalizing to the per-composite-leaf case). One
+/// call composes exactly one new layer; repeated calls (nested composites,
+/// or a later chrome-wrap pass) keep composing layers, which only grows ids,
+/// never re-collides them.
 pub(crate) fn uniquify_clip_ids_with_prefix(body: &str, prefix: &str) -> String {
-    let clip_prefix = format!("{prefix}-ferrum-clip-");
-    let colorbar_prefix = format!("{prefix}-ferrum-colorbar-");
-    let legend_clip_prefix = format!("{prefix}-ferrum-legend-clip-");
     body
-        .replace("id=\"ferrum-clip-", &format!("id=\"{clip_prefix}"))
-        .replace("url(#ferrum-clip-", &format!("url(#{clip_prefix}"))
-        .replace("id=\"ferrum-colorbar-", &format!("id=\"{colorbar_prefix}"))
-        .replace("url(#ferrum-colorbar-", &format!("url(#{colorbar_prefix}"))
-        .replace("id=\"ferrum-legend-clip-", &format!("id=\"{legend_clip_prefix}"))
-        .replace("url(#ferrum-legend-clip-", &format!("url(#{legend_clip_prefix}"))
+        .replace("ferrum-clip-", &format!("{prefix}-ferrum-clip-"))
+        .replace("ferrum-colorbar-", &format!("{prefix}-ferrum-colorbar-"))
+        .replace("ferrum-legend-clip-", &format!("{prefix}-ferrum-legend-clip-"))
 }
 
 #[cfg(test)]
@@ -1016,5 +1025,50 @@ mod tests {
         }
         // Different cell indices must not collide with each other.
         assert_ne!(cell0, cell1);
+    }
+
+    /// S4 regression: a body whose ids are ALREADY namespaced (e.g. an inset
+    /// embedded via `uniquify_clip_ids_with_prefix(body, "inset0")`) must get
+    /// a NEW prefix layer composed in front when uniquified again for a
+    /// composite leaf, not be skipped. Skipping is exactly the bug the
+    /// closing design review caught: two composite leaves each embedding an
+    /// inset both produce `id="inset0-ferrum-clip-0"` inside their own leaf,
+    /// and if the per-leaf `cellN` pass ignored already-prefixed ids (because
+    /// it only matched the bare `id="ferrum-clip-` literal), the two leaves'
+    /// insets would still collide with EACH OTHER once merged, even though
+    /// neither collides with its own host anymore.
+    #[test]
+    fn uniquify_clip_ids_composes_with_an_already_namespaced_id_instead_of_skipping_it() {
+        let inset_body = concat!(
+            r#"<defs><clipPath id="ferrum-clip-0"><rect/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-0)"/>"#,
+        );
+        // Simulates `build_inset_nodes`'s embed-time pass: the inset body is
+        // namespaced under its own `insetN` prefix before ever reaching a
+        // composite cell pass.
+        let pre_namespaced = uniquify_clip_ids_with_prefix(inset_body, "inset0");
+        assert!(pre_namespaced.contains(r#"id="inset0-ferrum-clip-0""#));
+
+        // Two leaves' cell passes run over their own already-inset0-prefixed
+        // copy of the SAME fixture body (mirroring two composite leaves each
+        // rendering an identical inset chart, exactly the color_spec-style
+        // end-to-end scenario `colorbar_raw_clip_ids_uniquified_per_leaf_end_to_end`
+        // exercises for colorbars in `composite_render.rs`).
+        let leaf0 = uniquify_clip_ids(&pre_namespaced, 0);
+        let leaf1 = uniquify_clip_ids(&pre_namespaced, 1);
+
+        assert!(
+            leaf0.contains(r#"id="inset0-cell0-ferrum-clip-0""#),
+            "expected the inset prefix and the leaf prefix to compose: {leaf0}"
+        );
+        assert!(
+            leaf1.contains(r#"id="inset0-cell1-ferrum-clip-0""#),
+            "expected the inset prefix and the leaf prefix to compose: {leaf1}"
+        );
+        assert_ne!(leaf0, leaf1, "two leaves' inset ids must not collide after composition");
+        assert!(
+            !leaf1.contains(r#"id="inset0-ferrum-clip-0""#),
+            "leaf 1 must not still carry the un-cell-prefixed inset id: {leaf1}"
+        );
     }
 }

@@ -32,11 +32,9 @@ chart-level one exactly, per spec-review finding).
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import warnings
-from pathlib import Path
 
 import polars as pl
 import pytest
@@ -44,6 +42,7 @@ import pytest
 import ferrum as fm
 import ferrum.encoding._channel_policy as _channel_policy_mod
 from ferrum._warn import reset_warnings
+from tests._leaf_guard import assert_module_is_a_leaf
 
 
 def _df() -> pl.DataFrame:
@@ -162,27 +161,10 @@ def test_channel_policy_module_is_a_leaf():
     or ``_spec_build.py`` back in; an added ``from ferrum...`` import would
     silently reintroduce the dependency the #103 relocation exists to
     remove (mirrors ``test_validate_module_is_a_leaf`` in
-    ``tests/test_finding_p7.py``).
+    ``tests/test_finding_p7.py`` -- both now share the walk itself via
+    ``tests/_leaf_guard.assert_module_is_a_leaf``).
     """
-    tree = ast.parse(Path(_channel_policy_mod.__file__).read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names = [a.name for a in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            # A relative import (level > 0, e.g. `from . import x`) can carry
-            # a `module` that doesn't start with "ferrum" (or is None for
-            # `from . import x`) while still reaching back into the ferrum
-            # package -- flag it directly rather than relying on name-prefix
-            # matching, which misses it entirely.
-            assert node.level == 0, (
-                f"leaf module uses a relative import (level={node.level}): "
-                f"from {'.' * node.level}{node.module or ''} import ..."
-            )
-            names = [node.module or ""]
-        else:
-            continue
-        for name in names:
-            assert not name.startswith("ferrum"), f"leaf module imports {name!r}"
+    assert_module_is_a_leaf(_channel_policy_mod)
 
 
 # ---------------------------------------------------------------------------
