@@ -308,7 +308,7 @@ class TestW4BuildLayersListMissingChannels:
 
     def test_all_honored_channels_iterated(self, df):
         """The channel set iterated by _build_layers_list must cover all _RENDERER_HONORED_CHANNELS."""
-        from ferrum.chart import _RENDERER_HONORED_CHANNELS
+        from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS
 
         honored = set(_RENDERER_HONORED_CHANNELS)
         old_set = {"x", "y", "x2", "y2", "color", "size", "shape", "opacity", "text"}

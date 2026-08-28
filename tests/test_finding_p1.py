@@ -6,7 +6,8 @@ Decision: .claude/output/decisions/2026-08-27-design-review-findings-decision.md
 
 ``encode()`` is a total function over ``ferrum.encoding._channel_class_map()``:
 every channel falls into exactly one of five disjoint buckets declared in
-``ferrum.chart`` --
+``ferrum.encoding._channel_policy`` (relocated from ``ferrum.chart`` 2026-08-27,
+#103) --
 
 - ``_RENDERER_HONORED_CHANNELS`` -- becomes its own ``EncodingSpec``.
 - ``_ALIAS_CHANNELS`` -- redirects to another channel or to mark-style kwargs
@@ -31,14 +32,17 @@ chart-level one exactly, per spec-review finding).
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import warnings
+from pathlib import Path
 
 import polars as pl
 import pytest
 
 import ferrum as fm
+import ferrum.encoding._channel_policy as _channel_policy_mod
 from ferrum._warn import reset_warnings
 
 
@@ -88,7 +92,7 @@ class TestBucketPartition:
     """ALIAS ∪ POLAR ∪ FACET ∪ RENDERER_HONORED ∪ WARN == keys(_channel_class_map())."""
 
     def _buckets(self):
-        from ferrum.chart import (
+        from ferrum.encoding._channel_policy import (
             _ALIAS_CHANNELS,
             _FACET_CHANNELS,
             _POLAR_CHANNELS,
@@ -131,22 +135,54 @@ class TestBucketPartition:
         assert total == len(union)
 
     def test_key_is_renderer_honored_not_alias(self):
-        from ferrum.chart import _ALIAS_CHANNELS, _RENDERER_HONORED_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS, _RENDERER_HONORED_CHANNELS
 
         assert "key" in _RENDERER_HONORED_CHANNELS
         assert "key" not in _ALIAS_CHANNELS
 
     def test_x_error_family_is_warn_not_alias(self):
-        from ferrum.chart import _ALIAS_CHANNELS, _WARN_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS, _WARN_CHANNELS
 
         for ch in ("x_error", "y_error", "x_error2", "y_error2"):
             assert ch in _WARN_CHANNELS, f"{ch} must be in the WARN bucket"
             assert ch not in _ALIAS_CHANNELS
 
     def test_tooltip_field_is_warn(self):
-        from ferrum.chart import _WARN_CHANNELS
+        from ferrum.encoding._channel_policy import _WARN_CHANNELS
 
         assert "tooltip_field" in _WARN_CHANNELS
+
+
+def test_channel_policy_module_is_a_leaf():
+    """Regression (#103): ``ferrum.encoding._channel_policy`` must import
+    nothing from ``ferrum``.
+
+    The leaf invariant (spec §7) is what lets the five-bucket taxonomy live
+    beside the rest of the encoding vocabulary without pulling ``chart.py``
+    or ``_spec_build.py`` back in; an added ``from ferrum...`` import would
+    silently reintroduce the dependency the #103 relocation exists to
+    remove (mirrors ``test_validate_module_is_a_leaf`` in
+    ``tests/test_finding_p7.py``).
+    """
+    tree = ast.parse(Path(_channel_policy_mod.__file__).read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            # A relative import (level > 0, e.g. `from . import x`) can carry
+            # a `module` that doesn't start with "ferrum" (or is None for
+            # `from . import x`) while still reaching back into the ferrum
+            # package -- flag it directly rather than relying on name-prefix
+            # matching, which misses it entirely.
+            assert node.level == 0, (
+                f"leaf module uses a relative import (level={node.level}): "
+                f"from {'.' * node.level}{node.module or ''} import ..."
+            )
+            names = [node.module or ""]
+        else:
+            continue
+        for name in names:
+            assert not name.startswith("ferrum"), f"leaf module imports {name!r}"
 
 
 # ---------------------------------------------------------------------------

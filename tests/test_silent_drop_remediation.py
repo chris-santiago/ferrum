@@ -950,7 +950,7 @@ def _stroke_df() -> pl.DataFrame:
 class TestStrokeWidthSVG:
     def test_stroke_width_not_in_silent_channels(self):
         """stroke_width must not be in _ALIAS_CHANNELS after Task 5."""
-        from ferrum.chart import _ALIAS_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS
 
         assert "stroke_width" not in _ALIAS_CHANNELS, (
             "stroke_width should have been removed from _ALIAS_CHANNELS"
@@ -974,7 +974,7 @@ class TestStrokeWidthSVG:
 class TestStrokeOpacitySVG:
     def test_stroke_opacity_not_in_silent_channels(self):
         """stroke_opacity must not be in _ALIAS_CHANNELS after Task 5."""
-        from ferrum.chart import _ALIAS_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS
 
         assert "stroke_opacity" not in _ALIAS_CHANNELS, (
             "stroke_opacity should have been removed from _ALIAS_CHANNELS"
@@ -1015,7 +1015,7 @@ class TestStrokeOpacitySVG:
 class TestStrokeDashSVG:
     def test_stroke_dash_not_in_silent_channels(self):
         """stroke_dash must not be in _ALIAS_CHANNELS after Task 5."""
-        from ferrum.chart import _ALIAS_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS
 
         assert "stroke_dash" not in _ALIAS_CHANNELS, (
             "stroke_dash should have been removed from _ALIAS_CHANNELS"
@@ -1065,7 +1065,7 @@ class TestStrokeDashSVG:
 class TestAngleSVG:
     def test_angle_not_in_silent_channels(self):
         """angle must not be in _ALIAS_CHANNELS after Task 5."""
-        from ferrum.chart import _ALIAS_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS
 
         assert "angle" not in _ALIAS_CHANNELS, "angle should have been removed from _ALIAS_CHANNELS"
 
@@ -1100,7 +1100,7 @@ class TestFillOpacitySVG:
 
     def test_fill_opacity_not_in_silent_channels(self):
         """fill_opacity must not be in _ALIAS_CHANNELS after promotion."""
-        from ferrum.chart import _ALIAS_CHANNELS
+        from ferrum.encoding._channel_policy import _ALIAS_CHANNELS
 
         assert "fill_opacity" not in _ALIAS_CHANNELS, (
             "fill_opacity should have been removed from _ALIAS_CHANNELS"
@@ -1108,7 +1108,7 @@ class TestFillOpacitySVG:
 
     def test_fill_opacity_in_renderer_honored_channels(self):
         """fill_opacity must be in _RENDERER_HONORED_CHANNELS."""
-        from ferrum.chart import _RENDERER_HONORED_CHANNELS
+        from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS
 
         assert "fill_opacity" in _RENDERER_HONORED_CHANNELS, (
             "fill_opacity must be in _RENDERER_HONORED_CHANNELS"

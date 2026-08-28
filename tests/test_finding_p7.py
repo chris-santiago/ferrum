@@ -45,6 +45,15 @@ def test_validate_module_is_a_leaf():
         if isinstance(node, ast.Import):
             names = [a.name for a in node.names]
         elif isinstance(node, ast.ImportFrom):
+            # A relative import (level > 0, e.g. `from . import x`) can carry
+            # a `module` that doesn't start with "ferrum" (or is None for
+            # `from . import x`) while still reaching back into the ferrum
+            # package -- flag it directly rather than relying on name-prefix
+            # matching, which misses it entirely.
+            assert node.level == 0, (
+                f"leaf module uses a relative import (level={node.level}): "
+                f"from {'.' * node.level}{node.module or ''} import ..."
+            )
             names = [node.module or ""]
         else:
             continue

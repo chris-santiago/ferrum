@@ -22,6 +22,7 @@ from ferrum._facet import (
     build_facet_dict as _build_facet_dict_fn,
     infer_facet_cardinality as _infer_facet_cardinality_fn,
 )
+from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._layer_transforms import _infer_agg_groupby
 
@@ -59,8 +60,6 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
         the (possibly renamed) column used for the actual value lookup;
         ``title`` is presentation-only.
     """
-    from ferrum.chart import _RENDERER_HONORED_CHANNELS
-
     auto_fields: list[dict] = []
     seen: set[str] = set()
     for ch_name in _RENDERER_HONORED_CHANNELS:
@@ -131,7 +130,6 @@ def _warn_unbucketed_channels(enc: dict) -> None:
     *enc* values may be either a ``ChannelBase`` instance or a plain string
     (the layered path's legitimate shorthand).
     """
-    from ferrum.chart import _SPEC_KNOWN_CHANNELS
     from ferrum.encoding._aliases import _channel_field
 
     for ch_name, ch in enc.items():
@@ -255,11 +253,7 @@ class SpecBuildMixin:
             ``"tooltip_fields"`` when applicable.
         """
         from ferrum import EncodingSpec
-        from ferrum.chart import (
-            _RENDERER_HONORED_CHANNELS,
-            _apply_inferred_type,
-            _strip_unstackable,
-        )
+        from ferrum.chart import _apply_inferred_type, _strip_unstackable
         from ferrum.repeat import _RepeatPlaceholder
 
         # Bucket-partition safety net (single enforcement point, see
@@ -390,11 +384,7 @@ class SpecBuildMixin:
             ``to_spec`` passes the aggregate-resolved layers so the originating
             chart object is never mutated.
         """
-        from ferrum.chart import (
-            _RENDERER_HONORED_CHANNELS,
-            _apply_inferred_type,
-            _strip_unstackable,
-        )
+        from ferrum.chart import _apply_inferred_type, _strip_unstackable
         from ferrum.encoding._aliases import apply_channel_aliases
         from ferrum._layer_transforms import _transforms_to_json_list
 
