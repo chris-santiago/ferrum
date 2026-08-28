@@ -207,6 +207,35 @@ flat path) because selections/hit-testing require overlays to be ONE scene
 panel. Deliberate behavior change: an all-empty composition (e.g. zero-row
 pairplot) raises instead of rendering a blank grid.
 
+**Overlay chrome dedup is total (residuals batch, #89, 2026-08-28).** For an
+Overlay group whose children are all leaves, every leaf lays out against one
+shared plot rect — the per-side intersection of the leaves' natural gutters —
+computed in a composite planning pre-pass and threaded into `compute_layout`,
+so layout never needs post-hoc correction. Suppression of non-primary-leaf
+chrome (grid, axes, above-marks axis chrome, scene title) is coupled to
+imposition: it applies to every leaf that actually laid out against the
+shared rect, which is every leaf in a well-formed group. The former
+per-leaf safety-check gate (`overlay_imposition_safe`) and its
+`chrome_suppressed` plumbing are deleted — the three former refusal shapes
+(a non-primary leaf with its own legend, a `zindex >= 1` axis, or a
+`z="below_marks"` annotation) now render one chrome with content preserved,
+not per-leaf duplicated chrome. `Panel` gained two typed, serde-default slots
+for this: `below_marks: Vec<SceneNode>` (painted after `grid`) and
+`chrome_above: Vec<SceneNode>` (zindex ≥ 1 axis/grid nodes, painted after
+`axes`, before `annotations`); both SVG and WASM walkers paint them
+identically, and scenes that don't use these slots serialize byte-identically.
+Three cases still keep per-leaf chrome: an Overlay node whose children are
+NOT uniformly direct leaves (a nested-composite child) is structurally
+excluded from grouping up front, verified unreachable from Python lowering;
+a degenerate per-side-max intersection (no common plot area) drops that
+group's suppression and emits `RenderWarning::OverlayGuttersDiverged` naming
+the layer count, so a doubled-chrome render is diagnosable; and a member
+whose own layout fails during the imposition pre-pass also drops its
+group's suppression, with no warning, since that leaf's render re-runs the
+same layout moments later and raises the failure as a typed error instead.
+See `ferrum-spec.md`'s composition section
+(2026-08-28 note) for the user-facing behavior contract.
+
 **Independent-y LayerChart extends this exception to BOTH kinds (secondary
 y-axis, 2026-07-11, #52).** `LayerChart(a, b, resolve={"y": "independent"})`
 (and its `SecondaryY` sugar, which desugars to an appended independent-y
@@ -227,15 +256,32 @@ path, unchanged from before.
 
 ---
 
+## Rust test-module convention
+
+Default to an inline `#[cfg(test)] mod tests { ... }` at the bottom of a
+single-file module. Promote to a directory module (`mod.rs` + a sibling
+`tests.rs`) when the ported/test body would exceed the source module —
+not on a line-count threshold, but when a module accumulates enough
+relocated or generated test coverage that inlining it would make the
+source file harder to read than the split. Precedents: `render/scale_resolve/`
+(`mod.rs` + `auxiliary.rs`/`color.rs`/`domain.rs`/`positional.rs`/`seam.rs` +
+`tests.rs`), `projection/` (`mod.rs` + `tests.rs`), `transform/stats/`
+(`mod.rs` + `tests.rs`). When promoting, leave a short rationale comment at
+the top of the new `tests.rs` naming what it carries and why it couldn't stay
+inline (see `projection/tests.rs`'s and `transform/stats/tests.rs`'s doc
+comments for the pattern to mirror).
+
+---
+
 ## Known open gaps (code archaeology)
 
 **Read `design-docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
 
-- **Channels:** `Description`/`Href` encoding already work. `Key` encoding is now accepted and carried into the scene graph as mark identity for interactive/animated runtimes (as of the 2026-08-27 P1 remediation — `chart-level` and `layered` paths both populate `MarkBatch.keys` via `ChartSpec(key=...)`/`scene_build::extract_keys`, in both static and interactive scene JSON) — but **no renderer consumes it visually yet**: static SVG output is byte-identical with and without `key=`, and the WASM runtime never reads `MarkBatch.keys`. A visual/identity consumer (e.g. transition-matching on data updates) is still an open gap — see the archaeology doc's `Key` row.
 - **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
-- **Missing spec implementations:** `ferrum.Grid`, full palette library (`SceneNode::Raw` WASM and `compare=` diagnostic routing were resolved by the compare-aggregate work + Phase B composite unification, 2026-07)
+- **Missing spec implementations:** full palette library (`ferrum.Grid`, `SceneNode::Raw` WASM, and `compare=` diagnostic routing were resolved by the render-gaps work, compare-aggregate work, and Phase B composite unification, 2026-05/2026-07)
 - **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`
 - **Resolved (2026-05-22):** Opacity semantics (`fill_opacity`/`stroke_opacity` now applied per-channel in WASM shaders; `opacity` no longer double-applied to stroke) and annotation z-order (annotation mesh drawn after marks, not before) were fixed in the `feat/rtree-toolbar` merge.
+- **Resolved (2026-08-28, residuals batch #93):** `Description`/`Href`/`Key` encoding all now work end to end. `Key` reached the scene graph without a consumer as of the 2026-08-27 P1 remediation; it now has one — the WASM interactive runtime pairs marks by `key` for transition matching, with enter/exit fades for keys present on only one side of an update, including for packed (≥1000-mark) batches via a `HAS_KEYS` sidecar. Static SVG output is unaffected and stays byte-identical with and without `key=`; unkeyed interactive scenes are unaffected too. Key-based selection membership and key-addressed hit-testing remain unbuilt (logged follow-ups, not this batch). See the archaeology doc's `Key` row and `ferrum-spec.md` §3.2's 2026-08-28 note.
 
 When fixing a bug or adding a feature that overlaps with an open item, update the archaeology doc's status column and check off the corresponding action-list entry.
 

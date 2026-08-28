@@ -393,12 +393,12 @@ All positional and appearance channels accept:
 >   `stroke_width`, `stroke_dash`, `angle`, `fill_opacity`, and — newly
 >   promoted — `key` (the Rust wire already existed via
 >   `ChartSpec(key=...)` and `scene_build::extract_keys`; Python simply
->   never passed it through before this fix). **`key` reaches the scene
->   graph (`MarkBatch.keys`) on both paths but has no renderer consumer
->   yet** — static SVG output does not change with or without it, and the
->   WASM runtime does not read it; it is bucketed Honored because it does
->   reach its own `EncodingSpec` and the scene graph, not because it is
->   visually rendered.
+>   never passed it through before this fix). `key` reaches the scene
+>   graph (`MarkBatch.keys`) on both paths; at the time of this note the
+>   WASM runtime did not yet read it, so it was bucketed Honored because
+>   it reached its own `EncodingSpec` and the scene graph, not because it
+>   was visually rendered — **superseded by the 2026-08-28 note below:
+>   the WASM runtime now consumes `key` for transition pairing.**
 > - **Alias** (redirect to another channel or to mark-style kwargs, no
 >   warning unless noted): `fill`/`stroke` alias to `color`
 >   (`stroke` warns once if `color` is already bound); `detail` aliases
@@ -429,6 +429,44 @@ All positional and appearance channels accept:
 > All warn messages use `ferrum._warn.warn_once("encoding", <channel>)`;
 > dedupe key is the channel name, scoped per-context via
 > `reset_warnings()` in tests exactly as before.
+>
+> **2026-08-28 (residuals batch, #93):** the P1 remediation note above is
+> stale on one point — `key` no longer lacks a consumer. The WASM
+> interactive runtime now pairs marks by `key` instead of flat index
+> during a scene transition: matched keys lerp geometry and color as
+> before, a key present only on the new side enters (final geometry,
+> opacity ramping 0 → target), and a key present only on the old side
+> exits (old geometry, opacity ramping target → 0, dropped at `t=1`).
+> Pairing is per paired batch (batches still pair positionally by
+> panel/batch index); a batch falls back to the pre-#93 index-zip pairing
+> wholesale whenever either side lacks usable keys — absent keys, a
+> duplicate key within the batch, a keys/instance-count mismatch, or a
+> mixed-kind batch — never a partial keying. A key column
+> whose values are not distinct per row degrades to that same index-zip
+> fallback, silently: `Boolean` is non-injective above 2 rows by
+> construction, null key values from any dtype collapse together to `""`,
+> `Float32`/`Float64` saturate (every value `>= 2^63` collapses to one
+> key, every `NaN` collapses to one key), and a key column of a dtype
+> neither coercer covers (`Duration`, `List`, `Struct`) yields no keys at
+> all for that batch — in every case the chart still renders, object
+> constancy just never engages, with no warning (see
+> `scene_build.rs::extract_keys`'s doc comment for the full dtype
+> breakdown). Packed batches (≥1000 marks) carry keys through a
+> `HAS_KEYS` sidecar section written by the packer and decoded by the
+> WASM loader into `PackedBatchMeta.keys`, decoupled from the JSON
+> `nodes` path. The runtime sources the OLD side's keys from an in-memory
+> snapshot of the outgoing scene taken at load time, not by re-parsing
+> its JSON — a packed old batch's JSON carries neither instances nor
+> keys, so the snapshot is the only place a large old batch's identity
+> survives; JSON re-parsing remains only as the first-load fallback, when
+> there is no predecessor to snapshot. Static SVG output is unaffected
+> and remains byte-identical with and without `key=` — this is a
+> WASM-runtime-only consumer, not a static-render change — and unkeyed
+> interactive scenes are byte-identical in behavior to before #93.
+> Key-based selection membership and key-addressed hit-testing remain
+> unbuilt (logged follow-ups, not this batch); nor is there a transition
+> for mesh-backed marks (line/area/path), which carry no per-mark
+> identity.
 
 ---
 
@@ -1291,20 +1329,57 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 > independent x (dual-x) remains a typed `ValueError` naming GH #55. See
 > `SecondaryY` below for the sugar built on top of this mechanism.
 
-> **2026-08-27 (P2 chrome dedup, findings remediation):** static shared-`y`
-> `LayerChart` output previously drew every axis line, tick label, grid
-> line, and title once **per layer**, overprinting at identical
-> coordinates (2 layers = 2x every chrome element; layers binding
-> different y fields overprinted both axis titles). It now emits exactly
-> one set of chrome — layer 0's, matching the flat `a + b` merge — via
-> per-leaf geometry imposition in the Rust composite renderer, gated by a
-> per-leaf safety check (`overlay_imposition_safe`). A non-primary layer
-> that carries its own color/size legend, an axis drawn above marks
-> (`zindex=1`), or a `z="below_marks"` text annotation deliberately keeps
-> the pre-fix per-layer chrome at its own rect (visibly layered, never a
-> silent chrome/marks mismatch); retiring that residual via a unified
-> overlay layout pass is tracked as a follow-up issue. Interactive
-> LayerChart (merged flat path) and independent-y are unchanged.
+> **2026-08-27 (P2 chrome dedup; retired 2026-08-28 by residuals batch
+> #89 — current behavior below, original gate preserved as amendment
+> history):** static shared-`y` `LayerChart` output previously drew every
+> axis line, tick label, grid line, and title once **per layer**,
+> overprinting at identical coordinates (2 layers = 2x every chrome
+> element; layers binding different y fields overprinted both axis
+> titles). Dedup is now **total**. For an Overlay composite node whose
+> direct children are all leaves, every leaf lays out against one shared
+> plot rect — the intersection, per side, of the leaves' natural gutters
+> (title/legend/axis bands) — computed in a composite planning pre-pass,
+> so layout never needs the old post-layout `plot_area` overwrite.
+> Suppression (clearing grid, axes, above-marks axis chrome, and scene
+> title on non-primary leaves) is coupled to imposition: it applies to
+> every leaf that actually laid out against the shared rect, which after
+> the shared pre-pass is every leaf in a well-formed group. The three
+> former refusal shapes — a non-primary leaf with its own legend, a
+> `zindex >= 1` axis, or a `z="below_marks"` annotation — now render with
+> one chrome and full content preserved (legend renders, annotation
+> renders below marks, above-marks axis renders once); legends are never
+> suppressed, so their gutters still participate in the shared rect on
+> every leaf. Three cases still keep per-leaf chrome, never suppression
+> without geometric alignment: (1) an Overlay node whose children are NOT
+> uniformly direct leaves — e.g. one child is itself a nested composite —
+> is structurally excluded from grouping up front, so every child keeps
+> its own rect and chrome exactly as before this batch (unreachable from
+> Python lowering: `LayerChart`, the sole producer of an Overlay node,
+> rejects any non-leaf layer with a typed `ValueError` before a tree is
+> built; the guard exists only because a directly-constructed wire spec
+> could still express it); (2) a degenerate intersection — the leaves'
+> combined gutters leave no common plot area — drops that group's
+> suppression and emits `RenderWarning::OverlayGuttersDiverged` naming
+> the layer count, so the resulting doubled chrome is diagnosable rather
+> than silent; and (3) a member whose own layout fails during the
+> imposition pre-pass also drops its group's suppression, with **no**
+> warning — that leaf's render re-runs the identical layout moments later
+> and raises the failure as a typed error at its canonical position, so a
+> chrome-suppression warning here would be noise ahead of an outright
+> render failure, not a silently-wrong chart. Interactive LayerChart
+> (merged flat path) and independent-y are unchanged. See CLAUDE.md
+> "Composite rendering" for the Rust-side mechanism.
+>
+> **Amendment history:** the original 2026-08-27 note described dedup as
+> gated by a per-leaf safety check (`overlay_imposition_safe`): a
+> non-primary layer carrying its own color/size legend, an axis drawn
+> above marks (`zindex=1`), or a `z="below_marks"` text annotation kept
+> its pre-fix per-layer chrome at its own rect rather than sharing the
+> primary layer's, with the gate's removal tracked as a follow-up issue.
+> Residuals batch #89 (2026-08-28) deleted that gate, along with
+> `overlay_imposition_safe` and `chrome_suppressed` themselves — neither
+> symbol exists in the codebase anymore — and the totality behavior
+> described above replaced it.
 
 #### `JointChart`
 
