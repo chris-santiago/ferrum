@@ -8,7 +8,7 @@ and introduces no ``__init__`` or ``__slots__``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
 from ferrum._layer import _PRIMITIVE_MARKS
 from ferrum._validate import validate_choice
@@ -364,7 +364,7 @@ class StatisticalMarksMixin:
         k_depth: str = "tukey",
         k_proportion: float = 0.007,
         outlier_threshold: float = 1.5,
-        palette=None,
+        palette: str | Sequence[str] | None = None,
         horizontal: bool = False,
         orient=None,
         color_field=None,
@@ -388,14 +388,41 @@ class StatisticalMarksMixin:
         outlier_threshold : float, optional
             IQR multiple beyond which points are considered outliers.  Default
             is ``1.5``.
-        palette : list of str or None, optional
-            Accepted but not yet honored: this argument is never read.
-            Depth-band color follows the ordinary mark-color resolution —
-            an explicit ``fill=`` override, else the chart's ``color``
+        palette : str, sequence of str, or None, optional
+            Colors the depth bands directly at opacity 1.0, replacing the
+            opacity ramp.  The mapping anchors on the **base band**:
+            ``colors[0]`` lands on ``k=2``, the innermost real interval
+            beyond the median -- guaranteed to render whenever any
+            non-degenerate depth exists, for any dataset -- and later
+            colors consume outward as richer data materializes more
+            bands.  Band ``k=1`` (the median rule's own row, always
+            zero-pixel by construction) never consumes a color of its
+            own; it borrows ``k=2``'s.  Bands paint widest-first
+            (outermost under, innermost on top) so the nesting stays
+            visible once the ramp's alpha blending is gone.  A ``str``
+            names a registered palette (expanded and cycled to the number
+            of colorable bands, like ``scheme=`` on a ``Color`` channel);
+            a sequence of color strings is applied in order and cycled if
+            shorter.  For a dataset whose real letter-value depth falls
+            short of the mark's configured band count, the *later*
+            (outer) colors may go unused on that render -- the same as
+            any palette longer than the actual number of categories
+            elsewhere; ``colors[0]`` itself is visible for any dataset
+            with at least one real depth level.  This is depth-band
+            coloring, not a seaborn-style hue mapping -- **boxen has no
+            hue channel today** (hue-vs-palette support is tracked
+            frontier work, out of scope here), and ``palette`` does not
+            interact with ``color_field`` (which only changes the
+            groupby, not color).  A chart-level ``.encode(color=...)``
+            channel does conflict with ``palette`` (the color encoding
+            always overrides a layer's fill), so combining the two raises
+            ``ValueError`` -- drop the color encoding, or drop
+            ``palette=``.  ``None`` (the default) keeps the opacity-ramp
+            shading applied to the ordinary mark-color resolution (an
+            explicit ``fill=`` override, else the chart's ``color``
             encoding through the theme's categorical palette, else the
-            theme's default ``mark_color`` — with only opacity ramping by
-            depth.  A non-``None`` value emits a one-time warning naming
-            the no-op (tracked as a follow-up to implement or remove).
+            theme's default ``mark_color``).  An unrecognized palette
+            name, or a non-str non-iterable value, raises ``ValueError``.
         horizontal : bool, optional
             Swap axes so bands run horizontally.  Default is ``False``.
             Legacy alias; prefer ``orient="horizontal"``.
@@ -427,28 +454,6 @@ class StatisticalMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.composite import desugar_boxen
-
-        if palette is not None:
-            # `palette` is registered in ferrum.marks._informational_kwargs
-            # as accepted-but-not-yet-honored (not "informational" in the
-            # proba/n_thresholds sense -- no call site anywhere gives it an
-            # effect; it is a real, unimplemented feature). See
-            # mark_decision_boundary for the routing rationale.
-            from ferrum.marks._informational_kwargs import warn_informational_kwarg
-
-            warn_informational_kwarg(
-                "boxen",
-                "palette",
-                (
-                    "mark_boxen(palette=...) is accepted but not yet "
-                    "honored -- this argument is never read. Depth-band "
-                    "color follows the ordinary mark-color resolution "
-                    "(an explicit fill= override, else the chart's color "
-                    "encoding through the theme's categorical palette, "
-                    "else the theme's default mark_color), with only "
-                    "opacity ramping by depth."
-                ),
-            )
 
         effective_horizontal = _normalize_orient("mark_boxen", orient, horizontal)
 

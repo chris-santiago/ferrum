@@ -469,16 +469,15 @@ Marks are constructors that accept visual property overrides as keyword argument
 > parameters: `k_depth` (`"tukey"` \| `"proportion"` \| `"trustworthy"` \|
 > `"full"` \| `int`), `k_proportion` (float in `(0, 1)`, used when
 > `k_depth="proportion"`), `outlier_threshold` (float; rows beyond the
-> outermost letter value are flagged outliers), `palette` — see 2026-08-27
-> note below: accepted but not yet honored; never read. Depth-band color
-> follows the ordinary mark-color resolution (explicit `fill=`, else the
-> chart's `color` encoding through the theme's categorical palette, else
-> the theme's default `mark_color`), with only opacity ramping by depth.
+> outermost letter value are flagged outliers), `palette` (`str` \|
+> `Sequence[str]` \| `None`) — see the 2026-08-27 note below (residuals
+> batch, #91): colors the depth bands directly, replacing the opacity
+> ramp.
 
 | Mark | Expands To | Key Parameters |
 |---|---|---|
 | `mark_boxplot(...)` | box + whisker + outlier points | `extent` (`"min-max"` or float IQR multiplier), `size`, `outliers` |
-| `mark_boxen(...)` | nested rectangles (letter values) + outlier points | `k_depth` (`"tukey"`\|`"proportion"`\|`"trustworthy"`\|`"full"`\|`int`), `k_proportion`, `outlier_threshold`, `palette` — see 2026-08-27 note below: accepted but not yet honored, now warns |
+| `mark_boxen(...)` | nested rectangles (letter values) + outlier points | `k_depth` (`"tukey"`\|`"proportion"`\|`"trustworthy"`\|`"full"`\|`int`), `k_proportion`, `outlier_threshold`, `palette` (`str`\|`Sequence[str]`\|`None`) — colors depth bands directly, see 2026-08-27 note below |
 | `mark_errorbar(...)` | rule + tick | `extent` (`"ci"`, `"stderr"`, `"stdev"`, `"iqr"`), `ticks` |
 | `mark_errorband(...)` | area + line | `extent`, `borders` |
 | `mark_ribbon(...)` | area between Y and Y2 | `opacity`, `interpolate` |
@@ -742,19 +741,86 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 >   + warn-once treatment; no effect on rendered output either way.
 > - `mark_boxen(palette=...)` — **not** the same shape as the two above.
 >   Unlike `normalize`/`center`, no call site anywhere — mark, mixin, or
->   figure function — ever gives `palette` an effect: it is simply never
->   read. Depth-band color follows the ordinary mark-color resolution (an
->   explicit `fill=` override, else the chart's `color` encoding through
->   the theme's categorical palette, else the theme's default
->   `mark_color`), with only opacity ramping by depth — `palette` itself
->   plays no part in any of that, under any theme. It is registered the
->   same way (warns once on a non-`None` value) purely so it stops being a
->   *silent* drop, but this is a stopgap, not a fix — the palette itself
->   remains unimplemented. Tracked as an open item in
->   `design-docs/superpowers/followups/2026-05-15-code-archaeology.md`
->   pending either implementing per-depth-band palette application in
->   `desugar_boxen` (`src/ferrum/marks/composite.py`) or removing the
->   parameter.
+>   figure function — ever gave `palette` an effect: it was simply never
+>   read. Registered as a stopgap (warned once on a non-`None` value)
+>   purely so it stopped being a *silent* drop, tracked as an open item in
+>   `design-docs/superpowers/followups/2026-05-15-code-archaeology.md`.
+>
+> **2026-08-27 (residuals batch, #91; current behavior after three rounds
+> of quality-review correction — see the amendment history below):**
+> `mark_boxen(palette=...)` implemented. `palette: str | Sequence[str] |
+> None = None`. The color mapping anchors on the **base band**: `colors[0]`
+> is spent on `k=2`, the innermost real letter-value interval beyond the
+> median — guaranteed to render whenever `LetterValue` produces *any*
+> non-degenerate depth at all, for *any* dataset — and later colors
+> consume outward (`k=3`, `k=4`, ...) as richer data materializes more
+> bands; a `k` that never materializes for a given dataset simply leaves
+> its color, and every color past it, unused (the same tail-truncation as
+> a palette longer than the actual number of categories elsewhere). `k=1`
+> — the median rule's own row, `lower == upper == median` by construction,
+> always zero-pixel on every render — never consumes a color of its own
+> (it borrows `k=2`'s). Fills apply at opacity 1.0, replacing the opacity
+> ramp. A named palette (`str`) is expanded via `ferrum.color.palette(name,
+> n=_BOXEN_K_MAX - 1)` — exactly the number of colorable band slots, so a
+> full-depth dataset shows every generated color, including a continuous
+> palette's endpoint (`viridis` reaches `#fde725`) — raising the same
+> `ValueError` shape `scheme=` raises for an unrecognized name; an
+> explicit color sequence is applied in inside-out order and cycled if
+> shorter than the colorable band count. Bands paint **widest-first**
+> (largest present `k` painted first/under, `k=1` last/on top) so the
+> letter-value nesting stays visible once the ramp's alpha blending is
+> gone; `palette=None` keeps the original ascending-`k` layer order and is
+> byte-identical to the pre-batch shading. This is depth-band coloring,
+> not a seaborn-style hue mapping — **boxen has no hue channel today**
+> (hue-vs-palette support is the tracked violin-hue frontier work, out of
+> scope here), and `palette` does not interact with `color_field` (which
+> only changes the `LetterValue` groupby, not color — every band still
+> renders in one theme color at ramp opacities, or the flat palette fill,
+> regardless of `color_field`). A chart-level `.encode(color=...)` channel
+> *does* conflict with `palette`: the color encoding always overrides a
+> layer's `fill=` (the same precedence a plain `fill=` has under any
+> encoded channel), so combining the two raises `ValueError`
+> (`ferrum._desugar._prep_boxen_palette_color_conflict`, both call orders)
+> — drop the color encoding, or drop `palette=`; there is no hue-channel
+> fallback to redirect to. A non-`str`, non-iterable `palette=` value
+> (e.g. an `int`) raises the same named `ValueError` shape as the
+> empty-sequence case, not a bare `TypeError`. An explicit user
+> `fill=`/`opacity=` mark kwarg still wins over either shading (existing
+> `apply_user_mark_kwargs` precedence). The `warn_informational_kwarg`
+> call and the `INFORMATIONAL_KWARGS["boxen"]` registry entry are removed
+> — `palette` is now genuinely used by `desugar_boxen`.
+>
+> **Amendment history:** the original 2026-08-27 note above said "band k
+> (outermost = 1) gets `fill = colors[k-1]`" — backwards (`k=1` is
+> innermost) — and a first correction pass (same day) fixed the
+> band-indexing description but kept `colors[k-1]` as a literal raw-index
+> formula, which put `colors[0]` on the innermost, always-zero-pixel `k=1`
+> band. A second quality-review pass rasterized the output and proved the
+> requested first palette color rendered in zero pixels, and also caught a
+> false remedy in the `.encode(color=...)` conflict error/docstrings ("use
+> `color_field=...` for per-group hue instead" — `color_field=` grants no
+> hue at all, contradicted by this very note's own "no hue channel"
+> sentence two lines earlier); the hue-remedy fix landed clean, but the
+> color-mapping fix that pass shipped anchored `colors[0]` at the widest
+> *configured* band (`k=_BOXEN_K_MAX`) instead of the widest *rendered*
+> one — real per-group depth is a Rust-side quantity this desugar function
+> has no access to, so that anchor only rendered `colors[0]` when a
+> dataset happened to reach full configured depth, which is not the
+> common case: measured (third quality-review pass) at zero pixels for
+> every group under 1000-ish rows on the mark's default `k_depth`, with
+> only the palette's *last* two colors ever appearing at n=200. The
+> now-shipped base-band anchor (`k=2`, above) replaces it, along with
+> sizing the palette request to the actual number of colorable slots
+> (`_BOXEN_K_MAX - 1`, not `_BOXEN_K_MAX` — the previous request generated
+> one color, `colors[-1]`, that no mapping could ever reach, truncating
+> every continuous-palette ramp one step short of its endpoint
+> unconditionally). The "architecturally-unavoidable-in-Python" framing
+> attached to the previous anchor's residual gap is retracted: it was true
+> of the *literal* "outermost rendered band" reading (still not decidable
+> without a Rust round-trip, since depth is data- and even per-group-
+> dependent), but not of removing the gap itself, which the base-band
+> anchor does in pure Python by choosing a different, always-present
+> anchor point instead.
 
 ---
 

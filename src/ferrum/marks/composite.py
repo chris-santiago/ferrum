@@ -21,11 +21,12 @@ supplying both the canonical name and ``extent=`` in the same call raises a
 
 from __future__ import annotations
 import warnings
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.color import palette as _named_palette_colors
 from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import resolve_color_groupby
 from ferrum.marks._mark_kwargs import (
@@ -696,6 +697,89 @@ register_layer_names(
 )
 
 
+# Number of color slots ``palette=`` can ever actually paint. ``k=1`` (the
+# median band) is always zero-pixel by construction (see
+# ``_boxen_band_color_index``) and borrows ``k=2``'s slot rather than
+# consuming one of its own, so only bands ``k=2.._BOXEN_K_MAX`` are
+# independently colorable -- one fewer than ``_BOXEN_K_MAX``. Requesting
+# exactly this many colors (not ``_BOXEN_K_MAX``) means a full-depth
+# dataset shows every generated color, including a named continuous
+# palette's endpoint (``viridis`` reaches ``#fde725``), instead of a
+# structurally-dead last slot.
+_BOXEN_VISIBLE_BANDS = _BOXEN_K_MAX - 1
+
+
+def _resolve_boxen_palette(palette: str | Sequence[str] | None) -> list[str] | None:
+    """Expand ``palette=`` into exactly ``_BOXEN_VISIBLE_BANDS`` colors, in
+    **inside-out** order: ``colors[0]`` is spent on the innermost
+    *visible* band (``k=2``), ``colors[1]`` the next band out, and so on --
+    see ``_boxen_band_color_index`` for how a raw depth ``k`` maps into
+    this list (``k=1``, the always-zero-pixel median band, never gets a
+    slot of its own; it borrows ``k=2``'s color).
+
+    ``None`` means "no palette": the caller keeps the opacity-ramp shading
+    that is the ``palette=None`` behavior. A named palette (``str``) is
+    expanded via ``ferrum.color.palette``, which raises the same
+    ``ValueError`` shape ``scheme=`` raises for an unrecognized name, and
+    already cycles categorical palettes shorter than ``n`` colors. An
+    explicit color sequence is cycled to length manually here, since
+    ``ferrum.color.palette`` only cycles *named* palettes. A value that is
+    neither a ``str`` nor iterable (e.g. ``palette=5``) raises the same
+    named ``ValueError`` shape as the empty-sequence case below, rather
+    than leaking a bare ``TypeError`` from ``list(palette)``.
+    """
+    if palette is None:
+        return None
+    if isinstance(palette, str):
+        return _named_palette_colors(palette, n=_BOXEN_VISIBLE_BANDS)
+    try:
+        colors = list(palette)
+    except TypeError as exc:
+        raise ValueError(
+            f"mark_boxen(palette=...): expected a palette name (str), a "
+            f"sequence of color strings, or None, got {palette!r}"
+        ) from exc
+    if not colors:
+        raise ValueError("mark_boxen(palette=...): color sequence must not be empty")
+    return [colors[i % len(colors)] for i in range(_BOXEN_VISIBLE_BANDS)]
+
+
+def _boxen_band_color_index(k: int) -> int:
+    """Map a raw ``LetterValue`` depth ``k`` to a 0-based index into the
+    inside-out color list ``_resolve_boxen_palette`` returns.
+
+    ``k=1`` is *always* a zero-pixel band by construction, not merely for
+    small samples: ``lv_depth_1``'s rows satisfy ``lower == upper ==
+    median`` (it is the median rule's own data source, see the comment
+    above the median-rule layer below), so it never has a visible extent
+    for any dataset. ``k=2`` is the **base band**: the first real interval
+    beyond the median, guaranteed to render whenever ``LetterValue``
+    produces *any* non-degenerate depth at all (real depth count is never
+    less than 2 once it exceeds 1). Anchoring ``colors[0]`` at ``k=2``
+    (spec §4.4, re-amended after a second quality-review pass) rather than
+    at the widest *configured* band (``k=_BOXEN_K_MAX``) is deliberate:
+    "outermost rendered band gets colors[0]" is not decidable at desugar
+    time (no data access here -- real per-group depth is a Rust-side
+    quantity, computed later, and can differ between groups in the same
+    chart), so anchoring at the widest *configured* slot made ``colors[0]``
+    render only when a dataset happened to reach full depth -- dead for
+    every typical dataset under the mark's default ``k_depth="tukey"``
+    (measured: only colors 4-5 of a 6-color palette ever appeared at
+    n=200). Anchoring at the guaranteed-present base band instead makes
+    ``colors[0]`` visible for *any* dataset with at least one real depth
+    level, and later colors consume outward (``k=3`` -> ``colors[1]``,
+    ``k=4`` -> ``colors[2]``, ...) as richer data materializes more bands
+    -- a band that never materializes for a given dataset simply leaves
+    its color, and every color past it, unused, the same tail-truncation
+    behavior as a palette longer than the number of real categories
+    anywhere else in the codebase. ``k=1`` borrows index 0 (``k=2``'s
+    slot) via ``visible_k = max(k, 2)``, so it never independently
+    consumes a color either.
+    """
+    visible_k = max(k, 2)
+    return visible_k - 2
+
+
 def desugar_boxen(
     x_field: str | None,
     y_field: str | None,
@@ -703,7 +787,7 @@ def desugar_boxen(
     k_depth: str = "tukey",
     k_proportion: float = 0.007,
     outlier_threshold: float = 1.5,
-    palette=None,
+    palette: str | Sequence[str] | None = None,
     horizontal: bool = False,
     color_field: str | None = None,
     x_sort: Any = None,
@@ -728,26 +812,50 @@ def desugar_boxen(
     scales resolve naturally (LetterValue copies the groupby values verbatim
     into ``group``, and quantile outputs lie within the original value range).
 
-    ``palette`` is accepted but not yet honored: it is never read, by this
-    function or anywhere else. Depth-band color follows the ordinary
-    mark-color resolution -- an explicit ``fill=`` override, else the
-    chart's ``color`` encoding through the theme's categorical palette,
-    else the theme's default ``mark_color`` -- with only opacity ramping
-    by depth (see the ``opacity`` computation in the layer loop below). It
-    is registered in ``ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS``
-    under ``"boxen"``; ``Chart.mark_boxen`` warns once if it is passed
-    directly with a non-``None`` value. Unlike the mark's other
-    informational parameters, no other call site honors it either -- this
-    is a real, unimplemented feature, not a value computed elsewhere
-    (tracked as a follow-up: implement per-depth-band palette application,
-    or remove the parameter).
+    ``palette`` colors the depth bands directly, at opacity 1.0, replacing
+    the opacity ramp. The mapping anchors on the **base band** (spec §4.4,
+    re-amended after a second quality-review pass): ``colors[0]`` lands on
+    ``k=2``, the innermost real interval beyond the median -- guaranteed
+    to render whenever ``LetterValue`` produces any non-degenerate depth
+    at all, for any dataset -- and later colors consume outward
+    (``k=3``, ``k=4``, ...) as richer data materializes more bands.
+    ``k=1``, the median-rule band, is always a zero-pixel degenerate row
+    (``lower == upper == median``) and never consumes a color of its own;
+    it borrows ``k=2``'s. See ``_boxen_band_color_index`` for the exact
+    mapping and why the anchor is inside-out rather than the intuitive
+    "outermost band gets colors[0]" (that framing is not decidable at
+    desugar time -- no data access here -- and was measured to leave
+    ``colors[0]`` unused on every typical dataset under the default
+    ``k_depth``). Solid fills make occlusion structural, so bands paint
+    **widest-first**
+    (largest present ``k`` painted first/under, ``k=1`` painted last/on
+    top) -- the only way the nesting stays visible once the alpha-blended
+    ramp is gone; the ``palette=None`` branch below keeps its original
+    ascending-``k`` layer order untouched (and stays byte-identical). This
+    is depth-band coloring, not a seaborn-style hue mapping -- boxen has
+    **no hue channel today** (hue-vs-palette support is the tracked
+    violin-hue frontier work, out of scope here), and ``palette`` does not
+    interact with ``color_field`` (which only changes the ``LetterValue``
+    groupby, not color -- every band still renders in one theme color at
+    ramp opacities, or the flat palette fill, regardless of
+    ``color_field``). A chart-level ``.encode(color=...)`` channel *does*
+    conflict with ``palette``: the renderer's color-encoding resolution
+    always overrides a layer's ``fill=`` kwarg (the same precedence a
+    plain ``fill=`` has under any encoded channel), so combining the two
+    would silently drop every band's palette color while still forcing
+    opacity to 1.0 -- ``ferrum._desugar._prep_boxen_palette_color_conflict``
+    raises a ``ValueError`` for that combination instead of rendering a
+    chart where ``palette`` had no visible effect (drop the color
+    encoding, or drop ``palette=``; boxen has no hue channel to fall back
+    to). ``palette=None`` (the default) keeps the opacity-ramp shading
+    applied to the ordinary mark-color resolution (an explicit ``fill=``
+    override, else the chart's ``color`` encoding through the theme's
+    categorical palette, else the theme's default ``mark_color``). An
+    explicit user ``fill=`` or ``opacity=`` mark kwarg still wins over
+    either shading, per the usual ``apply_user_mark_kwargs`` precedence.
     """
     user_kw = _validate("boxen", mark_kwargs)
-    # palette is accepted but not yet honored -- see the docstring above
-    # and ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS, which is
-    # what Chart.mark_boxen's warn_once is keyed against. Unlike the other
-    # registry entries, no call site anywhere gives this an effect.
-    del palette
+    palette_colors = _resolve_boxen_palette(palette)
     if x_field is None or y_field is None:
         raise ValueError("mark_boxen() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field
@@ -786,9 +894,25 @@ def desugar_boxen(
     # batches and render nothing.  The same constant derives the registry's
     # ``depth_*`` names below, so the loop bound and the registered set cannot
     # drift apart.
+    #
+    # Paint order (spec §4.4, amended 2026-08-27 after quality review):
+    # k=1 is the innermost band; under a palette, every band renders at
+    # opacity=1.0 (no alpha blending to reveal what's underneath), so the
+    # only way nesting stays visible is z-order -- widest band first/under,
+    # narrowest (k=1) last/on top. Iterate descending only in the palette
+    # branch; the palette=None branch keeps its original ascending order
+    # (and stays byte-identical) since the opacity ramp already makes the
+    # painted-last widest band read as nested via alpha blending.
+    depth_ks = (
+        range(_BOXEN_K_MAX, 0, -1) if palette_colors is not None else range(1, _BOXEN_K_MAX + 1)
+    )
     layers: list = []
-    for k in range(1, _BOXEN_K_MAX + 1):
-        opacity = 0.85 - (0.55 * (k - 1) / max(_BOXEN_K_MAX - 1, 1))
+    for k in depth_ks:
+        if palette_colors is not None:
+            depth_kwargs = {"fill": palette_colors[_boxen_band_color_index(k)], "opacity": 1.0}
+        else:
+            opacity = 0.85 - (0.55 * (k - 1) / max(_BOXEN_K_MAX - 1, 1))
+            depth_kwargs = {"opacity": opacity}
         enc = (
             {"x": "lower", "x2": "upper", "y": group_enc_y}
             if horizontal
@@ -799,7 +923,7 @@ def desugar_boxen(
                 name=f"depth_{k}",
                 mark="rect",
                 encoding=enc,
-                mark_kwargs={"opacity": opacity},
+                mark_kwargs=depth_kwargs,
                 data_source=f"lv_depth_{k}",
             )
         )

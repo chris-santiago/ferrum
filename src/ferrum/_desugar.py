@@ -439,6 +439,44 @@ def _prep_boxen_agg_sort(ctx: _ResolveContext) -> None:
             ctx.x_sort = None
 
 
+def _prep_boxen_palette_color_conflict(ctx: _ResolveContext) -> None:
+    """Reject ``mark_boxen(palette=...)`` combined with a chart-level
+    ``.encode(color=...)`` channel.
+
+    ``palette`` colors each depth band via a per-layer ``fill=`` style
+    kwarg (design spec §4.4, #91). A chart-level color *encoding* always
+    overrides a layer's ``fill=`` -- the same precedence a plain ``fill=``
+    mark kwarg has under any encoded channel, true for every mark, not
+    boxen-specific. Under ``palette=None`` that precedence is harmless (the
+    ramp still shows through as varying opacity); under ``palette=...``
+    every band would render the *same* encoded color at the palette path's
+    fixed opacity=1.0, silently discarding the palette and collapsing the
+    letter-value nesting into one flat block per group. This runs at
+    ``_resolve_pending_impl`` time, after ``.encode()`` is fully known
+    regardless of call order (``mark_boxen()`` before or after
+    ``.encode(color=...)``), so it catches both.
+
+    ``color_field=`` (boxen's own per-group grouping kwarg, resolved
+    entirely inside the transform) is unaffected -- this only inspects the
+    chart-level ``color`` *encoding* channel, a different mechanism, and
+    ``color_field=`` grants no hue: it only changes which column the
+    ``LetterValue`` transform groups by, so every band still renders in
+    one theme color at ramp opacities (or the flat palette fill). boxen
+    has no hue channel at all today (violin-hue is the tracked frontier
+    work, out of scope here) -- the error below must not imply one exists.
+    """
+    if ctx.transform_kwargs.get("palette") is None:
+        return
+    if ctx._color_field() is not None:
+        raise ValueError(
+            "mark_boxen(palette=...) cannot be combined with a chart-level "
+            "color encoding (.encode(color=...)): the color channel "
+            "overrides every band's fill, so the palette would have no "
+            "visible effect. boxen has no hue channel -- drop the color "
+            "encoding, or drop palette=."
+        )
+
+
 def _prep_cat_axis_sorts(ctx: _ResolveContext) -> None:
     """Inject x_sort and y_sort for composites with a categorical positional axis.
 
@@ -544,7 +582,7 @@ class _KindPrep:
 _PENDING_PREP: dict[str, _KindPrep] = {
     "ribbon": _KindPrep(pre=(_prep_ribbon_y2,)),
     "boxen": _KindPrep(
-        pre=(_prep_boxen_agg_sort, _prep_cat_axis_sorts),
+        pre=(_prep_boxen_agg_sort, _prep_cat_axis_sorts, _prep_boxen_palette_color_conflict),
         post_cast=(_cast_xy_value,),
     ),
     "boxplot": _KindPrep(

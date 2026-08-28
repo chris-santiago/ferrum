@@ -56,19 +56,11 @@ longer *forward* the already-inert value into the mark method call, so the
 mark-level warning fires only for a caller who passes the parameter
 directly to the mark method.
 
-The fifth entry is different in kind, not degree, and is registered here
-only as a stopgap:
-
-- ``palette`` on ``mark_boxen``: **not** an "effect happens elsewhere"
-  parameter -- there is no upstream call site that honors it either.
-  ``desugar_boxen`` never reads it; it is a real, undelivered feature (the
-  public docstring used to promise "colour palette applied to successive
-  depth bands", which was simply false). Registering it here stops it from
-  being a *silent* drop -- it now warns -- but does not make it correct;
-  the palette itself is still unimplemented. See the tracked follow-up
-  (design-review findings-remediation batch, Task 14 extension, logged
-  2026-08-27) to either implement per-depth-band palette application or
-  remove the parameter.
+``mark_boxen``'s ``palette`` parameter previously lived here as a stopgap
+(it was a real, undelivered feature -- no upstream call site honored it
+either). It was implemented (design-review residuals batch, #91,
+2026-08-27): ``desugar_boxen`` now colors the depth bands directly from
+``palette``, so it is genuinely used and no longer needs an entry here.
 """
 
 from __future__ import annotations
@@ -78,7 +70,6 @@ INFORMATIONAL_KWARGS: dict[str, frozenset[str]] = {
     "discrimination_threshold": frozenset({"n_thresholds"}),
     "confusion": frozenset({"normalize"}),
     "pdp": frozenset({"center"}),
-    "boxen": frozenset({"palette"}),
 }
 
 
