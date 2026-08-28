@@ -1353,6 +1353,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![10, 20, 30]),
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,
@@ -1449,6 +1450,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![42, 99]),
                 tooltip_bytes: None,
                 kind: DrawKind::Rect,
@@ -1533,6 +1535,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 1u32), // panel 0, batch 1
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![2]),
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,

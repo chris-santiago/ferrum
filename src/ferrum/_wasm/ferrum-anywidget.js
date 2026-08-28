@@ -454,7 +454,11 @@ async function _render(container, sceneJson, adapter) {
   }
   container.replaceChildren();
 
-  const scene = JSON.parse(sceneJson);
+  // `scene` is re-assigned by `installScene` when a data update reuses this
+  // renderer (see the `update` closure at the end of this function), so every
+  // scene-dependent installer below reads the CURRENT scene, not the one this
+  // call was constructed with.
+  let scene = JSON.parse(sceneJson);
   const w = scene.width || 640, h = scene.height || 480;
 
   // ── Outer flex container ──────────────────────────────────────────
@@ -496,6 +500,16 @@ async function _render(container, sceneJson, adapter) {
 
   // ── Interaction config ────────────────────────────────────────────
   const cfg = JSON.parse(adapter.getInteractionConfig());
+  // Reuse guard (see `update`): the handlers below close over exactly three
+  // config fields, and a reload that changes any of them must rebuild rather
+  // than reuse this renderer. The rest of the interaction config is
+  // scene-derived — `tick_levels` changes with every domain — and is consumed
+  // on the Rust side from the scene itself, so comparing the whole config
+  // would decline reuse on ordinary data updates and defeat keyed transitions.
+  // SYNC: a new `cfg.X` read anywhere in this function belongs in this key.
+  const _handlerCfgKey = (c) =>
+    JSON.stringify([c.selections || [], c.param_bindings || [], c.toolbar]);
+  const cfgKey = _handlerCfgKey(cfg);
   const _hasPointSelections = (cfg.selections || []).some(s => s.type === 'point');
   const hasInterval = (cfg.selections || []).some(s => s.type === 'interval');
   // A domain-rescale binding (scale={"domain": param}) also requires brush
@@ -535,18 +549,11 @@ async function _render(container, sceneJson, adapter) {
       canvas.height = physH;
       renderer.resize(physW, physH);
     }
-    const packedArr = adapter.getPackedData();
-    const overlayJson = renderer.loadScene(sceneJson, packedArr);
-    // loadScene returns {"text": [...], "raw": [...]} since Task 6 (item 19).
-    const overlay = JSON.parse(overlayJson);
-    const textArr = Array.isArray(overlay) ? overlay : (overlay.text || []);
-    const rawFragments = Array.isArray(overlay) ? [] : (overlay.raw || []);
-    _placeTextSvg(svgEl, textArr);
-    // Inject raw fragments once; subsequent zoom/pan ticks only update transform.
-    _rawOverlay = _buildRawOverlay(svgEl, rawFragments);
   } catch (e) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);
   }
+  // The scene itself is loaded further down, by `installScene`, so the same
+  // code path serves the first load and every subsequent data update.
 
   // ── Mode switching ────────────────────────────────────────────────
   const defaultMode = (hasInterval || hasDomainRescale) ? 'select' : 'pan';
@@ -712,8 +719,19 @@ async function _render(container, sceneJson, adapter) {
   }
   container.addEventListener('keydown', _onKeydown);
 
+  // ── Per-scene installation ────────────────────────────────────────
+  // Everything below this point that depends on the SCENE (rather than on the
+  // container, the GPU, or the interaction config) lives in one of the three
+  // installers, so a data update can re-run them against the new scene on the
+  // live renderer instead of rebuilding the widget. Each is idempotent: it
+  // removes what its previous run added before adding anything.
+
   // ── D3-brush on SVG (per-panel overlays for interval/boxzoom) ─────
-  if (scene.panels) {
+  function _installBrushes() {
+    // Drop the previous scene's brush overlays: panel plot areas move when
+    // axis labels change width, so stale extents would brush the wrong region.
+    svgEl.querySelectorAll('g.ferrum-brush').forEach(g => g.remove());
+    if (!scene.panels) return;
     // Extract brush styling from the interval selection's SelectionMark.
     let brushFill = 'rgba(51, 136, 204, 0.2)';
     let brushStroke = 'rgba(51, 136, 204, 0.6)';
@@ -834,7 +852,12 @@ async function _render(container, sceneJson, adapter) {
   // behavior for non-param interactive charts).
   const _paramBindings = cfg.param_bindings || [];
   const _legendBinding = _paramBindings.find(b => b.role === 'legend');
-  if (_legendBinding && renderer) {
+  function _installLegendToggles() {
+    // The categories and the legend's bounds come from the SCENE, so a data
+    // update re-derives them; `container._ferrumWireLegend` is re-pointed at
+    // the new closure (or cleared when the new scene has no legend to wire).
+    container._ferrumWireLegend = null;
+    if (!(_legendBinding && renderer)) return;
     const _legendCategories = new Set(_collectLegendCategories(scene.legend));
     const _legendSelName = _legendBinding.param;
     // Scope wiring to the legend region so a same-named axis tick or annotation
@@ -881,6 +904,42 @@ async function _render(container, sceneJson, adapter) {
     // Expose for re-wiring after zoom/pan text re-placement.
     container._ferrumWireLegend = _wireLegendToggles;
   }
+
+  // ── Scene load + overlay installation ─────────────────────────────
+  // The single path by which a scene enters this widget: the first render and
+  // every data update both come through here. Loading on the LIVE renderer is
+  // what lets the Rust side snapshot the outgoing frame — the transition's
+  // old-side identity (GH #93), which a freshly constructed renderer has no
+  // way to know.
+  function installScene(json, parsedScene) {
+    scene = parsedScene;
+    let loaded = true;
+    if (renderer) {
+      try {
+        const overlayJson = renderer.loadScene(json, adapter.getPackedData());
+        // loadScene returns {"text": [...], "raw": [...]} since Task 6 (item 19).
+        const overlay = JSON.parse(overlayJson);
+        const textArr = Array.isArray(overlay) ? overlay : (overlay.text || []);
+        const rawFragments = Array.isArray(overlay) ? [] : (overlay.raw || []);
+        _placeTextSvg(svgEl, textArr);
+        // Inject raw fragments once per load; zoom/pan ticks only update transform.
+        _rawOverlay = _buildRawOverlay(svgEl, rawFragments);
+      } catch (e) {
+        console.warn('[ferrum] scene load failed — rendering disabled, tooltips still active.', e);
+        loaded = false;
+      }
+    }
+    // Both installers run on EVERY arm — no renderer, a renderer whose load
+    // threw, and the success path — because before this seam existed they sat
+    // outside the GPU-init `try` and a load failure fell straight through into
+    // them. The outcome is reported to the caller instead of short-circuiting:
+    // `update` declines a failed load and lets `_reload` rebuild.
+    _installBrushes();
+    _installLegendToggles();
+    return loaded;
+  }
+
+  installScene(sceneJson, scene);
 
   // Apply initial mode — sets container.dataset.mode and SVG pointer-events.
   setMode(defaultMode);
@@ -1005,7 +1064,54 @@ async function _render(container, sceneJson, adapter) {
     clearTimeout(_zoomDebounceId);
   };
 
-  return { canvas, renderer, scene, svgEl };
+  // ── In-place data update ──────────────────────────────────────────
+  // Load a new scene into THIS renderer instead of building a new widget.
+  // The point is the renderer's continuity: `loadScene` snapshots the frame it
+  // replaces, so the following `startTransition` can pair marks by
+  // `encode(key=...)` even for packed batches, whose instances and keys exist
+  // nowhere but that in-memory frame (GH #93). A rebuilt renderer starts with
+  // no predecessor and falls back to index pairing.
+  //
+  // Returns `false` when this widget cannot serve the update — a different
+  // canvas size or interaction config (both are baked into the DOM and the
+  // handlers above), no GPU renderer, or a failed load. The caller then
+  // rebuilds from scratch, which is what every reload did before.
+  //
+  // Everything a rebuild used to reset is reset here explicitly: zoom
+  // transform, interaction mode, tooltip, brush overlays, legend wiring, and
+  // the raw overlay. The Rust side resets its own zoom, selection, and slot
+  // state inside `loadScene`.
+  function update(nextSceneJson) {
+    if (!renderer) return false;
+    let nextScene;
+    try {
+      nextScene = JSON.parse(nextSceneJson);
+    } catch (e) {
+      console.warn('[ferrum] scene update parse failed:', e);
+      return false;
+    }
+    if ((nextScene.width || 640) !== w || (nextScene.height || 480) !== h) return false;
+    try {
+      if (_handlerCfgKey(JSON.parse(adapter.getInteractionConfig())) !== cfgKey) return false;
+    } catch (_) {
+      return false;
+    }
+
+    if (!installScene(nextSceneJson, nextScene)) return false;
+
+    // Reset the d3 zoom transform WITHOUT firing the zoom handler: a rebuilt
+    // widget started at identity with no `onZoomChange` round-trip, and
+    // `loadScene` has already reset the renderer's own transforms.
+    select(chartWrapper).property('__zoom', zoomIdentity);
+    if (_rawOverlay) _rawOverlay.dataG.removeAttribute('transform');
+    setMode(defaultMode);
+    tip.style.opacity = '0';
+    state.scene = nextScene;
+    return true;
+  }
+
+  const state = { canvas, renderer, scene, svgEl, update };
+  return state;
 }
 
 // ── Standalone adapter factory (for HTML exports) ────────────────────────
@@ -1062,7 +1168,15 @@ export async function render({ model, el }) {
         _transitionRafId = null;
       }
 
-      _state = await _render(container, s, adapter);
+      // Reuse the live renderer when it can serve this scene. Continuity is
+      // the point: `loadScene` on the existing renderer snapshots the frame it
+      // replaces, which is the only carrier of a packed batch's identity for
+      // the transition below (GH #93). A first render, a shape/config change,
+      // or any failure inside `update` falls through to a full rebuild — the
+      // path every reload took before.
+      if (!(_state && _state.update && _state.update(s))) {
+        _state = await _render(container, s, adapter);
+      }
 
       if (_state && prev && _state.renderer) {
         // Animate transition from previous scene to the current one.

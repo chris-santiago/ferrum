@@ -1,7 +1,8 @@
 use ferrum_scene::{ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode};
 
 use crate::scene_load::{
-    color_to_linear, stroke_dash_index, CircleInstance, DrawKind, PackedBatchMeta, RectInstance,
+    batch_instance_spans, color_to_linear, stroke_dash_index, CircleInstance, DrawKind,
+    PackedBatchMeta, RectInstance,
 };
 use crate::selection_state::SelectionState;
 
@@ -67,28 +68,6 @@ pub struct ConditionalUpdates {
     pub rect_instances: Vec<RectInstance>,
 }
 
-/// Compute the total number of packed circle and rect instances.
-///
-/// The loader (load_scene_with_packed) builds the flat instance arrays
-/// packed-FIRST: all packed instances are prepended, then non-packed instances
-/// are appended in scene-graph walk order. Non-packed batches therefore start
-/// at the total packed count. Both `apply_crossfilter_to_panel` and
-/// `resolve_conditionals_with_packed` need this same basis; centralising it
-/// here keeps the two paths in lock-step and removes a copy-paste drift risk.
-fn packed_base_offsets(packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>) -> (usize, usize) {
-    let total_packed_circles: usize = packed_batch_meta
-        .values()
-        .filter(|m| m.kind == DrawKind::Circle)
-        .map(|m| m.instance_count)
-        .sum();
-    let total_packed_rects: usize = packed_batch_meta
-        .values()
-        .filter(|m| m.kind == DrawKind::Rect)
-        .map(|m| m.instance_count)
-        .sum();
-    (total_packed_circles, total_packed_rects)
-}
-
 /// Apply a crossfilter dim to a single target panel's marks (D6 `Filter`
 /// binding).
 ///
@@ -100,9 +79,10 @@ fn packed_base_offsets(packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>)
 /// conditional dims marks whose centers fall outside it.
 ///
 /// `circles`/`rects` are mutated in place over the full instance buffers; only
-/// the instances belonging to `target_panel` are touched (offsets are advanced
-/// across earlier panels exactly as `resolve_conditionals_with_packed` does, so
-/// the two paths stay in lock-step on the packed/non-packed layout).
+/// the instances belonging to `target_panel` are touched. Instance addresses
+/// come from the shared `scene_load::batch_instance_spans` walk, the one
+/// definition of the packed/non-packed flat-array layout, which
+/// `resolve_conditionals_with_packed` reads too.
 ///
 /// Consumed by the wasm32 `WasmRenderer`; gated to wasm32 + test so the
 /// non-test host build does not flag it as dead code (host coverage is via the
@@ -126,51 +106,35 @@ pub(crate) fn apply_crossfilter_to_panel(
         value: dimmed_opacity,
     };
 
-    let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
-    let mut circle_offset = total_packed_circles;
-    let mut rect_offset = total_packed_rects;
+    if matches!(selection, SelectionState::Empty) {
+        return;
+    }
 
-    for (panel_idx, panel) in panels.iter().enumerate() {
-        for (batch_idx, batch) in panel.marks.iter().enumerate() {
-            let key = (panel_idx as u32, batch_idx as u32);
-
-            if let Some(meta) = packed_batch_meta.get(&key) {
-                // Packed batch: use meta.instance_start (absolute index).
-                // Do NOT advance circle_offset/rect_offset for packed batches.
-                if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
-                    apply_conditional_to_packed(
+    for span in batch_instance_spans(panels, packed_batch_meta) {
+        if span.panel_idx != target_panel {
+            continue;
+        }
+        match span.packed {
+            Some(meta) => {
+                apply_conditional_to_packed(&if_selected, &if_not, selection, meta, circles, rects);
+            }
+            None => {
+                if let Some(indices) = &span.batch.data_indices {
+                    let mut bufs = InstanceBuffers {
+                        circles,
+                        circle_offset: span.circles.start,
+                        rects,
+                        rect_offset: span.rects.start,
+                    };
+                    apply_conditional_to_batch(
                         &if_selected,
                         &if_not,
                         selection,
-                        meta,
-                        circles,
-                        rects,
+                        indices,
+                        span.batch,
+                        &mut bufs,
                     );
                 }
-            } else {
-                // Non-packed batch: instances live at circle_offset/rect_offset
-                // (after all packed instances in the flat array).
-                let (n_circles, n_rects) = count_instances(batch);
-                if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
-                    if let Some(indices) = &batch.data_indices {
-                        let mut bufs = InstanceBuffers {
-                            circles,
-                            circle_offset,
-                            rects,
-                            rect_offset,
-                        };
-                        apply_conditional_to_batch(
-                            &if_selected,
-                            &if_not,
-                            selection,
-                            indices,
-                            batch,
-                            &mut bufs,
-                        );
-                    }
-                }
-                circle_offset += n_circles;
-                rect_offset += n_rects;
             }
         }
     }
@@ -214,79 +178,47 @@ pub fn resolve_conditionals_with_packed(
     let mut circles = base_circles.to_vec();
     let mut rects = base_rects.to_vec();
 
-    // The loader (load_scene_with_packed) builds the flat instance arrays
-    // packed-FIRST: all packed instances are prepended by
-    // `unpack_binary_instances`, then non-packed instances are appended in
-    // scene-graph walk order. Non-packed batches therefore start at the total
-    // packed count, not at 0. Initialise the non-packed running offsets here
-    // so they address the correct flat-array positions regardless of the scene
-    // order of packed vs. non-packed batches.
-    //
-    // Packed batches use meta.instance_start (an absolute index, already
-    // correct) and do not advance these offsets.
-    let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
-    let mut circle_offset = total_packed_circles;
-    let mut rect_offset = total_packed_rects;
-
-    for (panel_idx, panel) in panels.iter().enumerate() {
-        for (batch_idx, batch) in panel.marks.iter().enumerate() {
-            let key = (panel_idx as u32, batch_idx as u32);
-
-            if let Some(meta) = packed_batch_meta.get(&key) {
-                // Packed batch: instances are in circle_instances or
-                // rect_instances at meta.instance_start..+instance_count.
-                // batch.nodes is empty for packed batches, so we must use
-                // the packed metadata to locate and process instances.
-                // Note: packed batches do NOT advance circle_offset/rect_offset
-                // because those accumulators track non-packed positions only.
-                for cond in conditionals {
-                    let Some(sel) = selections.get(&cond.selection_name) else {
-                        continue;
-                    };
-                    if matches!(sel, SelectionState::Empty) {
-                        continue;
-                    }
-                    apply_conditional_to_packed(
-                        &cond.if_selected,
-                        &cond.if_not,
-                        sel,
-                        meta,
-                        &mut circles,
-                        &mut rects,
-                    );
-                }
-            } else {
-                // Non-packed batch: instances live at circle_offset/rect_offset
-                // in the flat arrays (after all packed instances).
-                let (n_circles, n_rects) = count_instances(batch);
-
-                for cond in conditionals {
-                    let Some(sel) = selections.get(&cond.selection_name) else {
-                        continue;
-                    };
-                    if matches!(sel, SelectionState::Empty) {
-                        continue;
-                    }
-                    if let Some(indices) = &batch.data_indices {
+    // Instance addresses come from the shared `batch_instance_spans` walk:
+    // packed batches sit at their absolute sidecar `instance_start`,
+    // non-packed batches follow in scene-graph order after ALL packed
+    // instances (`load_scene_with_packed` builds the arrays packed-first).
+    for span in batch_instance_spans(panels, packed_batch_meta) {
+        for cond in conditionals {
+            let Some(sel) = selections.get(&cond.selection_name) else {
+                continue;
+            };
+            if matches!(sel, SelectionState::Empty) {
+                continue;
+            }
+            match span.packed {
+                // Packed batch: `batch.nodes` is empty, so the sidecar
+                // metadata is the only way to locate and process instances.
+                Some(meta) => apply_conditional_to_packed(
+                    &cond.if_selected,
+                    &cond.if_not,
+                    sel,
+                    meta,
+                    &mut circles,
+                    &mut rects,
+                ),
+                None => {
+                    if let Some(indices) = &span.batch.data_indices {
                         let mut bufs = InstanceBuffers {
                             circles: &mut circles,
-                            circle_offset,
+                            circle_offset: span.circles.start,
                             rects: &mut rects,
-                            rect_offset,
+                            rect_offset: span.rects.start,
                         };
                         apply_conditional_to_batch(
                             &cond.if_selected,
                             &cond.if_not,
                             sel,
                             indices,
-                            batch,
+                            span.batch,
                             &mut bufs,
                         );
                     }
                 }
-
-                circle_offset += n_circles;
-                rect_offset += n_rects;
             }
         }
     }
@@ -392,19 +324,6 @@ pub(crate) fn apply_conditional_to_packed(
             }
         }
     }
-}
-
-pub(crate) fn count_instances(batch: &MarkBatch) -> (usize, usize) {
-    let mut nc = 0usize;
-    let mut nr = 0usize;
-    for node in &batch.nodes {
-        match node {
-            SceneNode::Circle { .. } => nc += 1,
-            SceneNode::Rect { .. } => nr += 1,
-            _ => {}
-        }
-    }
-    (nc, nr)
 }
 
 pub(crate) fn apply_conditional_to_batch(
@@ -2700,6 +2619,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: None,
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,
@@ -2841,6 +2761,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: None,
                 tooltip_bytes: None,
                 kind: DrawKind::Rect,
@@ -3024,6 +2945,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![0, 1]),
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,
@@ -3209,6 +3131,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 1u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![0, 1, 2]),
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,
@@ -3377,6 +3300,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 1u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: None,
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,
@@ -3542,6 +3466,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![0, 1, 2]),
                 tooltip_bytes: Some(tooltip_bytes),
                 kind: DrawKind::Circle,

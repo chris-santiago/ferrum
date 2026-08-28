@@ -129,9 +129,10 @@ class InteractiveChart:
         if cls is None:
             return
         w = cls()
-        w.scene_json = self._scene_json
-        w.packed_data = self._packed_data
-        w.interaction_config = self._build_interaction_config(self._scene_json)
+        with w.hold_sync():
+            w.scene_json = self._scene_json
+            w.packed_data = self._packed_data
+            w.interaction_config = self._build_interaction_config(self._scene_json)
         w.observe(self._on_zoom_change, names=["zoom_state"])
         self._widget = w
 
@@ -151,9 +152,10 @@ class InteractiveChart:
             new_chart = self._apply_zoom_domains(zoom)
             new_json, new_packed = _render_scene(new_chart)
             if self._widget is not None:
-                self._widget.scene_json = new_json
-                self._widget.packed_data = new_packed
-                self._widget.interaction_config = self._build_interaction_config(new_json)
+                with self._widget.hold_sync():
+                    self._widget.scene_json = new_json
+                    self._widget.packed_data = new_packed
+                    self._widget.interaction_config = self._build_interaction_config(new_json)
         except Exception as exc:
             _log.warning("zoom rebuild failed: %s", exc, exc_info=True)
 

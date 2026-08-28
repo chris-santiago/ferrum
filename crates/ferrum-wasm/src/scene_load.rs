@@ -239,6 +239,17 @@ pub struct ImageQuad {
 pub struct PackedBatchMeta {
     pub data_indices: Option<Vec<u32>>,
     pub tooltip_bytes: Option<Vec<u8>>,
+    /// Object-constancy keys (`encode(key=...)`, GH #93), one per instance,
+    /// decoded from the `HAS_KEYS` sidecar section. `None` for a batch the
+    /// packer wrote without the flag — every scene predating #93.
+    ///
+    /// This is the packed sibling of `MarkBatch::keys` (which the packer
+    /// clears once the keys are in the sidecar), so the transition matcher
+    /// reads keys from whichever carrier a batch actually uses. Length always
+    /// equals the batch's header `count`: the decoder reads exactly `count`
+    /// entries or gives up, so a short table can never produce a misaligned
+    /// key list.
+    pub keys: Option<Vec<String>>,
     /// Which GPU instance buffer this batch's instances live in. Decoded once
     /// from the packed `kind: u32` header in [`unpack_binary_instances`] via
     /// [`DrawKind::try_from`], so all downstream sites match on the typed enum
@@ -1206,10 +1217,20 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     }
 }
 
+// ── Packed sidecar section flags ────────────────────────────────────────────
+//
+// Mirrors of `ferrum-core/src/render/pack_instances.rs`'s `pub(crate)`
+// constants (the two crates share no code, only the wire format — the same
+// mirroring convention the stride constants above use). The producer emits
+// present sections in flag order `data_indices → tooltips → keys`, which is
+// the order `unpack_binary_instances` reads them in.
+
 /// Flag: tooltips string table follows instance data (+ optional data_indices).
 const HAS_TOOLTIPS: u32 = 0x1;
 /// Flag: `count × u32` data-index array follows instance data.
 const HAS_DATA_INDICES: u32 = 0x2;
+/// Flag: keys string table follows instance data (GH #93 object constancy).
+const HAS_KEYS: u32 = 0x4;
 
 /// Read a little-endian `u32` from `data[offset..offset+4]`.
 ///
@@ -1223,6 +1244,28 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
         data[offset + 3],
     ];
     u32::from_le_bytes(bytes)
+}
+
+/// Append `bytes` reinterpreted as a run of packed `T` instances.
+///
+/// The fast path is the zero-copy cast. It fails when `bytes` is not aligned
+/// to `T`, which is reachable in a well-formed sidecar: a batch's trailing
+/// string sections (tooltips, keys) have arbitrary byte lengths, so the NEXT
+/// batch's instance data can start at an address that is not 4-byte aligned.
+/// The unaligned per-instance fallback keeps those batches loading — the
+/// alternative, which the plain `try_cast_slice` did, is to silently discard
+/// every instance in them (invisible marks, no hit-testing).
+fn extend_instances<T: bytemuck::Pod>(bytes: &[u8], out: &mut Vec<T>) {
+    match bytemuck::try_cast_slice::<u8, T>(bytes) {
+        Ok(instances) => out.extend_from_slice(instances),
+        // `chunks_exact` drops a trailing partial instance, so a truncated
+        // run loads its whole instances and ignores the remainder.
+        Err(_) => out.extend(
+            bytes
+                .chunks_exact(std::mem::size_of::<T>())
+                .map(bytemuck::pod_read_unaligned::<T>),
+        ),
+    }
 }
 
 /// Unpack raw binary instance data into circle/rect buffers.
@@ -1267,15 +1310,11 @@ fn unpack_binary_instances(
                     break;
                 }
                 let start = circles.len();
-                if let Ok(instances) =
-                    bytemuck::try_cast_slice::<_, CircleInstance>(&data[offset..offset + byte_len])
-                {
-                    circles.extend_from_slice(instances);
-                    // Packed instance color channels are sRGB — convert to linear.
-                    for ci in &mut circles[start..] {
-                        linearize_color_channels(&mut ci.fill_color);
-                        linearize_color_channels(&mut ci.stroke_color);
-                    }
+                extend_instances(&data[offset..offset + byte_len], circles);
+                // Packed instance color channels are sRGB — convert to linear.
+                for ci in &mut circles[start..] {
+                    linearize_color_channels(&mut ci.fill_color);
+                    linearize_color_channels(&mut ci.stroke_color);
                 }
                 let loaded = circles.len() - start;
                 (byte_len, start, loaded)
@@ -1286,15 +1325,11 @@ fn unpack_binary_instances(
                     break;
                 }
                 let start = rects.len();
-                if let Ok(instances) =
-                    bytemuck::try_cast_slice::<_, RectInstance>(&data[offset..offset + byte_len])
-                {
-                    rects.extend_from_slice(instances);
-                    // Packed instance color channels are sRGB — convert to linear.
-                    for ri in &mut rects[start..] {
-                        linearize_color_channels(&mut ri.fill_color);
-                        linearize_color_channels(&mut ri.stroke_color);
-                    }
+                extend_instances(&data[offset..offset + byte_len], rects);
+                // Packed instance color channels are sRGB — convert to linear.
+                for ri in &mut rects[start..] {
+                    linearize_color_channels(&mut ri.fill_color);
+                    linearize_color_channels(&mut ri.stroke_color);
                 }
                 let loaded = rects.len() - start;
                 (byte_len, start, loaded)
@@ -1337,21 +1372,216 @@ fn unpack_binary_instances(
             None
         };
 
+        // Read the keys string table if flagged (GH #93). Keys are the LAST
+        // section of a batch, so a malformed table means the rest of the
+        // buffer cannot be trusted either: give up on this batch and every
+        // batch after it, exactly as the truncated-instance guards above do.
+        let keys = if flags & HAS_KEYS != 0 {
+            let Some((decoded, section_len)) = decode_packed_keys(data, offset, count) else {
+                break;
+            };
+            offset += section_len;
+            Some(decoded)
+        } else {
+            None
+        };
+
         meta.insert(
             (panel_idx, batch_idx),
             PackedBatchMeta {
                 data_indices,
                 tooltip_bytes,
+                keys,
                 kind,
                 instance_start,
-                // Record the count ACTUALLY loaded, not the header `count`.
-                // On a bytemuck cast failure the `if let Ok` block is skipped
-                // so loaded_count is 0, preventing phantom instance references
-                // in hit-testing. On the success path loaded_count == count. (F3)
+                // Record the count ACTUALLY loaded, not the header `count`,
+                // so the metadata can never point at phantom instances in
+                // hit-testing. `extend_instances` loads whole instances on
+                // both its aligned and unaligned paths, so on a well-formed
+                // batch loaded_count == count; a short final instance is the
+                // only way the two differ. (F3)
                 instance_count: loaded_count,
             },
         );
     }
+}
+
+/// Decode the `HAS_KEYS` section of a packed batch (GH #93).
+///
+/// Layout, written by `ferrum-core/src/render/pack_instances.rs::pack_keys`:
+/// a flat run of exactly `count` length-prefixed UTF-8 strings,
+/// `[len: u32 LE][utf8 bytes]` each, with no field-name preamble (unlike
+/// [`PackedTooltipTable`]) — `count` comes from the batch's 20-byte header and
+/// is never re-read from the section itself.
+///
+/// Returns the decoded keys plus the section's byte length so the caller can
+/// advance its cursor. Returns `None` when any read would leave the buffer or
+/// an entry is not valid UTF-8; every read is bounds-checked against `data`
+/// with `checked_add` (a corrupt `len` near `u32::MAX` would wrap a plain `+`
+/// on wasm32's 32-bit `usize`, turning a rejected read into a slice-index
+/// panic), so a truncated or corrupt sidecar can never panic the runtime.
+///
+/// The reservation is bounded the same way, and for the same reason: `count`
+/// is the raw header word, and the caller's `count * stride` instance guard is
+/// an unchecked multiply that a corrupt `count` can wrap past on wasm32's
+/// 32-bit `usize`. Every entry costs at least its 4-byte length prefix, so
+/// `data.len() / 4` is a hard ceiling on how many can decode — reserving more
+/// than that could only abort the runtime on an allocation it would never use.
+fn decode_packed_keys(data: &[u8], start: usize, count: usize) -> Option<(Vec<String>, usize)> {
+    let mut offset = start;
+    let mut keys = Vec::with_capacity(count.min(data.len() / 4));
+    for _ in 0..count {
+        if offset.checked_add(4)? > data.len() {
+            return None;
+        }
+        let len = read_u32_le(data, offset) as usize;
+        offset += 4;
+        let end = offset.checked_add(len)?;
+        if end > data.len() {
+            return None;
+        }
+        keys.push(std::str::from_utf8(&data[offset..end]).ok()?.to_string());
+        offset = end;
+    }
+    Some((keys, offset - start))
+}
+
+// ── Flat instance-array layout walk ─────────────────────────────────────────
+
+/// Where one mark batch's instances live in the flat circle/rect arrays.
+///
+/// Produced by [`batch_instance_spans`]; see that function for the layout rule
+/// this encodes.
+pub(crate) struct BatchInstanceSpan<'a> {
+    pub(crate) panel_idx: usize,
+    pub(crate) batch_idx: usize,
+    pub(crate) batch: &'a MarkBatch,
+    /// The packed sidecar metadata for this batch, or `None` when the batch
+    /// carries its marks as JSON `nodes`.
+    pub(crate) packed: Option<&'a PackedBatchMeta>,
+    /// This batch's slice of [`SceneData::circle_instances`]. Empty for a
+    /// batch that contributed no circles.
+    pub(crate) circles: std::ops::Range<usize>,
+    /// This batch's slice of [`SceneData::rect_instances`].
+    pub(crate) rects: std::ops::Range<usize>,
+}
+
+impl BatchInstanceSpan<'_> {
+    /// Object-constancy keys for this batch (GH #93), read from whichever
+    /// carrier it uses: the packed sidecar for a packed batch, `MarkBatch`
+    /// for a JSON-node batch. The packer moves keys from one to the other, so
+    /// exactly one carrier is ever populated.
+    pub(crate) fn keys(&self) -> Option<&[String]> {
+        match self.packed {
+            Some(meta) => meta.keys.as_deref(),
+            None => self.batch.keys.as_deref(),
+        }
+    }
+}
+
+/// Compute the total number of packed circle and rect instances.
+///
+/// [`load_scene_with_packed`] builds the flat instance arrays packed-FIRST:
+/// all packed instances are prepended by [`unpack_binary_instances`], then
+/// non-packed instances are appended in scene-graph walk order. Non-packed
+/// batches therefore start at the total packed count.
+fn packed_base_offsets(packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>) -> (usize, usize) {
+    let total_packed_circles: usize = packed_batch_meta
+        .values()
+        .filter(|m| m.kind == DrawKind::Circle)
+        .map(|m| m.instance_count)
+        .sum();
+    let total_packed_rects: usize = packed_batch_meta
+        .values()
+        .filter(|m| m.kind == DrawKind::Rect)
+        .map(|m| m.instance_count)
+        .sum();
+    (total_packed_circles, total_packed_rects)
+}
+
+/// Number of circle and rect instances one non-packed batch contributes.
+///
+/// Only `Circle`/`Rect` nodes become instances; every other node kind
+/// (lines, paths, text, …) is tessellated into mesh and contributes none.
+pub(crate) fn count_instances(batch: &MarkBatch) -> (usize, usize) {
+    let mut nc = 0usize;
+    let mut nr = 0usize;
+    for node in &batch.nodes {
+        match node {
+            SceneNode::Circle { .. } => nc += 1,
+            SceneNode::Rect { .. } => nr += 1,
+            _ => {}
+        }
+    }
+    (nc, nr)
+}
+
+/// Locate every mark batch's instances in the flat circle/rect arrays.
+///
+/// This is the ONE definition of the loader's flat-array layout for consumers
+/// that need to address a specific batch's instances: packed batches live at
+/// their sidecar `instance_start` (an absolute index, assigned first), and
+/// non-packed batches follow in scene-graph walk order starting after ALL
+/// packed instances. Both the conditional-encoding/crossfilter path
+/// (`conditional.rs`) and the keyed-transition matcher (`transition.rs`) walk
+/// through here rather than re-deriving the offsets, because the two must stay
+/// in lock-step with each other and with `load_scene_with_packed`.
+///
+/// `panels` may be either the raw `SceneGraph::panels` or the baked geometry
+/// (`bake_panels`) — baking rewrites coordinates only, never batch or node
+/// counts, so the spans are identical for both.
+///
+/// **Standing assumption, inherited from the conditional/crossfilter path this
+/// walk was extracted from:** non-packed offsets are derived from mark batches
+/// ALONE, but chrome nodes share the same flat circle/rect arrays and are
+/// collected before a panel's marks (title, grid, `below_marks`). A Circle or
+/// Rect node in any of those shifts every subsequent non-packed mark span, and
+/// since #93 that assumption governs transition pairing as well as conditional
+/// dimming. A `below_marks` `annotate_rect` chart is the shape that would
+/// expose it. Packed batches are immune (their `instance_start` is absolute).
+/// Tracked as GH #105.
+pub(crate) fn batch_instance_spans<'a>(
+    panels: &'a [Panel],
+    packed_batch_meta: &'a HashMap<(u32, u32), PackedBatchMeta>,
+) -> Vec<BatchInstanceSpan<'a>> {
+    let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
+    let mut circle_offset = total_packed_circles;
+    let mut rect_offset = total_packed_rects;
+
+    let mut spans = Vec::new();
+    for (panel_idx, panel) in panels.iter().enumerate() {
+        for (batch_idx, batch) in panel.marks.iter().enumerate() {
+            let key = (panel_idx as u32, batch_idx as u32);
+            let (packed, circles, rects) = match packed_batch_meta.get(&key) {
+                // Packed batch: instances sit at the absolute sidecar range,
+                // and do NOT advance the non-packed running offsets.
+                Some(meta) => {
+                    let range = meta.instance_start..meta.instance_start + meta.instance_count;
+                    match meta.kind {
+                        DrawKind::Circle => (Some(meta), range, 0..0),
+                        DrawKind::Rect => (Some(meta), 0..0, range),
+                    }
+                }
+                None => {
+                    let (n_circles, n_rects) = count_instances(batch);
+                    let circles = circle_offset..circle_offset + n_circles;
+                    let rects = rect_offset..rect_offset + n_rects;
+                    circle_offset += n_circles;
+                    rect_offset += n_rects;
+                    (None, circles, rects)
+                }
+            };
+            spans.push(BatchInstanceSpan {
+                panel_idx,
+                batch_idx,
+                batch,
+                packed,
+                circles,
+                rects,
+            });
+        }
+    }
+    spans
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4034,6 +4264,223 @@ mod tests {
         assert_eq!(tb, &tooltip_data);
     }
 
+    // ── HAS_KEYS sidecar (spec §4.3 / GH #93) ────────────────────────
+    //
+    // The producer is `ferrum-core`'s `pack_instances::pack_keys`: a flat run
+    // of `count` `[len: u32 LE][utf8]` entries, emitted last of the three
+    // trailing sections. These tests mirror that layout by hand so a drift in
+    // either crate shows up as a decode failure here.
+
+    /// Encode a keys section exactly as `pack_keys` writes it.
+    fn pack_keys_section(keys: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for key in keys {
+            buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            buf.extend_from_slice(key.as_bytes());
+        }
+        buf
+    }
+
+    fn unit_circle() -> CircleInstance {
+        CircleInstance {
+            center: [1.0, 2.0],
+            radius: 3.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }
+    }
+
+    #[test]
+    fn binary_unpack_keys_round_trip() {
+        let instances = vec![unit_circle(), unit_circle()];
+        let packed = build_packed_circle_stream_ex(
+            0,
+            0,
+            &instances,
+            HAS_KEYS,
+            &pack_keys_section(&["row-0", "row-1"]),
+        );
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        let m = meta.get(&(0, 0)).expect("meta should exist");
+        assert_eq!(
+            m.keys.as_deref(),
+            Some(["row-0".to_string(), "row-1".to_string()].as_slice()),
+        );
+    }
+
+    #[test]
+    fn binary_unpack_keys_follow_data_indices_and_tooltips() {
+        // Section order is data_indices → tooltips → keys; reading them out of
+        // order would decode key bytes as tooltip bytes (or vice versa).
+        let instances = vec![unit_circle()];
+        let mut trailing = Vec::new();
+        trailing.extend_from_slice(&7u32.to_le_bytes()); // one data index
+        trailing.extend_from_slice(&1u32.to_le_bytes()); // tooltips: num_fields
+        trailing.extend_from_slice(&2u32.to_le_bytes()); // field name len
+        trailing.extend_from_slice(b"id");
+        trailing.extend_from_slice(&1u32.to_le_bytes()); // row 0 value len
+        trailing.extend_from_slice(b"7");
+        trailing.extend_from_slice(&pack_keys_section(&["k7"]));
+
+        let packed = build_packed_circle_stream_ex(
+            0,
+            0,
+            &instances,
+            HAS_DATA_INDICES | HAS_TOOLTIPS | HAS_KEYS,
+            &trailing,
+        );
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        let m = meta.get(&(0, 0)).expect("meta should exist");
+        assert_eq!(m.data_indices.as_deref(), Some([7u32].as_slice()));
+        assert_eq!(m.keys.as_deref(), Some(["k7".to_string()].as_slice()));
+    }
+
+    #[test]
+    fn binary_unpack_without_keys_flag_carries_no_keys() {
+        // The byte-identity guarantee for every scene predating #93: no flag,
+        // no bytes, no keys.
+        let packed = build_packed_circle_stream(&[unit_circle()]);
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+        assert!(meta.get(&(0, 0)).expect("meta").keys.is_none());
+    }
+
+    #[test]
+    fn binary_unpack_truncated_keys_does_not_panic() {
+        // A key entry claiming more bytes than the buffer holds must be
+        // rejected by the bounds checks, not indexed into.
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&9999u32.to_le_bytes()); // len overruns
+        truncated.extend_from_slice(b"ab");
+        let packed = build_packed_circle_stream_ex(0, 0, &[unit_circle()], HAS_KEYS, &truncated);
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+        assert!(
+            meta.is_empty(),
+            "a malformed trailing section abandons the batch rather than \
+             surfacing half-decoded keys"
+        );
+    }
+
+    #[test]
+    fn binary_unpack_keys_section_shorter_than_count_does_not_panic() {
+        // Two instances but only one key entry: the decoder runs out of bytes
+        // on the second read and gives up.
+        let packed = build_packed_circle_stream_ex(
+            0,
+            0,
+            &[unit_circle(), unit_circle()],
+            HAS_KEYS,
+            &pack_keys_section(&["only-one"]),
+        );
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn binary_unpack_keys_then_next_batch_still_loads() {
+        // Two things are load-bearing here. The keys section must be measured
+        // exactly, or the cursor lands mid-buffer and every following batch
+        // silently disappears. And "first" is 5 bytes, so the section is 9
+        // bytes long and leaves the SECOND batch's instance data at an
+        // unaligned address — which the zero-copy cast rejects, dropping
+        // every instance in that batch (see `extend_instances`).
+        let mut packed = build_packed_circle_stream_ex(
+            0,
+            0,
+            &[unit_circle()],
+            HAS_KEYS,
+            &pack_keys_section(&["first"]),
+        );
+        packed.extend_from_slice(&build_packed_circle_stream_ex(
+            0,
+            1,
+            &[unit_circle()],
+            HAS_KEYS,
+            &pack_keys_section(&["second"]),
+        ));
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 2);
+        assert_eq!(
+            meta.get(&(0, 0)).expect("batch 0").keys.as_deref(),
+            Some(["first".to_string()].as_slice())
+        );
+        assert_eq!(
+            meta.get(&(0, 1)).expect("batch 1").keys.as_deref(),
+            Some(["second".to_string()].as_slice())
+        );
+        assert_eq!(
+            meta.get(&(0, 1)).expect("batch 1").instance_start,
+            1,
+            "the second batch's instances follow the first's"
+        );
+    }
+
+    /// A batch whose instance bytes land at an unaligned address (because a
+    /// preceding batch's string section had an odd length) must still load,
+    /// with its values intact. The zero-copy cast alone returns `Err` here and
+    /// drops the whole batch — invisible marks that no hit-test can find.
+    #[test]
+    fn unaligned_instance_bytes_still_load_with_correct_values() {
+        let mut second = unit_circle();
+        second.center = [42.0, 43.0];
+        second.radius = 7.0;
+
+        // A 3-byte key ⇒ 7-byte section ⇒ the next batch's instances start at
+        // an address 3 mod 4.
+        let mut packed = build_packed_circle_stream_ex(
+            0,
+            0,
+            &[unit_circle()],
+            HAS_KEYS,
+            &pack_keys_section(&["abc"]),
+        );
+        packed.extend_from_slice(&build_packed_circle_stream_ex(0, 1, &[second], 0, &[]));
+
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 2, "both batches load");
+        assert_eq!(circles[1].center, [42.0, 43.0]);
+        assert!((circles[1].radius - 7.0).abs() < 1e-6);
+        assert_eq!(
+            meta.get(&(0, 1)).expect("batch 1").instance_count,
+            1,
+            "metadata must not report a phantom-free batch as empty"
+        );
+    }
+
     // ── F2 regression: truncated tooltip table must not panic ─────────
     //
     // Pre-fix: the scan loop advances `offset += 4 + slen` without clamping,
@@ -6694,6 +7141,7 @@ mod tests {
         batch_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 1,
@@ -6704,6 +7152,7 @@ mod tests {
         batch_meta.insert(
             (0u32, 1u32),
             PackedBatchMeta {
+                keys: None,
                 kind: DrawKind::Rect,
                 instance_start: 0,
                 instance_count: 1,

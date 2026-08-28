@@ -983,6 +983,71 @@ class TestPackedTooltips:
         assert len(batch["tooltips"][0]["fields"]) == 2
 
 
+# ── scene_json / packed_data comm-message atomicity (#93 ordering hazard) ─────
+#
+# ipywidgets sends one comm message per traitlet assignment unless the
+# assignments are batched with `hold_sync()`. If `scene_json` and
+# `packed_data` are set in two separate messages, the JS `change:scene_json`
+# listener can fire (and start a keyed WASM transition) against a stale
+# `packed_data` buffer for one frame. `_try_init_widget` and `_on_zoom_change`
+# must sync both traits (plus `interaction_config`) atomically.
+
+
+class TestSceneAndPackedDataSyncedAtomically:
+    @staticmethod
+    def _record_send_state(widget) -> list[set[str]]:
+        """Patch ``widget.send_state`` to record the trait-name set carried
+        by each outgoing comm message; returns the list of per-call sets."""
+        calls: list[set[str]] = []
+        original = widget.send_state
+
+        def _recording(key=None):
+            calls.append(set(widget.get_state(key=key).keys()))
+            original(key=key)
+
+        widget.send_state = _recording
+        return calls
+
+    def test_zoom_rebuild_syncs_scene_and_packed_data_in_one_message(self):
+        from ferrum._interactive import InteractiveChart
+
+        ic = InteractiveChart(_packed_scatter(2000))
+        calls = self._record_send_state(ic._widget)
+
+        zoom = {"0": {"x_domain": [-1.0, 1.0], "y_domain": [-1.0, 1.0]}}
+        ic._on_zoom_change({"new": json.dumps(zoom)})
+
+        assert any({"scene_json", "packed_data"} <= keys for keys in calls), (
+            "scene_json and packed_data must be synced in a single comm "
+            f"message so the JS listener never sees a stale packed buffer; "
+            f"got separate messages {calls}"
+        )
+
+    def test_initial_widget_init_syncs_scene_and_packed_data_in_one_message(self):
+        from ferrum._interactive import InteractiveChart, _get_widget_class
+
+        cls = _get_widget_class()
+        assert cls is not None, "anywidget must be installed for this test"
+
+        calls: list[set[str]] = []
+        original_send_state = cls.send_state
+
+        def _recording(self, key=None):
+            calls.append(set(self.get_state(key=key).keys()))
+            original_send_state(self, key=key)
+
+        cls.send_state = _recording
+        try:
+            InteractiveChart(_packed_scatter(2000))
+        finally:
+            cls.send_state = original_send_state
+
+        assert any({"scene_json", "packed_data"} <= keys for keys in calls), (
+            "scene_json and packed_data must be synced in a single comm "
+            f"message on initial widget setup; got separate messages {calls}"
+        )
+
+
 # ── Item 19: SceneNode::Raw not silently dropped in WASM scene graph ───────────
 #
 # Regression against the previous `console.warn` silent drop of Raw nodes.

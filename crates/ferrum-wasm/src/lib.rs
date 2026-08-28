@@ -50,7 +50,9 @@ use crate::selection_state::InteractionState;
 #[cfg(target_arch = "wasm32")]
 use crate::spatial_index::SpatialIndex;
 #[cfg(target_arch = "wasm32")]
-use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
+use crate::transition::{
+    ease_in_out_cubic, plan_transition, Instances, SceneSnapshot, TransitionPlan, TransitionSide,
+};
 #[cfg(target_arch = "wasm32")]
 use crate::zoom_pan::ZoomPanState;
 
@@ -75,13 +77,35 @@ pub struct WasmRenderer {
     slot_rescales: Vec<crate::zoom_pan::Affine2>,
     interaction: ferrum_scene::InteractionConfig,
     spatial_index: Option<SpatialIndex>,
+    /// The frame this renderer was showing before the current `loadScene`
+    /// (GH #93 old-side identity, spec §4.3).
+    ///
+    /// Captured in `load_scene` before the incoming scene replaces the loaded
+    /// one, because a packed batch's instances and its `HAS_KEYS` sidecar
+    /// exist ONLY in this in-memory form — the previous scene's JSON carries
+    /// neither. `start_transition` consumes it; when there is none (first
+    /// load) it falls back to parsing the JSON it was handed.
+    ///
+    /// SYNC (JS): this is only reachable if the caller keeps ONE renderer
+    /// alive across data updates. `ferrum-anywidget.js`'s `_reload` does —
+    /// its `update` path calls `loadScene` on the live renderer and only
+    /// rebuilds when it cannot (size/config change, or failure). A caller that
+    /// constructs a fresh renderer per update always takes the JSON fallback.
+    previous: Option<SceneSnapshot>,
 }
 
 #[cfg(target_arch = "wasm32")]
 struct ActiveTransition {
-    old_data: SceneData,
+    /// The scene being transitioned away from, in the form the pairing was
+    /// resolved against.
+    old: SceneSnapshot,
     new_data: SceneData,
     new_scene: ferrum_scene::SceneGraph,
+    /// Old-to-new instance pairing, resolved once when the transition starts
+    /// (GH #93). Holding the plan rather than the old `SceneGraph` is what
+    /// "retaining the old keys" amounts to: the keys are consumed into
+    /// `key → instance index` maps here and never read again.
+    plan: TransitionPlan,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -119,6 +143,7 @@ impl WasmRenderer {
             slot_rescales: Vec::new(),
             interaction: ferrum_scene::InteractionConfig::default(),
             spatial_index: None,
+            previous: None,
         })
     }
 
@@ -153,6 +178,15 @@ impl WasmRenderer {
         // Build spatial index over all panels for O(log n) hit-testing.
         // Pass scene data so packed instances (>= 1000 marks) are also indexed.
         self.spatial_index = Some(SpatialIndex::build_with_packed(&baked_panels, Some(&data)));
+        // Snapshot the OUTGOING frame before it is replaced (GH #93 old-side
+        // identity). This is the only moment a packed batch's instances and
+        // sidecar keys are still addressable: the scene JSON a later
+        // `startTransition` receives has neither. Its GPU buffers drop here,
+        // as they did before the snapshot existed.
+        self.previous = self
+            .loaded
+            .take()
+            .map(|prev| SceneSnapshot::from_scene_data(prev.data, prev.scene.panels));
         self.loaded = Some(LoadedScene {
             data,
             buffers,
@@ -185,8 +219,13 @@ impl WasmRenderer {
     /// Begin a GPU-interpolated transition from an old scene to the currently
     /// loaded scene.
     ///
-    /// `old_scene_json` is the **previous** scene JSON string. The transition
-    /// target is `self.loaded.data` (the scene already loaded via `loadScene`).
+    /// The transition target is `self.loaded.data` (the scene already loaded
+    /// via `loadScene`). The transition SOURCE is the snapshot `loadScene`
+    /// took of the outgoing frame (GH #93 old-side identity, spec §4.3);
+    /// `old_scene_json` is the fallback source, used only when this renderer
+    /// has no predecessor to snapshot — a first load. The parameter is kept
+    /// (rather than removed) so the JS caller's contract is unchanged and the
+    /// fallback stays available.
     ///
     /// B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
     /// as old. But `loadScene(new_json)` was already called before
@@ -202,21 +241,37 @@ impl WasmRenderer {
     /// Returns `Ok(())` immediately (no-op) if no scene is currently loaded.
     #[wasm_bindgen(js_name = "startTransition")]
     pub fn start_transition(&mut self, old_scene_json: &str) -> Result<(), JsValue> {
+        // Resolve the old side first: `previous` is consumed here, so the
+        // snapshot is never reused across two transitions, and taking it now
+        // leaves no borrow outstanding when `loaded` is read below.
+        let previous = self.previous.take();
         let Some(loaded) = &self.loaded else {
             return Ok(());
         };
         // B4+B5 fix: the new scene (transition target) is already in loaded.data,
-        // which was populated by loadScene with full packed data. Parse the old
-        // scene from JSON (no packed data needed — it is only the animation source
-        // for a brief 300ms transition).
+        // which was populated by loadScene with full packed data.
         let new_data = loaded.data.clone();
-        let old_scene: ferrum_scene::SceneGraph = serde_json::from_str(old_scene_json)
-            .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
-        let old_data = scene_load::load_scene(&old_scene);
+        let old = match previous {
+            Some(snapshot) => snapshot,
+            None => transition::SceneSnapshot::from_scene_json(old_scene_json)?,
+        };
+        // Resolve the old→new instance pairing once (GH #93). Keyed batches
+        // pair by `encode(key=...)` so each mark transitions to its own new
+        // position; scenes without keys resolve to `TransitionPlan::IndexZip`
+        // and interpolate exactly as they did before keys existed.
+        let plan = plan_transition(
+            old.side(),
+            TransitionSide {
+                panels: &loaded.scene.panels,
+                packed_batch_meta: &new_data.packed_batch_meta,
+                draw_commands: &new_data.draw_commands,
+            },
+        );
         self.transition = Some(ActiveTransition {
-            old_data,
+            old,
             new_data,
             new_scene: loaded.scene.clone(),
+            plan,
         });
         Ok(())
     }
@@ -230,19 +285,24 @@ impl WasmRenderer {
     pub fn tick_transition(&mut self, t: f32) -> Result<(), JsValue> {
         let t_eased = ease_in_out_cubic(t.clamp(0.0, 1.0));
         if let Some(ref tr) = self.transition {
-            let lerped_circles = lerp_circles(
-                &tr.old_data.circle_instances,
-                &tr.new_data.circle_instances,
+            let frame = transition::interpolate(
+                &tr.plan,
+                tr.old.instances(),
+                Instances {
+                    circles: &tr.new_data.circle_instances,
+                    rects: &tr.new_data.rect_instances,
+                },
                 t_eased,
             );
-            let lerped_rects = lerp_rects(
-                &tr.old_data.rect_instances,
-                &tr.new_data.rect_instances,
-                t_eased,
-            );
+            // Exiting marks live past the new scene's own instance ranges, so
+            // every draw command the new scene emitted still addresses its own
+            // slots; their fade-out draws append after it. Empty for an
+            // unkeyed transition, leaving the command list untouched.
+            let mut draw_commands = tr.new_data.draw_commands.clone();
+            draw_commands.extend(frame.exit_draws);
             let lerped_data = SceneData {
-                circle_instances: lerped_circles,
-                rect_instances: lerped_rects,
+                circle_instances: frame.circles,
+                rect_instances: frame.rects,
                 mesh_buffers: tr.new_data.mesh_buffers.clone(),
                 static_mesh_buffers: tr.new_data.static_mesh_buffers.clone(),
                 annotation_mesh_buffers: tr.new_data.annotation_mesh_buffers.clone(),
@@ -253,7 +313,7 @@ impl WasmRenderer {
                 width: tr.new_data.width,
                 height: tr.new_data.height,
                 packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
-                draw_commands: tr.new_data.draw_commands.clone(),
+                draw_commands,
                 mark_mesh_panels: tr.new_data.mark_mesh_panels.clone(),
                 panel_count: tr.new_data.panel_count,
                 panel_slot_counts: tr.new_data.panel_slot_counts.clone(),
@@ -1159,6 +1219,7 @@ mod tests {
         packed_meta.insert(
             (0u32, 0u32),
             PackedBatchMeta {
+                keys: None,
                 data_indices: Some(vec![7, 8, 9]),
                 tooltip_bytes: None,
                 kind: DrawKind::Circle,

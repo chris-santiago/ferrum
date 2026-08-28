@@ -270,8 +270,13 @@ export class WasmRenderer {
      * Begin a GPU-interpolated transition from an old scene to the currently
      * loaded scene.
      *
-     * `old_scene_json` is the **previous** scene JSON string. The transition
-     * target is `self.loaded.data` (the scene already loaded via `loadScene`).
+     * The transition target is `self.loaded.data` (the scene already loaded
+     * via `loadScene`). The transition SOURCE is the snapshot `loadScene`
+     * took of the outgoing frame (GH #93 old-side identity, spec §4.3);
+     * `old_scene_json` is the fallback source, used only when this renderer
+     * has no predecessor to snapshot — a first load. The parameter is kept
+     * (rather than removed) so the JS caller's contract is unchanged and the
+     * fallback stays available.
      *
      * B4 fix: the old API accepted the *new* scene JSON and cloned `loaded.data`
      * as old. But `loadScene(new_json)` was already called before
