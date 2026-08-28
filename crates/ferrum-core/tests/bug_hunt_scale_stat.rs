@@ -10,8 +10,8 @@
 
 use ferrum_scene::{
     BlendMode, Color, CoordKind, FillStroke, FontWeight, LayoutScale, MarkBatch, MarkBatchKind,
-    Panel, PathCmd, Rect, SceneGraph, SceneNode, TextAnchor, TextBaseline,
-    TextStyle, Tick, TickLevel,
+    Panel, PathCmd, Rect, SceneGraph, SceneNode, TextAnchor, TextBaseline, TextStyle, Tick,
+    TickLevel,
 };
 
 fn default_text_style() -> TextStyle {
@@ -43,8 +43,18 @@ fn default_fill_stroke() -> FillStroke {
 fn make_panel(marks: Vec<MarkBatch>) -> Panel {
     Panel {
         id: 0,
-        plot_area: Rect { x: 50.0, y: 10.0, w: 500.0, h: 350.0 },
-        clip: Rect { x: 50.0, y: 10.0, w: 500.0, h: 350.0 },
+        plot_area: Rect {
+            x: 50.0,
+            y: 10.0,
+            w: 500.0,
+            h: 350.0,
+        },
+        clip: Rect {
+            x: 50.0,
+            y: 10.0,
+            w: 500.0,
+            h: 350.0,
+        },
         coord: CoordKind::Cartesian {
             x_domain: Some((0.0, 10.0)),
             y_domain: Some((0.0, 10.0)),
@@ -58,6 +68,8 @@ fn make_panel(marks: Vec<MarkBatch>) -> Panel {
         annotations: vec![],
         strip_title: vec![],
         layout_scale: LayoutScale::identity(),
+        below_marks: Vec::new(),
+        chrome_above: Vec::new(),
     }
 }
 
@@ -81,7 +93,10 @@ fn fill_stroke_nan_angle_serializes_as_null() {
         ..default_fill_stroke()
     };
     let json = serde_json::to_string(&fs).expect("serialize NaN angle");
-    assert!(!json.contains("NaN"), "NaN angle must serialize as null: {json}");
+    assert!(
+        !json.contains("NaN"),
+        "NaN angle must serialize as null: {json}"
+    );
 }
 
 #[test]
@@ -177,7 +192,10 @@ fn path_empty_commands_round_trips() {
 #[test]
 fn circle_zero_radius_round_trips() {
     let node = SceneNode::Circle {
-        cx: 100.0, cy: 200.0, r: 0.0, style: default_fill_stroke(),
+        cx: 100.0,
+        cy: 200.0,
+        r: 0.0,
+        style: default_fill_stroke(),
     };
     let json = serde_json::to_string(&node).expect("serialize zero-radius circle");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -190,7 +208,10 @@ fn circle_zero_radius_round_trips() {
 #[test]
 fn circle_negative_radius_round_trips() {
     let node = SceneNode::Circle {
-        cx: 100.0, cy: 200.0, r: -5.0, style: default_fill_stroke(),
+        cx: 100.0,
+        cy: 200.0,
+        r: -5.0,
+        style: default_fill_stroke(),
     };
     let json = serde_json::to_string(&node).expect("serialize negative-radius circle");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -203,10 +224,16 @@ fn circle_negative_radius_round_trips() {
 #[test]
 fn circle_nan_radius_serializes_as_null() {
     let node = SceneNode::Circle {
-        cx: 100.0, cy: 200.0, r: f64::NAN, style: default_fill_stroke(),
+        cx: 100.0,
+        cy: 200.0,
+        r: f64::NAN,
+        style: default_fill_stroke(),
     };
     let json = serde_json::to_string(&node).expect("serialize NaN-radius circle");
-    assert!(!json.contains("NaN"), "NaN radius must serialize as null: {json}");
+    assert!(
+        !json.contains("NaN"),
+        "NaN radius must serialize as null: {json}"
+    );
 }
 
 // ── Rect edge cases ─────────────────────────────────────────────────────
@@ -214,8 +241,12 @@ fn circle_nan_radius_serializes_as_null() {
 #[test]
 fn rect_negative_width_round_trips() {
     let node = SceneNode::Rect {
-        x: 100.0, y: 50.0, w: -50.0, h: 100.0,
-        style: default_fill_stroke(), corner_radius: 0.0,
+        x: 100.0,
+        y: 50.0,
+        w: -50.0,
+        h: 100.0,
+        style: default_fill_stroke(),
+        corner_radius: 0.0,
     };
     let json = serde_json::to_string(&node).expect("serialize negative-width rect");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -228,8 +259,12 @@ fn rect_negative_width_round_trips() {
 #[test]
 fn rect_negative_height_round_trips() {
     let node = SceneNode::Rect {
-        x: 100.0, y: 50.0, w: 50.0, h: -100.0,
-        style: default_fill_stroke(), corner_radius: 0.0,
+        x: 100.0,
+        y: 50.0,
+        w: 50.0,
+        h: -100.0,
+        style: default_fill_stroke(),
+        corner_radius: 0.0,
     };
     let json = serde_json::to_string(&node).expect("serialize negative-height rect");
     let back: SceneNode = serde_json::from_str(&json).expect("deserialize");
@@ -244,13 +279,18 @@ fn rect_negative_height_round_trips() {
 #[test]
 fn cartesian_no_domains_round_trips() {
     let coord = CoordKind::Cartesian {
-        x_domain: None, y_domain: None, expand: true, clip: true,
+        x_domain: None,
+        y_domain: None,
+        expand: true,
+        clip: true,
         y_domains: Vec::new(),
     };
     let json = serde_json::to_string(&coord).expect("serialize no-domain Cartesian");
     let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
     match back {
-        CoordKind::Cartesian { x_domain, y_domain, .. } => {
+        CoordKind::Cartesian {
+            x_domain, y_domain, ..
+        } => {
             assert!(x_domain.is_none());
             assert!(y_domain.is_none());
         }
@@ -263,13 +303,16 @@ fn cartesian_inverted_domain_round_trips() {
     let coord = CoordKind::Cartesian {
         x_domain: Some((10.0, 0.0)),
         y_domain: Some((100.0, -100.0)),
-        expand: false, clip: false,
+        expand: false,
+        clip: false,
         y_domains: Vec::new(),
     };
     let json = serde_json::to_string(&coord).expect("serialize inverted domain");
     let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
     match back {
-        CoordKind::Cartesian { x_domain, y_domain, .. } => {
+        CoordKind::Cartesian {
+            x_domain, y_domain, ..
+        } => {
             let (x_lo, x_hi) = x_domain.unwrap();
             assert_eq!(x_lo, 10.0);
             assert_eq!(x_hi, 0.0);
@@ -292,7 +335,11 @@ fn tick_level_many_ticks_round_trips() {
             pixel: i as f64 * 0.5,
         })
         .collect();
-    let level = TickLevel { min_zoom: 1.0, max_zoom: 10.0, ticks };
+    let level = TickLevel {
+        min_zoom: 1.0,
+        max_zoom: 10.0,
+        ticks,
+    };
     let json = serde_json::to_string(&level).expect("serialize 1000-tick level");
     let back: TickLevel = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.ticks.len(), 1000);
@@ -301,8 +348,13 @@ fn tick_level_many_ticks_round_trips() {
 #[test]
 fn tick_level_degenerate_zoom_range_round_trips() {
     let level = TickLevel {
-        min_zoom: 5.0, max_zoom: 5.0,
-        ticks: vec![Tick { value: 0.0, label: "0".to_string(), pixel: 0.0 }],
+        min_zoom: 5.0,
+        max_zoom: 5.0,
+        ticks: vec![Tick {
+            value: 0.0,
+            label: "0".to_string(),
+            pixel: 0.0,
+        }],
     };
     let json = serde_json::to_string(&level).expect("serialize degenerate zoom");
     let back: TickLevel = serde_json::from_str(&json).expect("deserialize");
@@ -312,7 +364,11 @@ fn tick_level_degenerate_zoom_range_round_trips() {
 
 #[test]
 fn tick_level_zero_zoom_range_round_trips() {
-    let level = TickLevel { min_zoom: 0.0, max_zoom: 0.0, ticks: vec![] };
+    let level = TickLevel {
+        min_zoom: 0.0,
+        max_zoom: 0.0,
+        ticks: vec![],
+    };
     let json = serde_json::to_string(&level).expect("serialize zero zoom range");
     let back: TickLevel = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.min_zoom, 0.0);
@@ -324,7 +380,8 @@ fn tick_level_zero_zoom_range_round_trips() {
 #[test]
 fn text_node_empty_string_round_trips() {
     let node = SceneNode::Text {
-        x: 100.0, y: 200.0,
+        x: 100.0,
+        y: 200.0,
         content: String::new(),
         slot: None,
         style: default_text_style(),
@@ -341,7 +398,8 @@ fn text_node_empty_string_round_trips() {
 fn text_node_very_long_text_round_trips() {
     let long_text = "A".repeat(10000);
     let node = SceneNode::Text {
-        x: 100.0, y: 200.0,
+        x: 100.0,
+        y: 200.0,
         content: long_text.clone(),
         slot: None,
         style: default_text_style(),
@@ -357,7 +415,8 @@ fn text_node_very_long_text_round_trips() {
 #[test]
 fn text_node_nan_coordinates_serialize_as_null() {
     let node = SceneNode::Text {
-        x: f64::NAN, y: f64::NAN,
+        x: f64::NAN,
+        y: f64::NAN,
         content: "label".to_string(),
         slot: None,
         style: TextStyle {
@@ -366,13 +425,17 @@ fn text_node_nan_coordinates_serialize_as_null() {
         },
     };
     let json = serde_json::to_string(&node).expect("serialize NaN-text node");
-    assert!(!json.contains("NaN"), "NaN in Text must serialize as null: {json}");
+    assert!(
+        !json.contains("NaN"),
+        "NaN in Text must serialize as null: {json}"
+    );
 }
 
 #[test]
 fn text_node_unicode_round_trips() {
     let node = SceneNode::Text {
-        x: 100.0, y: 200.0,
+        x: 100.0,
+        y: 200.0,
         content: "温度 (°C)".to_string(),
         slot: None,
         style: default_text_style(),
@@ -390,7 +453,8 @@ fn text_node_unicode_round_trips() {
 #[test]
 fn scene_graph_with_title_text_round_trips() {
     let title_node = SceneNode::Text {
-        x: 300.0, y: 15.0,
+        x: 300.0,
+        y: 15.0,
         content: "My Chart Title".to_string(),
         slot: None,
         style: TextStyle {
@@ -400,11 +464,15 @@ fn scene_graph_with_title_text_round_trips() {
         },
     };
     let scene = SceneGraph {
-        width: 600.0, height: 400.0,
+        width: 600.0,
+        height: 400.0,
         background: Some(Color::rgb(255, 255, 255)),
         title: vec![title_node],
-        legend: vec![], panels: vec![], decorations: vec![],
-        selections: vec![], interaction: Default::default(),
+        legend: vec![],
+        panels: vec![],
+        decorations: vec![],
+        selections: vec![],
+        interaction: Default::default(),
         chart_description: None,
     };
     let json = serde_json::to_string(&scene).expect("serialize scene with title");
@@ -419,9 +487,15 @@ fn scene_graph_with_title_text_round_trips() {
 #[test]
 fn scene_graph_with_description_round_trips() {
     let scene = SceneGraph {
-        width: 600.0, height: 400.0, background: None,
-        title: vec![], legend: vec![], panels: vec![], decorations: vec![],
-        selections: vec![], interaction: Default::default(),
+        width: 600.0,
+        height: 400.0,
+        background: None,
+        title: vec![],
+        legend: vec![],
+        panels: vec![],
+        decorations: vec![],
+        selections: vec![],
+        interaction: Default::default(),
         chart_description: Some("A scatter plot".to_string()),
     };
     let json = serde_json::to_string(&scene).expect("serialize");
@@ -432,9 +506,15 @@ fn scene_graph_with_description_round_trips() {
 #[test]
 fn scene_graph_negative_dimensions_round_trips() {
     let scene = SceneGraph {
-        width: -100.0, height: -200.0, background: None,
-        title: vec![], legend: vec![], panels: vec![], decorations: vec![],
-        selections: vec![], interaction: Default::default(),
+        width: -100.0,
+        height: -200.0,
+        background: None,
+        title: vec![],
+        legend: vec![],
+        panels: vec![],
+        decorations: vec![],
+        selections: vec![],
+        interaction: Default::default(),
         chart_description: None,
     };
     let json = serde_json::to_string(&scene).expect("serialize negative-dim scene");
@@ -474,7 +554,8 @@ fn panel_with_annotations_round_trips() {
 #[test]
 fn panel_with_strip_title_round_trips() {
     let strip = SceneNode::Text {
-        x: 300.0, y: 5.0,
+        x: 300.0,
+        y: 5.0,
         content: "group = A".to_string(),
         slot: None,
         style: TextStyle {
@@ -486,17 +567,33 @@ fn panel_with_strip_title_round_trips() {
     };
     let panel = Panel {
         id: 42,
-        plot_area: Rect { x: 50.0, y: 20.0, w: 500.0, h: 330.0 },
-        clip: Rect { x: 50.0, y: 20.0, w: 500.0, h: 330.0 },
+        plot_area: Rect {
+            x: 50.0,
+            y: 20.0,
+            w: 500.0,
+            h: 330.0,
+        },
+        clip: Rect {
+            x: 50.0,
+            y: 20.0,
+            w: 500.0,
+            h: 330.0,
+        },
         coord: CoordKind::Cartesian {
             x_domain: Some((0.0, 10.0)),
             y_domain: Some((0.0, 10.0)),
-            expand: true, clip: true,
+            expand: true,
+            clip: true,
             y_domains: Vec::new(),
         },
-        grid: vec![], marks: vec![], axes: vec![],
-        annotations: vec![], strip_title: vec![strip],
+        grid: vec![],
+        marks: vec![],
+        axes: vec![],
+        annotations: vec![],
+        strip_title: vec![strip],
         layout_scale: LayoutScale::identity(),
+        below_marks: Vec::new(),
+        chrome_above: Vec::new(),
     };
     let json = serde_json::to_string(&panel).expect("serialize panel with strip_title");
     let back: Panel = serde_json::from_str(&json).expect("deserialize");
@@ -508,29 +605,51 @@ fn panel_with_strip_title_round_trips() {
 fn panel_one_pixel_plot_area_round_trips() {
     let panel = Panel {
         id: 0,
-        plot_area: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
-        clip: Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
+        plot_area: Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        },
+        clip: Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+        },
         coord: CoordKind::Cartesian {
             x_domain: Some((0.0, 1e6)),
             y_domain: Some((0.0, 1e6)),
-            expand: false, clip: true,
+            expand: false,
+            clip: true,
             y_domains: Vec::new(),
         },
         grid: vec![],
         marks: vec![MarkBatch {
             kind: MarkBatchKind::Point,
             nodes: vec![SceneNode::Circle {
-                cx: 0.5, cy: 0.5, r: 0.1, style: default_fill_stroke(),
+                cx: 0.5,
+                cy: 0.5,
+                r: 0.1,
+                style: default_fill_stroke(),
             }],
-            data_indices: None, tooltips: None, hrefs: None,
-            descriptions: None, keys: None,
+            data_indices: None,
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
             blend: BlendMode::Normal,
-            stroke_cap: None, stroke_join: None,
+            stroke_cap: None,
+            stroke_join: None,
             packed_instances: None,
             y_slot: 0,
         }],
-        axes: vec![], annotations: vec![], strip_title: vec![],
+        axes: vec![],
+        annotations: vec![],
+        strip_title: vec![],
         layout_scale: LayoutScale::identity(),
+        below_marks: Vec::new(),
+        chrome_above: Vec::new(),
     };
     let json = serde_json::to_string(&panel).expect("serialize 1x1 panel");
     let back: Panel = serde_json::from_str(&json).expect("deserialize");
@@ -551,7 +670,8 @@ fn mark_batch_tooltips_without_nodes_round_trips() {
         descriptions: Some(vec![]),
         keys: Some(vec![]),
         blend: BlendMode::Normal,
-        stroke_cap: None, stroke_join: None,
+        stroke_cap: None,
+        stroke_join: None,
         packed_instances: None,
         y_slot: 0,
     };
@@ -602,7 +722,11 @@ fn color_rgba_with_alpha_round_trips() {
 
 #[test]
 fn tick_unicode_label_round_trips() {
-    let tick = Tick { value: 1.0, label: "温度 (°C)".to_string(), pixel: 100.0 };
+    let tick = Tick {
+        value: 1.0,
+        label: "温度 (°C)".to_string(),
+        pixel: 100.0,
+    };
     let json = serde_json::to_string(&tick).expect("serialize unicode tick");
     let back: Tick = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.label, "温度 (°C)");
@@ -610,15 +734,27 @@ fn tick_unicode_label_round_trips() {
 
 #[test]
 fn tick_very_small_pixel_value_round_trips() {
-    let tick = Tick { value: 1e-15, label: "tiny".to_string(), pixel: 1e-15 };
+    let tick = Tick {
+        value: 1e-15,
+        label: "tiny".to_string(),
+        pixel: 1e-15,
+    };
     let json = serde_json::to_string(&tick).expect("serialize tiny-pixel tick");
     let back: Tick = serde_json::from_str(&json).expect("deserialize");
-    assert!((back.pixel - 1e-15).abs() < 1e-20, "pixel precision lost: {}", back.pixel);
+    assert!(
+        (back.pixel - 1e-15).abs() < 1e-20,
+        "pixel precision lost: {}",
+        back.pixel
+    );
 }
 
 #[test]
 fn tick_very_large_value_round_trips() {
-    let tick = Tick { value: 1e300, label: "huge".to_string(), pixel: 500.0 };
+    let tick = Tick {
+        value: 1e300,
+        label: "huge".to_string(),
+        pixel: 500.0,
+    };
     let json = serde_json::to_string(&tick).expect("serialize huge-value tick");
     let back: Tick = serde_json::from_str(&json).expect("deserialize");
     assert!((back.value - 1e300).abs() < 1e290);
@@ -629,19 +765,34 @@ fn tick_very_large_value_round_trips() {
 #[test]
 fn circle_nan_coordinates_serialize_as_null_not_literal() {
     let node = SceneNode::Circle {
-        cx: f64::NAN, cy: f64::NAN, r: 3.0, style: default_fill_stroke(),
+        cx: f64::NAN,
+        cy: f64::NAN,
+        r: 3.0,
+        style: default_fill_stroke(),
     };
     let json = serde_json::to_string(&node).expect("NaN circle serializes");
-    assert!(!json.contains("NaN"), "JSON must not contain literal 'NaN': {json}");
-    assert!(json.contains("null"), "NaN f64 should serialize as null: {json}");
+    assert!(
+        !json.contains("NaN"),
+        "JSON must not contain literal 'NaN': {json}"
+    );
+    assert!(
+        json.contains("null"),
+        "NaN f64 should serialize as null: {json}"
+    );
 }
 
 #[test]
 fn path_nan_coordinates_serialize_without_panic() {
     let node = SceneNode::Path {
         commands: vec![
-            PathCmd::MoveTo { x: f64::NAN, y: 0.0 },
-            PathCmd::LineTo { x: 100.0, y: f64::NAN },
+            PathCmd::MoveTo {
+                x: f64::NAN,
+                y: 0.0,
+            },
+            PathCmd::LineTo {
+                x: 100.0,
+                y: f64::NAN,
+            },
             PathCmd::Close,
         ],
         style: default_fill_stroke(),
@@ -654,8 +805,12 @@ fn path_nan_coordinates_serialize_without_panic() {
 #[test]
 fn rect_zero_dimension_serializes_and_deserializes() {
     let node = SceneNode::Rect {
-        x: 50.0, y: 100.0, w: 0.0, h: 200.0,
-        style: default_fill_stroke(), corner_radius: 0.0,
+        x: 50.0,
+        y: 100.0,
+        w: 0.0,
+        h: 200.0,
+        style: default_fill_stroke(),
+        corner_radius: 0.0,
     };
     let json = serde_json::to_string(&node).expect("zero-width rect serializes");
     let back: SceneNode = serde_json::from_str(&json).expect("deserializes");
@@ -671,8 +826,12 @@ fn rect_zero_dimension_serializes_and_deserializes() {
 #[test]
 fn rect_nan_dimensions_serialize_as_null() {
     let node = SceneNode::Rect {
-        x: f64::NAN, y: f64::NAN, w: f64::NAN, h: f64::NAN,
-        style: default_fill_stroke(), corner_radius: 0.0,
+        x: f64::NAN,
+        y: f64::NAN,
+        w: f64::NAN,
+        h: f64::NAN,
+        style: default_fill_stroke(),
+        corner_radius: 0.0,
     };
     let json = serde_json::to_string(&node).expect("NaN rect serializes");
     assert!(!json.contains("NaN"));
@@ -681,11 +840,20 @@ fn rect_nan_dimensions_serialize_as_null() {
 #[test]
 fn circle_infinity_coordinates_serialize_as_null() {
     let node = SceneNode::Circle {
-        cx: f64::INFINITY, cy: f64::NEG_INFINITY, r: 5.0, style: default_fill_stroke(),
+        cx: f64::INFINITY,
+        cy: f64::NEG_INFINITY,
+        r: 5.0,
+        style: default_fill_stroke(),
     };
     let json = serde_json::to_string(&node).expect("Infinity circle serializes");
-    assert!(!json.contains("Infinity"), "JSON must not contain 'Infinity': {json}");
-    assert!(!json.contains("-Infinity"), "JSON must not contain '-Infinity': {json}");
+    assert!(
+        !json.contains("Infinity"),
+        "JSON must not contain 'Infinity': {json}"
+    );
+    assert!(
+        !json.contains("-Infinity"),
+        "JSON must not contain '-Infinity': {json}"
+    );
 }
 
 #[test]
@@ -693,13 +861,16 @@ fn cartesian_degenerate_domain_round_trips() {
     let coord = CoordKind::Cartesian {
         x_domain: Some((5.0, 5.0)),
         y_domain: Some((0.0, 0.0)),
-        expand: true, clip: true,
+        expand: true,
+        clip: true,
         y_domains: Vec::new(),
     };
     let json = serde_json::to_string(&coord).expect("serialize");
     let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
     match back {
-        CoordKind::Cartesian { x_domain, y_domain, .. } => {
+        CoordKind::Cartesian {
+            x_domain, y_domain, ..
+        } => {
             assert_eq!(x_domain.unwrap(), (5.0, 5.0));
             assert_eq!(y_domain.unwrap(), (0.0, 0.0));
         }
@@ -710,10 +881,15 @@ fn cartesian_degenerate_domain_round_trips() {
 #[test]
 fn scene_graph_zero_panels_round_trips() {
     let scene = SceneGraph {
-        width: 600.0, height: 400.0,
+        width: 600.0,
+        height: 400.0,
         background: Some(Color::rgb(255, 255, 255)),
-        title: vec![], legend: vec![], panels: vec![], decorations: vec![],
-        selections: vec![], interaction: Default::default(),
+        title: vec![],
+        legend: vec![],
+        panels: vec![],
+        decorations: vec![],
+        selections: vec![],
+        interaction: Default::default(),
         chart_description: None,
     };
     let json = serde_json::to_string(&scene).expect("serialize");
@@ -723,21 +899,39 @@ fn scene_graph_zero_panels_round_trips() {
 
 #[test]
 fn tick_nan_pixel_serializes_as_null() {
-    let tick = Tick { value: 5.0, label: "5".to_string(), pixel: f64::NAN };
+    let tick = Tick {
+        value: 5.0,
+        label: "5".to_string(),
+        pixel: f64::NAN,
+    };
     let json = serde_json::to_string(&tick).expect("serialize tick with NaN pixel");
-    assert!(!json.contains("NaN"), "Tick pixel must not serialize as 'NaN': {json}");
+    assert!(
+        !json.contains("NaN"),
+        "Tick pixel must not serialize as 'NaN': {json}"
+    );
 }
 
 #[test]
 fn tick_infinity_serializes_as_null() {
-    let tick = Tick { value: f64::INFINITY, label: "Inf".to_string(), pixel: 500.0 };
+    let tick = Tick {
+        value: f64::INFINITY,
+        label: "Inf".to_string(),
+        pixel: 500.0,
+    };
     let json = serde_json::to_string(&tick).expect("serialize tick with Inf");
-    assert!(!json.contains("Infinity"), "JSON must not contain 'Infinity': {json}");
+    assert!(
+        !json.contains("Infinity"),
+        "JSON must not contain 'Infinity': {json}"
+    );
 }
 
 #[test]
 fn tick_level_empty_ticks_round_trips() {
-    let level = TickLevel { min_zoom: 1.0, max_zoom: 100.0, ticks: vec![] };
+    let level = TickLevel {
+        min_zoom: 1.0,
+        max_zoom: 100.0,
+        ticks: vec![],
+    };
     let json = serde_json::to_string(&level).expect("serialize empty TickLevel");
     let back: TickLevel = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.ticks.len(), 0);
@@ -745,7 +939,11 @@ fn tick_level_empty_ticks_round_trips() {
 
 #[test]
 fn tick_level_infinity_max_zoom_round_trips() {
-    let level = TickLevel { min_zoom: 1.0, max_zoom: f64::INFINITY, ticks: vec![] };
+    let level = TickLevel {
+        min_zoom: 1.0,
+        max_zoom: f64::INFINITY,
+        ticks: vec![],
+    };
     let json = serde_json::to_string(&level).expect("serialize with Infinity");
     let back: TickLevel = serde_json::from_str(&json).expect("deserialize");
     assert!(back.max_zoom.is_infinite());
@@ -753,14 +951,25 @@ fn tick_level_infinity_max_zoom_round_trips() {
 
 #[test]
 fn tick_all_nan_fields_serialize_without_panic() {
-    let tick = Tick { value: f64::NAN, label: String::new(), pixel: f64::NAN };
+    let tick = Tick {
+        value: f64::NAN,
+        label: String::new(),
+        pixel: f64::NAN,
+    };
     let json = serde_json::to_string(&tick).expect("serialize all-NaN tick");
-    assert!(!json.contains("NaN"), "JSON must not contain literal 'NaN': {json}");
+    assert!(
+        !json.contains("NaN"),
+        "JSON must not contain literal 'NaN': {json}"
+    );
 }
 
 #[test]
 fn tick_empty_label_round_trips() {
-    let tick = Tick { value: 0.0, label: String::new(), pixel: 100.0 };
+    let tick = Tick {
+        value: 0.0,
+        label: String::new(),
+        pixel: 100.0,
+    };
     let json = serde_json::to_string(&tick).expect("serialize empty-label tick");
     let back: Tick = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.label, "");
@@ -780,9 +989,13 @@ fn mark_batch_empty_nodes_round_trips() {
         kind: MarkBatchKind::Point,
         nodes: vec![],
         data_indices: Some(vec![]),
-        tooltips: None, hrefs: None, descriptions: None, keys: None,
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
+        keys: None,
         blend: BlendMode::Normal,
-        stroke_cap: None, stroke_join: None,
+        stroke_cap: None,
+        stroke_join: None,
         packed_instances: None,
         y_slot: 0,
     };
@@ -794,21 +1007,36 @@ fn mark_batch_empty_nodes_round_trips() {
 #[test]
 fn scene_graph_nan_dimensions_serialize() {
     let scene = SceneGraph {
-        width: f64::NAN, height: f64::NAN, background: None,
-        title: vec![], legend: vec![], panels: vec![], decorations: vec![],
-        selections: vec![], interaction: Default::default(),
+        width: f64::NAN,
+        height: f64::NAN,
+        background: None,
+        title: vec![],
+        legend: vec![],
+        panels: vec![],
+        decorations: vec![],
+        selections: vec![],
+        interaction: Default::default(),
         chart_description: None,
     };
     let json = serde_json::to_string(&scene).expect("serialize NaN scene");
-    assert!(!json.contains("NaN"), "SceneGraph must not contain 'NaN': {json}");
+    assert!(
+        !json.contains("NaN"),
+        "SceneGraph must not contain 'NaN': {json}"
+    );
 }
 
 #[test]
 fn scene_graph_zero_dimensions_round_trips() {
     let scene = SceneGraph {
-        width: 0.0, height: 0.0, background: None,
-        title: vec![], legend: vec![], panels: vec![], decorations: vec![],
-        selections: vec![], interaction: Default::default(),
+        width: 0.0,
+        height: 0.0,
+        background: None,
+        title: vec![],
+        legend: vec![],
+        panels: vec![],
+        decorations: vec![],
+        selections: vec![],
+        interaction: Default::default(),
         chart_description: None,
     };
     let json = serde_json::to_string(&scene).expect("serialize zero-dim scene");
@@ -820,7 +1048,9 @@ fn scene_graph_zero_dimensions_round_trips() {
 #[test]
 fn fill_stroke_zero_opacity_round_trips() {
     let fs = FillStroke {
-        opacity: 0.0, stroke_opacity: 0.0, fill_opacity: 0.0,
+        opacity: 0.0,
+        stroke_opacity: 0.0,
+        fill_opacity: 0.0,
         ..default_fill_stroke()
     };
     let json = serde_json::to_string(&fs).expect("serialize zero-opacity");
@@ -831,7 +1061,8 @@ fn fill_stroke_zero_opacity_round_trips() {
 #[test]
 fn fill_stroke_nan_opacity_serializes() {
     let fs = FillStroke {
-        fill: None, stroke: None,
+        fill: None,
+        stroke: None,
         stroke_width: 0.0,
         opacity: f64::NAN,
         stroke_dash: None,
@@ -840,5 +1071,8 @@ fn fill_stroke_nan_opacity_serializes() {
         angle: 0.0,
     };
     let json = serde_json::to_string(&fs).expect("serialize NaN opacity");
-    assert!(!json.contains("NaN"), "FillStroke NaN must not appear as literal: {json}");
+    assert!(
+        !json.contains("NaN"),
+        "FillStroke NaN must not appear as literal: {json}"
+    );
 }

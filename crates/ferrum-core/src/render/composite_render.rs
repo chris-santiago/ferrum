@@ -69,7 +69,9 @@ use arrow::record_batch::RecordBatch;
 use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
 
 use crate::layout::facet::ResolveMode;
-use crate::layout::legend::{layout_aux_legends, layout_color_legend, LEGEND_OUTER_PAD, LEGEND_PLOT_GAP};
+use crate::layout::legend::{
+    layout_aux_legends, layout_color_legend, LEGEND_OUTER_PAD, LEGEND_PLOT_GAP,
+};
 use crate::layout::text_metrics::TextMetrics;
 use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendEntry, LegendLayout, LegendOrient, LegendOverrides,
@@ -82,10 +84,10 @@ use super::composite::{
     effective_share, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError,
     LeafResolveInput,
 };
-use super::scale_resolve::{ColorScale, LeafScaleContext};
-use super::svg::uniquify_clip_ids;
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
+use super::scale_resolve::{ColorScale, LeafScaleContext};
+use super::svg::uniquify_clip_ids;
 use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 
@@ -168,10 +170,22 @@ impl std::fmt::Display for CompositeRenderError {
                 "composite leaf count mismatch: tree has {expected} leaves, got {got} leaf inputs"
             ),
             Self::Resolve(e) => write!(f, "composite scale resolution failed: {e}"),
-            Self::LeafRender { kind, index, source } => {
-                write!(f, "failed to render composite {kind} leaf #{index}: {source}")
+            Self::LeafRender {
+                kind,
+                index,
+                source,
+            } => {
+                write!(
+                    f,
+                    "failed to render composite {kind} leaf #{index}: {source}"
+                )
             }
-            Self::LeafDataIndexOutOfBounds { kind, index, data, payload_count } => write!(
+            Self::LeafDataIndexOutOfBounds {
+                kind,
+                index,
+                data,
+                payload_count,
+            } => write!(
                 f,
                 "composite {kind} leaf #{index}: data index {data} out of bounds \
                  ({payload_count} payload(s) provided)"
@@ -305,7 +319,11 @@ pub(crate) fn render_composite_scene(
         });
         let (mut scene, leaf_warnings, bundle, imposition_applied) =
             render_leaf(leaf, ctx_opt, impose_plot_area).map_err(|source| {
-                CompositeRenderError::LeafRender { kind: "leaf", index: i, source }
+                CompositeRenderError::LeafRender {
+                    kind: "leaf",
+                    index: i,
+                    source,
+                }
             })?;
         // Geometry parity was ESTABLISHED for this leaf iff `render_leaf`
         // itself reports it applied the override — `render_leaf` is the only
@@ -359,7 +377,14 @@ pub(crate) fn render_composite_scene(
     );
 
     // Root figure chrome (title/subtitle/caption/config) — validated root-only.
-    if let CompositeNode::Composite { title, subtitle, caption, config, .. } = tree {
+    if let CompositeNode::Composite {
+        title,
+        subtitle,
+        caption,
+        config,
+        ..
+    } = tree
+    {
         let (left_inset, right_inset, anchor) =
             resolve_root_chrome_config(config.as_ref(), tree.kind_name())?;
         inject_root_chrome(
@@ -401,11 +426,12 @@ pub(crate) fn render_composite_scene(
 ///   [`overlay_imposition_safe`] (below) refuses the override for any leaf
 ///   whose axis/grid would draw ABOVE marks (`AxisLayout::draws_above_marks`,
 ///   `zindex >= 1`), which is the ONLY routing that leaks stale axis/grid
-///   content into `Panel.annotations` (scene_build.rs:924-1010) — a slot this
-///   function's caller does NOT clear. For every leaf this override actually
-///   applies to, the stale below-marks axis/grid nodes therefore land
-///   exclusively in `Panel.axes`/`Panel.grid` — see the third bullet below
-///   for why `Panel.grid` is not purely gridlines either.
+///   content into `Panel.chrome_above` (a typed sibling of
+///   `Panel.annotations`, GH #89B/task 2) — a slot this function's caller
+///   does NOT clear. For every leaf this override actually applies to, the
+///   stale below-marks axis/grid nodes therefore land exclusively in
+///   `Panel.axes`/`Panel.grid` — see the third bullet below for the
+///   below-marks-annotation refusal's now-historical rationale.
 /// - **`layout.legend`/`layout.aux_legends`** are ALSO left un-recomputed by
 ///   this override, and the merge seam never suppresses a leaf's legend (it
 ///   is owned by the separate shared/per-leaf legend machinery) — so
@@ -413,21 +439,25 @@ pub(crate) fn render_composite_scene(
 ///   leaf that reserved legend/aux-legend gutter, since an imposed (and
 ///   possibly widened) rect would otherwise place this leaf's marks across
 ///   its own untouched legend box.
-/// - **`Panel.grid` is not gridlines-only.** `scene_build.rs:417` folds
-///   `AnnotationSpec::Text { z: "below_marks", .. }` user-annotation nodes
-///   into the SAME below-marks bucket that becomes `Panel.grid` — a leaf
-///   carrying one of those (`fa.text(..., z="below_marks")`, a public,
-///   documented annotation option) would have that annotation's node
-///   silently deleted by the merge seam's `panel.grid.clear()`, not just its
-///   gridlines (found in review cycle 3: the same slot-commingling class as
-///   the axis/legend hazards above, with content in the chrome slot instead
-///   of chrome in the content slot). [`overlay_imposition_safe`] therefore
-///   also refuses the override for any leaf whose `chart_config.annotations`
-///   carries one — this override's caller does not (and, short of adding
-///   node provenance to `SceneNode` — out of this task's scope — cannot)
-///   distinguish "this `Panel.grid` entry is a gridline" from "this
-///   `Panel.grid` entry is a user annotation" at the merge seam, so refusal
-///   is the only safe move available here.
+/// - **`Panel.grid` IS gridlines-only, as of GH #89B (task 2).** Before that
+///   task, `scene_build.rs` folded `AnnotationSpec::Text { z: "below_marks",
+///   .. }` user-annotation nodes into the SAME below-marks bucket that
+///   became `Panel.grid` — a leaf carrying one of those (`fa.text(..., z=
+///   "below_marks")`, a public, documented annotation option) would have had
+///   that annotation's node silently deleted by the merge seam's
+///   `panel.grid.clear()`, not just its gridlines (found in review cycle 3:
+///   the same slot-commingling class as the axis/legend hazards above, with
+///   content in the chrome slot instead of chrome in the content slot). GH
+///   #89B split below-marks text annotations into a separate typed
+///   `Panel.below_marks` slot (a sibling of `Panel.grid`, not a sub-bucket of
+///   it) — `panel.grid.clear()` cannot reach one anymore, so this specific
+///   hazard is closed. [`overlay_imposition_safe`]'s refusal condition below
+///   is UNCHANGED, however: it still refuses the override for any leaf whose
+///   `chart_config.annotations` carries a below-marks entry, on the same
+///   trigger as before. That refusal is therefore now conservative rather
+///   than load-bearing — the residuals-batch design spec (§4.2) names it as
+///   one of the three former refusal shapes a later task (Task 4) retires;
+///   not touched here.
 ///
 /// A leaf failing any safety check, or resolving to more than one panel,
 /// keeps its own natively-computed `plot_area` — this function reports
@@ -461,7 +491,15 @@ fn render_leaf(
     leaf: &CompositeLeafInput<'_>,
     ctx: Option<&LeafScaleContext>,
     impose_plot_area: Option<LayoutRect>,
-) -> Result<(SceneGraph, Vec<RenderWarning>, Option<LeafLegendBundle>, bool), RenderError> {
+) -> Result<
+    (
+        SceneGraph,
+        Vec<RenderWarning>,
+        Option<LeafLegendBundle>,
+        bool,
+    ),
+    RenderError,
+> {
     // `prepare_and_layout` has no viewport guard of its own — `render_svg`/
     // `render_scene_json` each check this before calling it; a composite leaf
     // bypasses those entries, so the check is repeated here.
@@ -520,17 +558,25 @@ fn render_leaf(
 ///
 /// 1. Any axis whose `zindex` routes it to draw ABOVE marks
 ///    (`AxisLayout::draws_above_marks`) — that routing lands the axis/grid
-///    nodes in `Panel.annotations`, a slot the merge seam does not clear, so
-///    a stale-position axis would survive suppression undetected.
+///    nodes in `Panel.chrome_above` (a typed sibling of `Panel.annotations`,
+///    GH #89B/task 2), a slot the merge seam does not clear, so a
+///    stale-position axis would survive suppression undetected.
 /// 2. Any reserved legend/aux-legend gutter (`layout.legend`/
 ///    `layout.aux_legends`) — the merge seam never suppresses a leaf's
 ///    legend, so an imposed (possibly wider) rect would place marks across
 ///    an unmoved legend box.
 /// 3. Any `AnnotationSpec::Text` with `z == "below_marks"` on
-///    `chart_config.annotations` — `scene_build.rs:417` folds those nodes
-///    into the SAME below-marks bucket that becomes `Panel.grid`
-///    (`scene_build.rs:434`), so `merge_children`'s `panel.grid.clear()`
-///    would silently delete the user's annotation, not just gridlines.
+///    `chart_config.annotations`. Before GH #89B (task 2), `scene_build.rs`
+///    folded those nodes into the SAME below-marks bucket that became
+///    `Panel.grid`, so `merge_children`'s `panel.grid.clear()` would
+///    silently delete the user's annotation, not just gridlines — this check
+///    existed to prevent exactly that. As of GH #89B, below-marks text
+///    annotations route into a separate typed `Panel.below_marks` slot
+///    instead, which `panel.grid.clear()` cannot reach — the hazard this
+///    check guards against no longer occurs. The refusal below is UNCHANGED
+///    and still fires on the same trigger, so it is now conservative rather
+///    than load-bearing (spec §4.2 names it as one of three former refusal
+///    shapes retired by a later task, Task 4).
 ///
 /// Checked against `secondary_y_axes` too (empty for every leaf without an
 /// independent-y layer — vacuously safe there).
@@ -544,10 +590,9 @@ fn overlay_imposition_safe(
         .chain(layout.secondary_y_axes.iter())
         .all(|a| !a.draws_above_marks());
     let no_legend_gutter = layout.legend.is_none() && layout.aux_legends.is_empty();
-    let no_below_marks_annotation = !chart_config
-        .annotations
-        .iter()
-        .any(|a| matches!(a, super::annotation::AnnotationSpec::Text { z, .. } if z == "below_marks"));
+    let no_below_marks_annotation = !chart_config.annotations.iter().any(
+        |a| matches!(a, super::annotation::AnnotationSpec::Text { z, .. } if z == "below_marks"),
+    );
     no_above_marks_axis && no_legend_gutter && no_below_marks_annotation
 }
 
@@ -717,11 +762,24 @@ struct ChannelWalk {
 /// explicit per-chart `scale=`, or under an explicitly-independent nested node
 /// (excluded from the union), keeps its own panel legend.
 fn plan_legend_bands(tree: &CompositeNode, contexts: &mut [LeafScaleContext]) -> LegendBandPlan {
-    let mut plan = LegendBandPlan { band_nodes: HashMap::new() };
+    let mut plan = LegendBandPlan {
+        band_nodes: HashMap::new(),
+    };
     let mut leaf_cursor = 0usize;
     let mut node_cursor = 0usize;
-    let root = ChannelWalk { scale_inherited: ResolveMode::Independent, band_active: false };
-    plan_legend_walk(tree, contexts, &mut leaf_cursor, &mut node_cursor, root, root, &mut plan);
+    let root = ChannelWalk {
+        scale_inherited: ResolveMode::Independent,
+        band_active: false,
+    };
+    plan_legend_walk(
+        tree,
+        contexts,
+        &mut leaf_cursor,
+        &mut node_cursor,
+        root,
+        root,
+        &mut plan,
+    );
     plan
 }
 
@@ -757,7 +815,9 @@ fn plan_legend_walk(
             }
         }
         CompositeNode::Hole { .. } => {}
-        CompositeNode::Composite { children, resolve, .. } => {
+        CompositeNode::Composite {
+            children, resolve, ..
+        } => {
             let node_idx = *node_cursor;
             *node_cursor += 1;
             // Must agree bit-for-bit with `resolve_nonpositional`'s union gate
@@ -769,13 +829,26 @@ fn plan_legend_walk(
             // positional x/y concern only.
             let (color_next, color_band) =
                 descend_channel(resolve.color, resolve.legend.color, color);
-            let (size_next, size_band) =
-                descend_channel(resolve.size, resolve.legend.size, size);
+            let (size_next, size_band) = descend_channel(resolve.size, resolve.legend.size, size);
             if color_band || size_band {
-                plan.band_nodes.insert(node_idx, BandFlags { color: color_band, size: size_band });
+                plan.band_nodes.insert(
+                    node_idx,
+                    BandFlags {
+                        color: color_band,
+                        size: size_band,
+                    },
+                );
             }
             for c in children {
-                plan_legend_walk(c, contexts, leaf_cursor, node_cursor, color_next, size_next, plan);
+                plan_legend_walk(
+                    c,
+                    contexts,
+                    leaf_cursor,
+                    node_cursor,
+                    color_next,
+                    size_next,
+                    plan,
+                );
             }
         }
     }
@@ -807,16 +880,24 @@ fn plan_overlay_rect_groups(tree: &CompositeNode, n_leaves: usize) -> Vec<Option
     groups
 }
 
-fn plan_overlay_rect_walk(node: &CompositeNode, leaf_cursor: &mut usize, groups: &mut [Option<usize>]) {
+fn plan_overlay_rect_walk(
+    node: &CompositeNode,
+    leaf_cursor: &mut usize,
+    groups: &mut [Option<usize>],
+) {
     match node {
         CompositeNode::Leaf { .. } => {
             *leaf_cursor += 1;
         }
         CompositeNode::Hole { .. } => {}
-        CompositeNode::Composite { layout, children, .. } => {
+        CompositeNode::Composite {
+            layout, children, ..
+        } => {
             if *layout == CompositeLayout::Overlay
                 && children.len() > 1
-                && children.iter().all(|c| matches!(c, CompositeNode::Leaf { .. }))
+                && children
+                    .iter()
+                    .all(|c| matches!(c, CompositeNode::Leaf { .. }))
             {
                 let group_start = *leaf_cursor;
                 for j in 1..children.len() {
@@ -836,7 +917,12 @@ fn plan_overlay_rect_walk(node: &CompositeNode, leaf_cursor: &mut usize, groups:
 /// `From` impl exists between the two crates (scene_build.rs:259-264
 /// constructs the reverse direction the same field-by-field way).
 fn scene_rect_to_layout_rect(r: Rect) -> LayoutRect {
-    LayoutRect { x: r.x, y: r.y, w: r.w, h: r.h }
+    LayoutRect {
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+    }
 }
 
 /// Advance one channel's [`ChannelWalk`] across a composite node, returning the
@@ -998,13 +1084,21 @@ fn layout_band_legends(
     let theme = &bundle.theme;
     let orient = theme.legend.legend_orient;
     let overrides = &bundle.overrides;
-    let inner = LayoutRect { x: 0.0, y: 0.0, w: LEGEND_SANDBOX, h: LEGEND_SANDBOX };
+    let inner = LayoutRect {
+        x: 0.0,
+        y: 0.0,
+        w: LEGEND_SANDBOX,
+        h: LEGEND_SANDBOX,
+    };
 
     // `!flags.color`: an empty-entries + no-colorbar input makes the shared
     // dispatch a no-op `(None, inner, ..)` via `layout_legend`'s empty-entries
     // early return — matching the pre-extraction "never attempted layout" skip.
-    let (color_entries, color_colorbar): (&[LegendEntry], Option<&ColorbarInput>) =
-        if flags.color { (&bundle.entries, bundle.colorbar.as_ref()) } else { (&[], None) };
+    let (color_entries, color_colorbar): (&[LegendEntry], Option<&ColorbarInput>) = if flags.color {
+        (&bundle.entries, bundle.colorbar.as_ref())
+    } else {
+        (&[], None)
+    };
     let (color_legend, inner_after, effective_label_font_size) = layout_color_legend(
         inner,
         orient,
@@ -1098,7 +1192,12 @@ fn legend_layouts_extent(
             let mut max_tick = 0.0_f64;
             for tk in &cb.ticks {
                 max_tick = max_tick.max(metrics.measure_width(&tk.label, label_fs));
-                acc(cb.bar_rect.x, tk.y - line_h / 2.0, cb.bar_rect.x, tk.y + line_h / 2.0);
+                acc(
+                    cb.bar_rect.x,
+                    tk.y - line_h / 2.0,
+                    cb.bar_rect.x,
+                    tk.y + line_h / 2.0,
+                );
             }
             acc(
                 cb.bar_rect.x,
@@ -1172,7 +1271,11 @@ fn build_placed(
             *panel_base += scene.panels.len();
             *leaf_cursor += 1;
             let (width, height) = (scene.width, scene.height);
-            Placed { scene, width, height }
+            Placed {
+                scene,
+                width,
+                height,
+            }
         }
         // A hole is not a leaf: it consumes no scene from `scenes`, claims no
         // panel ids, and carries no label/chrome — it renders as an empty
@@ -1196,9 +1299,22 @@ fn build_placed(
             } else {
                 (0.0, 0.0)
             };
-            Placed { scene: empty_scene(w, h), width: w, height: h }
+            Placed {
+                scene: empty_scene(w, h),
+                width: w,
+                height: h,
+            }
         }
-        CompositeNode::Composite { layout, children, spacing, row_ratios, col_ratios, ncols, nrows, .. } => {
+        CompositeNode::Composite {
+            layout,
+            children,
+            spacing,
+            row_ratios,
+            col_ratios,
+            ncols,
+            nrows,
+            ..
+        } => {
             // Captured BEFORE recursing into children, at the same point
             // `plan_legend_walk`'s `Composite` arm captures its own
             // `node_idx` — keeping the two walks' pre-order numbering
@@ -1218,7 +1334,16 @@ fn build_placed(
                 .iter()
                 .map(|c| {
                     child_leaf_starts.push(*leaf_cursor);
-                    build_placed(c, scenes, panel_base, leaf_cursor, node_cursor, call_theme, band_ctx, Some(*layout))
+                    build_placed(
+                        c,
+                        scenes,
+                        panel_base,
+                        leaf_cursor,
+                        node_cursor,
+                        call_theme,
+                        band_ctx,
+                        Some(*layout),
+                    )
                 })
                 .collect();
             let spacing = spacing.unwrap_or(DEFAULT_SPACING);
@@ -1242,13 +1367,18 @@ fn build_placed(
             // proxy can disagree with what actually happened). `render_leaf`
             // itself refuses the override (`overlay_imposition_safe`, cycle-3
             // review) for a leaf whose axis/grid would draw ABOVE marks
-            // (leaks stale chrome into `Panel.annotations`, a slot this seam
+            // (leaks stale chrome into `Panel.chrome_above`, a typed sibling
+            // of `Panel.annotations` as of GH #89B/task 2 — a slot this seam
             // never clears), that reserves its own legend/aux-legend gutter
             // (never suppressed here, so an imposed wider rect would run
             // marks across it), or that carries a below-marks text
-            // annotation (folded into the SAME `Panel.grid` bucket this seam
-            // clears — clearing it would delete the annotation, not just
-            // gridlines) — so consulting the flag (rather than suppressing
+            // annotation (before GH #89B, folded into the SAME `Panel.grid`
+            // bucket this seam clears, so clearing it would have deleted the
+            // annotation; as of GH #89B that content lives in the separate
+            // `Panel.below_marks` slot instead, which this seam's
+            // `panel.grid.clear()` cannot reach — the refusal below fires on
+            // the same trigger regardless, now conservative rather than
+            // load-bearing) — so consulting the flag (rather than suppressing
             // unconditionally whenever `layout == Overlay`) means EVERY
             // un-provable case — a nested composite child, an
             // above-marks-axis child, a legend-gutter child, a below-marks-
@@ -1263,7 +1393,12 @@ fn build_placed(
                     .iter()
                     .enumerate()
                     .map(|(j, &leaf_idx)| {
-                        j > 0 && band_ctx.chrome_suppressed.get(leaf_idx).copied().unwrap_or(false)
+                        j > 0
+                            && band_ctx
+                                .chrome_suppressed
+                                .get(leaf_idx)
+                                .copied()
+                                .unwrap_or(false)
                     })
                     .collect()
             } else {
@@ -1278,7 +1413,12 @@ fn build_placed(
             // title band stacks above the legend exactly as it does for a
             // per-panel legend.
             if let Some(flags) = band_ctx.plan.band_nodes.get(&node_idx) {
-                apply_legend_band(&mut merged.scene, band_ctx, leaf_start..*leaf_cursor, *flags);
+                apply_legend_band(
+                    &mut merged.scene,
+                    band_ctx,
+                    leaf_start..*leaf_cursor,
+                    *flags,
+                );
                 merged.width = merged.scene.width;
                 merged.height = merged.scene.height;
             }
@@ -1381,9 +1521,17 @@ fn plan_linear(children: &[Placed], spacing: f64, horizontal: bool) -> LayoutPla
     }
     let main = (cursor - spacing).max(0.0);
     if horizontal {
-        LayoutPlan { placements, width: main, height: cross }
+        LayoutPlan {
+            placements,
+            width: main,
+            height: cross,
+        }
     } else {
-        LayoutPlan { placements, width: cross, height: main }
+        LayoutPlan {
+            placements,
+            width: cross,
+            height: main,
+        }
     }
 }
 
@@ -1393,7 +1541,11 @@ fn plan_overlay(children: &[Placed]) -> LayoutPlan {
     let width = children.iter().map(|c| c.width).fold(0.0_f64, f64::max);
     let height = children.iter().map(|c| c.height).fold(0.0_f64, f64::max);
     let placements = children.iter().map(|_| translate(0.0, 0.0)).collect();
-    LayoutPlan { placements, width, height }
+    LayoutPlan {
+        placements,
+        width,
+        height,
+    }
 }
 
 /// Wrap: children flow left-to-right into rows of `cols`, wrapping to the next
@@ -1415,7 +1567,11 @@ fn plan_wrap(children: &[Placed], spacing: f64, cols: usize) -> LayoutPlan {
         y += row_h + spacing;
     }
     let total_h = (y - spacing).max(0.0);
-    LayoutPlan { placements, width: total_w, height: total_h }
+    LayoutPlan {
+        placements,
+        width: total_w,
+        height: total_h,
+    }
 }
 
 /// Grid: row-major placement with F20 ratio math (absorbed from the deleted
@@ -1463,18 +1619,35 @@ fn plan_grid(
     let mut placements = vec![translate(0.0, 0.0); children.len()];
     for (idx, c) in children.iter().enumerate() {
         let (r, col) = (idx / cols, idx % cols);
-        let mut sx = if c.width > 0.0 { col_w[col] / c.width } else { 1.0 };
-        let mut sy = if c.height > 0.0 { row_h[r] / c.height } else { 1.0 };
+        let mut sx = if c.width > 0.0 {
+            col_w[col] / c.width
+        } else {
+            1.0
+        };
+        let mut sy = if c.height > 0.0 {
+            row_h[r] / c.height
+        } else {
+            1.0
+        };
         if (sx - 1.0).abs() < SLOT_MATCH_EPS && (sy - 1.0).abs() < SLOT_MATCH_EPS {
             sx = 1.0;
             sy = 1.0;
         }
-        placements[idx] = LayoutScale { sx, sy, tx: col_x[col], ty: row_y[r] };
+        placements[idx] = LayoutScale {
+            sx,
+            sy,
+            tx: col_x[col],
+            ty: row_y[r],
+        };
     }
 
     let total_w = col_w.iter().sum::<f64>() + spacing * cols.saturating_sub(1) as f64;
     let total_h = row_h.iter().sum::<f64>() + spacing * rows.saturating_sub(1) as f64;
-    LayoutPlan { placements, width: total_w, height: total_h }
+    LayoutPlan {
+        placements,
+        width: total_w,
+        height: total_h,
+    }
 }
 
 /// `K = min over lanes of (native[i] / ratio[i])` for lanes with positive ratio
@@ -1484,7 +1657,13 @@ fn fit_factor(ratios: &[f64], native: &[f64]) -> f64 {
     let k = ratios
         .iter()
         .zip(native)
-        .filter_map(|(r, n)| if *r > 0.0 && *n > 0.0 { Some(n / r) } else { None })
+        .filter_map(|(r, n)| {
+            if *r > 0.0 && *n > 0.0 {
+                Some(n / r)
+            } else {
+                None
+            }
+        })
         .fold(f64::INFINITY, f64::min);
     if k.is_finite() {
         k
@@ -1511,16 +1690,23 @@ fn prefix_offsets(extents: &[f64], spacing: f64) -> Vec<f64> {
 /// `suppress_chrome[i]` (P2 chrome suppression, design §6 merge contract;
 /// gated for correctness by the S2 geometry-parity fix below) drops child
 /// `i`'s per-panel `grid`/`axes` and scene-level `title` when `true`, keeping
-/// every other field. **`panel.grid` is NOT gridlines-only** — `scene_build.
-/// rs:417` folds any `AnnotationSpec::Text { z: "below_marks" }` USER
-/// annotation into the same bucket, so clearing it can delete real content,
-/// not just chrome (cycle-3 review). This function does not — and, absent
-/// per-node provenance on `SceneNode` (out of scope here), cannot —
-/// distinguish a gridline from a below-marks annotation once they are both
-/// sitting in `panel.grid`; that is why `render_leaf`'s own
-/// `overlay_imposition_safe` gate refuses suppression+imposition entirely
-/// for any leaf carrying one, rather than this function trying to sort them
-/// out post hoc. The caller ([`build_placed`]'s `Composite` arm) is the ONLY
+/// every other field. **`panel.grid` IS gridlines-only, as of GH #89B (task
+/// 2).** Before that task, `scene_build.rs` folded any
+/// `AnnotationSpec::Text { z: "below_marks" }` USER annotation into the same
+/// bucket, so clearing it could delete real content, not just chrome
+/// (cycle-3 review) — this function could not, absent per-node provenance on
+/// `SceneNode` (out of scope here), distinguish a gridline from a
+/// below-marks annotation once they were both sitting in `panel.grid`; that
+/// is why `render_leaf`'s own `overlay_imposition_safe` gate refuses
+/// suppression+imposition entirely for any leaf carrying one, rather than
+/// this function trying to sort them out post hoc. GH #89B moved below-marks
+/// text annotations into a separate typed `Panel.below_marks` slot instead,
+/// so `panel.grid.clear()` below cannot reach one anymore and the original
+/// hazard this paragraph describes is closed — `overlay_imposition_safe`'s
+/// refusal is unchanged and still fires on the same trigger, now
+/// conservative rather than load-bearing (spec §4.2 names it as one of three
+/// former refusal shapes a later task, Task 4, retires). The caller
+/// ([`build_placed`]'s `Composite` arm) is the ONLY
 /// place `suppress_chrome` is decided: it is `true` exclusively for a
 /// non-primary direct-leaf child of an `Overlay` node whose marks were
 /// actually re-based onto child 0's real rendered rect (`render_leaf`'s
@@ -1557,20 +1743,28 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         // content — the whole point of layering), `legend` (owned by the
         // existing shared/per-leaf legend-suppression machinery, untouched
         // here), `decorations`, `selections`, `background`,
-        // `chart_description`, and the interaction fold below. `annotations`
-        // is ALSO always kept here — never cleared — but is not purely
-        // "never duplicates": an above-marks axis/grid (zindex >= 1) routes
-        // into it too (scene_build.rs:924-1010), which WOULD duplicate
-        // visually. That case never reaches this branch with
-        // `suppress_chrome[i] == true`: `render_leaf`'s
-        // `overlay_imposition_safe` gate refuses imposition+suppression for
-        // any leaf with an above-marks axis (or a reserved legend gutter, or
-        // a below-marks text annotation folded into `panel.grid` below — see
-        // this function's doc). `panel.grid` itself is likewise not
-        // gridlines-only (same scene_build.rs:417 routing folds below-marks
-        // TEXT ANNOTATIONS into it) — clearing it here is real content
-        // deletion for a leaf carrying one, which is exactly the third thing
-        // the safety gate exists to keep out of this branch.
+        // `chart_description`, and the interaction fold below.
+        // `below_marks`, `annotations`, and `chrome_above` (GH #89B/task 2's
+        // typed slots) are ALSO always kept here — never cleared.
+        // `annotations` is not purely "never duplicates": an above-marks
+        // axis/grid (zindex >= 1) routes into `chrome_above` (a typed
+        // sibling of `annotations`, not the same bucket), which WOULD
+        // duplicate visually if this branch ran for such a leaf. That case
+        // never reaches this branch with `suppress_chrome[i] == true`:
+        // `render_leaf`'s `overlay_imposition_safe` gate refuses
+        // imposition+suppression for any leaf with an above-marks axis (or a
+        // reserved legend gutter, or a below-marks text annotation — see
+        // this function's doc). Before GH #89B, `panel.grid` itself was
+        // likewise not gridlines-only (the same pre-#89B routing folded
+        // below-marks TEXT ANNOTATIONS into it), which would have made
+        // clearing it here real content deletion for a leaf carrying one —
+        // exactly the third thing the safety gate exists to keep out of this
+        // branch. As of GH #89B, below-marks annotations live in the
+        // separate `panel.below_marks` slot (untouched by the
+        // `panel.grid.clear()` below), so clearing `panel.grid` itself no
+        // longer risks deleting one — the gate's refusal condition is
+        // unchanged and still fires on the same trigger regardless (spec
+        // §4.2 names this refusal shape as one Task 4 retires).
         if suppress_chrome.get(i).copied().unwrap_or(false) {
             for panel in &mut scene.panels {
                 panel.grid.clear();
@@ -1602,7 +1796,10 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
         let ci = &mut scene.interaction;
         merged.interaction.conditionals.append(&mut ci.conditionals);
         merged.interaction.tick_levels.append(&mut ci.tick_levels);
-        merged.interaction.linked_panels.append(&mut ci.linked_panels);
+        merged
+            .interaction
+            .linked_panels
+            .append(&mut ci.linked_panels);
         for p in ci.params.drain(..) {
             if !merged.interaction.params.iter().any(|q| q.name == p.name) {
                 merged.interaction.params.push(p);
@@ -1628,7 +1825,11 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan, suppress_chrome: &[bo
     merged.interaction.zoom_enabled = zoom;
     merged.interaction.pan_enabled = pan;
     merged.interaction.toolbar = toolbar;
-    Placed { scene: merged, width: plan.width, height: plan.height }
+    Placed {
+        scene: merged,
+        width: plan.width,
+        height: plan.height,
+    }
 }
 
 /// A fresh empty merge target sized to `(w, h)`, carrying the single-chart
@@ -1667,7 +1868,12 @@ fn empty_scene(w: f64, h: f64) -> SceneGraph {
 
 /// A pure-translation [`LayoutScale`].
 fn translate(tx: f64, ty: f64) -> LayoutScale {
-    LayoutScale { sx: 1.0, sy: 1.0, tx, ty }
+    LayoutScale {
+        sx: 1.0,
+        sy: 1.0,
+        tx,
+        ty,
+    }
 }
 
 /// Compose two transforms: `outer ∘ inner` — apply `inner` then `outer`.
@@ -1726,7 +1932,14 @@ fn offset_panel(panel: &mut Panel, dx: f64, dy: f64) {
     offset_rect(&mut panel.plot_area, dx, dy);
     offset_rect(&mut panel.clip, dx, dy);
     offset_nodes(&mut panel.grid, dx, dy);
+    // GH #89B: `below_marks`/`chrome_above` are typed siblings of `grid`/
+    // `annotations`, not sub-buckets of them — they need the same
+    // translation bake every other node slot gets, or a leaf placed anywhere
+    // but the origin strands their content at the pre-placement offset while
+    // its marks (correctly baked below) move to the real position.
+    offset_nodes(&mut panel.below_marks, dx, dy);
     offset_nodes(&mut panel.axes, dx, dy);
+    offset_nodes(&mut panel.chrome_above, dx, dy);
     offset_nodes(&mut panel.annotations, dx, dy);
     offset_nodes(&mut panel.strip_title, dx, dy);
     for batch in &mut panel.marks {
@@ -1829,7 +2042,14 @@ fn offset_path_cmd(cmd: &mut ferrum_scene::PathCmd, dx: f64, dy: f64) {
             *x += dx;
             *y += dy;
         }
-        PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
+        PathCmd::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        } => {
             *c1x += dx;
             *c1y += dy;
             *c2x += dx;
@@ -1856,14 +2076,29 @@ fn offset_path_cmd(cmd: &mut ferrum_scene::PathCmd, dx: f64, dy: f64) {
 /// scene-node world. Applied once per leaf (before placement) so colorbar and
 /// legend-clip defs from different leaves stay disjoint in the merged scene.
 fn uniquify_scene_raw_clips(scene: &mut SceneGraph, cell_idx: usize) {
-    for node in scene.title.iter_mut().chain(&mut scene.legend).chain(&mut scene.decorations) {
+    for node in scene
+        .title
+        .iter_mut()
+        .chain(&mut scene.legend)
+        .chain(&mut scene.decorations)
+    {
         uniquify_node_raw_clips(node, cell_idx);
     }
     for panel in &mut scene.panels {
+        // GH #89B: `below_marks`/`chrome_above` are typed siblings of the
+        // other node slots here, not sub-buckets of `grid`/`annotations` —
+        // include them in the chain so a leaf's `Raw` fragments in either
+        // slot get the same per-leaf clip-id uniquification as every other
+        // slot (latent today: only `AnnotationSpec::Text` reaches
+        // `below_marks`, and axis/grid chrome is Line/Text, so no `Raw` node
+        // currently lands in either — this closes the omission before a
+        // future producer hits it).
         for node in panel
             .grid
             .iter_mut()
+            .chain(&mut panel.below_marks)
             .chain(&mut panel.axes)
+            .chain(&mut panel.chrome_above)
             .chain(&mut panel.annotations)
             .chain(&mut panel.strip_title)
         {
@@ -1911,8 +2146,15 @@ fn inject_root_chrome(
     right_inset: f64,
     anchor: ChromeAnchor,
 ) {
-    let chrome =
-        FigureChrome { title, subtitle, caption, left_inset, right_inset, anchor, ..Default::default() };
+    let chrome = FigureChrome {
+        title,
+        subtitle,
+        caption,
+        left_inset,
+        right_inset,
+        anchor,
+        ..Default::default()
+    };
     apply_chrome_band(scene, chrome);
 }
 
@@ -1947,15 +2189,25 @@ fn resolve_root_chrome_config(
     kind: &'static str,
 ) -> Result<(f64, f64, ChromeAnchor), CompositeRenderError> {
     let parsed: RootChromeConfig = match config {
-        None => RootChromeConfig { left_inset: None, right_inset: None, anchor: None },
+        None => RootChromeConfig {
+            left_inset: None,
+            right_inset: None,
+            anchor: None,
+        },
         Some(value) => serde_json::from_value(value.clone()).map_err(|source| {
-            CompositeRenderError::RootChromeConfigInvalid { kind, message: source.to_string() }
+            CompositeRenderError::RootChromeConfigInvalid {
+                kind,
+                message: source.to_string(),
+            }
         })?,
     };
     let anchor = match parsed.anchor.as_deref() {
         None => ChromeAnchor::Start,
         Some(s) => s.parse::<ChromeAnchor>().map_err(|source| {
-            CompositeRenderError::RootChromeConfigInvalid { kind, message: source.to_string() }
+            CompositeRenderError::RootChromeConfigInvalid {
+                kind,
+                message: source.to_string(),
+            }
         })?,
     };
     Ok((
@@ -2003,13 +2255,13 @@ fn apply_chrome_band(scene: &mut SceneGraph, chrome: FigureChrome<'_>) -> (f64, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::SymbolKind;
     use crate::render::config::RenderConfig;
     use crate::spec::composite::CompositeResolve;
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::DataType as EncDataType;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
-    use crate::layout::SymbolKind;
     use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -2021,8 +2273,14 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2057,7 +2315,11 @@ mod tests {
     }
 
     fn leaf_node(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(scatter_spec()), data, label: None }
+        CompositeNode::Leaf {
+            spec: Box::new(scatter_spec()),
+            data,
+            label: None,
+        }
     }
 
     fn composite(layout: CompositeLayout, children: Vec<CompositeNode>) -> CompositeNode {
@@ -2102,7 +2364,10 @@ mod tests {
             spec: &h.spec,
             batch: &h.batch,
             theme: &h.theme,
-            viewport: Viewport { width: w, height: ht },
+            viewport: Viewport {
+                width: w,
+                height: ht,
+            },
             config: &h.config,
             chart_config: &h.chart_config,
         }
@@ -2118,7 +2383,10 @@ mod tests {
         let y_layer = |field: &str, independent_y: bool| Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                y: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: field.into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2133,7 +2401,10 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2182,13 +2453,21 @@ mod tests {
     }
 
     fn dual_leaf_node(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(dual_axis_spec()), data, label: None }
+        CompositeNode::Leaf {
+            spec: Box::new(dual_axis_spec()),
+            data,
+            label: None,
+        }
     }
 
     // -- layout math ----------------------------------------------------------
 
     fn placed_stub(w: f64, h: f64) -> Placed {
-        Placed { scene: empty_scene(w, h), width: w, height: h }
+        Placed {
+            scene: empty_scene(w, h),
+            width: w,
+            height: h,
+        }
     }
 
     #[test]
@@ -2273,8 +2552,24 @@ mod tests {
             assert_eq!(p.sx, 1.0, "congruent grid must not scale");
             assert_eq!(p.sy, 1.0, "congruent grid must not scale");
         }
-        assert_eq!(plan.placements[0], LayoutScale { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 });
-        assert_eq!(plan.placements[3], LayoutScale { sx: 1.0, sy: 1.0, tx: 55.0, ty: 55.0 });
+        assert_eq!(
+            plan.placements[0],
+            LayoutScale {
+                sx: 1.0,
+                sy: 1.0,
+                tx: 0.0,
+                ty: 0.0
+            }
+        );
+        assert_eq!(
+            plan.placements[3],
+            LayoutScale {
+                sx: 1.0,
+                sy: 1.0,
+                tx: 55.0,
+                ty: 55.0
+            }
+        );
         assert_eq!(plan.width, 105.0); // 50 + 5 + 50
         assert_eq!(plan.height, 105.0);
     }
@@ -2287,11 +2582,23 @@ mod tests {
         let children = vec![placed_stub(80.0, 100.0), placed_stub(80.0, 100.0)];
         let plan = plan_grid(&children, 0.0, 2, 1, Some(&[3.0, 1.0]), None);
         // Row 0: dominant share, native size.
-        assert!((plan.placements[0].sy - 1.0).abs() < 1e-9, "row0 sy={}", plan.placements[0].sy);
+        assert!(
+            (plan.placements[0].sy - 1.0).abs() < 1e-9,
+            "row0 sy={}",
+            plan.placements[0].sy
+        );
         assert_eq!(plan.placements[0].ty, 0.0);
         // Row 1: shrunk to 1/3.
-        assert!((plan.placements[1].sy - (1.0 / 3.0)).abs() < 1e-9, "row1 sy={}", plan.placements[1].sy);
-        assert!((plan.placements[1].ty - 100.0).abs() < 1e-9, "row1 ty={}", plan.placements[1].ty);
+        assert!(
+            (plan.placements[1].sy - (1.0 / 3.0)).abs() < 1e-9,
+            "row1 sy={}",
+            plan.placements[1].sy
+        );
+        assert!(
+            (plan.placements[1].ty - 100.0).abs() < 1e-9,
+            "row1 ty={}",
+            plan.placements[1].ty
+        );
         // Columns: single col, native 80, ratio 1 → K_w=80, slot 80, sx=1.
         assert_eq!(plan.placements[0].sx, 1.0);
         assert_eq!(plan.placements[1].sx, 1.0);
@@ -2310,8 +2617,14 @@ mod tests {
             placed_stub(80.0, 100.0),
         ];
         let plan = plan_grid(&children, 10.0, 2, 2, None, None);
-        assert_eq!(plan.width, 170.0, "80 + 10 + 80, unaffected by the hole's 0 width");
-        assert_eq!(plan.height, 210.0, "100 + 10 + 100, unaffected by the hole's 0 height");
+        assert_eq!(
+            plan.width, 170.0,
+            "80 + 10 + 80, unaffected by the hole's 0 width"
+        );
+        assert_eq!(
+            plan.height, 210.0,
+            "100 + 10 + 100, unaffected by the hole's 0 height"
+        );
         for (i, p) in plan.placements.iter().enumerate() {
             assert_eq!(p.sx, 1.0, "cell {i} should not scale");
             assert_eq!(p.sy, 1.0, "cell {i} should not scale");
@@ -2324,8 +2637,18 @@ mod tests {
 
     #[test]
     fn compose_applies_inner_then_outer() {
-        let inner = LayoutScale { sx: 2.0, sy: 3.0, tx: 1.0, ty: 1.0 };
-        let outer = LayoutScale { sx: 10.0, sy: 10.0, tx: 5.0, ty: 5.0 };
+        let inner = LayoutScale {
+            sx: 2.0,
+            sy: 3.0,
+            tx: 1.0,
+            ty: 1.0,
+        };
+        let outer = LayoutScale {
+            sx: 10.0,
+            sy: 10.0,
+            tx: 5.0,
+            ty: 5.0,
+        };
         let c = compose(&outer, &inner);
         // point (1,1): inner -> (3,4); outer -> (35,45).
         assert_eq!(c.apply(1.0, 1.0), (35.0, 45.0));
@@ -2335,7 +2658,10 @@ mod tests {
     fn place_panel_pure_translate_bakes_and_keeps_identity() {
         let mut panel = stub_panel();
         place_panel(&mut panel, &translate(20.0, 30.0));
-        assert!(panel.layout_scale.is_identity(), "translate placement keeps identity ls");
+        assert!(
+            panel.layout_scale.is_identity(),
+            "translate placement keeps identity ls"
+        );
         assert_eq!(panel.plot_area.x, 20.0);
         assert_eq!(panel.plot_area.y, 30.0);
     }
@@ -2343,7 +2669,12 @@ mod tests {
     #[test]
     fn place_panel_scaling_sets_layout_scale_native_coords() {
         let mut panel = stub_panel();
-        let t = LayoutScale { sx: 0.5, sy: 0.25, tx: 10.0, ty: 40.0 };
+        let t = LayoutScale {
+            sx: 0.5,
+            sy: 0.25,
+            tx: 10.0,
+            ty: 40.0,
+        };
         place_panel(&mut panel, &t);
         // Native coords untouched; layout_scale carries the whole placement.
         assert_eq!(panel.plot_area.x, 0.0);
@@ -2353,20 +2684,49 @@ mod tests {
     #[test]
     fn place_panel_translate_on_nonidentity_ls_adds_translation() {
         let mut panel = stub_panel();
-        panel.layout_scale = LayoutScale { sx: 0.5, sy: 0.5, tx: 1.0, ty: 2.0 };
+        panel.layout_scale = LayoutScale {
+            sx: 0.5,
+            sy: 0.5,
+            tx: 1.0,
+            ty: 2.0,
+        };
         place_panel(&mut panel, &translate(10.0, 20.0));
-        assert_eq!(panel.layout_scale, LayoutScale { sx: 0.5, sy: 0.5, tx: 11.0, ty: 22.0 });
-        assert_eq!(panel.plot_area.x, 0.0, "native coords untouched for non-identity ls");
+        assert_eq!(
+            panel.layout_scale,
+            LayoutScale {
+                sx: 0.5,
+                sy: 0.5,
+                tx: 11.0,
+                ty: 22.0
+            }
+        );
+        assert_eq!(
+            panel.plot_area.x, 0.0,
+            "native coords untouched for non-identity ls"
+        );
     }
 
     fn stub_panel() -> Panel {
         use ferrum_scene::CoordKind;
         Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: false, clip: false,
+                x_domain: None,
+                y_domain: None,
+                expand: false,
+                clip: false,
                 y_domains: Vec::new(),
             },
             grid: Vec::new(),
@@ -2375,6 +2735,8 @@ mod tests {
             annotations: Vec::new(),
             strip_title: Vec::new(),
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }
     }
 
@@ -2402,15 +2764,31 @@ mod tests {
             stroke_join: None,
             stroke_opacity: 1.0,
         };
-        let mut circle = SceneNode::Circle { cx: 1.0, cy: 2.0, r: 3.0, style: fill.clone() };
+        let mut circle = SceneNode::Circle {
+            cx: 1.0,
+            cy: 2.0,
+            r: 3.0,
+            style: fill.clone(),
+        };
         offset_node(&mut circle, 5.0, 7.0);
         assert!(matches!(circle, SceneNode::Circle { cx, cy, .. } if cx == 6.0 && cy == 9.0));
 
-        let mut line = SceneNode::Line { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0, style: stroke };
+        let mut line = SceneNode::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+            style: stroke,
+        };
         offset_node(&mut line, 2.0, 3.0);
-        assert!(matches!(line, SceneNode::Line { x1, y1, x2, y2, .. } if x1 == 2.0 && y1 == 3.0 && x2 == 3.0 && y2 == 4.0));
+        assert!(
+            matches!(line, SceneNode::Line { x1, y1, x2, y2, .. } if x1 == 2.0 && y1 == 3.0 && x2 == 3.0 && y2 == 4.0)
+        );
 
-        let mut poly = SceneNode::Polygon { rings: vec![vec![[0.0, 0.0], [1.0, 1.0]]], style: fill };
+        let mut poly = SceneNode::Polygon {
+            rings: vec![vec![[0.0, 0.0], [1.0, 1.0]]],
+            style: fill,
+        };
         offset_node(&mut poly, 1.0, 1.0);
         if let SceneNode::Polygon { rings, .. } = &poly {
             assert_eq!(rings[0][0], [1.0, 1.0]);
@@ -2422,10 +2800,16 @@ mod tests {
 
     #[test]
     fn offset_node_raw_wraps_in_translate_group() {
-        let mut raw = SceneNode::Raw { svg: "<rect/>".into(), anchor: Default::default() };
+        let mut raw = SceneNode::Raw {
+            svg: "<rect/>".into(),
+            anchor: Default::default(),
+        };
         offset_node(&mut raw, 5.0, 8.0);
         if let SceneNode::Raw { svg, .. } = &raw {
-            assert!(svg.contains(r#"<g transform="translate(5,8)"><rect/></g>"#), "svg: {svg}");
+            assert!(
+                svg.contains(r#"<g transform="translate(5,8)"><rect/></g>"#),
+                "svg: {svg}"
+            );
         } else {
             panic!("expected raw");
         }
@@ -2439,7 +2823,13 @@ mod tests {
         let h = hold();
         let leaves = [leaf_input(&h, 300.0, 200.0)]; // only 1, tree has 2
         let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap_err();
-        assert!(matches!(err, CompositeRenderError::LeafCountMismatch { expected: 2, got: 1 }));
+        assert!(matches!(
+            err,
+            CompositeRenderError::LeafCountMismatch {
+                expected: 2,
+                got: 1
+            }
+        ));
     }
 
     #[test]
@@ -2448,7 +2838,8 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 2, "two leaves → two panels");
         // Panels globally renumbered 0..N in pre-order.
         assert_eq!(scene.panels[0].id, 0);
@@ -2510,7 +2901,10 @@ mod tests {
                 let (_, slot0_hi) = y_domains[0].expect("slot 0 domain preserved");
                 let (slot1_lo, _) = y_domains[1].expect("slot 1 domain preserved");
                 assert!(slot0_hi < 50.0, "slot 0 must stay the small y0 domain");
-                assert!(slot1_lo > 50.0, "slot 1 must stay the large independent y1 domain");
+                assert!(
+                    slot1_lo > 50.0,
+                    "slot 1 must stay the large independent y1 domain"
+                );
             }
             other => panic!("expected Cartesian coord, got {other:?}"),
         }
@@ -2539,7 +2933,8 @@ mod tests {
             leaf_input(&h[1], 200.0, 150.0),
             leaf_input(&h[2], 200.0, 150.0),
         ];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 3);
         let ids: Vec<usize> = scene.panels.iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![0, 1, 2], "panels renumbered 0..N pre-order");
@@ -2550,7 +2945,13 @@ mod tests {
         // 2 rows x 1 col with row ratios [3,1]: differently-native rows force the
         // small-share row to scale → non-identity layout_scale on that panel.
         let mut tree = composite(CompositeLayout::Grid, vec![leaf_node(0), leaf_node(1)]);
-        if let CompositeNode::Composite { nrows, ncols, row_ratios, .. } = &mut tree {
+        if let CompositeNode::Composite {
+            nrows,
+            ncols,
+            row_ratios,
+            ..
+        } = &mut tree
+        {
             *nrows = Some(2);
             *ncols = Some(1);
             *row_ratios = Some(vec![3.0, 1.0]);
@@ -2559,11 +2960,18 @@ mod tests {
         let h1 = hold();
         // Same native size so the ratio (not native disparity) drives scaling.
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 2);
         // Row 0 dominant share → identity (native). Row 1 shrunk → non-identity.
-        assert!(scene.panels[0].layout_scale.is_identity(), "row0 should be native");
-        assert!(!scene.panels[1].layout_scale.is_identity(), "row1 must carry a ratio layout_scale");
+        assert!(
+            scene.panels[0].layout_scale.is_identity(),
+            "row0 should be native"
+        );
+        assert!(
+            !scene.panels[1].layout_scale.is_identity(),
+            "row1 must carry a ratio layout_scale"
+        );
         assert!((scene.panels[1].layout_scale.sy - (1.0 / 3.0)).abs() < 1e-9);
     }
 
@@ -2580,7 +2988,10 @@ mod tests {
             CompositeLayout::Grid,
             vec![
                 leaf_node(0),
-                CompositeNode::Hole { width: None, height: None },
+                CompositeNode::Hole {
+                    width: None,
+                    height: None,
+                },
                 leaf_node(1),
                 leaf_node(2),
             ],
@@ -2597,20 +3008,27 @@ mod tests {
             leaf_input(&h[1], 300.0, 200.0),
             leaf_input(&h[2], 300.0, 200.0),
         ];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 3, "hole must not emit a panel");
 
         // No ratios and uniform native sizes → uniform grid, every placement
         // is identity-scale pure translation (mirrors
         // `grid_congruent_cells_have_identity_scale`).
         for p in &scene.panels {
-            assert!(p.layout_scale.is_identity(), "uniform grid: no cell should scale");
+            assert!(
+                p.layout_scale.is_identity(),
+                "uniform grid: no cell should scale"
+            );
         }
         // Row 1 (leaf1) sits below row 0 (leaf0) by exactly row 0's native
         // height + spacing (200 + 10 = 210) — the hole sharing row 0 does not
         // change row 0's height.
         let row_offset = scene.panels[1].plot_area.y - scene.panels[0].plot_area.y;
-        assert!((row_offset - 210.0).abs() < 1e-9, "row offset: {row_offset}");
+        assert!(
+            (row_offset - 210.0).abs() < 1e-9,
+            "row offset: {row_offset}"
+        );
         assert!(
             (scene.panels[1].plot_area.x - scene.panels[0].plot_area.x).abs() < 1e-9,
             "leaf1 shares leaf0's column"
@@ -2619,7 +3037,10 @@ mod tests {
         // 0's native width + spacing (300 + 10 = 310) — the hole's own
         // (empty) column does not change column 0's width.
         let col_offset = scene.panels[2].plot_area.x - scene.panels[1].plot_area.x;
-        assert!((col_offset - 310.0).abs() < 1e-9, "col offset: {col_offset}");
+        assert!(
+            (col_offset - 310.0).abs() < 1e-9,
+            "col offset: {col_offset}"
+        );
         assert!(
             (scene.panels[2].plot_area.y - scene.panels[1].plot_area.y).abs() < 1e-9,
             "leaf2 shares leaf1's row"
@@ -2636,7 +3057,10 @@ mod tests {
                 leaf_node(0),
                 leaf_node(1),
                 leaf_node(2),
-                CompositeNode::Hole { width: None, height: None },
+                CompositeNode::Hole {
+                    width: None,
+                    height: None,
+                },
             ],
         );
         if let CompositeNode::Composite { ncols, .. } = &mut tree {
@@ -2650,13 +3074,17 @@ mod tests {
             leaf_input(&h[1], 300.0, 200.0),
             leaf_input(&h[2], 300.0, 200.0),
         ];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 3, "trailing hole must not emit a panel");
 
         // Row 1 (leaf2, alone — its sibling slot is the hole) sits below row 0
         // by exactly row 0's height + spacing, starting again at column 0.
         let row_offset = scene.panels[2].plot_area.y - scene.panels[0].plot_area.y;
-        assert!((row_offset - 210.0).abs() < 1e-9, "row offset: {row_offset}");
+        assert!(
+            (row_offset - 210.0).abs() < 1e-9,
+            "row offset: {row_offset}"
+        );
         assert!(
             (scene.panels[2].plot_area.x - scene.panels[0].plot_area.x).abs() < 1e-9,
             "leaf2 starts row 1 at column 0"
@@ -2675,12 +3103,17 @@ mod tests {
 
         // Baseline: same tree without chrome.
         let bare = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
-        let (bare_scene, _warnings) = render_composite_scene(&bare, &leaves, &ThemeInputs::default()).unwrap();
+        let (bare_scene, _warnings) =
+            render_composite_scene(&bare, &leaves, &ThemeInputs::default()).unwrap();
         let bare_y = bare_scene.panels[0].plot_area.y;
 
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         // A title band was reserved: canvas grew and panels shifted down.
-        assert!(scene.height > bare_scene.height, "chrome must grow the canvas height");
+        assert!(
+            scene.height > bare_scene.height,
+            "chrome must grow the canvas height"
+        );
         let header_h = scene.height - bare_scene.height;
         assert!(header_h > 0.0);
         assert!(
@@ -2689,7 +3122,10 @@ mod tests {
         );
         // Chrome text node injected into the title list.
         assert!(
-            scene.title.iter().any(|n| matches!(n, SceneNode::Text { content, .. } if content == "Figure title")),
+            scene
+                .title
+                .iter()
+                .any(|n| matches!(n, SceneNode::Text { content, .. } if content == "Figure title")),
             "figure title text node must be present",
         );
     }
@@ -2705,7 +3141,9 @@ mod tests {
             .title
             .iter()
             .find_map(|n| match n {
-                SceneNode::Text { x, style, content, .. } if content == "T" => Some((*x, style.anchor)),
+                SceneNode::Text {
+                    x, style, content, ..
+                } if content == "T" => Some((*x, style.anchor)),
                 _ => None,
             })
             .expect("title text node must be present")
@@ -2727,7 +3165,8 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         let (x, anchor) = title_node_x_anchor(&scene);
         assert_eq!(x, DEFAULT_CHROME_INSET);
         assert_eq!(anchor, ferrum_scene::TextAnchor::Start);
@@ -2742,9 +3181,13 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         let (x, anchor) = title_node_x_anchor(&scene);
-        assert_eq!(x, 60.0, "custom left_inset must reposition the start-anchored chrome");
+        assert_eq!(
+            x, 60.0,
+            "custom left_inset must reposition the start-anchored chrome"
+        );
         assert_eq!(anchor, ferrum_scene::TextAnchor::Start);
     }
 
@@ -2757,9 +3200,14 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         let (x, anchor) = title_node_x_anchor(&scene);
-        assert_eq!(x, scene.width / 2.0, "middle anchor must center on the composed width");
+        assert_eq!(
+            x,
+            scene.width / 2.0,
+            "middle anchor must center on the composed width"
+        );
         assert_eq!(anchor, ferrum_scene::TextAnchor::Middle);
     }
 
@@ -2772,9 +3220,14 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         let (x, anchor) = title_node_x_anchor(&scene);
-        assert_eq!(x, scene.width - 40.0, "end anchor must use the custom right_inset");
+        assert_eq!(
+            x,
+            scene.width - 40.0,
+            "end anchor must use the custom right_inset"
+        );
         assert_eq!(anchor, ferrum_scene::TextAnchor::End);
     }
 
@@ -2811,7 +3264,9 @@ mod tests {
             CompositeRenderError::RootChromeConfigInvalid { kind, message } => {
                 assert_eq!(kind, "hconcat");
                 assert!(
-                    message.contains("start") && message.contains("middle") && message.contains("end"),
+                    message.contains("start")
+                        && message.contains("middle")
+                        && message.contains("end"),
                     "message: {message}"
                 );
             }
@@ -2827,16 +3282,23 @@ mod tests {
             CompositeLayout::Hconcat,
             vec![
                 leaf_node(0),
-                CompositeNode::Hole { width: Some(50.0), height: Some(150.0) },
+                CompositeNode::Hole {
+                    width: Some(50.0),
+                    height: Some(150.0),
+                },
                 leaf_node(1),
             ],
         );
-        assert!(tree.validate().is_ok(), "fully-sized hole is valid under hconcat");
+        assert!(
+            tree.validate().is_ok(),
+            "fully-sized hole is valid under hconcat"
+        );
 
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 2, "hole must not emit a panel");
 
         // leaf0 (300 wide) + spacing (10) + hole (50 wide) + spacing (10) = 370.
@@ -2854,16 +3316,23 @@ mod tests {
             CompositeLayout::Vconcat,
             vec![
                 leaf_node(0),
-                CompositeNode::Hole { width: Some(150.0), height: Some(50.0) },
+                CompositeNode::Hole {
+                    width: Some(150.0),
+                    height: Some(50.0),
+                },
                 leaf_node(1),
             ],
         );
-        assert!(tree.validate().is_ok(), "fully-sized hole is valid under vconcat");
+        assert!(
+            tree.validate().is_ok(),
+            "fully-sized hole is valid under vconcat"
+        );
 
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 2, "hole must not emit a panel");
 
         // leaf0 (200 tall) + spacing (10) + hole (50 tall) + spacing (10) = 270.
@@ -2885,7 +3354,10 @@ mod tests {
             CompositeLayout::Grid,
             vec![
                 leaf_node(0),
-                CompositeNode::Hole { width: Some(9999.0), height: Some(9999.0) },
+                CompositeNode::Hole {
+                    width: Some(9999.0),
+                    height: Some(9999.0),
+                },
                 leaf_node(1),
                 leaf_node(2),
             ],
@@ -2894,7 +3366,10 @@ mod tests {
             *nrows = Some(2);
             *ncols = Some(2);
         }
-        assert!(tree.validate().is_ok(), "sized hole is valid under grid (fields ignored)");
+        assert!(
+            tree.validate().is_ok(),
+            "sized hole is valid under grid (fields ignored)"
+        );
 
         let h = [hold(), hold(), hold()];
         let leaves = [
@@ -2902,13 +3377,20 @@ mod tests {
             leaf_input(&h[1], 300.0, 200.0),
             leaf_input(&h[2], 300.0, 200.0),
         ];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 3, "hole must not emit a panel");
 
         let row_offset = scene.panels[1].plot_area.y - scene.panels[0].plot_area.y;
-        assert!((row_offset - 210.0).abs() < 1e-9, "row offset unaffected by hole size: {row_offset}");
+        assert!(
+            (row_offset - 210.0).abs() < 1e-9,
+            "row offset unaffected by hole size: {row_offset}"
+        );
         let col_offset = scene.panels[2].plot_area.x - scene.panels[1].plot_area.x;
-        assert!((col_offset - 310.0).abs() < 1e-9, "col offset unaffected by hole size: {col_offset}");
+        assert!(
+            (col_offset - 310.0).abs() < 1e-9,
+            "col offset unaffected by hole size: {col_offset}"
+        );
     }
 
     #[test]
@@ -2922,15 +3404,23 @@ mod tests {
         let spec = scatter_spec();
         let b0 = xy_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]);
         let b1 = xy_batch(&[10.0, 20.0, 30.0], &[1.0, 2.0, 3.0]);
-        let h0 = LeafHold { batch: b0, ..hold() };
-        let h1 = LeafHold { batch: b1, spec: spec.clone(), ..hold() };
+        let h0 = LeafHold {
+            batch: b0,
+            ..hold()
+        };
+        let h1 = LeafHold {
+            batch: b1,
+            spec: spec.clone(),
+            ..hold()
+        };
 
         let mut tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
             resolve.x = crate::layout::facet::ResolveMode::Shared;
         }
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let dom = |p: &Panel| match &p.coord {
             ferrum_scene::CoordKind::Cartesian { x_domain, .. } => *x_domain,
@@ -2938,21 +3428,29 @@ mod tests {
         };
         let d0 = dom(&scene.panels[0]).expect("panel 0 x_domain");
         let d1 = dom(&scene.panels[1]).expect("panel 1 x_domain");
-        assert_eq!(d0, d1, "shared-x panels must carry the identical resolved x domain");
+        assert_eq!(
+            d0, d1,
+            "shared-x panels must carry the identical resolved x domain"
+        );
         // The shared extent spans BOTH leaves: panel 0's own data maxes at 3.0, so a
         // domain reaching 30.0 proves it absorbed leaf 1's extent (and vice versa) —
         // the discriminator against per-leaf independent resolution.
-        assert!(d0.0 <= 1.0, "shared lower extent expected ~1.0, got {}", d0.0);
-        assert!(d0.1 >= 30.0, "shared upper extent expected ~30.0, got {}", d0.1);
+        assert!(
+            d0.0 <= 1.0,
+            "shared lower extent expected ~1.0, got {}",
+            d0.0
+        );
+        assert!(
+            d0.1 >= 30.0,
+            "shared upper extent expected ~30.0, got {}",
+            d0.1
+        );
     }
 
     // -- GH #74 lockstep cross-check ------------------------------------------
 
     /// Build a composite node with an explicit `resolve.color` mode.
-    fn composite_color(
-        children: Vec<CompositeNode>,
-        color: Option<ResolveMode>,
-    ) -> CompositeNode {
+    fn composite_color(children: Vec<CompositeNode>, color: Option<ResolveMode>) -> CompositeNode {
         let mut node = composite(CompositeLayout::Hconcat, children);
         if let CompositeNode::Composite { resolve, .. } = &mut node {
             resolve.color = color;
@@ -2972,7 +3470,10 @@ mod tests {
         cursor: &mut usize,
         acc: &mut Vec<usize>,
     ) {
-        let CompositeNode::Composite { children, resolve, .. } = node else {
+        let CompositeNode::Composite {
+            children, resolve, ..
+        } = node
+        else {
             return;
         };
         let node_idx = *cursor;
@@ -3020,7 +3521,12 @@ mod tests {
         // Reference union-fire set (mirrors resolve_nonpositional).
         let mut union_nodes = Vec::new();
         let mut cursor = 0usize;
-        collect_color_union_nodes(&tree, ResolveMode::Independent, &mut cursor, &mut union_nodes);
+        collect_color_union_nodes(
+            &tree,
+            ResolveMode::Independent,
+            &mut cursor,
+            &mut union_nodes,
+        );
         union_nodes.sort_unstable();
 
         // Real band-attach set from the production legend planner.
@@ -3108,7 +3614,8 @@ mod tests {
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let raw_svgs: Vec<&str> = scene
             .legend
@@ -3128,20 +3635,26 @@ mod tests {
         // be rewritten together, each under its own leaf-indexed prefix — proving
         // uniquify_clip_ids rewrote both occurrences, not just the def.
         assert!(
-            raw_svgs.iter().any(|s| s.contains(r#"id="cell0-ferrum-colorbar-0""#)
-                && s.contains("url(#cell0-ferrum-colorbar-0)")),
+            raw_svgs
+                .iter()
+                .any(|s| s.contains(r#"id="cell0-ferrum-colorbar-0""#)
+                    && s.contains("url(#cell0-ferrum-colorbar-0)")),
             "leaf 0's colorbar def+ref must be namespaced cell0-...: {raw_svgs:?}"
         );
         assert!(
-            raw_svgs.iter().any(|s| s.contains(r#"id="cell1-ferrum-colorbar-0""#)
-                && s.contains("url(#cell1-ferrum-colorbar-0)")),
+            raw_svgs
+                .iter()
+                .any(|s| s.contains(r#"id="cell1-ferrum-colorbar-0""#)
+                    && s.contains("url(#cell1-ferrum-colorbar-0)")),
             "leaf 1's colorbar def+ref must be namespaced cell1-...: {raw_svgs:?}"
         );
         // No collision survives: the bare (un-namespaced) id must not leak
         // through, which is exactly what would happen if uniquification were a
         // no-op (the historical gap this test closes).
         assert!(
-            !raw_svgs.iter().any(|s| s.contains(r#"id="ferrum-colorbar-0""#)),
+            !raw_svgs
+                .iter()
+                .any(|s| s.contains(r#"id="ferrum-colorbar-0""#)),
             "un-namespaced colorbar id leaked into the merged scene: {raw_svgs:?}"
         );
     }
@@ -3182,9 +3695,14 @@ mod tests {
         // panic or a silent skip). Flagged to the orchestrator in the gap-fix
         // addendum.
         let mut bad_spec = scatter_spec();
-        bad_spec.encoding.x =
-            Some(EncodingSpec { field: "missing".into(), ..Default::default() });
-        let h0 = LeafHold { spec: bad_spec, ..hold() };
+        bad_spec.encoding.x = Some(EncodingSpec {
+            field: "missing".into(),
+            ..Default::default()
+        });
+        let h0 = LeafHold {
+            spec: bad_spec,
+            ..hold()
+        };
         let h1 = hold();
 
         let mut tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
@@ -3194,7 +3712,11 @@ mod tests {
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
         let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap_err();
         match err {
-            CompositeRenderError::LeafRender { kind, index, ref source } => {
+            CompositeRenderError::LeafRender {
+                kind,
+                index,
+                ref source,
+            } => {
                 assert_eq!(kind, "leaf");
                 assert_eq!(index, 0, "the broken leaf (index 0) must be pinpointed");
                 assert!(
@@ -3221,15 +3743,22 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
         // Panel ids are assigned by `renumber_panels` in pre-order BEFORE
         // placement/merge, so id 0 is unambiguously the first-declared child
         // (painted first / on the bottom) and id 1 the second-declared child
         // (painted last / on top) — the vec position IS the z-order.
-        assert_eq!(scene.panels[0].id, 0, "first-declared child occupies slot 0 (bottom)");
-        assert_eq!(scene.panels[1].id, 1, "second-declared child occupies slot 1 (drawn on top)");
+        assert_eq!(
+            scene.panels[0].id, 0,
+            "first-declared child occupies slot 0 (bottom)"
+        );
+        assert_eq!(
+            scene.panels[1].id, 1,
+            "second-declared child occupies slot 1 (drawn on top)"
+        );
         // Both share the identical overlay rect, confirming this genuinely
         // exercises the overlay (same-rect) case rather than a linear layout
         // where position alone would already prove ordering.
@@ -3256,9 +3785,19 @@ mod tests {
         let (scene, _warnings) =
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
-        assert_eq!(scene.panels.len(), 2, "both leaves still contribute a panel");
-        assert!(!scene.panels[0].axes.is_empty(), "child 0's axes must survive the merge");
-        assert!(!scene.panels[0].grid.is_empty(), "child 0's grid must survive the merge");
+        assert_eq!(
+            scene.panels.len(),
+            2,
+            "both leaves still contribute a panel"
+        );
+        assert!(
+            !scene.panels[0].axes.is_empty(),
+            "child 0's axes must survive the merge"
+        );
+        assert!(
+            !scene.panels[0].grid.is_empty(),
+            "child 0's grid must survive the merge"
+        );
         assert!(
             scene.panels[1].axes.is_empty(),
             "child 1's axes must be dropped by the overlay merge seam"
@@ -3282,17 +3821,37 @@ mod tests {
         use crate::spec::title::TitleSpec;
 
         let mut spec0 = scatter_spec();
-        spec0.title = Some(TitleSpec { text: "Left Y".into(), ..Default::default() });
+        spec0.title = Some(TitleSpec {
+            text: "Left Y".into(),
+            ..Default::default()
+        });
         let mut spec1 = scatter_spec();
-        spec1.title = Some(TitleSpec { text: "Right Y".into(), ..Default::default() });
+        spec1.title = Some(TitleSpec {
+            text: "Right Y".into(),
+            ..Default::default()
+        });
 
-        let h0 = LeafHold { spec: spec0.clone(), ..hold() };
-        let h1 = LeafHold { spec: spec1.clone(), ..hold() };
+        let h0 = LeafHold {
+            spec: spec0.clone(),
+            ..hold()
+        };
+        let h1 = LeafHold {
+            spec: spec1.clone(),
+            ..hold()
+        };
         let tree = composite(
             CompositeLayout::Overlay,
             vec![
-                CompositeNode::Leaf { spec: Box::new(spec0), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(spec1), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(spec0),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(spec1),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
@@ -3329,8 +3888,16 @@ mod tests {
         let mut tree = composite(
             CompositeLayout::Overlay,
             vec![
-                CompositeNode::Leaf { spec: Box::new(color_spec()), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(scatter_spec()), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(color_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
@@ -3347,7 +3914,11 @@ mod tests {
         let (scene, _warnings) =
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
-        assert_eq!(scene.panels.len(), 2, "both leaves still contribute a panel");
+        assert_eq!(
+            scene.panels.len(),
+            2,
+            "both leaves still contribute a panel"
+        );
         assert_eq!(
             scene.panels[0].plot_area, scene.panels[1].plot_area,
             "child 1's plot_area must be re-based onto child 0's real rect, \
@@ -3375,19 +3946,27 @@ mod tests {
         // Chrome suppression must still have fired for child 1 (imposition
         // succeeded — both leaves are single-panel), confirming this test
         // exercises the fix, not an accidental fallback to no-suppression.
-        assert!(!scene.panels[0].axes.is_empty(), "child 0's axes must survive");
-        assert!(scene.panels[1].axes.is_empty(), "child 1's axes must still be dropped");
+        assert!(
+            !scene.panels[0].axes.is_empty(),
+            "child 0's axes must survive"
+        );
+        assert!(
+            scene.panels[1].axes.is_empty(),
+            "child 1's axes must still be dropped"
+        );
     }
 
     #[test]
     fn overlay_degrades_when_non_primary_child_axis_draws_above_marks() {
-        // S2 fix, cycle 3 (rust-quality-reviewer 2026-08-27 findings batch):
-        // a non-primary child whose x-axis carries `zindex >= 1`
-        // (`fm.Axis(zindex=1)` / `configure_axis(zindex=1)`) routes that
-        // axis's nodes into `Panel.annotations` at scene-build time
-        // (scene_build.rs:924-1010), a slot the merge seam never clears —
+        // S2 fix, cycle 3 (rust-quality-reviewer 2026-08-27 findings batch).
+        // GH #89B (typed chrome/content slots, task 2): a non-primary child
+        // whose x-axis carries `zindex >= 1` (`fm.Axis(zindex=1)` /
+        // `configure_axis(zindex=1)`) routes that axis's nodes into the typed
+        // `Panel.chrome_above` slot at scene-build time (scene_build.rs), a
+        // sibling of `Panel.annotations` rather than a prefix within it — and
+        // still a slot the merge seam (untouched here) never clears —
         // suppressing this child's `panel.axes`/`panel.grid` would leave a
-        // SECOND, stale-position axis surviving in `annotations`. The safety
+        // SECOND, stale-position axis surviving in `chrome_above`. The safety
         // gate (`overlay_imposition_safe`) must refuse BOTH imposition and
         // suppression for this child: it keeps its own natural rect (never
         // equal to child 0's, since nothing was imposed) AND its own chrome
@@ -3398,15 +3977,26 @@ mod tests {
         let mut spec1 = scatter_spec();
         spec1.encoding.x = Some(EncodingSpec {
             field: "x".into(),
-            axis: Some(Box::new(AxisStyleSpec { zindex: Some(1), ..Default::default() })),
+            axis: Some(Box::new(AxisStyleSpec {
+                zindex: Some(1),
+                ..Default::default()
+            })),
             ..Default::default()
         });
 
         let mut tree = composite(
             CompositeLayout::Overlay,
             vec![
-                CompositeNode::Leaf { spec: Box::new(scatter_spec()), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(spec1.clone()), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(spec1.clone()),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
@@ -3414,7 +4004,10 @@ mod tests {
             resolve.y = crate::layout::facet::ResolveMode::Shared;
         }
         let h0 = hold();
-        let h1 = LeafHold { spec: spec1, ..hold() };
+        let h1 = LeafHold {
+            spec: spec1,
+            ..hold()
+        };
         let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
         let (scene, _warnings) =
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
@@ -3424,19 +4017,19 @@ mod tests {
         // its own (un-imposed) geometry — never one without the other. Y's
         // axis (zindex unset) stays in `panel.axes` (below-marks bucket)
         // unsuppressed; X's axis + the whole grid block route ABOVE marks
-        // into `panel.annotations` regardless of suppression (that routing
-        // is intrinsic to `zindex >= 1`, not a P2 artifact — `panel.grid`
-        // ends up empty for this spec on ANY render path, suppressed or
-        // not, so asserting on it would not discriminate this fix). The
-        // `annotations` assertion below is what proves this leaf really
-        // carries the hazard the gate exists to catch.
+        // into `panel.chrome_above` (GH #89B) regardless of suppression (that
+        // routing is intrinsic to `zindex >= 1`, not a P2 artifact —
+        // `panel.grid` ends up empty for this spec on ANY render path,
+        // suppressed or not, so asserting on it would not discriminate this
+        // fix). The `chrome_above` assertion below is what proves this leaf
+        // really carries the hazard the gate exists to catch.
         assert!(
             !scene.panels[1].axes.is_empty(),
             "hazard child must keep its own below-marks axis (no suppression without proven parity)"
         );
         assert!(
-            !scene.panels[1].annotations.is_empty(),
-            "hazard child's above-marks axis+grid must be present in annotations — otherwise \
+            !scene.panels[1].chrome_above.is_empty(),
+            "hazard child's above-marks axis+grid must be present in chrome_above — otherwise \
              this test isn't exercising the routing the safety gate exists to catch"
         );
         assert_eq!(
@@ -3465,8 +4058,16 @@ mod tests {
         let mut tree = composite(
             CompositeLayout::Overlay,
             vec![
-                CompositeNode::Leaf { spec: Box::new(scatter_spec()), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(color_spec()), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(color_spec()),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
@@ -3503,11 +4104,18 @@ mod tests {
     #[test]
     fn overlay_degrades_when_non_primary_child_has_below_marks_text_annotation() {
         // S3 fix, cycle 3 round 2 (rust-quality-reviewer 2026-08-27 findings
-        // batch): `scene_build.rs:417` folds a `z="below_marks"` text
-        // annotation into the SAME below-marks bucket that becomes
-        // `Panel.grid` (`scene_build.rs:434`) — so suppressing a non-primary
-        // child carrying one (`panel.grid.clear()` at the merge seam) would
-        // silently DELETE the user's annotation, not just gridlines. Same
+        // batch). GH #89B (typed chrome/content slots, task 2) split the
+        // below-marks bucket this comment originally described: a
+        // `z="below_marks"` text annotation now routes into the typed
+        // `Panel.below_marks` slot, a sibling of `Panel.grid` rather than a
+        // sub-bucket of it — `merge_children`'s `panel.grid.clear()` (the
+        // merge seam, untouched here) can no longer reach it at all. This
+        // test's `overlay_imposition_safe` gate (checked below) still guards
+        // the ORIGINAL hazard independently, since it inspects
+        // `chart_config.annotations` directly rather than the built scene —
+        // so the gate's refusal behavior is unaffected by the slot split, and
+        // this test still asserts on the surviving content, now via its new
+        // typed slot. Same
         // data/encoding on both leaves (only the annotation differs), so the
         // two leaves' NATIVE rects already coincide — proving this test's
         // hazard gate fires on the annotation alone, not an incidental width
@@ -3517,8 +4125,16 @@ mod tests {
         let mut tree = composite(
             CompositeLayout::Overlay,
             vec![
-                CompositeNode::Leaf { spec: Box::new(scatter_spec()), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(scatter_spec()), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
@@ -3542,7 +4158,10 @@ mod tests {
             ..Default::default()
         };
         let h0 = hold();
-        let h1 = LeafHold { chart_config: cc1, ..hold() };
+        let h1 = LeafHold {
+            chart_config: cc1,
+            ..hold()
+        };
         let leaves = [leaf_input(&h0, 400.0, 300.0), leaf_input(&h1, 400.0, 300.0)];
         let (scene, _warnings) =
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
@@ -3557,13 +4176,17 @@ mod tests {
             !scene.panels[1].axes.is_empty(),
             "annotation-hazard child must keep its own axes (no suppression without proven parity)"
         );
-        let annotation_survived = scene.panels[1].grid.iter().any(|n| {
-            matches!(n, SceneNode::Text { content, .. } if content == "below marks note")
-        });
+        // GH #89B: below-marks text annotations route into the typed
+        // `Panel.below_marks` slot, not `Panel.grid` — see this test's
+        // updated doc comment above.
+        let annotation_survived = scene.panels[1]
+            .below_marks
+            .iter()
+            .any(|n| matches!(n, SceneNode::Text { content, .. } if content == "below marks note"));
         assert!(
             annotation_survived,
-            "the below-marks text annotation must survive in panel.grid — a suppressed child \
-             would have had panel.grid.clear() silently delete it"
+            "the below-marks text annotation must survive in panel.below_marks — a suppressed \
+             child would have had panel.grid.clear() silently delete it under the pre-#89B schema"
         );
     }
 
@@ -3582,17 +4205,37 @@ mod tests {
         use crate::spec::title::TitleSpec;
 
         let mut spec0 = scatter_spec();
-        spec0.title = Some(TitleSpec { text: "Panel A".into(), ..Default::default() });
+        spec0.title = Some(TitleSpec {
+            text: "Panel A".into(),
+            ..Default::default()
+        });
         let mut spec1 = scatter_spec();
-        spec1.title = Some(TitleSpec { text: "Panel B".into(), ..Default::default() });
+        spec1.title = Some(TitleSpec {
+            text: "Panel B".into(),
+            ..Default::default()
+        });
 
-        let h0 = LeafHold { spec: spec0.clone(), ..hold() };
-        let h1 = LeafHold { spec: spec1.clone(), ..hold() };
+        let h0 = LeafHold {
+            spec: spec0.clone(),
+            ..hold()
+        };
+        let h1 = LeafHold {
+            spec: spec1.clone(),
+            ..hold()
+        };
         let tree = composite(
             CompositeLayout::Hconcat,
             vec![
-                CompositeNode::Leaf { spec: Box::new(spec0), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(spec1), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(spec0),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(spec1),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
@@ -3600,10 +4243,22 @@ mod tests {
             render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
-        assert!(!scene.panels[0].axes.is_empty(), "child 0's axes must be kept under hconcat");
-        assert!(!scene.panels[0].grid.is_empty(), "child 0's grid must be kept under hconcat");
-        assert!(!scene.panels[1].axes.is_empty(), "child 1's axes must be kept under hconcat");
-        assert!(!scene.panels[1].grid.is_empty(), "child 1's grid must be kept under hconcat");
+        assert!(
+            !scene.panels[0].axes.is_empty(),
+            "child 0's axes must be kept under hconcat"
+        );
+        assert!(
+            !scene.panels[0].grid.is_empty(),
+            "child 0's grid must be kept under hconcat"
+        );
+        assert!(
+            !scene.panels[1].axes.is_empty(),
+            "child 1's axes must be kept under hconcat"
+        );
+        assert!(
+            !scene.panels[1].grid.is_empty(),
+            "child 1's grid must be kept under hconcat"
+        );
 
         let title_text: Vec<&str> = scene
             .title
@@ -3618,6 +4273,189 @@ mod tests {
             vec!["Panel A", "Panel B"],
             "hconcat must keep BOTH children's titles — got {title_text:?}"
         );
+    }
+
+    /// GH #89B spec-review remediation (cycle 2): `offset_panel` bakes a
+    /// non-primary leaf's geometry into its placed position under a
+    /// non-`Overlay` layout — every panel node slot must be in that
+    /// translation, or content in an un-translated slot renders at its
+    /// pre-placement (solo) coordinates while the panel around it moved.
+    /// `below_marks` was omitted when the slot was split out of `panel.grid`
+    /// (which WAS translated), so a below-marks text annotation on the
+    /// second `hconcat` child rendered stranded at its solo x, landing on
+    /// top of child 0 instead of moving with child 1's marks.
+    #[test]
+    fn hconcat_translates_below_marks_annotation_with_its_panel() {
+        use crate::render::annotation::{AnnotationSpec, CoordValue};
+
+        let cc1 = ChartConfig {
+            annotations: vec![AnnotationSpec::Text {
+                x: CoordValue::Norm { norm: 0.5 },
+                y: CoordValue::Norm { norm: 0.5 },
+                text: "hconcat below marks".into(),
+                font_size: 14.0,
+                color: "#ff0000".into(),
+                anchor: "middle".into(),
+                baseline: "middle".into(),
+                angle: 0.0,
+                dx: 0.0,
+                dy: 0.0,
+                z: "below_marks".into(),
+            }],
+            ..Default::default()
+        };
+        let h0 = hold();
+        let h1 = LeafHold {
+            chart_config: cc1,
+            ..hold()
+        };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 1,
+                    label: None,
+                },
+            ],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(scene.panels.len(), 2);
+        assert!(
+            scene.panels[0].below_marks.is_empty(),
+            "only child 1 carries the below_marks annotation"
+        );
+        let ann_x = scene.panels[1]
+            .below_marks
+            .iter()
+            .find_map(|n| match n {
+                SceneNode::Text { x, content, .. } if content == "hconcat below marks" => Some(*x),
+                _ => None,
+            })
+            .expect("child 1's below_marks annotation must be present");
+
+        let (p0_lo, p0_hi) = (
+            scene.panels[0].plot_area.x,
+            scene.panels[0].plot_area.x + scene.panels[0].plot_area.w,
+        );
+        let (p1_lo, p1_hi) = (
+            scene.panels[1].plot_area.x,
+            scene.panels[1].plot_area.x + scene.panels[1].plot_area.w,
+        );
+        assert!(
+            p1_lo > p0_hi,
+            "prerequisite: hconcat must place child 1 strictly to the right of child 0 \
+             (child 0 x∈[{p0_lo},{p0_hi}], child 1 x∈[{p1_lo},{p1_hi}])"
+        );
+        assert!(
+            ann_x >= p1_lo && ann_x <= p1_hi,
+            "child 1's below_marks annotation must translate into child 1's plot area \
+             (x∈[{p1_lo},{p1_hi}]), not stay at its un-translated solo x={ann_x} \
+             (which would land inside child 0's x∈[{p0_lo},{p0_hi}])"
+        );
+    }
+
+    /// GH #89B spec-review remediation (cycle 2): same omission class as
+    /// above, for `chrome_above`. A non-primary hconcat child's `zindex >= 1`
+    /// x-axis + gridlines route into `panel.chrome_above` at scene-build
+    /// time; `offset_panel` must translate that slot too, or the second
+    /// child's above-marks axis collapses onto child 0's x range instead of
+    /// moving with child 1's own (translated) axes/marks.
+    #[test]
+    fn hconcat_translates_chrome_above_axis_with_its_panel() {
+        use crate::render::chart_config::AxisStyleSpec;
+
+        let mut spec1 = scatter_spec();
+        spec1.encoding.x = Some(EncodingSpec {
+            field: "x".into(),
+            axis: Some(Box::new(AxisStyleSpec {
+                zindex: Some(1),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+
+        let h0 = hold();
+        let h1 = LeafHold {
+            spec: spec1.clone(),
+            ..hold()
+        };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                CompositeNode::Leaf {
+                    spec: Box::new(scatter_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(spec1),
+                    data: 1,
+                    label: None,
+                },
+            ],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(scene.panels.len(), 2);
+        assert!(
+            scene.panels[0].chrome_above.is_empty(),
+            "only child 1 carries a zindex>=1 axis"
+        );
+        assert!(
+            !scene.panels[1].chrome_above.is_empty(),
+            "child 1's above-marks axis+grid must be present in chrome_above — otherwise \
+             this test isn't exercising the routing the translation bug hits"
+        );
+
+        let chrome_xs: Vec<f64> = scene.panels[1]
+            .chrome_above
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { x1, .. } => Some(*x1),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !chrome_xs.is_empty(),
+            "expected at least one Line node in child 1's chrome_above"
+        );
+
+        let (p0_lo, p0_hi) = (
+            scene.panels[0].plot_area.x,
+            scene.panels[0].plot_area.x + scene.panels[0].plot_area.w,
+        );
+        let (p1_lo, p1_hi) = (
+            scene.panels[1].plot_area.x,
+            scene.panels[1].plot_area.x + scene.panels[1].plot_area.w,
+        );
+        assert!(
+            p1_lo > p0_hi,
+            "prerequisite: hconcat must place child 1 strictly to the right of child 0 \
+             (child 0 x∈[{p0_lo},{p0_hi}], child 1 x∈[{p1_lo},{p1_hi}])"
+        );
+        // Gridline endpoints may sit exactly on the plot-area boundary
+        // (inclusive), so use an epsilon-widened window rather than a bare
+        // `>=`/`<=` against child 1's rect.
+        let eps = 1e-6;
+        for x in &chrome_xs {
+            assert!(
+                *x >= p1_lo - eps && *x <= p1_hi + eps,
+                "child 1's chrome_above axis/grid must translate into child 1's plot area \
+                 (x∈[{p1_lo},{p1_hi}]), found x={x} — un-translated content collapses onto \
+                 child 0's x∈[{p0_lo},{p0_hi}]"
+            );
+        }
     }
 
     // -- D4c: packed-buffer panel indexing (render_composite_interactive seam)
@@ -3643,11 +4481,15 @@ mod tests {
         let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
         let ys: Vec<f64> = (0..n).map(|i| (i % 50) as f64).collect();
         let h0 = hold();
-        let h1 = LeafHold { batch: xy_batch(&xs, &ys), ..hold() };
+        let h1 = LeafHold {
+            batch: xy_batch(&xs, &ys),
+            ..hold()
+        };
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (mut scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (mut scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
         // Panel 1 (leaf 1) is placed to the right of panel 0 by the hconcat
@@ -3660,7 +4502,10 @@ mod tests {
         );
 
         let packed = crate::render::pack_instances::extract_packed_bytes(&mut scene);
-        assert!(!packed.is_empty(), "leaf 1's 1200-point batch must trigger packing");
+        assert!(
+            !packed.is_empty(),
+            "leaf 1's 1200-point batch must trigger packing"
+        );
 
         // Header layout (pack_instances.rs): [panel_idx: u32][batch_idx: u32]
         // [kind: u32][count: u32][flags: u32], all little-endian.
@@ -3672,7 +4517,10 @@ mod tests {
              not leaf 1's own leaf-local panel 0 — proving no post-hoc header \
              patch is needed (D4c)"
         );
-        assert_eq!(count, n as u32, "packed instance count must match the source batch size");
+        assert_eq!(
+            count, n as u32,
+            "packed instance count must match the source batch size"
+        );
 
         // The header's panel_idx indexes directly into the merged scene's
         // panel vec at the SAME position whose plot_area was asserted above —
@@ -3709,12 +4557,19 @@ mod tests {
         theme0.sizes.point_size = 12.0;
         let mut theme1 = ThemeInputs::default();
         theme1.sizes.point_size = 300.0;
-        let h0 = LeafHold { theme: theme0, ..hold() };
-        let h1 = LeafHold { theme: theme1, ..hold() };
+        let h0 = LeafHold {
+            theme: theme0,
+            ..hold()
+        };
+        let h1 = LeafHold {
+            theme: theme1,
+            ..hold()
+        };
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let r0 = first_circle_radius(&scene.panels[0]);
         let r1 = first_circle_radius(&scene.panels[1]);
@@ -3725,7 +4580,10 @@ mod tests {
         );
         // Discriminator: leaf 1's larger point_size must render the larger radius,
         // proving the mapping applied per leaf (not one shared theme).
-        assert!(r1 > r0, "larger per-leaf point_size must render the larger radius");
+        assert!(
+            r1 > r0,
+            "larger per-leaf point_size must render the larger radius"
+        );
     }
 
     /// A labeled leaf node — a per-child label attached to an otherwise-standard
@@ -3779,12 +4637,16 @@ mod tests {
         let bare = composite(CompositeLayout::Wrap, vec![leaf_node(0), leaf_node(1)]);
         let bare = {
             let mut b = bare;
-            if let CompositeNode::Composite { ncols, .. } = &mut b { *ncols = Some(2); }
+            if let CompositeNode::Composite { ncols, .. } = &mut b {
+                *ncols = Some(2);
+            }
             b
         };
-        let (bare_scene, _) = render_composite_scene(&bare, &leaves, &ThemeInputs::default()).unwrap();
+        let (bare_scene, _) =
+            render_composite_scene(&bare, &leaves, &ThemeInputs::default()).unwrap();
 
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let (ax, _ay) = find_label(&scene, "Model A").expect("child 0 label present");
         let (bx, _by) = find_label(&scene, "Model B").expect("child 1 label present");
@@ -3794,7 +4656,10 @@ mod tests {
             "child 0 label must sit at the child origin inset, got x={ax}"
         );
         // Child 1 is placed to the right; its label is offset by that placement.
-        assert!(bx > ax, "child 1 label must be offset right of child 0: ax={ax} bx={bx}");
+        assert!(
+            bx > ax,
+            "child 1 label must be offset right of child 0: ax={ax} bx={bx}"
+        );
 
         // The label reserves headroom: panels shift DOWN vs. the unlabeled tree.
         assert!(
@@ -3819,7 +4684,8 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let (_tx, top_y) = find_label(&scene, "Top").expect("row 0 label present");
         let (_bx, bot_y) = find_label(&scene, "Bottom").expect("row 1 label present");
@@ -3850,13 +4716,15 @@ mod tests {
         let h0 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0)];
         let default_theme = ThemeInputs::default();
-        let (scene, _warnings) =
-            render_composite_scene(&tree, &leaves, &default_theme).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &default_theme).unwrap();
 
         let (font_size, color) =
             find_label_style(&scene, "Model A").expect("labeled leaf's label must be present");
         assert_eq!(font_size, default_theme.typography.title_font_size);
-        assert_eq!(color, crate::render::draw::to_scene_color(default_theme.colors.title_color));
+        assert_eq!(
+            color,
+            crate::render::draw::to_scene_color(default_theme.colors.title_color)
+        );
     }
 
     /// The finding this test closes: `apply_child_label` used to style every
@@ -3879,10 +4747,18 @@ mod tests {
 
         let (font_size, color) =
             find_label_style(&scene, "Model A").expect("labeled leaf's label must be present");
-        assert_eq!(font_size, 30.0, "label must use the call-level theme's title_font_size");
+        assert_eq!(
+            font_size, 30.0,
+            "label must use the call-level theme's title_font_size"
+        );
         assert_eq!(
             color,
-            ferrum_scene::Color { r: 0x11, g: 0x22, b: 0x33, a: 0xff },
+            ferrum_scene::Color {
+                r: 0x11,
+                g: 0x22,
+                b: 0x33,
+                a: 0xff
+            },
             "label must use the call-level theme's title_color"
         );
         assert_ne!(
@@ -3898,7 +4774,10 @@ mod tests {
     /// A point spec with a categorical color encoding on field `g`.
     fn cat_color_spec() -> ChartSpec {
         let mut s = scatter_spec();
-        s.encoding.color = Some(EncodingSpec { field: "g".into(), ..Default::default() });
+        s.encoding.color = Some(EncodingSpec {
+            field: "g".into(),
+            ..Default::default()
+        });
         s
     }
 
@@ -3906,7 +4785,10 @@ mod tests {
     /// (different fields → color+size do NOT merge; two stacked legends).
     fn color_size_spec() -> ChartSpec {
         let mut spec = cat_color_spec();
-        spec.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        spec.encoding.size = Some(EncodingSpec {
+            field: "s".into(),
+            ..Default::default()
+        });
         spec
     }
 
@@ -3922,7 +4804,9 @@ mod tests {
             vec![
                 Arc::new(Float64Array::from(xs.to_vec())),
                 Arc::new(Float64Array::from(ys.to_vec())),
-                Arc::new(StringArray::from(gs.iter().map(|s| Some(*s)).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(
+                    gs.iter().map(|s| Some(*s)).collect::<Vec<_>>(),
+                )),
             ],
         )
         .unwrap()
@@ -3941,7 +4825,9 @@ mod tests {
             vec![
                 Arc::new(Float64Array::from(xs.to_vec())),
                 Arc::new(Float64Array::from(ys.to_vec())),
-                Arc::new(StringArray::from(gs.iter().map(|s| Some(*s)).collect::<Vec<_>>())),
+                Arc::new(StringArray::from(
+                    gs.iter().map(|s| Some(*s)).collect::<Vec<_>>(),
+                )),
                 Arc::new(Float64Array::from(ss.to_vec())),
             ],
         )
@@ -3949,21 +4835,39 @@ mod tests {
     }
 
     fn color_hold_with(spec: ChartSpec, batch: RecordBatch, theme: ThemeInputs) -> LeafHold {
-        LeafHold { spec, batch, theme, config: RenderConfig::default(), chart_config: ChartConfig::default() }
+        LeafHold {
+            spec,
+            batch,
+            theme,
+            config: RenderConfig::default(),
+            chart_config: ChartConfig::default(),
+        }
     }
 
     fn color_hold(gs: &[&str]) -> LeafHold {
-        color_hold_with(cat_color_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], gs), ThemeInputs::default())
+        color_hold_with(
+            cat_color_spec(),
+            xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], gs),
+            ThemeInputs::default(),
+        )
     }
 
     fn color_hold_oriented(gs: &[&str], orient: LegendOrient) -> LeafHold {
         let mut theme = ThemeInputs::default();
         theme.legend.legend_orient = orient;
-        color_hold_with(cat_color_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], gs), theme)
+        color_hold_with(
+            cat_color_spec(),
+            xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], gs),
+            theme,
+        )
     }
 
     fn color_leaf(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(cat_color_spec()), data, label: None }
+        CompositeNode::Leaf {
+            spec: Box::new(cat_color_spec()),
+            data,
+            label: None,
+        }
     }
 
     /// An hconcat of `n` color leaves with the given color resolve mode and an
@@ -3987,20 +4891,32 @@ mod tests {
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
 
         let shared = color_hconcat(2, RM::Shared, None);
-        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+        let (shared_scene, _) =
+            render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
 
         let indep = color_hconcat(2, RM::Shared, Some(RM::Independent));
-        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+        let (indep_scene, _) =
+            render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
 
-        assert!(!shared_scene.legend.is_empty(), "shared color must emit one figure legend");
-        assert!(!indep_scene.legend.is_empty(), "legend-independent keeps per-panel legends");
+        assert!(
+            !shared_scene.legend.is_empty(),
+            "shared color must emit one figure legend"
+        );
+        assert!(
+            !indep_scene.legend.is_empty(),
+            "legend-independent keeps per-panel legends"
+        );
         assert!(
             shared_scene.legend.len() < indep_scene.legend.len(),
             "one figure legend ({}) must draw fewer nodes than two per-panel legends ({})",
             shared_scene.legend.len(),
             indep_scene.legend.len(),
         );
-        assert_eq!(shared_scene.panels.len(), 2, "band must not add or drop panels");
+        assert_eq!(
+            shared_scene.panels.len(),
+            2,
+            "band must not add or drop panels"
+        );
     }
 
     #[test]
@@ -4014,13 +4930,26 @@ mod tests {
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
 
         let shared = color_hconcat(2, RM::Shared, None);
-        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
-        assert!(shared_scene.width > 610.0, "right band must grow width past the grid: {}", shared_scene.width);
-        assert!((shared_scene.height - 200.0).abs() < 1e-6, "right band must not grow height");
+        let (shared_scene, _) =
+            render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(
+            shared_scene.width > 610.0,
+            "right band must grow width past the grid: {}",
+            shared_scene.width
+        );
+        assert!(
+            (shared_scene.height - 200.0).abs() < 1e-6,
+            "right band must not grow height"
+        );
 
         let indep = color_hconcat(2, RM::Shared, Some(RM::Independent));
-        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
-        assert!((indep_scene.width - 610.0).abs() < 1e-6, "per-panel legends must not grow the grid width: {}", indep_scene.width);
+        let (indep_scene, _) =
+            render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(
+            (indep_scene.width - 610.0).abs() < 1e-6,
+            "per-panel legends must not grow the grid width: {}",
+            indep_scene.width
+        );
     }
 
     #[test]
@@ -4030,9 +4959,21 @@ mod tests {
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
         let tree = color_hconcat(2, RM::Shared, None);
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-        assert!(scene.height > 200.0, "top band must grow scene height: {}", scene.height);
-        assert!((scene.width - 610.0).abs() < 1e-6, "top band must not grow width: {}", scene.width);
-        assert!(scene.panels[0].plot_area.y > 8.0, "top band must shift panels down: {}", scene.panels[0].plot_area.y);
+        assert!(
+            scene.height > 200.0,
+            "top band must grow scene height: {}",
+            scene.height
+        );
+        assert!(
+            (scene.width - 610.0).abs() < 1e-6,
+            "top band must not grow width: {}",
+            scene.width
+        );
+        assert!(
+            scene.panels[0].plot_area.y > 8.0,
+            "top band must shift panels down: {}",
+            scene.panels[0].plot_area.y
+        );
     }
 
     #[test]
@@ -4042,15 +4983,24 @@ mod tests {
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
         let tree = color_hconcat(2, RM::Shared, None);
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-        assert!(scene.width > 610.0, "left band must grow scene width: {}", scene.width);
+        assert!(
+            scene.width > 610.0,
+            "left band must grow scene width: {}",
+            scene.width
+        );
         // Panel 0's plot area is pushed right by the legend gutter.
         let right_h = color_hold(&["a", "b", "a"]);
-        let right_leaves = [leaf_input(&right_h, 300.0, 200.0), leaf_input(&right_h, 300.0, 200.0)];
-        let (right_scene, _) = render_composite_scene(&tree, &right_leaves, &ThemeInputs::default()).unwrap();
+        let right_leaves = [
+            leaf_input(&right_h, 300.0, 200.0),
+            leaf_input(&right_h, 300.0, 200.0),
+        ];
+        let (right_scene, _) =
+            render_composite_scene(&tree, &right_leaves, &ThemeInputs::default()).unwrap();
         assert!(
             scene.panels[0].plot_area.x > right_scene.panels[0].plot_area.x,
             "left band shifts panels right ({} vs right-orient {})",
-            scene.panels[0].plot_area.x, right_scene.panels[0].plot_area.x,
+            scene.panels[0].plot_area.x,
+            right_scene.panels[0].plot_area.x,
         );
     }
 
@@ -4071,8 +5021,14 @@ mod tests {
     fn band_bundle(theme: ThemeInputs, title: Option<&str>) -> LeafLegendBundle {
         LeafLegendBundle {
             entries: vec![
-                LegendEntry { label: "a".into(), symbol: SymbolKind::Circle },
-                LegendEntry { label: "b".into(), symbol: SymbolKind::Circle },
+                LegendEntry {
+                    label: "a".into(),
+                    symbol: SymbolKind::Circle,
+                },
+                LegendEntry {
+                    label: "b".into(),
+                    symbol: SymbolKind::Circle,
+                },
             ],
             colorbar: None,
             title: title.map(str::to_owned),
@@ -4114,11 +5070,17 @@ mod tests {
     #[test]
     fn legend_band_pads_trailing_edge_past_content_extent_all_orients() {
         let metrics = crate::render::font::FontdueMetrics::new();
-        let flags = BandFlags { color: true, size: false };
+        let flags = BandFlags {
+            color: true,
+            size: false,
+        };
 
-        for orient in
-            [LegendOrient::Right, LegendOrient::Left, LegendOrient::Top, LegendOrient::Bottom]
-        {
+        for orient in [
+            LegendOrient::Right,
+            LegendOrient::Left,
+            LegendOrient::Top,
+            LegendOrient::Bottom,
+        ] {
             let mut theme = ThemeInputs::default();
             theme.legend.legend_orient = orient;
             let bundle = band_bundle(theme.clone(), Some("grp"));
@@ -4138,12 +5100,8 @@ mod tests {
             let content_h = max_y - min_y;
 
             let grown = match orient {
-                LegendOrient::Right | LegendOrient::Left => {
-                    scene.width - 300.0 - LEGEND_PLOT_GAP
-                }
-                LegendOrient::Top | LegendOrient::Bottom => {
-                    scene.height - 200.0 - LEGEND_PLOT_GAP
-                }
+                LegendOrient::Right | LegendOrient::Left => scene.width - 300.0 - LEGEND_PLOT_GAP,
+                LegendOrient::Top | LegendOrient::Bottom => scene.height - 200.0 - LEGEND_PLOT_GAP,
             };
             let content = match orient {
                 LegendOrient::Right | LegendOrient::Left => content_w,
@@ -4164,7 +5122,10 @@ mod tests {
     #[test]
     fn legend_band_pads_trailing_edge_colorbar_bottom_orient() {
         let metrics = crate::render::font::FontdueMetrics::new();
-        let flags = BandFlags { color: true, size: false };
+        let flags = BandFlags {
+            color: true,
+            size: false,
+        };
         let mut theme = ThemeInputs::default();
         theme.legend.legend_orient = LegendOrient::Bottom;
         let bundle = band_colorbar_bundle(theme.clone(), Some("value"));
@@ -4203,7 +5164,14 @@ mod tests {
         let bundle = band_bundle(theme.clone(), Some("A Very Long Legend Title"));
 
         let mut scene = empty_scene(300.0, 200.0);
-        draw_legend_band(&mut scene, &bundle, BandFlags { color: true, size: false });
+        draw_legend_band(
+            &mut scene,
+            &bundle,
+            BandFlags {
+                color: true,
+                size: false,
+            },
+        );
 
         let metrics = crate::render::font::FontdueMetrics::new();
         let title_w_at_title_fs = metrics.measure_width(
@@ -4249,20 +5217,26 @@ mod tests {
         let c0 = color_hold(&["a", "b", "a"]);
         let c1 = color_hold(&["a", "b", "a"]);
         let plain = hold(); // data index 2: a plain x/y leaf, no color
-        // Leaf inputs are in tree pre-order: the outer plain leaf, then the inner
-        // node's two color leaves.
+                            // Leaf inputs are in tree pre-order: the outer plain leaf, then the inner
+                            // node's two color leaves.
         let ordered = [
             leaf_input(&plain, 300.0, 200.0),
             leaf_input(&c0, 300.0, 200.0),
             leaf_input(&c1, 300.0, 200.0),
         ];
-        let (shared_scene, _) = render_composite_scene(&inner_shared, &ordered, &ThemeInputs::default()).unwrap();
-        let (indep_scene, _) = render_composite_scene(&inner_indep, &ordered, &ThemeInputs::default()).unwrap();
-        assert!(!shared_scene.legend.is_empty(), "inner-shared color must emit one band");
+        let (shared_scene, _) =
+            render_composite_scene(&inner_shared, &ordered, &ThemeInputs::default()).unwrap();
+        let (indep_scene, _) =
+            render_composite_scene(&inner_indep, &ordered, &ThemeInputs::default()).unwrap();
+        assert!(
+            !shared_scene.legend.is_empty(),
+            "inner-shared color must emit one band"
+        );
         assert!(
             shared_scene.legend.len() < indep_scene.legend.len(),
             "nested band ({}) must draw fewer legend nodes than per-panel ({})",
-            shared_scene.legend.len(), indep_scene.legend.len(),
+            shared_scene.legend.len(),
+            indep_scene.legend.len(),
         );
         assert_eq!(shared_scene.panels.len(), 3);
     }
@@ -4275,27 +5249,52 @@ mod tests {
         use crate::render::chart_config::LegendStyleSpec;
         let disabled_spec = || {
             let mut s = cat_color_spec();
-            s.encoding.color.as_mut().unwrap().legend =
-                Some(Box::new(LegendStyleSpec { disabled: Some(true), ..Default::default() }));
+            s.encoding.color.as_mut().unwrap().legend = Some(Box::new(LegendStyleSpec {
+                disabled: Some(true),
+                ..Default::default()
+            }));
             s
         };
-        let h0 = color_hold_with(disabled_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
-        let h1 = color_hold_with(disabled_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        let h0 = color_hold_with(
+            disabled_spec(),
+            xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]),
+            ThemeInputs::default(),
+        );
+        let h1 = color_hold_with(
+            disabled_spec(),
+            xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]),
+            ThemeInputs::default(),
+        );
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
         // Tree leaf specs must also carry the disabled legend so planning sees it.
         let mut tree = composite(
             CompositeLayout::Hconcat,
             vec![
-                CompositeNode::Leaf { spec: Box::new(disabled_spec()), data: 0, label: None },
-                CompositeNode::Leaf { spec: Box::new(disabled_spec()), data: 1, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(disabled_spec()),
+                    data: 0,
+                    label: None,
+                },
+                CompositeNode::Leaf {
+                    spec: Box::new(disabled_spec()),
+                    data: 1,
+                    label: None,
+                },
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
             resolve.color = Some(RM::Shared);
         }
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-        assert!(scene.legend.is_empty(), "all-disabled participants → no figure band");
-        assert!((scene.width - 610.0).abs() < 1e-6, "no band → no width growth: {}", scene.width);
+        assert!(
+            scene.legend.is_empty(),
+            "all-disabled participants → no figure band"
+        );
+        assert!(
+            (scene.width - 610.0).abs() < 1e-6,
+            "no band → no width growth: {}",
+            scene.width
+        );
     }
 
     #[test]
@@ -4304,15 +5303,25 @@ mod tests {
         // leaf 1's non-empty bundle, so exactly one band is still emitted.
         use crate::render::chart_config::LegendStyleSpec;
         let mut disabled = cat_color_spec();
-        disabled.encoding.color.as_mut().unwrap().legend =
-            Some(Box::new(LegendStyleSpec { disabled: Some(true), ..Default::default() }));
-        let h0 = color_hold_with(disabled.clone(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        disabled.encoding.color.as_mut().unwrap().legend = Some(Box::new(LegendStyleSpec {
+            disabled: Some(true),
+            ..Default::default()
+        }));
+        let h0 = color_hold_with(
+            disabled.clone(),
+            xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]),
+            ThemeInputs::default(),
+        );
         let h1 = color_hold(&["a", "b", "a"]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
         let mut tree = composite(
             CompositeLayout::Hconcat,
             vec![
-                CompositeNode::Leaf { spec: Box::new(disabled), data: 0, label: None },
+                CompositeNode::Leaf {
+                    spec: Box::new(disabled),
+                    data: 0,
+                    label: None,
+                },
                 color_leaf(1),
             ],
         );
@@ -4320,8 +5329,15 @@ mod tests {
             resolve.color = Some(RM::Shared);
         }
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
-        assert!(!scene.legend.is_empty(), "band must be captured from the non-disabled leaf 1");
-        assert!(scene.width > 610.0, "band from leaf 1 still grows the scene: {}", scene.width);
+        assert!(
+            !scene.legend.is_empty(),
+            "band must be captured from the non-disabled leaf 1"
+        );
+        assert!(
+            scene.width > 610.0,
+            "band from leaf 1 still grows the scene: {}",
+            scene.width
+        );
     }
 
     #[test]
@@ -4332,14 +5348,28 @@ mod tests {
         // where both participate (band only).
         use crate::spec::encoding::ScaleSpec;
         let mut excl_spec = cat_color_spec();
-        excl_spec.encoding.color.as_mut().unwrap().scale =
-            Some(ScaleSpec::Ordinal { domain: None, range: None, padding: 0.0 });
+        excl_spec.encoding.color.as_mut().unwrap().scale = Some(ScaleSpec::Ordinal {
+            domain: None,
+            range: None,
+            padding: 0.0,
+        });
         let h0 = color_hold(&["a", "b", "a"]);
-        let h1 = color_hold_with(excl_spec.clone(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        let h1 = color_hold_with(
+            excl_spec.clone(),
+            xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]),
+            ThemeInputs::default(),
+        );
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
         let mut tree = composite(
             CompositeLayout::Hconcat,
-            vec![color_leaf(0), CompositeNode::Leaf { spec: Box::new(excl_spec), data: 1, label: None }],
+            vec![
+                color_leaf(0),
+                CompositeNode::Leaf {
+                    spec: Box::new(excl_spec),
+                    data: 1,
+                    label: None,
+                },
+            ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
             resolve.color = Some(RM::Shared);
@@ -4348,14 +5378,19 @@ mod tests {
 
         // Baseline: both participate (no explicit scale) → single band only.
         let both = color_hold(&["a", "b", "a"]);
-        let both_leaves = [leaf_input(&both, 300.0, 200.0), leaf_input(&both, 300.0, 200.0)];
+        let both_leaves = [
+            leaf_input(&both, 300.0, 200.0),
+            leaf_input(&both, 300.0, 200.0),
+        ];
         let both_tree = color_hconcat(2, RM::Shared, None);
-        let (both_scene, _) = render_composite_scene(&both_tree, &both_leaves, &ThemeInputs::default()).unwrap();
+        let (both_scene, _) =
+            render_composite_scene(&both_tree, &both_leaves, &ThemeInputs::default()).unwrap();
 
         assert!(
             scene.legend.len() > both_scene.legend.len(),
             "excluded leaf's own legend ({}) must add nodes beyond the lone band ({})",
-            scene.legend.len(), both_scene.legend.len(),
+            scene.legend.len(),
+            both_scene.legend.len(),
         );
     }
 
@@ -4364,30 +5399,45 @@ mod tests {
         // A leaf with color (categorical) + size (numeric) on DIFFERENT fields,
         // sharing both channels on one node → one band containing the color
         // legend AND the size aux block: more legend nodes than a color-only band.
-        let batch = xycs_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"], &[2.0, 5.0, 9.0]);
+        let batch = xycs_batch(
+            &[1.0, 2.0, 3.0],
+            &[1.0, 2.0, 3.0],
+            &["a", "b", "a"],
+            &[2.0, 5.0, 9.0],
+        );
         let h0 = color_hold_with(color_size_spec(), batch.clone(), ThemeInputs::default());
         let h1 = color_hold_with(color_size_spec(), batch, ThemeInputs::default());
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let cs_leaf = |data| CompositeNode::Leaf { spec: Box::new(color_size_spec()), data, label: None };
+        let cs_leaf = |data| CompositeNode::Leaf {
+            spec: Box::new(color_size_spec()),
+            data,
+            label: None,
+        };
         let mut tree = composite(CompositeLayout::Hconcat, vec![cs_leaf(0), cs_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
             resolve.color = Some(RM::Shared);
             resolve.size = Some(RM::Shared);
         }
-        let (both_scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (both_scene, _) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         // Color-only shared baseline (size independent → size legend stays per-panel,
         // not in the band).
         let color_only = color_hconcat(2, RM::Shared, None);
         let ch = color_hold(&["a", "b", "a"]);
         let color_leaves = [leaf_input(&ch, 300.0, 200.0), leaf_input(&ch, 300.0, 200.0)];
-        let (color_scene, _) = render_composite_scene(&color_only, &color_leaves, &ThemeInputs::default()).unwrap();
+        let (color_scene, _) =
+            render_composite_scene(&color_only, &color_leaves, &ThemeInputs::default()).unwrap();
 
-        assert!(!both_scene.legend.is_empty(), "color+size share must emit a band");
+        assert!(
+            !both_scene.legend.is_empty(),
+            "color+size share must emit a band"
+        );
         assert!(
             both_scene.legend.len() > color_scene.legend.len(),
             "stacked color+size band ({}) must draw more nodes than a color-only band ({})",
-            both_scene.legend.len(), color_scene.legend.len(),
+            both_scene.legend.len(),
+            color_scene.legend.len(),
         );
     }
 
@@ -4402,16 +5452,22 @@ mod tests {
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
 
         let override_tree = color_hconcat(2, RM::Shared, Some(RM::Independent));
-        let (override_scene, _) = render_composite_scene(&override_tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (override_scene, _) =
+            render_composite_scene(&override_tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let independent_scale = color_hconcat(2, RM::Independent, None);
-        let (indep_scene, _) = render_composite_scene(&independent_scale, &leaves, &ThemeInputs::default()).unwrap();
+        let (indep_scene, _) =
+            render_composite_scene(&independent_scale, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(
             override_scene.legend.len(), indep_scene.legend.len(),
             "legend-independent over a shared scale must draw the same per-panel legends as an independent scale",
         );
-        assert!((override_scene.width - 610.0).abs() < 1e-6, "no band → no growth: {}", override_scene.width);
+        assert!(
+            (override_scene.width - 610.0).abs() < 1e-6,
+            "no band → no growth: {}",
+            override_scene.width
+        );
     }
 
     #[test]
@@ -4450,10 +5506,12 @@ mod tests {
             render_composite_scene(&baseline, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(
-            scene.legend.len(), baseline_scene.legend.len(),
+            scene.legend.len(),
+            baseline_scene.legend.len(),
             "shared legend over an independent scale must degrade to the same per-panel \
              legends as a plain independent-scale render: got {} vs baseline {}",
-            scene.legend.len(), baseline_scene.legend.len(),
+            scene.legend.len(),
+            baseline_scene.legend.len(),
         );
         assert_eq!(scene.panels.len(), 2, "degrade must not add or drop panels");
     }
@@ -4480,12 +5538,19 @@ mod tests {
     /// A point spec with numeric size on `s` and NO color channel at all.
     fn size_only_spec() -> ChartSpec {
         let mut s = scatter_spec();
-        s.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        s.encoding.size = Some(EncodingSpec {
+            field: "s".into(),
+            ..Default::default()
+        });
         s
     }
 
     fn size_leaf(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(size_only_spec()), data, label: None }
+        CompositeNode::Leaf {
+            spec: Box::new(size_only_spec()),
+            data,
+            label: None,
+        }
     }
 
     #[test]
@@ -4505,35 +5570,58 @@ mod tests {
         if let CompositeNode::Composite { resolve, .. } = &mut shared {
             resolve.size = Some(RM::Shared);
         }
-        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+        let (shared_scene, _) =
+            render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
 
         let mut indep = composite(CompositeLayout::Hconcat, vec![size_leaf(0), size_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut indep {
             resolve.size = Some(RM::Independent);
         }
-        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+        let (indep_scene, _) =
+            render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
 
-        assert!(!shared_scene.legend.is_empty(), "shared size must emit one figure legend band");
-        assert!(!indep_scene.legend.is_empty(), "independent size keeps per-panel size legends");
+        assert!(
+            !shared_scene.legend.is_empty(),
+            "shared size must emit one figure legend band"
+        );
+        assert!(
+            !indep_scene.legend.is_empty(),
+            "independent size keeps per-panel size legends"
+        );
         assert!(
             shared_scene.legend.len() < indep_scene.legend.len(),
             "one figure size band ({}) must draw fewer nodes than two per-panel size legends ({})",
-            shared_scene.legend.len(), indep_scene.legend.len(),
+            shared_scene.legend.len(),
+            indep_scene.legend.len(),
         );
-        assert_eq!(shared_scene.panels.len(), 2, "band must not add or drop panels");
+        assert_eq!(
+            shared_scene.panels.len(),
+            2,
+            "band must not add or drop panels"
+        );
     }
 
     /// A point spec with color AND size mapped to the SAME numeric field `s` —
     /// `leaf_merges_color_size` folds size into the color legend for this leaf.
     fn merged_color_size_spec() -> ChartSpec {
         let mut s = scatter_spec();
-        s.encoding.color = Some(EncodingSpec { field: "s".into(), ..Default::default() });
-        s.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        s.encoding.color = Some(EncodingSpec {
+            field: "s".into(),
+            ..Default::default()
+        });
+        s.encoding.size = Some(EncodingSpec {
+            field: "s".into(),
+            ..Default::default()
+        });
         s
     }
 
     fn merged_leaf(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(merged_color_size_spec()), data, label: None }
+        CompositeNode::Leaf {
+            spec: Box::new(merged_color_size_spec()),
+            data,
+            label: None,
+        }
     }
 
     #[test]
@@ -4544,22 +5632,34 @@ mod tests {
         // `layout_band_legends`'s `include_size = flags.color && merged_color_size`
         // arm — and suppress BOTH panel channels together, not just color.
         let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
-        let h0 = color_hold_with(merged_color_size_spec(), batch.clone(), ThemeInputs::default());
+        let h0 = color_hold_with(
+            merged_color_size_spec(),
+            batch.clone(),
+            ThemeInputs::default(),
+        );
         let h1 = color_hold_with(merged_color_size_spec(), batch, ThemeInputs::default());
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
 
-        let mut shared = composite(CompositeLayout::Hconcat, vec![merged_leaf(0), merged_leaf(1)]);
+        let mut shared = composite(
+            CompositeLayout::Hconcat,
+            vec![merged_leaf(0), merged_leaf(1)],
+        );
         if let CompositeNode::Composite { resolve, .. } = &mut shared {
             resolve.color = Some(RM::Shared);
         }
-        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+        let (shared_scene, _) =
+            render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
 
         // Baseline A: same tree, resolve stays default (Independent) → both
         // panels keep their OWN already-merged color+size legend (nothing
         // compositor-suppressed) — proves suppression collapsed two per-panel
         // merged blocks into one band.
-        let unshared = composite(CompositeLayout::Hconcat, vec![merged_leaf(0), merged_leaf(1)]);
-        let (unshared_scene, _) = render_composite_scene(&unshared, &leaves, &ThemeInputs::default()).unwrap();
+        let unshared = composite(
+            CompositeLayout::Hconcat,
+            vec![merged_leaf(0), merged_leaf(1)],
+        );
+        let (unshared_scene, _) =
+            render_composite_scene(&unshared, &leaves, &ThemeInputs::default()).unwrap();
 
         // Baseline B: a plain categorical color-only band (different field,
         // no size at all) — proves the merged band carries MORE than bare
@@ -4567,21 +5667,31 @@ mod tests {
         let color_only = color_hconcat(2, RM::Shared, None);
         let ch = color_hold(&["a", "b", "a"]);
         let color_leaves = [leaf_input(&ch, 300.0, 200.0), leaf_input(&ch, 300.0, 200.0)];
-        let (color_scene, _) = render_composite_scene(&color_only, &color_leaves, &ThemeInputs::default()).unwrap();
+        let (color_scene, _) =
+            render_composite_scene(&color_only, &color_leaves, &ThemeInputs::default()).unwrap();
 
-        assert!(!shared_scene.legend.is_empty(), "same-field color+size merge must emit a band");
+        assert!(
+            !shared_scene.legend.is_empty(),
+            "same-field color+size merge must emit a band"
+        );
         assert!(
             shared_scene.legend.len() < unshared_scene.legend.len(),
             "one band folding both suppressed channels ({}) must draw fewer nodes than two \
              per-panel merged legends ({})",
-            shared_scene.legend.len(), unshared_scene.legend.len(),
+            shared_scene.legend.len(),
+            unshared_scene.legend.len(),
         );
         assert!(
             shared_scene.legend.len() > color_scene.legend.len(),
             "band with folded size content ({}) must draw more nodes than a color-only band ({})",
-            shared_scene.legend.len(), color_scene.legend.len(),
+            shared_scene.legend.len(),
+            color_scene.legend.len(),
         );
-        assert_eq!(shared_scene.panels.len(), 2, "band must not add or drop panels");
+        assert_eq!(
+            shared_scene.panels.len(),
+            2,
+            "band must not add or drop panels"
+        );
     }
 
     #[test]
@@ -4608,8 +5718,15 @@ mod tests {
         ];
         let (scene, _) = render_composite_scene(&inner, &leaves, &ThemeInputs::default()).unwrap();
 
-        assert!(!scene.legend.is_empty(), "nested Top-orient share must still emit a band");
-        assert!(scene.height > 200.0, "top band must grow scene height even when nested: {}", scene.height);
+        assert!(
+            !scene.legend.is_empty(),
+            "nested Top-orient share must still emit a band"
+        );
+        assert!(
+            scene.height > 200.0,
+            "top band must grow scene height even when nested: {}",
+            scene.height
+        );
         assert!(
             scene.panels[1].plot_area.y > 8.0,
             "top band must shift the inner subtree's panels down: {}",
@@ -4624,9 +5741,20 @@ mod tests {
     /// mode — mirrors `color_hconcat`'s shape for the `Grid` layout kind
     /// `pairplot`/`jointplot` actually lower to (a flat grid whose direct
     /// children mix real cells with `Hole` placeholders).
-    fn color_grid(children: Vec<CompositeNode>, nrows: u32, ncols: u32, color: RM) -> CompositeNode {
+    fn color_grid(
+        children: Vec<CompositeNode>,
+        nrows: u32,
+        ncols: u32,
+        color: RM,
+    ) -> CompositeNode {
         let mut node = composite(CompositeLayout::Grid, children);
-        if let CompositeNode::Composite { resolve, nrows: nr, ncols: nc, .. } = &mut node {
+        if let CompositeNode::Composite {
+            resolve,
+            nrows: nr,
+            ncols: nc,
+            ..
+        } = &mut node
+        {
             resolve.color = Some(color);
             *nr = Some(nrows);
             *nc = Some(ncols);
@@ -4649,7 +5777,10 @@ mod tests {
         let cells = || {
             vec![
                 color_leaf(0),
-                CompositeNode::Hole { width: None, height: None },
+                CompositeNode::Hole {
+                    width: None,
+                    height: None,
+                },
                 color_leaf(1),
                 color_leaf(2),
             ]
@@ -4667,7 +5798,8 @@ mod tests {
         let (scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
 
         let indep = color_grid(cells(), 2, 2, RM::Independent);
-        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+        let (indep_scene, _) =
+            render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 3, "the hole must not claim a panel");
         assert!(
@@ -4697,7 +5829,10 @@ mod tests {
         // on the wrong (or no) leaves.
         let with_hole = color_grid(
             vec![
-                CompositeNode::Hole { width: None, height: None },
+                CompositeNode::Hole {
+                    width: None,
+                    height: None,
+                },
                 color_leaf(0),
                 color_leaf(1),
             ],
@@ -4708,12 +5843,18 @@ mod tests {
         let h0 = color_hold(&["a", "b", "a"]);
         let h1 = color_hold(&["a", "b", "a"]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (hole_scene, _) = render_composite_scene(&with_hole, &leaves, &ThemeInputs::default()).unwrap();
+        let (hole_scene, _) =
+            render_composite_scene(&with_hole, &leaves, &ThemeInputs::default()).unwrap();
 
         let no_hole = color_hconcat(2, RM::Shared, None);
-        let (baseline_scene, _) = render_composite_scene(&no_hole, &leaves, &ThemeInputs::default()).unwrap();
+        let (baseline_scene, _) =
+            render_composite_scene(&no_hole, &leaves, &ThemeInputs::default()).unwrap();
 
-        assert_eq!(hole_scene.panels.len(), 2, "the leading hole must not claim a panel");
+        assert_eq!(
+            hole_scene.panels.len(),
+            2,
+            "the leading hole must not claim a panel"
+        );
         assert!(
             !hole_scene.legend.is_empty(),
             "the two real leaves after a leading hole must still band"

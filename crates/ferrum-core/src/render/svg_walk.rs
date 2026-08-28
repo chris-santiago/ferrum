@@ -53,6 +53,14 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
             emit_gridline_node(&mut svg, node);
         }
 
+        // Below-marks content (GH #89B): text annotations with `z ==
+        // "below_marks"`. A typed sibling of `grid`, painted immediately
+        // after it — the same visual position these nodes held before this
+        // slot existed (previously appended onto `grid` itself).
+        for node in &panel.below_marks {
+            emit_node(&mut svg, node);
+        }
+
         // Axes
         for node in &panel.axes {
             emit_node(&mut svg, node);
@@ -76,7 +84,12 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
 
         // Marks (non-text/label first, inside clip)
         for batch in &panel.marks {
-            if matches!(batch.kind, ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label) { continue; }
+            if matches!(
+                batch.kind,
+                ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
+            ) {
+                continue;
+            }
             // Additive blend: wrap batch in <g style="mix-blend-mode:screen">.
             let blend_wrap = matches!(batch.blend, ferrum_scene::BlendMode::Additive);
             if blend_wrap {
@@ -110,9 +123,15 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
                 svg.raw(&format!("<g{}>", attrs));
             }
             for (i, node) in batch.nodes.iter().enumerate() {
-                let href = batch.hrefs.as_ref().and_then(|h| h.get(i).and_then(|o| o.as_deref()));
+                let href = batch
+                    .hrefs
+                    .as_ref()
+                    .and_then(|h| h.get(i).and_then(|o| o.as_deref()));
                 let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
-                let desc = batch.descriptions.as_ref().and_then(|d| d.get(i).and_then(|o| o.as_deref()));
+                let desc = batch
+                    .descriptions
+                    .as_ref()
+                    .and_then(|d| d.get(i).and_then(|o| o.as_deref()));
                 let needs_wrap = href.is_some() || tooltip.is_some() || desc.is_some();
 
                 if needs_wrap {
@@ -121,7 +140,9 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
                     }
                     svg.g_open(None);
                     if let Some(tt) = tooltip {
-                        let text: String = tt.fields.iter()
+                        let text: String = tt
+                            .fields
+                            .iter()
                             .map(|f| format!("{}: {}", f.name, f.value))
                             .collect::<Vec<_>>()
                             .join(", ");
@@ -151,6 +172,17 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
 
         svg.use_clip_close();
 
+        // Above-marks axis/grid chrome (GH #89B): nodes from an axis or its
+        // gridlines whose effective `zindex >= 1`. A typed sibling of
+        // `annotations`, painted immediately after marks and before
+        // `annotations` — the deliberate z-order refinement that makes
+        // above-marks user annotations always paint above above-marks axis
+        // chrome (previously the two were commingled in one list with chrome
+        // prefixed ahead of user content, so chrome painted OVER it).
+        for node in &panel.chrome_above {
+            emit_node(&mut svg, node);
+        }
+
         // Annotations (reference lines, hlines, vlines) — emitted OUTSIDE the
         // clip region so they can span the full panel width/height, and AFTER
         // marks so they render above data (matching WASM z-order in scene_load.rs).
@@ -161,23 +193,47 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
         // Text/Label-kind mark batches (mark_text, mark_label) outside clip so
         // dy/dx offsets near panel edges are not cut off.
         for batch in &panel.marks {
-            if !matches!(batch.kind, ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label) { continue; }
+            if !matches!(
+                batch.kind,
+                ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
+            ) {
+                continue;
+            }
             for (i, node) in batch.nodes.iter().enumerate() {
-                let href = batch.hrefs.as_ref().and_then(|h| h.get(i).and_then(|o| o.as_deref()));
+                let href = batch
+                    .hrefs
+                    .as_ref()
+                    .and_then(|h| h.get(i).and_then(|o| o.as_deref()));
                 let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
-                let desc = batch.descriptions.as_ref().and_then(|d| d.get(i).and_then(|o| o.as_deref()));
+                let desc = batch
+                    .descriptions
+                    .as_ref()
+                    .and_then(|d| d.get(i).and_then(|o| o.as_deref()));
                 let needs_wrap = href.is_some() || tooltip.is_some() || desc.is_some();
                 if needs_wrap {
-                    if let Some(url) = href { svg.a_open(url); }
+                    if let Some(url) = href {
+                        svg.a_open(url);
+                    }
                     svg.g_open(None);
                     if let Some(tt) = tooltip {
-                        let text: String = tt.fields.iter().map(|f| format!("{}: {}", f.name, f.value)).collect::<Vec<_>>().join(", ");
-                        if !text.is_empty() { svg.title_elem(&text); }
+                        let text: String = tt
+                            .fields
+                            .iter()
+                            .map(|f| format!("{}: {}", f.name, f.value))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if !text.is_empty() {
+                            svg.title_elem(&text);
+                        }
                     }
-                    if let Some(d) = desc { svg.desc_elem(d); }
+                    if let Some(d) = desc {
+                        svg.desc_elem(d);
+                    }
                     emit_node(&mut svg, node);
                     svg.g_close();
-                    if href.is_some() { svg.a_close(); }
+                    if href.is_some() {
+                        svg.a_close();
+                    }
                 } else {
                     emit_node(&mut svg, node);
                 }
@@ -204,12 +260,28 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
 
 fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
     match node {
-        SceneNode::Rect { x, y, w, h, style, corner_radius } => {
-            let cr = if *corner_radius > 0.0 { Some(*corner_radius) } else { None };
+        SceneNode::Rect {
+            x,
+            y,
+            w,
+            h,
+            style,
+            corner_radius,
+        } => {
+            let cr = if *corner_radius > 0.0 {
+                Some(*corner_radius)
+            } else {
+                None
+            };
             // Anchor: center of the rect.
             let svg_style = to_svg_fill_stroke_with_anchor(style, x + w / 2.0, y + h / 2.0);
             svg.rect(
-                Rect { x: *x, y: *y, w: *w, h: *h },
+                Rect {
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                },
                 &svg_style,
                 cr,
             );
@@ -219,31 +291,52 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
             let svg_style = to_svg_fill_stroke_with_anchor(style, *cx, *cy);
             svg.circle(*cx, *cy, *r, &svg_style);
         }
-        SceneNode::Line { x1, y1, x2, y2, style } => {
+        SceneNode::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            style,
+        } => {
             svg.line(*x1, *y1, *x2, *y2, &to_svg_stroke(style));
         }
-        SceneNode::Path { commands, style, closed: _ } => {
+        SceneNode::Path {
+            commands,
+            style,
+            closed: _,
+        } => {
             let d = path_cmds_to_d(commands);
             // Anchor: first MoveTo coordinates.
-            let (anchor_x, anchor_y) = commands.iter().find_map(|c| {
-                if let ferrum_scene::PathCmd::MoveTo { x, y } = c { Some((*x, *y)) } else { None }
-            }).unwrap_or((0.0, 0.0));
+            let (anchor_x, anchor_y) = commands
+                .iter()
+                .find_map(|c| {
+                    if let ferrum_scene::PathCmd::MoveTo { x, y } = c {
+                        Some((*x, *y))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or((0.0, 0.0));
             let svg_style = to_svg_fill_stroke_with_anchor(style, anchor_x, anchor_y);
             svg.path(&d, &svg_style);
         }
-        SceneNode::Text { x, y, content, style, .. } => {
+        SceneNode::Text {
+            x,
+            y,
+            content,
+            style,
+            ..
+        } => {
             emit_text(svg, *x, *y, content, style);
         }
-        SceneNode::Image { x, y, w, h, data } => {
-            match data {
-                ImageData::Inline { bytes, mime } => {
-                    svg.image(*x, *y, *w, *h, bytes, *mime);
-                }
-                ImageData::Url { url } => {
-                    svg.image_data_url(*x, *y, *w, *h, url);
-                }
+        SceneNode::Image { x, y, w, h, data } => match data {
+            ImageData::Inline { bytes, mime } => {
+                svg.image(*x, *y, *w, *h, bytes, *mime);
             }
-        }
+            ImageData::Url { url } => {
+                svg.image_data_url(*x, *y, *w, *h, url);
+            }
+        },
         SceneNode::Polyline { points, style } => {
             svg.polyline(points, &to_svg_stroke(style));
         }
@@ -254,20 +347,28 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
                 .collect();
             // Anchor: centroid of first ring's points (good enough for rotation anchor).
             let (anchor_x, anchor_y) = if let Some(ring) = rings.first() {
-                if ring.is_empty() { (0.0, 0.0) } else {
+                if ring.is_empty() {
+                    (0.0, 0.0)
+                } else {
                     let n = ring.len() as f64;
                     let sx: f64 = ring.iter().map(|p| p[0]).sum();
                     let sy: f64 = ring.iter().map(|p| p[1]).sum();
                     (sx / n, sy / n)
                 }
-            } else { (0.0, 0.0) };
-            svg.polygon(&svg_rings, &to_svg_fill_stroke_with_anchor(style, anchor_x, anchor_y));
+            } else {
+                (0.0, 0.0)
+            };
+            svg.polygon(
+                &svg_rings,
+                &to_svg_fill_stroke_with_anchor(style, anchor_x, anchor_y),
+            );
         }
         SceneNode::Group { attrs, children } => {
             if attrs.is_empty() {
                 svg.g_open(None);
             } else {
-                let attr_str: String = attrs.iter()
+                let attr_str: String = attrs
+                    .iter()
                     .map(|(k, v)| format!(" {}=\"{}\"", k, escape_attr(v)))
                     .collect();
                 svg.raw(&format!("<g{}>", attr_str));
@@ -286,10 +387,20 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
 }
 
 fn emit_gridline_node(svg: &mut SvgBuffer, node: &SceneNode) {
-    if let SceneNode::Line { x1, y1, x2, y2, style } = node {
+    if let SceneNode::Line {
+        x1,
+        y1,
+        x2,
+        y2,
+        style,
+    } = node
+    {
         let color = from_rgba(style.color.r, style.color.g, style.color.b, style.color.a);
         svg.gridline(
-            *x1, *y1, *x2, *y2,
+            *x1,
+            *y1,
+            *x2,
+            *y2,
             color,
             style.width,
             style.dash.as_deref(),
@@ -379,8 +490,18 @@ mod tests {
             chart_description: None,
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
-                clip: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 300.0,
+                    h: 250.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 300.0,
+                    h: 250.0,
+                },
                 coord: CoordKind::Cartesian {
                     x_domain: None,
                     y_domain: None,
@@ -421,6 +542,8 @@ mod tests {
                     y_slot: 0,
                 }],
                 annotations,
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
         }
     }
@@ -524,7 +647,8 @@ mod tests {
 
         let circle_pos = svg.find("<circle ").expect("mark circle missing from SVG");
         // The annotation line's distinctive color should appear after the circle.
-        let annotation_pos = svg.find("ff0000")
+        let annotation_pos = svg
+            .find("ff0000")
             .or_else(|| svg.find("255,0,0"))
             .expect("annotation line not found in SVG");
 
@@ -532,6 +656,111 @@ mod tests {
             annotation_pos > circle_pos,
             "annotation appears before mark in SVG (wrong z-order): \
              circle at byte {circle_pos}, annotation at byte {annotation_pos}"
+        );
+    }
+
+    // ── GH #89B: Panel::below_marks / chrome_above paint order ──────────────
+
+    /// `below_marks` (typed sibling of `grid`) must paint after `grid` and
+    /// before marks — the same visual position these nodes held when they
+    /// were commingled into `grid` itself.
+    #[test]
+    fn below_marks_appears_after_grid_and_before_marks_in_svg() {
+        let mut scene = minimal_scene(vec![]);
+        scene.panels[0].grid = vec![SceneNode::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 100.0,
+            y2: 0.0,
+            style: StrokeStyle {
+                color: Color::rgb(0, 255, 0),
+                width: 1.0,
+                opacity: 1.0,
+                dash: None,
+                stroke_cap: None,
+                stroke_join: None,
+                stroke_opacity: 1.0,
+            },
+        }];
+        scene.panels[0].below_marks = vec![SceneNode::Text {
+            x: 60.0,
+            y: 70.0,
+            content: "BELOWMARKXYZ".to_string(),
+            slot: None,
+            style: ferrum_scene::TextStyle {
+                font_size: 12.0,
+                font_weight: ferrum_scene::FontWeight::Normal,
+                anchor: ferrum_scene::TextAnchor::Middle,
+                baseline: ferrum_scene::TextBaseline::Alphabetic,
+                angle: 0.0,
+                color: Color::rgb(80, 80, 80),
+                opacity: 1.0,
+                font_family: "sans-serif".to_string(),
+            },
+        }];
+        let svg = walk_svg(&scene, false);
+
+        let grid_pos = svg
+            .find("00ff00")
+            .or_else(|| svg.find("0,255,0"))
+            .expect("grid line stroke color not found in SVG");
+        let below_marks_pos = svg
+            .find("BELOWMARKXYZ")
+            .expect("below_marks text not found in SVG");
+        let circle_pos = svg.find("<circle ").expect("mark circle missing from SVG");
+
+        assert!(
+            grid_pos < below_marks_pos,
+            "below_marks must appear after grid: grid at {grid_pos}, below_marks at {below_marks_pos}"
+        );
+        assert!(
+            below_marks_pos < circle_pos,
+            "below_marks must appear before marks: below_marks at {below_marks_pos}, mark at {circle_pos}"
+        );
+    }
+
+    /// `chrome_above` (typed sibling of `annotations`) must paint after marks
+    /// and before `annotations` — the deliberate z-order refinement so
+    /// above-marks user annotations always paint above above-marks axis
+    /// chrome.
+    #[test]
+    fn chrome_above_appears_after_marks_and_before_annotations_in_svg() {
+        let mut scene = minimal_scene(vec![SceneNode::Text {
+            x: 200.0,
+            y: 50.0,
+            content: "ANNOTATIONXYZ".to_string(),
+            slot: None,
+            style: ferrum_scene::TextStyle {
+                font_size: 12.0,
+                font_weight: ferrum_scene::FontWeight::Normal,
+                anchor: ferrum_scene::TextAnchor::Middle,
+                baseline: ferrum_scene::TextBaseline::Alphabetic,
+                angle: 0.0,
+                color: Color::rgb(80, 80, 80),
+                opacity: 1.0,
+                font_family: "sans-serif".to_string(),
+            },
+        }]);
+        scene.panels[0].chrome_above = vec![annotation_line()];
+        let svg = walk_svg(&scene, false);
+
+        let circle_pos = svg.find("<circle ").expect("mark circle missing from SVG");
+        let chrome_pos = svg
+            .find("ff0000")
+            .or_else(|| svg.find("255,0,0"))
+            .expect("chrome_above line not found in SVG");
+        let annotation_pos = svg
+            .find("ANNOTATIONXYZ")
+            .expect("annotations text not found in SVG");
+
+        assert!(
+            circle_pos < chrome_pos,
+            "chrome_above must appear after marks: mark at {circle_pos}, chrome_above at {chrome_pos}"
+        );
+        assert!(
+            chrome_pos < annotation_pos,
+            "chrome_above must appear before annotations (z-order refinement): \
+             chrome_above at {chrome_pos}, annotations at {annotation_pos}"
         );
     }
 
@@ -569,7 +798,12 @@ mod tests {
         // A ratio-fitted cell (sx != sy, as JointChart marginals require)
         // must wrap the panel's content in a <g transform="translate(...)
         // scale(...)"> group carrying exactly those values.
-        let ls = LayoutScale { sx: 0.5, sy: 0.2, tx: 10.0, ty: 20.0 };
+        let ls = LayoutScale {
+            sx: 0.5,
+            sy: 0.2,
+            tx: 10.0,
+            ty: 20.0,
+        };
         let svg = walk_svg(&scene_with_layout_scale(ls), false);
         assert!(
             svg.contains(r#"<g transform="translate(10,20) scale(0.5,0.2)">"#),
@@ -577,16 +811,26 @@ mod tests {
             &svg[..svg.len().min(800)]
         );
         // The mark circle must still be present (inside the wrapper).
-        assert!(svg.contains("<circle "), "mark circle missing under layout_scale wrapper");
+        assert!(
+            svg.contains("<circle "),
+            "mark circle missing under layout_scale wrapper"
+        );
     }
 
     #[test]
     fn non_identity_layout_scale_wrapper_closes() {
         // The transform group opened for a non-identity layout_scale must be
         // closed with a matching </g> (paired open/close, no dangling group).
-        let ls = LayoutScale { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let ls = LayoutScale {
+            sx: 2.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         let svg = walk_svg(&scene_with_layout_scale(ls), false);
-        let opens = svg.matches("<g transform=\"translate(0,0) scale(2,2)\">").count();
+        let opens = svg
+            .matches("<g transform=\"translate(0,0) scale(2,2)\">")
+            .count();
         assert_eq!(opens, 1, "expected exactly one layout_scale wrapper open");
     }
 
@@ -595,7 +839,16 @@ mod tests {
     /// (invisible text). `emit_text` guards NaN opacity to render fully opaque.
     #[test]
     fn emit_text_nan_opacity_renders_opaque_not_invisible() {
-        let mut svg = SvgBuffer::new(crate::layout::Rect { x: 0.0, y: 0.0, w: 100.0, h: 80.0 }, None, false);
+        let mut svg = SvgBuffer::new(
+            crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 80.0,
+            },
+            None,
+            false,
+        );
         let style = FsText {
             font_size: 11.0,
             font_weight: ferrum_scene::FontWeight::Normal,
@@ -629,11 +882,31 @@ fn path_cmds_to_d(cmds: &[PathCmd]) -> String {
                 d.push_str(&format!("L{} {}", fmt_f(*x), fmt_f(*y)));
             }
             PathCmd::QuadTo { cx, cy, x, y } => {
-                d.push_str(&format!("Q{} {} {} {}", fmt_f(*cx), fmt_f(*cy), fmt_f(*x), fmt_f(*y)));
+                d.push_str(&format!(
+                    "Q{} {} {} {}",
+                    fmt_f(*cx),
+                    fmt_f(*cy),
+                    fmt_f(*x),
+                    fmt_f(*y)
+                ));
             }
-            PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
-                d.push_str(&format!("C{} {} {} {} {} {}",
-                    fmt_f(*c1x), fmt_f(*c1y), fmt_f(*c2x), fmt_f(*c2y), fmt_f(*x), fmt_f(*y)));
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                d.push_str(&format!(
+                    "C{} {} {} {} {} {}",
+                    fmt_f(*c1x),
+                    fmt_f(*c1y),
+                    fmt_f(*c2x),
+                    fmt_f(*c2y),
+                    fmt_f(*x),
+                    fmt_f(*y)
+                ));
             }
             PathCmd::HLineTo { x } => {
                 d.push_str(&format!("H{}", fmt_f(*x)));
@@ -641,12 +914,25 @@ fn path_cmds_to_d(cmds: &[PathCmd]) -> String {
             PathCmd::VLineTo { y } => {
                 d.push_str(&format!("V{}", fmt_f(*y)));
             }
-            PathCmd::ArcTo { rx, ry, rotation, large_arc, sweep, x, y } => {
-                d.push_str(&format!("A{} {} {} {} {} {} {}",
-                    fmt_f(*rx), fmt_f(*ry), fmt_f(*rotation),
+            PathCmd::ArcTo {
+                rx,
+                ry,
+                rotation,
+                large_arc,
+                sweep,
+                x,
+                y,
+            } => {
+                d.push_str(&format!(
+                    "A{} {} {} {} {} {} {}",
+                    fmt_f(*rx),
+                    fmt_f(*ry),
+                    fmt_f(*rotation),
                     if *large_arc { 1 } else { 0 },
                     if *sweep { 1 } else { 0 },
-                    fmt_f(*x), fmt_f(*y)));
+                    fmt_f(*x),
+                    fmt_f(*y)
+                ));
             }
             PathCmd::Close => {
                 d.push('Z');

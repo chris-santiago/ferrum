@@ -77,7 +77,9 @@ impl ZoomPanState {
         let factor = 1.0 + delta * 0.001;
         let new_sx = (t.sx * factor).clamp(self.zoom_range.0, self.zoom_range.1);
         // Uniform scaling: sy always equals sx (CoordFixed / square-pixel panels).
-        let new_sy = if scale_mode == ScaleMode::Uniform { new_sx } else {
+        let new_sy = if scale_mode == ScaleMode::Uniform {
+            new_sx
+        } else {
             (t.sy * factor).clamp(self.zoom_range.0, self.zoom_range.1)
         };
 
@@ -246,13 +248,21 @@ mod bug_hunt_tests {
         };
         // The guard is 1e-12; 1e-15 < 1e-12, so it should return (x, y) unchanged
         let (rx, ry) = t.inverse_apply(5.0, 10.0);
-        assert!(rx.is_finite(), "inverse_apply must not produce inf/nan for near-zero scale");
+        assert!(
+            rx.is_finite(),
+            "inverse_apply must not produce inf/nan for near-zero scale"
+        );
         assert!(ry.is_finite());
     }
 
     #[test]
     fn bug_hunt_zoom_factor_returns_max_of_abs_sx_sy() {
-        let t = Affine2 { sx: -3.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let t = Affine2 {
+            sx: -3.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         // zoom_factor should be max(|sx|, |sy|) = max(3.0, 2.0) = 3.0
         assert!((t.zoom_factor() - 3.0).abs() < 1e-10);
     }
@@ -297,8 +307,14 @@ mod bug_hunt_tests {
             state.on_pan(0, 5.0 * (i as f64), -3.0 * (i as f64));
         }
         let t = &state.transforms[0];
-        assert!(t.tx.is_finite(), "tx must remain finite after accumulated ops");
-        assert!(t.ty.is_finite(), "ty must remain finite after accumulated ops");
+        assert!(
+            t.tx.is_finite(),
+            "tx must remain finite after accumulated ops"
+        );
+        assert!(
+            t.ty.is_finite(),
+            "ty must remain finite after accumulated ops"
+        );
         assert!(t.sx.is_finite(), "sx must remain finite");
         assert!(t.sy.is_finite(), "sy must remain finite");
     }
@@ -336,7 +352,9 @@ mod bug_hunt_tests {
         let t = &state.transforms[0];
         assert!(
             (t.sx - t.sy).abs() < 1e-10,
-            "Uniform mode must produce sx == sy; got sx={}, sy={}", t.sx, t.sy
+            "Uniform mode must produce sx == sy; got sx={}, sy={}",
+            t.sx,
+            t.sy
         );
     }
 
@@ -410,8 +428,14 @@ mod bug_hunt_tests {
     fn bug_hunt_inverse_apply_with_identity_is_noop() {
         let t = Affine2::identity();
         let (x, y) = t.inverse_apply(42.0, 99.0);
-        assert!((x - 42.0).abs() < 1e-10, "identity inverse must not change x");
-        assert!((y - 99.0).abs() < 1e-10, "identity inverse must not change y");
+        assert!(
+            (x - 42.0).abs() < 1e-10,
+            "identity inverse must not change x"
+        );
+        assert!(
+            (y - 99.0).abs() < 1e-10,
+            "identity inverse must not change y"
+        );
     }
 
     #[test]
@@ -421,8 +445,16 @@ mod bug_hunt_tests {
         let mut state = ZoomPanState::new(1, &config);
         state.set_absolute(0, 0.0, 0.0, 0.0);
         let t = &state.transforms[0];
-        assert!(t.sx >= 0.1, "zero scale must clamp to min 0.1, got {}", t.sx);
-        assert!(t.sy >= 0.1, "zero scale must clamp to min 0.1, got {}", t.sy);
+        assert!(
+            t.sx >= 0.1,
+            "zero scale must clamp to min 0.1, got {}",
+            t.sx
+        );
+        assert!(
+            t.sy >= 0.1,
+            "zero scale must clamp to min 0.1, got {}",
+            t.sy
+        );
     }
 
     #[test]
@@ -432,7 +464,11 @@ mod bug_hunt_tests {
         let mut state = ZoomPanState::new(1, &config);
         state.set_absolute(0, -5.0, 0.0, 0.0);
         let t = &state.transforms[0];
-        assert!(t.sx >= 0.1, "negative scale must clamp to min 0.1, got {}", t.sx);
+        assert!(
+            t.sx >= 0.1,
+            "negative scale must clamp to min 0.1, got {}",
+            t.sx
+        );
     }
 
     #[test]
@@ -476,9 +512,18 @@ mod bug_hunt_interactive_slots {
     #[test]
     fn bug_hunt_compose_panel_slot_drops_slot_x_components() {
         let panel = Affine2::identity();
-        let rogue_slot = Affine2 { sx: 5.0, sy: 1.0, tx: 99.0, ty: 0.0 };
+        let rogue_slot = Affine2 {
+            sx: 5.0,
+            sy: 1.0,
+            tx: 99.0,
+            ty: 0.0,
+        };
         let c = compose_panel_slot(panel, rogue_slot);
-        assert!((c.sx - 1.0).abs() < 1e-12, "slot sx must be ignored, got {}", c.sx);
+        assert!(
+            (c.sx - 1.0).abs() < 1e-12,
+            "slot sx must be ignored, got {}",
+            c.sx
+        );
         assert!(c.tx.abs() < 1e-12, "slot tx must be ignored, got {}", c.tx);
         assert!((c.sy - 1.0).abs() < 1e-12);
         assert!(c.ty.abs() < 1e-12);
@@ -490,8 +535,18 @@ mod bug_hunt_interactive_slots {
     /// y=1 → slot: 8 → panel: -2*8+10 = -6.
     #[test]
     fn bug_hunt_compose_panel_slot_negative_panel_scale() {
-        let panel = Affine2 { sx: 1.0, sy: -2.0, tx: 0.0, ty: 10.0 };
-        let slot = Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 5.0 };
+        let panel = Affine2 {
+            sx: 1.0,
+            sy: -2.0,
+            tx: 0.0,
+            ty: 10.0,
+        };
+        let slot = Affine2 {
+            sx: 1.0,
+            sy: 3.0,
+            tx: 0.0,
+            ty: 5.0,
+        };
         let c = compose_panel_slot(panel, slot);
         assert!((c.sy - (-6.0)).abs() < 1e-12, "sy must be -6, got {}", c.sy);
         assert!(c.ty.abs() < 1e-12, "ty must be 0, got {}", c.ty);
@@ -506,8 +561,18 @@ mod bug_hunt_interactive_slots {
     /// `hit_test.rs::bug_hunt_interactive_slots`).
     #[test]
     fn bug_hunt_composed_slot_affine_round_trips_inverse() {
-        let panel = Affine2 { sx: 2.0, sy: 2.0, tx: 30.0, ty: -10.0 };
-        let slot = Affine2 { sx: 1.0, sy: 0.5, tx: 0.0, ty: 40.0 };
+        let panel = Affine2 {
+            sx: 2.0,
+            sy: 2.0,
+            tx: 30.0,
+            ty: -10.0,
+        };
+        let slot = Affine2 {
+            sx: 1.0,
+            sy: 0.5,
+            tx: 0.0,
+            ty: 40.0,
+        };
         let c = compose_panel_slot(panel, slot);
         let scene = (120.0_f64, 250.0_f64);
         let (dx, dy) = c.apply(scene.0, scene.1);
@@ -539,19 +604,38 @@ mod tests {
     fn select_panel_transform_picks_per_panel_affine() {
         // Panel 0: identity. Panel 1: non-uniform rescale (sx != sy), like an
         // x-only domain rescale written by `apply_reactive_rescale`.
-        let rescaled = Affine2 { sx: 3.0, sy: 1.0, tx: -40.0, ty: 0.0 };
+        let rescaled = Affine2 {
+            sx: 3.0,
+            sy: 1.0,
+            tx: -40.0,
+            ty: 0.0,
+        };
         let transforms = vec![Affine2::identity(), rescaled];
 
         let t0 = select_panel_transform(&transforms, 0);
         assert!(
             (t0.sx - 1.0).abs() < 1e-9 && (t0.sy - 1.0).abs() < 1e-9,
-            "panel 0 must stay identity, got sx={} sy={}", t0.sx, t0.sy
+            "panel 0 must stay identity, got sx={} sy={}",
+            t0.sx,
+            t0.sy
         );
 
         let t1 = select_panel_transform(&transforms, 1);
-        assert!((t1.sx - 3.0).abs() < 1e-9, "panel 1 sx must be the rescale, got {}", t1.sx);
-        assert!((t1.sy - 1.0).abs() < 1e-9, "panel 1 sy must be 1.0 (x-only rescale), got {}", t1.sy);
-        assert!((t1.tx - (-40.0)).abs() < 1e-9, "panel 1 tx must be the rescale offset, got {}", t1.tx);
+        assert!(
+            (t1.sx - 3.0).abs() < 1e-9,
+            "panel 1 sx must be the rescale, got {}",
+            t1.sx
+        );
+        assert!(
+            (t1.sy - 1.0).abs() < 1e-9,
+            "panel 1 sy must be 1.0 (x-only rescale), got {}",
+            t1.sy
+        );
+        assert!(
+            (t1.tx - (-40.0)).abs() < 1e-9,
+            "panel 1 tx must be the rescale offset, got {}",
+            t1.tx
+        );
 
         // Out-of-range panel_id falls back to identity (never panics).
         let t_oob = select_panel_transform(&transforms, 9);
@@ -571,7 +655,12 @@ mod tests {
     /// panel affine — the byte-stability anchor.
     #[test]
     fn compose_panel_slot_identity_slot_is_panel_affine() {
-        let panel = Affine2 { sx: 2.0, sy: 3.0, tx: 10.0, ty: -5.0 };
+        let panel = Affine2 {
+            sx: 2.0,
+            sy: 3.0,
+            tx: 10.0,
+            ty: -5.0,
+        };
         let c = compose_panel_slot(panel, Affine2::identity());
         assert!((c.sx - 2.0).abs() < 1e-12);
         assert!((c.sy - 3.0).abs() < 1e-12);
@@ -584,20 +673,41 @@ mod tests {
     #[test]
     fn compose_panel_slot_y_rescale_leaves_x_untouched() {
         let panel = Affine2::identity();
-        let slot = Affine2 { sx: 1.0, sy: 4.0, tx: 0.0, ty: -30.0 };
+        let slot = Affine2 {
+            sx: 1.0,
+            sy: 4.0,
+            tx: 0.0,
+            ty: -30.0,
+        };
         let c = compose_panel_slot(panel, slot);
         assert!((c.sx - 1.0).abs() < 1e-12, "x scale must stay the panel's");
         assert!((c.tx - 0.0).abs() < 1e-12, "x offset must stay the panel's");
-        assert!((c.sy - 4.0).abs() < 1e-12, "y scale must be the slot rescale");
-        assert!((c.ty - (-30.0)).abs() < 1e-12, "y offset must be the slot rescale");
+        assert!(
+            (c.sy - 4.0).abs() < 1e-12,
+            "y scale must be the slot rescale"
+        );
+        assert!(
+            (c.ty - (-30.0)).abs() < 1e-12,
+            "y offset must be the slot rescale"
+        );
     }
 
     /// Full composition order: panel affine applied after the slot rescale.
     /// A point y maps through `panel.sy * (slot.sy*y + slot.ty) + panel.ty`.
     #[test]
     fn compose_panel_slot_applies_slot_then_panel() {
-        let panel = Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 100.0 };
-        let slot = Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 5.0 };
+        let panel = Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 100.0,
+        };
+        let slot = Affine2 {
+            sx: 1.0,
+            sy: 3.0,
+            tx: 0.0,
+            ty: 5.0,
+        };
         let c = compose_panel_slot(panel, slot);
         // sy = 2*3 = 6; ty = 2*5 + 100 = 110.
         assert!((c.sy - 6.0).abs() < 1e-12);
@@ -614,7 +724,10 @@ mod tests {
             let t = select_panel_transform(&transforms, panel_id);
             assert!((t.sx - 1.0).abs() < 1e-9, "slot {panel_id} sx");
             assert!((t.sy - 1.0).abs() < 1e-9, "slot {panel_id} sy");
-            assert!(t.tx.abs() < 1e-9 && t.ty.abs() < 1e-9, "slot {panel_id} translation");
+            assert!(
+                t.tx.abs() < 1e-9 && t.ty.abs() < 1e-9,
+                "slot {panel_id} translation"
+            );
         }
     }
 
@@ -686,7 +799,12 @@ mod tests {
         state.transforms[0].sy = 2.0;
         state.on_wheel(0, 100.0, 50.0, 50.0, ScaleMode::Uniform);
         let t = &state.transforms[0];
-        assert!((t.sx - t.sy).abs() < 1e-10, "sx={} sy={} must be equal for CoordFixed", t.sx, t.sy);
+        assert!(
+            (t.sx - t.sy).abs() < 1e-10,
+            "sx={} sy={} must be equal for CoordFixed",
+            t.sx,
+            t.sy
+        );
     }
 
     #[test]
@@ -696,9 +814,21 @@ mod tests {
         state.set_absolute(0, 2.0, 100.0, 50.0);
         let t = &state.transforms[0];
         assert!((t.sx - 2.0).abs() < 1e-10, "sx should be 2.0, got {}", t.sx);
-        assert!((t.sy - 2.0).abs() < 1e-10, "sy should equal sx (uniform), got {}", t.sy);
-        assert!((t.tx - 100.0).abs() < 1e-10, "tx should be 100.0, got {}", t.tx);
-        assert!((t.ty - 50.0).abs() < 1e-10, "ty should be 50.0, got {}", t.ty);
+        assert!(
+            (t.sy - 2.0).abs() < 1e-10,
+            "sy should equal sx (uniform), got {}",
+            t.sy
+        );
+        assert!(
+            (t.tx - 100.0).abs() < 1e-10,
+            "tx should be 100.0, got {}",
+            t.tx
+        );
+        assert!(
+            (t.ty - 50.0).abs() < 1e-10,
+            "ty should be 50.0, got {}",
+            t.ty
+        );
     }
 
     #[test]
@@ -733,10 +863,16 @@ mod tests {
         let mut state = ZoomPanState::new(1, &config);
         // Scale below minimum (0.1)
         state.set_absolute(0, 0.01, 0.0, 0.0);
-        assert!((state.transforms[0].sx - 0.1).abs() < 1e-10, "scale should clamp to min");
+        assert!(
+            (state.transforms[0].sx - 0.1).abs() < 1e-10,
+            "scale should clamp to min"
+        );
         // Scale above maximum (50.0)
         state.set_absolute(0, 100.0, 0.0, 0.0);
-        assert!((state.transforms[0].sx - 50.0).abs() < 1e-10, "scale should clamp to max");
+        assert!(
+            (state.transforms[0].sx - 50.0).abs() < 1e-10,
+            "scale should clamp to max"
+        );
     }
 
     #[test]

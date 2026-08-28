@@ -406,8 +406,14 @@ mod tests {
 
         assert_eq!(floats.len(), 16);
         // center: X at FIELD_X_OFFSET (byte 0 → float index 0), Y at FIELD_Y_OFFSET (byte 4 → float index 1)
-        assert!((floats[FIELD_X_OFFSET / 4] - 100.0).abs() < 1e-6, "center_x");
-        assert!((floats[FIELD_Y_OFFSET / 4] - 200.0).abs() < 1e-6, "center_y");
+        assert!(
+            (floats[FIELD_X_OFFSET / 4] - 100.0).abs() < 1e-6,
+            "center_x"
+        );
+        assert!(
+            (floats[FIELD_Y_OFFSET / 4] - 200.0).abs() < 1e-6,
+            "center_y"
+        );
         // radius
         assert!((floats[2] - 10.0).abs() < 1e-6, "radius");
         // fill_color: (255/255, 0, 0, (255/255)*fill_opacity) = (1.0, 0.0, 0.0, 1.0)
@@ -415,7 +421,10 @@ mod tests {
         assert!((floats[3] - 1.0).abs() < 1e-5, "fill_r");
         assert!((floats[4] - 0.0).abs() < 1e-5, "fill_g");
         assert!((floats[5] - 0.0).abs() < 1e-5, "fill_b");
-        assert!((floats[6] - 1.0).abs() < 1e-5, "fill_a = (255/255)*fill_opacity(1.0)");
+        assert!(
+            (floats[6] - 1.0).abs() < 1e-5,
+            "fill_a = (255/255)*fill_opacity(1.0)"
+        );
         // stroke_color: raw color, no opacity baked in — shader applies stroke_opacity and opacity
         // (0, 0, 0, (128/255)*1.0)
         assert!((floats[7] - 0.0).abs() < 1e-5, "stroke_r");
@@ -445,7 +454,9 @@ mod tests {
         let n = PACK_THRESHOLD + 10;
         let nodes: Vec<SceneNode> = (0..n)
             .map(|i| SceneNode::Circle {
-                cx: i as f64, cy: i as f64, r: 3.0,
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
                 style: test_style(70, 1.0),
             })
             .collect();
@@ -470,7 +481,10 @@ mod tests {
         assert_eq!(flags, 0, "no data_indices or tooltips → flags = 0");
 
         // Nodes should be cleared after extraction
-        assert!(scene.panels[0].marks[0].nodes.is_empty(), "nodes must be cleared");
+        assert!(
+            scene.panels[0].marks[0].nodes.is_empty(),
+            "nodes must be cleared"
+        );
     }
 
     #[test]
@@ -479,7 +493,9 @@ mod tests {
 
         let nodes: Vec<SceneNode> = (0..100)
             .map(|i| SceneNode::Circle {
-                cx: i as f64, cy: i as f64, r: 3.0,
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
                 style: test_style(70, 1.0),
             })
             .collect();
@@ -487,8 +503,15 @@ mod tests {
         let mut scene = test_scene(MarkBatchKind::Point, nodes);
         let bytes = extract_packed_bytes(&mut scene);
 
-        assert!(bytes.is_empty(), "small batch should produce no packed bytes");
-        assert_eq!(scene.panels[0].marks[0].nodes.len(), 100, "nodes should be preserved");
+        assert!(
+            bytes.is_empty(),
+            "small batch should produce no packed bytes"
+        );
+        assert_eq!(
+            scene.panels[0].marks[0].nodes.len(),
+            100,
+            "nodes should be preserved"
+        );
     }
 
     fn test_scene(kind: MarkBatchKind, nodes: Vec<SceneNode>) -> ferrum_scene::SceneGraph {
@@ -503,29 +526,58 @@ mod tests {
     ) -> ferrum_scene::SceneGraph {
         use ferrum_scene::*;
         SceneGraph {
-            width: 500.0, height: 400.0, background: None, title: vec![],
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 400.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 400.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 500.0,
+                    h: 400.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 500.0,
+                    h: 400.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                     y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
-                    kind, nodes,
-                    data_indices, tooltips, hrefs: None,
-                    descriptions: None, keys: None,
-                    blend: BlendMode::Normal, stroke_cap: None, stroke_join: None,
+                    kind,
+                    nodes,
+                    data_indices,
+                    tooltips,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 }],
-                axes: vec![], annotations: vec![], strip_title: vec![],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
-            legend: vec![], decorations: vec![], selections: vec![],
-            interaction: InteractionConfig::default(), chart_description: None,
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
         }
     }
 
@@ -536,7 +588,9 @@ mod tests {
         let n = PACK_THRESHOLD + 5;
         let nodes: Vec<SceneNode> = (0..n)
             .map(|i| SceneNode::Circle {
-                cx: i as f64, cy: i as f64, r: 3.0,
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
                 style: test_style(70, 1.0),
             })
             .collect();
@@ -545,8 +599,14 @@ mod tests {
         let tooltips: Vec<TooltipContent> = (0..n)
             .map(|i| TooltipContent {
                 fields: vec![
-                    TooltipField { name: "x".into(), value: format!("{}.0", i) },
-                    TooltipField { name: "y".into(), value: format!("{}.0", i * 2) },
+                    TooltipField {
+                        name: "x".into(),
+                        value: format!("{}.0", i),
+                    },
+                    TooltipField {
+                        name: "y".into(),
+                        value: format!("{}.0", i * 2),
+                    },
                 ],
             })
             .collect();
@@ -593,7 +653,9 @@ mod tests {
         let read_str = |cur: &mut usize| -> String {
             let len = u32::from_le_bytes(bytes[*cur..*cur + 4].try_into().unwrap()) as usize;
             *cur += 4;
-            let s = std::str::from_utf8(&bytes[*cur..*cur + len]).unwrap().to_string();
+            let s = std::str::from_utf8(&bytes[*cur..*cur + len])
+                .unwrap()
+                .to_string();
             *cur += len;
             s
         };
@@ -610,7 +672,8 @@ mod tests {
         for _ in 1..n - 1 {
             // Skip 2 fields per row.
             for _ in 0..2 {
-                let len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+                let len =
+                    u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
                 cursor += 4 + len;
             }
         }
@@ -686,7 +749,10 @@ mod tests {
             angle: 0.0,
         };
         let nodes = vec![SceneNode::Circle {
-            cx: 50.0, cy: 50.0, r: 5.0, style,
+            cx: 50.0,
+            cy: 50.0,
+            r: 5.0,
+            style,
         }];
         let bytes = pack_circle_batch(&nodes);
         let floats: Vec<f32> = bytes
@@ -716,7 +782,10 @@ mod tests {
             angle: 0.0,
         };
         let nodes = vec![SceneNode::Circle {
-            cx: 50.0, cy: 50.0, r: 5.0, style,
+            cx: 50.0,
+            cy: 50.0,
+            r: 5.0,
+            style,
         }];
         let bytes = pack_circle_batch(&nodes);
         let floats: Vec<f32> = bytes
@@ -744,7 +813,12 @@ mod tests {
             angle: 0.0,
         };
         let nodes = vec![SceneNode::Rect {
-            x: 10.0, y: 20.0, w: 30.0, h: 40.0, style, corner_radius: 0.0,
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 40.0,
+            style,
+            corner_radius: 0.0,
         }];
         let bytes = pack_rect_batch(&nodes);
         let floats: Vec<f32> = bytes
@@ -773,7 +847,12 @@ mod tests {
             angle: 0.0,
         };
         let nodes = vec![SceneNode::Rect {
-            x: 10.0, y: 20.0, w: 30.0, h: 40.0, style, corner_radius: 0.0,
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 40.0,
+            style,
+            corner_radius: 0.0,
         }];
         let bytes = pack_rect_batch(&nodes);
         let floats: Vec<f32> = bytes
@@ -811,26 +890,33 @@ mod tests {
     fn decode_tooltip(tooltip_bytes: &[u8], node_idx: usize, field_idx: usize) -> String {
         let mut offset = 0usize;
         // num_fields
-        let num_fields = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let num_fields =
+            u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         // skip field names
         for _ in 0..num_fields {
-            let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let slen =
+                u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4 + slen;
         }
         // skip to node_idx row
         for _ in 0..node_idx * num_fields {
-            let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let slen =
+                u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4 + slen;
         }
         // skip to field_idx within the row
         for _ in 0..field_idx {
-            let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let slen =
+                u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4 + slen;
         }
-        let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let slen =
+            u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
-        std::str::from_utf8(&tooltip_bytes[offset..offset + slen]).unwrap().to_string()
+        std::str::from_utf8(&tooltip_bytes[offset..offset + slen])
+            .unwrap()
+            .to_string()
     }
 
     /// Locate the tooltip section inside the full packed-bytes output and return
@@ -940,8 +1026,18 @@ mod tests {
         let nodes: Vec<SceneNode> = (0..n_rows)
             .flat_map(|row| {
                 [
-                    SceneNode::Circle { cx: row as f64, cy: 0.0, r: 3.0, style: test_style(70, 1.0) },
-                    SceneNode::Circle { cx: row as f64, cy: 5.0, r: 3.0, style: test_style(70, 1.0) },
+                    SceneNode::Circle {
+                        cx: row as f64,
+                        cy: 0.0,
+                        r: 3.0,
+                        style: test_style(70, 1.0),
+                    },
+                    SceneNode::Circle {
+                        cx: row as f64,
+                        cy: 5.0,
+                        r: 3.0,
+                        style: test_style(70, 1.0),
+                    },
                 ]
             })
             .collect();

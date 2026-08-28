@@ -52,8 +52,11 @@ fn color_string(style: &ferrum_scene::TextStyle) -> String {
 /// verbatim fragments with ID namespacing and anchor-based grouping.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn build_overlay_json(data: &crate::scene_load::SceneData) -> String {
-    let text_elements: Vec<serde_json::Value> =
-        data.text_elements.iter().map(text_element_to_json).collect();
+    let text_elements: Vec<serde_json::Value> = data
+        .text_elements
+        .iter()
+        .map(text_element_to_json)
+        .collect();
     let raw_elements: Vec<serde_json::Value> = data
         .raw_fragments
         .iter()
@@ -383,7 +386,12 @@ mod bug_hunt_interactive_slots {
             font_size: 11.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            color: Color {
+                r: 51,
+                g: 51,
+                b: 51,
+                a: 255,
+            },
             opacity: 1.0,
             anchor: TextAnchor::Start,
             baseline: TextBaseline::Alphabetic,
@@ -392,18 +400,34 @@ mod bug_hunt_interactive_slots {
     }
 
     fn text(x: f64, y: f64, content: &str) -> TextElementData {
-        TextElementData { x, y, content: content.to_string(), style: style(), slot: None }
+        TextElementData {
+            x,
+            y,
+            content: content.to_string(),
+            style: style(),
+            slot: None,
+        }
     }
 
     /// A tick-label text node explicitly tagged with its y-scale slot (GH
     /// #60/#73), as `route_y_axis_slotted`/`build_axis` emit for a dual-axis
     /// panel: slot 0 = primary, slot `k >= 1` = the k-th stacked right axis.
     fn text_slot(x: f64, y: f64, content: &str, slot: usize) -> TextElementData {
-        TextElementData { x, y, content: content.to_string(), style: style(), slot: Some(slot) }
+        TextElementData {
+            x,
+            y,
+            content: content.to_string(),
+            style: style(),
+            slot: Some(slot),
+        }
     }
 
     fn tick(label: &str, pixel: f64) -> ferrum_scene::Tick {
-        ferrum_scene::Tick { value: pixel, label: label.to_string(), pixel }
+        ferrum_scene::Tick {
+            value: pixel,
+            label: label.to_string(),
+            pixel,
+        }
     }
 
     fn level(labels: &[(&str, f64)]) -> ferrum_scene::TickLevel {
@@ -461,9 +485,16 @@ mod bug_hunt_interactive_slots {
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [crate::zoom_pan::compose_panel_slot(
             panel,
-            crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+            crate::zoom_pan::Affine2 {
+                sx: 1.0,
+                sy: 2.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
         )];
-        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text, &cfg, 0, &panel, &secondary, None,
+        ));
         assert_eq!(
             y_of(&parsed, "R99"),
             240.0,
@@ -494,9 +525,16 @@ mod bug_hunt_interactive_slots {
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [crate::zoom_pan::compose_panel_slot(
             panel,
-            crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+            crate::zoom_pan::Affine2 {
+                sx: 1.0,
+                sy: 2.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
         )];
-        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text, &cfg, 0, &panel, &secondary, None,
+        ));
         // The genuine tagged tick rescales (120 * 2 = 240); the untagged stray,
         // sharing content "R99", must remain at its original y=300, never 600.
         let ys: Vec<f64> = parsed
@@ -531,12 +569,23 @@ mod bug_hunt_interactive_slots {
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [crate::zoom_pan::compose_panel_slot(
             panel,
-            crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+            crate::zoom_pan::Affine2 {
+                sx: 1.0,
+                sy: 2.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
         )];
-        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text, &cfg, 0, &panel, &secondary, None,
+        ));
         assert_eq!(y_of(&parsed, "R1"), 240.0);
         assert_eq!(y_of(&parsed, "R2"), 400.0);
-        assert_eq!(y_of(&parsed, "L"), 100.0, "primary axis frozen under slot-only rescale");
+        assert_eq!(
+            y_of(&parsed, "L"),
+            100.0,
+            "primary axis frozen under slot-only rescale"
+        );
     }
 
     /// A slot rescale that pushes right-axis labels outside the plot area must
@@ -557,7 +606,12 @@ mod bug_hunt_interactive_slots {
         // Slot rescale moves everything down by 500 px — outside (0,0,500,400).
         let secondary = [crate::zoom_pan::compose_panel_slot(
             panel,
-            crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 500.0 },
+            crate::zoom_pan::Affine2 {
+                sx: 1.0,
+                sy: 1.0,
+                tx: 0.0,
+                ty: 500.0,
+            },
         )];
         let parsed = parse(&build_zoomed_text_json(
             &all_text,
@@ -567,10 +621,19 @@ mod bug_hunt_interactive_slots {
             &secondary,
             Some((0.0, 0.0, 500.0, 400.0)),
         ));
-        let contents: Vec<&str> = parsed.iter().filter_map(|v| v["content"].as_str()).collect();
-        assert!(!contents.contains(&"R1"), "R1 at y=600 must be clipped (plot y ≤ 400)");
+        let contents: Vec<&str> = parsed
+            .iter()
+            .filter_map(|v| v["content"].as_str())
+            .collect();
+        assert!(
+            !contents.contains(&"R1"),
+            "R1 at y=600 must be clipped (plot y ≤ 400)"
+        );
         assert!(!contents.contains(&"R2"), "R2 at y=700 must be clipped");
-        assert!(contents.contains(&"L"), "unmoved primary label must survive");
+        assert!(
+            contents.contains(&"L"),
+            "unmoved primary label must survive"
+        );
     }
 
     /// Two right axes (slot 1, slot 2) but only ONE secondary affine
@@ -595,13 +658,29 @@ mod bug_hunt_interactive_slots {
         let panel = crate::zoom_pan::Affine2::identity();
         let only = crate::zoom_pan::compose_panel_slot(
             panel,
-            crate::zoom_pan::Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 0.0 },
+            crate::zoom_pan::Affine2 {
+                sx: 1.0,
+                sy: 3.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
         );
-        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &[only], None));
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text,
+            &cfg,
+            0,
+            &panel,
+            &[only],
+            None,
+        ));
         // Slot 1 (x=460) uses affines[0]; slot 2 (x=500) has no affines[1] and
         // must degrade to `last()` — the same ×3 rescale.
         assert_eq!(y_of(&parsed, "A1"), 300.0);
-        assert_eq!(y_of(&parsed, "B1"), 300.0, "slot 2 must fall back to last affine");
+        assert_eq!(
+            y_of(&parsed, "B1"),
+            300.0,
+            "slot 2 must fall back to last affine"
+        );
         assert_eq!(y_of(&parsed, "B2"), 600.0);
     }
 
@@ -628,14 +707,26 @@ mod bug_hunt_interactive_slots {
         let secondary = [
             crate::zoom_pan::compose_panel_slot(
                 panel,
-                crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+                crate::zoom_pan::Affine2 {
+                    sx: 1.0,
+                    sy: 2.0,
+                    tx: 0.0,
+                    ty: 0.0,
+                },
             ),
             crate::zoom_pan::compose_panel_slot(
                 panel,
-                crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 50.0 },
+                crate::zoom_pan::Affine2 {
+                    sx: 1.0,
+                    sy: 1.0,
+                    tx: 0.0,
+                    ty: 50.0,
+                },
             ),
         ];
-        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text, &cfg, 0, &panel, &secondary, None,
+        ));
         let ys_of_5: Vec<f64> = parsed
             .iter()
             .filter(|v| v["content"] == "5")
@@ -656,10 +747,26 @@ mod bug_hunt_interactive_slots {
     fn bug_hunt_empty_slot_level_vec_is_safe() {
         let cfg = interaction(&[("L", 100.0)], vec![vec![]]);
         let all_text = vec![text(40.0, 100.0, "L"), text(460.0, 100.0, "R1")];
-        let panel = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 };
-        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &[], None));
+        let panel = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text,
+            &cfg,
+            0,
+            &panel,
+            &[],
+            None,
+        ));
         assert_eq!(y_of(&parsed, "L"), 200.0, "primary still relabels");
-        assert_eq!(y_of(&parsed, "R1"), 100.0, "unrecognized right label stays put");
+        assert_eq!(
+            y_of(&parsed, "R1"),
+            100.0,
+            "unrecognized right label stays put"
+        );
     }
 }
 
@@ -798,9 +905,9 @@ mod tests {
         };
 
         let all_text = vec![
-            make_text(100.0, 360.0, "100"), // x-tick label
-            make_text(400.0, 360.0, "400"), // x-tick label
-            make_text(40.0, 200.0, "200"),  // y-tick label
+            make_text(100.0, 360.0, "100"),  // x-tick label
+            make_text(400.0, 360.0, "400"),  // x-tick label
+            make_text(40.0, 200.0, "200"),   // y-tick label
             make_text(250.0, 20.0, "Title"), // non-tick (title)
         ];
 
@@ -813,7 +920,8 @@ mod tests {
 
         let plot_area = Some((50.0, 50.0, 400.0, 300.0));
 
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
+        let json_str =
+            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         // The two x-tick labels should be clipped out (transformed to 0 and 600,
@@ -892,7 +1000,8 @@ mod tests {
 
         let plot_area = Some((0.0, 0.0, 500.0, 500.0));
 
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
+        let json_str =
+            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let contents: Vec<&str> = parsed
@@ -937,7 +1046,11 @@ mod tests {
         // Simulate a rotated (label_angle override) x tick: End-anchored,
         // non-zero angle — exactly what `render/marks/axis.rs`'s Bottom
         // rotation fixup produces.
-        let rotated_style = TextStyle { anchor: TextAnchor::End, angle: -45.0, ..make_style() };
+        let rotated_style = TextStyle {
+            anchor: TextAnchor::End,
+            angle: -45.0,
+            ..make_style()
+        };
         let all_text = vec![TextElementData {
             x: 100.0,
             y: 360.0,
@@ -945,7 +1058,12 @@ mod tests {
             style: rotated_style,
             slot: None,
         }];
-        let transform = crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 };
+        let transform = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         assert_eq!(
@@ -984,7 +1102,10 @@ mod tests {
             }],
         };
         // Simulate a Right-oriented primary y-axis tick: Start-anchored.
-        let right_style = TextStyle { anchor: TextAnchor::Start, ..make_style() };
+        let right_style = TextStyle {
+            anchor: TextAnchor::Start,
+            ..make_style()
+        };
         let all_text = vec![TextElementData {
             x: 460.0,
             y: 100.0,
@@ -992,7 +1113,12 @@ mod tests {
             style: right_style,
             slot: None,
         }];
-        let transform = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let transform = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         assert_eq!(
@@ -1039,13 +1165,36 @@ mod tests {
                 y_slot_levels: vec![],
             }],
         };
-        let x_style = TextStyle { anchor: TextAnchor::Middle, ..make_style() };
-        let y_style = TextStyle { anchor: TextAnchor::End, ..make_style() };
+        let x_style = TextStyle {
+            anchor: TextAnchor::Middle,
+            ..make_style()
+        };
+        let y_style = TextStyle {
+            anchor: TextAnchor::End,
+            ..make_style()
+        };
         let all_text = vec![
-            TextElementData { x: 100.0, y: 360.0, content: "X".to_string(), style: x_style, slot: None },
-            TextElementData { x: 40.0, y: 200.0, content: "Y".to_string(), style: y_style, slot: None },
+            TextElementData {
+                x: 100.0,
+                y: 360.0,
+                content: "X".to_string(),
+                style: x_style,
+                slot: None,
+            },
+            TextElementData {
+                x: 40.0,
+                y: 200.0,
+                content: "Y".to_string(),
+                style: y_style,
+                slot: None,
+            },
         ];
-        let transform = crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 };
+        let transform = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         let anchor_of = |content: &str| -> String {
@@ -1056,8 +1205,16 @@ mod tests {
                 .unwrap()
                 .to_string()
         };
-        assert_eq!(anchor_of("X"), "center", "default x-tick anchor must stay byte-identical");
-        assert_eq!(anchor_of("Y"), "end", "default y-tick anchor must stay byte-identical");
+        assert_eq!(
+            anchor_of("X"),
+            "center",
+            "default x-tick anchor must stay byte-identical"
+        );
+        assert_eq!(
+            anchor_of("Y"),
+            "end",
+            "default y-tick anchor must stay byte-identical"
+        );
     }
 
     #[test]
@@ -1107,7 +1264,7 @@ mod tests {
         };
 
         let all_text = vec![
-            make_text(40.0, 100.0, "L"),        // left-axis tick (column x=40)
+            make_text(40.0, 100.0, "L"),           // left-axis tick (column x=40)
             make_text_slot(460.0, 100.0, "R1", 1), // right-axis tick, slot 1 (x=460)
             make_text_slot(460.0, 200.0, "R2", 1), // right-axis tick, slot 1 (x=460)
         ];
@@ -1129,8 +1286,14 @@ mod tests {
             transform,
             crate::zoom_pan::Affine2::identity(),
         )];
-        let json_str =
-            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &secondary, plot_area);
+        let json_str = build_zoomed_text_json(
+            &all_text,
+            &interaction,
+            0,
+            &transform,
+            &secondary,
+            plot_area,
+        );
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let y_of = |content: &str| -> f64 {
@@ -1184,18 +1347,21 @@ mod tests {
                 y_slot_levels: vec![],
             }],
         };
-        let all_text = vec![
-            make_text(40.0, 100.0, "L"),
-            make_text(460.0, 100.0, "R1"),
-        ];
+        let all_text = vec![make_text(40.0, 100.0, "L"), make_text(460.0, 100.0, "R1")];
         let transform = crate::zoom_pan::Affine2 {
             sx: 1.0,
             sy: 2.0,
             tx: 0.0,
             ty: 0.0,
         };
-        let json_str =
-            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], Some((0.0, 0.0, 500.0, 500.0)));
+        let json_str = build_zoomed_text_json(
+            &all_text,
+            &interaction,
+            0,
+            &transform,
+            &[],
+            Some((0.0, 0.0, 500.0, 500.0)),
+        );
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         let y_of = |content: &str| -> f64 {
             parsed
@@ -1280,7 +1446,7 @@ mod tests {
             }],
         };
         let all_text = vec![
-            make_text(40.0, 100.0, "L"),          // left axis (column x=40)
+            make_text(40.0, 100.0, "L"),           // left axis (column x=40)
             make_text(100.0, 360.0, "X"),          // x-axis tick (row y=360)
             make_text_slot(460.0, 100.0, "A1", 1), // inner right axis, slot 1 (x=460)
             make_text_slot(460.0, 200.0, "A2", 1),
@@ -1303,21 +1469,24 @@ mod tests {
         let secondary = [
             crate::zoom_pan::compose_panel_slot(
                 panel,
-                crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+                crate::zoom_pan::Affine2 {
+                    sx: 1.0,
+                    sy: 2.0,
+                    tx: 0.0,
+                    ty: 0.0,
+                },
             ),
             crate::zoom_pan::compose_panel_slot(
                 panel,
-                crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 50.0 },
+                crate::zoom_pan::Affine2 {
+                    sx: 1.0,
+                    sy: 1.0,
+                    tx: 0.0,
+                    ty: 50.0,
+                },
             ),
         ];
-        let json = build_zoomed_text_json(
-            &all_text,
-            &interaction,
-            0,
-            &panel,
-            &secondary,
-            None,
-        );
+        let json = build_zoomed_text_json(&all_text, &interaction, 0, &panel, &secondary, None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
         let pos = |content: &str| -> (f64, f64) {
             let v = parsed
@@ -1327,8 +1496,16 @@ mod tests {
             (v["x"].as_f64().unwrap(), v["y"].as_f64().unwrap())
         };
         // Primary axis and x axis do NOT move (panel affine is identity).
-        assert_eq!(pos("L"), (40.0, 100.0), "left axis frozen under slot-only rescale");
-        assert_eq!(pos("X"), (100.0, 360.0), "x axis frozen under slot-only rescale");
+        assert_eq!(
+            pos("L"),
+            (40.0, 100.0),
+            "left axis frozen under slot-only rescale"
+        );
+        assert_eq!(
+            pos("X"),
+            (100.0, 360.0),
+            "x axis frozen under slot-only rescale"
+        );
         // Inner right axis (slot 1) relabels: 100*2=200, 200*2=400.
         assert_eq!(pos("A1"), (460.0, 200.0));
         assert_eq!(pos("A2"), (460.0, 400.0));
@@ -1344,20 +1521,23 @@ mod tests {
         // the panel affine alone (identity slot), and the primary axes through
         // the panel affine — proving the composition is per column.
         let (interaction, all_text) = dual_axis_fixture();
-        let panel = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 10.0 };
-        let slot1 = crate::zoom_pan::Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 5.0 };
+        let panel = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 10.0,
+        };
+        let slot1 = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 3.0,
+            tx: 0.0,
+            ty: 5.0,
+        };
         let secondary = [
             crate::zoom_pan::compose_panel_slot(panel, slot1),
             crate::zoom_pan::compose_panel_slot(panel, crate::zoom_pan::Affine2::identity()),
         ];
-        let json = build_zoomed_text_json(
-            &all_text,
-            &interaction,
-            0,
-            &panel,
-            &secondary,
-            None,
-        );
+        let json = build_zoomed_text_json(&all_text, &interaction, 0, &panel, &secondary, None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
         let y_of = |content: &str| -> f64 {
             parsed
@@ -1413,8 +1593,7 @@ mod tests {
             ty: 0.0,
         };
 
-        let json_str =
-            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let contents: Vec<&str> = parsed
@@ -1466,8 +1645,8 @@ mod tests {
         };
         let json_str = build_text_json_from(&[te]);
         // serde_json serializes NaN as null.
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
-            .expect("NaN coordinates must produce valid JSON");
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&json_str).expect("NaN coordinates must produce valid JSON");
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0]["x"].is_null(), "NaN x must serialize as null");
     }
@@ -1483,8 +1662,8 @@ mod tests {
             slot: None,
         };
         let json_str = build_text_json_from(&[te]);
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
-            .expect("Infinity coordinates must produce valid JSON");
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&json_str).expect("Infinity coordinates must produce valid JSON");
         assert_eq!(parsed.len(), 1);
     }
 
@@ -1493,8 +1672,8 @@ mod tests {
         // Empty content string must produce valid JSON.
         let te = make_text(50.0, 50.0, "");
         let json_str = build_text_json_from(&[te]);
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
-            .expect("empty content must produce valid JSON");
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&json_str).expect("empty content must produce valid JSON");
         assert_eq!(parsed[0]["content"], "");
     }
 
@@ -1503,8 +1682,8 @@ mod tests {
         // Unicode (emoji, CJK) in content must serialize correctly.
         let te = make_text(10.0, 20.0, "\u{1F600}\u{4E16}\u{754C}");
         let json_str = build_text_json_from(&[te]);
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
-            .expect("unicode content must produce valid JSON");
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&json_str).expect("unicode content must produce valid JSON");
         assert_eq!(parsed[0]["content"], "\u{1F600}\u{4E16}\u{754C}");
     }
 
@@ -1519,8 +1698,8 @@ mod tests {
             }],
         };
         let json = format_tooltip_content(&tooltip);
-        let parsed: serde_json::Value = serde_json::from_str(&json)
-            .expect("unicode in tooltip must produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("unicode in tooltip must produce valid JSON");
         assert_eq!(parsed["fields"][0]["name"], "\u{1F4CA}chart");
     }
 
@@ -1538,7 +1717,12 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color { r: 100, g: 200, b: 50, a: 255 },
+            color: Color {
+                r: 100,
+                g: 200,
+                b: 50,
+                a: 255,
+            },
             opacity: 0.5,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
@@ -1556,7 +1740,10 @@ mod tests {
         let interaction = ferrum_scene::InteractionConfig::default();
         let texts = vec![make_text(100.0, 200.0, "hello")];
         let transform = crate::zoom_pan::Affine2 {
-            sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0,
+            sx: 2.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
         };
         let result = build_zoomed_text_json(&texts, &interaction, 99, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();

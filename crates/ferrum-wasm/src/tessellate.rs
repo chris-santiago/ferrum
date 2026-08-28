@@ -3,8 +3,8 @@ use lyon::math::point;
 use lyon::path::builder::SvgPathBuilder;
 use lyon::path::{Path as LyonPath, PathEvent};
 use lyon::tessellation::{
-    BuffersBuilder, FillOptions, FillTessellator, FillVertex, LineCap, LineJoin,
-    StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
+    BuffersBuilder, FillOptions, FillTessellator, FillVertex, LineCap, LineJoin, StrokeOptions,
+    StrokeTessellator, StrokeVertex, VertexBuffers,
 };
 
 /// Per-vertex data for the mesh pipeline (strokes and fills share one format).
@@ -39,7 +39,10 @@ pub struct MeshVertex {
 const _: () = assert!(core::mem::size_of::<MeshVertex>() == 36);
 
 pub fn tessellate_line(
-    x1: f64, y1: f64, x2: f64, y2: f64,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
     style: &StrokeStyle,
     buffers: &mut VertexBuffers<MeshVertex, u32>,
 ) {
@@ -133,7 +136,9 @@ pub fn tessellate_polygon(
     builder.close();
     // Interior rings (holes).
     for hole in &rings[1..] {
-        if hole.len() < 3 { continue; }
+        if hole.len() < 3 {
+            continue;
+        }
         builder.begin(point(hole[0][0] as f32, hole[0][1] as f32));
         for p in &hole[1..] {
             builder.line_to(point(p[0] as f32, p[1] as f32));
@@ -174,7 +179,10 @@ pub fn tessellate_polygon(
             &opts,
             &mut BuffersBuilder::new(buffers, move |v: StrokeVertex| MeshVertex {
                 position: v.position_on_path().to_array(),
-                normal: { let n = v.normal(); [n.x, n.y] },
+                normal: {
+                    let n = v.normal();
+                    [n.x, n.y]
+                },
                 half_width: v.line_width() / 2.0,
                 color,
             }),
@@ -210,12 +218,16 @@ fn pathcmds_to_lyon(cmds: &[PathCmd], closed: bool) -> LyonPath {
             PathCmd::QuadTo { cx, cy, x, y } => {
                 cur_x = *x as f32;
                 cur_y = *y as f32;
-                builder.quadratic_bezier_to(
-                    point(*cx as f32, *cy as f32),
-                    point(cur_x, cur_y),
-                );
+                builder.quadratic_bezier_to(point(*cx as f32, *cy as f32), point(cur_x, cur_y));
             }
-            PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
                 cur_x = *x as f32;
                 cur_y = *y as f32;
                 builder.cubic_bezier_to(
@@ -224,7 +236,15 @@ fn pathcmds_to_lyon(cmds: &[PathCmd], closed: bool) -> LyonPath {
                     point(cur_x, cur_y),
                 );
             }
-            PathCmd::ArcTo { rx, ry, rotation, large_arc, sweep, x, y } => {
+            PathCmd::ArcTo {
+                rx,
+                ry,
+                rotation,
+                large_arc,
+                sweep,
+                x,
+                y,
+            } => {
                 cur_x = *x as f32;
                 cur_y = *y as f32;
                 builder.arc_to(
@@ -276,7 +296,10 @@ fn stroke_path_dashed(
         opts,
         &mut BuffersBuilder::new(buffers, move |v: StrokeVertex| MeshVertex {
             position: v.position_on_path().to_array(),
-            normal: { let n = v.normal(); [n.x, n.y] },
+            normal: {
+                let n = v.normal();
+                [n.x, n.y]
+            },
             half_width: v.line_width() / 2.0,
             color,
         }),
@@ -302,7 +325,12 @@ fn apply_dash_pattern(path: &LyonPath, pattern: &[f64]) -> LyonPath {
                 flatten_quad(from, ctrl, to, &mut segments);
                 prev = Some(to);
             }
-            PathEvent::Cubic { from, ctrl1, ctrl2, to } => {
+            PathEvent::Cubic {
+                from,
+                ctrl1,
+                ctrl2,
+                to,
+            } => {
                 flatten_cubic(from, ctrl1, ctrl2, to, &mut segments);
                 prev = Some(to);
             }
@@ -410,7 +438,12 @@ mod tests {
 
     fn make_stroke_style(opacity: f64, stroke_opacity: f64) -> StrokeStyle {
         StrokeStyle {
-            color: Color { r: 255, g: 255, b: 255, a: 255 },
+            color: Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
             width: 2.0,
             opacity,
             dash: None,
@@ -430,7 +463,10 @@ mod tests {
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
         tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
 
-        assert!(!buffers.vertices.is_empty(), "tessellate_line must produce vertices");
+        assert!(
+            !buffers.vertices.is_empty(),
+            "tessellate_line must produce vertices"
+        );
         for v in &buffers.vertices {
             assert!(
                 (v.color[3] - 0.5).abs() < 0.05,
@@ -498,8 +534,18 @@ mod tests {
 
     fn make_fill_stroke_style(opacity: f64, stroke_opacity: f64, fill_opacity: f64) -> FillStroke {
         FillStroke {
-            fill: Some(Color { r: 200, g: 100, b: 50, a: 255 }),
-            stroke: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            fill: Some(Color {
+                r: 200,
+                g: 100,
+                b: 50,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            }),
             stroke_width: 2.0,
             opacity,
             stroke_dash: None,
@@ -524,9 +570,19 @@ mod tests {
         let mut stroke_only_style = style;
         stroke_only_style.fill = None;
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
-        tessellate_path(&commands, &stroke_only_style, true, None, None, &mut buffers);
+        tessellate_path(
+            &commands,
+            &stroke_only_style,
+            true,
+            None,
+            None,
+            &mut buffers,
+        );
 
-        assert!(!buffers.vertices.is_empty(), "path stroke must produce vertices");
+        assert!(
+            !buffers.vertices.is_empty(),
+            "path stroke must produce vertices"
+        );
         for v in &buffers.vertices {
             // Expected alpha = opacity(1.0) * stroke_opacity(0.6) = 0.6
             assert!(
@@ -554,7 +610,10 @@ mod tests {
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
         tessellate_path(&commands, &fill_only_style, true, None, None, &mut buffers);
 
-        assert!(!buffers.vertices.is_empty(), "path fill must produce vertices");
+        assert!(
+            !buffers.vertices.is_empty(),
+            "path fill must produce vertices"
+        );
         for v in &buffers.vertices {
             // Expected alpha = opacity(0.8) * fill_opacity(0.5) = 0.4
             assert!(
@@ -571,13 +630,14 @@ mod tests {
         let style = make_fill_stroke_style(1.0, 0.6, 1.0);
         let mut stroke_only_style = style;
         stroke_only_style.fill = None;
-        let rings = vec![vec![
-            [0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0],
-        ]];
+        let rings = vec![vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]];
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
         tessellate_polygon(&rings, &stroke_only_style, &mut buffers);
 
-        assert!(!buffers.vertices.is_empty(), "polygon stroke must produce vertices");
+        assert!(
+            !buffers.vertices.is_empty(),
+            "polygon stroke must produce vertices"
+        );
         for v in &buffers.vertices {
             assert!(
                 (v.color[3] - 0.6).abs() < 0.05,
@@ -593,13 +653,14 @@ mod tests {
         let style = make_fill_stroke_style(0.8, 1.0, 0.5);
         let mut fill_only_style = style;
         fill_only_style.stroke = None;
-        let rings = vec![vec![
-            [0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0],
-        ]];
+        let rings = vec![vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]];
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
         tessellate_polygon(&rings, &fill_only_style, &mut buffers);
 
-        assert!(!buffers.vertices.is_empty(), "polygon fill must produce vertices");
+        assert!(
+            !buffers.vertices.is_empty(),
+            "polygon fill must produce vertices"
+        );
         for v in &buffers.vertices {
             assert!(
                 (v.color[3] - 0.4).abs() < 0.05,
@@ -696,13 +757,14 @@ mod tests {
         let style = make_fill_stroke_style(1.0, 1.0, 1.0);
         let mut fill_only = style;
         fill_only.stroke = None;
-        let rings = vec![vec![
-            [0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0],
-        ]];
+        let rings = vec![vec![[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]]];
         let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
         tessellate_polygon(&rings, &fill_only, &mut buffers);
 
-        assert!(!buffers.vertices.is_empty(), "polygon fill must produce vertices");
+        assert!(
+            !buffers.vertices.is_empty(),
+            "polygon fill must produce vertices"
+        );
         for v in &buffers.vertices {
             assert_eq!(v.half_width, 0.0, "polygon fill half_width must be 0.0");
             assert_eq!(v.normal, [0.0, 0.0], "polygon fill normal must be [0,0]");
@@ -727,11 +789,7 @@ mod tests {
     }
 }
 
-fn apply_cap_join(
-    opts: &mut StrokeOptions,
-    cap: Option<StrokeCap>,
-    join: Option<StrokeJoin>,
-) {
+fn apply_cap_join(opts: &mut StrokeOptions, cap: Option<StrokeCap>, join: Option<StrokeJoin>) {
     // Default to Bevel joins unconditionally. Bevel emits unit-normal vertices
     // (|normal| ≈ 1) at every join, which is required for the screen-space-width
     // shader to remain correct under non-uniform affines (sx ≠ sy). Miter joins

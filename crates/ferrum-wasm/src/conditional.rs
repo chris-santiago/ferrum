@@ -122,7 +122,9 @@ pub(crate) fn apply_crossfilter_to_panel(
     // The targeted channel is implied by the value variant (`Opacity`); the
     // apply path dispatches on the value alone.
     let if_selected = EncodingValue::Opacity { value: 1.0 };
-    let if_not = EncodingValue::Opacity { value: dimmed_opacity };
+    let if_not = EncodingValue::Opacity {
+        value: dimmed_opacity,
+    };
 
     let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
     let mut circle_offset = total_packed_circles;
@@ -137,16 +139,19 @@ pub(crate) fn apply_crossfilter_to_panel(
                 // Do NOT advance circle_offset/rect_offset for packed batches.
                 if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
                     apply_conditional_to_packed(
-                        &if_selected, &if_not, selection, meta, circles, rects,
+                        &if_selected,
+                        &if_not,
+                        selection,
+                        meta,
+                        circles,
+                        rects,
                     );
                 }
             } else {
                 // Non-packed batch: instances live at circle_offset/rect_offset
                 // (after all packed instances in the flat array).
                 let (n_circles, n_rects) = count_instances(batch);
-                if panel_idx == target_panel
-                    && !matches!(selection, SelectionState::Empty)
-                {
+                if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
                     if let Some(indices) = &batch.data_indices {
                         let mut bufs = InstanceBuffers {
                             circles,
@@ -155,7 +160,12 @@ pub(crate) fn apply_crossfilter_to_panel(
                             rect_offset,
                         };
                         apply_conditional_to_batch(
-                            &if_selected, &if_not, selection, indices, batch, &mut bufs,
+                            &if_selected,
+                            &if_not,
+                            selection,
+                            indices,
+                            batch,
+                            &mut bufs,
                         );
                     }
                 }
@@ -654,7 +664,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -665,8 +680,18 @@ mod tests {
         };
         let mk_panel = |cx: f64| Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -677,7 +702,12 @@ mod tests {
             grid: vec![],
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
-                nodes: vec![SceneNode::Circle { cx, cy: 50.0, r: 5.0, style: style.clone() }],
+                nodes: vec![SceneNode::Circle {
+                    cx,
+                    cy: 50.0,
+                    r: 5.0,
+                    style: style.clone(),
+                }],
                 data_indices: Some(vec![0]),
                 tooltips: None,
                 hrefs: None,
@@ -693,6 +723,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         // Panel 0 (source) mark at x=10 (inside the brush); panel 1 (target)
         // mark at x=400 (outside the re-projected interval).
@@ -700,16 +732,26 @@ mod tests {
 
         let mut circles = vec![
             CircleInstance {
-                center: [10.0, 50.0], radius: 5.0,
-                fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                stroke_dash: 0.0, angle: 0.0,
+                center: [10.0, 50.0],
+                radius: 5.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             CircleInstance {
-                center: [400.0, 50.0], radius: 5.0,
-                fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                stroke_dash: 0.0, angle: 0.0,
+                center: [400.0, 50.0],
+                radius: 5.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
         ];
         let mut rects: Vec<RectInstance> = vec![];
@@ -721,7 +763,13 @@ mod tests {
         };
 
         apply_crossfilter_to_panel(
-            &panels, 1, &sel, 0.15, &mut circles, &mut rects, &HashMap::new(),
+            &panels,
+            1,
+            &sel,
+            0.15,
+            &mut circles,
+            &mut rects,
+            &HashMap::new(),
         );
 
         // Source panel (index 0) mark must be untouched (full opacity).
@@ -745,7 +793,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -756,16 +809,34 @@ mod tests {
         };
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
                 y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
-                nodes: vec![SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style }],
+                nodes: vec![SceneNode::Circle {
+                    cx: 50.0,
+                    cy: 50.0,
+                    r: 5.0,
+                    style,
+                }],
                 data_indices: Some(vec![0]),
                 tooltips: None,
                 hrefs: None,
@@ -781,18 +852,34 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
         let mut circles = vec![CircleInstance {
-            center: [50.0, 50.0], radius: 5.0,
-            fill_color: [0.0; 4], stroke_color: [0.0; 4],
-            stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-            stroke_dash: 0.0, angle: 0.0,
+            center: [50.0, 50.0],
+            radius: 5.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         }];
         let mut rects: Vec<RectInstance> = vec![];
         // Brush [0, 100] contains the mark at x=50.
-        let sel = SelectionState::Interval { x_range: Some((0.0, 100.0)), y_range: None };
+        let sel = SelectionState::Interval {
+            x_range: Some((0.0, 100.0)),
+            y_range: None,
+        };
         apply_crossfilter_to_panel(
-            &panels, 0, &sel, 0.15, &mut circles, &mut rects, &HashMap::new(),
+            &panels,
+            0,
+            &sel,
+            0.15,
+            &mut circles,
+            &mut rects,
+            &HashMap::new(),
         );
         assert!(
             (circles[0].opacity - 1.0).abs() < 1e-6,
@@ -820,10 +907,7 @@ mod tests {
             b: 0,
             a: 255,
         };
-        apply_value_to_circle(
-            &mut inst,
-            &EncodingValue::Color { value: red },
-        );
+        apply_value_to_circle(&mut inst, &EncodingValue::Color { value: red });
         assert!((inst.fill_color[0] - 1.0).abs() < 0.01);
         assert!(inst.fill_color[1] < 0.01);
     }
@@ -842,10 +926,7 @@ mod tests {
             stroke_dash: 0.0,
             angle: 0.0,
         };
-        apply_value_to_rect(
-            &mut inst,
-            &EncodingValue::Opacity { value: 0.3 },
-        );
+        apply_value_to_rect(&mut inst, &EncodingValue::Opacity { value: 0.3 });
         assert!((inst.opacity - 0.3).abs() < 0.01);
     }
 
@@ -863,10 +944,7 @@ mod tests {
             stroke_dash: 0.0,
             angle: 0.0,
         };
-        apply_value_to_rect(
-            &mut inst,
-            &EncodingValue::Size { value: 20.0 },
-        );
+        apply_value_to_rect(&mut inst, &EncodingValue::Size { value: 20.0 });
         assert!((inst.size[0] - 20.0).abs() < 0.01);
         assert!((inst.size[1] - 20.0).abs() < 0.01);
     }
@@ -890,7 +968,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -903,8 +986,18 @@ mod tests {
         // Three circles with tooltips: mark 0 group="a", mark 1 group="b", mark 2 group="a".
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -916,9 +1009,24 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 150.0, cy: 50.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 250.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle {
+                        cx: 50.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 150.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 250.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1, 2]),
                 tooltips: Some(vec![
@@ -954,10 +1062,22 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
-        let red = Color { r: 255, g: 0, b: 0, a: 255 };
-        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let grey = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
 
         let conditionals = vec![ConditionalEncoding {
             selection_name: "sel".to_string(),
@@ -974,7 +1094,9 @@ mod tests {
                 indices: vec![0, 2],
                 field_values: vec![(
                     "group".to_string(),
-                    FieldValue::String { value: "a".to_string() },
+                    FieldValue::String {
+                        value: "a".to_string(),
+                    },
                 )],
             },
         );
@@ -1027,7 +1149,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1039,8 +1166,18 @@ mod tests {
 
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1052,8 +1189,18 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 150.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle {
+                        cx: 50.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 150.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1]),
                 tooltips: None,
@@ -1070,10 +1217,22 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
-        let red = Color { r: 255, g: 0, b: 0, a: 255 };
-        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let grey = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
 
         let conditionals = vec![ConditionalEncoding {
             selection_name: "sel".to_string(),
@@ -1133,7 +1292,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1146,8 +1310,18 @@ mod tests {
         // Two circles: (50,50) and (200,200).
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1159,8 +1333,18 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 200.0, cy: 200.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle {
+                        cx: 50.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 200.0,
+                        cy: 200.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1]),
                 tooltips: None,
@@ -1177,6 +1361,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         // Point selection selects index 0 only.
@@ -1210,10 +1396,20 @@ mod tests {
                 selection_name: "brush_sel".to_string(),
                 channel: ChannelName::Color,
                 if_selected: EncodingValue::Color {
-                    value: Color { r: 255, g: 0, b: 0, a: 255 },
+                    value: Color {
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    },
                 },
                 if_not: EncodingValue::Color {
-                    value: Color { r: 128, g: 128, b: 128, a: 255 },
+                    value: Color {
+                        r: 128,
+                        g: 128,
+                        b: 128,
+                        a: 255,
+                    },
                 },
             },
         ];
@@ -1283,7 +1479,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1296,8 +1497,18 @@ mod tests {
         // Three circles: (20,30) inside, (100,100) outside, (30,40) inside brush.
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1309,9 +1520,24 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    SceneNode::Circle { cx: 20.0, cy: 30.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 30.0, cy: 40.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle {
+                        cx: 20.0,
+                        cy: 30.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 100.0,
+                        cy: 100.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 30.0,
+                        cy: 40.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1, 2]),
                 tooltips: None,
@@ -1328,10 +1554,22 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
-        let red = Color { r: 255, g: 0, b: 0, a: 255 };
-        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let grey = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
 
         let conditionals = vec![ConditionalEncoding {
             selection_name: "brush".to_string(),
@@ -1453,14 +1691,25 @@ mod tests {
     }
 
     #[test]
-    fn bug_hunt_field_value_matches_infinity() { // BUG: (inf - inf).abs() is NaN, not < 1e-10, so equal infinities don't match
+    fn bug_hunt_field_value_matches_infinity() {
+        // BUG: (inf - inf).abs() is NaN, not < 1e-10, so equal infinities don't match
         // "Infinity" parses to f64::INFINITY.
         assert!(
-            field_value_matches_tooltip("inf", &FieldValue::Number { value: f64::INFINITY }),
+            field_value_matches_tooltip(
+                "inf",
+                &FieldValue::Number {
+                    value: f64::INFINITY
+                }
+            ),
             "inf tooltip must match INFINITY field value"
         );
         assert!(
-            field_value_matches_tooltip("-inf", &FieldValue::Number { value: f64::NEG_INFINITY }),
+            field_value_matches_tooltip(
+                "-inf",
+                &FieldValue::Number {
+                    value: f64::NEG_INFINITY
+                }
+            ),
             "-inf tooltip must match NEG_INFINITY field value"
         );
     }
@@ -1478,7 +1727,12 @@ mod tests {
     fn bug_hunt_field_value_matches_empty_string() {
         // Empty tooltip string vs empty FieldValue::String.
         assert!(
-            field_value_matches_tooltip("", &FieldValue::String { value: String::new() }),
+            field_value_matches_tooltip(
+                "",
+                &FieldValue::String {
+                    value: String::new()
+                }
+            ),
             "empty tooltip must match empty string field value"
         );
         // Empty tooltip vs Null: "".is_empty() is true so should match.
@@ -1497,7 +1751,12 @@ mod tests {
         );
         // "null" vs String("null") should also match.
         assert!(
-            field_value_matches_tooltip("null", &FieldValue::String { value: "null".to_string() }),
+            field_value_matches_tooltip(
+                "null",
+                &FieldValue::String {
+                    value: "null".to_string()
+                }
+            ),
             "'null' tooltip must match String('null') field value"
         );
     }
@@ -1523,11 +1782,21 @@ mod tests {
         // Unicode strings must match exactly.
         let emoji = "\u{1F600}";
         assert!(
-            field_value_matches_tooltip(emoji, &FieldValue::String { value: emoji.to_string() }),
+            field_value_matches_tooltip(
+                emoji,
+                &FieldValue::String {
+                    value: emoji.to_string()
+                }
+            ),
             "unicode emoji must match identical string field value"
         );
         assert!(
-            !field_value_matches_tooltip(emoji, &FieldValue::String { value: "smiley".to_string() }),
+            !field_value_matches_tooltip(
+                emoji,
+                &FieldValue::String {
+                    value: "smiley".to_string()
+                }
+            ),
             "emoji must not match non-emoji string"
         );
     }
@@ -1537,7 +1806,12 @@ mod tests {
         // A tooltip value "42" compared against FieldValue::String{"42"} must
         // match (direct string equality).
         assert!(
-            field_value_matches_tooltip("42", &FieldValue::String { value: "42".to_string() }),
+            field_value_matches_tooltip(
+                "42",
+                &FieldValue::String {
+                    value: "42".to_string()
+                }
+            ),
             "'42' tooltip must match String('42') field value"
         );
     }
@@ -1546,7 +1820,12 @@ mod tests {
     fn bug_hunt_field_value_matches_very_long_string() {
         let long = "x".repeat(100_000);
         assert!(
-            field_value_matches_tooltip(&long, &FieldValue::String { value: long.clone() }),
+            field_value_matches_tooltip(
+                &long,
+                &FieldValue::String {
+                    value: long.clone()
+                }
+            ),
             "very long strings must still match"
         );
     }
@@ -1562,7 +1841,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1574,8 +1858,18 @@ mod tests {
 
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1607,16 +1901,28 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
             selection_name: "does_not_exist".to_string(),
             channel: ChannelName::Color,
             if_selected: EncodingValue::Color {
-                value: Color { r: 255, g: 0, b: 0, a: 255 },
+                value: Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
             },
             if_not: EncodingValue::Color {
-                value: Color { r: 128, g: 128, b: 128, a: 255 },
+                value: Color {
+                    r: 128,
+                    g: 128,
+                    b: 128,
+                    a: 255,
+                },
             },
         }];
 
@@ -1651,7 +1957,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1663,8 +1974,18 @@ mod tests {
 
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1696,6 +2017,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -1750,7 +2073,9 @@ mod tests {
         };
         apply_value_to_circle(
             &mut inst,
-            &EncodingValue::Size { value: std::f64::consts::PI * 100.0 },
+            &EncodingValue::Size {
+                value: std::f64::consts::PI * 100.0,
+            },
         );
         // Expected: sqrt(PI*100 / PI) = sqrt(100) = 10
         assert!(
@@ -1783,11 +2108,22 @@ mod tests {
 
         apply_value_to_circle(
             &mut inst,
-            &EncodingValue::Field { name: "category".to_string() },
+            &EncodingValue::Field {
+                name: "category".to_string(),
+            },
         );
-        assert_eq!(inst.fill_color, original_fill, "Field value must not change fill");
-        assert!((inst.opacity - original_opacity).abs() < 1e-10, "Field value must not change opacity");
-        assert!((inst.radius - original_radius).abs() < 1e-10, "Field value must not change radius");
+        assert_eq!(
+            inst.fill_color, original_fill,
+            "Field value must not change fill"
+        );
+        assert!(
+            (inst.opacity - original_opacity).abs() < 1e-10,
+            "Field value must not change opacity"
+        );
+        assert!(
+            (inst.radius - original_radius).abs() < 1e-10,
+            "Field value must not change radius"
+        );
     }
 
     // ── W7: StrokeWidth and StrokeDash conditional values ────────────────
@@ -1812,10 +2148,7 @@ mod tests {
             stroke_dash: 0.0,
             angle: 0.0,
         };
-        apply_value_to_circle(
-            &mut inst,
-            &EncodingValue::StrokeWidth { value: 3.5 },
-        );
+        apply_value_to_circle(&mut inst, &EncodingValue::StrokeWidth { value: 3.5 });
         assert!(
             (inst.stroke_width - 3.5).abs() < 0.01,
             "StrokeWidth value must set stroke_width, got {}",
@@ -1840,7 +2173,9 @@ mod tests {
         // [6.0, 3.0] maps to dash index 1.0
         apply_value_to_circle(
             &mut inst,
-            &EncodingValue::StrokeDash { value: vec![6.0, 3.0] },
+            &EncodingValue::StrokeDash {
+                value: vec![6.0, 3.0],
+            },
         );
         assert!(
             (inst.stroke_dash - 1.0).abs() < 0.01,
@@ -1864,10 +2199,7 @@ mod tests {
             stroke_dash: 0.0,
             angle: 0.0,
         };
-        apply_value_to_rect(
-            &mut inst,
-            &EncodingValue::StrokeWidth { value: 2.0 },
-        );
+        apply_value_to_rect(&mut inst, &EncodingValue::StrokeWidth { value: 2.0 });
         assert!(
             (inst.stroke_width - 2.0).abs() < 0.01,
             "StrokeWidth value must set rect stroke_width, got {}",
@@ -1893,7 +2225,9 @@ mod tests {
         // [2.0, 3.0] maps to dash index 2.0
         apply_value_to_rect(
             &mut inst,
-            &EncodingValue::StrokeDash { value: vec![2.0, 3.0] },
+            &EncodingValue::StrokeDash {
+                value: vec![2.0, 3.0],
+            },
         );
         assert!(
             (inst.stroke_dash - 2.0).abs() < 0.01,
@@ -1933,10 +2267,19 @@ mod tests {
         };
 
         let shared_values = [
-            EncodingValue::Color { value: Color { r: 200, g: 100, b: 50, a: 255 } },
+            EncodingValue::Color {
+                value: Color {
+                    r: 200,
+                    g: 100,
+                    b: 50,
+                    a: 255,
+                },
+            },
             EncodingValue::Opacity { value: 0.4 },
             EncodingValue::StrokeWidth { value: 2.5 },
-            EncodingValue::StrokeDash { value: vec![6.0, 3.0] },
+            EncodingValue::StrokeDash {
+                value: vec![6.0, 3.0],
+            },
             EncodingValue::StrokeOpacity { value: 0.6 },
             EncodingValue::FillOpacity { value: 0.7 },
             EncodingValue::Angle { value: 30.0 },
@@ -1951,7 +2294,10 @@ mod tests {
                 c.fill_color, r.fill_color,
                 "fill_color must match across geometries for {value:?}"
             );
-            assert!((c.opacity - r.opacity).abs() < 1e-6, "opacity parity for {value:?}");
+            assert!(
+                (c.opacity - r.opacity).abs() < 1e-6,
+                "opacity parity for {value:?}"
+            );
             assert!(
                 (c.stroke_width - r.stroke_width).abs() < 1e-6,
                 "stroke_width parity for {value:?}"
@@ -1964,7 +2310,10 @@ mod tests {
                 (c.stroke_opacity - r.stroke_opacity).abs() < 1e-6,
                 "stroke_opacity parity for {value:?}"
             );
-            assert!((c.angle - r.angle).abs() < 1e-6, "angle parity for {value:?}");
+            assert!(
+                (c.angle - r.angle).abs() < 1e-6,
+                "angle parity for {value:?}"
+            );
         }
     }
 
@@ -1977,7 +2326,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1991,8 +2345,18 @@ mod tests {
         // Brush from (95, 95) to (105, 105) -- contains center (100,100).
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -2026,6 +2390,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2074,7 +2440,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -2086,8 +2457,18 @@ mod tests {
 
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -2099,8 +2480,18 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: 150.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    SceneNode::Circle {
+                        cx: 50.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: 150.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1]),
                 tooltips: None, // <-- no tooltips
@@ -2117,6 +2508,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2135,9 +2528,12 @@ mod tests {
             "sel".to_string(),
             SelectionState::Point {
                 indices: vec![0],
-                field_values: vec![
-                    ("group".to_string(), FieldValue::String { value: "a".to_string() }),
-                ],
+                field_values: vec![(
+                    "group".to_string(),
+                    FieldValue::String {
+                        value: "a".to_string(),
+                    },
+                )],
             },
         );
 
@@ -2185,15 +2581,23 @@ mod tests {
 
     #[test]
     fn packed_circles_interval_conditional_applies() {
-        use ferrum_scene::{
-            BlendMode, CoordKind, MarkBatchKind, Panel, Rect,
-        };
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatchKind, Panel, Rect};
 
         // Panel with one batch that has empty nodes (packed batch).
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -2220,10 +2624,22 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
-        let red = Color { r: 255, g: 0, b: 0, a: 255 };
-        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let grey = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
 
         let conditionals = vec![ConditionalEncoding {
             selection_name: "brush".to_string(),
@@ -2246,19 +2662,37 @@ mod tests {
         let neutral = [0.0_f32, 0.0, 0.0, 1.0];
         let base_circles = vec![
             CircleInstance {
-                center: [20.0, 30.0], radius: 5.0, fill_color: neutral,
-                stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 1.0,
-                stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                center: [20.0, 30.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             CircleInstance {
-                center: [100.0, 100.0], radius: 5.0, fill_color: neutral,
-                stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 1.0,
-                stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                center: [100.0, 100.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             CircleInstance {
-                center: [30.0, 40.0], radius: 5.0, fill_color: neutral,
-                stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 1.0,
-                stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                center: [30.0, 40.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
         ];
 
@@ -2275,7 +2709,12 @@ mod tests {
         );
 
         let result = resolve_conditionals_with_packed(
-            &panels, &conditionals, &selections, &base_circles, &[], &packed_meta,
+            &panels,
+            &conditionals,
+            &selections,
+            &base_circles,
+            &[],
+            &packed_meta,
         );
 
         let red_r = srgb_to_linear(1.0);
@@ -2305,15 +2744,23 @@ mod tests {
 
     #[test]
     fn packed_rects_interval_conditional_applies() {
-        use ferrum_scene::{
-            BlendMode, CoordKind, MarkBatchKind, Panel, Rect,
-        };
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatchKind, Panel, Rect};
 
         // Panel with one batch that has empty nodes (packed batch).
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -2340,6 +2787,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2363,14 +2812,28 @@ mod tests {
         //   rect 1: pos=(100,100) size=(30,30) -> center=(115,115) outside brush
         let base_rects = vec![
             RectInstance {
-                position: [15.0, 15.0], size: [20.0, 20.0], corner_radius: 0.0,
-                fill_color: [0.0; 4], stroke_color: [0.0; 4], stroke_width: 0.0,
-                opacity: 0.5, stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                position: [15.0, 15.0],
+                size: [20.0, 20.0],
+                corner_radius: 0.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             RectInstance {
-                position: [100.0, 100.0], size: [30.0, 30.0], corner_radius: 0.0,
-                fill_color: [0.0; 4], stroke_color: [0.0; 4], stroke_width: 0.0,
-                opacity: 0.5, stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                position: [100.0, 100.0],
+                size: [30.0, 30.0],
+                corner_radius: 0.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
         ];
 
@@ -2387,7 +2850,12 @@ mod tests {
         );
 
         let result = resolve_conditionals_with_packed(
-            &panels, &conditionals, &selections, &[], &base_rects, &packed_meta,
+            &panels,
+            &conditionals,
+            &selections,
+            &[],
+            &base_rects,
+            &packed_meta,
         );
 
         // Rect 0 center (25,25) is inside brush — opacity should be 1.0.
@@ -2412,7 +2880,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -2425,10 +2898,23 @@ mod tests {
         // Panel with two batches: first is packed (2 circles), second is non-packed (1 circle).
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
                 y_domains: Vec::new(),
             },
             grid: vec![],
@@ -2438,22 +2924,33 @@ mod tests {
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
-                    tooltips: None, hrefs: None, keys: None,
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 },
                 // Batch 1: non-packed (1 circle in nodes).
                 MarkBatch {
                     kind: MarkBatchKind::Point,
-                    nodes: vec![
-                        SceneNode::Circle { cx: 200.0, cy: 200.0, r: 5.0, style: style.clone() },
-                    ],
+                    nodes: vec![SceneNode::Circle {
+                        cx: 200.0,
+                        cy: 200.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    }],
                     data_indices: Some(vec![99]),
-                    tooltips: None, hrefs: None, keys: None,
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 },
@@ -2462,6 +2959,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2485,21 +2984,39 @@ mod tests {
         let base_circles = vec![
             // Packed batch 0, instance 0:
             CircleInstance {
-                center: [50.0, 50.0], radius: 5.0, fill_color: neutral,
-                stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 0.5,
-                stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                center: [50.0, 50.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             // Packed batch 0, instance 1:
             CircleInstance {
-                center: [80.0, 80.0], radius: 5.0, fill_color: neutral,
-                stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 0.5,
-                stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                center: [80.0, 80.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             // Non-packed batch 1, instance 0:
             CircleInstance {
-                center: [200.0, 200.0], radius: 5.0, fill_color: neutral,
-                stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 0.5,
-                stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+                center: [200.0, 200.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
         ];
 
@@ -2516,7 +3033,12 @@ mod tests {
         );
 
         let result = resolve_conditionals_with_packed(
-            &panels, &conditionals, &selections, &base_circles, &[], &packed_meta,
+            &panels,
+            &conditionals,
+            &selections,
+            &base_circles,
+            &[],
+            &packed_meta,
         );
 
         // Non-packed circle (index 2) has data_idx=99 which IS selected.
@@ -2547,7 +3069,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -2571,10 +3098,23 @@ mod tests {
         // correctly addresses circles[3].
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
                 y_domains: Vec::new(),
             },
             grid: vec![],
@@ -2582,13 +3122,20 @@ mod tests {
                 // Batch 0 (scene order 0): non-packed, 1 circle.
                 MarkBatch {
                     kind: MarkBatchKind::Point,
-                    nodes: vec![
-                        SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() },
-                    ],
+                    nodes: vec![SceneNode::Circle {
+                        cx: 100.0,
+                        cy: 100.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    }],
                     data_indices: Some(vec![50]),
-                    tooltips: None, hrefs: None, keys: None,
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 },
@@ -2597,9 +3144,13 @@ mod tests {
                     kind: MarkBatchKind::Point,
                     nodes: vec![], // empty — packed
                     data_indices: None,
-                    tooltips: None, hrefs: None, keys: None,
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 },
@@ -2608,6 +3159,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         // Select data index 50 — that is the non-packed circle.
@@ -2633,14 +3186,20 @@ mod tests {
         //   [3] non-packed circle (data_idx=50, should be selected)
         let neutral = [0.0_f32, 0.0, 0.0, 1.0];
         let mk_circle = |cx: f32| CircleInstance {
-            center: [cx, 50.0], radius: 5.0, fill_color: neutral,
-            stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 0.5,
-            stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+            center: [cx, 50.0],
+            radius: 5.0,
+            fill_color: neutral,
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 0.5,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         let base_circles = vec![
-            mk_circle(10.0), // packed [0]
-            mk_circle(20.0), // packed [1]
-            mk_circle(30.0), // packed [2]
+            mk_circle(10.0),  // packed [0]
+            mk_circle(20.0),  // packed [1]
+            mk_circle(30.0),  // packed [2]
             mk_circle(100.0), // non-packed [3]
         ];
 
@@ -2659,7 +3218,12 @@ mod tests {
         );
 
         let result = resolve_conditionals_with_packed(
-            &panels, &conditionals, &selections, &base_circles, &[], &packed_meta,
+            &panels,
+            &conditionals,
+            &selections,
+            &base_circles,
+            &[],
+            &packed_meta,
         );
 
         // The packed region (circles[0..3]) should receive if_not = 0.15 from the
@@ -2673,7 +3237,8 @@ mod tests {
             assert!(
                 (result.circle_instances[i].opacity - 0.15).abs() < 0.01,
                 "packed circle[{}] must be dimmed (opacity=0.15, not selected), got {}",
-                i, result.circle_instances[i].opacity
+                i,
+                result.circle_instances[i].opacity
             );
         }
 
@@ -2697,7 +3262,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -2711,10 +3281,23 @@ mod tests {
         // Flat layout (loader): [packed x3][non-packed x1]
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
                 y_domains: Vec::new(),
             },
             grid: vec![],
@@ -2722,13 +3305,20 @@ mod tests {
                 // Batch 0 (scene order): non-packed, 1 circle at (400, 50).
                 MarkBatch {
                     kind: MarkBatchKind::Point,
-                    nodes: vec![
-                        SceneNode::Circle { cx: 400.0, cy: 50.0, r: 5.0, style: style.clone() },
-                    ],
+                    nodes: vec![SceneNode::Circle {
+                        cx: 400.0,
+                        cy: 50.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    }],
                     data_indices: Some(vec![0]),
-                    tooltips: None, hrefs: None, keys: None,
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 },
@@ -2737,9 +3327,13 @@ mod tests {
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
-                    tooltips: None, hrefs: None, keys: None,
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                     y_slot: 0,
                 },
@@ -2748,6 +3342,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         // Crossfilter brush covers x in [0, 100]: packed circles at x=10,20,30
@@ -2758,15 +3354,21 @@ mod tests {
         };
 
         let mk_circle = |cx: f32| CircleInstance {
-            center: [cx, 50.0], radius: 5.0, fill_color: [0.0; 4],
-            stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 1.0,
-            stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+            center: [cx, 50.0],
+            radius: 5.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 0.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         // Flat layout (loader): [packed x3][non-packed x1]
         let mut circles = vec![
-            mk_circle(10.0), // packed [0], inside brush
-            mk_circle(20.0), // packed [1], inside brush
-            mk_circle(30.0), // packed [2], inside brush
+            mk_circle(10.0),  // packed [0], inside brush
+            mk_circle(20.0),  // packed [1], inside brush
+            mk_circle(30.0),  // packed [2], inside brush
             mk_circle(400.0), // non-packed [3], outside brush
         ];
         let mut rects: Vec<RectInstance> = vec![];
@@ -2784,7 +3386,13 @@ mod tests {
         );
 
         apply_crossfilter_to_panel(
-            &panels, 0, &sel, 0.15, &mut circles, &mut rects, &packed_meta,
+            &panels,
+            0,
+            &sel,
+            0.15,
+            &mut circles,
+            &mut rects,
+            &packed_meta,
         );
 
         // Packed circles (inside brush) must keep full opacity.
@@ -2792,7 +3400,8 @@ mod tests {
             assert!(
                 (circles[i].opacity - 1.0).abs() < 0.01,
                 "packed circle[{}] inside brush must stay at opacity=1.0, got {}",
-                i, circles[i].opacity
+                i,
+                circles[i].opacity
             );
         }
 
@@ -2829,17 +3438,28 @@ mod tests {
     /// tooltip carries the selected category — not silently match nothing.
     #[test]
     fn packed_field_value_point_selection_matches_via_tooltip() {
-        use ferrum_scene::{
-            BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect,
-        };
+        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
 
         // Single packed batch with three circles, categories a / b / a.
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
                 y_domains: Vec::new(),
             },
             grid: vec![],
@@ -2861,10 +3481,22 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
-        let red = Color { r: 255, g: 0, b: 0, a: 255 };
-        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let red = Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let grey = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
         let conditionals = vec![ConditionalEncoding {
             selection_name: "leg".to_string(),
             channel: ChannelName::Opacity,
@@ -2883,7 +3515,9 @@ mod tests {
                 indices: Vec::new(),
                 field_values: vec![(
                     "cat".to_string(),
-                    FieldValue::String { value: "a".to_string() },
+                    FieldValue::String {
+                        value: "a".to_string(),
+                    },
                 )],
             },
         );
@@ -2903,10 +3537,7 @@ mod tests {
             })
             .collect();
 
-        let tooltip_bytes = build_tooltip_bytes(
-            &["cat"],
-            &[vec!["a"], vec!["b"], vec!["a"]],
-        );
+        let tooltip_bytes = build_tooltip_bytes(&["cat"], &[vec!["a"], vec!["b"], vec!["a"]]);
         let mut packed_meta = HashMap::new();
         packed_meta.insert(
             (0u32, 0u32),
@@ -2920,7 +3551,12 @@ mod tests {
         );
 
         let result = resolve_conditionals_with_packed(
-            &panels, &conditionals, &selections, &base_circles, &[], &packed_meta,
+            &panels,
+            &conditionals,
+            &selections,
+            &base_circles,
+            &[],
+            &packed_meta,
         );
 
         // Marks 0 and 2 carry cat="a" → selected → opacity 1.0.
@@ -2948,7 +3584,12 @@ mod tests {
     #[test]
     fn tooltip_matches_all_fields_match_returns_true() {
         let field_values = vec![
-            ("cat".to_string(), FieldValue::String { value: "a".to_string() }),
+            (
+                "cat".to_string(),
+                FieldValue::String {
+                    value: "a".to_string(),
+                },
+            ),
             ("val".to_string(), FieldValue::Number { value: 42.0 }),
         ];
         let result = tooltip_matches(&field_values, |fname| match fname {
@@ -2963,7 +3604,12 @@ mod tests {
     #[test]
     fn tooltip_matches_one_mismatch_returns_false() {
         let field_values = vec![
-            ("cat".to_string(), FieldValue::String { value: "a".to_string() }),
+            (
+                "cat".to_string(),
+                FieldValue::String {
+                    value: "a".to_string(),
+                },
+            ),
             ("val".to_string(), FieldValue::Number { value: 42.0 }),
         ];
         let result = tooltip_matches(&field_values, |fname| match fname {
@@ -2977,11 +3623,17 @@ mod tests {
     /// If the lookup returns `None` for a field, it counts as a mismatch.
     #[test]
     fn tooltip_matches_missing_field_returns_false() {
-        let field_values = vec![
-            ("cat".to_string(), FieldValue::String { value: "a".to_string() }),
-        ];
+        let field_values = vec![(
+            "cat".to_string(),
+            FieldValue::String {
+                value: "a".to_string(),
+            },
+        )];
         let result = tooltip_matches(&field_values, |_fname| None);
-        assert!(!result, "missing field (lookup returns None) must return false");
+        assert!(
+            !result,
+            "missing field (lookup returns None) must return false"
+        );
     }
 
     /// Empty `field_values` slice — vacuously true (all zero constraints pass).
@@ -2989,26 +3641,28 @@ mod tests {
     fn tooltip_matches_empty_field_values_returns_true() {
         let field_values: Vec<(String, FieldValue)> = vec![];
         let result = tooltip_matches(&field_values, |_| None);
-        assert!(result, "empty field_values must return true (vacuous truth)");
+        assert!(
+            result,
+            "empty field_values must return true (vacuous truth)"
+        );
     }
 
     /// Typed comparison: numeric tooltip string "42" matches `FieldValue::Number{42.0}`.
     #[test]
     fn tooltip_matches_numeric_field_value_typed_comparison() {
-        let field_values = vec![
-            ("x".to_string(), FieldValue::Number { value: 42.0 }),
-        ];
+        let field_values = vec![("x".to_string(), FieldValue::Number { value: 42.0 })];
         // The string "42" must match Number{42.0} via field_value_matches_tooltip.
         let result = tooltip_matches(&field_values, |_| Some("42".to_string()));
-        assert!(result, "string '42' must match Number(42.0) via typed comparison");
+        assert!(
+            result,
+            "string '42' must match Number(42.0) via typed comparison"
+        );
     }
 
     /// Bool field value: "true" matches `FieldValue::Bool{true}`.
     #[test]
     fn tooltip_matches_bool_field_value() {
-        let field_values = vec![
-            ("flag".to_string(), FieldValue::Bool { value: true }),
-        ];
+        let field_values = vec![("flag".to_string(), FieldValue::Bool { value: true })];
         let result = tooltip_matches(&field_values, |_| Some("true".to_string()));
         assert!(result, "'true' string must match Bool(true)");
 

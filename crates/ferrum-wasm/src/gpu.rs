@@ -1,8 +1,7 @@
 use web_sys::HtmlCanvasElement;
 use wgpu::{
-    Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, Limits,
-    PowerPreference, Queue, RequestAdapterOptions, Surface, SurfaceConfiguration,
-    TextureFormat, TextureUsages,
+    Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor, Limits, PowerPreference,
+    Queue, RequestAdapterOptions, Surface, SurfaceConfiguration, TextureFormat, TextureUsages,
 };
 
 use crate::error::WasmRenderError;

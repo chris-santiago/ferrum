@@ -168,24 +168,60 @@ pub enum AnnotationSpec {
 
 // ── Serde defaults ──────────────────────────────────────────────────────────
 
-fn default_font_size() -> f64 { 12.0 }
-fn default_color_str() -> String { "#333333".to_string() }
-fn default_anchor() -> String { "middle".to_string() }
-fn default_baseline() -> String { "middle".to_string() }
-fn default_z() -> String { "above_marks".to_string() }
-fn default_stroke_width() -> f64 { 1.5 }
-fn default_head_size() -> f64 { 8.0 }
-fn default_fill_str() -> String { "#cccccc".to_string() }
-fn default_rect_opacity() -> f64 { 0.3 }
-fn default_span_opacity() -> f64 { 0.2 }
-fn default_label_position() -> String { "center".to_string() }
-fn default_direction() -> String { "up".to_string() }
-fn default_tip_length() -> f64 { 6.0 }
-fn default_arrow_str() -> String { "curved".to_string() }
-fn default_callout_padding() -> f64 { 4.0 }
-fn default_background_str() -> String { "#ffffff".to_string() }
-fn default_border_color_str() -> String { "#333333".to_string() }
-fn default_image_size() -> f64 { 50.0 }
+fn default_font_size() -> f64 {
+    12.0
+}
+fn default_color_str() -> String {
+    "#333333".to_string()
+}
+fn default_anchor() -> String {
+    "middle".to_string()
+}
+fn default_baseline() -> String {
+    "middle".to_string()
+}
+fn default_z() -> String {
+    "above_marks".to_string()
+}
+fn default_stroke_width() -> f64 {
+    1.5
+}
+fn default_head_size() -> f64 {
+    8.0
+}
+fn default_fill_str() -> String {
+    "#cccccc".to_string()
+}
+fn default_rect_opacity() -> f64 {
+    0.3
+}
+fn default_span_opacity() -> f64 {
+    0.2
+}
+fn default_label_position() -> String {
+    "center".to_string()
+}
+fn default_direction() -> String {
+    "up".to_string()
+}
+fn default_tip_length() -> f64 {
+    6.0
+}
+fn default_arrow_str() -> String {
+    "curved".to_string()
+}
+fn default_callout_padding() -> f64 {
+    4.0
+}
+fn default_background_str() -> String {
+    "#ffffff".to_string()
+}
+fn default_border_color_str() -> String {
+    "#333333".to_string()
+}
+fn default_image_size() -> f64 {
+    50.0
+}
 
 // ── Scale context ───────────────────────────────────────────────────────────
 
@@ -280,9 +316,10 @@ fn parse_baseline(s: &str) -> TextBaseline {
 
 /// Partitioned result from `build_annotations`.
 ///
-/// `below_marks` contains nodes that should be inserted into the panel's
-/// pre-marks `grid` slot (painted before data marks).  `above_marks` contains
-/// nodes that belong in the post-marks `annotations` slot (painted after marks).
+/// `below_marks` contains nodes that route into the panel's typed
+/// `below_marks` slot (GH #89B; painted immediately after `grid`, before data
+/// marks).  `above_marks` contains nodes that route into the post-marks
+/// `annotations` slot (painted after marks, and after any `chrome_above`).
 pub struct AnnotationNodes {
     pub below_marks: Vec<SceneNode>,
     pub above_marks: Vec<SceneNode>,
@@ -313,7 +350,19 @@ pub fn build_annotations(specs: &[AnnotationSpec], ctx: &ScaleContext) -> Annota
 /// Dispatch a single annotation spec to its builder, appending nodes to `out`.
 fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>) {
     match spec {
-        AnnotationSpec::Text { x, y, text, font_size, color, anchor, baseline, angle, dx, dy, .. } => {
+        AnnotationSpec::Text {
+            x,
+            y,
+            text,
+            font_size,
+            color,
+            anchor,
+            baseline,
+            angle,
+            dx,
+            dy,
+            ..
+        } => {
             let px = ctx.resolve_x(x) + dx;
             let py = ctx.resolve_y(y) + dy;
             out.push(SceneNode::Text {
@@ -333,14 +382,41 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 },
             });
         }
-        AnnotationSpec::Arrow { x, y, x2, y2, stroke, stroke_width, head_size, .. } => {
+        AnnotationSpec::Arrow {
+            x,
+            y,
+            x2,
+            y2,
+            stroke,
+            stroke_width,
+            head_size,
+            ..
+        } => {
             let x1_px = ctx.resolve_x(x);
             let y1_px = ctx.resolve_y(y);
             let x2_px = ctx.resolve_x(x2);
             let y2_px = ctx.resolve_y(y2);
-            emit_arrow(x1_px, y1_px, x2_px, y2_px, stroke, *stroke_width, *head_size, out);
+            emit_arrow(
+                x1_px,
+                y1_px,
+                x2_px,
+                y2_px,
+                stroke,
+                *stroke_width,
+                *head_size,
+                out,
+            );
         }
-        AnnotationSpec::Rect { x1, y1, x2, y2, fill, opacity, corner_radius, stroke } => {
+        AnnotationSpec::Rect {
+            x1,
+            y1,
+            x2,
+            y2,
+            fill,
+            opacity,
+            corner_radius,
+            stroke,
+        } => {
             let px1 = ctx.resolve_x(x1);
             let py1 = ctx.resolve_y(y1);
             let px2 = ctx.resolve_x(x2);
@@ -352,7 +428,10 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
             let fill_color = resolve_color(fill);
             let stroke_color = stroke.as_deref().map(resolve_color);
             out.push(SceneNode::Rect {
-                x, y, w, h,
+                x,
+                y,
+                w,
+                h,
                 style: FillStroke {
                     fill: Some(fill_color),
                     stroke: stroke_color,
@@ -370,7 +449,15 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 corner_radius: *corner_radius,
             });
         }
-        AnnotationSpec::Line { x1, y1, x2, y2, stroke, stroke_width, dash } => {
+        AnnotationSpec::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            stroke,
+            stroke_width,
+            dash,
+        } => {
             out.push(SceneNode::Line {
                 x1: ctx.resolve_x(x1),
                 y1: ctx.resolve_y(y1),
@@ -387,24 +474,95 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 },
             });
         }
-        AnnotationSpec::Span { axis, start, end, fill, opacity, label, label_position } => {
-            emit_span(axis, start, end, fill, *opacity, label.as_deref(), label_position.as_str(), ctx, out);
+        AnnotationSpec::Span {
+            axis,
+            start,
+            end,
+            fill,
+            opacity,
+            label,
+            label_position,
+        } => {
+            emit_span(
+                axis,
+                start,
+                end,
+                fill,
+                *opacity,
+                label.as_deref(),
+                label_position.as_str(),
+                ctx,
+                out,
+            );
         }
-        AnnotationSpec::Bracket { x1, y1, x2, y2, label, direction, stroke, tip_length } => {
-            emit_bracket(ctx.resolve_x(x1), ctx.resolve_y(y1), ctx.resolve_x(x2), ctx.resolve_y(y2),
-                label, direction, stroke, *tip_length, out);
+        AnnotationSpec::Bracket {
+            x1,
+            y1,
+            x2,
+            y2,
+            label,
+            direction,
+            stroke,
+            tip_length,
+        } => {
+            emit_bracket(
+                ctx.resolve_x(x1),
+                ctx.resolve_y(y1),
+                ctx.resolve_x(x2),
+                ctx.resolve_y(y2),
+                label,
+                direction,
+                stroke,
+                *tip_length,
+                out,
+            );
         }
-        AnnotationSpec::Callout { x, y, text, arrow, padding, background, border_color, border_radius, text_x, text_y } => {
-            emit_callout(ctx, x, y, text, arrow, *padding, background, border_color,
-                *border_radius, text_x.as_ref(), text_y.as_ref(), out);
+        AnnotationSpec::Callout {
+            x,
+            y,
+            text,
+            arrow,
+            padding,
+            background,
+            border_color,
+            border_radius,
+            text_x,
+            text_y,
+        } => {
+            emit_callout(
+                ctx,
+                x,
+                y,
+                text,
+                arrow,
+                *padding,
+                background,
+                border_color,
+                *border_radius,
+                text_x.as_ref(),
+                text_y.as_ref(),
+                out,
+            );
         }
-        AnnotationSpec::Image { x, y, src, width, height, anchor } => {
+        AnnotationSpec::Image {
+            x,
+            y,
+            src,
+            width,
+            height,
+            anchor,
+        } => {
             let mut px = ctx.resolve_x(x);
             let mut py = ctx.resolve_y(y);
             match anchor.as_str() {
                 "start" | "left" => { /* px is already left edge */ }
-                "end" | "right" => { px -= width; }
-                _ => { px -= width * 0.5; py -= height * 0.5; }
+                "end" | "right" => {
+                    px -= width;
+                }
+                _ => {
+                    px -= width * 0.5;
+                    py -= height * 0.5;
+                }
             }
             // XML-escape src so that a URL containing '"' cannot break SVG structure.
             let escaped_src = src
@@ -431,15 +589,23 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
 
 #[allow(clippy::too_many_arguments)]
 fn emit_arrow(
-    x1: f64, y1: f64, x2: f64, y2: f64,
-    stroke: &str, stroke_width: f64, head_size: f64,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    stroke: &str,
+    stroke_width: f64,
+    head_size: f64,
     out: &mut Vec<SceneNode>,
 ) {
     let color = resolve_color(stroke);
 
     // Line shaft.
     out.push(SceneNode::Line {
-        x1, y1, x2, y2,
+        x1,
+        y1,
+        x2,
+        y2,
         style: StrokeStyle {
             color,
             width: stroke_width,
@@ -475,8 +641,14 @@ fn emit_arrow(
             out.push(SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: tip_x, y: tip_y },
-                    PathCmd::LineTo { x: left_x, y: left_y },
-                    PathCmd::LineTo { x: right_x, y: right_y },
+                    PathCmd::LineTo {
+                        x: left_x,
+                        y: left_y,
+                    },
+                    PathCmd::LineTo {
+                        x: right_x,
+                        y: right_y,
+                    },
                     PathCmd::Close,
                 ],
                 style: FillStroke {
@@ -497,10 +669,15 @@ fn emit_arrow(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_span(
-    axis: &str, start: &CoordValue, end: &CoordValue,
-    fill: &str, opacity: f64, label: Option<&str>,
+    axis: &str,
+    start: &CoordValue,
+    end: &CoordValue,
+    fill: &str,
+    opacity: f64,
+    label: Option<&str>,
     label_position: &str,
-    ctx: &ScaleContext, out: &mut Vec<SceneNode>,
+    ctx: &ScaleContext,
+    out: &mut Vec<SceneNode>,
 ) {
     let (x, y, w, h) = if axis == "x" {
         let x_start = ctx.resolve_x(start);
@@ -525,7 +702,10 @@ fn emit_span(
     };
 
     out.push(SceneNode::Rect {
-        x, y, w, h,
+        x,
+        y,
+        w,
+        h,
         style: FillStroke {
             fill: Some(resolve_color(fill)),
             stroke: None,
@@ -584,8 +764,14 @@ fn emit_span(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_bracket(
-    px1: f64, py1: f64, px2: f64, py2: f64,
-    label: &str, direction: &str, stroke: &str, tip_length: f64,
+    px1: f64,
+    py1: f64,
+    px2: f64,
+    py2: f64,
+    label: &str,
+    direction: &str,
+    stroke: &str,
+    tip_length: f64,
     out: &mut Vec<SceneNode>,
 ) {
     let color = resolve_color(stroke);
@@ -601,7 +787,10 @@ fn emit_bracket(
 
     // Baseline.
     out.push(SceneNode::Line {
-        x1: px1, y1: py1, x2: px2, y2: py2,
+        x1: px1,
+        y1: py1,
+        x2: px2,
+        y2: py2,
         style: stroke_style.clone(),
     });
 
@@ -615,15 +804,19 @@ fn emit_bracket(
 
     // Left tip.
     out.push(SceneNode::Line {
-        x1: px1, y1: py1,
-        x2: px1 + tip_dx, y2: py1 + tip_dy,
+        x1: px1,
+        y1: py1,
+        x2: px1 + tip_dx,
+        y2: py1 + tip_dy,
         style: stroke_style.clone(),
     });
 
     // Right tip.
     out.push(SceneNode::Line {
-        x1: px2, y1: py2,
-        x2: px2 + tip_dx, y2: py2 + tip_dy,
+        x1: px2,
+        y1: py2,
+        x2: px2 + tip_dx,
+        y2: py2 + tip_dy,
         style: stroke_style,
     });
 
@@ -660,18 +853,29 @@ fn emit_bracket(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_callout(
-    ctx: &ScaleContext, x: &CoordValue, y: &CoordValue,
-    text: &str, arrow: &str, padding: f64,
-    background: &str, border_color: &str, border_radius: f64,
-    text_x: Option<&CoordValue>, text_y: Option<&CoordValue>,
+    ctx: &ScaleContext,
+    x: &CoordValue,
+    y: &CoordValue,
+    text: &str,
+    arrow: &str,
+    padding: f64,
+    background: &str,
+    border_color: &str,
+    border_radius: f64,
+    text_x: Option<&CoordValue>,
+    text_y: Option<&CoordValue>,
     out: &mut Vec<SceneNode>,
 ) {
     let data_x = ctx.resolve_x(x);
     let data_y = ctx.resolve_y(y);
 
     let default_offset = 30.0;
-    let tx = text_x.map(|v| ctx.resolve_x(v)).unwrap_or(data_x + default_offset);
-    let ty = text_y.map(|v| ctx.resolve_y(v)).unwrap_or(data_y - default_offset);
+    let tx = text_x
+        .map(|v| ctx.resolve_x(v))
+        .unwrap_or(data_x + default_offset);
+    let ty = text_y
+        .map(|v| ctx.resolve_y(v))
+        .unwrap_or(data_y - default_offset);
 
     // Approximate text dimensions for the background box.
     // Use chars().count() not len() so multi-byte Unicode characters don't
@@ -749,12 +953,23 @@ mod tests {
     /// Create a simple linear scale context for testing.
     /// Domain [0, 100], x pixel range [50, 550], y pixel range [20, 320].
     fn test_ctx() -> (ScaleKind, ScaleKind, Rect) {
-        let plot_area = Rect { x: 50.0, y: 20.0, w: 500.0, h: 300.0 };
+        let plot_area = Rect {
+            x: 50.0,
+            y: 20.0,
+            w: 500.0,
+            h: 300.0,
+        };
         let x_scale = ScaleKind::Linear(LinearScale::new_internal(
-            vec![0.0, 100.0], vec![50.0, 550.0], false, false,
+            vec![0.0, 100.0],
+            vec![50.0, 550.0],
+            false,
+            false,
         ));
         let y_scale = ScaleKind::Linear(LinearScale::new_internal(
-            vec![0.0, 100.0], vec![20.0, 320.0], false, false,
+            vec![0.0, 100.0],
+            vec![20.0, 320.0],
+            false,
+            false,
         ));
         (x_scale, y_scale, plot_area)
     }
@@ -762,7 +977,11 @@ mod tests {
     #[test]
     fn resolve_data_coord_x() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         // Data value 50 should map to the center of the x pixel range.
         let px = ctx.resolve_x(&CoordValue::Data(50.0));
         assert!((px - 300.0).abs() < 1.0, "expected ~300, got {px}");
@@ -771,7 +990,11 @@ mod tests {
     #[test]
     fn resolve_pixel_coord() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let px = ctx.resolve_x(&CoordValue::Pixel { px: 100.0 });
         assert!((px - 150.0).abs() < f64::EPSILON, "expected 150, got {px}");
     }
@@ -779,7 +1002,11 @@ mod tests {
     #[test]
     fn resolve_norm_coord() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let px = ctx.resolve_x(&CoordValue::Norm { norm: 0.5 });
         assert!((px - 300.0).abs() < f64::EPSILON, "expected 300, got {px}");
     }
@@ -787,7 +1014,11 @@ mod tests {
     #[test]
     fn build_text_annotation() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let specs = vec![AnnotationSpec::Text {
             x: CoordValue::Norm { norm: 0.5 },
             y: CoordValue::Norm { norm: 0.5 },
@@ -806,7 +1037,13 @@ mod tests {
         assert!(ann.below_marks.is_empty());
         assert_eq!(ann.above_marks.len(), 1);
         match &ann.above_marks[0] {
-            SceneNode::Text { x, y, content, style, .. } => {
+            SceneNode::Text {
+                x,
+                y,
+                content,
+                style,
+                ..
+            } => {
                 assert!((x - 300.0).abs() < f64::EPSILON);
                 assert!((y - 170.0).abs() < f64::EPSILON);
                 assert_eq!(content, "hello");
@@ -820,7 +1057,11 @@ mod tests {
     #[test]
     fn build_line_annotation() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let specs = vec![AnnotationSpec::Line {
             x1: CoordValue::Norm { norm: 0.0 },
             y1: CoordValue::Norm { norm: 0.5 },
@@ -835,7 +1076,13 @@ mod tests {
         assert!(ann.below_marks.is_empty());
         assert_eq!(ann.above_marks.len(), 1);
         match &ann.above_marks[0] {
-            SceneNode::Line { x1, y1, x2, y2, style } => {
+            SceneNode::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                style,
+            } => {
                 assert!((x1 - 50.0).abs() < f64::EPSILON);
                 assert!((x2 - 550.0).abs() < f64::EPSILON);
                 assert!((y1 - 170.0).abs() < f64::EPSILON);
@@ -850,7 +1097,11 @@ mod tests {
     #[test]
     fn build_arrow_annotation() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         // `curve` is no longer a field on AnnotationSpec::Arrow (dropped as dead code).
         let specs = vec![AnnotationSpec::Arrow {
             x: CoordValue::Norm { norm: 0.0 },
@@ -873,7 +1124,11 @@ mod tests {
     #[test]
     fn build_span_annotation() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let specs = vec![AnnotationSpec::Span {
             axis: "x".to_string(),
             start: CoordValue::Norm { norm: 0.2 },
@@ -915,7 +1170,11 @@ mod tests {
     #[test]
     fn empty_specs_returns_empty_vecs() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let ann = build_annotations(&[], &ctx);
         assert!(ann.below_marks.is_empty());
         assert!(ann.above_marks.is_empty());
@@ -931,7 +1190,11 @@ mod tests {
     #[test]
     fn text_z_routing_below_and_above() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
 
         let mk_text = |z: &str| AnnotationSpec::Text {
             x: CoordValue::Norm { norm: 0.5 },
@@ -951,8 +1214,16 @@ mod tests {
         let ann = build_annotations(&specs, &ctx);
 
         // Exactly one node in each bucket.
-        assert_eq!(ann.below_marks.len(), 1, "below_marks bucket must have the below_marks text");
-        assert_eq!(ann.above_marks.len(), 1, "above_marks bucket must have the above_marks text");
+        assert_eq!(
+            ann.below_marks.len(),
+            1,
+            "below_marks bucket must have the below_marks text"
+        );
+        assert_eq!(
+            ann.above_marks.len(),
+            1,
+            "above_marks bucket must have the above_marks text"
+        );
 
         // Confirm the content so we know which went where.
         match &ann.below_marks[0] {
@@ -971,7 +1242,11 @@ mod tests {
     #[test]
     fn text_unknown_z_falls_to_above_marks() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
 
         let specs = vec![AnnotationSpec::Text {
             x: CoordValue::Norm { norm: 0.5 },
@@ -987,7 +1262,10 @@ mod tests {
             z: "front".to_string(), // old default — must still go above
         }];
         let ann = build_annotations(&specs, &ctx);
-        assert!(ann.below_marks.is_empty(), "unrecognized z must not go to below_marks");
+        assert!(
+            ann.below_marks.is_empty(),
+            "unrecognized z must not go to below_marks"
+        );
         assert_eq!(ann.above_marks.len(), 1);
     }
 
@@ -996,7 +1274,11 @@ mod tests {
     #[test]
     fn non_text_specs_always_above_marks() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
 
         let specs = vec![
             AnnotationSpec::Line {
@@ -1019,7 +1301,10 @@ mod tests {
             },
         ];
         let ann = build_annotations(&specs, &ctx);
-        assert!(ann.below_marks.is_empty(), "non-Text annotations must never go to below_marks");
+        assert!(
+            ann.below_marks.is_empty(),
+            "non-Text annotations must never go to below_marks"
+        );
         // Line = 1 node; Arrow with head_size=0 = 1 node (no path triangle).
         assert_eq!(ann.above_marks.len(), 2);
     }
@@ -1031,7 +1316,11 @@ mod tests {
     fn image_annotation_raw_node_has_data_anchor() {
         use ferrum_scene::RawAnchor;
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let specs = vec![AnnotationSpec::Image {
             x: CoordValue::Norm { norm: 0.5 },
             y: CoordValue::Norm { norm: 0.5 },
@@ -1041,11 +1330,22 @@ mod tests {
             anchor: "middle".to_string(),
         }];
         let ann = build_annotations(&specs, &ctx);
-        assert!(ann.below_marks.is_empty(), "image annotation should not go to below_marks");
-        assert_eq!(ann.above_marks.len(), 1, "expected exactly one node for image annotation");
+        assert!(
+            ann.below_marks.is_empty(),
+            "image annotation should not go to below_marks"
+        );
+        assert_eq!(
+            ann.above_marks.len(),
+            1,
+            "expected exactly one node for image annotation"
+        );
         match &ann.above_marks[0] {
             SceneNode::Raw { anchor, .. } => {
-                assert_eq!(*anchor, RawAnchor::Data, "image annotation Raw node must have Data anchor");
+                assert_eq!(
+                    *anchor,
+                    RawAnchor::Data,
+                    "image annotation Raw node must have Data anchor"
+                );
             }
             _ => panic!("expected SceneNode::Raw for image annotation"),
         }
@@ -1070,7 +1370,11 @@ mod tests {
     #[test]
     fn emit_span_skips_on_non_finite_coordinate() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let mut out = Vec::new();
         emit_span(
             "x",
@@ -1083,13 +1387,23 @@ mod tests {
             &ctx,
             &mut out,
         );
-        assert!(out.is_empty(), "non-finite span coordinate must skip emission entirely");
+        assert!(
+            out.is_empty(),
+            "non-finite span coordinate must skip emission entirely"
+        );
 
         // A fully finite span does emit.
         let mut out2 = Vec::new();
         emit_span(
-            "x", &CoordValue::Data(10.0), &CoordValue::Data(50.0),
-            "#ff0000", 0.3, None, "middle", &ctx, &mut out2,
+            "x",
+            &CoordValue::Data(10.0),
+            &CoordValue::Data(50.0),
+            "#ff0000",
+            0.3,
+            None,
+            "middle",
+            &ctx,
+            &mut out2,
         );
         assert_eq!(out2.len(), 1, "finite span must emit exactly one rect");
     }
@@ -1121,15 +1435,49 @@ mod tests {
     #[test]
     fn emit_bracket_unknown_direction_defaults_to_up() {
         let mut out_up = Vec::new();
-        emit_bracket(0.0, 100.0, 100.0, 100.0, "", "up", "#000000", 6.0, &mut out_up);
+        emit_bracket(
+            0.0,
+            100.0,
+            100.0,
+            100.0,
+            "",
+            "up",
+            "#000000",
+            6.0,
+            &mut out_up,
+        );
         let mut out_unknown = Vec::new();
-        emit_bracket(0.0, 100.0, 100.0, 100.0, "", "diagonal", "#000000", 6.0, &mut out_unknown);
+        emit_bracket(
+            0.0,
+            100.0,
+            100.0,
+            100.0,
+            "",
+            "diagonal",
+            "#000000",
+            6.0,
+            &mut out_unknown,
+        );
         assert_eq!(out_up.len(), out_unknown.len());
         // Both must produce identical tip geometry (same Line endpoints).
         for (a, b) in out_up.iter().zip(out_unknown.iter()) {
             match (a, b) {
-                (SceneNode::Line { x1: ax1, y1: ay1, x2: ax2, y2: ay2, .. },
-                 SceneNode::Line { x1: bx1, y1: by1, x2: bx2, y2: by2, .. }) => {
+                (
+                    SceneNode::Line {
+                        x1: ax1,
+                        y1: ay1,
+                        x2: ax2,
+                        y2: ay2,
+                        ..
+                    },
+                    SceneNode::Line {
+                        x1: bx1,
+                        y1: by1,
+                        x2: bx2,
+                        y2: by2,
+                        ..
+                    },
+                ) => {
                     assert_eq!((ax1, ay1, ax2, ay2), (bx1, by1, bx2, by2));
                 }
                 _ => panic!("expected Line nodes for both directions"),
@@ -1143,19 +1491,41 @@ mod tests {
     #[test]
     fn emit_callout_width_uses_char_count_not_byte_len() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let ascii = "resume"; // 6 chars, 6 bytes
         let unicode = "r\u{00e9}sum\u{00e9}"; // 6 chars, 8 bytes
         assert_eq!(ascii.chars().count(), unicode.chars().count());
 
         let build = |text: &str| {
             let mut out = Vec::new();
-            emit_callout(&ctx, &CoordValue::Data(50.0), &CoordValue::Data(50.0),
-                text, "curved", 4.0, "#fff", "#333", 0.0, None, None, &mut out);
-            let SceneNode::Rect { w, .. } = out[0] else { panic!("expected background Rect") };
+            emit_callout(
+                &ctx,
+                &CoordValue::Data(50.0),
+                &CoordValue::Data(50.0),
+                text,
+                "curved",
+                4.0,
+                "#fff",
+                "#333",
+                0.0,
+                None,
+                None,
+                &mut out,
+            );
+            let SceneNode::Rect { w, .. } = out[0] else {
+                panic!("expected background Rect")
+            };
             w
         };
-        assert_eq!(build(ascii), build(unicode), "equal char count must produce equal box width");
+        assert_eq!(
+            build(ascii),
+            build(unicode),
+            "equal char count must produce equal box width"
+        );
     }
 
     /// R1 port: `arrow == "none"` suppresses the callout's leader line; any
@@ -1163,15 +1533,41 @@ mod tests {
     #[test]
     fn emit_callout_arrow_none_suppresses_leader_line() {
         let (x_scale, y_scale, plot_area) = test_ctx();
-        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+        };
         let count_lines = |arrow: &str| {
             let mut out = Vec::new();
-            emit_callout(&ctx, &CoordValue::Data(50.0), &CoordValue::Data(50.0),
-                "hi", arrow, 4.0, "#fff", "#333", 0.0, None, None, &mut out);
-            out.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count()
+            emit_callout(
+                &ctx,
+                &CoordValue::Data(50.0),
+                &CoordValue::Data(50.0),
+                "hi",
+                arrow,
+                4.0,
+                "#fff",
+                "#333",
+                0.0,
+                None,
+                None,
+                &mut out,
+            );
+            out.iter()
+                .filter(|n| matches!(n, SceneNode::Line { .. }))
+                .count()
         };
-        assert_eq!(count_lines("none"), 0, "arrow='none' must suppress the leader line");
-        assert_eq!(count_lines(""), 1, "empty string is not 'none' — leader line still drawn");
+        assert_eq!(
+            count_lines("none"),
+            0,
+            "arrow='none' must suppress the leader line"
+        );
+        assert_eq!(
+            count_lines(""),
+            1,
+            "empty string is not 'none' — leader line still drawn"
+        );
         assert_eq!(count_lines("curved"), 1);
     }
 }

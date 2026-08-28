@@ -32,59 +32,99 @@ impl RenderPipelines {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/textured.wgsl").into()),
         });
 
-        let uniform_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("uniform_bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
+        let uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("uniform_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     },
                     count: None,
-                }],
-            });
-
-        let texture_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("texture_bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
 
         let alpha_blend = Some(wgpu::BlendState::ALPHA_BLENDING);
         let additive_blend = Some(additive_blend_state());
 
-        let instanced_circle =
-            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, alpha_blend, &circle_instance_layout(), sample_count);
-        let instanced_rect =
-            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, alpha_blend, &rect_instance_layout(), sample_count);
-        let mesh = build_mesh_pipeline(device, &mesh_shader, format, &uniform_bgl, alpha_blend, sample_count);
-        let textured =
-            build_textured_pipeline(device, &textured_shader, format, &uniform_bgl, &texture_bgl, alpha_blend, sample_count);
+        let instanced_circle = build_instanced_pipeline(
+            device,
+            &circle_shader,
+            format,
+            &uniform_bgl,
+            alpha_blend,
+            &circle_instance_layout(),
+            sample_count,
+        );
+        let instanced_rect = build_instanced_pipeline(
+            device,
+            &rect_shader,
+            format,
+            &uniform_bgl,
+            alpha_blend,
+            &rect_instance_layout(),
+            sample_count,
+        );
+        let mesh = build_mesh_pipeline(
+            device,
+            &mesh_shader,
+            format,
+            &uniform_bgl,
+            alpha_blend,
+            sample_count,
+        );
+        let textured = build_textured_pipeline(
+            device,
+            &textured_shader,
+            format,
+            &uniform_bgl,
+            &texture_bgl,
+            alpha_blend,
+            sample_count,
+        );
 
-        let instanced_circle_additive =
-            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, additive_blend, &circle_instance_layout(), sample_count);
-        let instanced_rect_additive =
-            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, additive_blend, &rect_instance_layout(), sample_count);
+        let instanced_circle_additive = build_instanced_pipeline(
+            device,
+            &circle_shader,
+            format,
+            &uniform_bgl,
+            additive_blend,
+            &circle_instance_layout(),
+            sample_count,
+        );
+        let instanced_rect_additive = build_instanced_pipeline(
+            device,
+            &rect_shader,
+            format,
+            &uniform_bgl,
+            additive_blend,
+            &rect_instance_layout(),
+            sample_count,
+        );
 
         Self {
             instanced_circle,
@@ -116,15 +156,51 @@ fn circle_instance_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: 16 * 4,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 }, // center
-            wgpu::VertexAttribute { offset: 8,  shader_location: 2, format: wgpu::VertexFormat::Float32 },   // radius
-            wgpu::VertexAttribute { offset: 12, shader_location: 3, format: wgpu::VertexFormat::Float32x4 }, // fill_color
-            wgpu::VertexAttribute { offset: 28, shader_location: 4, format: wgpu::VertexFormat::Float32x4 }, // stroke_color
-            wgpu::VertexAttribute { offset: 44, shader_location: 5, format: wgpu::VertexFormat::Float32 },   // stroke_width
-            wgpu::VertexAttribute { offset: 48, shader_location: 6, format: wgpu::VertexFormat::Float32 },   // opacity
-            wgpu::VertexAttribute { offset: 52, shader_location: 7, format: wgpu::VertexFormat::Float32 },   // stroke_opacity
-            wgpu::VertexAttribute { offset: 56, shader_location: 8, format: wgpu::VertexFormat::Float32 },   // stroke_dash
-            wgpu::VertexAttribute { offset: 60, shader_location: 9, format: wgpu::VertexFormat::Float32 },   // angle
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            }, // center
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32,
+            }, // radius
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x4,
+            }, // fill_color
+            wgpu::VertexAttribute {
+                offset: 28,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32x4,
+            }, // stroke_color
+            wgpu::VertexAttribute {
+                offset: 44,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32,
+            }, // stroke_width
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32,
+            }, // opacity
+            wgpu::VertexAttribute {
+                offset: 52,
+                shader_location: 7,
+                format: wgpu::VertexFormat::Float32,
+            }, // stroke_opacity
+            wgpu::VertexAttribute {
+                offset: 56,
+                shader_location: 8,
+                format: wgpu::VertexFormat::Float32,
+            }, // stroke_dash
+            wgpu::VertexAttribute {
+                offset: 60,
+                shader_location: 9,
+                format: wgpu::VertexFormat::Float32,
+            }, // angle
         ],
     }
 }
@@ -136,16 +212,56 @@ fn rect_instance_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: 18 * 4,
         step_mode: wgpu::VertexStepMode::Instance,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 }, // position
-            wgpu::VertexAttribute { offset: 8,  shader_location: 2, format: wgpu::VertexFormat::Float32x2 }, // size
-            wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32 },   // corner_radius
-            wgpu::VertexAttribute { offset: 20, shader_location: 4, format: wgpu::VertexFormat::Float32x4 }, // fill_color
-            wgpu::VertexAttribute { offset: 36, shader_location: 5, format: wgpu::VertexFormat::Float32x4 }, // stroke_color
-            wgpu::VertexAttribute { offset: 52, shader_location: 6, format: wgpu::VertexFormat::Float32 },   // stroke_width
-            wgpu::VertexAttribute { offset: 56, shader_location: 7, format: wgpu::VertexFormat::Float32 },   // opacity
-            wgpu::VertexAttribute { offset: 60, shader_location: 8, format: wgpu::VertexFormat::Float32 },   // stroke_opacity
-            wgpu::VertexAttribute { offset: 64, shader_location: 9, format: wgpu::VertexFormat::Float32 },   // stroke_dash
-            wgpu::VertexAttribute { offset: 68, shader_location: 10, format: wgpu::VertexFormat::Float32 },  // angle
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            }, // position
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x2,
+            }, // size
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32,
+            }, // corner_radius
+            wgpu::VertexAttribute {
+                offset: 20,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32x4,
+            }, // fill_color
+            wgpu::VertexAttribute {
+                offset: 36,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x4,
+            }, // stroke_color
+            wgpu::VertexAttribute {
+                offset: 52,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32,
+            }, // stroke_width
+            wgpu::VertexAttribute {
+                offset: 56,
+                shader_location: 7,
+                format: wgpu::VertexFormat::Float32,
+            }, // opacity
+            wgpu::VertexAttribute {
+                offset: 60,
+                shader_location: 8,
+                format: wgpu::VertexFormat::Float32,
+            }, // stroke_opacity
+            wgpu::VertexAttribute {
+                offset: 64,
+                shader_location: 9,
+                format: wgpu::VertexFormat::Float32,
+            }, // stroke_dash
+            wgpu::VertexAttribute {
+                offset: 68,
+                shader_location: 10,
+                format: wgpu::VertexFormat::Float32,
+            }, // angle
         ],
     }
 }
@@ -240,10 +356,26 @@ fn build_mesh_pipeline(
         array_stride: 9 * 4, // 36 bytes
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x2 }, // position
-            wgpu::VertexAttribute { offset: 8,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 }, // normal
-            wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Float32 },   // half_width
-            wgpu::VertexAttribute { offset: 20, shader_location: 3, format: wgpu::VertexFormat::Float32x4 }, // color
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }, // position
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            }, // normal
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32,
+            }, // half_width
+            wgpu::VertexAttribute {
+                offset: 20,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x4,
+            }, // color
         ],
     };
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -298,8 +430,16 @@ fn build_textured_pipeline(
         array_stride: 4 * 4, // position(2) + tex_coord(2) = 4 floats
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-            wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            },
         ],
     };
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

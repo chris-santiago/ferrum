@@ -117,19 +117,10 @@ impl Uniforms {
 
 use crate::zoom_pan::select_panel_transform;
 
-const QUAD_VERTICES: [[f32; 2]; 4] = [
-    [-1.0, -1.0],
-    [ 1.0, -1.0],
-    [-1.0,  1.0],
-    [ 1.0,  1.0],
-];
+const QUAD_VERTICES: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]];
 
 impl GpuBuffers {
-    pub fn from_scene(
-        gpu: &GpuContext,
-        pipelines: &RenderPipelines,
-        scene: &SceneData,
-    ) -> Self {
+    pub fn from_scene(gpu: &GpuContext, pipelines: &RenderPipelines, scene: &SceneData) -> Self {
         // One mark-transform slot per (panel, y-slot) pair. Every slot starts
         // at identity, so a freshly loaded scene renders identically to the
         // former per-panel path until a zoom/pan/rescale uploads a non-identity
@@ -139,8 +130,9 @@ impl GpuBuffers {
         let mark_transform_slots: Vec<PanelTransformSlot> = (0..total_slots)
             .map(|_| {
                 let uniforms = Uniforms::identity(scene.width, scene.height);
-                let buffer =
-                    gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                let buffer = gpu
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("panel_uniforms"),
                         contents: bytemuck::bytes_of(&uniforms),
                         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -162,22 +154,25 @@ impl GpuBuffers {
         // they stay fixed during zoom/pan.
         let identity_uniforms = Uniforms::identity(scene.width, scene.height);
         let identity_uniform_buffer =
-            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("identity_uniforms"),
-                contents: bytemuck::bytes_of(&identity_uniforms),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            gpu.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("identity_uniforms"),
+                    contents: bytemuck::bytes_of(&identity_uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+        let identity_uniform_bind_group =
+            gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("identity_uniforms_bg"),
+                layout: &pipelines.uniform_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: identity_uniform_buffer.as_entire_binding(),
+                }],
             });
-        let identity_uniform_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("identity_uniforms_bg"),
-            layout: &pipelines.uniform_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: identity_uniform_buffer.as_entire_binding(),
-            }],
-        });
 
-        let quad_vertex_buffer =
-            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let quad_vertex_buffer = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("quad"),
                 contents: bytemuck::cast_slice(&QUAD_VERTICES),
                 usage: wgpu::BufferUsages::VERTEX,
@@ -186,76 +181,102 @@ impl GpuBuffers {
         let circle_instance_buffer = if scene.circle_instances.is_empty() {
             None
         } else {
-            Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("circles"),
-                contents: bytemuck::cast_slice(&scene.circle_instances),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
+            Some(
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("circles"),
+                        contents: bytemuck::cast_slice(&scene.circle_instances),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
         };
 
         let rect_instance_buffer = if scene.rect_instances.is_empty() {
             None
         } else {
-            Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rects"),
-                contents: bytemuck::cast_slice(&scene.rect_instances),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
+            Some(
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("rects"),
+                        contents: bytemuck::cast_slice(&scene.rect_instances),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
         };
 
-        let (mesh_vertex_buffer, mesh_index_buffer) =
-            if scene.mesh_buffers.vertices.is_empty() {
-                (None, None)
-            } else {
-                (
-                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("mesh_verts"),
-                        contents: bytemuck::cast_slice(&scene.mesh_buffers.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })),
-                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("mesh_idx"),
-                        contents: bytemuck::cast_slice(&scene.mesh_buffers.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    })),
-                )
-            };
+        let (mesh_vertex_buffer, mesh_index_buffer) = if scene.mesh_buffers.vertices.is_empty() {
+            (None, None)
+        } else {
+            (
+                Some(
+                    gpu.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("mesh_verts"),
+                            contents: bytemuck::cast_slice(&scene.mesh_buffers.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        }),
+                ),
+                Some(
+                    gpu.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("mesh_idx"),
+                            contents: bytemuck::cast_slice(&scene.mesh_buffers.indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        }),
+                ),
+            )
+        };
 
         let (static_mesh_vertex_buffer, static_mesh_index_buffer) =
             if scene.static_mesh_buffers.vertices.is_empty() {
                 (None, None)
             } else {
                 (
-                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("static_mesh_verts"),
-                        contents: bytemuck::cast_slice(&scene.static_mesh_buffers.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })),
-                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("static_mesh_idx"),
-                        contents: bytemuck::cast_slice(&scene.static_mesh_buffers.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    })),
+                    Some(
+                        gpu.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("static_mesh_verts"),
+                                contents: bytemuck::cast_slice(&scene.static_mesh_buffers.vertices),
+                                usage: wgpu::BufferUsages::VERTEX,
+                            }),
+                    ),
+                    Some(
+                        gpu.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("static_mesh_idx"),
+                                contents: bytemuck::cast_slice(&scene.static_mesh_buffers.indices),
+                                usage: wgpu::BufferUsages::INDEX,
+                            }),
+                    ),
                 )
             };
 
-        let (annotation_mesh_vertex_buffer, annotation_mesh_index_buffer) =
-            if scene.annotation_mesh_buffers.vertices.is_empty() {
-                (None, None)
-            } else {
-                (
-                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("annotation_mesh_verts"),
-                        contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })),
-                    Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("annotation_mesh_idx"),
-                        contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    })),
-                )
-            };
+        let (annotation_mesh_vertex_buffer, annotation_mesh_index_buffer) = if scene
+            .annotation_mesh_buffers
+            .vertices
+            .is_empty()
+        {
+            (None, None)
+        } else {
+            (
+                Some(
+                    gpu.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("annotation_mesh_verts"),
+                            contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        }),
+                ),
+                Some(
+                    gpu.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("annotation_mesh_idx"),
+                            contents: bytemuck::cast_slice(&scene.annotation_mesh_buffers.indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        }),
+                ),
+            )
+        };
 
         let image_draws = scene
             .image_quads
@@ -349,7 +370,8 @@ impl GpuBuffers {
     /// out-of-range mesh/instance command draws at identity rather than
     /// panicking. Single-y scenes map `(panel_id, 0) → panel_id`.
     fn mark_bind_group(&self, panel_id: usize, y_slot: usize) -> &wgpu::BindGroup {
-        let idx = crate::scene_load::transform_slot_index(&self.panel_slot_counts, panel_id, y_slot);
+        let idx =
+            crate::scene_load::transform_slot_index(&self.panel_slot_counts, panel_id, y_slot);
         self.mark_transform_slots
             .get(idx)
             .map(|slot| &slot.bind_group)
@@ -371,20 +393,26 @@ impl GpuBuffers {
         self.circle_instance_buffer = if circles.is_empty() {
             None
         } else {
-            Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("circles"),
-                contents: bytemuck::cast_slice(circles),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
+            Some(
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("circles"),
+                        contents: bytemuck::cast_slice(circles),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
         };
         self.rect_instance_buffer = if rects.is_empty() {
             None
         } else {
-            Some(gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rects"),
-                contents: bytemuck::cast_slice(rects),
-                usage: wgpu::BufferUsages::VERTEX,
-            }))
+            Some(
+                gpu.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("rects"),
+                        contents: bytemuck::cast_slice(rects),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
         };
     }
 }
@@ -433,8 +461,14 @@ fn upload_image_quad(
         label: Some("img_bg"),
         layout: &pipelines.texture_bgl,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
         ],
     });
 
@@ -448,13 +482,18 @@ fn upload_image_quad(
         [x0, y1, 0.0, 1.0],
         [x1, y1, 1.0, 1.0],
     ];
-    let vertex_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("img_quad"),
-        contents: bytemuck::cast_slice(&vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
+    let vertex_buffer = gpu
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("img_quad"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
 
-    Some(ImageGpu { vertex_buffer, bind_group })
+    Some(ImageGpu {
+        vertex_buffer,
+        bind_group,
+    })
 }
 
 /// Begin a render pass over `color_view` (resolving into `resolve_target` when
@@ -521,8 +560,7 @@ pub fn render_frame(
     clear_color: Option<[f32; 4]>,
 ) -> Result<(), WasmRenderError> {
     let surface_tex = match gpu.surface.get_current_texture() {
-        wgpu::CurrentSurfaceTexture::Success(t)
-        | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+        wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         other => {
             return Err(WasmRenderError::GpuInit(format!(
                 "get_current_texture: {other:?}"
@@ -535,9 +573,11 @@ pub fn render_frame(
 
     let bg = clear_color.unwrap_or([1.0, 1.0, 1.0, 1.0]);
 
-    let mut encoder =
-        gpu.device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame"),
+        });
 
     {
         // FA-19: when MSAA is active, render into the multisampled target and
@@ -616,9 +656,10 @@ pub fn render_frame(
         // above data marks, matching SVG painter order.
 
         // 1. Static mesh — identity transform (stays fixed during zoom/pan)
-        if let (Some(vb), Some(ib)) =
-            (&buffers.static_mesh_vertex_buffer, &buffers.static_mesh_index_buffer)
-        {
+        if let (Some(vb), Some(ib)) = (
+            &buffers.static_mesh_vertex_buffer,
+            &buffers.static_mesh_index_buffer,
+        ) {
             pass.set_pipeline(&pipelines.mesh);
             pass.set_bind_group(0, &buffers.identity_uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
@@ -638,9 +679,7 @@ pub fn render_frame(
         // When `mark_mesh_panels` is empty (no mesh marks in the scene) the
         // loop body never executes, so the behaviour is identical to the old
         // single-draw path for circle/rect-only charts.
-        if let (Some(vb), Some(ib)) =
-            (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
-        {
+        if let (Some(vb), Some(ib)) = (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer) {
             if buffers.mark_mesh_panels.is_empty() {
                 // Fallback: no panel metadata (should not occur in practice for
                 // mesh-bearing scenes, but guards against stale GpuBuffers).
@@ -832,8 +871,15 @@ pub(crate) fn upload_transform_and_render(
     transforms: &PanelTransformState,
     panel_id: usize,
 ) -> Result<String, crate::error::WasmRenderError> {
-    let GpuResources { gpu, pipelines, buffers } = *gpu_resources;
-    let PanelTransformState { zoom_transforms, slot_rescales } = *transforms;
+    let GpuResources {
+        gpu,
+        pipelines,
+        buffers,
+    } = *gpu_resources;
+    let PanelTransformState {
+        zoom_transforms,
+        slot_rescales,
+    } = *transforms;
 
     // Upload EVERY (panel, y-slot) composed affine into its own slot, not just
     // `panel_id`'s. A reactive domain-rescale writes a non-uniform affine into
@@ -879,9 +925,9 @@ pub(crate) fn upload_transform_and_render(
             crate::zoom_pan::compose_panel_slot(transform, rescale)
         })
         .collect();
-    let plot_area = scene_panels.get(panel_id).map(|p| {
-        (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h)
-    });
+    let plot_area = scene_panels
+        .get(panel_id)
+        .map(|p| (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h));
     let text_json = crate::text_json::build_zoomed_text_json(
         &scene_data.text_elements,
         interaction,
@@ -1006,7 +1052,13 @@ mod tests {
     /// extra passes — only an actual rect change should.
     #[test]
     fn repeated_scissor_value_does_not_fragment_passes() {
-        let sequence = [None, None, Some([0u32, 0, 50, 50]), Some([0u32, 0, 50, 50]), None];
+        let sequence = [
+            None,
+            None,
+            Some([0u32, 0, 50, 50]),
+            Some([0u32, 0, 50, 50]),
+            None,
+        ];
         let mut current: Option<[u32; 4]> = None;
         let mut pass_count = 0;
         for &desired in &sequence {

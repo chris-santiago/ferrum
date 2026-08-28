@@ -1093,6 +1093,14 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             .collect();
         collector.collect_static(&snapped_grid, None, None);
 
+        // Below-marks content (GH #89B): text annotations with `z ==
+        // "below_marks"`. A typed sibling of `grid`, collected immediately
+        // after it into the same static mesh (drawn before mark mesh) — the
+        // same visual position these nodes held before this slot existed
+        // (previously appended onto `grid` itself). No pixel-snapping: that
+        // pass is Line-specific (gridlines); `below_marks` carries Text nodes.
+        collector.collect_static(&maybe_transform_nodes(&panel.below_marks, ls), None, None);
+
         let effective_plot_area = if ls.is_identity() {
             panel.plot_area
         } else {
@@ -1157,6 +1165,14 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         // Axes, strip titles: non-mark → static mesh
         collector.collect_static(&maybe_transform_nodes(&panel.axes, ls), None, None);
         collector.collect_static(&maybe_transform_nodes(&panel.strip_title, ls), None, None);
+        // Above-marks axis/grid chrome (GH #89B): nodes from an axis or its
+        // gridlines whose effective `zindex >= 1`. A typed sibling of
+        // `annotations`, routed to annotation_mesh (drawn after mark mesh)
+        // BEFORE `annotations` — the deliberate z-order refinement that makes
+        // above-marks user annotations always paint above above-marks axis
+        // chrome (previously the two were commingled in one list with chrome
+        // prefixed ahead of user content, so chrome painted OVER it).
+        collector.collect_annotation(&maybe_transform_nodes(&panel.chrome_above, ls), None, None);
         // Annotations: route to annotation_mesh so they appear above data
         // marks in WASM (matching SVG painter order).
         collector.collect_annotation(&maybe_transform_nodes(&panel.annotations, ls), None, None);
@@ -1887,8 +1903,18 @@ mod tests {
         // Simulate two independent rescales: panel 1's secondary-y layer
         // (slot idx 2) via a domainParam brush, and panel 2 (slot idx 3) via
         // its own independent rescale.
-        slot_rescales[2] = Affine2 { sx: 1.0, sy: 2.5, tx: 0.0, ty: -10.0 };
-        slot_rescales[3] = Affine2 { sx: 1.0, sy: 4.0, tx: 0.0, ty: 5.0 };
+        slot_rescales[2] = Affine2 {
+            sx: 1.0,
+            sy: 2.5,
+            tx: 0.0,
+            ty: -10.0,
+        };
+        slot_rescales[3] = Affine2 {
+            sx: 1.0,
+            sy: 4.0,
+            tx: 0.0,
+            ty: 5.0,
+        };
 
         // Reset panel 1 (as `set_transform(1, ...)` would): only its owned
         // range (1..3) resets to identity.
@@ -1896,8 +1922,14 @@ mod tests {
             *slot = Affine2::identity();
         }
 
-        assert_eq!(slot_rescales[0].sy, 1.0, "panel 0's untouched slot stays identity");
-        assert_eq!(slot_rescales[1].sy, 1.0, "panel 1's primary slot was already identity");
+        assert_eq!(
+            slot_rescales[0].sy, 1.0,
+            "panel 0's untouched slot stays identity"
+        );
+        assert_eq!(
+            slot_rescales[1].sy, 1.0,
+            "panel 1's primary slot was already identity"
+        );
         assert_eq!(
             slot_rescales[2].sy, 1.0,
             "panel 1's rescaled secondary-y slot must reset to identity"
@@ -1928,11 +1960,25 @@ mod tests {
 
         let counts = vec![1, 2, 1];
         let mut slot_rescales = vec![Affine2::identity(); total_transform_slots(&counts)];
-        slot_rescales[2] = Affine2 { sx: 1.0, sy: 2.5, tx: 0.0, ty: -10.0 };
-        slot_rescales[3] = Affine2 { sx: 1.0, sy: 4.0, tx: 0.0, ty: 5.0 };
+        slot_rescales[2] = Affine2 {
+            sx: 1.0,
+            sy: 2.5,
+            tx: 0.0,
+            ty: -10.0,
+        };
+        slot_rescales[3] = Affine2 {
+            sx: 1.0,
+            sy: 4.0,
+            tx: 0.0,
+            ty: 5.0,
+        };
 
         let out_of_range_slot_range = panel_slot_range(&counts, 5);
-        assert_eq!(out_of_range_slot_range, 4..5, "sanity: past the end of slot_rescales (len 4)");
+        assert_eq!(
+            out_of_range_slot_range,
+            4..5,
+            "sanity: past the end of slot_rescales (len 4)"
+        );
 
         // Bounded reset: must not panic, and must leave every existing slot
         // untouched since panel 5 owns none of them.
@@ -2210,6 +2256,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -2318,6 +2366,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -2443,6 +2493,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -2519,6 +2571,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -2816,6 +2870,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -3257,7 +3313,12 @@ mod tests {
             anchor: TextAnchor::End,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
@@ -3272,7 +3333,10 @@ mod tests {
 
         // Emit to JSON and decode back — the actual wire path, not a clone.
         let json = serde_json::to_string(&scene).expect("serialize scene with slotted text");
-        assert!(json.contains("\"slot\":2"), "slot must appear on the wire: {json}");
+        assert!(
+            json.contains("\"slot\":2"),
+            "slot must appear on the wire: {json}"
+        );
         let decoded: SceneGraph = serde_json::from_str(&json).expect("deserialize scene");
 
         let data = load_scene(&decoded);
@@ -3296,7 +3360,12 @@ mod tests {
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
@@ -3312,13 +3381,19 @@ mod tests {
         // `slot: None` is skip_serialized — the emitted JSON has no "slot" key
         // at all, exactly like scene JSON produced before this field existed.
         let json = serde_json::to_string(&scene).expect("serialize scene with untagged text");
-        assert!(!json.contains("\"slot\""), "untagged text must omit slot from JSON: {json}");
+        assert!(
+            !json.contains("\"slot\""),
+            "untagged text must omit slot from JSON: {json}"
+        );
         let decoded: SceneGraph =
             serde_json::from_str(&json).expect("legacy-shaped scene JSON must still deserialize");
 
         let data = load_scene(&decoded);
         assert_eq!(data.text_elements.len(), 1);
-        assert_eq!(data.text_elements[0].slot, None, "absent slot must decode to None");
+        assert_eq!(
+            data.text_elements[0].slot, None,
+            "absent slot must decode to None"
+        );
     }
 
     // ── Group (recursive) ─────────────────────────────────────────────
@@ -3542,6 +3617,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -3781,6 +3858,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -4618,6 +4697,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -4802,6 +4883,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -5080,6 +5163,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -5240,6 +5325,8 @@ mod tests {
                 annotations: vec![annotation_line],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -5286,6 +5373,269 @@ mod tests {
         assert!(
             data.mesh_buffers.vertices.is_empty(),
             "mark mesh must be empty when no mark nodes are present"
+        );
+    }
+
+    // ── GH #89B: Panel::below_marks / chrome_above typed slots ───────
+
+    /// A helper scene with one `Panel` whose `below_marks`/`chrome_above`
+    /// (and every other slot) are supplied by the caller.
+    fn scene_with_slots(
+        grid: Vec<SceneNode>,
+        below_marks: Vec<SceneNode>,
+        axes: Vec<SceneNode>,
+        chrome_above: Vec<SceneNode>,
+        annotations: Vec<SceneNode>,
+    ) -> ferrum_scene::SceneGraph {
+        use ferrum_scene::{CoordKind, InteractionConfig, Panel, Rect};
+
+        ferrum_scene::SceneGraph {
+            width: 500.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                    y_domains: Vec::new(),
+                },
+                grid,
+                marks: vec![],
+                axes,
+                annotations,
+                strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
+                below_marks,
+                chrome_above,
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    /// `below_marks` Line nodes must land in `static_mesh_buffers` (the same
+    /// buffer `grid` uses), not `annotation_mesh_buffers` — a typed sibling
+    /// of `grid`, not a content bucket that draws after marks. This mirrors
+    /// `test_annotation_mesh_separate_from_static_mesh` for the new slot.
+    #[test]
+    fn below_marks_lands_in_static_mesh_not_annotation_mesh() {
+        let below_marks_line = SceneNode::Line {
+            x1: 0.0,
+            y1: 100.0,
+            x2: 400.0,
+            y2: 100.0,
+            style: default_stroke_style(),
+        };
+        let scene = scene_with_slots(vec![], vec![below_marks_line], vec![], vec![], vec![]);
+        let data = load_scene(&scene);
+
+        assert!(
+            !data.static_mesh_buffers.vertices.is_empty(),
+            "below_marks Line must produce static_mesh vertices"
+        );
+        assert!(
+            data.annotation_mesh_buffers.vertices.is_empty(),
+            "below_marks Line must NOT produce annotation_mesh vertices"
+        );
+    }
+
+    /// `chrome_above` Line nodes must land in `annotation_mesh_buffers` (the
+    /// same buffer `annotations` uses — both draw after mark mesh), not
+    /// `static_mesh_buffers`.
+    #[test]
+    fn chrome_above_lands_in_annotation_mesh_not_static_mesh() {
+        let chrome_line = SceneNode::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 400.0,
+            y2: 0.0,
+            style: default_stroke_style(),
+        };
+        let scene = scene_with_slots(vec![], vec![], vec![], vec![chrome_line], vec![]);
+        let data = load_scene(&scene);
+
+        assert!(
+            !data.annotation_mesh_buffers.vertices.is_empty(),
+            "chrome_above Line must produce annotation_mesh vertices"
+        );
+        assert!(
+            data.static_mesh_buffers.vertices.is_empty(),
+            "chrome_above Line must NOT produce static_mesh vertices"
+        );
+    }
+
+    /// Deliberate z-order refinement (spec §4.2/§6): `chrome_above` content
+    /// must be collected — and therefore drawn — BEFORE `annotations`
+    /// content, so above-marks user annotations always paint on top of
+    /// above-marks axis chrome. Uses Circle nodes (routed through `emit` as
+    /// individual draw commands) so relative order is directly assertable
+    /// via `draw_commands` position.
+    ///
+    /// The two circles are identified by their OWN geometry (`cx`), not by
+    /// `instance_start`: `emit()` sets `instance_start = self.prev_c` then
+    /// advances `prev_c`, so `instance_start` is monotonically increasing
+    /// with `draw_commands` position by construction — asserting
+    /// `instance_start == 0` precedes `instance_start == 1` would hold
+    /// whichever slot was collected first, making that shape tautological
+    /// (rust-quality-reviewer, cycle 2). Reading `cx` back out of
+    /// `circle_instances` at the FIRST `Circle` draw command's
+    /// `instance_start` instead pins WHICH content that command draws, so
+    /// swapping the `collect_annotation` call order for `chrome_above`/
+    /// `annotations` in `load_scene_with_packed` fails this test.
+    #[test]
+    fn chrome_above_draw_command_precedes_annotations_draw_command() {
+        use ferrum_scene::FillStroke;
+
+        let fs = FillStroke {
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        const CHROME_CX: f32 = 10.0;
+        const ANNOTATION_CX: f32 = 20.0;
+        let chrome_circle = SceneNode::Circle {
+            cx: CHROME_CX as f64,
+            cy: 10.0,
+            r: 3.0,
+            style: fs.clone(),
+        };
+        let annotation_circle = SceneNode::Circle {
+            cx: ANNOTATION_CX as f64,
+            cy: 20.0,
+            r: 3.0,
+            style: fs,
+        };
+        let scene = scene_with_slots(
+            vec![],
+            vec![],
+            vec![],
+            vec![chrome_circle],
+            vec![annotation_circle],
+        );
+        let data = load_scene(&scene);
+
+        let first_circle_cmd = data
+            .draw_commands
+            .iter()
+            .find(|c| c.kind == DrawKind::Circle)
+            .expect("expected at least one Circle draw command");
+        let first_circle = &data.circle_instances[first_circle_cmd.instance_start as usize];
+        assert_eq!(
+            first_circle.center[0], CHROME_CX,
+            "the FIRST Circle draw command must draw the chrome_above circle (cx={CHROME_CX}), \
+             not the annotations circle (cx={ANNOTATION_CX}) — got cx={} — chrome_above must be \
+             collected (and therefore drawn) before annotations",
+            first_circle.center[0]
+        );
+
+        // Every draw command must be present and in collection order: two
+        // Circle commands total (one per slot, since `emit()` only merges
+        // adjacent same-kind pushes within a single collect call, and these
+        // are two separate `collect_annotation` calls).
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle)
+            .collect();
+        assert_eq!(
+            circle_cmds.len(),
+            2,
+            "expected one Circle draw command per collect_annotation call, got {}",
+            circle_cmds.len()
+        );
+        let second_circle = &data.circle_instances[circle_cmds[1].instance_start as usize];
+        assert_eq!(
+            second_circle.center[0], ANNOTATION_CX,
+            "the SECOND Circle draw command must draw the annotations circle (cx={ANNOTATION_CX})"
+        );
+    }
+
+    /// Same z-order refinement as above, for the mesh-tessellated path:
+    /// `chrome_above` in production carries `Line` nodes (axis/gridline
+    /// chrome), which tessellate into `annotation_mesh_buffers` rather than
+    /// becoming instanced draw commands. The buffer-membership tests above
+    /// (`chrome_above_lands_in_annotation_mesh_not_static_mesh` and its
+    /// `below_marks` counterpart) only settle static-vs-annotation routing;
+    /// nothing pinned intra-buffer order until this test. Two horizontal
+    /// lines at distinctive, non-colliding y-coordinates let the mesh
+    /// vertices be identified by their own baked scene-space position (lyon
+    /// stroke tessellation's `MeshVertex::position` is the exact centerline
+    /// point, not offset by half-width), so the FIRST vertex appended to
+    /// `annotation_mesh_buffers` must belong to the `chrome_above` line.
+    #[test]
+    fn chrome_above_mesh_vertices_precede_annotations_mesh_vertices() {
+        const CHROME_Y: f32 = 1000.0;
+        const ANNOTATION_Y: f32 = -1000.0;
+        let chrome_line = SceneNode::Line {
+            x1: 0.0,
+            y1: CHROME_Y as f64,
+            x2: 50.0,
+            y2: CHROME_Y as f64,
+            style: default_stroke_style(),
+        };
+        let annotation_line = SceneNode::Line {
+            x1: 0.0,
+            y1: ANNOTATION_Y as f64,
+            x2: 50.0,
+            y2: ANNOTATION_Y as f64,
+            style: default_stroke_style(),
+        };
+        let scene = scene_with_slots(
+            vec![],
+            vec![],
+            vec![],
+            vec![chrome_line],
+            vec![annotation_line],
+        );
+        let data = load_scene(&scene);
+
+        let first_chrome_idx = data
+            .annotation_mesh_buffers
+            .vertices
+            .iter()
+            .position(|v| (v.position[1] - CHROME_Y).abs() < 1.0)
+            .expect("a chrome_above vertex near y=1000 must be present in annotation_mesh");
+        let first_annotation_idx = data
+            .annotation_mesh_buffers
+            .vertices
+            .iter()
+            .position(|v| (v.position[1] - ANNOTATION_Y).abs() < 1.0)
+            .expect("an annotations vertex near y=-1000 must be present in annotation_mesh");
+
+        assert!(
+            first_chrome_idx < first_annotation_idx,
+            "chrome_above's Line must tessellate into annotation_mesh_buffers BEFORE \
+             annotations' Line (chrome vertex at index {first_chrome_idx}, annotation vertex at \
+             index {first_annotation_idx}) — swapping collection order would reverse this"
         );
     }
 
@@ -5402,6 +5752,8 @@ mod tests {
                     annotations: vec![],
                     strip_title: vec![],
                     layout_scale: LayoutScale::identity(),
+                    below_marks: Vec::new(),
+                    chrome_above: Vec::new(),
                 },
                 Panel {
                     id: 1,
@@ -5443,6 +5795,8 @@ mod tests {
                     annotations: vec![],
                     strip_title: vec![],
                     layout_scale: LayoutScale::identity(),
+                    below_marks: Vec::new(),
+                    chrome_above: Vec::new(),
                 },
             ],
             legend: vec![],
@@ -5641,6 +5995,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
 
         let scene = SceneGraph {
@@ -5847,7 +6203,13 @@ mod tests {
         let ls = gap_fix_layout_scale();
         let mut style = gap_fix_stroke_style(1.0);
         style.dash = Some(vec![4.0, 2.0]);
-        let node = SceneNode::Line { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0, style };
+        let node = SceneNode::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+            style,
+        };
         match transform_node(&node, &ls) {
             SceneNode::Line { style, .. } => {
                 let dash = style.dash.expect("dash must survive the bake");
@@ -5868,7 +6230,10 @@ mod tests {
         let dash = out.stroke_dash.expect("stroke_dash must survive the bake");
         assert!((dash[0] - 12.0).abs() < 1e-9, "dash[0]: got {}", dash[0]);
         assert!((dash[1] - 6.0).abs() < 1e-9, "dash[1]: got {}", dash[1]);
-        assert!((out.stroke_width - 4.0).abs() < 1e-9, "stroke_width must still scale");
+        assert!(
+            (out.stroke_width - 4.0).abs() < 1e-9,
+            "stroke_width must still scale"
+        );
     }
 
     #[test]
@@ -5933,7 +6298,11 @@ mod tests {
                     style.angle, 45.0,
                     "text rotation must pass through UNCHANGED (documented gap)"
                 );
-                assert_eq!(slot, Some(1), "slot tag must survive the layout-scale transform");
+                assert_eq!(
+                    slot,
+                    Some(1),
+                    "slot tag must survive the layout-scale transform"
+                );
             }
             other => panic!("expected Text, got {other:?}"),
         }
@@ -6287,6 +6656,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: ls,
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -6453,6 +6824,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale,
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
 
         let scene = SceneGraph {
@@ -6572,8 +6945,18 @@ mod tests {
 
         let mk_panel = |id: usize, layout_scale: LayoutScale| Panel {
             id,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -6605,6 +6988,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale,
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
 
         let scene = SceneGraph {
@@ -6637,7 +7022,12 @@ mod tests {
         // two that could drift.
         assert_eq!(
             baked[1].plot_area,
-            Rect { x: 10.0, y: -5.0, w: 200.0, h: 800.0 }
+            Rect {
+                x: 10.0,
+                y: -5.0,
+                w: 200.0,
+                h: 800.0
+            }
         );
         match &baked[1].marks[0].nodes[0] {
             SceneNode::Circle { cx, cy, r, .. } => {
@@ -6651,7 +7041,12 @@ mod tests {
         // `bake_panels` must not mutate the source scene in place.
         assert_eq!(
             scene.panels[1].plot_area,
-            Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0
+            }
         );
     }
 
@@ -6661,8 +7056,18 @@ mod tests {
 
         let mk_panel = |id: usize| Panel {
             id,
-            plot_area: Rect { x: id as f64 * 10.0, y: 0.0, w: 50.0, h: 50.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 },
+            plot_area: Rect {
+                x: id as f64 * 10.0,
+                y: 0.0,
+                w: 50.0,
+                h: 50.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 50.0,
+                h: 50.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -6676,6 +7081,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
 
         let scene = SceneGraph {
@@ -6694,7 +7101,10 @@ mod tests {
         let baked = bake_panels(&scene);
         assert_eq!(baked.len(), 3);
         for (i, panel) in baked.iter().enumerate() {
-            assert_eq!(panel.id, i, "bake_panels must preserve id/order at index {i}");
+            assert_eq!(
+                panel.id, i,
+                "bake_panels must preserve id/order at index {i}"
+            );
             assert_eq!(panel.plot_area.x, i as f64 * 10.0);
         }
     }
@@ -6719,8 +7129,18 @@ mod tests {
         let ls = gap_fix_layout_scale(); // sx=2, sy=8, tx=10, ty=-5
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -6752,6 +7172,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: ls,
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let scene = SceneGraph {
             width: 200.0,
@@ -6772,21 +7194,42 @@ mod tests {
             SceneNode::Circle { cx, cy, .. } => (*cx, *cy),
             other => panic!("expected Circle, got {other:?}"),
         };
-        assert!((baked_circle.0 - 16.0).abs() < 1e-9, "got {}", baked_circle.0);
-        assert!((baked_circle.1 - 27.0).abs() < 1e-9, "got {}", baked_circle.1);
+        assert!(
+            (baked_circle.0 - 16.0).abs() < 1e-9,
+            "got {}",
+            baked_circle.0
+        );
+        assert!(
+            (baked_circle.1 - 27.0).abs() < 1e-9,
+            "got {}",
+            baked_circle.1
+        );
 
         // A reactive rescale on panel 0 (matching `apply_reactive_rescale`'s
         // output shape, e.g. an x-only domain rescale): sx=3, tx=100; sy/ty
         // are also non-identity here to exercise both axes.
-        let transforms = vec![Affine2 { sx: 3.0, sy: 3.0, tx: 100.0, ty: 50.0 }];
+        let transforms = vec![Affine2 {
+            sx: 3.0,
+            sy: 3.0,
+            tx: 100.0,
+            ty: 50.0,
+        }];
         let t = select_panel_transform(&transforms, 0);
 
         // Correct composition: `t` applies to the ALREADY-baked position
         // (this is what the GPU vertex shader and `hit_test`'s inverse-apply
         // both assume) — the single source of truth this task establishes.
         let correct_screen_pos = t.apply(baked_circle.0, baked_circle.1);
-        assert!((correct_screen_pos.0 - 148.0).abs() < 1e-9, "got {}", correct_screen_pos.0);
-        assert!((correct_screen_pos.1 - 131.0).abs() < 1e-9, "got {}", correct_screen_pos.1);
+        assert!(
+            (correct_screen_pos.0 - 148.0).abs() < 1e-9,
+            "got {}",
+            correct_screen_pos.0
+        );
+        assert!(
+            (correct_screen_pos.1 - 131.0).abs() < 1e-9,
+            "got {}",
+            correct_screen_pos.1
+        );
 
         // A double-bake bug would instead apply `layout_scale` a SECOND time
         // on the already-baked position before the zoom affine.
@@ -7266,6 +7709,8 @@ mod bug_hunt_tests {
                 annotations: vec![node],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -7751,7 +8196,12 @@ mod bug_hunt_interactive_slots {
 
     fn fill() -> FillStroke {
         FillStroke {
-            fill: Some(Color { r: 10, g: 20, b: 30, a: 255 }),
+            fill: Some(Color {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -7764,7 +8214,12 @@ mod bug_hunt_interactive_slots {
 
     fn stroke() -> StrokeStyle {
         StrokeStyle {
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 1.0,
             opacity: 1.0,
             dash: None,
@@ -7799,8 +8254,18 @@ mod bug_hunt_interactive_slots {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 400.0,
+                    h: 300.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 400.0,
+                    h: 300.0,
+                },
                 coord: CoordKind::Cartesian {
                     x_domain: Some((0.0, 10.0)),
                     y_domain: Some((0.0, 100.0)),
@@ -7837,7 +8302,12 @@ mod bug_hunt_interactive_slots {
                     // Slot-1 instanced batch (circle → DrawCommand).
                     batch(
                         MarkBatchKind::Point,
-                        vec![SceneNode::Circle { cx: 50.0, cy: 50.0, r: 4.0, style: fill() }],
+                        vec![SceneNode::Circle {
+                            cx: 50.0,
+                            cy: 50.0,
+                            r: 4.0,
+                            style: fill(),
+                        }],
                         slot1,
                     ),
                 ],
@@ -7845,6 +8315,8 @@ mod bug_hunt_interactive_slots {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -7863,16 +8335,31 @@ mod bug_hunt_interactive_slots {
     #[test]
     fn bug_hunt_load_scene_threads_y_slots_into_all_gpu_metadata() {
         let data = load_scene(&dual_slot_scene(1));
-        assert_eq!(data.panel_slot_counts, vec![2], "y_domains len drives slot count");
+        assert_eq!(
+            data.panel_slot_counts,
+            vec![2],
+            "y_domains len drives slot count"
+        );
         assert_eq!(total_transform_slots(&data.panel_slot_counts), 2);
 
         let mesh_slots: Vec<usize> = data.mark_mesh_panels.iter().map(|m| m.y_slot).collect();
-        assert_eq!(mesh_slots, vec![0, 1], "each mesh batch must carry its own slot");
+        assert_eq!(
+            mesh_slots,
+            vec![0, 1],
+            "each mesh batch must carry its own slot"
+        );
 
         let mark_cmds: Vec<&DrawCommand> =
             data.draw_commands.iter().filter(|c| c.is_mark).collect();
-        assert_eq!(mark_cmds.len(), 1, "one instanced mark command (the circle batch)");
-        assert_eq!(mark_cmds[0].y_slot, 1, "instanced command must carry the batch's slot");
+        assert_eq!(
+            mark_cmds.len(),
+            1,
+            "one instanced mark command (the circle batch)"
+        );
+        assert_eq!(
+            mark_cmds[0].y_slot, 1,
+            "instanced command must carry the batch's slot"
+        );
         assert_eq!(mark_cmds[0].panel_id, 0);
     }
 
@@ -7915,7 +8402,11 @@ mod bug_hunt_interactive_slots {
         let data = load_scene(&scene);
         assert!(data.panel_slot_counts.is_empty());
         assert_eq!(data.panel_count, 1, "panel_count floors at 1");
-        assert_eq!(total_transform_slots(&data.panel_slot_counts), 1, "slot total floors at 1");
+        assert_eq!(
+            total_transform_slots(&data.panel_slot_counts),
+            1,
+            "slot total floors at 1"
+        );
         // The (0, 0) lookup against empty counts must stay in the floor slot.
         assert_eq!(transform_slot_index(&data.panel_slot_counts, 0, 0), 0);
     }
@@ -7928,8 +8419,14 @@ mod bug_hunt_interactive_slots {
     fn bug_hunt_transform_slot_index_out_of_range_panel_lands_past_total() {
         let counts = vec![2, 2];
         let idx = transform_slot_index(&counts, 5, 0);
-        assert_eq!(idx, 4, "out-of-range panel must map past the allocated slots");
-        assert!(idx >= total_transform_slots(&counts), "must NOT alias an existing slot");
+        assert_eq!(
+            idx, 4,
+            "out-of-range panel must map past the allocated slots"
+        );
+        assert!(
+            idx >= total_transform_slots(&counts),
+            "must NOT alias an existing slot"
+        );
     }
 
     /// Non-cartesian coords have no slot list: Fixed and Polar panels are
@@ -8007,7 +8504,10 @@ mod bug_hunt_interactive_slots {
             y_domains: vec![Some((0.0, 100.0)), None, Some((-3.5, 3.5))],
         };
         let json = serde_json::to_string(&coord).expect("serialize");
-        assert!(json.contains("y_domains"), "populated y_domains must serialize");
+        assert!(
+            json.contains("y_domains"),
+            "populated y_domains must serialize"
+        );
         let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, coord, "y_domains (incl. None slot) must round-trip");
 
@@ -8019,14 +8519,20 @@ mod bug_hunt_interactive_slots {
             y_domains: Vec::new(),
         };
         let sj = serde_json::to_string(&single).expect("serialize");
-        assert!(!sj.contains("y_domains"), "empty y_domains must be omitted: {sj}");
+        assert!(
+            !sj.contains("y_domains"),
+            "empty y_domains must be omitted: {sj}"
+        );
 
         let legacy = r#"{"kind":"cartesian","x_domain":null,"y_domain":null,
             "expand":true,"clip":true}"#;
         let parsed: CoordKind = serde_json::from_str(legacy).expect("legacy deserialize");
         match parsed {
             CoordKind::Cartesian { y_domains, .. } => {
-                assert!(y_domains.is_empty(), "missing y_domains must default to empty")
+                assert!(
+                    y_domains.is_empty(),
+                    "missing y_domains must default to empty"
+                )
             }
             other => panic!("expected cartesian, got {other:?}"),
         }
@@ -8043,21 +8549,37 @@ mod bug_hunt_interactive_slots {
             y_slot_levels: vec![vec![TickLevel {
                 min_zoom: 1.0,
                 max_zoom: f64::INFINITY,
-                ticks: vec![Tick { value: 0.5, label: "0.5".into(), pixel: 42.0 }],
+                ticks: vec![Tick {
+                    value: 0.5,
+                    label: "0.5".into(),
+                    pixel: 42.0,
+                }],
             }]],
         };
         let json = serde_json::to_string(&ptl).expect("serialize");
         assert!(json.contains("y_slot_levels"));
         // Infinity must be string-encoded (zoom_serde), never a bare token
         // that would break the browser's JSON.parse.
-        assert!(json.contains("\"Infinity\""), "max_zoom=inf must string-encode: {json}");
-        assert!(!json.contains(":Infinity"), "bare Infinity token must never appear: {json}");
+        assert!(
+            json.contains("\"Infinity\""),
+            "max_zoom=inf must string-encode: {json}"
+        );
+        assert!(
+            !json.contains(":Infinity"),
+            "bare Infinity token must never appear: {json}"
+        );
         let back: PanelTickLevels = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, ptl, "y_slot_levels must round-trip (incl. Infinity zoom bound)");
+        assert_eq!(
+            back, ptl,
+            "y_slot_levels must round-trip (incl. Infinity zoom bound)"
+        );
 
         let legacy = r#"{"panel_id":3,"x_levels":[],"y_levels":[]}"#;
         let parsed: PanelTickLevels = serde_json::from_str(legacy).expect("legacy deserialize");
-        assert!(parsed.y_slot_levels.is_empty(), "missing y_slot_levels must default to empty");
+        assert!(
+            parsed.y_slot_levels.is_empty(),
+            "missing y_slot_levels must default to empty"
+        );
     }
 
     /// `ParamBinding.y_slot` survives a full `InteractionConfig` round-trip

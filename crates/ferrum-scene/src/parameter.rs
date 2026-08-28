@@ -109,7 +109,10 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         let parsed: ParameterSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
-        assert_eq!(json, r#"{"name":"brush","kind":"interval","select":{"encodings":["x"]}}"#);
+        assert_eq!(
+            json,
+            r#"{"name":"brush","kind":"interval","select":{"encodings":["x"]}}"#
+        );
     }
 
     /// The serde shape is unchanged from the pre-move ferrum-core definition:

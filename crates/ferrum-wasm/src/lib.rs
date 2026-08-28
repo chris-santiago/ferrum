@@ -153,7 +153,12 @@ impl WasmRenderer {
         // Build spatial index over all panels for O(log n) hit-testing.
         // Pass scene data so packed instances (>= 1000 marks) are also indexed.
         self.spatial_index = Some(SpatialIndex::build_with_packed(&baked_panels, Some(&data)));
-        self.loaded = Some(LoadedScene { data, buffers, scene, baked_panels });
+        self.loaded = Some(LoadedScene {
+            data,
+            buffers,
+            scene,
+            baked_panels,
+        });
 
         if let Some(ref loaded) = self.loaded {
             render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, clear_color)
@@ -196,10 +201,7 @@ impl WasmRenderer {
     ///
     /// Returns `Ok(())` immediately (no-op) if no scene is currently loaded.
     #[wasm_bindgen(js_name = "startTransition")]
-    pub fn start_transition(
-        &mut self,
-        old_scene_json: &str,
-    ) -> Result<(), JsValue> {
+    pub fn start_transition(&mut self, old_scene_json: &str) -> Result<(), JsValue> {
         let Some(loaded) = &self.loaded else {
             return Ok(());
         };
@@ -211,7 +213,11 @@ impl WasmRenderer {
         let old_scene: ferrum_scene::SceneGraph = serde_json::from_str(old_scene_json)
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
         let old_data = scene_load::load_scene(&old_scene);
-        self.transition = Some(ActiveTransition { old_data, new_data, new_scene: loaded.scene.clone() });
+        self.transition = Some(ActiveTransition {
+            old_data,
+            new_data,
+            new_scene: loaded.scene.clone(),
+        });
         Ok(())
     }
 
@@ -224,8 +230,16 @@ impl WasmRenderer {
     pub fn tick_transition(&mut self, t: f32) -> Result<(), JsValue> {
         let t_eased = ease_in_out_cubic(t.clamp(0.0, 1.0));
         if let Some(ref tr) = self.transition {
-            let lerped_circles = lerp_circles(&tr.old_data.circle_instances, &tr.new_data.circle_instances, t_eased);
-            let lerped_rects = lerp_rects(&tr.old_data.rect_instances, &tr.new_data.rect_instances, t_eased);
+            let lerped_circles = lerp_circles(
+                &tr.old_data.circle_instances,
+                &tr.new_data.circle_instances,
+                t_eased,
+            );
+            let lerped_rects = lerp_rects(
+                &tr.old_data.rect_instances,
+                &tr.new_data.rect_instances,
+                t_eased,
+            );
             let lerped_data = SceneData {
                 circle_instances: lerped_circles,
                 rect_instances: lerped_rects,
@@ -345,21 +359,22 @@ impl WasmRenderer {
         // Convert canvas-space brush coordinates to scene-space so
         // contains_point comparisons in conditional resolution use
         // the same coordinate space as mark positions.
-        let (sx0, sy0) = self.zoom.transforms
+        let (sx0, sy0) = self
+            .zoom
+            .transforms
             .get(panel_id as usize)
             .map(|t| t.inverse_apply(x0 as f64, y0 as f64))
             .unwrap_or((x0 as f64, y0 as f64));
-        let (sx1, sy1) = self.zoom.transforms
+        let (sx1, sy1) = self
+            .zoom
+            .transforms
             .get(panel_id as usize)
             .map(|t| t.inverse_apply(x1 as f64, y1 as f64))
             .unwrap_or((x1 as f64, y1 as f64));
 
         // Update interval selection state in scene-space.
-        self.interaction_state.handle_drag(
-            &self.selections,
-            panel_id as usize,
-            sx0, sy0, sx1, sy1,
-        );
+        self.interaction_state
+            .handle_drag(&self.selections, panel_id as usize, sx0, sy0, sx1, sy1);
 
         // D6 crossfilter (BindingRole::Filter): dim marks on a bound target
         // panel that fall outside this brush. Re-projects the source brush
@@ -372,8 +387,11 @@ impl WasmRenderer {
         // panel to the brushed sub-domain via the existing zoom transform.
         // No-op (returns None) when there are no Domain bindings for the
         // brushed selection.
-        let rescaled =
-            self.apply_reactive_rescale(panel_id as usize, (x0 as f64, x1 as f64), (y0 as f64, y1 as f64));
+        let rescaled = self.apply_reactive_rescale(
+            panel_id as usize,
+            (x0 as f64, x1 as f64),
+            (y0 as f64, y1 as f64),
+        );
 
         // Envelope the selection-state JSON with the rescale signal. When a
         // Domain binding rescaled a target panel, the JS brush handler must NOT
@@ -418,11 +436,20 @@ impl WasmRenderer {
     ///
     /// Returns updated text-element JSON so the JS overlay can reposition labels.
     #[wasm_bindgen(js_name = "setTransform")]
-    pub fn set_transform(&mut self, panel_id: u32, k: f32, tx: f32, ty: f32) -> Result<String, JsValue> {
+    pub fn set_transform(
+        &mut self,
+        panel_id: u32,
+        k: f32,
+        tx: f32,
+        ty: f32,
+    ) -> Result<String, JsValue> {
         let panel = panel_id as usize;
-        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let Some(loaded) = &self.loaded else {
+            return Ok("[]".to_string());
+        };
         let slot_range = scene_load::panel_slot_range(&loaded.data.panel_slot_counts, panel);
-        self.zoom.set_absolute(panel, k as f64, tx as f64, ty as f64);
+        self.zoom
+            .set_absolute(panel, k as f64, tx as f64, ty as f64);
         // Out-of-range `panel_id` must be a no-op (mirrors `set_absolute`'s
         // `get_mut` above): `panel_slot_range` always returns a range past
         // the end of `slot_rescales` for an out-of-range panel, so indexing
@@ -458,13 +485,18 @@ impl WasmRenderer {
     /// the index of the mark within that batch.  Returns a JSON object
     #[wasm_bindgen(js_name = "hitTestAt")]
     pub fn hit_test_at(&self, x: f32, y: f32) -> String {
-        let Some(loaded) = &self.loaded else { return "{}".to_string(); };
+        let Some(loaded) = &self.loaded else {
+            return "{}".to_string();
+        };
 
         // Spatial-index + scene-graph hit-test (covers both packed and
         // non-packed batches via the R-tree built in load_scene). Baked
         // geometry (D4a amendment addendum).
         if let Some(hr) = hit_test::hit_test_nearest_with_index(
-            &loaded.baked_panels, x as f64, y as f64, &self.zoom,
+            &loaded.baked_panels,
+            x as f64,
+            y as f64,
+            &self.zoom,
             self.spatial_index.as_ref(),
             &hit_test::SlotRescalePlan {
                 slot_rescales: &self.slot_rescales,
@@ -475,7 +507,8 @@ impl WasmRenderer {
                 "panel": hr.panel_id,
                 "batch": hr.batch_idx,
                 "idx": hr.node_idx,
-            }).to_string();
+            })
+            .to_string();
         }
 
         "{}".to_string()
@@ -498,7 +531,9 @@ impl WasmRenderer {
         }
 
         // Fall back to scene-graph tooltips (non-packed batches with < 1000 marks).
-        if let Some(tooltip) = loaded.scene.panels
+        if let Some(tooltip) = loaded
+            .scene
+            .panels
             .get(panel_id as usize)
             .and_then(|p| p.marks.get(batch_idx as usize))
             .and_then(|b| b.tooltips.as_ref())
@@ -553,7 +588,11 @@ impl WasmRenderer {
     /// re-runs `apply_conditionals_and_render` (the same machinery legend-less
     /// point selections use).
     #[wasm_bindgen(js_name = "toggleLegend")]
-    pub fn toggle_legend(&mut self, selection_name: &str, category: &str) -> Result<String, JsValue> {
+    pub fn toggle_legend(
+        &mut self,
+        selection_name: &str,
+        category: &str,
+    ) -> Result<String, JsValue> {
         use ferrum_scene::FieldValue;
         use selection_state::SelectionState;
 
@@ -565,14 +604,21 @@ impl WasmRenderer {
             .selections
             .iter()
             .find_map(|spec| match spec {
-                ferrum_scene::SelectionSpec::Point { name, fields, .. } if name == selection_name => {
+                ferrum_scene::SelectionSpec::Point { name, fields, .. }
+                    if name == selection_name =>
+                {
                     fields.as_ref().and_then(|f| f.first()).cloned()
                 }
                 _ => None,
             })
             .unwrap_or_else(|| "_legend".to_string());
 
-        let entry = (field_name, FieldValue::String { value: category.to_string() });
+        let entry = (
+            field_name,
+            FieldValue::String {
+                value: category.to_string(),
+            },
+        );
         let state = self
             .interaction_state
             .selections
@@ -689,9 +735,7 @@ impl WasmRenderer {
             if target_panel == source_panel {
                 continue;
             }
-            let (Some(src), Some(tgt)) =
-                (source, loaded.baked_panels.get(target_panel))
-            else {
+            let (Some(src), Some(tgt)) = (source, loaded.baked_panels.get(target_panel)) else {
                 continue;
             };
 
@@ -704,12 +748,24 @@ impl WasmRenderer {
             // same-panel targets are skipped above, so this inverts through
             // slot 0 — byte-identical to the pre-#52 crossfilter path.
             if let Some(r) = reproject_extent(
-                brush_x, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::X, 0,
+                brush_x,
+                &src.plot_area,
+                &src.coord,
+                &tgt.plot_area,
+                &tgt.coord,
+                Axis::X,
+                0,
             ) {
                 x_range = Some(r);
             }
             if let Some(r) = reproject_extent(
-                brush_y, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::Y, 0,
+                brush_y,
+                &src.plot_area,
+                &src.coord,
+                &tgt.plot_area,
+                &tgt.coord,
+                Axis::Y,
+                0,
             ) {
                 y_range = Some(r);
             }
@@ -730,8 +786,13 @@ impl WasmRenderer {
         }
 
         loaded.buffers.update_instances(&self.gpu, &circles, &rects);
-        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
-            .map_err(JsValue::from)?;
+        render::render_frame(
+            &self.gpu,
+            &self.pipelines,
+            &loaded.buffers,
+            loaded.data.background,
+        )
+        .map_err(JsValue::from)?;
         Ok(self.interaction_state.to_json())
     }
 
@@ -828,7 +889,13 @@ impl WasmRenderer {
             // any panel; y on a single-y panel) keeps the per-panel affine path,
             // byte-identical to the pre-#52 behavior.
             let slotted = axis == Axis::Y
-                && loaded.data.panel_slot_counts.get(panel).copied().unwrap_or(1) > 1;
+                && loaded
+                    .data
+                    .panel_slot_counts
+                    .get(panel)
+                    .copied()
+                    .unwrap_or(1)
+                    > 1;
             if slotted {
                 let idx = crate::scene_load::transform_slot_index(
                     &loaded.data.panel_slot_counts,
@@ -864,7 +931,9 @@ impl WasmRenderer {
     /// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.
     /// Delegates to `render::upload_transform_and_render`.
     fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
-        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let Some(loaded) = &self.loaded else {
+            return Ok("[]".to_string());
+        };
         // Baked geometry (D4a amendment addendum): the scissor/plot_area this
         // reads must already be at final on-screen position for a
         // ratio-fitted panel.
@@ -887,8 +956,6 @@ impl WasmRenderer {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,7 +971,12 @@ mod tests {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            color: Color {
+                r: 51,
+                g: 51,
+                b: 51,
+                a: 255,
+            },
             opacity: 1.0,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
@@ -939,7 +1011,12 @@ mod tests {
             font_size: 11.0,
             font_weight: FontWeight::Normal,
             font_family: "sans-serif".to_string(),
-            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            color: Color {
+                r: 51,
+                g: 51,
+                b: 51,
+                a: 255,
+            },
             opacity: 1.0,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
@@ -977,8 +1054,14 @@ mod tests {
         use ferrum_scene::{TooltipContent, TooltipField};
         let tooltip = TooltipContent {
             fields: vec![
-                TooltipField { name: "x".to_string(), value: "1.23".to_string() },
-                TooltipField { name: "y".to_string(), value: "4.56".to_string() },
+                TooltipField {
+                    name: "x".to_string(),
+                    value: "1.23".to_string(),
+                },
+                TooltipField {
+                    name: "y".to_string(),
+                    value: "4.56".to_string(),
+                },
             ],
         };
         let json = text_json::format_tooltip_content(&tooltip);
@@ -1030,16 +1113,29 @@ mod tests {
         // Build a panel with one packed batch (empty nodes).
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
                 y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
-                nodes: vec![],  // empty — packed batch
+                nodes: vec![], // empty — packed batch
                 data_indices: None,
                 tooltips: None,
                 hrefs: None,
@@ -1055,6 +1151,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let mut packed_meta = HashMap::new();
@@ -1072,22 +1170,37 @@ mod tests {
         let data = SceneData {
             circle_instances: vec![
                 CircleInstance {
-                    center: [100.0, 100.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    center: [100.0, 100.0],
+                    radius: 5.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
                 CircleInstance {
-                    center: [200.0, 200.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    center: [200.0, 200.0],
+                    radius: 5.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
                 CircleInstance {
-                    center: [300.0, 300.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    center: [300.0, 300.0],
+                    radius: 5.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
             ],
             rect_instances: vec![],
@@ -1109,11 +1222,17 @@ mod tests {
 
         // Build spatial index with packed data.
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
-        let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // Use the spatial-index-aware hit test (the same path hit_test_at uses).
         let result = hit_test::hit_test_nearest_with_index(
-            &panels, 100.0, 100.0, &zoom, Some(&idx), &hit_test::SlotRescalePlan::identity(),
+            &panels,
+            100.0,
+            100.0,
+            &zoom,
+            Some(&idx),
+            &hit_test::SlotRescalePlan::identity(),
         );
         let hr = result.expect("packed circle at (100,100) must be found via spatial index");
         assert_eq!(hr.panel_id, 0);
@@ -1123,7 +1242,12 @@ mod tests {
 
         // Also check the second packed circle.
         let result2 = hit_test::hit_test_nearest_with_index(
-            &panels, 200.0, 200.0, &zoom, Some(&idx), &hit_test::SlotRescalePlan::identity(),
+            &panels,
+            200.0,
+            200.0,
+            &zoom,
+            Some(&idx),
+            &hit_test::SlotRescalePlan::identity(),
         );
         let hr2 = result2.expect("packed circle at (200,200) must be found");
         assert_eq!(hr2.data_idx, Some(8));

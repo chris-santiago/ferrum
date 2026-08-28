@@ -284,7 +284,10 @@ mod tests {
             ..InteractionConfig::default()
         };
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("\"params\""), "non-empty params must serialize");
+        assert!(
+            json.contains("\"params\""),
+            "non-empty params must serialize"
+        );
         let parsed: InteractionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, config);
         assert_eq!(parsed.params.len(), 1);
@@ -296,7 +299,10 @@ mod tests {
     #[test]
     fn interaction_config_omits_empty_params() {
         let json = serde_json::to_string(&InteractionConfig::default()).unwrap();
-        assert!(!json.contains("params"), "empty params must be skipped: {json}");
+        assert!(
+            !json.contains("params"),
+            "empty params must be skipped: {json}"
+        );
     }
 
     /// Old JSON with no `params` key deserializes to an empty vec via the
@@ -337,17 +343,34 @@ mod tests {
     fn encoding_value_channel_maps_each_variant() {
         use crate::types::Color;
         assert_eq!(
-            EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } }.channel(),
+            EncodingValue::Color {
+                value: Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255
+                }
+            }
+            .channel(),
             ChannelName::Color
         );
-        assert_eq!(EncodingValue::Opacity { value: 0.5 }.channel(), ChannelName::Opacity);
-        assert_eq!(EncodingValue::Size { value: 10.0 }.channel(), ChannelName::Size);
+        assert_eq!(
+            EncodingValue::Opacity { value: 0.5 }.channel(),
+            ChannelName::Opacity
+        );
+        assert_eq!(
+            EncodingValue::Size { value: 10.0 }.channel(),
+            ChannelName::Size
+        );
         assert_eq!(
             EncodingValue::StrokeWidth { value: 2.0 }.channel(),
             ChannelName::StrokeWidth
         );
         assert_eq!(
-            EncodingValue::StrokeDash { value: vec![6.0, 3.0] }.channel(),
+            EncodingValue::StrokeDash {
+                value: vec![6.0, 3.0]
+            }
+            .channel(),
             ChannelName::StrokeDash
         );
         assert_eq!(
@@ -358,7 +381,10 @@ mod tests {
             EncodingValue::FillOpacity { value: 0.7 }.channel(),
             ChannelName::FillOpacity
         );
-        assert_eq!(EncodingValue::Angle { value: 45.0 }.channel(), ChannelName::Angle);
+        assert_eq!(
+            EncodingValue::Angle { value: 45.0 }.channel(),
+            ChannelName::Angle
+        );
         // Field carries no literal channel; it defaults to Color.
         assert_eq!(
             EncodingValue::Field { name: "g".into() }.channel(),

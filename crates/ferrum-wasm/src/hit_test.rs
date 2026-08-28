@@ -37,7 +37,10 @@ impl<'a> SlotRescalePlan<'a> {
     /// Identity plan: no rescales, no allocated slots. The byte-stability
     /// default for a single-y scene at rest.
     pub fn identity() -> Self {
-        Self { slot_rescales: &[], panel_slot_counts: &[] }
+        Self {
+            slot_rescales: &[],
+            panel_slot_counts: &[],
+        }
     }
 
     /// Combine this plan with one panel's resolved zoom/pan affine into the
@@ -83,8 +86,11 @@ fn slot_rescale_at(plan: &SlotRescalePlan, panel: usize, y_slot: usize) -> Affin
 /// rescaled-slot mark could be returned as "nearest" over a display-near
 /// identity-slot mark that was wrongly skipped).
 fn panel_has_active_rescale(plan: &SlotRescalePlan, panel: usize) -> bool {
-    crate::scene_load::panel_slot_range(plan.panel_slot_counts, panel)
-        .any(|idx| plan.slot_rescales.get(idx).is_some_and(|r| !r.is_identity()))
+    crate::scene_load::panel_slot_range(plan.panel_slot_counts, panel).any(|idx| {
+        plan.slot_rescales
+            .get(idx)
+            .is_some_and(|r| !r.is_identity())
+    })
 }
 
 /// Resolve the `data_idx` for a spatial-index hit result.
@@ -160,7 +166,8 @@ pub fn hit_test_with_index(
             if let Some(entry) =
                 idx.hit_test_slot_aware(panel_pos, x, y, 0.0, &plan.with_panel_affine(panel_affine))
             {
-                let data_idx = resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
+                let data_idx =
+                    resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
                 return Some(HitResult {
                     panel_id: panel_pos,
                     batch_idx: entry.batch_idx,
@@ -184,7 +191,11 @@ pub fn hit_test_with_index(
             // above — skip it. Once any slot in this panel is rescaled,
             // identity-slot batches must re-enter the scan too (mixed-panel
             // shadowing guard, GH #73).
-            if spatial_index.is_some() && is_indexed_kind(batch.kind) && rescale.is_identity() && !panel_rescaled {
+            if spatial_index.is_some()
+                && is_indexed_kind(batch.kind)
+                && rescale.is_identity()
+                && !panel_rescaled
+            {
                 continue;
             }
             let (bx, by) = compose_panel_slot(panel_affine, rescale).inverse_apply(x, y);
@@ -251,15 +262,19 @@ pub fn hit_test_nearest_with_index(
             if let Some((entry, dist)) =
                 idx.nearest_slot_aware(panel_pos, x, y, &plan.with_panel_affine(panel_affine))
             {
-                let data_idx = resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
+                let data_idx =
+                    resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
                 let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
                 if is_closer {
-                    best = Some((dist, HitResult {
-                        panel_id: panel_pos,
-                        batch_idx: entry.batch_idx,
-                        node_idx: entry.node_idx,
-                        data_idx,
-                    }));
+                    best = Some((
+                        dist,
+                        HitResult {
+                            panel_id: panel_pos,
+                            batch_idx: entry.batch_idx,
+                            node_idx: entry.node_idx,
+                            data_idx,
+                        },
+                    ));
                 }
             }
         }
@@ -285,7 +300,11 @@ pub fn hit_test_nearest_with_index(
         // (byte-stable fast path).
         for (bi, batch) in panel.marks.iter().enumerate() {
             let rescale = slot_rescale_at(plan, panel_pos, batch.y_slot);
-            if spatial_index.is_some() && is_indexed_kind(batch.kind) && rescale.is_identity() && !panel_rescaled {
+            if spatial_index.is_some()
+                && is_indexed_kind(batch.kind)
+                && rescale.is_identity()
+                && !panel_rescaled
+            {
                 continue;
             }
             let (bx, by) = compose_panel_slot(panel_affine, rescale).inverse_apply(x, y);
@@ -316,9 +335,7 @@ fn nearest_in_batch(batch: &MarkBatch, x: f64, y: f64) -> Option<(usize, f64)> {
     let mut best: Option<(usize, f64)> = None;
     for (i, node) in batch.nodes.iter().enumerate() {
         let dist = match node {
-            SceneNode::Circle { cx, cy, .. } => {
-                ((x - cx).powi(2) + (y - cy).powi(2)).sqrt()
-            }
+            SceneNode::Circle { cx, cy, .. } => ((x - cx).powi(2) + (y - cy).powi(2)).sqrt(),
             SceneNode::Rect {
                 x: rx, y: ry, w, h, ..
             } => {
@@ -375,11 +392,7 @@ fn hit_test_circles(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
 fn hit_test_rects(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
     for (i, node) in nodes.iter().enumerate().rev() {
         if let SceneNode::Rect {
-            x: rx,
-            y: ry,
-            w,
-            h,
-            ..
+            x: rx, y: ry, w, h, ..
         } = node
         {
             if x >= *rx && x <= rx + w && y >= *ry && y <= ry + h {
@@ -424,9 +437,11 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
             // MoveTo/LineTo vertices and run point-in-polygon. Curves are
             // approximated by their endpoints, which is sufficient for tooltip
             // hit-testing on smooth CI bands.
-            SceneNode::Path { commands, style, closed }
-                if *closed && style.fill.is_some() =>
-            {
+            SceneNode::Path {
+                commands,
+                style,
+                closed,
+            } if *closed && style.fill.is_some() => {
                 let vertices: Vec<[f64; 2]> = commands
                     .iter()
                     .filter_map(|cmd| match cmd {
@@ -451,7 +466,13 @@ fn hit_test_lines(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
 /// click anywhere within the approximate glyph cell counts as a hit.
 fn hit_test_texts(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
     for (i, node) in nodes.iter().enumerate().rev() {
-        if let SceneNode::Text { x: tx, y: ty, style, .. } = node {
+        if let SceneNode::Text {
+            x: tx,
+            y: ty,
+            style,
+            ..
+        } = node
+        {
             let half = style.font_size.max(4.0);
             if (x - tx).abs() <= half && (y - ty).abs() <= half {
                 return Some(i);
@@ -466,7 +487,10 @@ fn hit_test_texts(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
 /// cannot be reused here.
 fn hit_test_images(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
     for (i, node) in nodes.iter().enumerate().rev() {
-        if let SceneNode::Image { x: ix, y: iy, w, h, .. } = node {
+        if let SceneNode::Image {
+            x: ix, y: iy, w, h, ..
+        } = node
+        {
             if x >= *ix && x <= ix + w && y >= *iy && y <= iy + h {
                 return Some(i);
             }
@@ -483,11 +507,15 @@ fn hit_test_polar_arcs(
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    use std::f64::consts::TAU;
     use ferrum_scene::CoordKind;
+    use std::f64::consts::TAU;
 
     let (inner_r, outer_r) = match &panel.coord {
-        CoordKind::Polar { inner_radius, outer_radius, .. } => (*inner_radius, *outer_radius),
+        CoordKind::Polar {
+            inner_radius,
+            outer_radius,
+            ..
+        } => (*inner_radius, *outer_radius),
         _ => return None,
     };
     let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
@@ -497,10 +525,14 @@ fn hit_test_polar_arcs(
         return None;
     }
     let mut theta = (x - cx).atan2(-(y - cy)); // clockwise from top, [-π, π]
-    if theta < 0.0 { theta += TAU; }
+    if theta < 0.0 {
+        theta += TAU;
+    }
 
     for (i, node) in nodes.iter().enumerate().rev() {
-        let SceneNode::Path { commands, .. } = node else { continue };
+        let SceneNode::Path { commands, .. } = node else {
+            continue;
+        };
         // Extract start angle from first MoveTo, end angle from first ArcTo.
         let mut start_theta: Option<f64> = None;
         let mut end_theta: Option<f64> = None;
@@ -508,12 +540,16 @@ fn hit_test_polar_arcs(
             match cmd {
                 ferrum_scene::PathCmd::MoveTo { x: mx, y: my } if start_theta.is_none() => {
                     let mut t = (*mx - cx).atan2(-(*my - cy));
-                    if t < 0.0 { t += TAU; }
+                    if t < 0.0 {
+                        t += TAU;
+                    }
                     start_theta = Some(t);
                 }
                 ferrum_scene::PathCmd::ArcTo { x: ax, y: ay, .. } if end_theta.is_none() => {
                     let mut t = (*ax - cx).atan2(-(*ay - cy));
-                    if t < 0.0 { t += TAU; }
+                    if t < 0.0 {
+                        t += TAU;
+                    }
                     end_theta = Some(t);
                     break;
                 }
@@ -551,7 +587,9 @@ fn dist_to_segment(px: f64, py: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64 
 
 fn point_in_polygon(px: f64, py: f64, vertices: &[[f64; 2]]) -> bool {
     let n = vertices.len();
-    if n == 0 { return false; }
+    if n == 0 {
+        return false;
+    }
     let mut inside = false;
     let mut j = n - 1;
     for i in 0..n {
@@ -580,7 +618,12 @@ mod bug_hunt_interactive_slots {
 
     fn fill() -> FillStroke {
         FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -592,12 +635,20 @@ mod bug_hunt_interactive_slots {
     }
 
     fn circle(cx: f64, cy: f64, r: f64) -> SceneNode {
-        SceneNode::Circle { cx, cy, r, style: fill() }
+        SceneNode::Circle {
+            cx,
+            cy,
+            r,
+            style: fill(),
+        }
     }
 
     fn tooltip(field: &str, value: &str) -> TooltipContent {
         TooltipContent {
-            fields: vec![TooltipField { name: field.to_string(), value: value.to_string() }],
+            fields: vec![TooltipField {
+                name: field.to_string(),
+                value: value.to_string(),
+            }],
         }
     }
 
@@ -623,8 +674,18 @@ mod bug_hunt_interactive_slots {
     fn dual_slot_panel(c0: (f64, f64), c1: (f64, f64)) -> Vec<Panel> {
         vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: Some((0.0, 10.0)),
                 y_domain: Some((0.0, 100.0)),
@@ -641,6 +702,8 @@ mod bug_hunt_interactive_slots {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }]
     }
 
@@ -658,7 +721,17 @@ mod bug_hunt_interactive_slots {
         let panels = dual_slot_panel((100.0, 100.0), (100.0, 100.0)); // exact overlap
         let zoom = identity_zoom();
         // The panel allocates two y-slots; rescales are all identity (at rest).
-        let hit = hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan { slot_rescales: &[], panel_slot_counts: &[2] }).expect("overlap must hit");
+        let hit = hit_test(
+            &panels,
+            100.0,
+            100.0,
+            &zoom,
+            &SlotRescalePlan {
+                slot_rescales: &[],
+                panel_slot_counts: &[2],
+            },
+        )
+        .expect("overlap must hit");
         assert_eq!(hit.batch_idx, 1, "topmost (slot-1) batch must win the hit");
         // The tooltip the runtime would serve for this hit is the slot-1 layer's.
         let tip = panels[0].marks[hit.batch_idx]
@@ -666,7 +739,10 @@ mod bug_hunt_interactive_slots {
             .as_ref()
             .and_then(|t| t.get(hit.node_idx))
             .expect("slot-1 batch tooltip present");
-        assert_eq!(tip.fields[0].name, "y2", "hit must resolve the slot-1 layer's tooltip");
+        assert_eq!(
+            tip.fields[0].name, "y2",
+            "hit must resolve the slot-1 layer's tooltip"
+        );
         assert_eq!(tip.fields[0].value, "secondary");
     }
 
@@ -679,7 +755,17 @@ mod bug_hunt_interactive_slots {
         let zoom = identity_zoom();
         // Two allocated slots, all rescales identity: slot-1 hit-tests exactly
         // like slot-0 (byte-stability control).
-        let hit = hit_test(&panels, 300.0, 300.0, &zoom, &SlotRescalePlan { slot_rescales: &[], panel_slot_counts: &[2] }).expect("slot-1 mark must hit at rest");
+        let hit = hit_test(
+            &panels,
+            300.0,
+            300.0,
+            &zoom,
+            &SlotRescalePlan {
+                slot_rescales: &[],
+                panel_slot_counts: &[2],
+            },
+        )
+        .expect("slot-1 mark must hit at rest");
         assert_eq!(hit.batch_idx, 1);
         assert_eq!(hit.data_idx, Some(0));
     }
@@ -689,10 +775,18 @@ mod bug_hunt_interactive_slots {
     /// slotted branch writes for a domainParam/brush bound to the independent-y
     /// layer (GH #52). Returned as `(panel_slot_counts, slot_rescales)`.
     fn slot1_rescaled() -> (Vec<usize>, Vec<crate::zoom_pan::Affine2>) {
-        let slot_rescale = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let slot_rescale = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         // Flat-indexed by `transform_slot_index([2], panel=0, y_slot)`: slot 0
         // identity, slot 1 the rescale.
-        (vec![2], vec![crate::zoom_pan::Affine2::identity(), slot_rescale])
+        (
+            vec![2],
+            vec![crate::zoom_pan::Affine2::identity(), slot_rescale],
+        )
     }
 
     /// After a per-slot domain rescale (domainParam/brush bound to the
@@ -713,9 +807,22 @@ mod bug_hunt_interactive_slots {
         );
         // The GPU draws the slot-1 mark (scene y=100) at the composed position.
         let (disp_x, disp_y) = composed.apply(200.0, 100.0);
-        assert_eq!((disp_x, disp_y), (200.0, 200.0), "fixture sanity: displayed at (200, 200)");
+        assert_eq!(
+            (disp_x, disp_y),
+            (200.0, 200.0),
+            "fixture sanity: displayed at (200, 200)"
+        );
 
-        let hit = hit_test(&panels, disp_x, disp_y, &zoom, &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts });
+        let hit = hit_test(
+            &panels,
+            disp_x,
+            disp_y,
+            &zoom,
+            &SlotRescalePlan {
+                slot_rescales: &slot_rescales,
+                panel_slot_counts: &counts,
+            },
+        );
         assert!(
             hit.is_some(),
             "click at the DISPLAYED (slot-rescaled) position of a slot-1 mark must hit"
@@ -735,7 +842,16 @@ mod bug_hunt_interactive_slots {
         // With the slot rescale threaded through, (200, 100) re-inverts through
         // the slot-1 affine to scene (200, 50) — 50px above the mark at
         // (200, 100) — so nothing is hit there any more.
-        let hit = hit_test(&panels, 200.0, 100.0, &zoom, &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts });
+        let hit = hit_test(
+            &panels,
+            200.0,
+            100.0,
+            &zoom,
+            &SlotRescalePlan {
+                slot_rescales: &slot_rescales,
+                panel_slot_counts: &counts,
+            },
+        );
         assert!(
             hit.is_none(),
             "the stale pre-rescale position must miss once hit-testing is slot-aware"
@@ -767,7 +883,15 @@ mod bug_hunt_interactive_slots {
         let (counts, slot_rescales) = slot1_rescaled();
 
         let hit = hit_test_with_index(
-            &panels, 200.0, 100.0, &zoom, Some(&idx), &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts },
+            &panels,
+            200.0,
+            100.0,
+            &zoom,
+            Some(&idx),
+            &SlotRescalePlan {
+                slot_rescales: &slot_rescales,
+                panel_slot_counts: &counts,
+            },
         );
         assert!(
             hit.is_none(),
@@ -796,7 +920,15 @@ mod bug_hunt_interactive_slots {
         assert_eq!((disp_x, disp_y), (200.0, 200.0), "fixture sanity");
 
         let hit = hit_test_with_index(
-            &panels, disp_x, disp_y, &zoom, Some(&idx), &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts },
+            &panels,
+            disp_x,
+            disp_y,
+            &zoom,
+            Some(&idx),
+            &SlotRescalePlan {
+                slot_rescales: &slot_rescales,
+                panel_slot_counts: &counts,
+            },
         )
         .expect("click at the displayed position must hit via the R-tree/linear fallthrough");
         assert_eq!(hit.batch_idx, 1);
@@ -829,7 +961,15 @@ mod bug_hunt_interactive_slots {
         let (counts, slot_rescales) = slot1_rescaled();
 
         let hit = hit_test_nearest_with_index(
-            &panels, 100.0, 100.0, &zoom, Some(&idx), &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts },
+            &panels,
+            100.0,
+            100.0,
+            &zoom,
+            Some(&idx),
+            &SlotRescalePlan {
+                slot_rescales: &slot_rescales,
+                panel_slot_counts: &counts,
+            },
         )
         .expect("must find a nearest mark");
         assert_eq!(
@@ -852,7 +992,12 @@ mod bug_hunt_tests {
             cy,
             r,
             style: ferrum_scene::FillStroke {
-                fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+                fill: Some(ferrum_scene::Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
                 stroke: None,
                 stroke_width: 0.0,
                 opacity: 1.0,
@@ -901,10 +1046,22 @@ mod bug_hunt_tests {
             corner_radius: 0.0,
         }];
         // All four corners
-        assert!(hit_test_rects(&nodes, 10.0, 20.0).is_some(), "top-left corner");
-        assert!(hit_test_rects(&nodes, 60.0, 20.0).is_some(), "top-right corner");
-        assert!(hit_test_rects(&nodes, 10.0, 50.0).is_some(), "bottom-left corner");
-        assert!(hit_test_rects(&nodes, 60.0, 50.0).is_some(), "bottom-right corner");
+        assert!(
+            hit_test_rects(&nodes, 10.0, 20.0).is_some(),
+            "top-left corner"
+        );
+        assert!(
+            hit_test_rects(&nodes, 60.0, 20.0).is_some(),
+            "top-right corner"
+        );
+        assert!(
+            hit_test_rects(&nodes, 10.0, 50.0).is_some(),
+            "bottom-left corner"
+        );
+        assert!(
+            hit_test_rects(&nodes, 60.0, 50.0).is_some(),
+            "bottom-right corner"
+        );
     }
 
     #[test]
@@ -947,12 +1104,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_polygon_point_on_edge_is_ambiguous_but_no_panic() {
         // A point exactly on the polygon edge must not panic.
-        let square = vec![
-            [0.0, 0.0],
-            [10.0, 0.0],
-            [10.0, 10.0],
-            [0.0, 10.0],
-        ];
+        let square = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
         // This just checks it doesn't panic; edge behaviour is implementation-defined.
         let _ = point_in_polygon(5.0, 0.0, &square);
     }
@@ -968,13 +1120,14 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_hit_test_circles_last_in_list_wins() {
         // Overlapping circles: the later one in the list (rendered on top) should win
-        let nodes = vec![
-            make_circle(50.0, 50.0, 10.0),
-            make_circle(50.0, 50.0, 10.0),
-        ];
+        let nodes = vec![make_circle(50.0, 50.0, 10.0), make_circle(50.0, 50.0, 10.0)];
         // hit_test_circles iterates in reverse, so the LAST node (idx 1) should win
         let result = hit_test_circles(&nodes, 50.0, 50.0);
-        assert_eq!(result, Some(1), "last (topmost) overlapping circle must win");
+        assert_eq!(
+            result,
+            Some(1),
+            "last (topmost) overlapping circle must win"
+        );
     }
 
     #[test]
@@ -1008,7 +1161,12 @@ mod bug_hunt_tests {
             BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let style = FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1019,15 +1177,41 @@ mod bug_hunt_tests {
         };
         vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    SceneNode::Circle { cx: c1.0, cy: c1.1, r: 5.0, style: style.clone() },
-                    SceneNode::Circle { cx: c2.0, cy: c2.1, r: 5.0, style: style.clone() },
+                    SceneNode::Circle {
+                        cx: c1.0,
+                        cy: c1.1,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: c2.0,
+                        cy: c2.1,
+                        r: 5.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1]),
                 tooltips: None,
@@ -1044,6 +1228,8 @@ mod bug_hunt_tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }]
     }
 
@@ -1067,7 +1253,11 @@ mod bug_hunt_tests {
         let zoom = identity_zoom_n(1);
         let result = hit_test_nearest(&panels, 110.0, 100.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark");
-        assert_eq!(r.data_idx, Some(0), "circle at (100,100) must be nearest to (110,100)");
+        assert_eq!(
+            r.data_idx,
+            Some(0),
+            "circle at (100,100) must be nearest to (110,100)"
+        );
     }
 
     #[test]
@@ -1077,7 +1267,11 @@ mod bug_hunt_tests {
         let zoom = identity_zoom_n(1);
         let result = hit_test_nearest(&panels, 295.0, 295.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark");
-        assert_eq!(r.data_idx, Some(1), "circle at (300,300) must be nearest to (295,295)");
+        assert_eq!(
+            r.data_idx,
+            Some(1),
+            "circle at (300,300) must be nearest to (295,295)"
+        );
     }
 
     #[test]
@@ -1086,7 +1280,10 @@ mod bug_hunt_tests {
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = identity_zoom_n(1);
         let result = hit_test_nearest(&panels, -50.0, 250.0, &zoom, &SlotRescalePlan::identity());
-        assert!(result.is_none(), "click outside plot_area must miss even for nearest");
+        assert!(
+            result.is_none(),
+            "click outside plot_area must miss even for nearest"
+        );
     }
 
     #[test]
@@ -1106,19 +1303,40 @@ mod bug_hunt_tests {
         use ferrum_scene::{CoordKind, LayoutScale, Panel, Rect};
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
-            marks: vec![],  // no marks
+            marks: vec![], // no marks
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
         let zoom = identity_zoom_n(1);
         let result = hit_test_nearest(&panels, 250.0, 250.0, &zoom, &SlotRescalePlan::identity());
-        assert!(result.is_none(), "panel with no marks must yield None for nearest");
+        assert!(
+            result.is_none(),
+            "panel with no marks must yield None for nearest"
+        );
     }
 
     #[test]
@@ -1127,7 +1345,8 @@ mod bug_hunt_tests {
         let panels = make_panel_two_circles((200.0, 200.0), (400.0, 200.0));
         let zoom = identity_zoom_n(1);
         // Click just next to first circle
-        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity()).expect("must hit");
+        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity())
+            .expect("must hit");
         assert_eq!(result.data_idx, Some(0));
     }
 
@@ -1150,11 +1369,17 @@ mod bug_hunt_tests {
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = zoom_with_n(1, 2.0, 2.0, 50.0, 30.0);
         let hit_at_visual = hit_test(&panels, 250.0, 230.0, &zoom, &SlotRescalePlan::identity());
-        assert!(hit_at_visual.is_some(), "click at zoomed+translated visual pos must hit");
+        assert!(
+            hit_at_visual.is_some(),
+            "click at zoomed+translated visual pos must hit"
+        );
         assert_eq!(hit_at_visual.as_ref().map(|h| h.data_idx), Some(Some(0)));
 
         let miss_at_original = hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity());
-        assert!(miss_at_original.is_none(), "click at pre-zoom pos must miss");
+        assert!(
+            miss_at_original.is_none(),
+            "click at pre-zoom pos must miss"
+        );
     }
 
     #[test]
@@ -1165,7 +1390,11 @@ mod bug_hunt_tests {
         let zoom = zoom_with_n(1, 2.0, 2.0, 0.0, 0.0);
         let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark under zoom");
-        assert_eq!(r.data_idx, Some(0), "canvas (200,200) / scene (100,100) must be nearest to circle 0");
+        assert_eq!(
+            r.data_idx,
+            Some(0),
+            "canvas (200,200) / scene (100,100) must be nearest to circle 0"
+        );
     }
 
     #[test]
@@ -1177,7 +1406,11 @@ mod bug_hunt_tests {
         let zoom = zoom_with_n(1, 0.5, 0.5, 0.0, 0.0);
         let result = hit_test_nearest(&panels, 145.0, 145.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark");
-        assert_eq!(r.data_idx, Some(1), "canvas (145,145) / scene (290,290) nearest to circle 1");
+        assert_eq!(
+            r.data_idx,
+            Some(1),
+            "canvas (145,145) / scene (290,290) nearest to circle 1"
+        );
     }
 
     #[test]
@@ -1198,51 +1431,133 @@ mod bug_hunt_tests {
             BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let style = FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
-            stroke: None, stroke_width: 0.0, opacity: 1.0,
-            stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0,
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
         };
         let panels = vec![
             Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
-                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
-                grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                    y_domains: Vec::new(),
+                },
+                grid: vec![],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
-                    nodes: vec![SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() }],
-                    data_indices: Some(vec![0]), tooltips: None, hrefs: None, keys: None,
-                    blend: BlendMode::Normal, descriptions: None,
-                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                    nodes: vec![SceneNode::Circle {
+                        cx: 100.0,
+                        cy: 100.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    }],
+                    data_indices: Some(vec![0]),
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
                     y_slot: 0,
                 }],
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             },
             Panel {
                 id: 1,
-                plot_area: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
-                clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
-                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
-                grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                plot_area: Rect {
+                    x: 250.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
+                clip: Rect {
+                    x: 250.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                    y_domains: Vec::new(),
+                },
+                grid: vec![],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
-                    nodes: vec![SceneNode::Circle { cx: 350.0, cy: 100.0, r: 5.0, style: style.clone() }],
-                    data_indices: Some(vec![10]), tooltips: None, hrefs: None, keys: None,
-                    blend: BlendMode::Normal, descriptions: None,
-                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                    nodes: vec![SceneNode::Circle {
+                        cx: 350.0,
+                        cy: 100.0,
+                        r: 5.0,
+                        style: style.clone(),
+                    }],
+                    data_indices: Some(vec![10]),
+                    tooltips: None,
+                    hrefs: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    descriptions: None,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
                     y_slot: 0,
                 }],
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             },
         ];
         let config = ferrum_scene::InteractionConfig::default();
         let mut zoom = crate::zoom_pan::ZoomPanState::new(2, &config);
         // Zoom panel 0 to 2x; panel 1 stays identity
-        zoom.transforms[0] = crate::zoom_pan::Affine2 { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        zoom.transforms[0] = crate::zoom_pan::Affine2 {
+            sx: 2.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
         // Click at panel 1's circle at identity position (350, 100)
         let result = hit_test(&panels, 350.0, 100.0, &zoom, &SlotRescalePlan::identity());
-        assert!(result.is_some(), "panel 1 click at identity position must hit");
+        assert!(
+            result.is_some(),
+            "panel 1 click at identity position must hit"
+        );
         assert_eq!(result.as_ref().map(|h| h.panel_id), Some(1));
     }
 
@@ -1250,7 +1565,12 @@ mod bug_hunt_tests {
 
     fn stroke_style() -> ferrum_scene::StrokeStyle {
         ferrum_scene::StrokeStyle {
-            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            color: ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 1.0,
             opacity: 1.0,
             stroke_opacity: 1.0,
@@ -1262,7 +1582,12 @@ mod bug_hunt_tests {
 
     fn fill_stroke_with_fill() -> ferrum_scene::FillStroke {
         ferrum_scene::FillStroke {
-            fill: Some(ferrum_scene::Color { r: 100, g: 100, b: 100, a: 200 }),
+            fill: Some(ferrum_scene::Color {
+                r: 100,
+                g: 100,
+                b: 100,
+                a: 200,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1280,7 +1605,12 @@ mod bug_hunt_tests {
             anchor: ferrum_scene::TextAnchor::Middle,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle: 0.0,
-            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            color: ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "sans-serif".into(),
         }
@@ -1290,105 +1620,181 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_tick_hit_test_hits_line() {
         let nodes = vec![SceneNode::Line {
-            x1: 50.0, y1: 90.0, x2: 50.0, y2: 100.0,
+            x1: 50.0,
+            y1: 90.0,
+            x2: 50.0,
+            y2: 100.0,
             style: stroke_style(),
         }];
         // Click directly on the tick line — should hit.
-        assert!(hit_test_lines(&nodes, 50.0, 95.0).is_some(), "tick line must be hit");
+        assert!(
+            hit_test_lines(&nodes, 50.0, 95.0).is_some(),
+            "tick line must be hit"
+        );
         // Click far away — should miss.
-        assert!(hit_test_lines(&nodes, 200.0, 200.0).is_none(), "miss expected");
+        assert!(
+            hit_test_lines(&nodes, 200.0, 200.0).is_none(),
+            "miss expected"
+        );
     }
 
     #[test]
     fn bug_hunt_tick_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
             marks: vec![],
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Tick,
             nodes: vec![SceneNode::Line {
-                x1: 50.0, y1: 90.0, x2: 50.0, y2: 100.0,
+                x1: 50.0,
+                y1: 90.0,
+                x2: 50.0,
+                y2: 100.0,
                 style: stroke_style(),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None, hrefs: None, keys: None,
+            tooltips: None,
+            hrefs: None,
+            keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None, packed_instances: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
             y_slot: 0,
         };
-        assert!(hit_test_batch(&batch, &panel, 50.0, 95.0).is_some(),
-            "Tick batch must route to hit_test_lines and return a hit");
+        assert!(
+            hit_test_batch(&batch, &panel, 50.0, 95.0).is_some(),
+            "Tick batch must route to hit_test_lines and return a hit"
+        );
     }
 
     // Text — emits Text nodes; proximity check using font_size as tolerance.
     #[test]
     fn bug_hunt_text_hit_inside_font_box() {
         let nodes = vec![SceneNode::Text {
-            x: 100.0, y: 100.0,
+            x: 100.0,
+            y: 100.0,
             content: "hello".into(),
             slot: None,
             style: text_style(12.0),
         }];
         // Click within font_size radius of anchor — should hit.
-        assert!(hit_test_texts(&nodes, 105.0, 105.0).is_some(), "text hit inside box expected");
+        assert!(
+            hit_test_texts(&nodes, 105.0, 105.0).is_some(),
+            "text hit inside box expected"
+        );
         // Click far outside — should miss.
-        assert!(hit_test_texts(&nodes, 200.0, 200.0).is_none(), "miss expected");
+        assert!(
+            hit_test_texts(&nodes, 200.0, 200.0).is_none(),
+            "miss expected"
+        );
     }
 
     #[test]
     fn bug_hunt_text_hit_on_anchor_exact() {
         let nodes = vec![SceneNode::Text {
-            x: 50.0, y: 50.0,
+            x: 50.0,
+            y: 50.0,
             content: "label".into(),
             slot: None,
             style: text_style(16.0),
         }];
-        assert!(hit_test_texts(&nodes, 50.0, 50.0).is_some(), "click exactly on anchor must hit");
+        assert!(
+            hit_test_texts(&nodes, 50.0, 50.0).is_some(),
+            "click exactly on anchor must hit"
+        );
     }
 
     #[test]
     fn bug_hunt_text_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
             marks: vec![],
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Text,
             nodes: vec![SceneNode::Text {
-                x: 100.0, y: 100.0,
+                x: 100.0,
+                y: 100.0,
                 content: "label".into(),
                 slot: None,
                 style: text_style(14.0),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None, hrefs: None, keys: None,
+            tooltips: None,
+            hrefs: None,
+            keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None, packed_instances: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
             y_slot: 0,
         };
-        assert!(hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
-            "Text batch must route to hit_test_texts and return a hit on anchor");
+        assert!(
+            hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
+            "Text batch must route to hit_test_texts and return a hit on anchor"
+        );
     }
 
     // Ribbon — emits closed filled Path nodes; point-in-polygon via hit_test_lines.
@@ -1396,10 +1802,10 @@ mod bug_hunt_tests {
     fn bug_hunt_ribbon_hit_inside_closed_path() {
         // Build a simple rectangular closed path: (0,0)→(100,0)→(100,50)→(0,50)→Close.
         let commands = vec![
-            ferrum_scene::PathCmd::MoveTo { x: 0.0,   y: 0.0  },
-            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 0.0  },
+            ferrum_scene::PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 0.0 },
             ferrum_scene::PathCmd::LineTo { x: 100.0, y: 50.0 },
-            ferrum_scene::PathCmd::LineTo { x: 0.0,   y: 50.0 },
+            ferrum_scene::PathCmd::LineTo { x: 0.0, y: 50.0 },
             ferrum_scene::PathCmd::Close,
         ];
         let nodes = vec![SceneNode::Path {
@@ -1408,9 +1814,15 @@ mod bug_hunt_tests {
             closed: true,
         }];
         // Click inside the band.
-        assert!(hit_test_lines(&nodes, 50.0, 25.0).is_some(), "click inside ribbon band must hit");
+        assert!(
+            hit_test_lines(&nodes, 50.0, 25.0).is_some(),
+            "click inside ribbon band must hit"
+        );
         // Click outside.
-        assert!(hit_test_lines(&nodes, 200.0, 200.0).is_none(), "click outside ribbon must miss");
+        assert!(
+            hit_test_lines(&nodes, 200.0, 200.0).is_none(),
+            "click outside ribbon must miss"
+        );
     }
 
     #[test]
@@ -1418,17 +1830,22 @@ mod bug_hunt_tests {
         // An unfilled (stroke-only) closed path should NOT hit on interior click —
         // only the outline would be tested, and a click far from the border misses.
         let commands = vec![
-            ferrum_scene::PathCmd::MoveTo { x: 0.0,   y: 0.0  },
-            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 0.0  },
+            ferrum_scene::PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            ferrum_scene::PathCmd::LineTo { x: 100.0, y: 0.0 },
             ferrum_scene::PathCmd::LineTo { x: 100.0, y: 50.0 },
-            ferrum_scene::PathCmd::LineTo { x: 0.0,   y: 50.0 },
+            ferrum_scene::PathCmd::LineTo { x: 0.0, y: 50.0 },
             ferrum_scene::PathCmd::Close,
         ];
         let nodes = vec![SceneNode::Path {
             commands,
             style: ferrum_scene::FillStroke {
-                fill: None,  // stroke-only
-                stroke: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+                fill: None, // stroke-only
+                stroke: Some(ferrum_scene::Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
                 stroke_width: 1.0,
                 opacity: 1.0,
                 stroke_dash: None,
@@ -1439,24 +1856,46 @@ mod bug_hunt_tests {
             closed: true,
         }];
         // Interior click should miss an unfilled path (no point-in-polygon).
-        assert!(hit_test_lines(&nodes, 50.0, 25.0).is_none(),
-            "interior click on unfilled path must miss");
+        assert!(
+            hit_test_lines(&nodes, 50.0, 25.0).is_none(),
+            "interior click on unfilled path must miss"
+        );
     }
 
     #[test]
     fn bug_hunt_ribbon_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
             marks: vec![],
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let commands = vec![
             ferrum_scene::PathCmd::MoveTo { x: 10.0, y: 10.0 },
@@ -1473,120 +1912,220 @@ mod bug_hunt_tests {
                 closed: true,
             }],
             data_indices: Some(vec![0]),
-            tooltips: None, hrefs: None, keys: None,
+            tooltips: None,
+            hrefs: None,
+            keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None, packed_instances: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
             y_slot: 0,
         };
-        assert!(hit_test_batch(&batch, &panel, 100.0, 50.0).is_some(),
-            "Ribbon batch must hit inside filled closed path");
+        assert!(
+            hit_test_batch(&batch, &panel, 100.0, 50.0).is_some(),
+            "Ribbon batch must hit inside filled closed path"
+        );
     }
 
     // Segment — emits Line nodes (same as Rule/Tick); routes to hit_test_lines.
     #[test]
     fn bug_hunt_segment_hit_on_diagonal_line() {
         let nodes = vec![SceneNode::Line {
-            x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0,
+            x1: 0.0,
+            y1: 0.0,
+            x2: 100.0,
+            y2: 100.0,
             style: stroke_style(),
         }];
         // Click very close to the midpoint of the diagonal.
-        assert!(hit_test_lines(&nodes, 50.0, 50.0).is_some(), "midpoint click on diagonal must hit");
+        assert!(
+            hit_test_lines(&nodes, 50.0, 50.0).is_some(),
+            "midpoint click on diagonal must hit"
+        );
         // Click well off the line.
-        assert!(hit_test_lines(&nodes, 50.0, 150.0).is_none(), "off-diagonal miss expected");
+        assert!(
+            hit_test_lines(&nodes, 50.0, 150.0).is_none(),
+            "off-diagonal miss expected"
+        );
     }
 
     #[test]
     fn bug_hunt_segment_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
             marks: vec![],
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Segment,
             nodes: vec![SceneNode::Line {
-                x1: 10.0, y1: 10.0, x2: 200.0, y2: 200.0,
+                x1: 10.0,
+                y1: 10.0,
+                x2: 200.0,
+                y2: 200.0,
                 style: stroke_style(),
             }],
             data_indices: Some(vec![0]),
-            tooltips: None, hrefs: None, keys: None,
+            tooltips: None,
+            hrefs: None,
+            keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None, packed_instances: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
             y_slot: 0,
         };
-        assert!(hit_test_batch(&batch, &panel, 105.0, 105.0).is_some(),
-            "Segment batch must route to hit_test_lines and return a hit near midpoint");
+        assert!(
+            hit_test_batch(&batch, &panel, 105.0, 105.0).is_some(),
+            "Segment batch must route to hit_test_lines and return a hit near midpoint"
+        );
     }
 
     // Image — emits Image nodes with x/y/w/h bbox; routes to hit_test_images.
     #[test]
     fn bug_hunt_image_hit_inside_bbox() {
         let nodes = vec![SceneNode::Image {
-            x: 10.0, y: 20.0, w: 80.0, h: 60.0,
-            data: ferrum_scene::ImageData::Url { url: "data:image/png;base64,abc".into() },
+            x: 10.0,
+            y: 20.0,
+            w: 80.0,
+            h: 60.0,
+            data: ferrum_scene::ImageData::Url {
+                url: "data:image/png;base64,abc".into(),
+            },
         }];
         // Click inside the image rect.
-        assert!(hit_test_images(&nodes, 50.0, 50.0).is_some(), "click inside image must hit");
+        assert!(
+            hit_test_images(&nodes, 50.0, 50.0).is_some(),
+            "click inside image must hit"
+        );
         // Click outside.
-        assert!(hit_test_images(&nodes, 200.0, 200.0).is_none(), "click outside image must miss");
+        assert!(
+            hit_test_images(&nodes, 200.0, 200.0).is_none(),
+            "click outside image must miss"
+        );
     }
 
     #[test]
     fn bug_hunt_image_hit_on_boundary() {
         let nodes = vec![SceneNode::Image {
-            x: 0.0, y: 0.0, w: 100.0, h: 100.0,
-            data: ferrum_scene::ImageData::Url { url: "data:image/png;base64,abc".into() },
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            data: ferrum_scene::ImageData::Url {
+                url: "data:image/png;base64,abc".into(),
+            },
         }];
         // Corners should be included (<=, not <).
-        assert!(hit_test_images(&nodes, 0.0, 0.0).is_some(), "top-left corner must hit");
-        assert!(hit_test_images(&nodes, 100.0, 100.0).is_some(), "bottom-right corner must hit");
-        assert!(hit_test_images(&nodes, 100.001, 50.0).is_none(), "just outside right edge must miss");
+        assert!(
+            hit_test_images(&nodes, 0.0, 0.0).is_some(),
+            "top-left corner must hit"
+        );
+        assert!(
+            hit_test_images(&nodes, 100.0, 100.0).is_some(),
+            "bottom-right corner must hit"
+        );
+        assert!(
+            hit_test_images(&nodes, 100.001, 50.0).is_none(),
+            "just outside right edge must miss"
+        );
     }
 
     #[test]
     fn bug_hunt_image_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+                y_domains: Vec::new(),
+            },
             grid: vec![],
             marks: vec![],
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Image,
             nodes: vec![SceneNode::Image {
-                x: 50.0, y: 50.0, w: 200.0, h: 150.0,
+                x: 50.0,
+                y: 50.0,
+                w: 200.0,
+                h: 150.0,
                 data: ferrum_scene::ImageData::Url {
-                    url: "data:image/png;base64,abc".into()
+                    url: "data:image/png;base64,abc".into(),
                 },
             }],
             data_indices: Some(vec![0]),
-            tooltips: None, hrefs: None, keys: None,
+            tooltips: None,
+            hrefs: None,
+            keys: None,
             blend: BlendMode::Normal,
             descriptions: None,
-            stroke_cap: None, stroke_join: None, packed_instances: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
             y_slot: 0,
         };
-        assert!(hit_test_batch(&batch, &panel, 150.0, 125.0).is_some(),
-            "Image batch must route to hit_test_images and return a hit inside bbox");
-        assert!(hit_test_batch(&batch, &panel, 10.0, 10.0).is_none(),
-            "Image batch must miss outside bbox");
+        assert!(
+            hit_test_batch(&batch, &panel, 150.0, 125.0).is_some(),
+            "Image batch must route to hit_test_images and return a hit inside bbox"
+        );
+        assert!(
+            hit_test_batch(&batch, &panel, 10.0, 10.0).is_none(),
+            "Image batch must miss outside bbox"
+        );
     }
 }
 
@@ -1600,7 +2139,12 @@ mod tests {
 
     fn default_style() -> FillStroke {
         FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1612,7 +2156,12 @@ mod tests {
     }
 
     fn circle_node(cx: f64, cy: f64, r: f64) -> SceneNode {
-        SceneNode::Circle { cx, cy, r, style: default_style() }
+        SceneNode::Circle {
+            cx,
+            cy,
+            r,
+            style: default_style(),
+        }
     }
 
     /// Build a single-panel scene with one circle at (cx, cy, r).
@@ -1620,8 +2169,18 @@ mod tests {
     fn single_circle_panel(cx: f64, cy: f64, r: f64) -> Vec<Panel> {
         vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1648,6 +2207,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }]
     }
 
@@ -1672,25 +2233,53 @@ mod tests {
         vec![
             Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                     y_domains: Vec::new(),
                 },
                 grid: vec![],
-                marks: vec![],  // no marks in panel 0
+                marks: vec![], // no marks in panel 0
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             },
             Panel {
-                id: 5,  // logical id diverges from array position (1)
-                plot_area: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
-                clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
+                id: 5, // logical id diverges from array position (1)
+                plot_area: Rect {
+                    x: 250.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
+                clip: Rect {
+                    x: 250.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 500.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                     y_domains: Vec::new(),
                 },
                 grid: vec![],
@@ -1712,6 +2301,8 @@ mod tests {
                 annotations: vec![],
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
+                below_marks: Vec::new(),
+                chrome_above: Vec::new(),
             },
         ]
     }
@@ -1779,7 +2370,10 @@ mod tests {
         let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
         let result = hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity());
         // Inverse maps (100,100) → (50,50), which is not within radius 10 of (100,100).
-        assert!(result.is_none(), "click at pre-zoom position must miss after zoom");
+        assert!(
+            result.is_none(),
+            "click at pre-zoom position must miss after zoom"
+        );
     }
 
     #[test]
@@ -1797,7 +2391,8 @@ mod tests {
         // Verify that data_idx is threaded through correctly after zoom.
         let panels = single_circle_panel(100.0, 100.0, 10.0);
         let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
-        let result = hit_test(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity()).expect("must hit");
+        let result =
+            hit_test(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity()).expect("must hit");
         assert_eq!(result.data_idx, Some(0));
     }
 
@@ -1872,12 +2467,7 @@ mod tests {
 
     #[test]
     fn winding_number_polygon() {
-        let square = vec![
-            [0.0, 0.0],
-            [10.0, 0.0],
-            [10.0, 10.0],
-            [0.0, 10.0],
-        ];
+        let square = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
         assert!(point_in_polygon(5.0, 5.0, &square));
         assert!(!point_in_polygon(15.0, 5.0, &square));
     }
@@ -1891,7 +2481,12 @@ mod tests {
             anchor: ferrum_scene::TextAnchor::Middle,
             baseline: ferrum_scene::TextBaseline::Alphabetic,
             angle: 0.0,
-            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            color: ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "sans-serif".into(),
         }
@@ -1902,8 +2497,18 @@ mod tests {
     fn label_batch_routes_to_hit_test_texts() {
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1917,6 +2522,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Label,
@@ -1955,8 +2562,18 @@ mod tests {
     fn make_panel_with_data_indices(data_indices: Option<Vec<usize>>) -> Panel {
         Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1983,6 +2600,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }
     }
 
@@ -1993,7 +2612,11 @@ mod tests {
         let panel = make_panel_with_data_indices(Some(vec![42]));
         // entry_data_idx = Some(99) takes priority over batch.data_indices[0] = 42.
         let result = resolve_data_idx(&panel, 0, 0, Some(99));
-        assert_eq!(result, Some(99), "entry_data_idx must take priority over batch.data_indices");
+        assert_eq!(
+            result,
+            Some(99),
+            "entry_data_idx must take priority over batch.data_indices"
+        );
     }
 
     /// When `entry_data_idx` is `None`, fall back to `batch.data_indices[node_idx]`.
@@ -2001,7 +2624,11 @@ mod tests {
     fn resolve_data_idx_falls_back_to_batch_data_indices() {
         let panel = make_panel_with_data_indices(Some(vec![42]));
         let result = resolve_data_idx(&panel, 0, 0, None);
-        assert_eq!(result, Some(42), "must fall back to batch.data_indices[node_idx]");
+        assert_eq!(
+            result,
+            Some(42),
+            "must fall back to batch.data_indices[node_idx]"
+        );
     }
 
     /// When both `entry_data_idx` and `batch.data_indices` are `None`, returns `None`.
@@ -2009,7 +2636,10 @@ mod tests {
     fn resolve_data_idx_returns_none_when_both_absent() {
         let panel = make_panel_with_data_indices(None);
         let result = resolve_data_idx(&panel, 0, 0, None);
-        assert_eq!(result, None, "must return None when both sources are absent");
+        assert_eq!(
+            result, None,
+            "must return None when both sources are absent"
+        );
     }
 
     /// When `batch_idx` is out of range, returns `None` gracefully.
@@ -2044,7 +2674,12 @@ mod tests {
     /// `gap_fix_layout_scale` fixture so the expected baked values
     /// (`(16, 27)`, `r=8`) are pinned identically in both modules.
     fn non_identity_layout_scale() -> LayoutScale {
-        LayoutScale { sx: 2.0, sy: 8.0, tx: 10.0, ty: -5.0 }
+        LayoutScale {
+            sx: 2.0,
+            sy: 8.0,
+            tx: 10.0,
+            ty: -5.0,
+        }
     }
 
     /// A one-panel `SceneGraph` whose panel carries `non_identity_layout_scale()`
@@ -2053,8 +2688,18 @@ mod tests {
     fn scene_with_ratio_fitted_panel() -> ferrum_scene::SceneGraph {
         let panel = Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -2081,6 +2726,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: non_identity_layout_scale(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         };
         ferrum_scene::SceneGraph {
             width: 200.0,
@@ -2160,7 +2807,14 @@ mod tests {
         assert_eq!(hit.data_idx, Some(7));
 
         assert!(
-            hit_test(&scene.panels, 16.0, 27.0, &zoom, &SlotRescalePlan::identity()).is_none(),
+            hit_test(
+                &scene.panels,
+                16.0,
+                27.0,
+                &zoom,
+                &SlotRescalePlan::identity()
+            )
+            .is_none(),
             "click at baked position (16, 27) must miss raw (un-baked) panels"
         );
     }
@@ -2178,8 +2832,14 @@ mod tests {
         // Correct: the visual position is `zoom.apply(baked_position)` —
         // (3*16+100, 3*27+50) = (148, 131).
         let correct_visual = (3.0 * 16.0 + 100.0, 3.0 * 27.0 + 50.0);
-        let hit = hit_test(&baked, correct_visual.0, correct_visual.1, &zoom, &SlotRescalePlan::identity())
-            .expect("click at zoom_affine(baked_position) must hit");
+        let hit = hit_test(
+            &baked,
+            correct_visual.0,
+            correct_visual.1,
+            &zoom,
+            &SlotRescalePlan::identity(),
+        )
+        .expect("click at zoom_affine(baked_position) must hit");
         assert_eq!(hit.data_idx, Some(7));
 
         // Wrong: a double-bake bug would expect
@@ -2190,7 +2850,14 @@ mod tests {
         let double_baked = ls.apply(16.0, 27.0);
         let wrong_visual = zoom.transforms[0].apply(double_baked.0, double_baked.1);
         assert!(
-            hit_test(&baked, wrong_visual.0, wrong_visual.1, &zoom, &SlotRescalePlan::identity()).is_none(),
+            hit_test(
+                &baked,
+                wrong_visual.0,
+                wrong_visual.1,
+                &zoom,
+                &SlotRescalePlan::identity()
+            )
+            .is_none(),
             "click at zoom_affine(layout_scale(baked_position)) (double-bake) must miss"
         );
     }

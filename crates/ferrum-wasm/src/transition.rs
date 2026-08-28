@@ -1,10 +1,6 @@
 use crate::scene_load::{CircleInstance, RectInstance};
 
-pub fn lerp_circles(
-    old: &[CircleInstance],
-    new: &[CircleInstance],
-    t: f32,
-) -> Vec<CircleInstance> {
+pub fn lerp_circles(old: &[CircleInstance], new: &[CircleInstance], t: f32) -> Vec<CircleInstance> {
     old.iter()
         .zip(new.iter())
         .map(|(a, b)| CircleInstance {
@@ -24,11 +20,7 @@ pub fn lerp_circles(
         .collect()
 }
 
-pub fn lerp_rects(
-    old: &[RectInstance],
-    new: &[RectInstance],
-    t: f32,
-) -> Vec<RectInstance> {
+pub fn lerp_rects(old: &[RectInstance], new: &[RectInstance], t: f32) -> Vec<RectInstance> {
     old.iter()
         .zip(new.iter())
         .map(|(a, b)| RectInstance {
@@ -106,7 +98,10 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_lerp_circles_empty_slices_returns_empty() {
         let result = lerp_circles(&[], &[], 0.5);
-        assert!(result.is_empty(), "lerp_circles on empty slices must return empty vec");
+        assert!(
+            result.is_empty(),
+            "lerp_circles on empty slices must return empty vec"
+        );
     }
 
     #[test]
@@ -120,8 +115,14 @@ mod bug_hunt_tests {
         let old = vec![make_circle(0.0, 0.0, 10.0)];
         let new = vec![make_circle(100.0, 200.0, 20.0)];
         let result = lerp_circles(&old, &new, 0.0);
-        assert!((result[0].center[0] - 0.0).abs() < 0.001, "t=0 must return old center.x");
-        assert!((result[0].radius - 10.0).abs() < 0.001, "t=0 must return old radius");
+        assert!(
+            (result[0].center[0] - 0.0).abs() < 0.001,
+            "t=0 must return old center.x"
+        );
+        assert!(
+            (result[0].radius - 10.0).abs() < 0.001,
+            "t=0 must return old radius"
+        );
     }
 
     #[test]
@@ -129,8 +130,14 @@ mod bug_hunt_tests {
         let old = vec![make_circle(0.0, 0.0, 10.0)];
         let new = vec![make_circle(100.0, 200.0, 20.0)];
         let result = lerp_circles(&old, &new, 1.0);
-        assert!((result[0].center[0] - 100.0).abs() < 0.001, "t=1 must return new center.x");
-        assert!((result[0].radius - 20.0).abs() < 0.001, "t=1 must return new radius");
+        assert!(
+            (result[0].center[0] - 100.0).abs() < 0.001,
+            "t=1 must return new center.x"
+        );
+        assert!(
+            (result[0].radius - 20.0).abs() < 0.001,
+            "t=1 must return new radius"
+        );
     }
 
     #[test]
@@ -158,7 +165,11 @@ mod bug_hunt_tests {
         let new = vec![make_circle(50.0, 50.0, 8.0)];
         let result = lerp_circles(&old, &new, 0.5);
         // Only 1 result — second old element is dropped by zip
-        assert_eq!(result.len(), 1, "mismatched lengths must truncate to shorter (zip behaviour)");
+        assert_eq!(
+            result.len(),
+            1,
+            "mismatched lengths must truncate to shorter (zip behaviour)"
+        );
     }
 
     #[test]
@@ -227,9 +238,18 @@ mod bug_hunt_tests {
             angle: 0.0,
         };
         let mid = lerp_circles(&[white], &[black], 0.5);
-        assert!((mid[0].fill_color[0] - 0.5).abs() < 0.01, "mid-grey R channel");
-        assert!((mid[0].fill_color[1] - 0.5).abs() < 0.01, "mid-grey G channel");
-        assert!((mid[0].fill_color[2] - 0.5).abs() < 0.01, "mid-grey B channel");
+        assert!(
+            (mid[0].fill_color[0] - 0.5).abs() < 0.01,
+            "mid-grey R channel"
+        );
+        assert!(
+            (mid[0].fill_color[1] - 0.5).abs() < 0.01,
+            "mid-grey G channel"
+        );
+        assert!(
+            (mid[0].fill_color[2] - 0.5).abs() < 0.01,
+            "mid-grey B channel"
+        );
     }
 
     #[test]
@@ -241,7 +261,8 @@ mod bug_hunt_tests {
         let mid = lerp_rects(&[old], &[new_r], 0.5);
         assert!(
             (mid[0].corner_radius - 10.0).abs() < 0.01,
-            "corner_radius must lerp to 10.0 at t=0.5, got {}", mid[0].corner_radius
+            "corner_radius must lerp to 10.0 at t=0.5, got {}",
+            mid[0].corner_radius
         );
     }
 
@@ -437,19 +458,23 @@ mod b4_transition_tests {
         let mid = lerp_circles(&old, &new, 0.5);
         assert!(
             (mid[0].center[0] - 100.0).abs() < 0.01,
-            "midpoint x should be 100.0, got {}", mid[0].center[0]
+            "midpoint x should be 100.0, got {}",
+            mid[0].center[0]
         );
         assert!(
             (mid[0].center[1] - 200.0).abs() < 0.01,
-            "midpoint y should be 200.0, got {}", mid[0].center[1]
+            "midpoint y should be 200.0, got {}",
+            mid[0].center[1]
         );
         assert!(
             (mid[0].radius - 20.0).abs() < 0.01,
-            "midpoint radius should be 20.0, got {}", mid[0].radius
+            "midpoint radius should be 20.0, got {}",
+            mid[0].radius
         );
         assert!(
             (mid[0].fill_color[0] - 0.5).abs() < 0.01,
-            "midpoint fill_color[0] should be 0.5, got {}", mid[0].fill_color[0]
+            "midpoint fill_color[0] should be 0.5, got {}",
+            mid[0].fill_color[0]
         );
     }
 
@@ -472,11 +497,13 @@ mod b4_transition_tests {
         let mid = lerp_rects(&old, &new, 0.5);
         assert!(
             (mid[0].position[0] - 100.0).abs() < 0.01,
-            "midpoint x should be 100.0, got {}", mid[0].position[0]
+            "midpoint x should be 100.0, got {}",
+            mid[0].position[0]
         );
         assert!(
             (mid[0].size[0] - 250.0).abs() < 0.01,
-            "midpoint width should be 250.0, got {}", mid[0].size[0]
+            "midpoint width should be 250.0, got {}",
+            mid[0].size[0]
         );
     }
 }

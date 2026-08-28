@@ -70,7 +70,11 @@ pub(crate) fn axis_domain_slot(coord: &CoordKind, axis: Axis, y_slot: usize) -> 
             CoordKind::Polar { .. } | CoordKind::Geo { .. } => None,
         },
         Axis::Y => match coord {
-            CoordKind::Cartesian { y_domain, y_domains, .. } => match y_domains.get(y_slot) {
+            CoordKind::Cartesian {
+                y_domain,
+                y_domains,
+                ..
+            } => match y_domains.get(y_slot) {
                 // Guard note (Task 8 review): when slots are present, slot 0's
                 // resolved domain lives in `y_domains[0]` and may diverge from
                 // the legacy `y_domain`; prefer the slotted value.
@@ -97,12 +101,7 @@ fn axis_pixel_bounds(plot_area: &Rect, axis: Axis) -> (f64, f64) {
 
 /// Convert a screen-pixel coordinate on `axis` to a data value, given the
 /// panel's plot area and data domain. Linear; honors the Y screen flip.
-pub(crate) fn pixel_to_data(
-    px: f64,
-    plot_area: &Rect,
-    domain: (f64, f64),
-    axis: Axis,
-) -> f64 {
+pub(crate) fn pixel_to_data(px: f64, plot_area: &Rect, domain: (f64, f64), axis: Axis) -> f64 {
     let (p_lo, p_hi) = axis_pixel_bounds(plot_area, axis);
     let (d_lo, d_hi) = domain;
     let span = p_hi - p_lo;
@@ -120,12 +119,7 @@ pub(crate) fn pixel_to_data(
 
 /// Convert a data value on `axis` to a screen-pixel coordinate. Inverse of
 /// `pixel_to_data`.
-pub(crate) fn data_to_pixel(
-    value: f64,
-    plot_area: &Rect,
-    domain: (f64, f64),
-    axis: Axis,
-) -> f64 {
+pub(crate) fn data_to_pixel(value: f64, plot_area: &Rect, domain: (f64, f64), axis: Axis) -> f64 {
     let (p_lo, p_hi) = axis_pixel_bounds(plot_area, axis);
     let (d_lo, d_hi) = domain;
     let dspan = d_hi - d_lo;
@@ -295,9 +289,18 @@ mod bug_hunt_interactive_slots {
             rescale_affine_cross_panel((40.0, 60.0), &pa, &coord, &pa, &coord, Axis::Y, 1)
                 .expect("slot-1 domain present, brush non-degenerate");
         assert!((scale - 5.0).abs() < 1e-9, "scale must be 5, got {scale}");
-        assert!((offset - (-200.0)).abs() < 1e-6, "offset must be -200, got {offset}");
-        assert!((scale * 50.0 + offset - 50.0).abs() < 1e-6, "brush center must be fixed");
-        assert!((scale * 40.0 + offset - 0.0).abs() < 1e-6, "brush top → plot top");
+        assert!(
+            (offset - (-200.0)).abs() < 1e-6,
+            "offset must be -200, got {offset}"
+        );
+        assert!(
+            (scale * 50.0 + offset - 50.0).abs() < 1e-6,
+            "brush center must be fixed"
+        );
+        assert!(
+            (scale * 40.0 + offset - 0.0).abs() < 1e-6,
+            "brush top → plot top"
+        );
     }
 
     /// The same brush inverted through slot 0 must yield a DIFFERENT data
@@ -395,12 +398,18 @@ mod bug_hunt_interactive_slots {
     fn bug_hunt_degenerate_spans_produce_finite_values() {
         let flat_pa = rect(0.0, 20.0, 100.0, 0.0); // zero height
         let d = pixel_to_data(20.0, &flat_pa, (3.0, 9.0), Axis::Y);
-        assert!(d.is_finite(), "zero-height plot area must not produce NaN, got {d}");
+        assert!(
+            d.is_finite(),
+            "zero-height plot area must not produce NaN, got {d}"
+        );
         assert!((d - 3.0).abs() < 1e-12, "must return domain lo, got {d}");
 
         let pa = rect(0.0, 0.0, 100.0, 100.0);
         let p = data_to_pixel(5.0, &pa, (5.0, 5.0), Axis::Y); // zero-span domain
-        assert!(p.is_finite(), "zero-span domain must not produce NaN, got {p}");
+        assert!(
+            p.is_finite(),
+            "zero-span domain must not produce NaN, got {p}"
+        );
         assert!((p - 0.0).abs() < 1e-12, "must return pixel lo, got {p}");
     }
 }
@@ -547,7 +556,10 @@ mod tests {
             for &v in &[-2.0_f64, 0.0, 7.5, 18.0] {
                 let px = data_to_pixel(v, &pa, dom, axis);
                 let back = pixel_to_data(px, &pa, dom, axis);
-                assert!((back - v).abs() < 1e-9, "round-trip {axis:?} v={v} back={back}");
+                assert!(
+                    (back - v).abs() < 1e-9,
+                    "round-trip {axis:?} v={v} back={back}"
+                );
             }
         }
     }
@@ -639,10 +651,9 @@ mod tests {
         // source x [340, 624] → data [50, 100] (since domain is [0,100]).
         let brush = (340.0_f64, 624.0_f64);
 
-        let (scale, offset) = rescale_affine_cross_panel(
-            brush, &src_pa, &src_coord, &tgt_pa, &tgt_coord, Axis::X, 0,
-        )
-        .expect("cartesian domains present, brush non-degenerate");
+        let (scale, offset) =
+            rescale_affine_cross_panel(brush, &src_pa, &src_coord, &tgt_pa, &tgt_coord, Axis::X, 0)
+                .expect("cartesian domains present, brush non-degenerate");
 
         // After the affine `x' = scale * x + offset` applied to TARGET marks:
         //   - the target mark at data-50 lives at target pixel 990
@@ -738,7 +749,10 @@ mod tests {
         // and may still return Some (clamped brush spans the whole target).
         // The key assertion: if Some, the scale is positive.
         if let Some((scale, _offset)) = result {
-            assert!(scale > 0.0, "scale must be positive across disjoint domains");
+            assert!(
+                scale > 0.0,
+                "scale must be positive across disjoint domains"
+            );
         }
         // None is also acceptable (degenerate after clamp).
     }

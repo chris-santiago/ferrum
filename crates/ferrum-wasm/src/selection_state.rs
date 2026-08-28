@@ -78,7 +78,15 @@ impl InteractionState {
         panel_slot_counts: &[usize],
     ) {
         self.handle_click_with_index(
-            panels, specs, x, y, zoom, shift_held, None, slot_rescales, panel_slot_counts,
+            panels,
+            specs,
+            x,
+            y,
+            zoom,
+            shift_held,
+            None,
+            slot_rescales,
+            panel_slot_counts,
         );
     }
 
@@ -96,16 +104,29 @@ impl InteractionState {
         panel_slot_counts: &[usize],
     ) {
         let hit = hit_test::hit_test_with_index(
-            panels, x, y, zoom, spatial_index,
-            &hit_test::SlotRescalePlan { slot_rescales, panel_slot_counts },
+            panels,
+            x,
+            y,
+            zoom,
+            spatial_index,
+            &hit_test::SlotRescalePlan {
+                slot_rescales,
+                panel_slot_counts,
+            },
         );
 
         for spec in specs {
             match spec {
                 SelectionSpec::Point {
-                    name, toggle, fields, ..
+                    name,
+                    toggle,
+                    fields,
+                    ..
                 } => {
-                    let sel = self.selections.entry(name.clone()).or_insert(SelectionState::Empty);
+                    let sel = self
+                        .selections
+                        .entry(name.clone())
+                        .or_insert(SelectionState::Empty);
                     match &hit {
                         Some(h) => {
                             if let Some(data_idx) = h.data_idx {
@@ -136,10 +157,7 @@ impl InteractionState {
                                     vec![data_idx]
                                 };
                                 let is_toggle = shift_held
-                                    && matches!(
-                                        toggle,
-                                        ferrum_scene::EventExpr::ShiftKey
-                                    );
+                                    && matches!(toggle, ferrum_scene::EventExpr::ShiftKey);
                                 if is_toggle {
                                     toggle_points(sel, &indices, &field_values);
                                 } else {
@@ -222,8 +240,15 @@ impl InteractionState {
         panel_slot_counts: &[usize],
     ) -> Option<&HitResult> {
         self.hover = hit_test::hit_test_with_index(
-            panels, x, y, zoom, spatial_index,
-            &hit_test::SlotRescalePlan { slot_rescales, panel_slot_counts },
+            panels,
+            x,
+            y,
+            zoom,
+            spatial_index,
+            &hit_test::SlotRescalePlan {
+                slot_rescales,
+                panel_slot_counts,
+            },
         );
         self.hover.as_ref()
     }
@@ -301,20 +326,16 @@ fn extract_field_values(
     field_names
         .iter()
         .filter_map(|fname| {
-            tooltip
-                .fields
-                .iter()
-                .find(|f| f.name == *fname)
-                .map(|f| {
-                    let fv = if let Ok(n) = f.value.parse::<f64>() {
-                        FieldValue::Number { value: n }
-                    } else {
-                        FieldValue::String {
-                            value: f.value.clone(),
-                        }
-                    };
-                    (fname.clone(), fv)
-                })
+            tooltip.fields.iter().find(|f| f.name == *fname).map(|f| {
+                let fv = if let Ok(n) = f.value.parse::<f64>() {
+                    FieldValue::Number { value: n }
+                } else {
+                    FieldValue::String {
+                        value: f.value.clone(),
+                    }
+                };
+                (fname.clone(), fv)
+            })
         })
         .collect()
 }
@@ -385,7 +406,11 @@ fn collect_matching_indices(
         }
     }
 
-    if matching.is_empty() { vec![clicked_data_idx] } else { matching }
+    if matching.is_empty() {
+        vec![clicked_data_idx]
+    } else {
+        matching
+    }
 }
 
 /// Toggle a set of indices: if all are already selected, deselect them;
@@ -404,7 +429,9 @@ fn toggle_points(
     // Build a HashSet from the existing indices once so all membership checks
     // below are O(1) rather than O(n) per query.
     let existing_set: HashSet<usize> = match sel {
-        SelectionState::Point { indices: existing, .. } => existing.iter().copied().collect(),
+        SelectionState::Point {
+            indices: existing, ..
+        } => existing.iter().copied().collect(),
         _ => HashSet::new(),
     };
 
@@ -505,10 +532,14 @@ mod tests {
         // Pre-populate a selection as if a mark had been clicked earlier.
         state.selections.insert(
             "sel1".to_string(),
-            SelectionState::Point { indices: vec![0, 1], field_values: Vec::new() },
+            SelectionState::Point {
+                indices: vec![0, 1],
+                field_values: Vec::new(),
+            },
         );
         // Click on empty panels (no marks) — simulates a background click.
-        let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
         state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false, &[], &[]);
         assert!(
             matches!(state.selections.get("sel1"), Some(SelectionState::Empty)),
@@ -520,9 +551,13 @@ mod tests {
     fn background_click_with_no_prior_selection_stays_empty() {
         let specs = vec![point_spec("s")];
         let mut state = InteractionState::new(&specs);
-        let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
         state.handle_click(&[], &specs, 0.0, 0.0, &zoom, false, &[], &[]);
-        assert!(matches!(state.selections.get("s"), Some(SelectionState::Empty)));
+        assert!(matches!(
+            state.selections.get("s"),
+            Some(SelectionState::Empty)
+        ));
     }
 
     #[test]
@@ -537,7 +572,10 @@ mod tests {
     #[test]
     fn bug_hunt_new_with_empty_specs_has_no_selections() {
         let state = InteractionState::new(&[]);
-        assert!(state.selections.is_empty(), "empty specs must produce empty selections map");
+        assert!(
+            state.selections.is_empty(),
+            "empty specs must produce empty selections map"
+        );
     }
 
     #[test]
@@ -563,17 +601,15 @@ mod tests {
 
     #[test]
     fn bug_hunt_to_json_produces_valid_json_for_interval_selection() {
-        let specs = vec![
-            SelectionSpec::Interval {
-                name: "brush".to_string(),
-                fields: None,
-                encodings: None,
-                translate: true,
-                zoom: true,
-                mark: None,
-                resolve: ferrum_scene::SelectionResolve::Global,
-            }
-        ];
+        let specs = vec![SelectionSpec::Interval {
+            name: "brush".to_string(),
+            fields: None,
+            encodings: None,
+            translate: true,
+            zoom: true,
+            mark: None,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }];
         let mut state = InteractionState::new(&specs);
         state.selections.insert(
             "brush".to_string(),
@@ -586,29 +622,35 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("to_json must produce valid JSON");
         assert_eq!(parsed["brush"]["type"], "interval");
-        let xr = parsed["brush"]["x_range"].as_array().expect("x_range must be array");
+        let xr = parsed["brush"]["x_range"]
+            .as_array()
+            .expect("x_range must be array");
         assert!((xr[0].as_f64().unwrap() - 10.0).abs() < 1e-10);
     }
 
     #[test]
     fn bug_hunt_handle_drag_clamps_lo_hi_regardless_of_order() {
         // Dragging right-to-left (x0 > x1) must still produce correct lo/hi ordering.
-        let specs = vec![
-            SelectionSpec::Interval {
-                name: "b".to_string(),
-                fields: None,
-                encodings: None,
-                translate: true,
-                zoom: true,
-                mark: None,
-                resolve: ferrum_scene::SelectionResolve::Global,
-            }
-        ];
+        let specs = vec![SelectionSpec::Interval {
+            name: "b".to_string(),
+            fields: None,
+            encodings: None,
+            translate: true,
+            zoom: true,
+            mark: None,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }];
         let mut state = InteractionState::new(&specs);
         state.handle_drag(&specs, 0, 300.0, 200.0, 100.0, 50.0);
         match state.selections.get("b") {
-            Some(SelectionState::Interval { x_range: Some((lo, hi)), .. }) => {
-                assert!(lo <= hi, "x_range lo must be <= hi regardless of drag direction");
+            Some(SelectionState::Interval {
+                x_range: Some((lo, hi)),
+                ..
+            }) => {
+                assert!(
+                    lo <= hi,
+                    "x_range lo must be <= hi regardless of drag direction"
+                );
                 assert!((lo - 100.0).abs() < 1e-10, "lo must be min(x0,x1)=100");
                 assert!((hi - 300.0).abs() < 1e-10, "hi must be max(x0,x1)=300");
             }
@@ -624,7 +666,10 @@ mod tests {
             field_values: Vec::new(),
         };
         toggle_points(&mut sel, &[1, 2, 3], &[]);
-        assert!(matches!(sel, SelectionState::Empty), "all-selected toggle must deselect to Empty");
+        assert!(
+            matches!(sel, SelectionState::Empty),
+            "all-selected toggle must deselect to Empty"
+        );
     }
 
     #[test]
@@ -792,7 +837,12 @@ mod tests {
         let mut state = InteractionState::new(&specs);
 
         let style = FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -803,8 +853,18 @@ mod tests {
         };
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -836,11 +896,11 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
-        let zoom = crate::zoom_pan::ZoomPanState::new(
-            1,
-            &ferrum_scene::InteractionConfig::default(),
-        );
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // First click on mark with shift held — should select index 0.
         state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true, &[], &[]);
@@ -857,10 +917,7 @@ mod tests {
         // Second click on same mark with shift held — toggle=ShiftKey means deselect.
         state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true, &[], &[]);
         assert!(
-            matches!(
-                state.selections.get("sel"),
-                Some(SelectionState::Empty)
-            ),
+            matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
             "second click on same mark must toggle to Empty"
         );
     }
@@ -878,10 +935,8 @@ mod tests {
                 field_values: Vec::new(),
             },
         );
-        let zoom = crate::zoom_pan::ZoomPanState::new(
-            0,
-            &ferrum_scene::InteractionConfig::default(),
-        );
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
         state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false, &[], &[]);
         assert!(
             matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
@@ -1000,10 +1055,8 @@ mod tests {
             },
         );
         // Click at coordinates that miss all marks (empty panels = no marks to hit).
-        let zoom = crate::zoom_pan::ZoomPanState::new(
-            0,
-            &ferrum_scene::InteractionConfig::default(),
-        );
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
         state.handle_click(&[], &specs, 999.0, 999.0, &zoom, false, &[], &[]);
         assert!(
             matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
@@ -1048,7 +1101,10 @@ mod tests {
 
         // A scene-space point inside the interval must be contained.
         let sel = state.selections.get("brush").expect("brush must exist");
-        assert!(sel.contains_point(200.0, 150.0), "scene-space point inside interval must be contained");
+        assert!(
+            sel.contains_point(200.0, 150.0),
+            "scene-space point inside interval must be contained"
+        );
 
         // A canvas-space point that would be inside the brush at 2x zoom
         // (e.g., 400, 300 in canvas-space maps to 200, 150 in scene-space
@@ -1056,13 +1112,17 @@ mod tests {
         // This is the bug W1 prevents: without inverse_apply, the stored
         // range would be in canvas-space and the comparison would use
         // scene-space mark positions, causing a mismatch.
-        assert!(!sel.contains_point(400.0, 300.0), "canvas-space point must be outside scene-space interval");
+        assert!(
+            !sel.contains_point(400.0, 300.0),
+            "canvas-space point must be outside scene-space interval"
+        );
     }
 
     // ── bug_hunt_2: selection state machine edge cases ──────────────────
 
     #[test]
-    fn bug_hunt_toggle_points_from_empty_with_empty_indices() { // BUG: creates Point{indices:[], field_values:[]} instead of staying Empty
+    fn bug_hunt_toggle_points_from_empty_with_empty_indices() {
+        // BUG: creates Point{indices:[], field_values:[]} instead of staying Empty
         // Toggling with empty indices from Empty must remain Empty (not create
         // Point{indices:[], field_values:[]}).
         let mut sel = SelectionState::Empty;
@@ -1082,11 +1142,19 @@ mod tests {
         // to add -- it only replaces field_values.
         let mut sel = SelectionState::Point {
             indices: vec![1, 2],
-            field_values: vec![("k".to_string(), FieldValue::String { value: "v".to_string() })],
+            field_values: vec![(
+                "k".to_string(),
+                FieldValue::String {
+                    value: "v".to_string(),
+                },
+            )],
         };
         toggle_points(&mut sel, &[], &[("k2".to_string(), FieldValue::Null)]);
         match &sel {
-            SelectionState::Point { indices, field_values } => {
+            SelectionState::Point {
+                indices,
+                field_values,
+            } => {
                 assert_eq!(indices, &[1, 2], "existing indices must be unchanged");
                 // field_values get replaced wholesale by the new ones
                 assert_eq!(field_values.len(), 1);
@@ -1119,7 +1187,10 @@ mod tests {
         assert!(matches!(&sel, SelectionState::Point { indices, .. } if indices.len() == 3));
 
         toggle_points(&mut sel, &[0, 1, 2], &[]);
-        assert!(matches!(sel, SelectionState::Empty), "full deselect must go to Empty");
+        assert!(
+            matches!(sel, SelectionState::Empty),
+            "full deselect must go to Empty"
+        );
 
         toggle_points(&mut sel, &[1], &[]);
         match &sel {
@@ -1179,17 +1250,34 @@ mod tests {
             SelectionState::Point {
                 indices: vec![0],
                 field_values: vec![
-                    ("quote_field".to_string(), FieldValue::String { value: r#"say "hello""#.to_string() }),
-                    ("newline".to_string(), FieldValue::String { value: "line1\nline2".to_string() }),
-                    ("unicode".to_string(), FieldValue::String { value: "\u{1F600}\u{1F4A9}".to_string() }),
+                    (
+                        "quote_field".to_string(),
+                        FieldValue::String {
+                            value: r#"say "hello""#.to_string(),
+                        },
+                    ),
+                    (
+                        "newline".to_string(),
+                        FieldValue::String {
+                            value: "line1\nline2".to_string(),
+                        },
+                    ),
+                    (
+                        "unicode".to_string(),
+                        FieldValue::String {
+                            value: "\u{1F600}\u{1F4A9}".to_string(),
+                        },
+                    ),
                 ],
             },
         );
         let json_str = state.to_json();
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_str).expect("to_json must produce valid JSON even with special chars");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .expect("to_json must produce valid JSON even with special chars");
         assert_eq!(parsed["special"]["type"], "point");
-        let fv = parsed["special"]["field_values"].as_array().expect("field_values");
+        let fv = parsed["special"]["field_values"]
+            .as_array()
+            .expect("field_values");
         assert_eq!(fv.len(), 3);
     }
 
@@ -1228,7 +1316,10 @@ mod tests {
         let json_str = state.to_json();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let fv = &parsed["nv"]["field_values"][0];
-        assert!(fv["value"].is_null(), "FieldValue::Null must serialize as JSON null");
+        assert!(
+            fv["value"].is_null(),
+            "FieldValue::Null must serialize as JSON null"
+        );
     }
 
     #[test]
@@ -1246,7 +1337,10 @@ mod tests {
         let json_str = state.to_json();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let fv = &parsed["bv"]["field_values"][0];
-        assert_eq!(fv["value"], true, "FieldValue::Bool must serialize as JSON bool");
+        assert_eq!(
+            fv["value"], true,
+            "FieldValue::Bool must serialize as JSON bool"
+        );
     }
 
     #[test]
@@ -1257,15 +1351,27 @@ mod tests {
         let mut state = InteractionState::new(&specs);
         state.handle_drag(&specs, 0, 100.0, 200.0, 100.0, 200.0);
         match state.selections.get("z") {
-            Some(SelectionState::Interval { x_range: Some((lo, hi)), y_range: Some((ylo, yhi)) }) => {
-                assert!((lo - hi).abs() < 1e-10, "zero-size brush: x lo must equal hi");
-                assert!((ylo - yhi).abs() < 1e-10, "zero-size brush: y lo must equal hi");
+            Some(SelectionState::Interval {
+                x_range: Some((lo, hi)),
+                y_range: Some((ylo, yhi)),
+            }) => {
+                assert!(
+                    (lo - hi).abs() < 1e-10,
+                    "zero-size brush: x lo must equal hi"
+                );
+                assert!(
+                    (ylo - yhi).abs() < 1e-10,
+                    "zero-size brush: y lo must equal hi"
+                );
             }
             other => panic!("expected Interval, got {other:?}"),
         }
         // A point exactly at the brush location should be contained (inclusive bounds).
         let sel = state.selections.get("z").unwrap();
-        assert!(sel.contains_point(100.0, 200.0), "zero-size brush must contain its own location");
+        assert!(
+            sel.contains_point(100.0, 200.0),
+            "zero-size brush must contain its own location"
+        );
     }
 
     #[test]
@@ -1277,20 +1383,30 @@ mod tests {
         // Pre-seed a Point selection.
         state.selections.insert(
             "pt".to_string(),
-            SelectionState::Point { indices: vec![42], field_values: Vec::new() },
+            SelectionState::Point {
+                indices: vec![42],
+                field_values: Vec::new(),
+            },
         );
         state.handle_drag(&specs, 0, 10.0, 20.0, 50.0, 60.0);
         // Point selection must be untouched.
         match state.selections.get("pt") {
             Some(SelectionState::Point { indices, .. }) => {
-                assert_eq!(indices, &[42], "handle_drag must not modify Point selection");
+                assert_eq!(
+                    indices,
+                    &[42],
+                    "handle_drag must not modify Point selection"
+                );
             }
             other => panic!("Point selection was modified by handle_drag: {other:?}"),
         }
         // Interval selection must be updated.
         assert!(matches!(
             state.selections.get("iv"),
-            Some(SelectionState::Interval { x_range: Some(_), .. })
+            Some(SelectionState::Interval {
+                x_range: Some(_),
+                ..
+            })
         ));
     }
 
@@ -1303,8 +1419,14 @@ mod tests {
             x_range: Some((10.0, 50.0)),
             y_range: Some((20.0, 60.0)),
         };
-        assert!(sel.contains_point(50.0, 60.0), "hi boundary must be inclusive");
-        assert!(sel.contains_point(50.0, 20.0), "x-hi, y-lo boundary must be inclusive");
+        assert!(
+            sel.contains_point(50.0, 60.0),
+            "hi boundary must be inclusive"
+        );
+        assert!(
+            sel.contains_point(50.0, 20.0),
+            "x-hi, y-lo boundary must be inclusive"
+        );
     }
 
     #[test]
@@ -1313,9 +1435,18 @@ mod tests {
             x_range: Some((10.0, 50.0)),
             y_range: Some((20.0, 60.0)),
         };
-        assert!(!sel.contains_point(50.001, 40.0), "just outside x-hi must not contain");
-        assert!(!sel.contains_point(30.0, 60.001), "just outside y-hi must not contain");
-        assert!(!sel.contains_point(9.999, 40.0), "just outside x-lo must not contain");
+        assert!(
+            !sel.contains_point(50.001, 40.0),
+            "just outside x-hi must not contain"
+        );
+        assert!(
+            !sel.contains_point(30.0, 60.001),
+            "just outside y-hi must not contain"
+        );
+        assert!(
+            !sel.contains_point(9.999, 40.0),
+            "just outside x-lo must not contain"
+        );
     }
 
     #[test]
@@ -1326,8 +1457,14 @@ mod tests {
         let mut state = InteractionState::new(&specs);
         state.handle_drag(&specs, 0, 100.0, 100.0, 100.0, 100.0);
         match state.selections.get("b") {
-            Some(SelectionState::Interval { x_range: Some((lo, hi)), .. }) => {
-                assert!((lo - hi).abs() < 1e-10, "zero-area brush must have lo == hi");
+            Some(SelectionState::Interval {
+                x_range: Some((lo, hi)),
+                ..
+            }) => {
+                assert!(
+                    (lo - hi).abs() < 1e-10,
+                    "zero-area brush must have lo == hi"
+                );
             }
             other => panic!("expected Interval; got {other:?}"),
         }
@@ -1340,8 +1477,14 @@ mod tests {
             x_range: Some((100.0, 100.0)),
             y_range: Some((100.0, 100.0)),
         };
-        assert!(sel.contains_point(100.0, 100.0), "exact point must be contained");
-        assert!(!sel.contains_point(100.001, 100.0), "nearby point must not be contained");
+        assert!(
+            sel.contains_point(100.0, 100.0),
+            "exact point must be contained"
+        );
+        assert!(
+            !sel.contains_point(100.001, 100.0),
+            "nearby point must not be contained"
+        );
     }
 
     #[test]
@@ -1357,7 +1500,10 @@ mod tests {
         );
         // Interval selection must be updated
         assert!(
-            matches!(state.selections.get("b"), Some(SelectionState::Interval { .. })),
+            matches!(
+                state.selections.get("b"),
+                Some(SelectionState::Interval { .. })
+            ),
             "handle_drag must update interval selection"
         );
     }
@@ -1370,8 +1516,14 @@ mod tests {
             x_range: Some((0.0, 1000.0)),
             y_range: Some((0.0, 1000.0)),
         };
-        assert!(!sel.contains(0), "Interval.contains(data_idx) must be false");
-        assert!(!sel.contains(999), "Interval.contains(data_idx) must be false");
+        assert!(
+            !sel.contains(0),
+            "Interval.contains(data_idx) must be false"
+        );
+        assert!(
+            !sel.contains(999),
+            "Interval.contains(data_idx) must be false"
+        );
     }
 
     #[test]
@@ -1398,7 +1550,10 @@ mod tests {
             serde_json::from_str(&json_str).expect("mixed selections JSON must parse");
         assert_eq!(parsed["pt"]["type"], "point");
         assert_eq!(parsed["iv"]["type"], "interval");
-        assert!(parsed["iv"]["y_range"].is_null(), "y_range=None should serialize to null");
+        assert!(
+            parsed["iv"]["y_range"].is_null(),
+            "y_range=None should serialize to null"
+        );
     }
 
     #[test]
@@ -1425,7 +1580,12 @@ mod tests {
             TooltipContent, TooltipField,
         };
         let style = FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1437,8 +1597,18 @@ mod tests {
         // Build a panel with one circle that has a tooltip containing group="a".
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1475,6 +1645,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         // Point spec with fields: Some(vec!["group"]).
@@ -1489,10 +1661,8 @@ mod tests {
             resolve: ferrum_scene::SelectionResolve::Global,
         }];
         let mut state = InteractionState::new(&specs);
-        let zoom = crate::zoom_pan::ZoomPanState::new(
-            1,
-            &ferrum_scene::InteractionConfig::default(),
-        );
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // Click on the mark.
         state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, false, &[], &[]);
@@ -1512,8 +1682,7 @@ mod tests {
                 );
                 // Check that field_values contains ("group", String("a")).
                 let has_group = field_values.iter().any(|(name, val)| {
-                    name == "group"
-                        && matches!(val, FieldValue::String { value } if value == "a")
+                    name == "group" && matches!(val, FieldValue::String { value } if value == "a")
                 });
                 assert!(
                     has_group,
@@ -1548,7 +1717,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1564,8 +1738,18 @@ mod tests {
         // Mark 3: score = "99"    (candidate — genuinely different, must NOT co-select)
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1577,24 +1761,56 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    ferrum_scene::SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style: style.clone() },
-                    ferrum_scene::SceneNode::Circle { cx: 150.0, cy: 50.0, r: 10.0, style: style.clone() },
-                    ferrum_scene::SceneNode::Circle { cx: 250.0, cy: 50.0, r: 10.0, style: style.clone() },
-                    ferrum_scene::SceneNode::Circle { cx: 350.0, cy: 50.0, r: 10.0, style: style.clone() },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 50.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 150.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 250.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 350.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1, 2, 3]),
                 tooltips: Some(vec![
                     TooltipContent {
-                        fields: vec![TooltipField { name: "score".to_string(), value: "42.0".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "score".to_string(),
+                            value: "42.0".to_string(),
+                        }],
                     },
                     TooltipContent {
-                        fields: vec![TooltipField { name: "score".to_string(), value: "42".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "score".to_string(),
+                            value: "42".to_string(),
+                        }],
                     },
                     TooltipContent {
-                        fields: vec![TooltipField { name: "score".to_string(), value: "42.0".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "score".to_string(),
+                            value: "42.0".to_string(),
+                        }],
                     },
                     TooltipContent {
-                        fields: vec![TooltipField { name: "score".to_string(), value: "99".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "score".to_string(),
+                            value: "99".to_string(),
+                        }],
                     },
                 ]),
                 hrefs: None,
@@ -1610,6 +1826,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let specs = vec![SelectionSpec::Point {
@@ -1623,7 +1841,8 @@ mod tests {
             resolve: ferrum_scene::SelectionResolve::Global,
         }];
         let mut state = InteractionState::new(&specs);
-        let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // Click mark 0 (score="42.0") at (50, 50).
         state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false, &[], &[]);
@@ -1668,7 +1887,12 @@ mod tests {
         };
 
         let style = FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1683,8 +1907,18 @@ mod tests {
         // Mark 2: group = "a"    (candidate — trimmed, must NOT co-select)
         let panels = vec![Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 500.0,
+                h: 500.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -1696,20 +1930,44 @@ mod tests {
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
                 nodes: vec![
-                    ferrum_scene::SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style: style.clone() },
-                    ferrum_scene::SceneNode::Circle { cx: 150.0, cy: 50.0, r: 10.0, style: style.clone() },
-                    ferrum_scene::SceneNode::Circle { cx: 250.0, cy: 50.0, r: 10.0, style: style.clone() },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 50.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 150.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
+                    ferrum_scene::SceneNode::Circle {
+                        cx: 250.0,
+                        cy: 50.0,
+                        r: 10.0,
+                        style: style.clone(),
+                    },
                 ],
                 data_indices: Some(vec![0, 1, 2]),
                 tooltips: Some(vec![
                     TooltipContent {
-                        fields: vec![TooltipField { name: "group".to_string(), value: "  a".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "group".to_string(),
+                            value: "  a".to_string(),
+                        }],
                     },
                     TooltipContent {
-                        fields: vec![TooltipField { name: "group".to_string(), value: "  a".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "group".to_string(),
+                            value: "  a".to_string(),
+                        }],
                     },
                     TooltipContent {
-                        fields: vec![TooltipField { name: "group".to_string(), value: "a".to_string() }],
+                        fields: vec![TooltipField {
+                            name: "group".to_string(),
+                            value: "a".to_string(),
+                        }],
                     },
                 ]),
                 hrefs: None,
@@ -1725,6 +1983,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }];
 
         let specs = vec![SelectionSpec::Point {
@@ -1738,14 +1998,18 @@ mod tests {
             resolve: ferrum_scene::SelectionResolve::Global,
         }];
         let mut state = InteractionState::new(&specs);
-        let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
+        let zoom =
+            crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // Click mark 0 (group="  a") at (50, 50).
         state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false, &[], &[]);
 
         match state.selections.get("sel") {
             Some(SelectionState::Point { indices, .. }) => {
-                assert!(indices.contains(&0), "clicked mark (index 0) must be selected, got {indices:?}");
+                assert!(
+                    indices.contains(&0),
+                    "clicked mark (index 0) must be selected, got {indices:?}"
+                );
                 assert!(
                     indices.contains(&1),
                     "mark 1 (group='  a') must co-select (identical string), got {indices:?}"

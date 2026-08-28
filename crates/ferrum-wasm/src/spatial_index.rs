@@ -131,7 +131,11 @@ impl rstar::PointDistance for MarkEntry {
                 let dx = px - self.point[0];
                 let dy = py - self.point[1];
                 let dist = (dx * dx + dy * dy).sqrt() - r;
-                if dist <= 0.0 { 0.0 } else { dist * dist }
+                if dist <= 0.0 {
+                    0.0
+                } else {
+                    dist * dist
+                }
             }
             MarkGeom::Rect => {
                 // Rect: distance to nearest point on the AABB.
@@ -263,13 +267,7 @@ impl SpatialIndex {
     /// affine and no slot rescales, which reduces exactly to a plain scene-space
     /// hit-test (`compose_panel_slot(identity, identity) == identity`). One
     /// implementation serves both.
-    pub fn hit_test(
-        &self,
-        panel_id: usize,
-        x: f64,
-        y: f64,
-        tolerance: f64,
-    ) -> Option<MarkEntry> {
+    pub fn hit_test(&self, panel_id: usize, x: f64, y: f64, tolerance: f64) -> Option<MarkEntry> {
         self.hit_test_slot_aware(panel_id, x, y, tolerance, &SlotRescaleCtx::identity())
     }
 
@@ -299,8 +297,10 @@ impl SpatialIndex {
         ctx: &SlotRescaleCtx,
     ) -> Option<MarkEntry> {
         let (sx, sy) = ctx.panel_affine.inverse_apply(x, y);
-        let aabb =
-            AABB::from_corners([sx - tolerance, sy - tolerance], [sx + tolerance, sy + tolerance]);
+        let aabb = AABB::from_corners(
+            [sx - tolerance, sy - tolerance],
+            [sx + tolerance, sy + tolerance],
+        );
         for entry in self.in_envelope(panel_id, aabb) {
             let composed = composed_slot_affine(ctx, panel_id, entry.y_slot);
             let (cx, cy) = composed.inverse_apply(x, y);
@@ -367,9 +367,25 @@ fn composed_slot_affine(
 /// Used by both `collect_batch_entries` (scene-graph path) and
 /// `collect_packed_entries` (packed instance path) so the AABB convention and
 /// center computation are defined in one place.
-fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>, y_slot: usize) -> MarkEntry {
+fn circle_entry(
+    cx: f64,
+    cy: f64,
+    r: f64,
+    batch_idx: usize,
+    node_idx: usize,
+    data_idx: Option<usize>,
+    y_slot: usize,
+) -> MarkEntry {
     let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
-    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot, geom: MarkGeom::Circle { r }, aabb }
+    MarkEntry {
+        point: [cx, cy],
+        batch_idx,
+        node_idx,
+        data_idx,
+        y_slot,
+        geom: MarkGeom::Circle { r },
+        aabb,
+    }
 }
 
 /// Build a [`MarkEntry`] for a rect node.
@@ -378,11 +394,28 @@ fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, dat
 /// `collect_packed_entries` (packed instance path) so the AABB convention and
 /// center computation are defined in one place.
 #[allow(clippy::too_many_arguments)]
-fn rect_entry(x: f64, y: f64, w: f64, h: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>, y_slot: usize) -> MarkEntry {
+fn rect_entry(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    batch_idx: usize,
+    node_idx: usize,
+    data_idx: Option<usize>,
+    y_slot: usize,
+) -> MarkEntry {
     let cx = x + w / 2.0;
     let cy = y + h / 2.0;
     let aabb = AABB::from_corners([x, y], [x + w, y + h]);
-    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot, geom: MarkGeom::Rect, aabb }
+    MarkEntry {
+        point: [cx, cy],
+        batch_idx,
+        node_idx,
+        data_idx,
+        y_slot,
+        geom: MarkGeom::Rect,
+        aabb,
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -407,7 +440,10 @@ fn entries_for_panel(panel: &Panel) -> Vec<MarkEntry> {
 /// through this function so the indexed-kind set cannot drift between the two
 /// modules.
 pub fn is_indexed_kind(kind: MarkBatchKind) -> bool {
-    matches!(kind, MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect)
+    matches!(
+        kind,
+        MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect
+    )
 }
 
 /// Append [`MarkEntry`] values for each indexable node in `batch`.
@@ -420,10 +456,27 @@ fn collect_batch_entries(batch: &MarkBatch, batch_idx: usize, out: &mut Vec<Mark
 
         match node {
             SceneNode::Circle { cx, cy, r, .. } => {
-                out.push(circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx, batch.y_slot));
+                out.push(circle_entry(
+                    *cx,
+                    *cy,
+                    *r,
+                    batch_idx,
+                    node_idx,
+                    data_idx,
+                    batch.y_slot,
+                ));
             }
             SceneNode::Rect { x, y, w, h, .. } => {
-                out.push(rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx, batch.y_slot));
+                out.push(rect_entry(
+                    *x,
+                    *y,
+                    *w,
+                    *h,
+                    batch_idx,
+                    node_idx,
+                    data_idx,
+                    batch.y_slot,
+                ));
             }
             _ => {}
         }
@@ -450,8 +503,11 @@ fn collect_packed_entries(
             DrawKind::Circle => {
                 for i in 0..meta.instance_count {
                     let idx = meta.instance_start + i;
-                    let Some(ci) = data.circle_instances.get(idx) else { continue };
-                    let data_idx = meta.data_indices
+                    let Some(ci) = data.circle_instances.get(idx) else {
+                        continue;
+                    };
+                    let data_idx = meta
+                        .data_indices
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
@@ -469,8 +525,11 @@ fn collect_packed_entries(
             DrawKind::Rect => {
                 for i in 0..meta.instance_count {
                     let idx = meta.instance_start + i;
-                    let Some(ri) = data.rect_instances.get(idx) else { continue };
-                    let data_idx = meta.data_indices
+                    let Some(ri) = data.rect_instances.get(idx) else {
+                        continue;
+                    };
+                    let data_idx = meta
+                        .data_indices
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
@@ -529,7 +588,12 @@ mod tests {
 
     fn default_style() -> FillStroke {
         FillStroke {
-            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -541,18 +605,40 @@ mod tests {
     }
 
     fn circle(cx: f64, cy: f64, r: f64) -> SceneNode {
-        SceneNode::Circle { cx, cy, r, style: default_style() }
+        SceneNode::Circle {
+            cx,
+            cy,
+            r,
+            style: default_style(),
+        }
     }
 
     fn rect_node(x: f64, y: f64, w: f64, h: f64) -> SceneNode {
-        SceneNode::Rect { x, y, w, h, style: default_style(), corner_radius: 0.0 }
+        SceneNode::Rect {
+            x,
+            y,
+            w,
+            h,
+            style: default_style(),
+            corner_radius: 0.0,
+        }
     }
 
     fn panel_with_batches(batches: Vec<MarkBatch>) -> Panel {
         Panel {
             id: 0,
-            plot_area: Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 },
-            clip: Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 },
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1000.0,
+                h: 1000.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 1000.0,
+                h: 1000.0,
+            },
             coord: CoordKind::Cartesian {
                 x_domain: None,
                 y_domain: None,
@@ -566,6 +652,8 @@ mod tests {
             annotations: vec![],
             strip_title: vec![],
             layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
         }
     }
 
@@ -659,9 +747,10 @@ mod tests {
 
     #[test]
     fn single_circle_nearest_returns_it() {
-        let panels = make_panels(vec![
-            point_batch(vec![circle(100.0, 100.0, 5.0)], Some(vec![7])),
-        ]);
+        let panels = make_panels(vec![point_batch(
+            vec![circle(100.0, 100.0, 5.0)],
+            Some(vec![7]),
+        )]);
         let idx = SpatialIndex::build(&panels);
         let (entry, dist) = idx.nearest(0, 100.0, 100.0).expect("must find mark");
         assert_eq!(entry.data_idx, Some(7));
@@ -671,9 +760,7 @@ mod tests {
     #[test]
     fn single_circle_nearest_outside_radius_returns_zero_dist() {
         // Query at the circle center — dist should be 0.
-        let panels = make_panels(vec![
-            point_batch(vec![circle(200.0, 200.0, 10.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(200.0, 200.0, 10.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         let (_, dist) = idx.nearest(0, 200.0, 200.0).unwrap();
         assert!(dist < 1e-9);
@@ -682,19 +769,18 @@ mod tests {
     #[test]
     fn single_circle_nearest_at_edge_returns_zero_dist() {
         // Query exactly at the circle surface — dist should be 0.
-        let panels = make_panels(vec![
-            point_batch(vec![circle(0.0, 0.0, 10.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(0.0, 0.0, 10.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         let (_, dist) = idx.nearest(0, 10.0, 0.0).unwrap();
-        assert!(dist < 1e-9, "surface point must have distance 0, got {dist}");
+        assert!(
+            dist < 1e-9,
+            "surface point must have distance 0, got {dist}"
+        );
     }
 
     #[test]
     fn single_circle_nearest_outside_snap_returns_none() {
-        let panels = make_panels(vec![
-            point_batch(vec![circle(0.0, 0.0, 5.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(0.0, 0.0, 5.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         // Distance to surface = 100 - 5 = 95 > SNAP_DISTANCE = 50
         assert!(idx.nearest(0, 100.0, 0.0).is_none());
@@ -702,9 +788,10 @@ mod tests {
 
     #[test]
     fn single_circle_hit_test_inside() {
-        let panels = make_panels(vec![
-            point_batch(vec![circle(50.0, 50.0, 10.0)], Some(vec![3])),
-        ]);
+        let panels = make_panels(vec![point_batch(
+            vec![circle(50.0, 50.0, 10.0)],
+            Some(vec![3]),
+        )]);
         let idx = SpatialIndex::build(&panels);
         let hit = idx.hit_test(0, 55.0, 50.0, 1.0).expect("must hit");
         assert_eq!(hit.data_idx, Some(3));
@@ -712,9 +799,7 @@ mod tests {
 
     #[test]
     fn single_circle_hit_test_miss() {
-        let panels = make_panels(vec![
-            point_batch(vec![circle(50.0, 50.0, 10.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(50.0, 50.0, 10.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         // 30 px away from center, radius=10, tolerance=1 → should miss
         assert!(idx.hit_test(0, 80.0, 50.0, 1.0).is_none());
@@ -723,22 +808,24 @@ mod tests {
     #[test]
     fn single_rect_nearest_returns_it() {
         // Rect at (90, 90, 20, 20) — center at (100, 100).
-        let panels = make_panels(vec![
-            bar_batch(vec![rect_node(90.0, 90.0, 20.0, 20.0)], Some(vec![42])),
-        ]);
+        let panels = make_panels(vec![bar_batch(
+            vec![rect_node(90.0, 90.0, 20.0, 20.0)],
+            Some(vec![42]),
+        )]);
         let idx = SpatialIndex::build(&panels);
         let (entry, dist) = idx.nearest(0, 100.0, 100.0).expect("must find rect");
         assert_eq!(entry.data_idx, Some(42));
         // Query point is inside the rect — distance should be 0.
-        assert!(dist < 1e-9, "point inside rect must have distance 0, got {dist}");
+        assert!(
+            dist < 1e-9,
+            "point inside rect must have distance 0, got {dist}"
+        );
     }
 
     #[test]
     fn single_rect_nearest_outside() {
         // Rect at (0, 0, 10, 10); query at (15, 5) — nearest rect point is (10, 5), dist=5.
-        let panels = make_panels(vec![
-            bar_batch(vec![rect_node(0.0, 0.0, 10.0, 10.0)], None),
-        ]);
+        let panels = make_panels(vec![bar_batch(vec![rect_node(0.0, 0.0, 10.0, 10.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         let (_, dist) = idx.nearest(0, 15.0, 5.0).unwrap();
         assert!((dist - 5.0).abs() < 1e-6, "expected dist=5, got {dist}");
@@ -746,19 +833,23 @@ mod tests {
 
     #[test]
     fn single_rect_hit_test_inside() {
-        let panels = make_panels(vec![
-            rect_batch(vec![rect_node(10.0, 10.0, 80.0, 60.0)], Some(vec![99])),
-        ]);
+        let panels = make_panels(vec![rect_batch(
+            vec![rect_node(10.0, 10.0, 80.0, 60.0)],
+            Some(vec![99]),
+        )]);
         let idx = SpatialIndex::build(&panels);
-        let hit = idx.hit_test(0, 50.0, 40.0, 0.0).expect("must hit inside rect");
+        let hit = idx
+            .hit_test(0, 50.0, 40.0, 0.0)
+            .expect("must hit inside rect");
         assert_eq!(hit.data_idx, Some(99));
     }
 
     #[test]
     fn single_rect_hit_test_miss() {
-        let panels = make_panels(vec![
-            rect_batch(vec![rect_node(10.0, 10.0, 80.0, 60.0)], None),
-        ]);
+        let panels = make_panels(vec![rect_batch(
+            vec![rect_node(10.0, 10.0, 80.0, 60.0)],
+            None,
+        )]);
         let idx = SpatialIndex::build(&panels);
         assert!(idx.hit_test(0, 5.0, 5.0, 0.0).is_none());
     }
@@ -779,9 +870,7 @@ mod tests {
                 data_indices.push(i * 10 + j);
             }
         }
-        let panels = make_panels(vec![
-            point_batch(nodes.clone(), Some(data_indices.clone())),
-        ]);
+        let panels = make_panels(vec![point_batch(nodes.clone(), Some(data_indices.clone()))]);
         let idx = SpatialIndex::build(&panels);
 
         // Query at various points and compare to brute-force.
@@ -837,9 +926,7 @@ mod tests {
                 data_indices.push(i * 10 + j);
             }
         }
-        let panels = make_panels(vec![
-            point_batch(nodes.clone(), Some(data_indices)),
-        ]);
+        let panels = make_panels(vec![point_batch(nodes.clone(), Some(data_indices))]);
         let idx = SpatialIndex::build(&panels);
 
         let qbox = AABB::from_corners([100.0, 100.0], [200.0, 200.0]);
@@ -886,14 +973,16 @@ mod tests {
             let cy = (i / 1000) as f64 * 1.0 + 0.5;
             nodes.push(circle(cx, cy, 0.4));
         }
-        let panels = make_panels(vec![
-            point_batch(nodes, None),
-        ]);
+        let panels = make_panels(vec![point_batch(nodes, None)]);
         let idx = SpatialIndex::build(&panels);
 
         // Query at a known position — the circle at (250.5, 37.5) should be nearest.
         let (entry, dist) = idx.nearest(0, 250.5, 37.5).expect("must find mark in 100k");
-        assert_eq!(entry.node_idx, 37 * 1000 + 250, "unexpected nearest mark idx");
+        assert_eq!(
+            entry.node_idx,
+            37 * 1000 + 250,
+            "unexpected nearest mark idx"
+        );
         assert!(dist < 1e-6, "expected dist ~0, got {dist}");
     }
 
@@ -903,25 +992,45 @@ mod tests {
     fn nearest_neighbor_correctness_multiple_queries() {
         // 20 circles at random-ish positions; compare R-tree to linear scan for 10 queries.
         let positions: &[(f64, f64)] = &[
-            (10.0, 20.0), (50.0, 80.0), (120.0, 35.0), (200.0, 200.0), (300.0, 10.0),
-            (15.0, 150.0), (400.0, 300.0), (250.0, 450.0), (180.0, 90.0), (320.0, 220.0),
-            (60.0, 410.0), (145.0, 270.0), (380.0, 160.0), (90.0, 340.0), (440.0, 80.0),
-            (210.0, 350.0), (330.0, 400.0), (70.0, 230.0), (410.0, 420.0), (155.0, 130.0),
+            (10.0, 20.0),
+            (50.0, 80.0),
+            (120.0, 35.0),
+            (200.0, 200.0),
+            (300.0, 10.0),
+            (15.0, 150.0),
+            (400.0, 300.0),
+            (250.0, 450.0),
+            (180.0, 90.0),
+            (320.0, 220.0),
+            (60.0, 410.0),
+            (145.0, 270.0),
+            (380.0, 160.0),
+            (90.0, 340.0),
+            (440.0, 80.0),
+            (210.0, 350.0),
+            (330.0, 400.0),
+            (70.0, 230.0),
+            (410.0, 420.0),
+            (155.0, 130.0),
         ];
         let nodes: Vec<SceneNode> = positions
             .iter()
             .map(|(cx, cy)| circle(*cx, *cy, 8.0))
             .collect();
-        let panels = make_panels(vec![
-            point_batch(nodes.clone(), None),
-        ]);
+        let panels = make_panels(vec![point_batch(nodes.clone(), None)]);
         let idx = SpatialIndex::build(&panels);
 
         let queries: &[(f64, f64)] = &[
-            (10.0, 20.0), (100.0, 100.0), (250.0, 250.0),
-            (0.0, 0.0), (450.0, 450.0),
-            (200.0, 0.0), (50.0, 50.0), (300.0, 300.0),
-            (180.0, 180.0), (420.0, 85.0),
+            (10.0, 20.0),
+            (100.0, 100.0),
+            (250.0, 250.0),
+            (0.0, 0.0),
+            (450.0, 450.0),
+            (200.0, 0.0),
+            (50.0, 50.0),
+            (300.0, 300.0),
+            (180.0, 180.0),
+            (420.0, 85.0),
         ];
 
         for (qx, qy) in queries {
@@ -943,8 +1052,8 @@ mod tests {
             let rtree_result = idx.nearest(0, *qx, *qy);
 
             if bf_dist <= SNAP_DISTANCE {
-                let (entry, rt_dist) = rtree_result
-                    .expect("R-tree must find a mark within SNAP_DISTANCE");
+                let (entry, rt_dist) =
+                    rtree_result.expect("R-tree must find a mark within SNAP_DISTANCE");
                 assert_eq!(
                     entry.node_idx, bf_idx,
                     "nearest mismatch for query ({qx},{qy}): rtree={}, linear={bf_idx}",
@@ -969,14 +1078,12 @@ mod tests {
     fn envelope_query_excludes_marks_outside_box() {
         // 4 circles; only 2 are within the query box.
         let nodes = vec![
-            circle(50.0, 50.0, 5.0),   // inside  [40,60]x[40,60]
-            circle(150.0, 50.0, 5.0),  // outside
-            circle(55.0, 55.0, 5.0),   // inside
-            circle(50.0, 200.0, 5.0),  // outside
+            circle(50.0, 50.0, 5.0),  // inside  [40,60]x[40,60]
+            circle(150.0, 50.0, 5.0), // outside
+            circle(55.0, 55.0, 5.0),  // inside
+            circle(50.0, 200.0, 5.0), // outside
         ];
-        let panels = make_panels(vec![
-            point_batch(nodes, Some(vec![10, 20, 30, 40])),
-        ]);
+        let panels = make_panels(vec![point_batch(nodes, Some(vec![10, 20, 30, 40]))]);
         let idx = SpatialIndex::build(&panels);
 
         let qbox = AABB::from_corners([40.0, 40.0], [65.0, 65.0]);
@@ -987,14 +1094,16 @@ mod tests {
             .collect();
         results.sort();
 
-        assert_eq!(results, vec![10, 30], "only marks 0 and 2 should be in envelope");
+        assert_eq!(
+            results,
+            vec![10, 30],
+            "only marks 0 and 2 should be in envelope"
+        );
     }
 
     #[test]
     fn envelope_query_empty_box_returns_empty() {
-        let panels = make_panels(vec![
-            point_batch(vec![circle(500.0, 500.0, 5.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(500.0, 500.0, 5.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         // Tiny box far away from all marks.
         let qbox = AABB::from_corners([0.0, 0.0], [1.0, 1.0]);
@@ -1006,9 +1115,7 @@ mod tests {
     #[test]
     fn nearest_just_within_snap_distance_returns_some() {
         // Circle at (0, 0) with radius 0. Query at (SNAP_DISTANCE - 1, 0).
-        let panels = make_panels(vec![
-            point_batch(vec![circle(0.0, 0.0, 0.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(0.0, 0.0, 0.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         let dist = SNAP_DISTANCE - 1.0;
         assert!(
@@ -1020,9 +1127,7 @@ mod tests {
     #[test]
     fn nearest_exactly_at_snap_distance_returns_some() {
         // Surface of circle at (0,0) radius=0 is at (0,0). Query at (SNAP_DISTANCE, 0).
-        let panels = make_panels(vec![
-            point_batch(vec![circle(0.0, 0.0, 0.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(0.0, 0.0, 0.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         // Distance = SNAP_DISTANCE exactly — should return Some (≤ threshold).
         assert!(
@@ -1033,9 +1138,7 @@ mod tests {
 
     #[test]
     fn nearest_just_beyond_snap_distance_returns_none() {
-        let panels = make_panels(vec![
-            point_batch(vec![circle(0.0, 0.0, 0.0)], None),
-        ]);
+        let panels = make_panels(vec![point_batch(vec![circle(0.0, 0.0, 0.0)], None)]);
         let idx = SpatialIndex::build(&panels);
         let dist = SNAP_DISTANCE + 0.01;
         assert!(
@@ -1067,7 +1170,12 @@ mod tests {
     fn line_batch_nodes_not_indexed() {
         use ferrum_scene::StrokeStyle;
         let line_style = StrokeStyle {
-            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            color: ferrum_scene::Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 1.0,
             opacity: 1.0,
             stroke_opacity: 1.0,
@@ -1078,7 +1186,10 @@ mod tests {
         let line_batch = MarkBatch {
             kind: MarkBatchKind::Line,
             nodes: vec![SceneNode::Line {
-                x1: 0.0, y1: 0.0, x2: 100.0, y2: 100.0,
+                x1: 0.0,
+                y1: 0.0,
+                x2: 100.0,
+                y2: 100.0,
                 style: line_style,
             }],
             data_indices: Some(vec![0]),
@@ -1094,7 +1205,10 @@ mod tests {
         };
         let panels = make_panels(vec![line_batch]);
         let idx = SpatialIndex::build(&panels);
-        assert!(idx.nearest(0, 50.0, 50.0).is_none(), "Line batch must not be indexed");
+        assert!(
+            idx.nearest(0, 50.0, 50.0).is_none(),
+            "Line batch must not be indexed"
+        );
     }
 
     // ── data_idx threading ────────────────────────────────────────────────────
@@ -1114,9 +1228,7 @@ mod tests {
             circle(200.0, 100.0, 5.0),
             circle(300.0, 100.0, 5.0),
         ];
-        let panels = make_panels(vec![
-            point_batch(nodes, Some(vec![10, 20, 30])),
-        ]);
+        let panels = make_panels(vec![point_batch(nodes, Some(vec![10, 20, 30]))]);
         let idx = SpatialIndex::build(&panels);
 
         let (e0, _) = idx.nearest(0, 100.0, 100.0).unwrap();
@@ -1134,13 +1246,15 @@ mod tests {
     #[test]
     fn multiple_panels_indexed_independently() {
         let panels = vec![
-            panel_with_batches(vec![
-                point_batch(vec![circle(100.0, 100.0, 5.0)], Some(vec![1])),
-            ]),
+            panel_with_batches(vec![point_batch(
+                vec![circle(100.0, 100.0, 5.0)],
+                Some(vec![1]),
+            )]),
             {
-                let mut p = panel_with_batches(vec![
-                    point_batch(vec![circle(200.0, 200.0, 5.0)], Some(vec![2])),
-                ]);
+                let mut p = panel_with_batches(vec![point_batch(
+                    vec![circle(200.0, 200.0, 5.0)],
+                    Some(vec![2]),
+                )]);
                 p.id = 1;
                 p
             },
@@ -1184,7 +1298,11 @@ mod tests {
         };
         // Right of rect at x=70, y=50 → nearest point (60, 50) → dist=10
         let d2 = entry.distance_2(&[70.0, 50.0]);
-        assert!((d2.sqrt() - 10.0).abs() < 1e-6, "expected dist=10, got {}", d2.sqrt());
+        assert!(
+            (d2.sqrt() - 10.0).abs() < 1e-6,
+            "expected dist=10, got {}",
+            d2.sqrt()
+        );
     }
 
     #[test]
@@ -1246,22 +1364,37 @@ mod tests {
         let data = SceneData {
             circle_instances: vec![
                 CircleInstance {
-                    center: [100.0, 100.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    center: [100.0, 100.0],
+                    radius: 5.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
                 CircleInstance {
-                    center: [200.0, 200.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    center: [200.0, 200.0],
+                    radius: 5.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
                 CircleInstance {
-                    center: [300.0, 300.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    center: [300.0, 300.0],
+                    radius: 5.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
             ],
             rect_instances: vec![],
@@ -1284,20 +1417,26 @@ mod tests {
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
 
         // All three packed circles should be indexed and findable.
-        let (e0, d0) = idx.nearest(0, 100.0, 100.0).expect("must find packed circle 0");
+        let (e0, d0) = idx
+            .nearest(0, 100.0, 100.0)
+            .expect("must find packed circle 0");
         assert_eq!(e0.data_idx, Some(10));
         assert!(d0 < 1e-6, "dist must be ~0 at center");
 
-        let (e1, _) = idx.nearest(0, 200.0, 200.0).expect("must find packed circle 1");
+        let (e1, _) = idx
+            .nearest(0, 200.0, 200.0)
+            .expect("must find packed circle 1");
         assert_eq!(e1.data_idx, Some(20));
 
-        let (e2, _) = idx.nearest(0, 300.0, 300.0).expect("must find packed circle 2");
+        let (e2, _) = idx
+            .nearest(0, 300.0, 300.0)
+            .expect("must find packed circle 2");
         assert_eq!(e2.data_idx, Some(30));
     }
 
     #[test]
     fn build_with_packed_indexes_rect_instances() {
-        use crate::scene_load::{RectInstance, PackedBatchMeta, SceneData};
+        use crate::scene_load::{PackedBatchMeta, RectInstance, SceneData};
         use lyon::tessellation::VertexBuffers;
         use std::collections::HashMap;
 
@@ -1322,16 +1461,28 @@ mod tests {
             circle_instances: vec![],
             rect_instances: vec![
                 RectInstance {
-                    position: [90.0, 90.0], size: [20.0, 20.0], corner_radius: 0.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    position: [90.0, 90.0],
+                    size: [20.0, 20.0],
+                    corner_radius: 0.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
                 RectInstance {
-                    position: [200.0, 200.0], size: [50.0, 30.0], corner_radius: 0.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
+                    position: [200.0, 200.0],
+                    size: [50.0, 30.0],
+                    corner_radius: 0.0,
+                    fill_color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_opacity: 0.0,
+                    stroke_dash: 0.0,
+                    angle: 0.0,
                 },
             ],
             mesh_buffers: VertexBuffers::new(),
@@ -1353,12 +1504,16 @@ mod tests {
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
 
         // Rect 0 center at (100, 100) — should be findable.
-        let (e0, d0) = idx.nearest(0, 100.0, 100.0).expect("must find packed rect 0");
+        let (e0, d0) = idx
+            .nearest(0, 100.0, 100.0)
+            .expect("must find packed rect 0");
         assert_eq!(e0.data_idx, Some(42));
         assert!(d0 < 1e-6, "point inside rect must have dist 0");
 
         // Rect 1 center at (225, 215) — should be findable.
-        let (e1, _) = idx.nearest(0, 225.0, 215.0).expect("must find packed rect 1");
+        let (e1, _) = idx
+            .nearest(0, 225.0, 215.0)
+            .expect("must find packed rect 1");
         assert_eq!(e1.data_idx, Some(99));
     }
 
@@ -1371,7 +1526,7 @@ mod tests {
         // Panel with two batches: one non-packed, one packed.
         let panels = make_panels(vec![
             point_batch(vec![circle(50.0, 50.0, 5.0)], Some(vec![1])), // non-packed
-            point_batch(vec![], None), // packed
+            point_batch(vec![], None),                                 // packed
         ]);
 
         let mut packed_meta = HashMap::new();
@@ -1387,14 +1542,17 @@ mod tests {
         );
 
         let data = SceneData {
-            circle_instances: vec![
-                CircleInstance {
-                    center: [400.0, 400.0], radius: 5.0,
-                    fill_color: [0.0; 4], stroke_color: [0.0; 4],
-                    stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
-                    stroke_dash: 0.0, angle: 0.0,
-                },
-            ],
+            circle_instances: vec![CircleInstance {
+                center: [400.0, 400.0],
+                radius: 5.0,
+                fill_color: [0.0; 4],
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            }],
             rect_instances: vec![],
             mesh_buffers: VertexBuffers::new(),
             static_mesh_buffers: VertexBuffers::new(),
@@ -1415,11 +1573,15 @@ mod tests {
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
 
         // Non-packed circle at (50, 50).
-        let (e_np, _) = idx.nearest(0, 50.0, 50.0).expect("must find non-packed circle");
+        let (e_np, _) = idx
+            .nearest(0, 50.0, 50.0)
+            .expect("must find non-packed circle");
         assert_eq!(e_np.data_idx, Some(1));
 
         // Packed circle at (400, 400).
-        let (e_pk, _) = idx.nearest(0, 400.0, 400.0).expect("must find packed circle");
+        let (e_pk, _) = idx
+            .nearest(0, 400.0, 400.0)
+            .expect("must find packed circle");
         assert_eq!(e_pk.data_idx, Some(2));
     }
 
@@ -1431,23 +1593,56 @@ mod tests {
     /// `spatial_index` and `hit_test` cannot drift from each other.
     #[test]
     fn is_indexed_kind_returns_true_for_indexed_kinds() {
-        assert!(is_indexed_kind(MarkBatchKind::Point), "Point must be indexed");
-        assert!(is_indexed_kind(MarkBatchKind::Bar),   "Bar must be indexed");
-        assert!(is_indexed_kind(MarkBatchKind::Rect),  "Rect must be indexed");
+        assert!(
+            is_indexed_kind(MarkBatchKind::Point),
+            "Point must be indexed"
+        );
+        assert!(is_indexed_kind(MarkBatchKind::Bar), "Bar must be indexed");
+        assert!(is_indexed_kind(MarkBatchKind::Rect), "Rect must be indexed");
     }
 
     #[test]
     fn is_indexed_kind_returns_false_for_non_indexed_kinds() {
-        assert!(!is_indexed_kind(MarkBatchKind::Line),    "Line must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Area),    "Area must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Arc),     "Arc must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Tick),    "Tick must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Text),    "Text must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Label),   "Label must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Ribbon),  "Ribbon must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Segment), "Segment must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Image),   "Image must not be indexed");
-        assert!(!is_indexed_kind(MarkBatchKind::Polygon), "Polygon must not be indexed");
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Line),
+            "Line must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Area),
+            "Area must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Arc),
+            "Arc must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Tick),
+            "Tick must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Text),
+            "Text must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Label),
+            "Label must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Ribbon),
+            "Ribbon must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Segment),
+            "Segment must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Image),
+            "Image must not be indexed"
+        );
+        assert!(
+            !is_indexed_kind(MarkBatchKind::Polygon),
+            "Polygon must not be indexed"
+        );
     }
 
     // ── WASM-09: circle_entry / rect_entry constructors ──────────────────────
@@ -1458,7 +1653,11 @@ mod tests {
     fn circle_entry_sets_correct_fields() {
         let e = circle_entry(10.0, 20.0, 5.0, 1, 2, Some(99), 3);
         assert_eq!(e.point, [10.0, 20.0], "center must be (cx, cy)");
-        assert_eq!(e.geom, MarkGeom::Circle { r: 5.0 }, "geom must be Circle{{r}}");
+        assert_eq!(
+            e.geom,
+            MarkGeom::Circle { r: 5.0 },
+            "geom must be Circle{{r}}"
+        );
         assert_eq!(e.batch_idx, 1);
         assert_eq!(e.node_idx, 2);
         assert_eq!(e.data_idx, Some(99));
@@ -1466,7 +1665,7 @@ mod tests {
         // AABB must enclose (cx±r, cy±r).
         let lower = e.aabb.lower();
         let upper = e.aabb.upper();
-        assert!((lower[0] - 5.0).abs() < 1e-10,  "AABB lower x must be cx-r");
+        assert!((lower[0] - 5.0).abs() < 1e-10, "AABB lower x must be cx-r");
         assert!((lower[1] - 15.0).abs() < 1e-10, "AABB lower y must be cy-r");
         assert!((upper[0] - 15.0).abs() < 1e-10, "AABB upper x must be cx+r");
         assert!((upper[1] - 25.0).abs() < 1e-10, "AABB upper y must be cy+r");
@@ -1540,7 +1739,11 @@ mod tests {
     #[test]
     fn zero_radius_circle_classified_as_circle() {
         let e = circle_entry(50.0, 50.0, 0.0, 0, 0, None, 0);
-        assert_eq!(e.geom, MarkGeom::Circle { r: 0.0 }, "zero-radius circle must stay a circle");
+        assert_eq!(
+            e.geom,
+            MarkGeom::Circle { r: 0.0 },
+            "zero-radius circle must stay a circle"
+        );
         // Distance to center is 0; distance to a point 10px away is 10.
         assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);
         assert!((e.distance_2(&[60.0, 50.0]).sqrt() - 10.0).abs() < 1e-6);
@@ -1560,7 +1763,12 @@ mod tests {
     /// and `hit_test.rs` so the expected baked circle (`16, 27, r=8`) is
     /// pinned identically across all three modules.
     fn gap_fix_layout_scale() -> LayoutScale {
-        LayoutScale { sx: 2.0, sy: 8.0, tx: 10.0, ty: -5.0 }
+        LayoutScale {
+            sx: 2.0,
+            sy: 8.0,
+            tx: 10.0,
+            ty: -5.0,
+        }
     }
 
     /// A one-panel `SceneGraph` whose panel carries `gap_fix_layout_scale()`
@@ -1620,7 +1828,10 @@ mod tests {
             .nearest(0, 16.0, 27.0)
             .expect("nearest at baked position must find the mark");
         assert_eq!(entry.data_idx, Some(7));
-        assert!(dist < 1e-6, "query exactly at the baked center must have ~0 distance, got {dist}");
+        assert!(
+            dist < 1e-6,
+            "query exactly at the baked center must have ~0 distance, got {dist}"
+        );
     }
 
     #[test]

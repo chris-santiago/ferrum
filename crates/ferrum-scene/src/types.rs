@@ -30,8 +30,36 @@ pub struct Panel {
     pub clip: Rect,
     pub coord: CoordKind,
     pub grid: Vec<SceneNode>,
+    /// Below-marks text annotations (`AnnotationSpec::Text` with `z ==
+    /// "below_marks"`), painted immediately after `grid` and before `marks`.
+    ///
+    /// This is a typed sibling of `grid`, not a sub-bucket of it (GH #89B):
+    /// content (user annotations) and chrome (gridlines) are distinct scene
+    /// concerns so a later overlay merge can clear duplicate chrome without
+    /// risk of also dropping a user annotation. Empty on every scene that
+    /// doesn't use below-marks text annotations — the overwhelming majority —
+    /// so `#[serde(skip_serializing_if)]` keeps those scenes byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub below_marks: Vec<SceneNode>,
     pub marks: Vec<MarkBatch>,
     pub axes: Vec<SceneNode>,
+    /// Above-marks axis/grid chrome (nodes from an axis or its gridlines
+    /// whose effective `zindex >= 1`), painted immediately after `axes` and
+    /// before `annotations`.
+    ///
+    /// This is a typed sibling of `annotations`, not a sub-bucket of it (GH
+    /// #89B): chrome (a duplicated axis/grid on a merged overlay) and content
+    /// (user annotations, structural annotations) are distinct scene
+    /// concerns so a later overlay merge can clear duplicate chrome without
+    /// risk of also dropping a user annotation. Painting `chrome_above`
+    /// before `annotations` is a deliberate z-order refinement: above-marks
+    /// user annotations now always paint above above-marks axis chrome
+    /// (previously the two were interleaved within one `annotations` list in
+    /// axis-chrome-first order). Empty on every scene without a `zindex >= 1`
+    /// axis — the overwhelming majority — so `#[serde(skip_serializing_if)]`
+    /// keeps those scenes byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chrome_above: Vec<SceneNode>,
     pub annotations: Vec<SceneNode>,
     pub strip_title: Vec<SceneNode>,
     /// Per-panel layout transform mapping this panel's natively-computed
@@ -71,7 +99,12 @@ pub struct LayoutScale {
 impl LayoutScale {
     /// The no-op transform: `(x, y) -> (x, y)`.
     pub fn identity() -> Self {
-        Self { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 }
+        Self {
+            sx: 1.0,
+            sy: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
     }
 
     /// True when this transform is the identity — the byte-stability anchor
@@ -127,7 +160,9 @@ pub struct MarkBatch {
     pub y_slot: usize,
 }
 
-pub(crate) fn is_zero_usize(v: &usize) -> bool { *v == 0 }
+pub(crate) fn is_zero_usize(v: &usize) -> bool {
+    *v == 0
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -297,7 +332,9 @@ pub struct FillStroke {
     pub angle: f64,
 }
 
-fn is_zero_angle(v: &f64) -> bool { *v == 0.0 }
+fn is_zero_angle(v: &f64) -> bool {
+    *v == 0.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StrokeStyle {
@@ -312,9 +349,15 @@ pub struct StrokeStyle {
     pub stroke_opacity: f64,
 }
 
-fn default_stroke_opacity() -> f64 { 1.0 }
-fn default_fill_opacity() -> f64 { 1.0 }
-fn is_one_f64(v: &f64) -> bool { (*v - 1.0).abs() < f64::EPSILON }
+fn default_stroke_opacity() -> f64 {
+    1.0
+}
+fn default_fill_opacity() -> f64 {
+    1.0
+}
+fn is_one_f64(v: &f64) -> bool {
+    (*v - 1.0).abs() < f64::EPSILON
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -375,13 +418,43 @@ pub enum TextBaseline {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PathCmd {
-    MoveTo { x: f64, y: f64 },
-    LineTo { x: f64, y: f64 },
-    QuadTo { cx: f64, cy: f64, x: f64, y: f64 },
-    CubicTo { c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64 },
-    HLineTo { x: f64 },
-    VLineTo { y: f64 },
-    ArcTo { rx: f64, ry: f64, rotation: f64, large_arc: bool, sweep: bool, x: f64, y: f64 },
+    MoveTo {
+        x: f64,
+        y: f64,
+    },
+    LineTo {
+        x: f64,
+        y: f64,
+    },
+    QuadTo {
+        cx: f64,
+        cy: f64,
+        x: f64,
+        y: f64,
+    },
+    CubicTo {
+        c1x: f64,
+        c1y: f64,
+        c2x: f64,
+        c2y: f64,
+        x: f64,
+        y: f64,
+    },
+    HLineTo {
+        x: f64,
+    },
+    VLineTo {
+        y: f64,
+    },
+    ArcTo {
+        rx: f64,
+        ry: f64,
+        rotation: f64,
+        large_arc: bool,
+        sweep: bool,
+        x: f64,
+        y: f64,
+    },
     Close,
 }
 

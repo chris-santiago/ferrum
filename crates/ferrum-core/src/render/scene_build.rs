@@ -1,9 +1,9 @@
+use crate::spec::coord::to_scene_coord;
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
     BindingRole, BlendMode, CoordKind, InteractionConfig, LayoutScale, MarkBatch, Panel,
-    ParamBinding, PanelTickLevels, SceneGraph, SceneNode, TickLevel,
+    PanelTickLevels, ParamBinding, SceneGraph, SceneNode, TickLevel,
 };
-use crate::spec::coord::to_scene_coord;
 
 use crate::layout::{AxisLayout, LayoutResult, ResolveMode, ThemeInputs};
 use crate::spec::chart::ChartSpec;
@@ -16,8 +16,8 @@ use super::marks;
 use super::prepare::PreparedInputs;
 use super::scale_resolve::LeafScaleContext;
 use super::{
-    break_axis, inset,
-    filter_batch_by_facet, position, scale_resolve, RenderError, RenderWarning, CLIP_ID_PREFIX,
+    break_axis, filter_batch_by_facet, inset, position, scale_resolve, RenderError, RenderWarning,
+    CLIP_ID_PREFIX,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -82,11 +82,19 @@ pub fn build_scene(
     // constructing the bundle once here, rather than threading five loose
     // references through every `resolve_panel_scales` call, makes that
     // loop-invariance visible at the call site instead of implicit.
-    let panel_resolve_ctx = PanelResolveCtx { spec, prep, theme, chart_config, leaf_scales };
+    let panel_resolve_ctx = PanelResolveCtx {
+        spec,
+        prep,
+        theme,
+        chart_config,
+        leaf_scales,
+    };
 
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
-            warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
+            warnings.push(RenderWarning::EmptyPanel {
+                panel_index: panel_idx,
+            });
             continue;
         }
 
@@ -94,13 +102,17 @@ pub fn build_scene(
         // Includes both the column-header strip (top) and, in grid mode, the
         // row-header strip (right side). Both are appended to the same vec so
         // the compositor's offset logic picks them up without a schema change.
-        let mut strip_title_nodes: Vec<SceneNode> = panel.strip_title.as_ref()
+        let mut strip_title_nodes: Vec<SceneNode> = panel
+            .strip_title
+            .as_ref()
             .map(|strip| marks::strip_title::build_strip_title(strip, &panel.plot_area, theme))
             .unwrap_or_default();
         if let Some(row_strip) = &panel.row_strip_title {
-            strip_title_nodes.extend(
-                marks::strip_title::build_row_strip_title(row_strip, panel.plot_area.h, theme)
-            );
+            strip_title_nodes.extend(marks::strip_title::build_row_strip_title(
+                row_strip,
+                panel.plot_area.h,
+                theme,
+            ));
         }
 
         // Facet filter: filter the merged batch on col (and row in grid mode).
@@ -125,12 +137,12 @@ pub fn build_scene(
             .map(|layer| match &layer.data_source {
                 None => Ok(panel_batch.clone()),
                 Some(name) => {
-                    let src = prep.transform_outputs.get(name).expect(
-                        "layer.data_source validated by prepare_render_inputs",
-                    );
+                    let src = prep
+                        .transform_outputs
+                        .get(name)
+                        .expect("layer.data_source validated by prepare_render_inputs");
                     if let Some(key) = &panel.facet_key {
-                        let col_filtered =
-                            filter_batch_by_facet(src, &key.field, &key.value)?;
+                        let col_filtered = filter_batch_by_facet(src, &key.field, &key.value)?;
                         if let Some(rk) = &panel.row_facet_key {
                             filter_batch_by_facet(&col_filtered, &rk.field, &rk.value)
                         } else {
@@ -179,16 +191,18 @@ pub fn build_scene(
             .iter()
             .filter(|a| a.panel_index == panel_idx)
             .collect();
-        let panel_x_axis_global = panel_axes_layout
-            .iter()
-            .copied()
-            .find(|a| matches!(a.orient,
-                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top));
-        let panel_y_axis_global = panel_axes_layout
-            .iter()
-            .copied()
-            .find(|a| matches!(a.orient,
-                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
+        let panel_x_axis_global = panel_axes_layout.iter().copied().find(|a| {
+            matches!(
+                a.orient,
+                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
+            )
+        });
+        let panel_y_axis_global = panel_axes_layout.iter().copied().find(|a| {
+            matches!(
+                a.orient,
+                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right
+            )
+        });
 
         // Secondary y-axes for this panel (secondary-y-axis, GH #52): one per
         // `independent_y` layer, orient Right, stacked outward. Empty
@@ -215,14 +229,10 @@ pub fn build_scene(
 
         // Resolve the effective per-panel axis references: use the freshly-built
         // independent layout when available, otherwise the global shared one.
-        let panel_x_axis: Option<&AxisLayout> = panel_axes
-            .independent_x
-            .as_ref()
-            .or(panel_x_axis_global);
-        let panel_y_axis: Option<&AxisLayout> = panel_axes
-            .independent_y
-            .as_ref()
-            .or(panel_y_axis_global);
+        let panel_x_axis: Option<&AxisLayout> =
+            panel_axes.independent_x.as_ref().or(panel_x_axis_global);
+        let panel_y_axis: Option<&AxisLayout> =
+            panel_axes.independent_y.as_ref().or(panel_y_axis_global);
 
         // Grid + axis build and above/below routing (MOD-09).
         let PanelAxisGrid {
@@ -246,15 +256,8 @@ pub fn build_scene(
         );
 
         // Per-layer mark batches (MOD-09).
-        let mut mark_batches = build_panel_mark_batches(
-            spec,
-            prep,
-            &layer_batches,
-            &scales,
-            panel,
-            theme,
-            warnings,
-        )?;
+        let mut mark_batches =
+            build_panel_mark_batches(spec, prep, &layer_batches, &scales, panel, theme, warnings)?;
 
         let plot_area = ferrum_scene::Rect {
             x: panel.plot_area.x,
@@ -281,7 +284,9 @@ pub fn build_scene(
         // Convert spec-side CoordKind to scene-side CoordKind.
         // outer_radius_px defaults to half the smaller plot dimension for polar.
         let outer_radius_px = polar_outer_radius(&panel.plot_area);
-        let scene_coord = spec.coord.as_ref()
+        let scene_coord = spec
+            .coord
+            .as_ref()
             .map(|c| to_scene_coord(c, outer_radius_px))
             .unwrap_or(CoordKind::Cartesian {
                 x_domain: None,
@@ -294,15 +299,39 @@ pub fn build_scene(
         // Inject computed axis domains into the scene coord so the JS zoom handler
         // can read the actual displayed domain even for auto-scaled charts.
         let scene_coord = match scene_coord {
-            CoordKind::Cartesian { x_domain: None, y_domain: None, expand, clip, y_domains } => {
+            CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand,
+                clip,
+                y_domains,
+            } => {
                 let x_dom = scales.x.data_domain();
                 let y_dom = scales.y.data_domain();
-                CoordKind::Cartesian { x_domain: x_dom, y_domain: y_dom, expand, clip, y_domains }
+                CoordKind::Cartesian {
+                    x_domain: x_dom,
+                    y_domain: y_dom,
+                    expand,
+                    clip,
+                    y_domains,
+                }
             }
-            CoordKind::Fixed { x_domain: None, y_domain: None, ratio, expand, clip } => {
+            CoordKind::Fixed {
+                x_domain: None,
+                y_domain: None,
+                ratio,
+                expand,
+                clip,
+            } => {
                 let x_dom = scales.x.data_domain();
                 let y_dom = scales.y.data_domain();
-                CoordKind::Fixed { x_domain: x_dom, y_domain: y_dom, ratio, expand, clip }
+                CoordKind::Fixed {
+                    x_domain: x_dom,
+                    y_domain: y_dom,
+                    ratio,
+                    expand,
+                    clip,
+                }
             }
             other => other,
         };
@@ -319,12 +348,26 @@ pub fn build_scene(
         // panel-level zoom/pan affine (spec §6, §8.5).
         let scene_coord = if scales.y_slots.has_independent() {
             match scene_coord {
-                CoordKind::Cartesian { x_domain, y_domain, expand, clip, .. } => {
-                    let y_domains = scales.y_slots.slots()
+                CoordKind::Cartesian {
+                    x_domain,
+                    y_domain,
+                    expand,
+                    clip,
+                    ..
+                } => {
+                    let y_domains = scales
+                        .y_slots
+                        .slots()
                         .iter()
                         .map(|s| s.data_domain())
                         .collect();
-                    CoordKind::Cartesian { x_domain, y_domain, expand, clip, y_domains }
+                    CoordKind::Cartesian {
+                        x_domain,
+                        y_domain,
+                        expand,
+                        clip,
+                        y_domains,
+                    }
                 }
                 other => other,
             }
@@ -333,10 +376,12 @@ pub fn build_scene(
         };
 
         // Annotations: render user-specified annotations on the first panel only.
-        // `build_annotations` partitions nodes by the Text spec's `z` field:
-        //   - `below_marks` → appended to the panel `grid` slot (pre-marks bucket)
-        //   - `above_marks` → seeded into the `annotations` slot (post-marks bucket)
-        // This mirrors how above-marks grid/axes (zindex >= 1) route into `annotations`.
+        // `build_annotations` partitions nodes by the Text spec's `z` field
+        // (GH #89B): `below_marks` → the panel's typed `below_marks` slot
+        // (pre-marks content bucket); `above_marks` → the panel's
+        // `annotations` slot (post-marks content bucket). Chrome (above-marks
+        // grid/axes, zindex >= 1) routes into the separate `chrome_above`
+        // slot below — a typed sibling, not a prefix of `annotations`.
         let annotation_nodes = if panel_idx == 0 && !chart_config.annotations.is_empty() {
             let ann_ctx = super::annotation::ScaleContext {
                 plot_area: panel.plot_area,
@@ -353,17 +398,17 @@ pub fn build_scene(
 
         // Structural features: axis breaks, insets.
         // Only applied to the first panel (non-faceted charts).
-        let StructuralOutput { extra_annotations: structural_annotations, break_results } =
-            if panel_idx == 0 && !chart_config.structural.is_empty() {
-                build_structural_nodes(
-                    &chart_config.structural,
-                    &scales,
-                    &panel.plot_area,
-                    theme,
-                )
-            } else {
-                StructuralOutput { extra_annotations: Vec::new(), break_results: Vec::new() }
-            };
+        let StructuralOutput {
+            extra_annotations: structural_annotations,
+            break_results,
+        } = if panel_idx == 0 && !chart_config.structural.is_empty() {
+            build_structural_nodes(&chart_config.structural, &scales, &panel.plot_area, theme)
+        } else {
+            StructuralOutput {
+                extra_annotations: Vec::new(),
+                break_results: Vec::new(),
+            }
+        };
 
         // Remap mark, axis, and grid pixel coordinates through any broken scales
         // so that elements inside a gap are hidden and elements outside the gap
@@ -378,7 +423,13 @@ pub fn build_scene(
                 let (px_lo, px_hi) = pixel_range;
                 for batch in &mut mark_batches {
                     remap_mark_batch_through_break(
-                        &mut batch.nodes, axis, d_lo, d_hi, px_lo, px_hi, break_result,
+                        &mut batch.nodes,
+                        axis,
+                        d_lo,
+                        d_hi,
+                        px_lo,
+                        px_hi,
+                        break_result,
                     );
                 }
                 // Remap axis nodes whose coordinate falls within the
@@ -400,32 +451,43 @@ pub fn build_scene(
         }
 
         // zindex (B5): an above-marks grid is moved out of the (before-marks)
-        // `grid` slot into the `annotations` slot (emitted after marks). The
+        // `grid` slot into the `chrome_above` slot (emitted after marks). The
         // below-marks default keeps the grid in `grid` for byte-identical output.
-        let (mut grid_below, grid_above_nodes) = if grid_above {
+        let (grid_below, grid_above_nodes) = if grid_above {
             (Vec::new(), grid_nodes)
         } else {
             (grid_nodes, Vec::new())
         };
 
-        // z-routing for text annotations (XDEAD-03): Text annotations with
-        // z="below_marks" are appended to the grid slot (the pre-marks "below"
-        // bucket), painted on top of gridlines but below data marks.  All other
-        // annotation nodes go into the post-marks `annotations` slot below.
-        // Even when grid_above is true (grid_below is empty), below-marks
-        // annotation nodes must still land in the grid slot.
-        grid_below.extend(annotation_nodes.below_marks);
+        // Typed chrome/content slots (GH #89B): `grid` (chrome) and
+        // `below_marks` (content — text annotations with `z == "below_marks"`)
+        // are distinct `Panel` fields rather than one commingled bucket, so a
+        // later overlay merge can clear duplicate chrome without risk of also
+        // dropping a user annotation. `below_marks` paints immediately after
+        // `grid` (ferrum-scene `Panel::below_marks` doc), the same visual
+        // position these nodes held when they were appended onto `grid`.
+        let final_below_marks: Vec<SceneNode> = annotation_nodes.below_marks;
 
         let final_axes: Vec<SceneNode> = axes_nodes;
         let final_marks: Vec<ferrum_scene::MarkBatch> = mark_batches;
-        // Annotation list (emitted after marks): user annotations (`above_marks`
-        // bucket), then any above-marks grid + axes (zindex >= 1), then structural
-        // annotations.  `below_marks` annotation nodes were routed into `grid_below`
-        // above; they do not appear here.
+        // Typed chrome/content slots (GH #89B): above-marks axis/grid chrome
+        // (zindex >= 1) routes into `chrome_above`, a typed sibling of
+        // `annotations` rather than a prefix within it. `chrome_above` paints
+        // immediately after `axes` and before `annotations` — the deliberate
+        // z-order refinement: above-marks user annotations now always paint
+        // above above-marks axis chrome (previously chrome was prefixed into
+        // the same `annotations` list ahead of user content, so it painted
+        // OVER user annotations).
+        let final_chrome_above: Vec<SceneNode> = {
+            let mut v = grid_above_nodes;
+            v.extend(axes_above_nodes);
+            v
+        };
+        // Annotation list (emitted after `chrome_above`): user annotations
+        // (`above_marks` bucket), then structural annotations. Chrome (grid +
+        // axis, zindex >= 1) no longer lives here — see `final_chrome_above`.
         let final_annotations: Vec<SceneNode> = {
             let mut v = annotation_nodes.above_marks;
-            v.extend(grid_above_nodes);
-            v.extend(axes_above_nodes);
             v.extend(structural_annotations);
             v
         };
@@ -436,8 +498,10 @@ pub fn build_scene(
             clip: panel_clip,
             coord: scene_coord,
             grid: grid_below,
+            below_marks: final_below_marks,
             marks: final_marks,
             axes: final_axes,
+            chrome_above: final_chrome_above,
             annotations: final_annotations,
             strip_title: strip_title_nodes,
             layout_scale: LayoutScale::identity(),
@@ -469,8 +533,7 @@ pub fn build_scene(
     // which still carries `domainParam`/transform `param`/selection `bind`:
     // the static resolver only mutated per-panel clones.
     let y_slots = resolved_y_slots.unwrap_or_default();
-    let param_bindings =
-        collect_param_bindings(spec, &prep.layers, &y_slots, layout.panels.len());
+    let param_bindings = collect_param_bindings(spec, &prep.layers, &y_slots, layout.panels.len());
 
     let interaction = InteractionConfig {
         zoom_enabled: !spec.selections.is_empty(),
@@ -562,7 +625,13 @@ fn resolve_panel_scales(
     // panel would otherwise share.
     panel_offset: (f64, f64),
 ) -> Result<(ChartSpec, scale_resolve::ResolvedScales), RenderError> {
-    let &PanelResolveCtx { spec, prep, theme, chart_config, leaf_scales } = ctx;
+    let &PanelResolveCtx {
+        spec,
+        prep,
+        theme,
+        chart_config,
+        leaf_scales,
+    } = ctx;
 
     // Encoding merge: layer-0 encoding overlays the chart-level encoding.
     let mut merged_encoding = spec.encoding.clone();
@@ -662,7 +731,13 @@ fn resolve_layer_y_scale(
     y_offset: f64,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
-    let &PanelResolveCtx { spec, prep, theme, leaf_scales, .. } = ctx;
+    let &PanelResolveCtx {
+        spec,
+        prep,
+        theme,
+        leaf_scales,
+        ..
+    } = ctx;
 
     // Shared param-aware per-layer y resolution (#72): the layer encoding
     // overlays the chart encoding, `layers: None` scopes the domain to this
@@ -726,10 +801,14 @@ fn resolve_panel_axes(
     // Independent-axis override: when the facet spec requests independent
     // resolution for x or y, rebuild that channel's AxisLayout from the
     // per-panel scales. Shared channels keep the global layout as-is.
-    let x_independent = spec.facet.as_ref()
+    let x_independent = spec
+        .facet
+        .as_ref()
         .map(|f| f.resolve.x == ResolveMode::Independent)
         .unwrap_or(false);
-    let y_independent = spec.facet.as_ref()
+    let y_independent = spec
+        .facet
+        .as_ref()
         .map(|f| f.resolve.y == ResolveMode::Independent)
         .unwrap_or(false);
 
@@ -739,12 +818,10 @@ fn resolve_panel_axes(
     // `resolve_axis_label_format` is the canonical single source of truth
     // for this precedence — calling it here avoids duplicating the logic
     // and ensures both paths stay in sync.
-    let (x_fmt_spec, x_fmt_type) = super::prepare::resolve_axis_label_format(
-        rendering_spec_for_panel.encoding.x.as_ref(),
-    );
-    let (y_fmt_spec, y_fmt_type) = super::prepare::resolve_axis_label_format(
-        rendering_spec_for_panel.encoding.y.as_ref(),
-    );
+    let (x_fmt_spec, x_fmt_type) =
+        super::prepare::resolve_axis_label_format(rendering_spec_for_panel.encoding.x.as_ref());
+    let (y_fmt_spec, y_fmt_type) =
+        super::prepare::resolve_axis_label_format(rendering_spec_for_panel.encoding.y.as_ref());
 
     let independent_x = if x_independent {
         // Use the global tick count as the hint so per-panel independent axes
@@ -893,17 +970,24 @@ fn route_panel_axes_and_grid(
     let suppress_axes = matches!(
         &spec.coord,
         Some(crate::spec::coord::CoordKind::Polar { .. })
-        | Some(crate::spec::coord::CoordKind::Geo { .. })
+            | Some(crate::spec::coord::CoordKind::Geo { .. })
     );
 
-    let grid_band_colors: &[String] = chart_config.grid
+    let grid_band_colors: &[String] = chart_config
+        .grid
         .as_ref()
         .and_then(|g| g.band_colors.as_deref())
         .unwrap_or(&[]);
     let grid = if suppress_axes {
         Vec::new()
     } else {
-        marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
+        marks::axis::build_grid(
+            panel.plot_area,
+            panel_x_axis,
+            panel_y_axis,
+            theme,
+            grid_band_colors,
+        )
     };
     // zindex (B5): gridlines follow their axis above/below the marks. When a
     // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
@@ -984,10 +1068,13 @@ fn route_panel_axes_and_grid(
             // Also emit any other orientations (Top, Right) from the global
             // layout that are not covered by the independent overrides.
             for axis in panel_axes_layout {
-                if !matches!(axis.orient,
-                    crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
-                    | crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right)
-                {
+                if !matches!(
+                    axis.orient,
+                    crate::layout::AxisOrient::Bottom
+                        | crate::layout::AxisOrient::Top
+                        | crate::layout::AxisOrient::Left
+                        | crate::layout::AxisOrient::Right
+                ) {
                     route_axis(axis, &mut axes_above, &mut axes_below);
                 }
             }
@@ -1013,14 +1100,22 @@ fn route_panel_axes_and_grid(
     }
 
     // Polar axis: circular boundary + radial tick marks (replaces Cartesian axes)
-    if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
+    if matches!(
+        &spec.coord,
+        Some(crate::spec::coord::CoordKind::Polar { .. })
+    ) {
         let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
         let cy = panel.plot_area.y + panel.plot_area.h / 2.0;
         let outer_r = polar_outer_radius(&panel.plot_area);
         axes_below.extend(build_polar_axes(cx, cy, outer_r, scales, theme));
     }
 
-    PanelAxisGrid { axes_below, axes_above, grid, grid_above }
+    PanelAxisGrid {
+        axes_below,
+        axes_above,
+        grid,
+        grid_above,
+    }
 }
 
 /// Build this panel's per-layer mark batches (MOD-09 extraction of the inline
@@ -1056,22 +1151,20 @@ fn build_panel_mark_batches(
         // loop iteration always reflects this layer's real slot — independent
         // of how the clone's own `y_slots` describes itself.
         let layer_slot_idx = scales.y_slots.slot_for_layer(li);
-        let layer_scales_owned: Option<scale_resolve::ResolvedScales> =
-            if layer_slot_idx != 0 {
-                let mut s = scales.clone();
-                s.y = scales.y_for_layer(li).clone();
-                // Self-describing y_slots: the clone's `.y` now points at this
-                // one layer's own scale, so its `y_slots` should describe just
-                // that — a single slot — rather than keep the stale multi-slot
-                // list carried over from `scales.clone()`, which would let a
-                // reader of `ctx.scales.y_slots` disagree with `ctx.scales.y`.
-                s.y_slots = scale_resolve::YScaleSlots::single(s.y.clone());
-                Some(s)
-            } else {
-                None
-            };
-        let scales: &scale_resolve::ResolvedScales =
-            layer_scales_owned.as_ref().unwrap_or(scales);
+        let layer_scales_owned: Option<scale_resolve::ResolvedScales> = if layer_slot_idx != 0 {
+            let mut s = scales.clone();
+            s.y = scales.y_for_layer(li).clone();
+            // Self-describing y_slots: the clone's `.y` now points at this
+            // one layer's own scale, so its `y_slots` should describe just
+            // that — a single slot — rather than keep the stale multi-slot
+            // list carried over from `scales.clone()`, which would let a
+            // reader of `ctx.scales.y_slots` disagree with `ctx.scales.y`.
+            s.y_slots = scale_resolve::YScaleSlots::single(s.y.clone());
+            Some(s)
+        } else {
+            None
+        };
+        let scales: &scale_resolve::ResolvedScales = layer_scales_owned.as_ref().unwrap_or(scales);
 
         // Position adjustment — always call apply_position; it is the
         // single authority for all adjustments (explicit layer.position
@@ -1093,9 +1186,7 @@ fn build_panel_mark_batches(
             encoding: layer.encoding.clone(),
             ..spec.clone()
         };
-        let mark_style = draw::resolve_mark_style(
-            layer.mark_style.as_ref(), theme, &layer.mark,
-        );
+        let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
         let ctx = DrawCtx {
             spec: &layer_spec,
             panel,
@@ -1116,8 +1207,10 @@ fn build_panel_mark_batches(
         // must likewise be excluded from the transform, or the wedge
         // coordinates are corrupted by a second polar projection.
         let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
-        if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
-            && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
+        if matches!(
+            &spec.coord,
+            Some(crate::spec::coord::CoordKind::Polar { .. })
+        ) && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
             && !is_arc_geometry
         {
             apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
@@ -1149,8 +1242,16 @@ fn build_panel_mark_batches(
             descriptions: result.descriptions,
             keys,
             blend: layer.blend.unwrap_or(BlendMode::Normal),
-            stroke_cap: mark_style.line.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
-            stroke_join: mark_style.line.stroke_join.as_deref().and_then(draw::parse_stroke_join),
+            stroke_cap: mark_style
+                .line
+                .stroke_cap
+                .as_deref()
+                .and_then(draw::parse_stroke_cap),
+            stroke_join: mark_style
+                .line
+                .stroke_join
+                .as_deref()
+                .and_then(draw::parse_stroke_join),
             packed_instances: None,
             // Secondary-y-axis (GH #52 Task 8): tag this batch with the same
             // slot its marks were positioned through above. `0` on every
@@ -1210,8 +1311,12 @@ fn collect_param_bindings(
     ];
     for (wire_name, channel) in channels {
         let Some(channel) = channel else { continue };
-        let Some(scale) = channel.scale.as_ref() else { continue };
-        let Some(param) = scale.domain_param() else { continue };
+        let Some(scale) = channel.scale.as_ref() else {
+            continue;
+        };
+        let Some(param) = scale.domain_param() else {
+            continue;
+        };
         for panel in 0..panel_count {
             bindings.push(ParamBinding {
                 param: param.to_owned(),
@@ -1234,9 +1339,15 @@ fn collect_param_bindings(
         if !layer.independent_y {
             continue;
         }
-        let Some(y_channel) = layer.encoding.y.as_ref() else { continue };
-        let Some(scale) = y_channel.scale.as_ref() else { continue };
-        let Some(param) = scale.domain_param() else { continue };
+        let Some(y_channel) = layer.encoding.y.as_ref() else {
+            continue;
+        };
+        let Some(scale) = y_channel.scale.as_ref() else {
+            continue;
+        };
+        let Some(param) = scale.domain_param() else {
+            continue;
+        };
         let slot = y_slots.slot_for_layer(layer_idx);
         for panel in 0..panel_count {
             bindings.push(ParamBinding {
@@ -1252,7 +1363,9 @@ fn collect_param_bindings(
     // Filter bindings: each filter transform carrying a `param` marker.
     for transform in &spec.transforms {
         if let TransformSpec::Filter(filter) = transform {
-            let Some(param) = filter.param.as_ref() else { continue };
+            let Some(param) = filter.param.as_ref() else {
+                continue;
+            };
             for panel in 0..panel_count {
                 bindings.push(ParamBinding {
                     param: param.clone(),
@@ -1287,7 +1400,9 @@ fn build_title(
     theme: &ThemeInputs,
     out: &mut Vec<SceneNode>,
 ) {
-    let Some(title) = &layout.chart_title else { return };
+    let Some(title) = &layout.chart_title else {
+        return;
+    };
     let title_spec = spec.title.as_ref();
     let resolved_font_size = title_spec
         .and_then(|t| t.font_size)
@@ -1299,15 +1414,25 @@ fn build_title(
         .and_then(|t| t.color.as_deref())
         .and_then(|hex| super::color::from_hex_str(hex).ok())
         .unwrap_or(theme.colors.title_color);
-    let fw = if resolved_font_weight == "normal" { None } else { Some(resolved_font_weight.as_str()) };
+    let fw = if resolved_font_weight == "normal" {
+        None
+    } else {
+        Some(resolved_font_weight.as_str())
+    };
     out.push(SceneNode::Text {
         x: title.x,
         y: title.y,
         content: title.text.clone(),
         slot: None,
         style: to_scene_text_style(
-            resolved_color, resolved_font_size, title.anchor, 0.0,
-            &theme.typography.title_font_family, fw, None, 1.0,
+            resolved_color,
+            resolved_font_size,
+            title.anchor,
+            0.0,
+            &theme.typography.title_font_family,
+            fw,
+            None,
+            1.0,
         ),
     });
     if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
@@ -1326,8 +1451,14 @@ fn build_title(
             content: subtitle.clone(),
             slot: None,
             style: to_scene_text_style(
-                resolved_sub_color, resolved_sub_font_size, title.anchor, 0.0,
-                &theme.typography.font_family, None, None, 1.0,
+                resolved_sub_color,
+                resolved_sub_font_size,
+                title.anchor,
+                0.0,
+                &theme.typography.font_family,
+                None,
+                None,
+                1.0,
             ),
         });
     }
@@ -1386,13 +1517,21 @@ fn build_legend_decorations(
     }
     let color_scale = resolve_legend_color_scale(spec, prep, theme, chart_config)?;
     if let Some(legend) = &layout.legend {
-        out.extend(marks::legend::build_legend(legend, color_scale.as_ref(), theme));
+        out.extend(marks::legend::build_legend(
+            legend,
+            color_scale.as_ref(),
+            theme,
+        ));
     }
     // Auxiliary (size / shape) legend blocks stacked beneath the color legend.
     // Each carries its own per-entry color (color_hex) or falls back to the
     // theme mark color, so the color scale is unused but passed for uniformity.
     for aux in &layout.aux_legends {
-        out.extend(marks::legend::build_legend(aux, color_scale.as_ref(), theme));
+        out.extend(marks::legend::build_legend(
+            aux,
+            color_scale.as_ref(),
+            theme,
+        ));
     }
     Ok(())
 }
@@ -1417,12 +1556,8 @@ pub fn build_tick_levels(
     scales: &scale_resolve::ResolvedScales,
     panel_idx: usize,
 ) -> PanelTickLevels {
-    const ZOOM_BREAKPOINTS: &[(f64, f64, usize)] = &[
-        (0.0, 0.5, 4),
-        (0.5, 2.0, 8),
-        (2.0, 4.0, 16),
-        (4.0, 1e9, 32),
-    ];
+    const ZOOM_BREAKPOINTS: &[(f64, f64, usize)] =
+        &[(0.0, 0.5, 4), (0.5, 2.0, 8), (2.0, 4.0, 16), (4.0, 1e9, 32)];
 
     let x_levels: Vec<TickLevel> = ZOOM_BREAKPOINTS
         .iter()
@@ -1487,10 +1622,7 @@ fn polar_outer_radius(plot_area: &crate::layout::Rect) -> f64 {
 ///   arc the rect describes in polar space. Arc edges (constant-y) are sampled
 ///   with `RECT_ARC_SEGMENTS` points; radial edges (constant-x) use 2 points.
 ///   The Rect's `FillStroke` is preserved so fill colour is not lost.
-fn apply_polar_node_transform(
-    nodes: &mut Vec<SceneNode>,
-    plot_area: &crate::layout::Rect,
-) {
+fn apply_polar_node_transform(nodes: &mut Vec<SceneNode>, plot_area: &crate::layout::Rect) {
     use std::f64::consts::TAU;
     let plot_x = plot_area.x;
     let plot_y = plot_area.y;
@@ -1506,8 +1638,18 @@ fn apply_polar_node_transform(
     /// Map a single Cartesian pixel point to polar pixel coordinates.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    fn map_pt(px: f64, py: f64, plot_x: f64, plot_y: f64, plot_w: f64, plot_h: f64,
-              center_x: f64, center_y: f64, outer_r: f64, tau: f64) -> (f64, f64) {
+    fn map_pt(
+        px: f64,
+        py: f64,
+        plot_x: f64,
+        plot_y: f64,
+        plot_w: f64,
+        plot_h: f64,
+        center_x: f64,
+        center_y: f64,
+        outer_r: f64,
+        tau: f64,
+    ) -> (f64, f64) {
         let theta = (px - plot_x) / plot_w * tau;
         let r = (plot_y + plot_h - py) / plot_h * outer_r;
         (center_x + r * theta.sin(), center_y - r * theta.cos())
@@ -1517,70 +1659,112 @@ fn apply_polar_node_transform(
 
     for (idx, node) in nodes.iter_mut().enumerate() {
         match node {
-            SceneNode::Circle { ref mut cx, ref mut cy, .. } => {
-                let (nx, ny) = map_pt(*cx, *cy, plot_x, plot_y, plot_w, plot_h,
-                                      center_x, center_y, outer_r, TAU);
+            SceneNode::Circle {
+                ref mut cx,
+                ref mut cy,
+                ..
+            } => {
+                let (nx, ny) = map_pt(
+                    *cx, *cy, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r, TAU,
+                );
                 *cx = nx;
                 *cy = ny;
             }
             SceneNode::Polyline { ref mut points, .. } => {
                 for pt in points.iter_mut() {
-                    let (nx, ny) = map_pt(pt.0, pt.1, plot_x, plot_y, plot_w, plot_h,
-                                          center_x, center_y, outer_r, TAU);
+                    let (nx, ny) = map_pt(
+                        pt.0, pt.1, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r,
+                        TAU,
+                    );
                     pt.0 = nx;
                     pt.1 = ny;
                 }
             }
-            SceneNode::Line { ref mut x1, ref mut y1, ref mut x2, ref mut y2, .. } => {
-                let (nx1, ny1) = map_pt(*x1, *y1, plot_x, plot_y, plot_w, plot_h,
-                                        center_x, center_y, outer_r, TAU);
-                let (nx2, ny2) = map_pt(*x2, *y2, plot_x, plot_y, plot_w, plot_h,
-                                        center_x, center_y, outer_r, TAU);
-                *x1 = nx1; *y1 = ny1;
-                *x2 = nx2; *y2 = ny2;
+            SceneNode::Line {
+                ref mut x1,
+                ref mut y1,
+                ref mut x2,
+                ref mut y2,
+                ..
+            } => {
+                let (nx1, ny1) = map_pt(
+                    *x1, *y1, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r, TAU,
+                );
+                let (nx2, ny2) = map_pt(
+                    *x2, *y2, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r, TAU,
+                );
+                *x1 = nx1;
+                *y1 = ny1;
+                *x2 = nx2;
+                *y2 = ny2;
             }
-            SceneNode::Text { ref mut x, ref mut y, .. } => {
-                let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
-                                      center_x, center_y, outer_r, TAU);
+            SceneNode::Text {
+                ref mut x,
+                ref mut y,
+                ..
+            } => {
+                let (nx, ny) = map_pt(
+                    *x, *y, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r, TAU,
+                );
                 *x = nx;
                 *y = ny;
             }
-            SceneNode::Rect { x, y, w, h, style, .. } => {
+            SceneNode::Rect {
+                x, y, w, h, style, ..
+            } => {
                 // Convert the Cartesian rect to a polar Polygon by sampling
                 // its perimeter. Constant-y (arc) edges get RECT_ARC_SEGMENTS
                 // points; constant-x (radial) edges get 2 points (straight).
                 // Perimeter order: bottom-left → bottom-right (arc) →
                 // top-right (radial) → top-left (arc, reversed) → close.
                 let (rx, ry, rw, rh, fill_stroke) = (*x, *y, *w, *h, style.clone());
-                let mut pts: Vec<[f64; 2]> = Vec::with_capacity(
-                    2 * RECT_ARC_SEGMENTS + 2
-                );
+                let mut pts: Vec<[f64; 2]> = Vec::with_capacity(2 * RECT_ARC_SEGMENTS + 2);
                 // Bottom arc: y = ry + rh, x sweeps left → right.
                 for i in 0..=RECT_ARC_SEGMENTS {
                     let t = i as f64 / RECT_ARC_SEGMENTS as f64;
                     let px = rx + t * rw;
                     let py = ry + rh;
-                    let (nx, ny) = map_pt(px, py, plot_x, plot_y, plot_w, plot_h,
-                                          center_x, center_y, outer_r, TAU);
+                    let (nx, ny) = map_pt(
+                        px, py, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r, TAU,
+                    );
                     pts.push([nx, ny]);
                 }
                 // Right radial edge: x = rx + rw, y sweeps bottom → top.
-                let (nx, ny) = map_pt(rx + rw, ry, plot_x, plot_y, plot_w, plot_h,
-                                      center_x, center_y, outer_r, TAU);
+                let (nx, ny) = map_pt(
+                    rx + rw,
+                    ry,
+                    plot_x,
+                    plot_y,
+                    plot_w,
+                    plot_h,
+                    center_x,
+                    center_y,
+                    outer_r,
+                    TAU,
+                );
                 pts.push([nx, ny]);
                 // Top arc: y = ry, x sweeps right → left.
                 for i in (0..=RECT_ARC_SEGMENTS).rev() {
                     let t = i as f64 / RECT_ARC_SEGMENTS as f64;
                     let px = rx + t * rw;
                     let py = ry;
-                    let (nx, ny) = map_pt(px, py, plot_x, plot_y, plot_w, plot_h,
-                                          center_x, center_y, outer_r, TAU);
+                    let (nx, ny) = map_pt(
+                        px, py, plot_x, plot_y, plot_w, plot_h, center_x, center_y, outer_r, TAU,
+                    );
                     pts.push([nx, ny]);
                 }
                 // Left radial edge closes back to start (polygon auto-closes).
-                replacements.push((idx, SceneNode::Polygon { rings: vec![pts], style: fill_stroke }));
+                replacements.push((
+                    idx,
+                    SceneNode::Polygon {
+                        rings: vec![pts],
+                        style: fill_stroke,
+                    },
+                ));
             }
-            SceneNode::Path { ref mut commands, .. } => {
+            SceneNode::Path {
+                ref mut commands, ..
+            } => {
                 // Transform each PathCmd endpoint and control point through the
                 // polar projection. HLineTo/VLineTo change both axes under polar
                 // (x offset → angle, y → radius) so they are converted to LineTo.
@@ -1593,51 +1777,104 @@ fn apply_polar_node_transform(
                 let mut cy_cur = 0.0_f64;
                 for cmd in commands.iter_mut() {
                     match cmd {
-                        ferrum_scene::PathCmd::MoveTo { ref mut x, ref mut y } => {
-                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
-                            cx_cur = *x; cy_cur = *y;
-                            *x = nx; *y = ny;
+                        ferrum_scene::PathCmd::MoveTo {
+                            ref mut x,
+                            ref mut y,
+                        } => {
+                            let (nx, ny) = map_pt(
+                                *x, *y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            cx_cur = *x;
+                            cy_cur = *y;
+                            *x = nx;
+                            *y = ny;
                         }
-                        ferrum_scene::PathCmd::LineTo { ref mut x, ref mut y } => {
-                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
-                            cx_cur = *x; cy_cur = *y;
-                            *x = nx; *y = ny;
+                        ferrum_scene::PathCmd::LineTo {
+                            ref mut x,
+                            ref mut y,
+                        } => {
+                            let (nx, ny) = map_pt(
+                                *x, *y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            cx_cur = *x;
+                            cy_cur = *y;
+                            *x = nx;
+                            *y = ny;
                         }
-                        ferrum_scene::PathCmd::QuadTo { ref mut cx, ref mut cy, ref mut x, ref mut y } => {
-                            let (ncx, ncy) = map_pt(*cx, *cy, plot_x, plot_y, plot_w, plot_h,
-                                                    center_x, center_y, outer_r, TAU);
-                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
-                            cx_cur = *x; cy_cur = *y;
-                            *cx = ncx; *cy = ncy;
-                            *x = nx; *y = ny;
+                        ferrum_scene::PathCmd::QuadTo {
+                            ref mut cx,
+                            ref mut cy,
+                            ref mut x,
+                            ref mut y,
+                        } => {
+                            let (ncx, ncy) = map_pt(
+                                *cx, *cy, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            let (nx, ny) = map_pt(
+                                *x, *y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            cx_cur = *x;
+                            cy_cur = *y;
+                            *cx = ncx;
+                            *cy = ncy;
+                            *x = nx;
+                            *y = ny;
                         }
-                        ferrum_scene::PathCmd::CubicTo { ref mut c1x, ref mut c1y, ref mut c2x, ref mut c2y, ref mut x, ref mut y } => {
-                            let (nc1x, nc1y) = map_pt(*c1x, *c1y, plot_x, plot_y, plot_w, plot_h,
-                                                      center_x, center_y, outer_r, TAU);
-                            let (nc2x, nc2y) = map_pt(*c2x, *c2y, plot_x, plot_y, plot_w, plot_h,
-                                                      center_x, center_y, outer_r, TAU);
-                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
-                            cx_cur = *x; cy_cur = *y;
-                            *c1x = nc1x; *c1y = nc1y;
-                            *c2x = nc2x; *c2y = nc2y;
-                            *x = nx; *y = ny;
+                        ferrum_scene::PathCmd::CubicTo {
+                            ref mut c1x,
+                            ref mut c1y,
+                            ref mut c2x,
+                            ref mut c2y,
+                            ref mut x,
+                            ref mut y,
+                        } => {
+                            let (nc1x, nc1y) = map_pt(
+                                *c1x, *c1y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            let (nc2x, nc2y) = map_pt(
+                                *c2x, *c2y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            let (nx, ny) = map_pt(
+                                *x, *y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            cx_cur = *x;
+                            cy_cur = *y;
+                            *c1x = nc1x;
+                            *c1y = nc1y;
+                            *c2x = nc2x;
+                            *c2y = nc2y;
+                            *x = nx;
+                            *y = ny;
                         }
-                        ferrum_scene::PathCmd::ArcTo { ref mut x, ref mut y, .. } => {
-                            let (nx, ny) = map_pt(*x, *y, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
-                            cx_cur = *x; cy_cur = *y;
-                            *x = nx; *y = ny;
+                        ferrum_scene::PathCmd::ArcTo {
+                            ref mut x,
+                            ref mut y,
+                            ..
+                        } => {
+                            let (nx, ny) = map_pt(
+                                *x, *y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
+                            cx_cur = *x;
+                            cy_cur = *y;
+                            *x = nx;
+                            *y = ny;
                         }
                         ferrum_scene::PathCmd::HLineTo { x: target_x } => {
                             // Polar changes both axes, so convert to LineTo using the
                             // current y position tracked above.
                             let old_x = *target_x;
-                            let (nx, ny) = map_pt(old_x, cy_cur, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
+                            let (nx, ny) = map_pt(
+                                old_x, cy_cur, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
                             cx_cur = old_x;
                             *cmd = ferrum_scene::PathCmd::LineTo { x: nx, y: ny };
                         }
@@ -1645,8 +1882,10 @@ fn apply_polar_node_transform(
                             // Polar changes both axes, so convert to LineTo using the
                             // current x position tracked above.
                             let old_y = *target_y;
-                            let (nx, ny) = map_pt(cx_cur, old_y, plot_x, plot_y, plot_w, plot_h,
-                                                  center_x, center_y, outer_r, TAU);
+                            let (nx, ny) = map_pt(
+                                cx_cur, old_y, plot_x, plot_y, plot_w, plot_h, center_x, center_y,
+                                outer_r, TAU,
+                            );
                             cy_cur = old_y;
                             *cmd = ferrum_scene::PathCmd::LineTo { x: nx, y: ny };
                         }
@@ -1674,8 +1913,8 @@ fn build_polar_axes(
     scales: &scale_resolve::ResolvedScales,
     theme: &ThemeInputs,
 ) -> Vec<SceneNode> {
-    use std::f64::consts::TAU;
     use ferrum_scene::PathCmd;
+    use std::f64::consts::TAU;
 
     let axis_color = draw::to_scene_color(theme.colors.axis_line_color);
     let stroke = ferrum_scene::StrokeStyle {
@@ -1694,11 +1933,39 @@ fn build_polar_axes(
     if outer_r > 0.0 {
         nodes.push(SceneNode::Path {
             commands: vec![
-                PathCmd::MoveTo { x: cx - outer_r, y: cy },
-                PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx + outer_r, y: cy },
-                PathCmd::ArcTo { rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: true,  sweep: true, x: cx - outer_r, y: cy },
+                PathCmd::MoveTo {
+                    x: cx - outer_r,
+                    y: cy,
+                },
+                PathCmd::ArcTo {
+                    rx: outer_r,
+                    ry: outer_r,
+                    rotation: 0.0,
+                    large_arc: true,
+                    sweep: true,
+                    x: cx + outer_r,
+                    y: cy,
+                },
+                PathCmd::ArcTo {
+                    rx: outer_r,
+                    ry: outer_r,
+                    rotation: 0.0,
+                    large_arc: true,
+                    sweep: true,
+                    x: cx - outer_r,
+                    y: cy,
+                },
             ],
-            style: ferrum_scene::FillStroke { fill: None, stroke: Some(axis_color), stroke_width: theme.sizes.axis_line_width, opacity: 1.0, stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0 },
+            style: ferrum_scene::FillStroke {
+                fill: None,
+                stroke: Some(axis_color),
+                stroke_width: theme.sizes.axis_line_width,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
             closed: true,
         });
     }
@@ -1717,7 +1984,13 @@ fn build_polar_axes(
             let y1 = cy - outer_r * theta.cos();
             let x2 = cx + (outer_r + tick_len) * theta.sin();
             let y2 = cy - (outer_r + tick_len) * theta.cos();
-            nodes.push(SceneNode::Line { x1, y1, x2, y2, style: stroke.clone() });
+            nodes.push(SceneNode::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                style: stroke.clone(),
+            });
 
             // Label outside the tick
             let lx = cx + (outer_r + label_pad) * theta.sin();
@@ -1728,9 +2001,14 @@ fn build_polar_axes(
                 content: tick.label.clone(),
                 slot: None,
                 style: draw::to_scene_text_style(
-                    theme.colors.label_color, theme.typography.label_font_size,
-                    crate::layout::TextAnchor::Middle, 0.0,
-                    &theme.typography.font_family, None, None, 1.0,
+                    theme.colors.label_color,
+                    theme.typography.label_font_size,
+                    crate::layout::TextAnchor::Middle,
+                    0.0,
+                    &theme.typography.font_family,
+                    None,
+                    None,
+                    1.0,
                 ),
             });
         }
@@ -1802,27 +2080,31 @@ fn build_structural_nodes(
                 // before passing to build_inset_nodes (which treats them as pixels).
                 let resolved_inset;
                 let inset_to_build = if let Some([dx, dy]) = spec_inset.connect_to {
-                    let px_x = scales.x.to_pixel_f64(dx)
-                        .unwrap_or_else(|| {
-                            // Fallback for ordinal / out-of-domain: linear interpolation.
-                            if let Some((lo, hi)) = scales.x.data_domain() {
-                                let frac = if (hi - lo).abs() < f64::EPSILON { 0.5 }
-                                           else { (dx - lo) / (hi - lo) };
-                                plot_area.x + frac * plot_area.w
+                    let px_x = scales.x.to_pixel_f64(dx).unwrap_or_else(|| {
+                        // Fallback for ordinal / out-of-domain: linear interpolation.
+                        if let Some((lo, hi)) = scales.x.data_domain() {
+                            let frac = if (hi - lo).abs() < f64::EPSILON {
+                                0.5
                             } else {
-                                plot_area.x + plot_area.w * 0.5
-                            }
-                        });
-                    let px_y = scales.y.to_pixel_f64(dy)
-                        .unwrap_or_else(|| {
-                            if let Some((lo, hi)) = scales.y.data_domain() {
-                                let frac = if (hi - lo).abs() < f64::EPSILON { 0.5 }
-                                           else { (dy - lo) / (hi - lo) };
-                                plot_area.y + frac * plot_area.h
+                                (dx - lo) / (hi - lo)
+                            };
+                            plot_area.x + frac * plot_area.w
+                        } else {
+                            plot_area.x + plot_area.w * 0.5
+                        }
+                    });
+                    let px_y = scales.y.to_pixel_f64(dy).unwrap_or_else(|| {
+                        if let Some((lo, hi)) = scales.y.data_domain() {
+                            let frac = if (hi - lo).abs() < f64::EPSILON {
+                                0.5
                             } else {
-                                plot_area.y + plot_area.h * 0.5
-                            }
-                        });
+                                (dy - lo) / (hi - lo)
+                            };
+                            plot_area.y + frac * plot_area.h
+                        } else {
+                            plot_area.y + plot_area.h * 0.5
+                        }
+                    });
                     resolved_inset = super::chart_config::InsetSpec {
                         connect_to: Some([px_x, px_y]),
                         ..spec_inset.clone()
@@ -1837,7 +2119,10 @@ fn build_structural_nodes(
         }
     }
 
-    StructuralOutput { extra_annotations, break_results }
+    StructuralOutput {
+        extra_annotations,
+        break_results,
+    }
 }
 
 // ── Break-axis mark remapping ────────────────────────────────────────────────
@@ -1861,15 +2146,31 @@ const BREAK_HIDDEN: f64 = -99999.0;
 fn node_coord_in_range(node: &SceneNode, axis: &str, lo: f64, hi: f64) -> bool {
     let margin = 1.0;
     let coord = match node {
-        SceneNode::Text { x, y, .. } => if axis == "y" { *y } else { *x },
+        SceneNode::Text { x, y, .. } => {
+            if axis == "y" {
+                *y
+            } else {
+                *x
+            }
+        }
         SceneNode::Line { x1, y1, x2, y2, .. } => {
-            if axis == "y" { (*y1).min(*y2) } else { (*x1).min(*x2) }
+            if axis == "y" {
+                (*y1).min(*y2)
+            } else {
+                (*x1).min(*x2)
+            }
         }
         SceneNode::Rect { x, y, w, h, .. } => {
-            if axis == "y" { *y } else { *x }
+            if axis == "y" {
+                *y
+            } else {
+                *x
+            }
         }
         SceneNode::Group { children, .. } => {
-            return children.iter().any(|c| node_coord_in_range(c, axis, lo, hi));
+            return children
+                .iter()
+                .any(|c| node_coord_in_range(c, axis, lo, hi));
         }
         _ => return false,
     };
@@ -1906,8 +2207,7 @@ fn remap_node(
     match node {
         SceneNode::Circle { cx, cy, .. } => {
             let coord = if axis == "y" { cy } else { cx };
-            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br)
-                .unwrap_or(BREAK_HIDDEN);
+            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
         }
         SceneNode::Rect { x, y, w, h, .. } => {
             if axis == "y" {
@@ -1918,7 +2218,9 @@ fn remap_node(
                         *y = t.min(b);
                         *h = (b - t).abs();
                     }
-                    _ => { *h = 0.0; }
+                    _ => {
+                        *h = 0.0;
+                    }
                 }
             } else {
                 let left = remap_coord(*x, d_lo, d_hi, px_lo, px_hi, br);
@@ -1928,7 +2230,9 @@ fn remap_node(
                         *x = l.min(r);
                         *w = (r - l).abs();
                     }
-                    _ => { *w = 0.0; }
+                    _ => {
+                        *w = 0.0;
+                    }
                 }
             }
         }
@@ -1948,8 +2252,7 @@ fn remap_node(
         }
         SceneNode::Text { x, y, .. } => {
             let coord = if axis == "y" { y } else { x };
-            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br)
-                .unwrap_or(BREAK_HIDDEN);
+            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
         }
         SceneNode::Group { children, .. } => {
             for child in children.iter_mut() {
@@ -1977,20 +2280,56 @@ fn remap_path_cmd(
     };
     match cmd {
         PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => {
-            if axis == "y" { remap(y); } else { remap(x); }
+            if axis == "y" {
+                remap(y);
+            } else {
+                remap(x);
+            }
         }
         PathCmd::QuadTo { cx, cy, x, y } => {
-            if axis == "y" { remap(cy); remap(y); } else { remap(cx); remap(x); }
+            if axis == "y" {
+                remap(cy);
+                remap(y);
+            } else {
+                remap(cx);
+                remap(x);
+            }
         }
-        PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } => {
-            if axis == "y" { remap(c1y); remap(c2y); remap(y); }
-            else { remap(c1x); remap(c2x); remap(x); }
+        PathCmd::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        } => {
+            if axis == "y" {
+                remap(c1y);
+                remap(c2y);
+                remap(y);
+            } else {
+                remap(c1x);
+                remap(c2x);
+                remap(x);
+            }
         }
         PathCmd::ArcTo { x, y, .. } => {
-            if axis == "y" { remap(y); } else { remap(x); }
+            if axis == "y" {
+                remap(y);
+            } else {
+                remap(x);
+            }
         }
-        PathCmd::HLineTo { x } => { if axis != "y" { remap(x); } }
-        PathCmd::VLineTo { y } => { if axis == "y" { remap(y); } }
+        PathCmd::HLineTo { x } => {
+            if axis != "y" {
+                remap(x);
+            }
+        }
+        PathCmd::VLineTo { y } => {
+            if axis == "y" {
+                remap(y);
+            }
+        }
         PathCmd::Close => {}
     }
 }
@@ -2012,7 +2351,9 @@ fn remap_coord(
     br: &break_axis::BreakResult,
 ) -> Option<f64> {
     let span = px_hi - px_lo;
-    if span.abs() < f64::EPSILON { return Some(px); }
+    if span.abs() < f64::EPSILON {
+        return Some(px);
+    }
     let data_val = d_lo + (px - px_lo) / span * (d_hi - d_lo);
     let data_val = data_val.clamp(d_lo.min(d_hi), d_lo.max(d_hi));
     break_axis::broken_scale_map(data_val, br)
@@ -2048,15 +2389,13 @@ fn validate_mark_encoding(
 ) -> Result<(), RenderError> {
     use crate::spec::mark::Mark;
     match mark {
-        Mark::Area if encoding.x2.is_some() => {
-            Err(RenderError::UnsupportedChannelCombination {
-                mark: "mark_area",
-                channel: "x2",
-                hint: "use {alt}= for a vertical band area, or use mark_rect for a 2-D extent",
-                hint_alt_channel: Some("y2"),
-                coord_flipped,
-            })
-        }
+        Mark::Area if encoding.x2.is_some() => Err(RenderError::UnsupportedChannelCombination {
+            mark: "mark_area",
+            channel: "x2",
+            hint: "use {alt}= for a vertical band area, or use mark_rect for a 2-D extent",
+            hint_alt_channel: Some("y2"),
+            coord_flipped,
+        }),
         Mark::Bar if encoding.x2.is_some() && encoding.y2.is_some() => {
             Err(RenderError::UnsupportedChannelCombination {
                 mark: "mark_bar",
@@ -2073,8 +2412,8 @@ fn validate_mark_encoding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrum_scene::{FillStroke, PathCmd, SceneNode};
     use crate::layout::Rect;
+    use ferrum_scene::{FillStroke, PathCmd, SceneNode};
 
     fn default_fill_stroke() -> ferrum_scene::FillStroke {
         FillStroke {
@@ -2094,23 +2433,29 @@ mod tests {
     /// catch-all `_ => {}` left Path nodes at their original Cartesian coords.
     #[test]
     fn b5_path_nodes_are_polar_transformed() {
-        let plot_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let plot_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
         // A Path node placed at the top-left corner of the plot area in Cartesian space.
         // After polar transform this coordinate will NOT remain at (0, 0).
         let cartesian_x = 0.0_f64;
         let cartesian_y = 0.0_f64;
 
-        let mut nodes = vec![
-            SceneNode::Path {
-                commands: vec![
-                    PathCmd::MoveTo { x: cartesian_x, y: cartesian_y },
-                    PathCmd::LineTo { x: 100.0, y: 100.0 },
-                    PathCmd::Close,
-                ],
-                style: default_fill_stroke(),
-                closed: true,
-            }
-        ];
+        let mut nodes = vec![SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo {
+                    x: cartesian_x,
+                    y: cartesian_y,
+                },
+                PathCmd::LineTo { x: 100.0, y: 100.0 },
+                PathCmd::Close,
+            ],
+            style: default_fill_stroke(),
+            closed: true,
+        }];
 
         apply_polar_node_transform(&mut nodes, &plot_area);
 
@@ -2120,10 +2465,10 @@ mod tests {
                 // The MoveTo endpoint for (0, 0) in Cartesian maps to a non-zero polar
                 // coordinate. Specifically: theta = 0, r = 1 * outer_r → (cx, cy - r).
                 let outer_r = plot_area.w.min(plot_area.h) / 2.0; // 100.0
-                let center_x = plot_area.x + plot_area.w / 2.0;   // 100.0
-                let center_y = plot_area.y + plot_area.h / 2.0;   // 100.0
-                // theta = 0 / 200 * TAU = 0; r = (0 + 200 - 0) / 200 * 100 = 100
-                // nx = center_x + r * sin(0) = 100; ny = center_y - r * cos(0) = 0
+                let center_x = plot_area.x + plot_area.w / 2.0; // 100.0
+                let center_y = plot_area.y + plot_area.h / 2.0; // 100.0
+                                                                // theta = 0 / 200 * TAU = 0; r = (0 + 200 - 0) / 200 * 100 = 100
+                                                                // nx = center_x + r * sin(0) = 100; ny = center_y - r * cos(0) = 0
                 let expected_x = center_x + outer_r * 0_f64.sin(); // 100.0
                 let expected_y = center_y - outer_r * 0_f64.cos(); // 0.0
                 match &commands[0] {
@@ -2148,19 +2493,22 @@ mod tests {
     /// polar transform (since polar changes both x and y).
     #[test]
     fn b5_hlineto_vlineto_converted_to_lineto_under_polar() {
-        let plot_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let mut nodes = vec![
-            SceneNode::Path {
-                commands: vec![
-                    PathCmd::MoveTo { x: 50.0, y: 100.0 },
-                    PathCmd::HLineTo { x: 150.0 },
-                    PathCmd::VLineTo { y: 50.0 },
-                    PathCmd::Close,
-                ],
-                style: default_fill_stroke(),
-                closed: true,
-            }
-        ];
+        let plot_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let mut nodes = vec![SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 50.0, y: 100.0 },
+                PathCmd::HLineTo { x: 150.0 },
+                PathCmd::VLineTo { y: 50.0 },
+                PathCmd::Close,
+            ],
+            style: default_fill_stroke(),
+            closed: true,
+        }];
 
         apply_polar_node_transform(&mut nodes, &plot_area);
 
@@ -2176,11 +2524,13 @@ mod tests {
                 // The converted HLineTo/VLineTo must become LineTo variants.
                 assert!(
                     matches!(commands[1], PathCmd::LineTo { .. }),
-                    "HLineTo must become LineTo, got: {:?}", commands[1]
+                    "HLineTo must become LineTo, got: {:?}",
+                    commands[1]
                 );
                 assert!(
                     matches!(commands[2], PathCmd::LineTo { .. }),
-                    "VLineTo must become LineTo, got: {:?}", commands[2]
+                    "VLineTo must become LineTo, got: {:?}",
+                    commands[2]
                 );
             }
             other => panic!("expected Path node, got {other:?}"),
@@ -2190,18 +2540,26 @@ mod tests {
     /// B5: Control points in QuadTo/CubicTo must also be transformed.
     #[test]
     fn b5_quadto_control_points_are_transformed() {
-        let plot_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
-        let mut nodes = vec![
-            SceneNode::Path {
-                commands: vec![
-                    PathCmd::MoveTo { x: 0.0, y: 100.0 },
-                    PathCmd::QuadTo { cx: 50.0, cy: 0.0, x: 100.0, y: 100.0 },
-                    PathCmd::Close,
-                ],
-                style: default_fill_stroke(),
-                closed: true,
-            }
-        ];
+        let plot_area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
+        let mut nodes = vec![SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 0.0, y: 100.0 },
+                PathCmd::QuadTo {
+                    cx: 50.0,
+                    cy: 0.0,
+                    x: 100.0,
+                    y: 100.0,
+                },
+                PathCmd::Close,
+            ],
+            style: default_fill_stroke(),
+            closed: true,
+        }];
 
         apply_polar_node_transform(&mut nodes, &plot_area);
 
@@ -2355,7 +2713,8 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
+        let bindings =
+            collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
         assert_eq!(bindings.len(), 1);
         let b = &bindings[0];
         assert_eq!(b.param, "d");
@@ -2373,7 +2732,8 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 3);
+        let bindings =
+            collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 3);
         assert_eq!(bindings.len(), 3);
         assert_eq!(
             bindings.iter().filter_map(|b| b.panel).collect::<Vec<_>>(),
@@ -2396,7 +2756,8 @@ mod tests {
                 param: Some("brush".into()),
             },
         )];
-        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
+        let bindings =
+            collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
         assert_eq!(bindings.len(), 1);
         let b = &bindings[0];
         assert_eq!(b.param, "brush");
@@ -2415,7 +2776,8 @@ mod tests {
             select: None,
         }]);
         spec.encoding.x = None;
-        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
+        let bindings =
+            collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
         assert_eq!(bindings.len(), 1);
         let b = &bindings[0];
         assert_eq!(b.param, "sel");
@@ -2432,11 +2794,17 @@ mod tests {
         // binding because the reference exists. Strip it to assert true emptiness.
         let mut bare = spec;
         bare.encoding.x = None;
-        assert!(collect_param_bindings(&bare, &[], &scale_resolve::YScaleSlots::default(), 1).is_empty());
+        assert!(
+            collect_param_bindings(&bare, &[], &scale_resolve::YScaleSlots::default(), 1)
+                .is_empty()
+        );
     }
 
     /// Build a minimal `LayerPrepared` carrying a `y` domainParam scale.
-    fn layer_with_y_domain_param(name: &str, independent_y: bool) -> crate::render::prepare::LayerPrepared {
+    fn layer_with_y_domain_param(
+        name: &str,
+        independent_y: bool,
+    ) -> crate::render::prepare::LayerPrepared {
         crate::render::prepare::LayerPrepared {
             mark: Mark::Line,
             encoding: crate::spec::encoding::Encoding {
@@ -2513,12 +2881,19 @@ mod tests {
             bindings.iter().filter_map(|b| b.panel).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        assert!(bindings.iter().all(|b| b.y_slot == 1 && b.channel.as_deref() == Some("y")));
+        assert!(bindings
+            .iter()
+            .all(|b| b.y_slot == 1 && b.channel.as_deref() == Some("y")));
     }
 
     fn layout_with_subtitle(subtitle: &str) -> LayoutResult {
         LayoutResult {
-            viewport: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+            viewport: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 300.0,
+            },
             panels: Vec::new(),
             axes: Vec::new(),
             legend: None,
@@ -2543,7 +2918,10 @@ mod tests {
     #[test]
     fn build_title_applies_chart_config_subtitle_styling() {
         let spec = spec_with_x_domain_param(Vec::new());
-        assert!(spec.title.is_none(), "this test exercises the chart-config path, not spec.title");
+        assert!(
+            spec.title.is_none(),
+            "this test exercises the chart-config path, not spec.title"
+        );
         let layout = layout_with_subtitle("Styled subtitle");
 
         let mut theme = ThemeInputs::default();
@@ -2557,7 +2935,9 @@ mod tests {
         let subtitle_node = nodes
             .iter()
             .find_map(|n| match n {
-                SceneNode::Text { content, style, .. } if content == "Styled subtitle" => Some(style),
+                SceneNode::Text { content, style, .. } if content == "Styled subtitle" => {
+                    Some(style)
+                }
                 _ => None,
             })
             .expect("subtitle text node must be emitted");
@@ -2581,11 +2961,16 @@ mod tests {
         let subtitle_node = nodes
             .iter()
             .find_map(|n| match n {
-                SceneNode::Text { content, style, .. } if content == "Default subtitle" => Some(style),
+                SceneNode::Text { content, style, .. } if content == "Default subtitle" => {
+                    Some(style)
+                }
                 _ => None,
             })
             .expect("subtitle text node must be emitted");
-        assert_eq!(subtitle_node.font_size, theme.typography.title_font_size * 0.85);
+        assert_eq!(
+            subtitle_node.font_size,
+            theme.typography.title_font_size * 0.85
+        );
         assert_eq!(subtitle_node.color, to_scene_color(theme.colors.font_color));
     }
 
@@ -2601,18 +2986,24 @@ mod tests {
     /// share one pixel range and fail this assertion.)
     #[test]
     fn resolve_panel_scales_differs_per_panel_pixel_range() {
-        use arrow::array::Float64Array;
-        use arrow::datatypes::{DataType, Field, Schema};
         use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let spec = ChartSpec {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2643,37 +3034,70 @@ mod tests {
         .unwrap();
 
         let theme = ThemeInputs::default();
-        let prep = super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep =
+            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
         // Two panels with deliberately different plot_area widths.
         let panel_narrow = crate::layout::PanelLayout {
-            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 },
+            plot_area: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 200.0,
+            },
             ..Default::default()
         };
         let panel_wide = crate::layout::PanelLayout {
-            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 },
+            plot_area: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 200.0,
+            },
             ..Default::default()
         };
 
         let mut warnings = Vec::new();
         // One implicit layer → one layer batch (the whole panel batch).
         let layer_batches = vec![batch.clone()];
-        let ctx = PanelResolveCtx { spec: &spec, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
+        let ctx = PanelResolveCtx {
+            spec: &spec,
+            prep: &prep,
+            theme: &theme,
+            chart_config: &chart_config,
+            leaf_scales: None,
+        };
         let (_spec_a, scales_a) = resolve_panel_scales(
-            &ctx, &panel_narrow, &batch, &layer_batches, &mut warnings, (0.0, 0.0),
+            &ctx,
+            &panel_narrow,
+            &batch,
+            &layer_batches,
+            &mut warnings,
+            (0.0, 0.0),
         )
         .unwrap();
         let (_spec_b, scales_b) = resolve_panel_scales(
-            &ctx, &panel_wide, &batch, &layer_batches, &mut warnings, (0.0, 0.0),
+            &ctx,
+            &panel_wide,
+            &batch,
+            &layer_batches,
+            &mut warnings,
+            (0.0, 0.0),
         )
         .unwrap();
 
         let (a_lo, a_hi) = scales_a.x.pixel_range();
         let (b_lo, b_hi) = scales_b.x.pixel_range();
         // Each panel's x range spans its own plot_area width.
-        assert!((a_hi - a_lo).abs() <= 100.0 + 1e-6, "narrow panel x range within 100px");
-        assert!((b_hi - b_lo).abs() > 100.0 + 1e-6, "wide panel x range exceeds 100px");
+        assert!(
+            (a_hi - a_lo).abs() <= 100.0 + 1e-6,
+            "narrow panel x range within 100px"
+        );
+        assert!(
+            (b_hi - b_lo).abs() > 100.0 + 1e-6,
+            "wide panel x range exceeds 100px"
+        );
         // The two panels do NOT share a pixel range — the per-panel resolution is real.
         assert!(
             (a_hi - a_lo - (b_hi - b_lo)).abs() > 1e-6,
@@ -2687,17 +3111,20 @@ mod tests {
     /// on `y1`, and a batch carrying `x`/`y0`/`y1`. `layer1_independent` sets the
     /// flag on the appended layer. Returns `(spec, batch)`.
     fn two_layer_dual_y_spec(layer1_independent: bool) -> (ChartSpec, RecordBatch) {
-        use arrow::array::Float64Array;
-        use arrow::datatypes::{DataType, Field, Schema};
         use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let y_enc = |field: &str| Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                y: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: field.into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2715,7 +3142,10 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2758,17 +3188,20 @@ mod tests {
     /// the prepare axis inputs, the per-panel slots, and the axis-group tags in
     /// lock-step for more than a single secondary axis.
     fn three_layer_two_independent_spec() -> (ChartSpec, RecordBatch) {
-        use arrow::array::Float64Array;
-        use arrow::datatypes::{DataType, Field, Schema};
         use crate::spec::data_ref::DataRef;
         use crate::spec::encoding::{Encoding, EncodingSpec};
         use crate::spec::layer::Layer;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let y_layer = |field: &str, independent: bool| Layer {
             mark: Mark::Line,
             encoding: Encoding {
-                y: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: field.into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2784,7 +3217,10 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Line,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
@@ -2842,10 +3278,18 @@ mod tests {
 
         let (mut spec, batch) = two_layer_dual_y_spec(true);
         let mk_fields = |f: Option<&str>| {
-            f.map(|field| vec![EncodingSpec { field: field.into(), ..Default::default() }])
+            f.map(|field| {
+                vec![EncodingSpec {
+                    field: field.into(),
+                    ..Default::default()
+                }]
+            })
         };
         spec.encoding.tooltip_fields = mk_fields(chart_tooltip_field);
-        let layers = spec.layers.as_mut().expect("two_layer_dual_y_spec always sets layers");
+        let layers = spec
+            .layers
+            .as_mut()
+            .expect("two_layer_dual_y_spec always sets layers");
         layers[0].encoding.tooltip_fields = mk_fields(layer0_tooltip_field);
         layers[1].encoding.tooltip_fields = mk_fields(layer1_tooltip_field);
         (spec, batch)
@@ -2857,7 +3301,10 @@ mod tests {
     /// a customized spec.
     fn build_scene_for(spec: &ChartSpec, batch: &RecordBatch) -> ferrum_scene::SceneGraph {
         let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
@@ -2865,14 +3312,32 @@ mod tests {
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
-            spec, &theme, viewport,
-            &prep.axes, &prep.facet_groups, &prep.legend_entries,
-            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
-            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            spec,
+            &theme,
+            viewport,
+            &prep.axes,
+            &prep.facet_groups,
+            &prep.legend_entries,
+            prep.legend_title.clone(),
+            prep.colorbar.as_ref(),
+            &metrics,
+            &crate::layout::legend::LegendOverrides::default(),
+            &prep.aux_legends,
             crate::layout::legend::LegendSuppression::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
-        build_scene(spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None).unwrap()
+        build_scene(
+            spec,
+            &prep,
+            &layout,
+            &theme,
+            &config,
+            &mut warnings,
+            &chart_config,
+            None,
+        )
+        .unwrap()
     }
 
     /// A non-primary layer's mark batch must carry ITS OWN tooltip_fields —
@@ -2886,18 +3351,23 @@ mod tests {
     /// built in `build_panel_mark_batches` — this test locks that contract in.
     #[test]
     fn layer_tooltip_metadata_uses_each_layers_own_fields() {
-        let (spec, batch) =
-            two_layer_dual_y_spec_with_tooltips(Some("y0"), Some("y0"), Some("y1"));
+        let (spec, batch) = two_layer_dual_y_spec_with_tooltips(Some("y0"), Some("y0"), Some("y1"));
         let scene = build_scene_for(&spec, &batch);
         let panel = &scene.panels[0];
         assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
 
-        let layer0 = panel.marks[0].tooltips.as_ref().expect("layer 0 must have tooltips");
+        let layer0 = panel.marks[0]
+            .tooltips
+            .as_ref()
+            .expect("layer 0 must have tooltips");
         assert_eq!(layer0[0].fields.len(), 1);
         assert_eq!(layer0[0].fields[0].name, "y0");
         assert_eq!(layer0[0].fields[0].value, "1");
 
-        let layer1 = panel.marks[1].tooltips.as_ref().expect("layer 1 must have tooltips");
+        let layer1 = panel.marks[1]
+            .tooltips
+            .as_ref()
+            .expect("layer 1 must have tooltips");
         assert_eq!(layer1[0].fields.len(), 1);
         assert_eq!(
             layer1[0].fields[0].name, "y1",
@@ -2919,7 +3389,9 @@ mod tests {
         let panel = &scene.panels[0];
 
         for (i, mark_batch) in panel.marks.iter().enumerate() {
-            let tooltips = mark_batch.tooltips.as_ref()
+            let tooltips = mark_batch
+                .tooltips
+                .as_ref()
                 .unwrap_or_else(|| panic!("layer {i} must have tooltips via chart-level fallback"));
             assert_eq!(
                 tooltips[0].fields[0].name, "y0",
@@ -2944,23 +3416,46 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
-                tooltip_fields: Some(vec![EncodingSpec { field: "y".into(), ..Default::default() }]),
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }),
+                tooltip_fields: Some(vec![EncodingSpec {
+                    field: "y".into(),
+                    ..Default::default()
+                }]),
                 ..Default::default()
             },
-            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
-            position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
         ]));
-        let batch = RecordBatch::try_new(schema, vec![
-            Arc::new(Float64Array::from(vec![1.0, 2.0])),
-            Arc::new(Float64Array::from(vec![10.0, 20.0])),
-        ]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            ],
+        )
+        .unwrap();
 
         let scene_a = build_scene_for(&spec, &batch);
         let scene_b = build_scene_for(&spec, &batch);
@@ -2970,7 +3465,10 @@ mod tests {
             "identical inputs must produce byte-identical scene JSON"
         );
 
-        let tooltips = scene_a.panels[0].marks[0].tooltips.as_ref().expect("must have tooltips");
+        let tooltips = scene_a.panels[0].marks[0]
+            .tooltips
+            .as_ref()
+            .expect("must have tooltips");
         assert_eq!(tooltips[0].fields[0].name, "y");
         assert_eq!(tooltips[0].fields[0].value, "10");
     }
@@ -2980,15 +3478,31 @@ mod tests {
         let prep = super::super::prepare::prepare_render_inputs(spec, batch, &theme, None).unwrap();
         let chart_config = super::super::chart_config::ChartConfig::default();
         let panel = crate::layout::PanelLayout {
-            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+            plot_area: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
             ..Default::default()
         };
         // Both layers read the whole panel batch (no per-layer data_source).
         let layer_batches = vec![batch.clone(), batch.clone()];
         let mut warnings = Vec::new();
-        let ctx = PanelResolveCtx { spec, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
+        let ctx = PanelResolveCtx {
+            spec,
+            prep: &prep,
+            theme: &theme,
+            chart_config: &chart_config,
+            leaf_scales: None,
+        };
         let (_spec, scales) = resolve_panel_scales(
-            &ctx, &panel, batch, &layer_batches, &mut warnings, (0.0, 0.0),
+            &ctx,
+            &panel,
+            batch,
+            &layer_batches,
+            &mut warnings,
+            (0.0, 0.0),
         )
         .unwrap();
         scales
@@ -3002,18 +3516,45 @@ mod tests {
         let (spec, batch) = two_layer_dual_y_spec(true);
         let scales = resolve_dual_y(&spec, &batch);
 
-        assert!(scales.y_slots.has_independent(), "independent layer must create a second slot");
-        assert_eq!(scales.y_slots.slots().len(), 2, "one primary slot + one independent slot");
-        assert_eq!(scales.y_slots.slot_for_layer(0), 0, "layer 0 is always the primary slot");
-        assert_eq!(scales.y_slots.slot_for_layer(1), 1, "the independent layer binds slot 1");
+        assert!(
+            scales.y_slots.has_independent(),
+            "independent layer must create a second slot"
+        );
+        assert_eq!(
+            scales.y_slots.slots().len(),
+            2,
+            "one primary slot + one independent slot"
+        );
+        assert_eq!(
+            scales.y_slots.slot_for_layer(0),
+            0,
+            "layer 0 is always the primary slot"
+        );
+        assert_eq!(
+            scales.y_slots.slot_for_layer(1),
+            1,
+            "the independent layer binds slot 1"
+        );
 
-        let (lo0, hi0) = scales.y_for_layer(0).data_domain().expect("primary y is continuous");
-        let (lo1, hi1) = scales.y_for_layer(1).data_domain().expect("slot-1 y is continuous");
+        let (lo0, hi0) = scales
+            .y_for_layer(0)
+            .data_domain()
+            .expect("primary y is continuous");
+        let (lo1, hi1) = scales
+            .y_for_layer(1)
+            .data_domain()
+            .expect("slot-1 y is continuous");
 
         // Slot 0 is the small y0 range; slot 1 is the large y1 range. Padding/nice
         // widen the exact bounds, so compare against a separating midpoint.
-        assert!(hi0 < 50.0, "slot 0 must be layer 0's small y0 domain, got {lo0}..{hi0}");
-        assert!(lo1 > 50.0, "slot 1 must be layer 1's large y1 domain, got {lo1}..{hi1}");
+        assert!(
+            hi0 < 50.0,
+            "slot 0 must be layer 0's small y0 domain, got {lo0}..{hi0}"
+        );
+        assert!(
+            lo1 > 50.0,
+            "slot 1 must be layer 1's large y1 domain, got {lo1}..{hi1}"
+        );
 
         // Slot 0 mirrors the primary `y` exactly (byte-stable primary resolution).
         assert_eq!(
@@ -3031,9 +3572,19 @@ mod tests {
         let (spec, batch) = two_layer_dual_y_spec(false);
         let scales = resolve_dual_y(&spec, &batch);
 
-        assert!(!scales.y_slots.has_independent(), "no independent layer → no extra slot");
-        assert!(scales.y_slots.slots().is_empty(), "shared path leaves the slot list empty");
-        assert_eq!(scales.y_slots.slot_for_layer(1), 0, "shared layers bind slot 0");
+        assert!(
+            !scales.y_slots.has_independent(),
+            "no independent layer → no extra slot"
+        );
+        assert!(
+            scales.y_slots.slots().is_empty(),
+            "shared path leaves the slot list empty"
+        );
+        assert_eq!(
+            scales.y_slots.slot_for_layer(1),
+            0,
+            "shared layers bind slot 0"
+        );
 
         // Every layer draws through the one primary y-scale.
         assert_eq!(scales.y_for_layer(0).data_domain(), scales.y.data_domain());
@@ -3078,8 +3629,14 @@ mod tests {
 
         // Sanity: the clone really carries layer 1's own (large) domain, not
         // the primary's — this isn't accidentally testing a no-op clone.
-        let (lo, hi) = layer_scales.y.data_domain().expect("layer 1 y is continuous");
-        assert!(lo > 50.0, "clone must carry layer 1's large y1 domain, got {lo}..{hi}");
+        let (lo, hi) = layer_scales
+            .y
+            .data_domain()
+            .expect("layer 1 y is continuous");
+        assert!(
+            lo > 50.0,
+            "clone must carry layer 1's large y1 domain, got {lo}..{hi}"
+        );
     }
 
     /// Secondary-y (#52): `build_tick_levels` emits one `y_slot_levels` entry per
@@ -3091,7 +3648,11 @@ mod tests {
         let scales = resolve_dual_y(&spec, &batch);
         let ptl = build_tick_levels(&scales, 0);
 
-        assert_eq!(ptl.y_slot_levels.len(), 1, "one independent slot → one right-axis tick list");
+        assert_eq!(
+            ptl.y_slot_levels.len(),
+            1,
+            "one independent slot → one right-axis tick list"
+        );
         // Same zoom-breakpoint structure as `y_levels`, with populated ticks.
         assert_eq!(ptl.y_slot_levels[0].len(), ptl.y_levels.len());
         assert!(
@@ -3107,10 +3668,16 @@ mod tests {
         let (spec, batch) = two_layer_dual_y_spec(false);
         let scales = resolve_dual_y(&spec, &batch);
         let ptl = build_tick_levels(&scales, 0);
-        assert!(ptl.y_slot_levels.is_empty(), "shared-y chart emits no secondary slot levels");
+        assert!(
+            ptl.y_slot_levels.is_empty(),
+            "shared-y chart emits no secondary slot levels"
+        );
 
         let json = serde_json::to_string(&ptl).unwrap();
-        assert!(!json.contains("y_slot_levels"), "empty slot levels must be omitted from JSON");
+        assert!(
+            !json.contains("y_slot_levels"),
+            "empty slot levels must be omitted from JSON"
+        );
     }
 
     // ── #52 Task 3: layout + axis emission for independent-y layers ─────────
@@ -3129,12 +3696,20 @@ mod tests {
         let (spec, batch) = two_layer_dual_y_spec(true);
         let scales = resolve_dual_y(&spec, &batch);
         let panel = crate::layout::PanelLayout {
-            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+            plot_area: crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            },
             ..Default::default()
         };
         let theme = ThemeInputs::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
-        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let m = MockMetrics {
+            measure: fixed_width(8.0),
+            line_h_factor: 1.2,
+        };
 
         let (primary_y, _warn) = crate::layout::axis::layout_y_axis(
             &AxisInput::new(
@@ -3143,7 +3718,13 @@ mod tests {
                 vec!["0".into(), "5".into(), "10".into()],
                 None,
             ),
-            panel.plot_area, 0, 11.0, 13.0, 8.0, 4.0, &m,
+            panel.plot_area,
+            0,
+            11.0,
+            13.0,
+            8.0,
+            4.0,
+            &m,
         );
 
         let mut secondary_input = AxisInput::new(
@@ -3151,33 +3732,68 @@ mod tests {
             Some("Secondary".into()),
             // Deliberately a DIFFERENT tick count than the primary's 3 — if the
             // grid leaked this axis's ticks, the counts below would diverge.
-            vec!["0".into(), "25".into(), "50".into(), "75".into(), "100".into()],
+            vec![
+                "0".into(),
+                "25".into(),
+                "50".into(),
+                "75".into(),
+                "100".into(),
+            ],
             None,
         );
         secondary_input.show_grid = true; // deliberately try to leak into the grid
         let (secondary_y, _warn2) = crate::layout::axis::layout_y_axis(
-            &secondary_input, panel.plot_area, 0, 11.0, 13.0, 8.0, 4.0, &m,
+            &secondary_input,
+            panel.plot_area,
+            0,
+            11.0,
+            13.0,
+            8.0,
+            4.0,
+            &m,
         );
 
         // Baseline: grid + axis nodes built from the primary alone.
         let baseline = route_panel_axes_and_grid(
-            &spec, &scales, &panel, &[], None, Some(&primary_y), &[], &[],
-            false, false, &theme, &chart_config,
+            &spec,
+            &scales,
+            &panel,
+            &[],
+            None,
+            Some(&primary_y),
+            &[],
+            &[],
+            false,
+            false,
+            &theme,
+            &chart_config,
         );
         // With the secondary axis routed in alongside the primary (slot 1).
         let with_secondary = route_panel_axes_and_grid(
-            &spec, &scales, &panel, &[], None, Some(&primary_y), &[&secondary_y], &[1],
-            false, false, &theme, &chart_config,
+            &spec,
+            &scales,
+            &panel,
+            &[],
+            None,
+            Some(&primary_y),
+            &[&secondary_y],
+            &[1],
+            false,
+            false,
+            &theme,
+            &chart_config,
         );
 
         assert_eq!(
-            with_secondary.grid.len(), baseline.grid.len(),
+            with_secondary.grid.len(),
+            baseline.grid.len(),
             "a secondary y-axis must not add or alter gridlines, even with show_grid=true"
         );
         // But it DOES contribute its own axis nodes (ticks + domain + labels +
         // title) — one axis per slot.
         let baseline_axis_nodes = baseline.axes_below.len() + baseline.axes_above.len();
-        let with_secondary_axis_nodes = with_secondary.axes_below.len() + with_secondary.axes_above.len();
+        let with_secondary_axis_nodes =
+            with_secondary.axes_below.len() + with_secondary.axes_above.len();
         assert!(
             with_secondary_axis_nodes > baseline_axis_nodes,
             "secondary axis must emit its own scene nodes: baseline={baseline_axis_nodes}, with={with_secondary_axis_nodes}"
@@ -3192,13 +3808,21 @@ mod tests {
     #[test]
     fn render_svg_independent_y_reserves_right_band_and_emits_secondary_axis() {
         let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
         let (shared_spec, shared_batch) = two_layer_dual_y_spec(false);
         let shared = super::super::render_svg(
-            &shared_spec, &shared_batch, &theme, viewport, &config, &chart_config,
+            &shared_spec,
+            &shared_batch,
+            &theme,
+            viewport,
+            &config,
+            &chart_config,
         )
         .unwrap();
         assert!(
@@ -3208,11 +3832,20 @@ mod tests {
 
         let (dual_spec, dual_batch) = two_layer_dual_y_spec(true);
         let dual = super::super::render_svg(
-            &dual_spec, &dual_batch, &theme, viewport, &config, &chart_config,
+            &dual_spec,
+            &dual_batch,
+            &theme,
+            viewport,
+            &config,
+            &chart_config,
         )
         .unwrap();
 
-        assert_eq!(dual.layout.secondary_y_axes.len(), 1, "one secondary axis for the one independent_y layer");
+        assert_eq!(
+            dual.layout.secondary_y_axes.len(),
+            1,
+            "one secondary axis for the one independent_y layer"
+        );
         let secondary = &dual.layout.secondary_y_axes[0];
         assert_eq!(secondary.orient, crate::layout::AxisOrient::Right);
         // No explicit title on layer 1's y encoding → falls back to the field
@@ -3230,7 +3863,10 @@ mod tests {
         );
 
         // The secondary axis's title text renders into the SVG.
-        assert!(dual.bytes.contains(">y1<"), "secondary axis title must appear in the SVG");
+        assert!(
+            dual.bytes.contains(">y1<"),
+            "secondary axis title must appear in the SVG"
+        );
     }
 
     // ── #52 Task 8: scene contract — per-slot domains ────────────────────────
@@ -3244,35 +3880,63 @@ mod tests {
     fn build_dual_y_scene(layer1_independent: bool) -> ferrum_scene::SceneGraph {
         let (spec, batch) = two_layer_dual_y_spec(layer1_independent);
         let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep = super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep =
+            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
-            &spec, &theme, viewport,
-            &prep.axes, &prep.facet_groups, &prep.legend_entries,
-            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
-            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            &spec,
+            &theme,
+            viewport,
+            &prep.axes,
+            &prep.facet_groups,
+            &prep.legend_entries,
+            prep.legend_title.clone(),
+            prep.colorbar.as_ref(),
+            &metrics,
+            &crate::layout::legend::LegendOverrides::default(),
+            &prep.aux_legends,
             crate::layout::legend::LegendSuppression::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
-        build_scene(&spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None).unwrap()
+        build_scene(
+            &spec,
+            &prep,
+            &layout,
+            &theme,
+            &config,
+            &mut warnings,
+            &chart_config,
+            None,
+        )
+        .unwrap()
     }
 
     /// Find every `("y_slot", value)` attr pair carried by `SceneNode::Group`
     /// wrappers anywhere in `nodes` (axis nodes are wrapped one group per
     /// y-axis — see `route_y_axis_slotted`).
     fn collect_y_slot_group_tags(nodes: &[SceneNode]) -> Vec<String> {
-        nodes.iter().filter_map(|n| {
-            if let SceneNode::Group { attrs, .. } = n {
-                attrs.iter().find(|(k, _)| k == "y_slot").map(|(_, v)| v.clone())
-            } else {
-                None
-            }
-        }).collect()
+        nodes
+            .iter()
+            .filter_map(|n| {
+                if let SceneNode::Group { attrs, .. } = n {
+                    attrs
+                        .iter()
+                        .find(|(k, _)| k == "y_slot")
+                        .map(|(_, v)| v.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// The dual-axis panel's coordinate state carries an ordered y-domain list
@@ -3284,12 +3948,26 @@ mod tests {
         let scene = build_dual_y_scene(true);
         let panel = &scene.panels[0];
         match &panel.coord {
-            ferrum_scene::CoordKind::Cartesian { y_domain, y_domains, .. } => {
-                assert_eq!(y_domains.len(), 2, "one y-domain per slot (primary + one independent)");
+            ferrum_scene::CoordKind::Cartesian {
+                y_domain,
+                y_domains,
+                ..
+            } => {
+                assert_eq!(
+                    y_domains.len(),
+                    2,
+                    "one y-domain per slot (primary + one independent)"
+                );
                 let (slot0_lo, slot0_hi) = y_domains[0].expect("slot 0 domain must be Some");
                 let (slot1_lo, slot1_hi) = y_domains[1].expect("slot 1 domain must be Some");
-                assert!(slot0_hi < 50.0, "slot 0 must be the small y0 domain, got {slot0_lo}..{slot0_hi}");
-                assert!(slot1_lo > 50.0, "slot 1 must be the large y1 domain, got {slot1_lo}..{slot1_hi}");
+                assert!(
+                    slot0_hi < 50.0,
+                    "slot 0 must be the small y0 domain, got {slot0_lo}..{slot0_hi}"
+                );
+                assert!(
+                    slot1_lo > 50.0,
+                    "slot 1 must be the large y1 domain, got {slot1_lo}..{slot1_hi}"
+                );
                 // Slot 0 mirrors the panel's primary `y_domain` exactly.
                 assert_eq!(Some((slot0_lo, slot0_hi)), *y_domain);
             }
@@ -3308,12 +3986,18 @@ mod tests {
         let panel = &scene.panels[0];
         match &panel.coord {
             ferrum_scene::CoordKind::Cartesian { y_domains, .. } => {
-                assert!(y_domains.is_empty(), "shared path must leave the per-slot y-domain list empty");
+                assert!(
+                    y_domains.is_empty(),
+                    "shared path must leave the per-slot y-domain list empty"
+                );
             }
             other => panic!("expected Cartesian coord, got {other:?}"),
         }
         for batch in &panel.marks {
-            assert_eq!(batch.y_slot, 0, "every mark batch binds slot 0 on the shared path");
+            assert_eq!(
+                batch.y_slot, 0,
+                "every mark batch binds slot 0 on the shared path"
+            );
         }
         assert!(
             collect_y_slot_group_tags(&panel.axes).is_empty(),
@@ -3321,8 +4005,14 @@ mod tests {
         );
 
         let json = serde_json::to_string(&scene).expect("serialize shared-path scene");
-        assert!(!json.contains("y_domains"), "shared-path scene JSON must omit y_domains: {json}");
-        assert!(!json.contains("y_slot"), "shared-path scene JSON must omit y_slot: {json}");
+        assert!(
+            !json.contains("y_domains"),
+            "shared-path scene JSON must omit y_domains: {json}"
+        );
+        assert!(
+            !json.contains("y_slot"),
+            "shared-path scene JSON must omit y_slot: {json}"
+        );
     }
 
     /// Dual-axis mark meshes carry the slot index their layer's marks were
@@ -3334,7 +4024,10 @@ mod tests {
         let panel = &scene.panels[0];
         assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
         assert_eq!(panel.marks[0].y_slot, 0, "layer 0 (primary) binds slot 0");
-        assert_eq!(panel.marks[1].y_slot, 1, "layer 1 (independent) binds slot 1");
+        assert_eq!(
+            panel.marks[1].y_slot, 1,
+            "layer 1 (independent) binds slot 1"
+        );
     }
 
     /// Dual-axis y-axis scene nodes are tagged with their slot index: the
@@ -3367,14 +4060,29 @@ mod tests {
         let mut checked_groups = 0;
         for node in &panel.axes {
             if let SceneNode::Group { attrs, children } = node {
-                let Some((_, slot_str)) = attrs.iter().find(|(k, _)| k == "y_slot") else { continue };
+                let Some((_, slot_str)) = attrs.iter().find(|(k, _)| k == "y_slot") else {
+                    continue;
+                };
                 let expected_slot: usize = slot_str.parse().unwrap();
-                let text_slots: Vec<Option<usize>> = children.iter().filter_map(|c| {
-                    if let SceneNode::Text { slot, .. } = c { Some(*slot) } else { None }
-                }).collect();
-                assert!(!text_slots.is_empty(), "y_slot={expected_slot} axis group must contain tick-label text");
+                let text_slots: Vec<Option<usize>> = children
+                    .iter()
+                    .filter_map(|c| {
+                        if let SceneNode::Text { slot, .. } = c {
+                            Some(*slot)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert!(
+                    !text_slots.is_empty(),
+                    "y_slot={expected_slot} axis group must contain tick-label text"
+                );
                 let untagged = text_slots.iter().filter(|s| s.is_none()).count();
-                assert!(untagged <= 1, "at most the axis title may be untagged, got {untagged} untagged texts");
+                assert!(
+                    untagged <= 1,
+                    "at most the axis title may be untagged, got {untagged} untagged texts"
+                );
                 for slot in text_slots.iter().filter(|s| s.is_some()) {
                     assert_eq!(
                         *slot, Some(expected_slot),
@@ -3384,7 +4092,10 @@ mod tests {
                 checked_groups += 1;
             }
         }
-        assert_eq!(checked_groups, 2, "expected one slot-tagged group each for primary and secondary y-axes");
+        assert_eq!(
+            checked_groups, 2,
+            "expected one slot-tagged group each for primary and secondary y-axes"
+        );
     }
 
     /// #72 de-risking (design-review S3-2): with TWO independent-y layers, the
@@ -3399,7 +4110,10 @@ mod tests {
     fn two_independent_layers_keep_all_slot_consumers_in_lockstep() {
         let (spec, batch) = three_layer_two_independent_spec();
         let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
@@ -3414,26 +4128,47 @@ mod tests {
         assert_eq!(prep.y_slot_plan.slot_for_layer(2), 2);
 
         // Prepare built one axis input per secondary layer, in slot order.
-        assert_eq!(prep.axes.secondary_y.len(), 2, "one axis input per secondary slot");
+        assert_eq!(
+            prep.axes.secondary_y.len(),
+            2,
+            "one axis input per secondary slot"
+        );
 
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
-            &spec, &theme, viewport,
-            &prep.axes, &prep.facet_groups, &prep.legend_entries,
-            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
-            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            &spec,
+            &theme,
+            viewport,
+            &prep.axes,
+            &prep.facet_groups,
+            &prep.legend_entries,
+            prep.legend_title.clone(),
+            prep.colorbar.as_ref(),
+            &metrics,
+            &crate::layout::legend::LegendOverrides::default(),
+            &prep.aux_legends,
             crate::layout::legend::LegendSuppression::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
-            layout.secondary_y_axes.len(), 2,
+            layout.secondary_y_axes.len(),
+            2,
             "layout reserved one right band per secondary slot"
         );
 
         let scene = build_scene(
-            &spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None,
-        ).unwrap();
+            &spec,
+            &prep,
+            &layout,
+            &theme,
+            &config,
+            &mut warnings,
+            &chart_config,
+            None,
+        )
+        .unwrap();
         let panel = &scene.panels[0];
 
         // Every layer's mark batch binds its plan slot.
@@ -3446,7 +4181,8 @@ mod tests {
         let mut tags = collect_y_slot_group_tags(&panel.axes);
         tags.sort();
         assert_eq!(
-            tags, vec!["0".to_string(), "1".to_string(), "2".to_string()],
+            tags,
+            vec!["0".to_string(), "1".to_string(), "2".to_string()],
             "expected exactly one axis group per slot 0/1/2"
         );
 
@@ -3460,7 +4196,10 @@ mod tests {
                 let (lo1, hi1) = y_domains[1].expect("slot 1 domain");
                 let (lo2, _) = y_domains[2].expect("slot 2 domain");
                 assert!(hi0 < 50.0, "slot 0 is the small y0 domain, got ..{hi0}");
-                assert!(lo1 > 50.0 && hi1 < 500.0, "slot 1 is the y1 domain, got {lo1}..{hi1}");
+                assert!(
+                    lo1 > 50.0 && hi1 < 500.0,
+                    "slot 1 is the y1 domain, got {lo1}..{hi1}"
+                );
                 assert!(lo2 > 500.0, "slot 2 is the large y2 domain, got {lo2}..");
             }
             other => panic!("expected Cartesian coord, got {other:?}"),
@@ -3500,7 +4239,10 @@ mod tests {
         }];
 
         let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
@@ -3509,15 +4251,29 @@ mod tests {
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
-            &spec, &theme, viewport,
-            &prep.axes, &prep.facet_groups, &prep.legend_entries,
-            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
-            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            &spec,
+            &theme,
+            viewport,
+            &prep.axes,
+            &prep.facet_groups,
+            &prep.legend_entries,
+            prep.legend_title.clone(),
+            prep.colorbar.as_ref(),
+            &metrics,
+            &crate::layout::legend::LegendOverrides::default(),
+            &prep.aux_legends,
             crate::layout::legend::LegendSuppression::default(),
         )
         .unwrap();
         let scene = build_scene(
-            &spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None,
+            &spec,
+            &prep,
+            &layout,
+            &theme,
+            &config,
+            &mut warnings,
+            &chart_config,
+            None,
         )
         .unwrap();
 
@@ -3531,20 +4287,28 @@ mod tests {
             other => panic!("expected Cartesian coord, got {other:?}"),
         };
         assert_eq!(
-            slot1, (0.0, 1000.0),
+            slot1,
+            (0.0, 1000.0),
             "scene y_domains[1] must be the substituted param domain, not the data [100,300]"
         );
 
         // Prepare side (axis ticks): the right axis's tick labels must reflect the
         // SAME substituted domain. Parse numeric tick labels (stripping thousands
         // separators).
-        assert_eq!(layout.secondary_y_axes.len(), 1, "one right axis for the independent layer");
+        assert_eq!(
+            layout.secondary_y_axes.len(),
+            1,
+            "one right axis for the independent layer"
+        );
         let tick_vals: Vec<f64> = layout.secondary_y_axes[0]
             .ticks
             .iter()
             .filter_map(|t| t.label.replace(',', "").parse::<f64>().ok())
             .collect();
-        assert!(!tick_vals.is_empty(), "secondary axis must have numeric tick labels");
+        assert!(
+            !tick_vals.is_empty(),
+            "secondary axis must have numeric tick labels"
+        );
         let max_tick = tick_vals.iter().cloned().fold(f64::MIN, f64::max);
         let min_tick = tick_vals.iter().cloned().fold(f64::MAX, f64::min);
         // Discriminates: the data domain [100,300] cannot produce a tick at 1000 or
@@ -3569,15 +4333,28 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Area,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "price".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "weight".into(), ..Default::default() }),
-                y2: Some(EncodingSpec { field: "weight2".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "price".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "weight".into(),
+                    ..Default::default()
+                }),
+                y2: Some(EncodingSpec {
+                    field: "weight2".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
             layers: None,
-            coord: if coord_flipped { Some(CoordKind::Flip) } else { None },
+            coord: if coord_flipped {
+                Some(CoordKind::Flip)
+            } else {
+                None
+            },
             mark_style: None,
             position: None,
             title: None,
@@ -3621,9 +4398,13 @@ mod tests {
     fn unsupported_channel_combination_names_users_channel_under_flip() {
         let spec = area_spec_with_y2(true);
         let batch = price_weight_weight2_batch();
-        let prep =
-            crate::render::prepare::prepare_render_inputs(&spec, &batch, &ThemeInputs::default(), None)
-                .unwrap();
+        let prep = crate::render::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            None,
+        )
+        .unwrap();
         assert!(prep.coord_flipped);
         // Post-flip: the user's y2 (vertical-band area, supported) landed on x2
         // (unsupported for mark_area) — this is the resolved token validation acts on.
@@ -3645,11 +4426,18 @@ mod tests {
         let mut spec = area_spec_with_y2(false);
         // Directly bind x2 (the actually-unsupported channel) rather than y2.
         spec.encoding.y2 = None;
-        spec.encoding.x2 = Some(EncodingSpec { field: "weight2".into(), ..Default::default() });
+        spec.encoding.x2 = Some(EncodingSpec {
+            field: "weight2".into(),
+            ..Default::default()
+        });
         let batch = price_weight_weight2_batch();
-        let prep =
-            crate::render::prepare::prepare_render_inputs(&spec, &batch, &ThemeInputs::default(), None)
-                .unwrap();
+        let prep = crate::render::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            None,
+        )
+        .unwrap();
         assert!(!prep.coord_flipped);
         let err = validate_mark_encoding(&Mark::Area, &prep.layers[0].encoding, prep.coord_flipped)
             .expect_err("x2 must be rejected for mark_area");
@@ -3670,16 +4458,32 @@ mod tests {
             data: DataRef::default(),
             mark: Mark::Bar,
             encoding: Encoding {
-                x: Some(EncodingSpec { field: "price".into(), ..Default::default() }),
-                y: Some(EncodingSpec { field: "weight".into(), ..Default::default() }),
-                x2: Some(EncodingSpec { field: "price2".into(), ..Default::default() }),
-                y2: Some(EncodingSpec { field: "weight2".into(), ..Default::default() }),
+                x: Some(EncodingSpec {
+                    field: "price".into(),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "weight".into(),
+                    ..Default::default()
+                }),
+                x2: Some(EncodingSpec {
+                    field: "price2".into(),
+                    ..Default::default()
+                }),
+                y2: Some(EncodingSpec {
+                    field: "weight2".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             transforms: Vec::new(),
             facet: None,
             layers: None,
-            coord: if coord_flipped { Some(CoordKind::Flip) } else { None },
+            coord: if coord_flipped {
+                Some(CoordKind::Flip)
+            } else {
+                None
+            },
             mark_style: None,
             position: None,
             title: None,
@@ -3728,17 +4532,27 @@ mod tests {
 
         let flipped_spec = bar_spec_with_x2_y2(true);
         let flipped_prep =
-            crate::render::prepare::prepare_render_inputs(&flipped_spec, &batch, &theme, None).unwrap();
+            crate::render::prepare::prepare_render_inputs(&flipped_spec, &batch, &theme, None)
+                .unwrap();
         assert!(flipped_prep.coord_flipped);
-        let flipped_err = validate_mark_encoding(&Mark::Bar, &flipped_prep.layers[0].encoding, flipped_prep.coord_flipped)
-            .expect_err("both x2 and y2 bound must be rejected for mark_bar, flipped");
+        let flipped_err = validate_mark_encoding(
+            &Mark::Bar,
+            &flipped_prep.layers[0].encoding,
+            flipped_prep.coord_flipped,
+        )
+        .expect_err("both x2 and y2 bound must be rejected for mark_bar, flipped");
 
         let unflipped_spec = bar_spec_with_x2_y2(false);
         let unflipped_prep =
-            crate::render::prepare::prepare_render_inputs(&unflipped_spec, &batch, &theme, None).unwrap();
+            crate::render::prepare::prepare_render_inputs(&unflipped_spec, &batch, &theme, None)
+                .unwrap();
         assert!(!unflipped_prep.coord_flipped);
-        let unflipped_err = validate_mark_encoding(&Mark::Bar, &unflipped_prep.layers[0].encoding, unflipped_prep.coord_flipped)
-            .expect_err("both x2 and y2 bound must be rejected for mark_bar, unflipped");
+        let unflipped_err = validate_mark_encoding(
+            &Mark::Bar,
+            &unflipped_prep.layers[0].encoding,
+            unflipped_prep.coord_flipped,
+        )
+        .expect_err("both x2 and y2 bound must be rejected for mark_bar, unflipped");
 
         let flipped_text = format!("{flipped_err}");
         let unflipped_text = format!("{unflipped_err}");
@@ -3766,7 +4580,10 @@ mod tests {
     fn remap_coord_identity_maps_pixel_to_pixel() {
         let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
         let px = remap_coord(200.0, 0.0, 100.0, 50.0, 350.0, &br).unwrap();
-        assert!((px - 200.0).abs() < 1e-6, "single-segment remap must be identity; got {px}");
+        assert!(
+            (px - 200.0).abs() < 1e-6,
+            "single-segment remap must be identity; got {px}"
+        );
     }
 
     #[test]
@@ -3774,7 +4591,10 @@ mod tests {
         let br = two_segment_break();
         // Pixel 200 maps back to data value 50, which falls inside the gap [40, 60].
         let result = remap_coord(200.0, 0.0, 100.0, 50.0, 350.0, &br);
-        assert!(result.is_none(), "a pixel that reverse-maps into the gap must return None");
+        assert!(
+            result.is_none(),
+            "a pixel that reverse-maps into the gap must return None"
+        );
     }
 
     #[test]
@@ -3786,10 +4606,20 @@ mod tests {
     #[test]
     fn remap_node_circle_hides_at_break_hidden_when_in_gap() {
         let br = two_segment_break();
-        let mut node = SceneNode::Circle { cx: 200.0, cy: 100.0, r: 4.0, style: default_fill_stroke() };
+        let mut node = SceneNode::Circle {
+            cx: 200.0,
+            cy: 100.0,
+            r: 4.0,
+            style: default_fill_stroke(),
+        };
         remap_node(&mut node, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let SceneNode::Circle { cx, .. } = node else { panic!("expected Circle") };
-        assert_eq!(cx, BREAK_HIDDEN, "a mark inside the break gap must be hidden off-screen");
+        let SceneNode::Circle { cx, .. } = node else {
+            panic!("expected Circle")
+        };
+        assert_eq!(
+            cx, BREAK_HIDDEN,
+            "a mark inside the break gap must be hidden off-screen"
+        );
     }
 
     /// Discriminating fixture (quality-review kill-switch finding, cycle 2):
@@ -3805,9 +4635,16 @@ mod tests {
     #[test]
     fn remap_node_circle_moves_to_compressed_pixel_across_a_gap() {
         let br = two_segment_break();
-        let mut node = SceneNode::Circle { cx: 110.0, cy: 100.0, r: 4.0, style: default_fill_stroke() };
+        let mut node = SceneNode::Circle {
+            cx: 110.0,
+            cy: 100.0,
+            r: 4.0,
+            style: default_fill_stroke(),
+        };
         remap_node(&mut node, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let SceneNode::Circle { cx, .. } = node else { panic!("expected Circle") };
+        let SceneNode::Circle { cx, .. } = node else {
+            panic!("expected Circle")
+        };
         assert!(
             (cx - 122.0).abs() < 1e-6,
             "expected cx compressed to 122.0 across the break gap; got {cx}"
@@ -3820,7 +4657,9 @@ mod tests {
         let br = two_segment_break();
         let mut on_x = PathCmd::HLineTo { x: 110.0 };
         remap_path_cmd(&mut on_x, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::HLineTo { x } = on_x else { panic!() };
+        let PathCmd::HLineTo { x } = on_x else {
+            panic!()
+        };
         assert!(
             (x - 122.0).abs() < 1e-6,
             "HLineTo.x must compress to 122.0 through the broken scale when axis == x; got {x}"
@@ -3828,7 +4667,9 @@ mod tests {
 
         let mut on_y = PathCmd::HLineTo { x: 110.0 };
         remap_path_cmd(&mut on_y, "y", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::HLineTo { x } = on_y else { panic!() };
+        let PathCmd::HLineTo { x } = on_y else {
+            panic!()
+        };
         assert_eq!(x, 110.0, "HLineTo.x must NOT be touched when axis == y");
     }
 
@@ -3838,7 +4679,9 @@ mod tests {
         let br = two_segment_break();
         let mut on_y = PathCmd::VLineTo { y: 110.0 };
         remap_path_cmd(&mut on_y, "y", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::VLineTo { y } = on_y else { panic!() };
+        let PathCmd::VLineTo { y } = on_y else {
+            panic!()
+        };
         assert!(
             (y - 122.0).abs() < 1e-6,
             "VLineTo.y must compress to 122.0 through the broken scale when axis == y; got {y}"
@@ -3846,17 +4689,41 @@ mod tests {
 
         let mut on_x = PathCmd::VLineTo { y: 110.0 };
         remap_path_cmd(&mut on_x, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::VLineTo { y } = on_x else { panic!() };
+        let PathCmd::VLineTo { y } = on_x else {
+            panic!()
+        };
         assert_eq!(y, 110.0, "VLineTo.y must NOT be touched when axis == x");
     }
 
     #[test]
     fn polar_outer_radius_uses_smaller_dimension() {
-        assert_eq!(polar_outer_radius(&Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 }), 100.0);
         assert_eq!(
-            polar_outer_radius(&Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 }), 100.0,
+            polar_outer_radius(&Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 200.0
+            }),
+            100.0
+        );
+        assert_eq!(
+            polar_outer_radius(&Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 200.0
+            }),
+            100.0,
             "outer radius uses the smaller of width/height"
         );
-        assert_eq!(polar_outer_radius(&Rect { x: 0.0, y: 0.0, w: 0.0, h: 200.0 }), 0.0);
+        assert_eq!(
+            polar_outer_radius(&Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 200.0
+            }),
+            0.0
+        );
     }
 }
