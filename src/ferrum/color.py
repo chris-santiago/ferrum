@@ -21,6 +21,7 @@ from ferrum._core import (
     palette_colors as _palette_colors,
     palette_kind as _palette_kind,
     palette_sample as _palette_sample,
+    parse_color_to_hex as _parse_color_to_hex,
 )
 
 __all__ = ["palette", "to_hex", "sequential", "diverging"]
@@ -138,25 +139,38 @@ def to_hex(
     Parameters
     ----------
     color : tuple or str
-        An RGB tuple with values in [0, 1] (unit) or [0, 255] (byte),
-        or a hex string (returned as-is after normalization).
+        An RGB tuple with values in [0, 1] (unit) or [0, 255] (byte) — only
+        the first 3 components are read, so a 4th (alpha) component is
+        silently ignored — or a color string: a CSS named color (e.g.
+        ``"steelblue"``), hex (``#rgb``/``#rgba``/``#rrggbb``/``#rrggbbaa``),
+        or a functional ``rgb()``/``rgba()`` form. String input is validated
+        and normalized by ferrum's single Rust color parser (`parse_color`),
+        so this function accepts the exact vocabulary every other ferrum
+        color boundary accepts, alpha included.
     scale : {"unit", "byte"}, optional
         Explicit interpretation of an RGB tuple's component range.  ``"unit"``
         treats components as floats in ``[0, 1]``; ``"byte"`` treats them as
         integers in ``[0, 255]``.  When ``None`` (default) the range is
         inferred: any component greater than 1 forces byte interpretation;
         otherwise unit interpretation is used.  This makes integer-valued
-        floats (``1.0``) and integers (``1``) behave identically.
+        floats (``1.0``) and integers (``1``) behave identically.  Ignored
+        for string input.
 
     Returns
     -------
     str
-        Hex string like ``"#1f77b4"``.
+        Normalized hex string. For *string* input: ``"#rrggbb"``, or
+        ``"#rrggbbaa"`` when the parsed color carried alpha (e.g. an
+        ``rgba()`` or 4/8-digit hex input). For *tuple* input: always
+        ``"#rrggbb"`` — a 4th tuple component is not alpha-encoded into the
+        output (see the `color` parameter above).
 
     Raises
     ------
     ValueError
-        If the input format is not recognized, or *scale* is not one of
+        If a string input is not a recognized CSS color name, hex literal, or
+        ``rgb()``/``rgba()`` form (the message names the accepted forms); if
+        a tuple input's format is not recognized; or if *scale* is not one of
         ``"unit"``, ``"byte"``, or ``None``.
 
     Examples
@@ -168,13 +182,13 @@ def to_hex(
     '#ff0000'
     >>> ferrum.color.to_hex((128, 128, 128), scale="byte")
     '#808080'
+    >>> ferrum.color.to_hex("steelblue")
+    '#4682b4'
+    >>> ferrum.color.to_hex("rgb(70, 130, 180)")
+    '#4682b4'
     """
     if isinstance(color, str):
-        # Normalize: strip whitespace, ensure lowercase
-        s = color.strip().lower()
-        if not s.startswith("#"):
-            raise ValueError(f"String colors must be hex format (#rrggbb), got: {color!r}")
-        return s
+        return _parse_color_to_hex(color)
 
     if not isinstance(color, (tuple, list)) or len(color) < 3:
         raise ValueError(f"Expected an RGB tuple (r, g, b) or hex string, got: {color!r}")

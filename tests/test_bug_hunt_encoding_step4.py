@@ -244,13 +244,26 @@ def test_to_hex_short_tuple_raises() -> None:
         fm.color.to_hex((1, 0))
 
 
-def test_to_hex_non_hex_string_raises() -> None:
-    """A non-``#`` string is rejected with a legible message.
+def test_to_hex_rgb_function_string_now_accepted() -> None:
+    """``rgb()`` strings are valid input (Batch A, full-CSS-vocabulary contract).
 
-    Path: ``to_hex`` string branch ``not s.startswith("#")``.
+    Path: ``to_hex`` string branch now delegates to the Rust ``parse_color``
+    parser, which accepts ``rgb()``/``rgba()`` alongside hex and CSS names.
+    This deliberately supersedes the pre-Batch-A "hex-only" contract pinned
+    by the old ``test_to_hex_non_hex_string_raises`` — see
+    ``tests/test_color_vocabulary.py`` for full-vocabulary coverage.
     """
-    with pytest.raises(ValueError, match="must be hex format"):
-        fm.color.to_hex("rgb(1,0,0)")
+    assert fm.color.to_hex("rgb(1,0,0)") == "#010000"
+
+
+def test_to_hex_unrecognized_string_raises_naming_accepted_forms() -> None:
+    """A string matching none of the accepted forms is rejected legibly.
+
+    Path: ``to_hex`` string branch delegates to Rust `parse_color`, whose
+    error names the accepted forms.
+    """
+    with pytest.raises(ValueError, match="CSS color name"):
+        fm.color.to_hex("not-a-color")
 
 
 def test_to_hex_bool_components_treated_as_ints() -> None:

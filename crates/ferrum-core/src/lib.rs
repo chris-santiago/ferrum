@@ -66,6 +66,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::color::palette::palette_kind, m)?)?;
     m.add_function(wrap_pyfunction!(render::color::palette::palette_colors, m)?)?;
     m.add_function(wrap_pyfunction!(render::color::palette::palette_sample, m)?)?;
+    // Batch A Task 1 (F-L02-01/NF-A1): the one full-CSS color parser exposed
+    // to Python — `ferrum.color.to_hex`'s string path routes through this
+    // instead of hand-rolling a second color vocabulary in Python.
+    m.add_function(wrap_pyfunction!(render::color::primitive::parse_color_to_hex, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
     // Classification diagnostic curve kernels (sklearn-parity).
