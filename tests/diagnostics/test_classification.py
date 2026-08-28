@@ -226,6 +226,46 @@ def test_discrimination_threshold_chart_optimum_label_present_vs_absent(binary_s
     assert "max F1" not in svg_off, "optimum_label=False must not render the max-F1 annotation text"
 
 
+def test_discrimination_threshold_chart_metrics_accepts_display_and_raw_names(binary_source):
+    """`metrics=` on the figure-function path accepts both the raw sweep
+    column name ("f1") and the display label the function itself produces
+    ("F1") -- and filters the render down to just that metric in both
+    cases, instead of crashing on one of them.
+
+    Same-family regression as the mark-level `metrics=` loose-match fix
+    (`_disc_threshold_prep` / `_normalized_col`): `_discrimination_
+    threshold_chart_from_source` used to unpivot the wide sweep frame with
+    `on=list(metrics)` *before* relabeling the `metric` column to display
+    names, so passing the function's own output vocabulary back in
+    (`metrics=("F1",)`) raised `polars.exceptions.ColumnNotFoundError:
+    "F1" not found` -- the sweep frame only ever has the raw "f1" column.
+    """
+    svg_display = ferrum.discrimination_threshold_chart(
+        binary_source, metrics=("F1",), n_thresholds=20
+    ).to_svg()
+    svg_raw = ferrum.discrimination_threshold_chart(
+        binary_source, metrics=("f1",), n_thresholds=20
+    ).to_svg()
+    for svg in (svg_display, svg_raw):
+        assert "<svg" in svg
+        assert "F1" in svg
+        for other in ("Precision", "Recall", "Queue rate"):
+            assert other not in svg, f"{other!r} must not render when metrics=('F1',)"
+
+
+def test_discrimination_threshold_chart_metrics_typo_raises_value_error(binary_source):
+    """An unresolvable `metrics=` name on the figure-function path raises a
+    typed `ValueError` naming the bad value and the valid vocabulary,
+    instead of a bare `polars.exceptions.ColumnNotFoundError` leaking out
+    of `DataFrame.unpivot`."""
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.discrimination_threshold_chart(binary_source, metrics=("bogus",), n_thresholds=20)
+    message = str(excinfo.value)
+    assert "bogus" in message
+    for valid in ("precision", "recall", "f1", "queue_rate"):
+        assert valid in message
+
+
 # --- Figure-function tests (Task 16) --------------------------------
 
 

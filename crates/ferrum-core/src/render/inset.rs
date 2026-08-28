@@ -416,16 +416,8 @@ mod tests {
         let spec_a = InsetSpec { svg: two_inset_svg(), ..basic_spec() };
         let spec_b = InsetSpec { svg: two_inset_svg(), ..basic_spec() };
 
-        let nodes_a = build_inset_nodes(&spec_a, &plot(), 0);
-        let nodes_b = build_inset_nodes(&spec_b, &plot(), 1);
-        let raw_of = |nodes: &[SceneNode]| {
-            nodes
-                .iter()
-                .find_map(|n| if let SceneNode::Raw { svg, .. } = n { Some(svg.clone()) } else { None })
-                .expect("expected a Raw svg node")
-        };
-        let embedded_a = raw_of(&nodes_a);
-        let embedded_b = raw_of(&nodes_b);
+        let embedded_a = raw_svg_of(&build_inset_nodes(&spec_a, &plot(), 0));
+        let embedded_b = raw_svg_of(&build_inset_nodes(&spec_b, &plot(), 1));
 
         assert!(embedded_a.contains(r#"id="inset0-ferrum-clip-0""#));
         assert!(embedded_b.contains(r#"id="inset1-ferrum-clip-0""#));
@@ -433,6 +425,82 @@ mod tests {
             !embedded_b.contains(r#"id="inset0-ferrum-clip-0""#),
             "second inset must not collide with the first inset's namespaced id"
         );
+    }
+
+    /// Inset-in-inset (cycle-2 follow-up 1): public-API-reachable via
+    /// `outer_chart + Inset(chart=middle_chart)` where `middle_chart` is
+    /// itself `+ Inset(chart=innermost_chart)` — `Inset.chart` is `Any`, so
+    /// nothing in the Python API stops one inset's chart from having its own
+    /// inset (`src/ferrum/_render.py::_serialize_structural` just calls
+    /// `feat.chart.to_svg()`, recursively). This test builds "middle" not by
+    /// calling the full render pipeline, but by feeding a fixture that has
+    /// the same shape `middle_chart.to_svg()` would produce after its own
+    /// embed pass: its own host clip (bare `ferrum-clip-0`) plus an
+    /// ALREADY-`inset0`-namespaced clip from middle's own inset embed.
+    /// Embedding that as the OUTER's inset (`inset_idx = 0`, since the outer
+    /// has exactly one inset) must compose a second `inset0-` layer onto the
+    /// already-namespaced clip rather than leaving it colliding with middle's
+    /// now-namespaced host clip.
+    #[test]
+    fn inset_embed_composes_ids_for_an_inset_nested_inside_another_inset() {
+        let innermost_svg = concat!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150">"#,
+            r#"<defs><clipPath id="ferrum-clip-0"><rect width="200" height="150"/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-0)"><circle cx="100" cy="75" r="50"/></g>"#,
+            r#"</svg>"#,
+        );
+        // What `middle_chart.to_svg()` looks like after ITS OWN embed of
+        // `innermost_svg` as its one inset: middle's own host clip (bare,
+        // `ferrum-clip-1` — a chart's marks/panel clip and its inset are
+        // different clipPaths, so a real middle chart would number its own
+        // host clip independently of the inset's; kept distinct here so a
+        // collision-masking coincidence can't hide a real bug) alongside the
+        // already-namespaced embedded fragment `build_inset_nodes` produces.
+        let middle_host_clip = concat!(
+            r#"<defs><clipPath id="ferrum-clip-1"><rect width="300" height="200"/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-1)">"#,
+        );
+        let middle_inset_spec = InsetSpec { svg: innermost_svg.to_string(), ..basic_spec() };
+        let middle_embedded_innermost = raw_svg_of(&build_inset_nodes(&middle_inset_spec, &plot(), 0));
+        assert!(middle_embedded_innermost.contains(r#"id="inset0-ferrum-clip-0""#));
+        let middle_svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"300\" height=\"200\">{middle_host_clip}{middle_embedded_innermost}</g></svg>"
+        );
+
+        // The outer chart embeds `middle_svg` as ITS one inset.
+        let outer_spec = InsetSpec { svg: middle_svg, ..basic_spec() };
+        let outer_embedded = raw_svg_of(&build_inset_nodes(&outer_spec, &plot(), 0));
+
+        // Middle's own (previously bare) host clip gets a single new layer.
+        assert!(
+            outer_embedded.contains(r#"id="inset0-ferrum-clip-1""#),
+            "middle's host clip must be namespaced by the outer embed: {outer_embedded}"
+        );
+        // Middle's already-inset0-namespaced embedded clip gets a SECOND
+        // composed layer — doubling the literal token, not colliding with it.
+        assert!(
+            outer_embedded.contains(r#"id="inset0-inset0-ferrum-clip-0""#)
+                && outer_embedded.contains("url(#inset0-inset0-ferrum-clip-0)"),
+            "the doubly-nested clip must compose to inset0-inset0-...: {outer_embedded}"
+        );
+        // The single-layer form must not survive — that would mean the outer
+        // pass skipped the already-namespaced id instead of composing over it.
+        assert!(
+            !outer_embedded.contains(r#"id="inset0-ferrum-clip-0""#),
+            "the doubly-nested clip must not still read as single-layer inset0-...: {outer_embedded}"
+        );
+        // And the two surviving ids must be distinct from each other.
+        assert_ne!(
+            "inset0-ferrum-clip-1", "inset0-inset0-ferrum-clip-0",
+            "sanity: the two composed ids must differ"
+        );
+    }
+
+    fn raw_svg_of(nodes: &[SceneNode]) -> String {
+        nodes
+            .iter()
+            .find_map(|n| if let SceneNode::Raw { svg, .. } = n { Some(svg.clone()) } else { None })
+            .expect("expected a Raw svg node")
     }
 
     #[test]

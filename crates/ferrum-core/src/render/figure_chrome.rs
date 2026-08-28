@@ -407,6 +407,16 @@ pub fn wrap_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, S
 /// vertical-stack entry point called with a one-element list and
 /// `spacing=0.0`, extracted here so [`wrap_svg_with_chrome`] doesn't depend
 /// on the (now-deleted) general N-ary SVG compositor.
+///
+/// `uniquify_clip_ids` composes with (rather than skips) any namespace a
+/// body already carries, so a body that embeds an inset — whose ids
+/// `render/inset.rs::build_inset_nodes` already namespaced `insetN-` at
+/// build time — gets a SECOND, visible namespace layer here:
+/// `id="inset0-ferrum-clip-0"` becomes `id="cell0-inset0-ferrum-clip-0"`.
+/// That is intentional (it keeps the composed document collision-free if it
+/// is later merged into a larger composite), not a bug, but it IS a real
+/// content change, not just a `<g>` wrapper — pinned by
+/// `wrap_svg_with_chrome_composes_over_an_already_namespaced_inset_id` below.
 fn compose_single_cell(svg: &str) -> Result<String, SvgParseError> {
     let parsed = parse_svg_root(svg)?;
     let mut out = String::with_capacity(svg.len() + 64);
@@ -428,7 +438,13 @@ fn compose_single_cell(svg: &str) -> Result<String, SvgParseError> {
 /// `.properties(caption=)` post-wrap (Task 10 stage 3). It takes the same
 /// code path — [`compose_single_cell`] followed by [`wrap_with_chrome`] —
 /// without depending on the general N-ary SVG compositor, and is
-/// byte-identical to that call for the same chrome parameters.
+/// byte-identical to that historical call for the same chrome parameters —
+/// **for a bare-id body**. That claim does not extend to a body that embeds
+/// an inset: `compose_single_cell` composes a NEW namespace layer onto an
+/// already-namespaced inset id (see that function's doc), and the deleted
+/// compositor never received already-namespaced ids in the first place
+/// (`build_inset_nodes`'s `insetN-` namespacing postdates its removal), so
+/// there is no historical run to be byte-identical TO for that case.
 pub fn wrap_svg_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, SvgParseError> {
     let composed = compose_single_cell(svg)?;
     wrap_with_chrome(&composed, chrome)
@@ -1145,6 +1161,50 @@ mod tests {
         assert!(composed.contains(r#"id="cell0-ferrum-clip-0""#), "composed: {composed}");
         assert!(composed.contains("url(#cell0-ferrum-clip-0)"), "composed: {composed}");
         assert!(!composed.contains(r#"id="ferrum-clip-0""#), "unprefixed id leaked: {composed}");
+    }
+
+    /// Cycle-2 follow-up 2: a chart that embeds an inset (`render/inset.rs::
+    /// build_inset_nodes` already namespaced its clip `insetN-` at build
+    /// time) and is ALSO given a figure caption via `.properties(caption=)`
+    /// (`wrap_svg_with_chrome` → `compose_single_cell` → `uniquify_clip_ids`
+    /// with `cell_idx = 0`). The cell0 pass must compose a second layer onto
+    /// the already-namespaced inset id, not treat it as a bare id and not
+    /// skip it — pinning exactly the shape `compose_single_cell`'s doc now
+    /// describes for a namespaced body (previously unpinned by any test or
+    /// golden).
+    #[test]
+    fn wrap_svg_with_chrome_composes_over_an_already_namespaced_inset_id() {
+        let body = concat!(
+            r#"<defs><clipPath id="ferrum-clip-0"><rect/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-0)">"#,
+            r#"<svg x="10" y="10" width="50" height="50">"#,
+            r#"<defs><clipPath id="inset0-ferrum-clip-0"><rect/></clipPath></defs>"#,
+            r#"<g clip-path="url(#inset0-ferrum-clip-0)"/>"#,
+            r#"</svg></g>"#,
+        );
+        let svg = make_root_svg(100.0, 50.0, body);
+        let chrome = FigureChrome { caption: Some("Source: note"), ..Default::default() };
+        let wrapped = wrap_svg_with_chrome(&svg, chrome).unwrap();
+
+        // The host's own bare clip gets the ordinary single cell0- layer.
+        assert!(wrapped.contains(r#"id="cell0-ferrum-clip-0""#), "wrapped: {wrapped}");
+        // The inset's already-namespaced clip composes a SECOND layer in
+        // front, outermost-first, rather than being skipped or collapsed
+        // onto the host's id.
+        assert!(
+            wrapped.contains(r#"id="cell0-inset0-ferrum-clip-0""#)
+                && wrapped.contains("url(#cell0-inset0-ferrum-clip-0)"),
+            "wrapped: {wrapped}"
+        );
+        // Neither the single-layer inset id nor the fully bare id may survive.
+        assert!(
+            !wrapped.contains(r#"id="inset0-ferrum-clip-0""#),
+            "cell0 pass skipped the already-namespaced inset id: {wrapped}"
+        );
+        assert!(
+            !wrapped.contains(r#"id="ferrum-clip-0""#),
+            "unprefixed id leaked: {wrapped}"
+        );
     }
 
     fn make_root_svg(w: f64, h: f64, body: &str) -> String {

@@ -3680,8 +3680,14 @@ mod tests {
     #[test]
     fn two_leaves_each_embedding_an_inset_stay_disjoint_end_to_end() {
         let fixture = inset_svg_fixture();
-        let h0 = LeafHold { chart_config: inset_chart_config(&[fixture.clone()]), ..hold() };
-        let h1 = LeafHold { chart_config: inset_chart_config(&[fixture]), ..hold() };
+        let h0 = LeafHold {
+            chart_config: inset_chart_config(std::slice::from_ref(&fixture)),
+            ..hold()
+        };
+        let h1 = LeafHold {
+            chart_config: inset_chart_config(std::slice::from_ref(&fixture)),
+            ..hold()
+        };
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
@@ -3693,15 +3699,18 @@ mod tests {
         assert_eq!(panel0_raw.len(), 1, "leaf 0 must embed exactly one inset fragment");
         assert_eq!(panel1_raw.len(), 1, "leaf 1 must embed exactly one inset fragment");
 
+        // Outermost-first composition: the leaf-level `cellN` pass runs LAST
+        // (after `build_inset_nodes`'s embed-time `inset0-` pass), so it ends
+        // up leftmost.
         assert!(
-            panel0_raw[0].contains(r#"id="inset0-cell0-ferrum-clip-0""#)
-                && panel0_raw[0].contains("url(#inset0-cell0-ferrum-clip-0)"),
-            "leaf 0's inset def+ref must compose inset0- and cell0-: {panel0_raw:?}"
+            panel0_raw[0].contains(r#"id="cell0-inset0-ferrum-clip-0""#)
+                && panel0_raw[0].contains("url(#cell0-inset0-ferrum-clip-0)"),
+            "leaf 0's inset def+ref must compose cell0- in front of inset0-: {panel0_raw:?}"
         );
         assert!(
-            panel1_raw[0].contains(r#"id="inset0-cell1-ferrum-clip-0""#)
-                && panel1_raw[0].contains("url(#inset0-cell1-ferrum-clip-0)"),
-            "leaf 1's inset def+ref must compose inset0- and cell1-: {panel1_raw:?}"
+            panel1_raw[0].contains(r#"id="cell1-inset0-ferrum-clip-0""#)
+                && panel1_raw[0].contains("url(#cell1-inset0-ferrum-clip-0)"),
+            "leaf 1's inset def+ref must compose cell1- in front of inset0-: {panel1_raw:?}"
         );
         assert_ne!(
             panel0_raw[0], panel1_raw[0],

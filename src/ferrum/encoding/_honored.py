@@ -18,13 +18,10 @@ contract change. The appearance-channel membership is additionally pinned by
 
 Role: this module answers "which *kwargs* does one channel *instance*
 honor" (e.g. does ``X(...)`` accept ``sort=``; does ``Color(...)`` accept
-``legend=``) — a per-channel-type KWARG scope. Its sibling
-``ferrum.encoding._channel_policy`` answers a different question, "what
-does ``Chart.encode()`` *do* with a given channel *name*" (render it,
-alias it, warn-and-drop it, remap it under polar, or route it through
-faceting) — a per-channel ROUTING disposition. Both modules use "honored"
-for their own vocabulary; the overlap in name is deliberate (both describe
-"a documented contract this thing satisfies"), not an accidental collision.
+``legend=``) — a per-channel-type KWARG scope. See
+``ferrum.encoding._channel_policy`` for the per-channel-name ROUTING
+disposition (a different "honored" question); the naming overlap between
+the two is deliberate, not an accidental collision.
 """
 
 from __future__ import annotations

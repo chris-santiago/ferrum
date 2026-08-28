@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
+from ferrum.marks._desugar_helpers import _normalize_names
 from ferrum._overrides import register_layer_names
 from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
@@ -709,6 +710,44 @@ def _class_prediction_error_chart_from_source(
     )
 
 
+def _resolve_metric_columns(available: list[str], requested: tuple[str, ...]) -> list[str]:
+    """Resolve requested ``metrics=`` names to ``available``'s actual raw
+    column names, tolerating the same case/spacing relabeling
+    ``_disc_threshold_prep``'s ``metrics=`` filter already tolerates
+    (``_normalize_names`` -- reused directly, not re-implemented, so the
+    two loose-match rules cannot diverge).
+
+    ``discrimination_threshold_chart`` relabels the sweep frame's ``metric``
+    column to display names ("f1" -> "F1") for the legend, but the sweep
+    frame itself (``ModelSource.discrimination_threshold()``) only ever has
+    the raw names -- so passing the function's own display vocabulary back
+    in (``metrics=("F1",)``) needs to resolve against ``available`` before
+    ``DataFrame.unpivot`` ever sees it, or ``unpivot`` raises a bare
+    ``polars.exceptions.ColumnNotFoundError`` on the literal ``"F1"``.
+
+    Raises
+    ------
+    ValueError
+        Naming the first unresolvable requested metric and the valid raw
+        column vocabulary, in place of that bare polars error.
+    """
+
+    def _norm(name: str) -> str:
+        return next(iter(_normalize_names((name,))))
+
+    lookup = {_norm(col): col for col in available}
+    resolved: list[str] = []
+    for name in requested:
+        col = lookup.get(_norm(name))
+        if col is None:
+            raise ValueError(
+                f"discrimination_threshold_chart(metrics=...) unknown metric {name!r}; "
+                f"valid metrics are {tuple(available)!r}"
+            )
+        resolved.append(col)
+    return resolved
+
+
 def _discrimination_threshold_chart_from_source(
     source: Any,
     *,
@@ -741,9 +780,10 @@ def _discrimination_threshold_chart_from_source(
     import ferrum
 
     df = source.discrimination_threshold(n_thresholds=n_thresholds, cv=cv)
+    metric_columns = _resolve_metric_columns([c for c in df.columns if c != "threshold"], metrics)
     long_df = df.unpivot(
         index="threshold",
-        on=list(metrics),
+        on=metric_columns,
         variable_name="metric",
         value_name="value",
     )

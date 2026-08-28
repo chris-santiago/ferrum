@@ -17,11 +17,10 @@ comment are unchanged.
 Role: this module answers "what does ``Chart.encode()`` *do* with a given
 channel *name*" (render it into its own ``EncodingSpec``, alias it to
 another channel, warn-and-drop it, remap it under polar, or route it
-through faceting) — a per-channel ROUTING disposition. Its sibling
-``ferrum.encoding._honored`` answers a different question, "which *kwargs*
-does one channel *instance* honor" (e.g. does ``X(...)`` accept ``sort=``)
-— a per-channel-type KWARG scope. Both modules use "honored" for their own
-vocabulary; the overlap in name is deliberate, not an accidental collision.
+through faceting) — a per-channel ROUTING disposition. See
+``ferrum.encoding._honored`` for the per-channel-type KWARG scope (a
+different "honored" question); the naming overlap between the two is
+deliberate, not an accidental collision.
 """
 
 from __future__ import annotations

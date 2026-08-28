@@ -554,26 +554,74 @@ pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
 /// needs its own disjoint namespace) can uniquify without borrowing "cell"
 /// terminology that doesn't describe what they're doing.
 ///
-/// Matches the bare token (`ferrum-clip-`, `ferrum-colorbar-`,
-/// `ferrum-legend-clip-`) wherever it appears, not just immediately after
-/// `id="`/`url(#` — so a body whose ids are ALREADY namespaced (e.g. an inset
-/// embedded into a leaf that a composite is about to merge, carrying
-/// `id="inset0-ferrum-clip-0"`) gets a new prefix layer composed in front
-/// (`id="inset0-cell1-ferrum-clip-0"`) rather than being skipped. Composite
-/// leaves each restart their own per-leaf namespace counters (`inset_idx`,
+/// An **anchored scan**, not a blind token replace: it only ever inserts
+/// `{prefix}-` immediately after a literal `id="` or `url(#`, and only when
+/// the attribute value between there and the closing `"`/`)` contains one of
+/// the three id families (`ferrum-clip-`, `ferrum-colorbar-`,
+/// `ferrum-legend-clip-`) somewhere in it. Everything else — most importantly
+/// `<text>` element content — is copied through untouched. An inset is a
+/// fully independent pre-rendered document, so nothing stops its rendered
+/// text (a title, a data label, user-supplied annotation text) from
+/// containing the literal substring `ferrum-clip-`; an earlier, unanchored
+/// version of this function (`body.replace("ferrum-clip-", ...)`) would have
+/// silently corrupted that text. Only scanning inside `id="…"`/`url(#…)`
+/// closes that hole while keeping the composing behavior below.
+///
+/// Because the new prefix is always inserted at the FRONT of the attribute
+/// value (right after `id="`/`url(#`, before whatever is already there), an
+/// id that already carries a namespace — e.g. an inset embedded into a leaf
+/// that a composite is about to merge, carrying `id="inset0-ferrum-clip-0"`
+/// — gets a new layer composed in front rather than being skipped:
+/// `id="cell1-inset0-ferrum-clip-0"`. Composition is therefore
+/// **outermost-first**: whichever pass runs LAST (the outermost wrapping —
+/// a composite cell, or a later chrome-wrap pass) ends up leftmost, with
+/// earlier (more deeply nested) namespaces pushed right. Composite leaves
+/// each restart their own per-leaf namespace counters (`inset_idx`,
 /// `cell_idx`) independently, so without this a second leaf's inset would
 /// collide with the first leaf's inset even though each leaf's inset no
 /// longer collides with its own host — the composed-namespace bug an earlier
 /// version of this function had (skipping already-prefixed ids kept the
-/// per-chart fix from generalizing to the per-composite-leaf case). One
-/// call composes exactly one new layer; repeated calls (nested composites,
-/// or a later chrome-wrap pass) keep composing layers, which only grows ids,
-/// never re-collides them.
+/// per-chart fix from generalizing to the per-composite-leaf case). One call
+/// composes exactly one new layer; repeated calls (nested composites, an
+/// inset nested inside another inset, or a later chrome-wrap pass) keep
+/// composing layers, which only grows ids, never re-collides them.
 pub(crate) fn uniquify_clip_ids_with_prefix(body: &str, prefix: &str) -> String {
-    body
-        .replace("ferrum-clip-", &format!("{prefix}-ferrum-clip-"))
-        .replace("ferrum-colorbar-", &format!("{prefix}-ferrum-colorbar-"))
-        .replace("ferrum-legend-clip-", &format!("{prefix}-ferrum-legend-clip-"))
+    const FAMILIES: [&str; 3] = ["ferrum-clip-", "ferrum-colorbar-", "ferrum-legend-clip-"];
+
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut rest = body;
+    loop {
+        let id_pos = rest.find("id=\"").map(|i| (i, "id=\"", '"'));
+        let url_pos = rest.find("url(#").map(|i| (i, "url(#", ')'));
+        let next = match (id_pos, url_pos) {
+            (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some((pos, anchor, close_ch)) = next else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..pos + anchor.len()]);
+        let after = &rest[pos + anchor.len()..];
+        // A malformed/unterminated attribute (no closing delimiter): copy the
+        // remainder verbatim rather than looping forever or panicking.
+        let Some(close) = after.find(close_ch) else {
+            out.push_str(after);
+            break;
+        };
+        let value = &after[..close];
+        if FAMILIES.iter().any(|family| value.contains(family)) {
+            out.push_str(prefix);
+            out.push('-');
+        }
+        out.push_str(value);
+        // `rest` starts at the closing delimiter itself, so the next
+        // iteration's search resumes past everything already emitted.
+        rest = &after[close..];
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1029,14 +1077,16 @@ mod tests {
 
     /// S4 regression: a body whose ids are ALREADY namespaced (e.g. an inset
     /// embedded via `uniquify_clip_ids_with_prefix(body, "inset0")`) must get
-    /// a NEW prefix layer composed in front when uniquified again for a
-    /// composite leaf, not be skipped. Skipping is exactly the bug the
-    /// closing design review caught: two composite leaves each embedding an
-    /// inset both produce `id="inset0-ferrum-clip-0"` inside their own leaf,
-    /// and if the per-leaf `cellN` pass ignored already-prefixed ids (because
-    /// it only matched the bare `id="ferrum-clip-` literal), the two leaves'
-    /// insets would still collide with EACH OTHER once merged, even though
-    /// neither collides with its own host anymore.
+    /// a NEW prefix layer composed in front (outermost-first: the leaf-level
+    /// `cellN` pass runs LAST here, so it ends up leftmost) when uniquified
+    /// again for a composite leaf, not be skipped. Skipping is exactly the
+    /// bug the closing design review caught: two composite leaves each
+    /// embedding an inset both produce `id="inset0-ferrum-clip-0"` inside
+    /// their own leaf, and if the per-leaf `cellN` pass ignored
+    /// already-prefixed ids (because it only matched the bare
+    /// `id="ferrum-clip-` literal), the two leaves' insets would still
+    /// collide with EACH OTHER once merged, even though neither collides
+    /// with its own host anymore.
     #[test]
     fn uniquify_clip_ids_composes_with_an_already_namespaced_id_instead_of_skipping_it() {
         let inset_body = concat!(
@@ -1058,17 +1108,46 @@ mod tests {
         let leaf1 = uniquify_clip_ids(&pre_namespaced, 1);
 
         assert!(
-            leaf0.contains(r#"id="inset0-cell0-ferrum-clip-0""#),
-            "expected the inset prefix and the leaf prefix to compose: {leaf0}"
+            leaf0.contains(r#"id="cell0-inset0-ferrum-clip-0""#),
+            "expected the leaf prefix to compose in front of the inset prefix: {leaf0}"
         );
         assert!(
-            leaf1.contains(r#"id="inset0-cell1-ferrum-clip-0""#),
-            "expected the inset prefix and the leaf prefix to compose: {leaf1}"
+            leaf1.contains(r#"id="cell1-inset0-ferrum-clip-0""#),
+            "expected the leaf prefix to compose in front of the inset prefix: {leaf1}"
         );
         assert_ne!(leaf0, leaf1, "two leaves' inset ids must not collide after composition");
         assert!(
             !leaf1.contains(r#"id="inset0-ferrum-clip-0""#),
             "leaf 1 must not still carry the un-cell-prefixed inset id: {leaf1}"
+        );
+    }
+
+    /// S2 regression (cycle-2 closing review): an inset is a fully independent
+    /// pre-rendered document, so nothing stops its `<text>` content from
+    /// containing the literal token `ferrum-clip-` (e.g. a data label, a
+    /// title, or user-supplied annotation text that happens to say it). The
+    /// uniquify pass must only ever touch `id="…"`/`url(#…)` attribute
+    /// values, never element text content, or a user's rendered text would be
+    /// silently corrupted by an internal implementation detail leaking into
+    /// visible output.
+    #[test]
+    fn uniquify_clip_ids_with_prefix_only_rewrites_ids_never_text_content() {
+        let body = concat!(
+            r#"<defs><clipPath id="ferrum-clip-0"><rect/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-0)">"#,
+            r#"<text x="10" y="10">Uses ferrum-clip-0 as an example id</text>"#,
+            r#"</g>"#,
+        );
+        let out = uniquify_clip_ids_with_prefix(body, "cell0");
+
+        // The id def and its reference must still be namespaced.
+        assert!(out.contains(r#"id="cell0-ferrum-clip-0""#), "clip def must be namespaced: {out}");
+        assert!(out.contains("url(#cell0-ferrum-clip-0)"), "clip ref must be namespaced: {out}");
+        // The <text> content — which is not an id or a url(#…) reference —
+        // must survive byte-for-byte, literal token and all.
+        assert!(
+            out.contains(">Uses ferrum-clip-0 as an example id<"),
+            "text content must not be rewritten just because it contains the id token: {out}"
         );
     }
 }
