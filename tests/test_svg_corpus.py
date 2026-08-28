@@ -384,6 +384,45 @@ def test_outside_clip_maps_the_clip_rect_through_the_referencing_transform(tmp_p
     assert corpus.query_outside_clip(_doc(body, tmp_path=tmp_path)) == []
 
 
+def test_outside_clip_maps_all_four_clip_corners_under_a_rotating_transform(tmp_path):
+    """A rotated clip is bounded by FOUR mapped corners, not two.
+
+    Under ``rotate(30)`` the clip rect ``(0,0)-(20,10)`` maps to
+
+        (0,0)   -> (0.000,  0.000)      (20,0)  -> (17.321, 10.000)
+        (0,10)  -> (-5.000, 8.660)      (20,10) -> (12.321, 18.660)
+
+    so the true axis-aligned window is ``x[-5.000, 17.321] y[0, 18.660]``.
+    Mapping only the ``(x0,y0)``/``(x1,y1)`` diagonal — what the archive did —
+    misses the other two corners entirely and yields ``x[0, 12.321]``, a window
+    5.0 too narrow on the left and 5.0 too narrow on the right.
+
+    The first circle sits at local ``(18, 1)``, comfortably inside the clip
+    rect, and lands at ``x[14.905, 15.271]`` in root space: inside the true
+    window, wholly right of the two-corner one. A two-corner detector reports
+    a plainly visible mark as clipped out of existence. The second circle, at
+    local ``(60, 60)``, is genuinely outside and must still be caught — so the
+    assertion pins the count AND which one was named, and the two-corner
+    reduction breaks it by adding a finding rather than by losing one.
+    """
+    doc = _doc(
+        '<defs><clipPath id="c"><rect x="0" y="0" width="20" height="10"/></clipPath></defs>'
+        '<g transform="rotate(30)" clip-path="url(#c)">'
+        '<circle cx="18" cy="1" r="0.5" fill="#000"/>'
+        '<circle cx="60" cy="60" r="1" fill="#000"/></g>',
+        tmp_path=tmp_path,
+        width=120.0,
+        height=100.0,
+    )
+    window = corpus._resolved_clip_rect(
+        doc.clip_rects["c"], next(n for n in doc.nodes if n.tag == "g").ctm
+    )
+    assert [round(v, 3) for v in window] == [-5.0, 0.0, 17.321, 18.66]
+    hits = corpus.query_outside_clip(doc)
+    assert len(hits) == 1
+    assert "x=[21.6,22.3] y=[80.6,83.3]" in hits[0].detail
+
+
 def test_outside_clip_models_the_renderers_first_match_for_a_duplicate_id(tmp_path):
     """The query must model the RENDERER, which takes the first definition.
 
