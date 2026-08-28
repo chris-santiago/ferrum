@@ -2112,6 +2112,9 @@ fn build_structural_nodes(
 ) -> StructuralOutput {
     let mut extra_annotations: Vec<SceneNode> = Vec::new();
     let mut break_results: Vec<(String, break_axis::BreakResult)> = Vec::new();
+    // Distinct per Inset item so each embedded body gets its own clip-id
+    // namespace (see `inset::build_inset_nodes`); only Inset variants advance it.
+    let mut inset_idx: usize = 0;
 
     for item in structural {
         match item {
@@ -2189,7 +2192,8 @@ fn build_structural_nodes(
                 } else {
                     spec_inset
                 };
-                let inset_nodes = inset::build_inset_nodes(inset_to_build, plot_area);
+                let inset_nodes = inset::build_inset_nodes(inset_to_build, plot_area, inset_idx);
+                inset_idx += 1;
                 extra_annotations.extend(inset_nodes);
             }
         }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import ferrum
@@ -127,11 +129,19 @@ def test_mark_discrimination_threshold_renders(binary_source):
 
 
 def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
-    """threshold_line=True emits a vertical mark_rule at the F1-best
-    threshold. The chart builder computes argmax(f1) on the un-melted
-    source frame and injects a `_threshold_best` sentinel column with
-    one non-null row at the optimal threshold; Rust's mark_rule renders
-    exactly one vertical span there.
+    """threshold_line=True emits exactly one vertical mark_rule at the
+    F1-best threshold -- not one horizontal rule per (threshold, metric)
+    data row.
+
+    Regression for the discrimination-threshold rule layer inheriting the
+    chart-level y="value" encoding through the layered/desugar path: with
+    n_thresholds=20 and 4 metrics, an un-fixed render draws 80 horizontal
+    dashed rules (one per data row, spanning the full plot width) and zero
+    vertical ones. This asserts the dashed threshold-line layer's own
+    `<line>` element (identified by its distinctive
+    ``stroke-dasharray="4,4"`` style, which no gridline/tick/axis line
+    carries) is emitted exactly once, is vertical (x1 == x2), and spans a
+    non-zero extent (y1 != y2) rather than being a degenerate point.
     """
     svg = ferrum.discrimination_threshold_chart(
         binary_source,
@@ -139,8 +149,51 @@ def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
         n_thresholds=20,
     ).to_svg()
     assert "<svg" in svg
-    # mark_rule emits an SVG <line> element for the vertical span.
-    assert "<line " in svg
+
+    dashed_lines = re.findall(r'<line\b[^>]*stroke-dasharray="4,4"[^>]*/>', svg)
+    assert len(dashed_lines) == 1, (
+        f"expected exactly 1 dashed threshold-line rule, got {len(dashed_lines)}: {dashed_lines}"
+    )
+    (line,) = dashed_lines
+    x1, y1, x2, y2 = (
+        float(re.search(rf'{attr}="([^"]+)"', line).group(1)) for attr in ("x1", "y1", "x2", "y2")
+    )
+    assert x1 == x2, f"threshold line must be vertical (x1 == x2); got x1={x1}, x2={x2}"
+    assert y1 != y2, f"threshold line must span a non-zero height; got y1={y1}, y2={y2}"
+
+
+def test_discrimination_threshold_chart_optimum_label_present_vs_absent(binary_source):
+    """optimum_label=True renders the max-F1 annotation text on the
+    figure-function path; optimum_label=False renders none of it.
+
+    Regression for the F1-row case-mismatch bug (#96): `discrimination_
+    threshold_chart` relabels the metric column to display names ("f1" ->
+    "F1") before calling `mark_discrimination_threshold`, so the F1-optimum
+    lookup in `_disc_threshold_prep` (`pl.col("metric") == "f1"`) matched
+    zero rows and silently skipped the `_optimum_x`/`_optimum_y`/
+    `_optimum_text` sentinel-column injection for every
+    `discrimination_threshold_chart()` call -- not just `threshold_line=
+    True` ones. Asserts on the actual rendered label text (not merely the
+    presence of some `<text>` element, which the axis/legend/title already
+    guarantee), and that the same text is genuinely absent when
+    `optimum_label=False`.
+    """
+    svg_on = ferrum.discrimination_threshold_chart(
+        binary_source,
+        optimum_label=True,
+        n_thresholds=20,
+    ).to_svg()
+    svg_off = ferrum.discrimination_threshold_chart(
+        binary_source,
+        optimum_label=False,
+        n_thresholds=20,
+    ).to_svg()
+
+    label = re.search(r"max F1 = [\d.]+ @ t=[\d.]+", svg_on)
+    assert label is not None, "optimum_label=True must render the max-F1 annotation text"
+    assert svg_on.count(label.group(0)) == 1
+
+    assert "max F1" not in svg_off, "optimum_label=False must not render the max-F1 annotation text"
 
 
 # --- Figure-function tests (Task 16) --------------------------------

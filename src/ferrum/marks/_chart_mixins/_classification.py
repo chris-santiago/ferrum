@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ferrum.marks._desugar_helpers import (
     _filter_class_average,
     _normalize_names,
+    _normalized_col,
     _roc_render_frame,
     _sort_by,
     _utf8_col,
@@ -478,7 +479,14 @@ class ClassificationMarksMixin:
                 return df
             # Find F1-optimum row from the long-form data. ``f1`` lives
             # as a ``metric`` value with ``value`` carrying the score.
-            f1_rows = df.filter(pl.col("metric") == "f1")
+            # Matched loosely via `_normalized_col` (the polars-side
+            # counterpart of `_normalize_names`, used above for the
+            # `metrics=` filter) because `discrimination_threshold_chart`
+            # relabels the metric column to display names ("f1" -> "F1")
+            # before calling this mark -- an exact-literal match against
+            # "f1" would silently miss every row and skip the sentinel-
+            # column injection this whole block exists to perform.
+            f1_rows = df.filter(_normalized_col("metric") == "f1")
             if f1_rows.height == 0:
                 return df
             best_idx = int(f1_rows["value"].arg_max() or 0)

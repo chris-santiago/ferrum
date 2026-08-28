@@ -78,6 +78,12 @@ def _utf8_col(name: str) -> pl.Expr:
     return pl.col(name).cast(pl.Utf8)
 
 
+#: Shared by :func:`_normalize_names` (Python-side) and :func:`_normalized_col`
+#: (polars-side) so the loose case/spacing-match rule has exactly one
+#: definition instead of two copies that can silently drift apart.
+_NORMALIZE_PATTERN = r"[^a-z0-9]"
+
+
 def _normalize_names(values: "set[str] | frozenset[str] | tuple[str, ...]") -> set[str]:
     """Lowercase and strip non-alphanumeric characters for loose comparison.
 
@@ -85,7 +91,23 @@ def _normalize_names(values: "set[str] | frozenset[str] | tuple[str, ...]") -> s
     renames ``"queue_rate"`` to ``"Queue rate"`` for display) as the *same*
     name rather than a mismatch, without hardcoding the specific rename map.
     """
-    return {re.sub(r"[^a-z0-9]", "", str(v).lower()) for v in values}
+    return {re.sub(_NORMALIZE_PATTERN, "", str(v).lower()) for v in values}
+
+
+def _normalized_col(name: str) -> pl.Expr:
+    """Polars-side counterpart to :func:`_normalize_names`: lowercase and
+    strip non-alphanumeric characters from a column, for loose comparison
+    against a normalized Python string literal.
+
+    Built off the same :data:`_NORMALIZE_PATTERN` regex so the two loose-
+    match rules cannot silently diverge (a divergence between "how one name
+    is written in two places" is exactly the class of bug this pairs with —
+    see the discrimination-threshold F1-row lookup that used to hand-roll
+    this a second time). Casts via :func:`_utf8_col` first so a non-string
+    discriminator column produces a normal empty-match miss rather than a
+    polars ``ComputeError``.
+    """
+    return _utf8_col(name).str.to_lowercase().str.replace_all(_NORMALIZE_PATTERN, "")
 
 
 def _filter_class_average(df: pl.DataFrame, average: str | None, *, mark_name: str) -> pl.DataFrame:

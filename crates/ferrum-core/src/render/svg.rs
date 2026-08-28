@@ -539,9 +539,25 @@ pub(crate) fn write_svg_open(out: &mut String, w: f64, h: f64) {
 /// Prefixing each cell's IDs with `cellNN-` makes them disjoint while
 /// preserving each body's internal `id` ↔ `url(#id)` references.
 pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
-    let clip_prefix = format!("cell{cell_idx}-ferrum-clip-");
-    let colorbar_prefix = format!("cell{cell_idx}-ferrum-colorbar-");
-    let legend_clip_prefix = format!("cell{cell_idx}-ferrum-legend-clip-");
+    uniquify_clip_ids_with_prefix(body, &format!("cell{cell_idx}"))
+}
+
+/// Same rewrite as [`uniquify_clip_ids`], but with a caller-chosen namespace
+/// prefix instead of the `cellN` naming that composite/chrome-wrap callers
+/// use. Extracted so callers outside the cell-merge family (e.g. the inset
+/// embed path, which nests one pre-rendered SVG body inside another and
+/// needs its own disjoint namespace) can uniquify without borrowing "cell"
+/// terminology that doesn't describe what they're doing.
+///
+/// Safe to compose with a later `uniquify_clip_ids` pass over the same
+/// document: once an id has been rewritten to `{prefix}-ferrum-clip-N`, it no
+/// longer matches the literal `id="ferrum-clip-` / `url(#ferrum-clip-`
+/// patterns a subsequent pass searches for, so re-prefixing only touches
+/// still-bare ids and never double-mangles an already-namespaced one.
+pub(crate) fn uniquify_clip_ids_with_prefix(body: &str, prefix: &str) -> String {
+    let clip_prefix = format!("{prefix}-ferrum-clip-");
+    let colorbar_prefix = format!("{prefix}-ferrum-colorbar-");
+    let legend_clip_prefix = format!("{prefix}-ferrum-legend-clip-");
     body
         .replace("id=\"ferrum-clip-", &format!("id=\"{clip_prefix}"))
         .replace("url(#ferrum-clip-", &format!("url(#{clip_prefix}"))

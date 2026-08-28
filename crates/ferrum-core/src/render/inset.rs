@@ -2,7 +2,11 @@
 //! within the plot area, with optional border, background, shadow, and connector.
 //!
 //! Insets use SVG's native nested `<svg>` element support to embed the
-//! pre-rendered content inside a positioned, sized viewport.
+//! pre-rendered content inside a positioned, sized viewport. Each inset's
+//! `clipPath`/colorbar/legend-clip ids are namespaced via
+//! [`uniquify_clip_ids_with_prefix`](crate::render::svg::uniquify_clip_ids_with_prefix)
+//! before embedding, since the pre-rendered inset body numbers its own ids
+//! from zero independently of the host chart.
 
 use ferrum_scene::{FillStroke, RawAnchor, SceneNode, StrokeStyle};
 
@@ -10,8 +14,20 @@ use crate::layout::Rect;
 use crate::render::chart_config::InsetSpec;
 use crate::render::color::parse_color;
 use crate::render::draw::to_scene_color;
+use crate::render::svg::uniquify_clip_ids_with_prefix;
 
 /// Build scene nodes that embed the inset SVG at `spec.bounds` within `plot_area`.
+///
+/// `inset_idx` namespaces this inset's clip/colorbar/legend-clip ids
+/// (`inset{inset_idx}-ferrum-clip-…`) so they stay disjoint from both the
+/// host chart's own (unprefixed) ids and any other inset embedded in the
+/// same chart. `spec.svg` is a fully independent pre-rendered document that
+/// numbers its own ids from zero, so without this the host and inset (or two
+/// insets) can define the same `id="ferrum-clip-0"`; SVG ids are
+/// document-scoped, so `url(#ferrum-clip-0)` then resolves to whichever
+/// definition comes first and the other clips its content by the wrong
+/// rect. Caller passes a distinct `inset_idx` per `StructuralSpec::Inset`
+/// processed for this chart (see `scene_build::build_structural_nodes`).
 ///
 /// Rendering order (back to front):
 /// 1. Drop shadow (if `spec.shadow`)
@@ -19,7 +35,7 @@ use crate::render::draw::to_scene_color;
 /// 3. The SVG content as a `SceneNode::Raw`
 /// 4. Border rect (if `spec.border`)
 /// 5. Connector lines from `spec.connect_to` to inset corners (if set)
-pub fn build_inset_nodes(spec: &InsetSpec, plot_area: &Rect) -> Vec<SceneNode> {
+pub fn build_inset_nodes(spec: &InsetSpec, plot_area: &Rect, inset_idx: usize) -> Vec<SceneNode> {
     let [b_left, b_top, b_right, b_bottom] = spec.bounds;
 
     // Convert normalized [0,1] bounds to pixel coordinates relative to plot_area.
@@ -86,7 +102,8 @@ pub fn build_inset_nodes(spec: &InsetSpec, plot_area: &Rect) -> Vec<SceneNode> {
     // from the pre-rendered string and wrap it in a positioned <svg> element
     // with x/y/width/height plus the original viewBox so the content scales
     // to fit the inset bounds (without viewBox it just clips at 1:1).
-    let inner_content = strip_svg_wrapper(&spec.svg);
+    let inner_content =
+        uniquify_clip_ids_with_prefix(strip_svg_wrapper(&spec.svg), &format!("inset{inset_idx}"));
     let viewbox = extract_viewbox(&spec.svg);
     let svg_raw = format!(
         "<svg x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" viewBox=\"{}\" overflow=\"hidden\">{}</svg>",
@@ -256,7 +273,7 @@ mod tests {
     #[test]
     fn inset_with_border_includes_rect_node() {
         let spec = basic_spec();
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
         assert!(rect_count >= 1, "expected at least one rect node for border");
     }
@@ -264,7 +281,7 @@ mod tests {
     #[test]
     fn inset_without_border_has_no_border_rect() {
         let spec = InsetSpec { border: false, ..basic_spec() };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         // With no background and no shadow, there should be no Rect nodes.
         let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
         assert_eq!(rect_count, 0, "no border or shadow should mean no rect nodes");
@@ -279,7 +296,7 @@ mod tests {
             background: Some("#ffffff".to_string()),
             ..basic_spec()
         };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
         assert_eq!(rect_count, 1, "expected exactly one rect for background fill");
     }
@@ -291,8 +308,8 @@ mod tests {
         let spec_no_shadow = basic_spec(); // border=true, shadow=false
         let spec_shadow = InsetSpec { shadow: true, ..basic_spec() }; // border=true, shadow=true
 
-        let nodes_no_shadow = build_inset_nodes(&spec_no_shadow, &plot());
-        let nodes_shadow = build_inset_nodes(&spec_shadow, &plot());
+        let nodes_no_shadow = build_inset_nodes(&spec_no_shadow, &plot(), 0);
+        let nodes_shadow = build_inset_nodes(&spec_shadow, &plot(), 0);
 
         let rects_no_shadow = nodes_no_shadow.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
         let rects_shadow = nodes_shadow.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
@@ -309,7 +326,7 @@ mod tests {
     #[test]
     fn inset_always_includes_raw_svg_node() {
         let spec = basic_spec();
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let raw_count = nodes.iter().filter(|n| matches!(n, SceneNode::Raw { .. })).count();
         assert_eq!(raw_count, 1, "expected exactly one Raw SVG node");
     }
@@ -317,7 +334,7 @@ mod tests {
     #[test]
     fn inset_raw_svg_is_nested_svg_element() {
         let spec = basic_spec();
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         if let Some(SceneNode::Raw { svg, .. }) = nodes.iter().find(|n| matches!(n, SceneNode::Raw { .. })) {
             assert!(svg.starts_with("<svg "), "Raw node should be a nested <svg> element");
             assert!(svg.contains("overflow=\"hidden\""));
@@ -330,11 +347,92 @@ mod tests {
     fn inset_raw_node_has_chrome_anchor() {
         use ferrum_scene::RawAnchor;
         let spec = basic_spec();
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let raw = nodes.iter().find_map(|n| {
             if let SceneNode::Raw { anchor, .. } = n { Some(*anchor) } else { None }
         });
         assert_eq!(raw, Some(RawAnchor::Chrome), "inset Raw node must have Chrome anchor");
+    }
+
+    /// Regression for the corpus `duplicate_id` finding (#98 finding 1): the
+    /// inset body is a fully independent pre-rendered SVG document that
+    /// numbers its own clipPath ids from zero, exactly like the host chart
+    /// does. Embedding it verbatim collides `id="ferrum-clip-0"` in the host
+    /// with the inset's own `id="ferrum-clip-0"` — both `url(#ferrum-clip-0)`
+    /// refs then resolve to the host's rect (SVG ids are document-scoped),
+    /// clipping the inset content by the wrong region. The embedded body
+    /// must carry a namespaced id disjoint from the host's un-prefixed one.
+    #[test]
+    fn inset_embed_namespaces_clip_ids_disjoint_from_a_colliding_host_id() {
+        let spec = InsetSpec {
+            svg: concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150">"#,
+                r#"<defs><clipPath id="ferrum-clip-0"><rect width="200" height="150"/></clipPath></defs>"#,
+                r#"<g clip-path="url(#ferrum-clip-0)"><circle cx="100" cy="75" r="50"/></g>"#,
+                r#"</svg>"#,
+            )
+            .to_string(),
+            ..basic_spec()
+        };
+        let host_id = r#"id="ferrum-clip-0""#;
+
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
+        let embedded = nodes
+            .iter()
+            .find_map(|n| if let SceneNode::Raw { svg, .. } = n { Some(svg.as_str()) } else { None })
+            .expect("expected a Raw svg node");
+
+        // The embedded body must no longer carry the bare host-colliding id...
+        assert!(
+            !embedded.contains(host_id),
+            "embedded inset body still carries the un-namespaced host id: {embedded}"
+        );
+        // ...and its def + reference must both have been renamed to the same
+        // namespaced id, so the clip-path reference still resolves internally.
+        assert!(
+            embedded.contains(r#"id="inset0-ferrum-clip-0""#),
+            "expected namespaced clip def: {embedded}"
+        );
+        assert!(
+            embedded.contains("url(#inset0-ferrum-clip-0)"),
+            "expected namespaced clip reference: {embedded}"
+        );
+    }
+
+    /// Two insets embedded into the same host chart each pre-render starting
+    /// their own clip numbering at zero, so without a per-inset namespace a
+    /// second inset would collide with the first, not just with the host.
+    #[test]
+    fn inset_embed_namespaces_two_insets_disjoint_from_each_other() {
+        let two_inset_svg = || {
+            concat!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="150">"#,
+                r#"<defs><clipPath id="ferrum-clip-0"><rect width="200" height="150"/></clipPath></defs>"#,
+                r#"<g clip-path="url(#ferrum-clip-0)"><circle cx="100" cy="75" r="50"/></g>"#,
+                r#"</svg>"#,
+            )
+            .to_string()
+        };
+        let spec_a = InsetSpec { svg: two_inset_svg(), ..basic_spec() };
+        let spec_b = InsetSpec { svg: two_inset_svg(), ..basic_spec() };
+
+        let nodes_a = build_inset_nodes(&spec_a, &plot(), 0);
+        let nodes_b = build_inset_nodes(&spec_b, &plot(), 1);
+        let raw_of = |nodes: &[SceneNode]| {
+            nodes
+                .iter()
+                .find_map(|n| if let SceneNode::Raw { svg, .. } = n { Some(svg.clone()) } else { None })
+                .expect("expected a Raw svg node")
+        };
+        let embedded_a = raw_of(&nodes_a);
+        let embedded_b = raw_of(&nodes_b);
+
+        assert!(embedded_a.contains(r#"id="inset0-ferrum-clip-0""#));
+        assert!(embedded_b.contains(r#"id="inset1-ferrum-clip-0""#));
+        assert!(
+            !embedded_b.contains(r#"id="inset0-ferrum-clip-0""#),
+            "second inset must not collide with the first inset's namespaced id"
+        );
     }
 
     #[test]
@@ -344,7 +442,7 @@ mod tests {
             border: true,
             ..basic_spec()
         };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         // The border rect should cover the full plot area.
         let border_rect = nodes.iter().find(|n| {
             if let SceneNode::Rect { style, .. } = n {
@@ -372,7 +470,7 @@ mod tests {
             connect_style: "lines".to_string(),
             ..basic_spec()
         };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert_eq!(line_count, 2, "expected 2 connector lines (to 2 nearest corners)");
     }
@@ -380,7 +478,7 @@ mod tests {
     #[test]
     fn inset_without_connect_to_has_no_line_nodes() {
         let spec = InsetSpec { connect_to: None, ..basic_spec() };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert_eq!(line_count, 0, "no connector lines without connect_to");
     }
@@ -462,7 +560,7 @@ mod tests {
         // which `.max(1.0)` clamps to a 1px-wide inset rather than a
         // negative-width Rect.
         let spec = InsetSpec { bounds: [0.9, 0.1, 0.1, 0.9], ..basic_spec() };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let raw = nodes.iter().find_map(|n| {
             if let SceneNode::Raw { svg, .. } = n { Some(svg) } else { None }
         }).expect("expected a Raw svg node");
@@ -480,7 +578,7 @@ mod tests {
             connect_style: "lines".to_string(),
             ..basic_spec()
         };
-        let nodes = build_inset_nodes(&spec, &plot());
+        let nodes = build_inset_nodes(&spec, &plot(), 0);
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert_eq!(line_count, 2, "NaN connect_to must still draw exactly 2 connector lines");
     }

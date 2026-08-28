@@ -320,7 +320,9 @@ def desugar_discrimination_threshold(
     When ``threshold_line=True`` the data must carry a sentinel
     ``_threshold_best`` column (one non-null row at the F1-best
     threshold). The desugar emits a vertical ``mark_rule`` layer on
-    ``x=_threshold_best``.
+    ``x=_threshold_best``, routed through a named ``Identity`` transform
+    (see the inline comment at the append site) so the layered renderer
+    does not inherit the chart-level ``y="value"`` encoding onto it.
 
     When ``optimum_label=True`` the data must also carry
     ``_optimum_x`` / ``_optimum_y`` / ``_optimum_text`` sentinel columns
@@ -345,13 +347,33 @@ def desugar_discrimination_threshold(
             name="line", mark="line", encoding={"x": "threshold", "y": "value", "color": "metric"}
         ),
     ]
+    transforms: list = []
     if threshold_line:
+        # The rule layer declares x only (`x="_threshold_best"`) to draw a
+        # single vertical line. `LayerPrepared::from_chart_and_layer`
+        # (crates/ferrum-core/src/render/prepare/mod.rs) fills in any
+        # channel the layer leaves unset from the *chart-level* encoding
+        # unless the layer has its own `data_source` -- and this chart's
+        # top-level encoding sets y="value" (for the line layer). Left
+        # unguarded, the rule layer would inherit that y, and
+        # render/marks/rule.rs treats "y present" as the horizontal-span
+        # case regardless of x, turning the intended single vertical line
+        # into one horizontal rule per data row. Routing the layer through
+        # its own named `Identity` pass-through (same data, new name) makes
+        # it self-contained, so only its own x survives and the vertical-
+        # span branch fires. Mirrors the ``data_source="calibration_ref"``
+        # pattern in ``desugar_calibration`` above.
+        from ferrum._core import PyIdentity
+
+        identity_name = "_threshold_line_data"
+        transforms.append(PyIdentity(identity_name))
         layers.append(
             _Layer(
                 name="threshold",
                 mark="rule",
                 encoding={"x": "_threshold_best"},
                 mark_kwargs={"stroke": "#AAAAAA", "stroke_dash": [4, 4], "opacity": 0.6},
+                data_source=identity_name,
             )
         )
     if optimum_label:
@@ -363,7 +385,7 @@ def desugar_discrimination_threshold(
                 mark_kwargs={"align": "left", "dx": 4, "dy": -4},
             )
         )
-    return MarkDesugarResult(layers=_apply(layers, user_kw))
+    return MarkDesugarResult(transforms=transforms, layers=_apply(layers, user_kw))
 
 
 register_layer_names("discrimination_threshold", frozenset({"line", "threshold", "optimum_label"}))

@@ -1181,25 +1181,20 @@ class TestRawNodeNotSilentlyDropped:
             f"colorbar fragment has a url(#…) with no co-located id def: defs={ids!r} refs={urls!r}"
         )
 
-    def test_per_fragment_namespacing_distinguishes_colliding_colorbar_ids(self):
-        """Two self-contained Raw fragments that each author ``ferrum-colorbar-0``
-        must receive DISTINCT ids after per-fragment namespacing — the R5 bug.
+    def test_inset_colorbar_ids_disambiguated_at_build_time(self):
+        """An outer continuous-color chart with an ``.inset()`` of another
+        continuous-color chart must NOT produce two Raw fragments that both
+        author the bare id ``ferrum-colorbar-0``.
 
-        Trigger: a continuous-color chart (outer colorbar) that also contains an
-        ``.inset()`` of another continuous-color chart.  The inset is rendered in
-        a separate pass and embedded verbatim as one nested-``<svg>`` Raw
-        fragment, so it carries its OWN ``ferrum-colorbar-0``.  Both fragments are
-        self-contained (defs + consumer co-located).
-
-        This test replicates both the OLD shared-map logic and the NEW
-        per-fragment logic from ``ferrum-anywidget.js``:
-
-        - OLD shared map: one id→namespaced map across ALL fragments collapses
-          both ``ferrum-colorbar-0`` defs to the SAME namespaced id → one
-          ``<linearGradient>`` wins, the other colorbar renders with the wrong
-          gradient.
-        - NEW per-fragment: each fragment gets prefix ``ferrum-raw-{load}-{frag}-``
-          so the two colorbars get distinct ids AND no reference dangles.
+        Task 10b (2026-08-27) moved this disambiguation from the JS-side
+        per-fragment remap (a runtime defense layer, see
+        ``test_per_fragment_js_remap_distinguishes_colliding_colorbar_ids``
+        below) to Rust build time: ``render/inset.rs::build_inset_nodes`` now
+        runs the inset body through
+        ``uniquify_clip_ids_with_prefix(inner, "insetN")`` before embedding it
+        as a ``SceneNode::Raw`` fragment, so the collision this fixture used
+        to manufacture (former R5 bug precondition) is closed one layer
+        earlier — before the JS map ever needs to act.
         """
         import re
 
@@ -1238,11 +1233,66 @@ class TestRawNodeNotSilentlyDropped:
         raw_nodes = _find_raw_nodes(scene)
         svgs = [n.get("svg", "") for n in raw_nodes]
 
+        # Exactly one fragment (the outer chart's own colorbar) may still
+        # carry the bare, un-namespaced id.
+        bare = [s for s in svgs if 'id="ferrum-colorbar-0"' in s]
+        assert len(bare) == 1, (
+            "build-time inset namespacing must leave exactly one fragment "
+            f"carrying the bare outer id 'ferrum-colorbar-0'; found {len(bare)} "
+            f"across {len(svgs)} raw fragments"
+        )
+
+        # The inset's fragment must carry a distinct, disambiguated id
+        # instead of colliding with the outer chart's bare id.
+        namespaced = [s for s in svgs if re.search(r'id="inset\d+-ferrum-colorbar-0"', s)]
+        assert namespaced, (
+            "inset colorbar fragment must carry an insetN-ferrum-colorbar- "
+            f"namespaced id; none found in {svgs!r}"
+        )
+
+    def test_per_fragment_js_remap_distinguishes_colliding_colorbar_ids(self):
+        """The JS-side per-fragment id remap (``ferrum-anywidget.js``) must
+        still disambiguate two Raw fragments that genuinely author the SAME
+        literal id — the R5 bug it was written to fix.
+
+        The inset scenario that used to manufacture this collision is now
+        disambiguated at Rust build time (see
+        ``test_inset_colorbar_ids_disambiguated_at_build_time`` above), so it
+        can no longer reach the JS layer with colliding ids. The JS remap is
+        still load-bearing defense-in-depth for any other Raw-fragment
+        producer that hands the runtime un-namespaced ids, so this test
+        constructs the collision directly — two hand-built, self-contained
+        colorbar fragments both authoring ``id="ferrum-colorbar-0"`` — and
+        replicates both the OLD shared-map logic and the NEW per-fragment
+        logic from ``ferrum-anywidget.js``:
+
+        - OLD shared map: one id→namespaced map across ALL fragments collapses
+          both ``ferrum-colorbar-0`` defs to the SAME namespaced id → one
+          ``<linearGradient>`` wins, the other colorbar renders with the wrong
+          gradient.
+        - NEW per-fragment: each fragment gets prefix ``ferrum-raw-{load}-{frag}-``
+          so the two colorbars get distinct ids AND no reference dangles.
+        """
+        import re
+
+        svgs = [
+            '<defs><linearGradient id="ferrum-colorbar-0" x1="0" y1="1" x2="0" y2="0">'
+            '<stop offset="0.0" stop-color="#000000"/>'
+            '<stop offset="1.0" stop-color="#ffffff"/>'
+            "</linearGradient></defs>"
+            '<rect x="0" y="0" width="14" height="180" fill="url(#ferrum-colorbar-0)"/>',
+            '<defs><linearGradient id="ferrum-colorbar-0" x1="0" y1="1" x2="0" y2="0">'
+            '<stop offset="0.0" stop-color="#eff6ff"/>'
+            '<stop offset="1.0" stop-color="#1d4ed8"/>'
+            "</linearGradient></defs>"
+            '<rect x="640" y="45" width="14" height="180" fill="url(#ferrum-colorbar-0)"/>',
+        ]
+
         # Precondition: two distinct fragments must each author ferrum-colorbar-0.
         colliding = [s for s in svgs if 'id="ferrum-colorbar-0"' in s]
         assert len(colliding) >= 2, (
-            "fixture must produce two Raw fragments that each author "
-            f"id='ferrum-colorbar-0' (outer + inset colorbars); found {len(colliding)}"
+            "fixture must hand-build two Raw fragments that each author "
+            f"id='ferrum-colorbar-0'; found {len(colliding)}"
         )
 
         load_idx = 0
