@@ -741,8 +741,18 @@ fn reserve_axis_bands(
         .overrides
         .label_font_size
         .unwrap_or(theme.typography.label_font_size);
+    // Standoff gate (#97, spec §4.1 amended 2026-08-27, extended cycle 2;
+    // #94 phantom-margin family): `axes.show_y` is `.axis(y=False)`'s
+    // chart-level toggle (JointChart marginals, ClusterMap dendrograms). It
+    // does NOT empty `axes.y.tick_labels` — only `layout_y_axis`'s emission
+    // is skipped, not this reservation — so a hidden axis must keep its bare
+    // pre-#97 `max_label_w` reservation. `compute_y_label_band_width` also
+    // reads `axes.y.show_labels` directly off the passed `AxisInput`
+    // (`fm.Axis(labels=False)` on an otherwise-shown axis draws no label
+    // text either), so only an axis that both is shown AND draws its labels
+    // gets #97's new standoff.
     let y_label_band = axis::compute_y_label_band_width(
-        &axes.y, y_label_font_size, metrics, theme.sizes.tick_size,
+        &axes.y, y_label_font_size, metrics, theme.sizes.tick_size, axes.show_y,
     );
 
     // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
@@ -758,6 +768,12 @@ fn reserve_axis_bands(
             .overrides
             .label_font_size
             .unwrap_or(theme.typography.label_font_size);
+        // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side extension;
+        // #94 phantom-margin family): `axes.show_x` already gates this whole
+        // branch to `0.0` above (`.axis(x=False)`), so the only remaining
+        // knob is `axes.x.show_labels` (`fm.Axis(labels=False)` on an
+        // otherwise-shown axis draws no label text either) — mirrors the
+        // primary y band's gate exactly, see `estimate_x_label_band`'s doc.
         axis::estimate_x_label_band(
             &axes.x.tick_labels,
             x_label_font_size,
@@ -766,6 +782,7 @@ fn reserve_axis_bands(
             estimated_slot_w,
             axes.x.overrides.label_padding,
             theme.sizes.tick_size,
+            axes.x.show_labels,
         )
     } else {
         0.0
@@ -820,8 +837,18 @@ fn reserve_axis_bands(
                 .overrides
                 .label_font_size
                 .unwrap_or(theme.typography.label_font_size);
+            // Standoff gate (#97, same discipline as the primary y band
+            // above): secondary y-axes have no `.axis(show=False)`-style
+            // suppression toggle anywhere in `AxesInput` — the panel loop
+            // always emits every `axes.secondary_y` entry ("Independent of
+            // axes.show_y" — that toggle only suppresses the primary/left
+            // axis). `visible: true` is therefore always correct today, not
+            // a placeholder; if a per-secondary-axis show toggle is ever
+            // added, thread it through here. `Axis(labels=False)` on a
+            // secondary axis IS already honored — `compute_y_label_band_width`
+            // reads `a.show_labels` directly off this `AxisInput`.
             let label_band = axis::compute_y_label_band_width(
-                a, label_font_size, metrics, theme.sizes.tick_size,
+                a, label_font_size, metrics, theme.sizes.tick_size, true,
             );
             let title_gutter = axis::compute_y_title_width(
                 a,
@@ -1663,12 +1690,12 @@ mod tests {
 
     /// The exact per-secondary-axis band width `MockMetrics { measure:
     /// fixed_width(8.0), line_h_factor: 1.2 }` produces for [`n_secondary_axes`]:
-    /// label band (`"100"` = 3 chars * 8px) + title gutter
-    /// (`title_font_size * line_h_factor + axis_title_padding`), using
-    /// `ThemeInputs::default()`'s `title_font_size` (13.0) and
-    /// `axis_title_padding` (8.0).
+    /// label band (#97, spec §4.1: `tick_size + label_pad_eff` standoff +
+    /// `"100"` = 3 chars * 8px) + title gutter (`title_font_size * line_h_factor
+    /// + axis_title_padding`), using `ThemeInputs::default()`'s `tick_size`
+    /// (4.0), `title_font_size` (13.0), and `axis_title_padding` (8.0).
     fn expected_secondary_band(theme: &ThemeInputs) -> f64 {
-        let label_band = 3.0 * 8.0;
+        let label_band = theme.sizes.tick_size + 2.0 + 3.0 * 8.0;
         let title_gutter = theme.typography.title_font_size * 1.2 + theme.padding.axis_title_padding;
         label_band + title_gutter
     }

@@ -327,7 +327,7 @@ def test_position_end_byte_identical_to_pre_fix_single_series():
     svg = (base + AUCLabel(position="end")).to_svg()
     assert (
         hashlib.sha256(svg.encode()).hexdigest()
-        == "36d7d7cd6d53337c91e34c610a0c65480bda8d17f1536e827703f6cf603fb126"
+        == "6ae75ad67d4f8d7847173f6f37cb57c01372937ea335d1af7c696e0e387482ea"
     )
 
 
@@ -337,7 +337,7 @@ def test_position_end_byte_identical_to_pre_fix_multi_series():
     svg = (base + AUCLabel(position="end")).to_svg()
     assert (
         hashlib.sha256(svg.encode()).hexdigest()
-        == "5871b7c75e019d8881f25649797fb4b9c8b756c3718138317796441fedb7a017"
+        == "3d6dcea5a6dacbd311eba411e3a2bf5869a28f024c58fdb534b33afe3d6b3a45"
     )
 
 

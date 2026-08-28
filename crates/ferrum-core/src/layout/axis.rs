@@ -659,14 +659,22 @@ use super::text_metrics::TextMetrics;
 /// rotated label drops a further `sin(|angle|)·max_label_w + cos(|angle|)·line_h`.
 ///
 /// At -90 this collapses to `tick_size + label_pad + font_size + max_label_w`
-/// (sin=1, cos=0); at angle 0 it would give `tick_size + label_pad + line_h`,
-/// which is *not* the flat band — callers must guard on `angle != 0` and use the
-/// flat `line_h` term directly for un-rotated labels.
+/// (sin=1, cos=0); at angle 0 it collapses to `tick_size + label_pad + line_h`
+/// (sin=0, cos=1) — the SAME quantity `estimate_x_label_band`'s flat branch and
+/// `layout_x_axis`'s title placement compute directly (#97, spec §4.1). The
+/// formula is continuous in `angle`: callers no longer need to special-case
+/// `angle == 0`, they can call this unconditionally.
 ///
-/// SYNC: render (`render/marks/axis.rs`), the rotated branches of
-/// `estimate_x_label_band`, and the rotated title placement in `layout_x_axis`
-/// all depend on this. Change all three together or the x-axis title will
-/// overlap (or float above) the rotated labels.
+/// SYNC: render (`render/marks/axis.rs`), every branch of
+/// `estimate_x_label_band` (flat, wrapped, and rotated all now honor
+/// `tick_size + label_pad_eff`), and the title placement in `layout_x_axis`
+/// all depend on this for the **flat (single-line) and rotated cases**.
+/// Change those together or the x-axis title will overlap (or float above)
+/// the rotated labels. The **wrapped (S1, multi-line) case is the
+/// exception**: `estimate_x_label_band` reserves `max_lines` line heights,
+/// but `layout_x_axis`'s title placement still assumes one — a pre-existing
+/// (not introduced by #97) band/title asymmetry for wrapped x labels,
+/// deliberately left as-is; see the title-placement site's own comment.
 fn rotated_x_label_extent(
     angle: f64,
     max_label_w: f64,
@@ -689,24 +697,54 @@ fn rotated_x_label_extent(
 ///
 /// Algorithm (mirrors the cascade order in `cascade_collision_recovery`):
 /// 1. If `label_angle_override` is set, use that angle directly.
-/// 2. If all labels fit flat, return `line_height`.
+/// 2. If all labels fit flat, return `tick_size + label_pad_eff + line_height`
+///    (#97, spec §4.1 — the always-on standoff, not a bare `line_height`) when
+///    `show_labels` is true; otherwise the pre-#97 `line_height + padding_delta`
+///    (standoff gate, see doc below).
 /// 3. If wrapping resolves collision (all labels wrap successfully), return
-///    `max_lines * line_height`.
+///    `tick_size + label_pad_eff + max_lines * line_height` when `show_labels`
+///    is true; otherwise the pre-#97 `max_lines * line_height + padding_delta`.
 /// 4. Try each angle in `ANGLE_CASCADE`; first that passes returns the full
-///    geometric extent of the rotated label (see the SYNC comment below).
+///    geometric extent of the rotated label (see the SYNC comment below) —
+///    unaffected by `show_labels` (see the standoff-gate doc below).
 /// 5. Fallback: vertical labels (-90°, S4/S5 scenarios) reserve the full extent
-///    at sin=1, cos=0.
+///    at sin=1, cos=0 — also unaffected by `show_labels`.
 ///
-/// SYNC: the rotated branches mirror the rotated-bottom-label geometry in
-/// `crate::render::marks::axis::build_axis`. A rotated label is end-anchored at
-/// the pivot `(tick.position, label_y)` where
+/// SYNC: every branch mirrors the label geometry in
+/// `crate::render::marks::axis::build_axis`. A flat label's baseline sits at
+/// `r.y + tick_size + label_pad + font_size`, and a rotated label is
+/// end-anchored at the pivot `(tick.position, label_y)` where
 /// `label_y = r.y + tick_size + label_pad + sin(|angle|)·font_size`, then rotated
-/// about that pivot. Its lowest point sits below the pivot, so the full extent
-/// from the axis line (`r.y`) down to the label bottom is
-/// `tick_size + label_pad + sin(|angle|)·(font_size + max_label_w) + cos(|angle|)·descent`.
-/// The band below uses `line_h` for the cos term (instead of a bare descent) to
-/// match the existing code and keep a small safety margin. Changing either side
-/// requires changing the other or the x-axis title will overlap the labels.
+/// about that pivot. In both cases the full extent from the axis line (`r.y`)
+/// down to the label's lowest point is `tick_size + label_pad +
+/// sin(|angle|)·(font_size + max_label_w) + cos(|angle|)·descent`, which
+/// collapses at `angle = 0` to `tick_size + label_pad + descent` — the band
+/// below uses `line_h` for the cos/descent term (instead of a bare descent) to
+/// match the existing code and keep a small safety margin, so the flat and
+/// wrapped branches reserve `tick_size + label_pad_eff + n·line_h` (#97, spec
+/// §4.1). `label_padding` is honored absolutely (not as a delta from the 2.0
+/// default) in every non-empty branch. Changing this formula requires changing
+/// the render geometry (or the title placement in `layout_x_axis`) to match, or
+/// the x-axis title will overlap the labels.
+///
+/// **Standoff gate (`show_labels: bool`, spec §4.1 amended 2026-08-27, x-side
+/// extension):** mirrors `compute_y_label_band_width`'s gate exactly — the new
+/// standoff applies only to an axis that actually DRAWS its labels.
+/// `axes.show_x` (`.axis(x=False)`) already short-circuits the caller in
+/// `reserve_axis_bands` to `0.0` before this function is ever invoked, so the
+/// remaining knob is `fm.Axis(labels=False)` (`AxisInput.show_labels`): a
+/// SHOWN x axis whose labels never draw (`render/marks/axis.rs`'s tick loop:
+/// `if axis.show_labels && !tick.culled`) must not gain #97's new
+/// `tick_size + label_pad_eff` standoff either. When `show_labels` is `false`,
+/// the flat (S0) and wrapped (S1) branches fall back to their pre-#97 values
+/// (`line_h + padding_delta` / `n·line_h + padding_delta`) — byte-for-byte the
+/// same #94 phantom-margin-family reservation the empty-label branch above
+/// already returns unconditionally. Rotated/override branches (S2/S3/S4) are
+/// NOT gated: pre-#97 they already reserved the full standoff at any nonzero
+/// angle regardless of label visibility, so gating only matters where the
+/// angle resolves to flat/wrapped — the same reasoning that limited the y-side
+/// gate to θ=0 only (see `compute_y_label_band_width`'s doc). See #94.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn estimate_x_label_band(
     labels: &[String],
     label_font_size: f64,
@@ -715,25 +753,23 @@ pub(crate) fn estimate_x_label_band(
     estimated_slot_w: f64,
     label_padding: Option<f64>,
     tick_size: f64,
+    show_labels: bool,
 ) -> f64 {
-    // When label_padding is explicitly set, it replaces the hardcoded 2.0 gap
-    // in build_axis. The delta from the default (2.0) is added to the margin
-    // estimate for the flat/wrapped branches. When label_padding is None the
-    // existing margin values are unchanged (backward-compatible with all
-    // existing goldens). The rotated branches instead fold the *effective* pad
-    // directly into the pivot offset (`label_pad_eff` below), so they do not add
-    // `padding_delta` again — it is subsumed.
-    let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
-    // Clamp to match the renderer (`render/marks/axis.rs` L-2 guard: `.max(0.0)`).
-    // A negative label_padding must not under-reserve the rotated band — the
-    // renderer clamps it to 0, so the layout must too or band < render extent.
-    let label_pad_eff = label_padding.unwrap_or(2.0).max(0.0);
     let line_h = metrics.line_height(label_font_size);
+    let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
 
-    // Empty label set: fall back to current behavior.
+    // Empty label set: byte-identical to pre-#97 behavior — no tick_size/label_pad
+    // standoff is reserved when there are no labels to draw. JointChart marginals
+    // and ClusterMap dendrograms (axis(show=False)) rely on this to gain no new
+    // gutter (spec §4.1, §7).
     if labels.is_empty() {
         return line_h + padding_delta;
     }
+
+    // Clamp to match the renderer (`render/marks/axis.rs` L-2 guard: `.max(0.0)`).
+    // A negative label_padding must not under-reserve the band — the renderer
+    // clamps it to 0, so the layout must too or band < render extent.
+    let label_pad_eff = label_padding.unwrap_or(2.0).max(0.0);
 
     let max_label_w = labels
         .iter()
@@ -757,9 +793,14 @@ pub(crate) fn estimate_x_label_band(
 
     let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
 
-    // S0 — flat: if widest label fits, no extra margin needed.
+    // S0 — flat (#97, spec §4.1): the same `tick_size + label_pad_eff` standoff
+    // the renderer draws below the axis line, plus one line of text — but only
+    // for an axis whose labels actually draw (standoff gate, see doc above).
     if max_label_w <= threshold {
-        return line_h + padding_delta;
+        if !show_labels {
+            return line_h + padding_delta;
+        }
+        return tick_size + label_pad_eff + line_h;
     }
 
     // S1 — wrapping: attempt to wrap all labels and count max lines.
@@ -780,7 +821,10 @@ pub(crate) fn estimate_x_label_band(
                     .map(|w| w.split('\n').count())
                     .max()
                     .unwrap_or(1);
-                return max_lines as f64 * line_h + padding_delta;
+                if !show_labels {
+                    return max_lines as f64 * line_h + padding_delta;
+                }
+                return tick_size + label_pad_eff + max_lines as f64 * line_h;
             }
         }
     }
@@ -843,11 +887,12 @@ pub(crate) fn estimate_x_label_band(
 /// pivot geometry, not covered by this formula; a future fix would either
 /// clamp/mirror the pivot for `angle > 0` or add the missing clearance term.
 ///
-/// SYNC: render (`render/marks/axis.rs` `Left`/`Right` arms), the rotated
-/// branch of `compute_y_label_band_width`, and `layout_y_axis`'s
-/// override-angle branch all depend on this. Change all three together or the
-/// y-axis title / plot region will overlap (or float away from) the rotated
-/// labels.
+/// SYNC: render (`render/marks/axis.rs` `Left`/`Right` arms), the whole of
+/// `compute_y_label_band_width` (a VISIBLE axis routes through this formula
+/// at every angle, including θ=0 — there is no separate flat branch), and
+/// `layout_y_axis`'s override-angle branch and title placement all depend on
+/// this. Change all four together or the y-axis title / plot region will
+/// overlap (or float away from) the rendered labels.
 fn rotated_y_label_extent(
     angle: f64,
     max_label_w: f64,
@@ -866,31 +911,79 @@ fn rotated_y_label_extent(
 /// computing the plot rect, and by `layout_y_axis` to place the title beyond
 /// the labels.
 ///
-/// θ=0 (no override, or an explicit `0.0`) returns the widest tick label's
-/// measured width — bit-for-bit the pre-R2 behavior, which deliberately omits
-/// `tick_size`/`label_pad` (an existing quirk of the y band, preserved here;
-/// see `rotated_y_label_extent`'s doc for why the rotated branch DOES include
-/// them). A non-zero override goes through the transposed rotated-extent
-/// formula instead (SYNC with `rotated_y_label_extent`).
-pub fn compute_y_label_band_width(
+/// A non-empty label set on a **visible** axis (`visible = true`) goes through
+/// `rotated_y_label_extent` at every angle, including θ=0 (no override, or an
+/// explicit `0.0`), which collapses to `tick_size + label_pad_eff + max_label_w`
+/// (sin=0, cos=1) — matching exactly what `render/marks/axis.rs`'s
+/// `Left`/`Right` arms draw: the label's edge sits `tick_size + label_pad`
+/// beyond the axis line (#97, spec §4.1; this retires the pre-R2 quirk where
+/// the flat band omitted `tick_size`/`label_pad` entirely, under-reserving
+/// relative to the render). The formula is continuous in the override angle
+/// (SYNC with `rotated_y_label_extent`).
+///
+/// An empty tick-label set reserves 0.0 regardless of angle or visibility —
+/// this deliberately supersedes the pre-#97 rotated-empty formula (which
+/// returned a nonzero `tick_size + label_pad + sin|θ|·line_h` phantom
+/// reservation for an angle override with zero labels; spec §4.1 amended
+/// 2026-08-27 to retire that specific corner as a reservation for labels that
+/// don't exist).
+///
+/// **Standoff gate (`visible: bool`, spec §4.1 amended 2026-08-27, extended
+/// cycle 2):** the new standoff applies only to an axis that actually DRAWS
+/// its labels — visible AND labels shown. Two independent knobs feed this:
+///
+/// 1. `.axis(show=False)` (`AxesInput.show_x`/`show_y`, passed in as
+///    `visible`) does NOT empty `tick_labels` — `build_axis_input` populates
+///    them regardless, and `layout::mod`'s panel loop only skips *emitting*
+///    the axis layout, not the upstream gutter reservation (see that loop's
+///    own comment: "the plot area is unchanged, gutters remain reserved
+///    upstream"). So a hidden y axis (JointChart marginals, ClusterMap
+///    dendrograms use `.axis(show=False)`) still reaches this function with
+///    real labels.
+/// 2. `fm.Axis(labels=False)` (`AxisInput.show_labels`, read directly off
+///    `input` — no separate parameter needed) draws NO tick label text
+///    either (`render/marks/axis.rs`'s tick loop: `if axis.show_labels &&
+///    !tick.culled`), on an otherwise fully visible axis.
+///
+/// In BOTH cases #97 must not stack a NEW standoff on top of the pre-existing
+/// phantom reservation: when `visible && input.show_labels` is `false` (no
+/// labels actually draw) and the resolved angle is exactly 0.0, this returns
+/// the bare pre-#97 `max_label_w` (no `tick_size`/`label_pad_eff`),
+/// byte-for-byte identical to before this batch. A ROTATED axis with no drawn
+/// labels is unaffected by the gate — pre-#97 already routed any nonzero
+/// angle through `rotated_y_label_extent` (which already included the
+/// standoff) regardless of visibility or `show_labels`, so gating only
+/// matters at θ=0. The underlying phantom reservation for labels that never
+/// render is a pre-existing quirk in the #94 family and is intentionally NOT
+/// fixed here — see #94.
+pub(crate) fn compute_y_label_band_width(
     input: &AxisInput,
     label_font_size: f64,
     metrics: &dyn TextMetrics,
     tick_size: f64,
+    visible: bool,
 ) -> f64 {
+    if input.tick_labels.is_empty() {
+        return 0.0;
+    }
     let max_label_w = input
         .tick_labels
         .iter()
         .map(|s| metrics.measure_width(s, label_font_size))
         .fold(0.0_f64, f64::max);
-    match input.overrides.label_angle {
-        Some(angle) if angle != 0.0 => {
-            let line_h = metrics.line_height(label_font_size);
-            let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
-            rotated_y_label_extent(angle, max_label_w, line_h, tick_size, label_pad)
-        }
-        _ => max_label_w,
+    let angle = input.overrides.label_angle.unwrap_or(0.0);
+    let labels_drawn = visible && input.show_labels;
+    if !labels_drawn && angle == 0.0 {
+        // #94 phantom-margin family (deliberately unchanged here): the
+        // pre-#97 flat reservation for an axis whose labels never draw
+        // (hidden via `.axis(show=False)`, or shown but with
+        // `Axis(labels=False)`) was bare `max_label_w` — keep it exactly, do
+        // not add #97's new standoff on top.
+        return max_label_w;
     }
+    let line_h = metrics.line_height(label_font_size);
+    let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
+    rotated_y_label_extent(angle, max_label_w, line_h, tick_size, label_pad)
 }
 
 /// Returns the title-row width contribution: title text height (rotated 90°,
@@ -1038,7 +1131,18 @@ pub fn layout_y_axis(
     let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
 
     let title = input.title.as_ref().map(|text| {
-        let label_band = compute_y_label_band_width(input, label_font_size, metrics, tick_size);
+        // `visible: true` — `layout_y_axis` itself is only ever called for a
+        // chart-level-visible axis (the panel loop gates the call on
+        // `axes.show_y`/every `axes.secondary_y` entry is always emitted), so
+        // the `.axis(show=False)` half of `compute_y_label_band_width`'s gate
+        // is unreachable-but-inert here. The `Axis(labels=False)` half is
+        // NOT inert, though — a titled axis can still have `show_labels ==
+        // false` (a title with no tick labels), and `compute_y_label_band_width`
+        // reads `input.show_labels` directly, so that case correctly keeps
+        // the title flush against the bare `max_label_w` reservation instead
+        // of the new standoff.
+        let label_band =
+            compute_y_label_band_width(input, label_font_size, metrics, tick_size, true);
         let title_h = metrics.line_height(effective_title_font_size);
         // The title sits beyond the tick labels, on the same side as the axis.
         let title_x = if on_right {
@@ -1645,24 +1749,67 @@ pub fn layout_x_axis(
 
     let title = input.title.as_ref().map(|text| {
         let title_h = metrics.line_height(effective_title_font_size);
-        // The vertical drop from the axis line to the labels' lowest point. For
-        // flat labels this is a single line height (keeps flat goldens byte
-        // identical). For rotated labels it is the full end-anchored extent,
+        // The vertical drop from the axis line to the labels' lowest point,
         // shared with `estimate_x_label_band` via `rotated_x_label_extent` so the
-        // reserved band and the title placement cannot drift.
-        let label_extent = if resolved_angle == 0.0 {
-            metrics.line_height(label_font_size)
+        // reserved band and the title placement cannot drift for the flat
+        // (single-line) and rotated cases (#97, spec §4.1). `rotated_x_label_extent`
+        // is continuous in `angle` (it collapses to `tick_size + label_pad_eff +
+        // line_h` at 0), so flat and rotated labels go through the SAME call —
+        // no more flat-only special case.
+        // Clamp matches the renderer's L-2 guard so band >= render extent.
+        //
+        // KNOWN ASYMMETRY (pre-existing, not introduced by #97, #94 family):
+        // for WRAPPED x labels (S1), `estimate_x_label_band` reserves
+        // `tick_size + label_pad_eff + max_lines·line_h`, but this site always
+        // computes a SINGLE-line extent (`rotated_x_label_extent` at θ=0, or
+        // the labels-off bare `line_h` below) — it has no `max_lines` term.
+        // Band and title drift by `(max_lines - 1)·line_h` whenever x labels
+        // wrap to more than one line. The gap's MAGNITUDE is unchanged from
+        // pre-#97 only when `label_padding` is unset or exactly `2.0`
+        // (`padding_delta == 0.0`); otherwise it shrinks by exactly
+        // `padding_delta`. The shrink happens entirely on the LABELS-DRAWN
+        // path, not the gated labels-off one: when labels draw, the band
+        // trades its old `+ padding_delta` term for `+ tick_size +
+        // label_pad_eff` (a net `+(tick_size + label_pad_eff - padding_delta)`
+        // shift), while the title — which never carried `padding_delta`,
+        // pre- or post-batch — gains `tick_size + label_pad_eff` outright; the
+        // two shifts differ by exactly `padding_delta`, which is where the gap
+        // shrinks. The gated labels-off fallback (both band and title) is
+        // untouched from pre-#97 on both sides, so THAT path is where the gap
+        // does NOT move. Fixing the underlying wrapped-title placement is out
+        // of scope for #97/spec §4.1 (it would move any golden with wrapped x
+        // labels plus an x title) — tracked as row WRAP-1 in
+        // `design-docs/superpowers/followups/2026-05-15-code-archaeology.md`
+        // (added 2026-08-28), not fixed here.
+        let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
+        let line_h = metrics.line_height(label_font_size);
+        // Widest final (possibly-elided) label that will actually render — skip
+        // culled ticks since they draw no label.
+        let max_label_w = ticks
+            .iter()
+            .filter(|t| !t.culled)
+            .map(|t| metrics.measure_width(&t.label, label_font_size))
+            .fold(0.0_f64, f64::max);
+        // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side extension,
+        // cycle 5): mirrors `layout_y_axis`'s title-placement gate (the
+        // comment above its own `compute_y_label_band_width` call) — a
+        // titled x axis can still have `input.show_labels == false`
+        // (`fm.Axis(labels=False)`, a title with no drawn tick labels), and
+        // this site does NOT go through `estimate_x_label_band` (it calls
+        // `rotated_x_label_extent` directly), so the S0/S1 gate added there
+        // does not automatically cover it. At θ=0 with labels off, this
+        // returns the pre-#97 flat-only special-case value bare `line_h`
+        // (`git show HEAD`'s `label_extent = metrics.line_height(label_font_size)`,
+        // NOT `line_h + padding_delta` — title placement never included
+        // `padding_delta`, even pre-batch, unlike the band), so the title
+        // stays flush against the gated `estimate_x_label_band` reservation
+        // instead of drifting 6px past it. A rotated axis with no drawn
+        // labels is unaffected — pre-#97 rotated title placement already
+        // included the full standoff regardless of label visibility, the
+        // same reasoning that limits every other #97 gate to θ=0. See #94.
+        let label_extent = if resolved_angle == 0.0 && !input.show_labels {
+            line_h
         } else {
-            // Clamp matches the renderer's L-2 guard so band >= render extent.
-            let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
-            let line_h = metrics.line_height(label_font_size);
-            // Widest final (possibly-elided) label that will actually render —
-            // skip culled ticks since they draw no label.
-            let max_label_w = ticks
-                .iter()
-                .filter(|t| !t.culled)
-                .map(|t| metrics.measure_width(&t.label, label_font_size))
-                .fold(0.0_f64, f64::max);
             rotated_x_label_extent(
                 resolved_angle,
                 max_label_w,
@@ -1897,27 +2044,31 @@ mod tests {
     // three encoding sites are NOT byte-safely unifiable — see the task report —
     // so these lock the predictor's three outcomes in place instead.)
 
-    /// S0 flat: a label that fits the estimated slot reserves a single line band.
+    /// S0 flat: a label that fits the estimated slot reserves a single line band
+    /// plus the tick_size + label_pad_eff standoff (#97, spec §4.1).
     #[test]
     fn estimate_x_band_flat_when_label_fits() {
         let m = mock(10.0); // 10 px/char
         let labels = vec!["ab".into(), "cd".into()]; // 20 px each
         // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0);
-        // Flat band == line_height(11) = 13.2 (no padding delta).
-        assert!((band - m.line_height(11.0)).abs() < 1e-9);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0, true);
+        // Flat band == tick_size(4.0) + label_pad_eff(2.0) + line_height(11) = 19.2.
+        let expected = 4.0 + 2.0 + m.line_height(11.0);
+        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
 
     /// S1 wrap: an underscore-splittable label that won't fit flat but whose
-    /// segments fit wraps to N lines → band == max_lines * line_height.
+    /// segments fit wraps to N lines → band == tick_size + label_pad_eff +
+    /// max_lines * line_height (#97, spec §4.1).
     #[test]
     fn estimate_x_band_wraps_underscore_label() {
         let m = mock(10.0);
         // "aa_bb_cc": flat width 80; segments "aa"/"bb"/"cc" are 20 px each.
         let labels = vec!["aa_bb_cc".into()];
         // Slot 50 → threshold 45: flat (80) fails, segments (20) fit → 3 lines.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, None, 4.0);
-        assert!((band - 3.0 * m.line_height(11.0)).abs() < 1e-9, "band={band}");
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, None, 4.0, true);
+        let expected = 4.0 + 2.0 + 3.0 * m.line_height(11.0);
+        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
 
     /// S2/S3 rotate: a single long unsplittable label that cannot fit flat or wrap
@@ -1928,7 +2079,7 @@ mod tests {
         // 12-char label, no break points → 120 px, cannot wrap.
         let labels = vec!["abcdefghijkl".into()];
         let slot = 30.0; // threshold 27 < 120 → not flat, no wrap → rotate/vertical.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, None, 4.0);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, None, 4.0, true);
         // Must exceed the flat single-line band (a rotated/vertical reservation).
         assert!(band > m.line_height(11.0), "rotated band must exceed flat: {band}");
     }
@@ -1940,7 +2091,7 @@ mod tests {
         let m = mock(10.0);
         let labels = vec!["abc".into()];
         // label_padding=None → label_pad_eff defaults to 2.0; tick_size=4.0.
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, None, 4.0);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, None, 4.0, true);
         let expected = rotated_x_label_extent(-45.0, 30.0, 11.0, m.line_height(11.0), 4.0, 2.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
@@ -1954,15 +2105,127 @@ mod tests {
             None,
         );
         let m = mock(10.0);
-        let band = compute_y_label_band_width(&input, 11.0, &m, 4.0);
-        assert_eq!(band, 50.0);
+        let band = compute_y_label_band_width(&input, 11.0, &m, 4.0, true);
+        // #97 (spec §4.1): the band now includes the tick_size + label_pad_eff
+        // standoff the renderer actually draws (tick_size=4.0 + label_pad
+        // default 2.0 + widest label "10000" = 50.0px).
+        assert_eq!(band, 4.0 + 2.0 + 50.0);
     }
 
     #[test]
     fn y_axis_label_band_empty_labels_returns_zero() {
         let input = AxisInput::new(AxisOrient::Left, None, vec![], None);
         let m = mock(10.0);
-        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0), 0.0);
+        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true), 0.0);
+        // Byte-identical regardless of visibility (spec §4.1: empty label
+        // sets return 0.0 on y at every angle).
+        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, false), 0.0);
+    }
+
+    /// #97 spec §4.1 (amended 2026-08-27, gap 2): an empty label set with a
+    /// non-zero `label_angle` override must ALSO return 0.0 — deliberately
+    /// superseding the pre-#97 rotated-empty formula, which returned a
+    /// nonzero `tick_size + label_pad + sin|θ|·line_h` phantom reservation
+    /// for labels that don't exist. Pinned explicitly (not just implied by
+    /// the θ=0 empty case above) so this corner is a recorded decision, not
+    /// an accident of the early-return's placement before the angle branch.
+    #[test]
+    fn y_axis_label_band_empty_labels_with_rotated_override_returns_zero() {
+        let input = AxisInput::new(AxisOrient::Left, None, vec![], Some(-45.0));
+        let m = mock(10.0);
+        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true), 0.0);
+        assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, false), 0.0);
+    }
+
+    /// #97 spec §4.1 (amended 2026-08-27, gap 1 — the real defect): a HIDDEN
+    /// y axis (`visible: false`, as JointChart marginals / ClusterMap
+    /// dendrograms set via `.axis(show=False)`) must keep the pre-#97 bare
+    /// `max_label_w` reservation byte-for-byte, with NO
+    /// `tick_size`/`label_pad_eff` standoff — #94 phantom-margin family,
+    /// deliberately unchanged by #97. RED-proven: this test fails against the
+    /// unconditional (pre-gate) code, which returned `4.0 + 2.0 + 50.0 = 56.0`
+    /// regardless of visibility.
+    #[test]
+    fn y_axis_label_band_hidden_axis_keeps_bare_max_label_w() {
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "100".into(), "10000".into()],
+            None,
+        );
+        let m = mock(10.0);
+        let hidden = compute_y_label_band_width(&input, 11.0, &m, 4.0, false);
+        assert_eq!(hidden, 50.0, "hidden axis must reserve bare max_label_w, no standoff");
+
+        // label_padding must NOT move a hidden axis's reservation — the
+        // reviewer's probe shape: a hidden axis's first-mark position must
+        // not respond to `label_padding` at all, since the standoff term
+        // that padding feeds is gated off entirely.
+        let mut padded = input.clone();
+        padded.overrides.label_padding = Some(40.0);
+        let hidden_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, false);
+        assert_eq!(
+            hidden_padded, hidden,
+            "hidden axis must be insensitive to label_padding (standoff gated off)"
+        );
+
+        // Contrast: the SAME input, visible, DOES grow with label_padding.
+        let visible_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, true);
+        assert!(
+            visible_padded > hidden_padded,
+            "visible axis must reserve more than a hidden one for the same input"
+        );
+    }
+
+    /// #97 spec §4.1 (amended 2026-08-27, extended cycle 2): the standoff
+    /// gate must key off "labels actually drawn", not just "axis shown" — a
+    /// SHOWN axis (`visible: true`) with `fm.Axis(labels=False)`
+    /// (`AxisInput.show_labels = false`) draws no tick label text
+    /// (`render/marks/axis.rs`'s `if axis.show_labels && !tick.culled`
+    /// guard), so it must ALSO keep the pre-#97 bare `max_label_w`
+    /// reservation, byte-for-byte, same as a hidden axis. RED-proven: the
+    /// cycle-1 gate (`!visible && angle == 0.0`) alone left this case
+    /// unguarded — `visible` is `true` here, so the standoff still applied —
+    /// matching the reviewer's probe (`fm.Axis(labels=False)` on a shown y
+    /// axis grew `cx` under `label_padding`).
+    #[test]
+    fn y_axis_label_band_labels_off_on_shown_axis_keeps_bare_max_label_w() {
+        let mut input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "100".into(), "10000".into()],
+            None,
+        );
+        input.show_labels = false;
+        let m = mock(10.0);
+
+        // `visible: true` — the axis itself is shown; only its labels are off.
+        let labels_off = compute_y_label_band_width(&input, 11.0, &m, 4.0, true);
+        assert_eq!(
+            labels_off, 50.0,
+            "a shown axis with labels off must reserve bare max_label_w, no standoff"
+        );
+
+        // The reviewer's probe shape: label_padding must NOT move the
+        // reservation when labels never draw.
+        let mut padded = input.clone();
+        padded.overrides.label_padding = Some(40.0);
+        let labels_off_padded = compute_y_label_band_width(&padded, 11.0, &m, 4.0, true);
+        assert_eq!(
+            labels_off_padded, labels_off,
+            "labels-off axis must be insensitive to label_padding (standoff gated off)"
+        );
+
+        // Contrast: the SAME input with labels back on DOES grow with
+        // label_padding — proving the gate keys on `show_labels`, not some
+        // unrelated code path that always returns the bare value.
+        let mut labels_on_padded = padded.clone();
+        labels_on_padded.show_labels = true;
+        let labels_on_padded_band = compute_y_label_band_width(&labels_on_padded, 11.0, &m, 4.0, true);
+        assert!(
+            labels_on_padded_band > labels_off_padded,
+            "restoring show_labels must restore the standoff"
+        );
     }
 
     // ── R2: y-axis `label_angle` (transpose of the x rotated-extent geometry) ──
@@ -2008,25 +2271,38 @@ mod tests {
             Some(-45.0),
         );
         let m = mock(10.0); // 10 px/char → width 100
-        let band = compute_y_label_band_width(&input, 11.0, &m, 4.0);
+        let band = compute_y_label_band_width(&input, 11.0, &m, 4.0, true);
         let expected = rotated_y_label_extent(-45.0, 100.0, m.line_height(11.0), 4.0, 2.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
 
-    /// θ=0 bit-parity (spec §6, hard gate): an explicit `label_angle: Some(0.0)`
-    /// override must reserve EXACTLY the pre-R2 flat band (max label width
-    /// only, no `tick_size`/`label_pad`/`line_h` terms) — bit-for-bit equal to
-    /// the `None`-override fixture in `y_axis_label_band_uses_longest_label`.
+    /// #97 continuity gate (spec §4.1, §9.1), replacing the old pre-R2
+    /// θ=0-bit-parity gate: the y band is now ONE formula
+    /// (`rotated_y_label_extent`) at every angle, so `band(θ)` must approach
+    /// `band(0)` continuously as `θ→0` — no jump at exactly zero. `None` and an
+    /// explicit `Some(0.0)` override both resolve to angle 0.0 and must be
+    /// identical; a tiny non-zero angle must land within float epsilon of the
+    /// θ=0 value (not the old, under-reserving `max_label_w`-only quantity).
     #[test]
-    fn y_axis_label_band_width_zero_angle_is_bit_identical_to_flat() {
+    fn y_axis_label_band_width_continuous_at_theta_zero() {
         let labels = vec!["0".into(), "100".into(), "10000".into()];
         let m = mock(10.0);
         let no_override = AxisInput::new(AxisOrient::Left, None, labels.clone(), None);
-        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels, Some(0.0));
-        let band_none = compute_y_label_band_width(&no_override, 11.0, &m, 4.0);
-        let band_zero = compute_y_label_band_width(&explicit_zero, 11.0, &m, 4.0);
-        assert_eq!(band_none, 50.0);
-        assert_eq!(band_zero, band_none, "θ=0 must be bit-identical to no override");
+        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels.clone(), Some(0.0));
+        let tiny_angle = AxisInput::new(AxisOrient::Left, None, labels, Some(1e-6));
+
+        let band_none = compute_y_label_band_width(&no_override, 11.0, &m, 4.0, true);
+        let band_zero = compute_y_label_band_width(&explicit_zero, 11.0, &m, 4.0, true);
+        let band_tiny = compute_y_label_band_width(&tiny_angle, 11.0, &m, 4.0, true);
+
+        assert_eq!(band_none, band_zero, "no override must equal an explicit 0.0 override");
+        assert!(
+            (band_tiny - band_zero).abs() < 1e-3,
+            "band at θ→0 ({band_tiny}) must approach band(0) ({band_zero}) continuously"
+        );
+        // tick_size(4.0) + label_pad_eff(2.0) + widest label (50.0) — the
+        // renderer's actual standoff, not the retired flat-only quirk.
+        assert_eq!(band_zero, 4.0 + 2.0 + 50.0);
     }
 
     /// `layout_y_axis` stamps the override angle onto every tick (mirrors
@@ -2082,30 +2358,35 @@ mod tests {
         }
     }
 
-    /// θ=0 bit-parity (spec §6, hard gate) at the `layout_y_axis` level —
-    /// quality-review fix 3. `None` and an explicit `Some(0.0)` override take
-    /// DIFFERENT code branches (the override branch vs. the flat branch), so
-    /// `y_axis_label_band_width_zero_angle_is_bit_identical_to_flat` (which
-    /// only pins `compute_y_label_band_width`) does not cover this site. A
-    /// dense, long-label fixture is used deliberately: at θ=0 the override
+    /// #97 continuity gate (spec §4.1, §9.1) at the `layout_y_axis` level,
+    /// replacing the old θ=0-bit-parity gate. `None` and an explicit
+    /// `Some(0.0)` override take DIFFERENT code branches (the override branch
+    /// vs. the flat branch), so `y_axis_label_band_width_continuous_at_theta_zero`
+    /// (which only pins `compute_y_label_band_width`) does not cover this site.
+    /// A dense, long-label fixture is used deliberately: at θ=0 the override
     /// branch's own collision check (`sin(0) = 0` ⇒ `w * 0 > budget` is always
     /// false) must produce the SAME "never elides" outcome as the flat
     /// branch's unconditional "never checks" — proving the equivalence holds
     /// even in a case that WOULD collide at any other angle, not just a
-    /// trivially-non-colliding one.
+    /// trivially-non-colliding one. A tiny non-zero angle must land on the
+    /// same "never elides" outcome too, confirming the collision judgment is
+    /// continuous approaching θ=0, not just exact at it.
     #[test]
-    fn layout_y_axis_zero_angle_override_is_bit_identical_to_no_override() {
+    fn layout_y_axis_continuous_at_theta_zero() {
         let labels: Vec<String> = (0..20).map(|i| format!("Label_{}", i)).collect();
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
 
         let no_override = AxisInput::new(AxisOrient::Left, None, labels.clone(), None);
-        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels, Some(0.0));
+        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels.clone(), Some(0.0));
+        let tiny_angle = AxisInput::new(AxisOrient::Left, None, labels, Some(1e-6));
 
         let (axis_none, warn_none) =
             layout_y_axis(&no_override, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let (axis_zero, warn_zero) =
             layout_y_axis(&explicit_zero, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (_, warn_tiny) =
+            layout_y_axis(&tiny_angle, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
 
         assert_eq!(
             axis_zero.ticks, axis_none.ticks,
@@ -2113,6 +2394,107 @@ mod tests {
         );
         assert_eq!(warn_zero, None, "θ=0 override must never elide");
         assert_eq!(warn_none, None, "no-override flat path must never elide");
+        assert_eq!(warn_tiny, None, "θ→0 must continuously never elide, not jump at exactly zero");
+    }
+
+    // ── #97 acceptance (spec §9.1): reservation covers render, both axes,
+    // flat and rotated. The flat cases are render-integration tests: they run
+    // the SAME `AxisLayout` production code builds through the actual
+    // `render::marks::axis::build_axis`, and check the reserved band against
+    // the real emitted `SceneNode::Text` position. The rotated cases mirror
+    // the pre-existing `estimate_rotated_band_covers_true_label_extent`
+    // pattern (an independently re-derived analytic extent), since a rotated
+    // glyph's true screen-space bounding box is a renderer/SVG-level property
+    // the scene node's pre-rotation pivot coordinates alone don't carry.
+
+    #[test]
+    fn y_band_flat_reservation_covers_rendered_label_extent() {
+        let labels: Vec<String> = vec!["0".into(), "100".into(), "10000".into()];
+        let m = mock(10.0);
+        let tick_size = 4.0;
+        let font_size = 11.0;
+        let input = AxisInput::new(AxisOrient::Left, None, labels, None);
+        let panel_area = Rect { x: 100.0, y: 0.0, w: 300.0, h: 200.0 };
+        let (axis, _) = layout_y_axis(&input, panel_area, 0, font_size, 13.0, 4.0, tick_size, &m);
+
+        let band = compute_y_label_band_width(&input, font_size, &m, tick_size, true);
+
+        let theme = crate::layout::ThemeInputs::default();
+        let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None);
+        // Left orient anchors text at its right edge (`TextAnchor::End`), so the
+        // label's leftward reach from the axis line is `(axis_line.x - node.x)
+        // + measured_width`.
+        let max_left_reach = nodes
+            .iter()
+            .filter_map(|n| match n {
+                ferrum_scene::SceneNode::Text { x, content, .. } => {
+                    Some((axis.axis_line.x - x) + m.measure_width(content, font_size))
+                }
+                _ => None,
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            band >= max_left_reach,
+            "band ({band}) must cover the rendered label's leftward reach ({max_left_reach})"
+        );
+    }
+
+    #[test]
+    fn y_band_rotated_covers_true_label_extent() {
+        // Transpose of `estimate_rotated_band_covers_true_label_extent`: y
+        // rotation SHRINKS the horizontal footprint, so the `cos` term carries
+        // `max_label_w` and `sin` carries the small descent term (the opposite
+        // weighting from x).
+        let labels: Vec<String> = vec!["0".into(), "100".into(), "10000".into()];
+        let m = mock(10.0);
+        let tick_size = 4.0;
+        let font_size = 11.0;
+        let max_label_w = 50.0; // "10000" = 5 chars * 10px/char
+        let input = AxisInput::new(AxisOrient::Left, None, labels, Some(-45.0));
+        let band = compute_y_label_band_width(&input, font_size, &m, tick_size, true);
+
+        let angle_rad = (-45.0_f64).to_radians();
+        let sin_abs = angle_rad.sin().abs();
+        let cos_abs = angle_rad.cos().abs();
+        let descent = font_size * 0.3; // conservative estimate, well under line_h
+        let label_pad = 2.0; // default
+        let true_extent = tick_size + label_pad + cos_abs * max_label_w + sin_abs * descent;
+
+        assert!(
+            band >= true_extent,
+            "band ({band}) must cover the true rotated label extent ({true_extent})"
+        );
+    }
+
+    #[test]
+    fn x_band_flat_reservation_covers_rendered_label_extent() {
+        let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
+        let m = mock(10.0);
+        let tick_size = 4.0;
+        let font_size = 11.0;
+        let input = AxisInput::new(AxisOrient::Bottom, None, labels, None);
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let (axis, _) =
+            layout_x_axis(&input, panel_area, 0, font_size, 13.0, 4.0, 8, tick_size, &m);
+
+        let band =
+            estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, None, tick_size, true);
+
+        let theme = crate::layout::ThemeInputs::default();
+        let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None);
+        // Bottom orient's flat baseline is `y`; the vertical drop from the axis
+        // line to that baseline is the render's own ground truth.
+        let max_drop = nodes
+            .iter()
+            .filter_map(|n| match n {
+                ferrum_scene::SceneNode::Text { y, .. } => Some(y - axis.axis_line.y),
+                _ => None,
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            band >= max_drop,
+            "band ({band}) must cover the rendered label's vertical drop ({max_drop}) from the axis line"
+        );
     }
 
     #[test]
@@ -3238,17 +3620,18 @@ mod tests {
 
     #[test]
     fn estimate_flat_labels() {
-        // Short labels that fit within slot_w flat should return exactly line_height.
+        // Short labels that fit within slot_w flat should return the tick_size +
+        // label_pad_eff standoff plus one line_height (#97, spec §4.1).
         // "A" = 1 char * 10 = 10px. slot_w = 100. threshold = 90. 10 <= 90 -> flat.
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
-        // Regression guard: the new `tick_size` param must NOT affect the flat
-        // case — a non-zero tick_size (4.0) is passed, yet the band stays line_h.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0);
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, tick_size, true);
+        let expected = tick_size + 2.0 + line_h; // label_pad_eff default = 2.0
         assert!(
-            (band - line_h).abs() < 1e-9,
-            "flat labels should return line_height={line_h}, got {band}"
+            (band - expected).abs() < 1e-9,
+            "flat labels should return tick_size + label_pad_eff + line_height={expected}, got {band}"
         );
     }
 
@@ -3257,7 +3640,7 @@ mod tests {
         // snake_case labels that collide flat but wrap successfully.
         // "trivial_baseline" = 16 * 6 = 96 > threshold = 90.
         // After wrap: max("trivial"=42, "baseline"=48) = 48 <= 90 -> wraps to 2 lines.
-        // Expected: 2 * line_height.
+        // Expected: tick_size + label_pad_eff + 2*line_height (#97, spec §4.1).
         let labels: Vec<String> = vec![
             "trivial_baseline".into(),
             "negative_prompt".into(),
@@ -3266,11 +3649,93 @@ mod tests {
         ];
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0);
-        let expected = 2.0 * line_h;
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, tick_size, true);
+        let expected = tick_size + 2.0 + 2.0 * line_h;
         assert!(
             (band - expected).abs() < 1e-9,
-            "wrapped labels should return 2*line_height={expected}, got {band}"
+            "wrapped labels should return tick_size + label_pad_eff + 2*line_height={expected}, got {band}"
+        );
+    }
+
+    /// #97 spec §4.1 x-side extension (cycle 4, issue #97 gap): the standoff
+    /// gate applied to the y band in cycle 2 must ALSO apply to the x band's
+    /// flat/wrapped branches — a SHOWN x axis whose labels never draw
+    /// (`fm.Axis(labels=False)` → `AxisInput.show_labels = false`,
+    /// `render/marks/axis.rs`'s `if axis.show_labels && !tick.culled` guard)
+    /// must keep the pre-#97 `line_h + padding_delta` / `n·line_h +
+    /// padding_delta` reservation, byte-for-byte, NOT #97's new
+    /// `tick_size + label_pad_eff` standoff. RED-proven: with the gate
+    /// removed (`show_labels` ignored), both assertions below fail — the flat
+    /// case returns `tick_size + 2.0 + line_h` instead of `line_h`, and the
+    /// wrapped case returns `tick_size + 2.0 + 2.0*line_h` instead of
+    /// `2.0*line_h`.
+    #[test]
+    fn x_axis_label_band_labels_off_on_shown_axis_keeps_pre_97_value() {
+        let m = mock(10.0);
+        let line_h = m.line_height(11.0);
+        let tick_size = 4.0;
+
+        // Flat case (same fixture as `estimate_flat_labels`).
+        let flat_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
+        let flat_off =
+            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, None, tick_size, false);
+        assert!(
+            (flat_off - line_h).abs() < 1e-9,
+            "labels-off flat band should be pre-#97 line_h={line_h}, got {flat_off}"
+        );
+        // Contrast: labels drawn DOES gain the #97 standoff for the same input.
+        let flat_on =
+            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, None, tick_size, true);
+        assert!(
+            (flat_on - (tick_size + 2.0 + line_h)).abs() < 1e-9,
+            "labels-on flat band should still be tick_size + label_pad_eff + line_h"
+        );
+        assert!(
+            flat_on > flat_off,
+            "labels-drawn axis must reserve more than a labels-off axis for the same input"
+        );
+
+        // Pre-#97's flat branch was itself `line_h + padding_delta` (the same
+        // formula the empty-label branch still uses today), so a gated,
+        // labels-off axis stays sensitive to label_padding via that delta —
+        // unlike the y-side gate, which is fully padding-insensitive. This
+        // pins the EXACT pre-batch value, not just "insensitive to padding".
+        let padding_delta = 40.0 - 2.0;
+        let flat_off_padded = estimate_x_label_band(
+            &flat_labels, 11.0, None, &m, 100.0, Some(40.0), tick_size, false,
+        );
+        assert!(
+            (flat_off_padded - (line_h + padding_delta)).abs() < 1e-9,
+            "labels-off flat band must keep the pre-#97 line_h + padding_delta value, \
+             got {flat_off_padded}"
+        );
+
+        // Wrapped case (same fixture as `estimate_wrapped_labels`).
+        let wrapped_labels: Vec<String> = vec![
+            "trivial_baseline".into(),
+            "negative_prompt".into(),
+            "persona_limited".into(),
+            "minimal_context".into(),
+        ];
+        let m6 = mock(6.0);
+        let line_h6 = m6.line_height(11.0);
+        let wrapped_off =
+            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, None, tick_size, false);
+        assert!(
+            (wrapped_off - 2.0 * line_h6).abs() < 1e-9,
+            "labels-off wrapped band should be pre-#97 2*line_h={}, got {wrapped_off}",
+            2.0 * line_h6
+        );
+        let wrapped_on =
+            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, None, tick_size, true);
+        assert!(
+            (wrapped_on - (tick_size + 2.0 + 2.0 * line_h6)).abs() < 1e-9,
+            "labels-on wrapped band should still be tick_size + label_pad_eff + 2*line_h"
+        );
+        assert!(
+            wrapped_on > wrapped_off,
+            "labels-drawn axis must reserve more than a labels-off axis for the wrapped case"
         );
     }
 
@@ -3290,7 +3755,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, None, tick_size, true);
         // Full geometric extent (mirrors the render pivot): the old too-tight
         // formula was `sin·max_w + cos·line_h`; the band now adds the pivot
         // offset `tick_size + label_pad + sin·font_size` on top of it.
@@ -3317,7 +3782,7 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, None, tick_size, true);
         // At -90°: sin=1, cos=0 → full vertical extent =
         // tick_size + label_pad + font_size + max_label_w.
         let label_pad = 2.0; // default
@@ -3335,7 +3800,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, None, tick_size, true);
         // Full geometric extent at -45° (mirrors the render pivot).
         let angle_rad = (-45.0_f64).to_radians();
         let sin_abs = angle_rad.sin().abs();
@@ -3356,7 +3821,7 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, None, 4.0);
+        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, None, 4.0, true);
         assert!(
             (band - line_h).abs() < 1e-9,
             "empty labels should return line_height={line_h}, got {band}"
@@ -3373,7 +3838,7 @@ mod tests {
             line_h_factor: 1.2,
         };
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, None, tick_size, true);
         // Vertical fallback: tick_size + label_pad + font_size + max_label_w.
         // At 1e18 the additive terms vanish into float epsilon, so the band is
         // dominated by max_label_w (1e18). Compare with a generous tolerance.
@@ -3408,7 +3873,7 @@ mod tests {
         let line_h = m.line_height(font_size);
         let max_label_w = 100.0; // 10 chars * 10px
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size, true);
 
         // Cascade resolves at -45° here.
         let angle_rad = (-45.0_f64).to_radians();
@@ -3434,7 +3899,7 @@ mod tests {
         let m = MockMetrics { measure: |_, _| 5_000.0, line_h_factor: 1.2 };
         let font_size = 11.0;
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, None, tick_size, true);
         let label_pad = 2.0; // default
         let expected = tick_size + label_pad + font_size + 5_000.0;
         assert!(
@@ -3444,18 +3909,26 @@ mod tests {
     }
 
     #[test]
-    fn estimate_flat_band_unaffected_by_tick_size() {
-        // Regression guard for flat goldens: short labels that fit return exactly
-        // `line_h + padding_delta` regardless of the new tick_size param. Passing
-        // two different tick_size values must yield the identical flat band.
+    fn estimate_flat_band_scales_linearly_with_tick_size() {
+        // #97 (spec §4.1): the flat band now honors tick_size (it is the SAME
+        // standoff the renderer draws), so two different tick_size values must
+        // differ by exactly the tick_size delta — the flat band is no longer
+        // insensitive to tick_size.
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 0.0);
-        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 8.0);
+        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 0.0, true);
+        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 8.0, true);
+        let expected_ts0 = 0.0 + 2.0 + line_h;
         assert!(
-            (band_ts0 - line_h).abs() < 1e-9 && (band_ts8 - line_h).abs() < 1e-9,
-            "flat band must equal line_h ({line_h}) and ignore tick_size; got {band_ts0} and {band_ts8}",
+            (band_ts0 - expected_ts0).abs() < 1e-9,
+            "flat band at tick_size=0 should be {expected_ts0}, got {band_ts0}",
+        );
+        assert!(
+            (band_ts8 - band_ts0 - 8.0).abs() < 1e-9,
+            "flat band must scale linearly with tick_size: band(8)-band(0) should be 8.0, \
+             got {} (band_ts0={band_ts0}, band_ts8={band_ts8})",
+            band_ts8 - band_ts0,
         );
     }
 
@@ -3470,8 +3943,8 @@ mod tests {
         ];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(2.0), tick_size);
-        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(12.0), tick_size);
+        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(2.0), tick_size, true);
+        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(12.0), tick_size, true);
         let delta = 12.0 - 2.0;
         assert!(
             (band_wider - band_default - delta).abs() < 1e-6,
@@ -3507,7 +3980,7 @@ mod tests {
         let true_extent =
             tick_size + label_pad + sin_abs * (font_size + max_label_w) + cos_abs * descent;
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size, true);
         assert!(
             band >= true_extent,
             "band ({band}) must cover the true label extent ({true_extent}) so the \
@@ -3606,9 +4079,11 @@ mod tests {
     }
 
     #[test]
-    fn x_axis_title_flat_unchanged_regression_guard() {
-        // Short labels (angle 0) with a title: the title anchor_y must EXACTLY
-        // equal the old flat formula so flat-label goldens never move.
+    fn x_axis_title_flat_matches_unified_band_formula() {
+        // #97 (spec §4.1): flat labels (angle 0) with a title — the title
+        // anchor_y now goes through the SAME `rotated_x_label_extent` call as
+        // rotated labels (continuous at θ=0), so it includes the
+        // tick_size + label_pad_eff standoff instead of a bare line_height.
         let input = AxisInput::new(
             AxisOrient::Bottom,
             Some("Price".into()),
@@ -3620,23 +4095,91 @@ mod tests {
         let label_font_size = 11.0;
         let title_font_size = 13.0;
         let title_padding = 4.0;
+        let tick_size = 4.0;
         let (axis, _) = layout_x_axis(
             &input, panel_area, 0, label_font_size, title_font_size, title_padding,
-            8, 4.0, &m,
+            8, tick_size, &m,
         );
         // All flat.
         for t in &axis.ticks {
             assert_eq!(t.label_angle, 0.0);
         }
         let title = axis.title.expect("title present");
-        let label_h = m.line_height(label_font_size);
+        let line_h = m.line_height(label_font_size);
         let title_h = m.line_height(title_font_size);
+        // rotated_x_label_extent(0.0, ..) collapses to tick_size + label_pad_eff + line_h.
+        let label_extent = tick_size + 2.0 + line_h;
         let expected =
-            panel_area.y + panel_area.h + label_h + title_padding + title_h / 2.0;
+            panel_area.y + panel_area.h + label_extent + title_padding + title_h / 2.0;
         assert!(
             (title.anchor_y - expected).abs() < 1e-12,
-            "flat title anchor_y ({}) must equal the old formula ({expected})",
+            "flat title anchor_y ({}) must equal the unified formula ({expected})",
             title.anchor_y,
+        );
+    }
+
+    /// #97 spec §4.1 x-side extension (cycle 5, issue #97 gap): a titled x
+    /// axis with `fm.Axis(labels=False)` (`AxisInput.show_labels = false`)
+    /// must place its title at the SAME `anchor_y` the pre-#97 flat-only
+    /// special case gave (`git show HEAD`: bare `line_h`, no
+    /// `tick_size`/`label_pad_eff` standoff), matching the gated
+    /// `estimate_x_label_band` reservation (`line_h + padding_delta`) for
+    /// the same axis, so band and title cannot drift. RED-proven: with the
+    /// θ=0/`show_labels` gate removed, the title anchor is `tick_size +
+    /// label_pad_eff = 6.0` px further out than the gated band reserves,
+    /// same fixture as `x_axis_title_flat_matches_unified_band_formula`.
+    #[test]
+    fn x_axis_title_labels_off_matches_pre_97_flat_value() {
+        let mut input = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("Price".into()),
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            None,
+        );
+        input.show_labels = false;
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 20.0, line_h_factor: 1.2 };
+        let label_font_size = 11.0;
+        let title_font_size = 13.0;
+        let title_padding = 4.0;
+        let tick_size = 4.0;
+        let (axis, _) = layout_x_axis(
+            &input, panel_area, 0, label_font_size, title_font_size, title_padding,
+            8, tick_size, &m,
+        );
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, 0.0);
+        }
+        let title = axis.title.expect("title present");
+        let line_h = m.line_height(label_font_size);
+        let title_h = m.line_height(title_font_size);
+        // Pre-#97 flat-only special case: bare line_h, NOT
+        // tick_size + label_pad_eff + line_h. This is the value the
+        // reserved band also collapses to for a labels-off axis
+        // (`estimate_x_label_band`'s S0 gate returns `line_h +
+        // padding_delta`; with no override `label_padding`, `padding_delta
+        // == 0.0`, so the two match exactly here).
+        let label_extent = line_h;
+        let expected =
+            panel_area.y + panel_area.h + label_extent + title_padding + title_h / 2.0;
+        assert!(
+            (title.anchor_y - expected).abs() < 1e-12,
+            "labels-off flat title anchor_y ({}) must equal the pre-#97 bare line_h formula ({expected})",
+            title.anchor_y,
+        );
+
+        // Contrast: the SAME input with labels drawn gets the #97 standoff
+        // and sits strictly further from the axis line.
+        let mut labels_on = input.clone();
+        labels_on.show_labels = true;
+        let (axis_on, _) = layout_x_axis(
+            &labels_on, panel_area, 0, label_font_size, title_font_size, title_padding,
+            8, tick_size, &m,
+        );
+        let title_on = axis_on.title.expect("title present");
+        assert!(
+            title_on.anchor_y > title.anchor_y,
+            "labels-drawn axis's title must sit further out than a labels-off axis's"
         );
     }
 
@@ -3820,7 +4363,7 @@ mod tests {
         //     cos(-60)*80 = 40.0 ≤ 40 → passes at -60.
         let labels: Vec<String> = (0..6).map(|i| format!("L{i}")).collect();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, label_padding, 4.0)
+        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, label_padding, 4.0, true)
     }
 
     #[test]

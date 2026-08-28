@@ -122,13 +122,16 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                     // by the rotation.  At -90 this subtracts 0 (full clearance kept);
                     // at -45 it subtracts ~0.29*font_size.
                     //
-                    // SYNC: the band reservation for rotated bottom labels in
-                    // `crate::layout::axis::estimate_x_label_band` mirrors this
-                    // pivot geometry (pivot at
-                    // `r.y + tick_size + label_pad + sin(|angle|)·font_size`, label
-                    // dropping `sin·max_label_w + cos·extent` below it). The two
-                    // must be changed together or the x-axis title overlaps the
-                    // labels.
+                    // SYNC: `crate::layout::axis::estimate_x_label_band` mirrors
+                    // this pivot geometry at EVERY angle, not just rotated ones
+                    // (#97, spec §4.1) — the flat/wrapped branches reserve
+                    // `tick_size + label_pad_eff + line_h` (this same
+                    // `tick_size + label_pad + sin(|angle|)·font_size` pivot
+                    // collapsed to sin=0), and the rotated branches reserve the
+                    // full `sin·max_label_w + cos·extent` drop below it. The two
+                    // must be changed together (and `layout_x_axis`'s title
+                    // placement, which now calls the same helper unconditionally)
+                    // or the x-axis title overlaps the labels.
                     anchor = TextAnchor::End;
                     label_y -= effective_font_size * (1.0 - tick.label_angle.to_radians().sin().abs());
                 }
@@ -142,10 +145,19 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                 // rotation is carried purely by `angle` (now `tick.label_angle`)
                 // in the `SceneNode::Text` style below. SYNC: this "same pivot,
                 // no anchor flip" contract is exactly what
-                // `layout::axis::rotated_y_label_extent` assumes when it
-                // reserves the y-axis gutter — changing this pivot without
-                // updating that formula (and `layout_y_axis`'s override branch)
-                // will make the reserved band drift from what actually renders.
+                // `layout::axis::rotated_y_label_extent` assumes when
+                // `compute_y_label_band_width` reserves the y-axis gutter for
+                // an axis that both is shown AND draws its labels — that
+                // helper routes through `rotated_y_label_extent` at every
+                // angle including θ=0 (#97, spec §4.1), not just a rotated
+                // branch, so changing this pivot without updating that
+                // formula (and `layout_y_axis`'s title placement) will make
+                // the reserved band drift from what actually renders. An axis
+                // whose labels never draw — HIDDEN (`.axis(show=False)`) OR
+                // shown-but-labels-off (`fm.Axis(labels=False)`) — is exempt
+                // from this SYNC contract entirely: it keeps the pre-#97 bare
+                // `max_label_w` reservation regardless of pivot geometry,
+                // since no label text is drawn (#94 phantom-margin family).
                 AxisOrient::Left | AxisOrient::Right => {}
             }
         }
@@ -168,8 +180,9 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         // edge, rotation then turns the label about wherever that pivot sits.
         // Horizontal-extent-neutral, so `rotated_y_label_extent`'s SYNC
         // contract (`render/marks/axis.rs` Left/Right arms ↔
-        // `layout::axis::rotated_y_label_extent` ↔ `layout_y_axis`'s
-        // override branch) is unaffected.
+        // `layout::axis::rotated_y_label_extent` ↔ `compute_y_label_band_width`
+        // (all angles, visible axis only) ↔ `layout_y_axis`'s title placement)
+        // is unaffected.
         let flush_applies_to_this_orient = match axis.orient {
             AxisOrient::Bottom | AxisOrient::Top => tick.label_angle == 0.0,
             AxisOrient::Left | AxisOrient::Right => true,
