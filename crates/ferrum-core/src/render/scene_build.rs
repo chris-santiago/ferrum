@@ -8,7 +8,7 @@ use ferrum_scene::{
 use crate::layout::{AxisLayout, LayoutResult, ResolveMode, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
-use super::arrow_cast::col_as_str;
+use super::arrow_cast::{col_as_ordinal_category_str, col_as_temporal_epoch_str};
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
@@ -1536,13 +1536,89 @@ fn build_legend_decorations(
     Ok(())
 }
 
+/// Extract per-node object-constancy keys (spec §4.3 / GH #93) from
+/// `encoding.key`, in node order.
+///
+/// Reads `key_enc.field` straight off the `RecordBatch` at the same
+/// `data_indices`-indexed seam as tooltips/hrefs/descriptions — it never
+/// looks at `result.nodes` (the JSON scene-node output). That means the
+/// vector this returns is identical whether the batch later renders as JSON
+/// `nodes` or gets binary-packed by `pack_instances::extract_packed_bytes`
+/// (packing runs afterward, on the already-assembled `SceneGraph`, and moves
+/// this vector into the `HAS_KEYS` sidecar for qualifying batches — see
+/// `pack_instances.rs`). Packed-vs-JSON is purely a downstream serialization
+/// choice; key extraction itself is decoupled from it.
+///
+/// **`data_indices` coupling (deliberate, not decoupled):** `let indices =
+/// data_indices?;` short-circuits to `None` — keys silently absent — whenever
+/// the caller passes `data_indices: None`. This is spec §4.3 as designed:
+/// keys are defined by row identity, and `data_indices` is this codebase's
+/// one canonical row-identity vector (the same one `MetadataColumns::
+/// build_metadata_for_indices` consumes for tooltips/hrefs/descriptions), so
+/// piggybacking on it rather than inventing a second row-tracking mechanism
+/// is the intended design, not an oversight. It is safe **today** because
+/// every mark builder that can produce a packing-eligible batch (circles via
+/// `marks/point.rs`, rects via `marks/bar.rs`/`marks/rect.rs`) always
+/// populates `data_indices` through the shared `MarkNodes`/`MetadataColumns`
+/// accumulator — see `mark_nodes.rs`'s module doc. **What breaks if a future
+/// builder doesn't:** a hypothetical new circle- or rect-emitting builder
+/// that skips `data_indices` (returns `None` for it while still setting
+/// `encoding.key`) would silently produce `MarkBatch.keys == None` for that
+/// batch — no panic, no warning, object constancy quietly degrades to
+/// index-zip fallback (spec §4.3's documented no-keys behavior) with no
+/// signal that `key=` was ever requested. Any new packing-eligible builder
+/// must set `data_indices` (already required for tooltips to work at all) or
+/// this silent-drop failure mode reappears.
+///
+/// **Non-string key columns coerce to an injective identity string, not a
+/// display string (GH #93).** Integer, unsigned, float, boolean, and
+/// temporal key columns all produce keys via [`col_as_ordinal_category_str`]
+/// — the crate's existing identity stringifier (Utf8/LargeUtf8 passthrough,
+/// Int*/UInt* via native `.to_string()` with no magnitude ceiling, Float*
+/// via `float_as_ordinal_str`, Boolean via `"true"`/`"false"`), already used
+/// where `ScaleKind::Ordinal` needs per-row category strings that must match
+/// a domain 1:1 — the same injectivity requirement object-constancy keys
+/// have. It deliberately does not cover `Timestamp` (see its doc), so
+/// temporal columns fall to [`col_as_temporal_epoch_str`]: the raw `i64`
+/// epoch value's `.to_string()`, NOT an `f64` round-trip.
+///
+/// **Do not substitute a display formatter such as `format_numeric` here.**
+/// It is not an identity function: it aliases a six-digit database id column
+/// to 2 unique keys across 1200 rows, and any present-day Unix-epoch
+/// timestamp to 1 unique key for the whole batch — worse than the silent
+/// drop it would replace, since a colliding key makes a key-based matcher
+/// pair up unrelated rows.
+///
+/// **Injectivity holds for Utf8/LargeUtf8, Int*/UInt*, and `Timestamp`** — n
+/// distinct values in those dtypes produce n distinct key strings, with no
+/// magnitude ceiling. It does **not** hold unconditionally for `Float64`/
+/// `Float32` or `Boolean`: `float_as_ordinal_str` casts whole-valued floats
+/// via `v as i64`, which **saturates** rather than wrapping — every value
+/// `>= 2^63` (~9.2e18) collapses to the same `"9223372036854775807"` key,
+/// and every `NaN` row collapses to the same `"NaN"` key, regardless of
+/// which distinct `NaN` bit pattern produced it. This is a pre-existing
+/// property of the shared ordinal stringifier (the same saturation already
+/// merges ordinal *domain* categories elsewhere in the crate), not something
+/// introduced here, and `>= 2^63` is not a realistic object-constancy key in
+/// practice — but a consumer must not assume uniqueness in that corner.
+/// `Boolean` is by construction non-injective above 2 rows (only
+/// `"true"`/`"false"` exist) — correct coercion, not a defect, but a matcher
+/// must not expect more than 2 distinct keys from a boolean column. Null key
+/// values from any coercible dtype also collapse together:
+/// `unwrap_or_default()` below maps every null to `""`, so multiple null
+/// rows share one key. A key column of a dtype neither helper covers
+/// (`Duration`, `List`, `Struct`) still falls through to `None`, and still
+/// silently degrades to index-zip with no warning — the residual, now
+/// narrower, instance of the short-circuit described above.
 fn extract_keys(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
     data_indices: Option<&[usize]>,
 ) -> Option<Vec<String>> {
     let key_enc = encoding.key.as_ref()?;
-    let col = col_as_str(batch, &key_enc.field).ok()?;
+    let col = col_as_ordinal_category_str(batch, &key_enc.field)
+        .ok()
+        .or_else(|| col_as_temporal_epoch_str(batch, &key_enc.field).ok())?;
     let indices = data_indices?;
     Some(
         indices
@@ -3472,6 +3548,374 @@ mod tests {
             .expect("must have tooltips");
         assert_eq!(tooltips[0].fields[0].name, "y");
         assert_eq!(tooltips[0].fields[0].value, "10");
+    }
+
+    /// End-to-end (spec §9.3 / GH #93): a real
+    /// `encode(key=...)`-driven chart with ≥1000 rows carries its keys into
+    /// the `HAS_KEYS` packed sidecar through the ACTUAL production pipeline —
+    /// `build_scene` (which internally calls `extract_keys`) followed by
+    /// `pack_instances::extract_packed_bytes` — not a hand-constructed
+    /// `MarkBatch`. Every other `HAS_KEYS` test builds `MarkBatch.keys`
+    /// directly; this is the one test that proves `Encoding.key` actually
+    /// reaches the packed wire format via the real producer↔consumer seam.
+    #[test]
+    fn keyed_point_chart_above_pack_threshold_carries_has_keys_sidecar() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let n = 1200usize; // above PACK_THRESHOLD (1000)
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| (i as f64) * 2.0).collect();
+        let keys: Vec<String> = (0..n).map(|i| format!("row-{i}")).collect();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                key: Some(EncodingSpec { field: "k".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None, // default shape = Circle, required for packing eligibility
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("k", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(keys.clone())),
+            ],
+        )
+        .unwrap();
+
+        let mut scene = build_scene_for(&spec, &batch);
+        // Sanity: build_scene really did populate per-node keys pre-pack —
+        // proves `extract_keys` ran on this real pipeline, not that the
+        // packer merely no-ops on an absent/empty vector.
+        assert_eq!(
+            scene.panels[0].marks[0].keys.as_deref().map(<[String]>::len),
+            Some(n),
+            "build_scene must populate MarkBatch.keys for a >=1000-row key=-encoded batch \
+             before packing runs"
+        );
+
+        let packed = crate::render::pack_instances::extract_packed_bytes(&mut scene);
+        assert!(!packed.is_empty(), "a >=1000-row circle batch must pack");
+
+        let flags = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        assert_ne!(
+            flags & crate::render::pack_instances::HAS_KEYS,
+            0,
+            "HAS_KEYS (0x4) must be set for a real key=-encoded chart above the pack threshold"
+        );
+        let count = u32::from_le_bytes(packed[12..16].try_into().unwrap()) as usize;
+        assert_eq!(count, n);
+
+        // This real-pipeline chart also auto-populates data_indices (every
+        // packing-eligible builder does, per `extract_keys`'s doc above) and
+        // may carry auto-tooltips too — `decode_packed_keys_section` skips
+        // whichever of those two sections `flags` indicates are present.
+        let decoded = decode_packed_keys_section(&packed, count, flags);
+        assert_eq!(
+            decoded, keys,
+            "packed keys must match the encode(key=...) column, in row order"
+        );
+    }
+
+    /// Decode the `HAS_KEYS` trailing section of a packed circle-batch buffer
+    /// (GH #93), skipping whichever of `HAS_DATA_INDICES`/`HAS_TOOLTIPS`
+    /// `flags` indicates are present first — the fixed wire order is
+    /// data_indices -> tooltips -> keys (`pack_instances::extract_packed_bytes`).
+    /// Shared by the packed `HAS_KEYS` e2e tests below so the flags-aware
+    /// walker has exactly one definition; asserts the keys section runs
+    /// exactly to the end of `packed` (no trailing bytes) before returning.
+    /// Wire constants are imported from `pack_instances`, not re-declared.
+    fn decode_packed_keys_section(packed: &[u8], count: usize, flags: u32) -> Vec<String> {
+        use crate::render::pack_instances::{CIRCLE_STRIDE, HAS_DATA_INDICES, HAS_TOOLTIPS};
+
+        let instance_size = count * CIRCLE_STRIDE;
+        let mut cursor = 20 + instance_size;
+        if flags & HAS_DATA_INDICES != 0 {
+            cursor += count * 4; // count x u32 data indices
+        }
+        if flags & HAS_TOOLTIPS != 0 {
+            let num_fields =
+                u32::from_le_bytes(packed[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            for _ in 0..num_fields {
+                let name_len =
+                    u32::from_le_bytes(packed[cursor..cursor + 4].try_into().unwrap()) as usize;
+                cursor += 4 + name_len;
+            }
+            for _ in 0..(count * num_fields) {
+                let val_len =
+                    u32::from_le_bytes(packed[cursor..cursor + 4].try_into().unwrap()) as usize;
+                cursor += 4 + val_len;
+            }
+        }
+        let mut decoded = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = u32::from_le_bytes(packed[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            decoded.push(
+                std::str::from_utf8(&packed[cursor..cursor + len])
+                    .unwrap()
+                    .to_string(),
+            );
+            cursor += len;
+        }
+        assert_eq!(cursor, packed.len(), "no trailing bytes after the keys section");
+        decoded
+    }
+
+    /// Build a minimal x/y point-chart `ChartSpec` + `RecordBatch` with a
+    /// `key`-encoded column of caller-supplied dtype. Shared by the
+    /// non-string-key coercion tests below (GH #93) so each one only
+    /// supplies its key column's data.
+    fn build_x_y_key_chart_spec_and_batch(
+        n: usize,
+        key_field_name: &str,
+        key_col: arrow::array::ArrayRef,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| (i as f64) * 2.0).collect();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                key: Some(EncodingSpec { field: key_field_name.into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new(key_field_name, key_col.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                key_col,
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// End-to-end packed, **ids above 1e6** (GH #93): a display formatter
+    /// such as `format_numeric` would collapse ~1200 six-digit ids to 2
+    /// unique keys (see `extract_keys`'s doc). `col_as_ordinal_category_str`'s
+    /// native `i64.to_string()` has no such ceiling, so this asserts full
+    /// injectivity (1200 rows -> 1200 unique keys), not just "some key
+    /// exists".
+    #[test]
+    fn keyed_point_chart_with_integer_key_above_pack_threshold_carries_has_keys_sidecar() {
+        use arrow::array::Int64Array;
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let n = 1200usize;
+        let ids: Vec<i64> = (0..n as i64).map(|i| 1_000_000 + i).collect();
+        let (spec, batch) =
+            build_x_y_key_chart_spec_and_batch(n, "id", Arc::new(Int64Array::from(ids.clone())));
+
+        let mut scene = build_scene_for(&spec, &batch);
+        let pre_pack_keys = scene.panels[0].marks[0]
+            .keys
+            .clone()
+            .expect("an integer key= column must populate MarkBatch.keys before packing runs");
+        assert_eq!(pre_pack_keys.len(), n);
+        let pre_pack_unique: HashSet<&String> = pre_pack_keys.iter().collect();
+        assert_eq!(
+            pre_pack_unique.len(), n,
+            "1200 distinct six-digit ids must produce 1200 distinct keys, not 2 \
+             (the format_numeric aliasing this fixture targets — see extract_keys's doc)"
+        );
+
+        let packed = crate::render::pack_instances::extract_packed_bytes(&mut scene);
+        let flags = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        assert_ne!(
+            flags & crate::render::pack_instances::HAS_KEYS,
+            0,
+            "HAS_KEYS (0x4) must be set for an integer key= column above the pack threshold"
+        );
+        let count = u32::from_le_bytes(packed[12..16].try_into().unwrap()) as usize;
+        assert_eq!(count, n);
+
+        let decoded = decode_packed_keys_section(&packed, count, flags);
+        let expected: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        assert_eq!(
+            decoded, expected,
+            "packed keys must be the lossless decimal id strings, no scientific-notation aliasing"
+        );
+        let packed_unique: HashSet<&String> = decoded.iter().collect();
+        assert_eq!(
+            packed_unique.len(), n,
+            "packed keys must stay injective: 1200 rows -> 1200 unique keys"
+        );
+    }
+
+    /// JSON path, **i64 past 2^53** (GH #93): `2^53 + 1`
+    /// (`9_007_199_254_740_993`) is the first `i64` that cannot round-trip
+    /// through `f64` exactly, so a display formatter or a `col_as_f64`
+    /// fallback would collapse 1200 such ids to a single key (see
+    /// `extract_keys`'s doc). `col_as_ordinal_category_str` reads the native
+    /// `i64`, never touching `f64`, so this asserts lossless, injective
+    /// decimal strings at that exact magnitude.
+    #[test]
+    fn keyed_point_chart_with_integer_key_below_pack_threshold_populates_json_keys() {
+        use arrow::array::Int64Array;
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let n = 10usize;
+        let base: i64 = 9_007_199_254_740_993; // 2^53 + 1
+        let ids: Vec<i64> = (0..n as i64).map(|i| base + i).collect();
+        let (spec, batch) =
+            build_x_y_key_chart_spec_and_batch(n, "id", Arc::new(Int64Array::from(ids.clone())));
+
+        let scene = build_scene_for(&spec, &batch);
+        let keys = scene.panels[0].marks[0].keys.as_ref().expect(
+            "an integer key= column past 2^53 on a batch below the pack threshold must still \
+             populate MarkBatch.keys on the JSON path",
+        );
+        let expected: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+        assert_eq!(
+            keys, &expected,
+            "JSON-path keys must be the exact i64 decimal strings, lossless past f64's \
+             53-bit mantissa"
+        );
+        let unique: HashSet<&String> = keys.iter().collect();
+        assert_eq!(
+            unique.len(), n,
+            "distinct i64 ids past 2^53 must produce distinct keys, not collapse to one"
+        );
+    }
+
+    /// **Realistic 2026 timestamps** (GH #93): a display formatter such as
+    /// `format_numeric` would collapse an entire batch of present-day
+    /// millisecond epochs to ONE key — every timestamp after
+    /// 1970-01-01T00:16:40Z falls in its scientific-notation (4-sig-fig)
+    /// regime (see `extract_keys`'s doc). `col_as_temporal_epoch_str` reads
+    /// the raw `i64` epoch, so 50 one-second-apart 2026 timestamps must
+    /// produce 50 unique keys, not 1 — the realistic-magnitude case a
+    /// same-instant-only equality check would miss.
+    #[test]
+    fn extract_keys_coerces_realistic_2026_timestamp_key_column_injectively() {
+        use arrow::array::TimestampMillisecondArray;
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use std::collections::HashSet;
+        use std::sync::Arc;
+
+        let n = 50usize;
+        let base_ms: i64 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
+        let epochs: Vec<i64> = (0..n as i64).map(|i| base_ms + i * 1000).collect();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(epochs.clone()))],
+        )
+        .unwrap();
+        let encoding = Encoding {
+            key: Some(EncodingSpec { field: "t".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let data_indices: Vec<usize> = (0..n).collect();
+
+        let keys = extract_keys(&encoding, &batch, Some(&data_indices))
+            .expect("a Timestamp key column must coerce, not silently drop");
+        let expected: Vec<String> = epochs.iter().map(|e| e.to_string()).collect();
+        assert_eq!(
+            keys, expected,
+            "temporal keys must be the exact epoch i64 strings, not a 4-sig-fig display value"
+        );
+        let unique: HashSet<&String> = keys.iter().collect();
+        assert_eq!(
+            unique.len(), n,
+            "50 distinct present-day timestamps must produce 50 distinct keys, not 1"
+        );
+    }
+
+    /// **Boolean key column** (GH #93): a residual silent-drop gap distinct
+    /// from the aliasing defect above — neither `col_as_str` nor `col_as_f64`
+    /// covers `Boolean`, so `key="b:N"` on a `Boolean` column produced no
+    /// keys at all under either of those. `col_as_ordinal_category_str`
+    /// covers it, closing that gap as a side effect.
+    #[test]
+    fn extract_keys_coerces_boolean_key_column_instead_of_silently_dropping() {
+        use arrow::array::BooleanArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("flag", DataType::Boolean, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(BooleanArray::from(vec![true, false, true]))],
+        )
+        .unwrap();
+        let encoding = Encoding {
+            key: Some(EncodingSpec { field: "flag".into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let data_indices = [0usize, 1, 2];
+
+        let keys = extract_keys(&encoding, &batch, Some(&data_indices));
+        assert_eq!(
+            keys,
+            Some(vec!["true".to_string(), "false".to_string(), "true".to_string()]),
+            "a Boolean key= column must coerce to true/false strings, not silently drop"
+        );
     }
 
     fn resolve_dual_y(spec: &ChartSpec, batch: &RecordBatch) -> scale_resolve::ResolvedScales {

@@ -196,6 +196,28 @@ pub(crate) fn debug_assert_nodes_metadata_aligned(
     }
 }
 
+/// The packed-path sibling of [`debug_assert_nodes_metadata_aligned`] (spec
+/// §4.3 / GH #93).
+///
+/// The JSON-path guard above runs while a batch's `keys` vector is still
+/// paired with its `nodes` vector, one-to-one. Packing (`pack_instances.rs`)
+/// then clears `nodes` and moves `keys` into the `HAS_KEYS` binary sidecar —
+/// at that seam the only length left to check `keys` against is the packed
+/// instance count already written into the batch's 20-byte header. This
+/// mirrors the JSON guard's `data_indices`/`keys` check exactly, just against
+/// `instance_count` instead of `nodes.len()`, so a `keys` vector that
+/// desynced from its batch (the #6 defect class) trips at pack time instead
+/// of silently shipping a misaligned sidecar to the WASM reader.
+#[inline]
+pub(crate) fn debug_assert_packed_keys_aligned(instance_count: usize, keys_len: usize) {
+    debug_assert_eq!(
+        instance_count, keys_len,
+        "packed batch instance count ({instance_count}) must equal keys length \
+         ({keys_len}); a HAS_KEYS sidecar would desync mark instances from their \
+         object-constancy keys (archaeology bug #6 defect class, packed-path sibling)",
+    );
+}
+
 /// Checked form of the alignment guard for unit testing.
 ///
 /// Returns `Ok(())` when the node count agrees with every present per-node
@@ -456,6 +478,28 @@ mod tests {
     fn debug_assert_guard_trips_on_keys_misalignment() {
         // 4 nodes but only 2 keys entries.
         debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(2));
+    }
+
+    // ── Packed-path keys guard (spec §4.3 / GH #93) ─────────────────────────
+
+    /// The debug assertion trips when a packed batch's keys vector desyncs
+    /// from the instance count already written into the packed header —
+    /// exactly the failure mode `pack_instances.rs`'s `HAS_KEYS` writer must
+    /// catch before it ships a misaligned sidecar to the WASM reader.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "instance count")]
+    fn debug_assert_packed_keys_guard_trips_on_mismatch() {
+        // 1200 packed instances but only 1199 keys — one short.
+        debug_assert_packed_keys_aligned(1200, 1199);
+    }
+
+    /// The debug assertion passes silently when the packed instance count and
+    /// keys length agree.
+    #[test]
+    fn debug_assert_packed_keys_guard_silent_when_aligned() {
+        debug_assert_packed_keys_aligned(1200, 1200);
+        debug_assert_packed_keys_aligned(0, 0);
     }
 
     /// The debug assertion passes silently when all present channels are

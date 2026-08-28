@@ -216,6 +216,52 @@ pub(crate) fn col_as_ordinal_category_str(
     })
 }
 
+/// Read a `Timestamp` column (any unit) as `Vec<Option<String>>` via the raw
+/// `i64` epoch value's `.to_string()` — an **identity** mapping, not a
+/// display formatter.
+///
+/// This is deliberately NOT `col_as_f64`'s `x as f64` widening: `f64` has a
+/// 53-bit mantissa, so any epoch value whose magnitude exceeds `2^53`
+/// (nanosecond timestamps hit this for any date after 1970; millisecond
+/// timestamps hit it for dates far in the future, but the collision risk is
+/// real *today* at nanosecond/microsecond resolution) loses precision on the
+/// `i64 -> f64` cast, and two distinct instants can round to the same `f64`.
+/// Downstream display formatters (e.g. `format_numeric`) compound this by
+/// additionally collapsing everything to ~4 significant digits. Reading the
+/// native `i64` and stringifying it directly has no such ceiling — every
+/// representable epoch value round-trips to a distinct string.
+///
+/// `col_as_ordinal_category_str` deliberately does not cover `Timestamp`
+/// (see its doc); this is the sibling that does, for exactly one caller:
+/// `extract_keys` (GH #93), which needs an injective row -> string map for a
+/// temporal `key=` column, not a human-readable date.
+///
+/// Returns `Err(UnsupportedDtype)` for any dtype other than `Timestamp`.
+pub(crate) fn col_as_temporal_epoch_str(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<Option<String>>, RenderError> {
+    let col = batch.column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    macro_rules! collect_epoch_as_str {
+        ($t:ty) => {{
+            let a = col.as_any().downcast_ref::<$t>().expect("dtype matched");
+            return Ok(a.iter().map(|v| v.map(|x| x.to_string())).collect());
+        }};
+    }
+    match col.data_type() {
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => collect_epoch_as_str!(TimestampNanosecondArray),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => collect_epoch_as_str!(TimestampMicrosecondArray),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => collect_epoch_as_str!(TimestampMillisecondArray),
+        DataType::Timestamp(TimeUnit::Second, _) => collect_epoch_as_str!(TimestampSecondArray),
+        other => Err(RenderError::UnsupportedDtype {
+            field: field.to_string(),
+            dtype: format!("{other:?} (expected Timestamp)"),
+            context: None,
+        }),
+    }
+}
+
 /// Distinct categories for a **positional** (x:N / y:N) ordinal domain, with a
 /// null row surfaced as its own [`NULL_CATEGORY`] category (FA-9).
 ///
@@ -887,6 +933,109 @@ mod tests {
         ).unwrap();
         let out = col_as_ordinal_category_str(&b, "x").unwrap();
         assert_eq!(out, vec![Some("5".into()), Some("10".into()), None]);
+    }
+
+    /// `col_as_ordinal_category_str` deliberately errors on `Timestamp` — the
+    /// contract `col_as_temporal_epoch_str`'s doc comment relies on.
+    #[test]
+    fn col_as_ordinal_category_str_errors_on_timestamp() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(vec![Some(1_000i64)]))],
+        )
+        .unwrap();
+        assert!(col_as_ordinal_category_str(&b, "t").is_err());
+    }
+
+    /// `col_as_temporal_epoch_str` reads the raw `i64` epoch value — no `f64`
+    /// round-trip — so it stays injective at magnitudes where `col_as_f64`
+    /// (53-bit mantissa) would collapse distinct instants onto the same
+    /// value. `9_007_199_254_740_993` is `2^53 + 1`, the first `i64` that
+    /// cannot round-trip through `f64` exactly.
+    #[test]
+    fn col_as_temporal_epoch_str_stays_injective_past_f64_mantissa_precision() {
+        let ids: Vec<i64> = (0..5).map(|i| 9_007_199_254_740_993i64 + i).collect();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+            true,
+        )]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampNanosecondArray::from(ids.clone()))],
+        )
+        .unwrap();
+        let out = col_as_temporal_epoch_str(&b, "t").unwrap();
+        let expected: Vec<Option<String>> = ids.iter().map(|v| Some(v.to_string())).collect();
+        assert_eq!(out, expected);
+        let unique: std::collections::HashSet<_> = out.into_iter().collect();
+        assert_eq!(unique.len(), 5, "5 distinct nanosecond epochs must produce 5 distinct strings");
+    }
+
+    /// Every `TimeUnit` variant is covered, and nulls pass through.
+    #[test]
+    fn col_as_temporal_epoch_str_covers_every_time_unit() {
+        use arrow::datatypes::TimeUnit;
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "t",
+                DataType::Timestamp(unit, None),
+                true,
+            )]));
+            let batch = match unit {
+                TimeUnit::Second => RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(TimestampSecondArray::from(vec![Some(1_700_000_000i64), None]))],
+                ),
+                TimeUnit::Millisecond => RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(TimestampMillisecondArray::from(vec![
+                        Some(1_700_000_000_000i64),
+                        None,
+                    ]))],
+                ),
+                TimeUnit::Microsecond => RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(TimestampMicrosecondArray::from(vec![
+                        Some(1_700_000_000_000_000i64),
+                        None,
+                    ]))],
+                ),
+                TimeUnit::Nanosecond => RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(TimestampNanosecondArray::from(vec![
+                        Some(1_700_000_000_000_000_000i64),
+                        None,
+                    ]))],
+                ),
+            }
+            .unwrap();
+            let out = col_as_temporal_epoch_str(&batch, "t").unwrap();
+            assert!(out[0].is_some(), "{unit:?} must produce a value");
+            assert_eq!(out[1], None, "{unit:?} null must pass through");
+        }
+    }
+
+    /// Non-Timestamp dtypes are rejected, not silently coerced.
+    #[test]
+    fn col_as_temporal_epoch_str_errors_on_non_timestamp() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::Int64Array::from(vec![Some(1i64)]))],
+        )
+        .unwrap();
+        assert!(col_as_temporal_epoch_str(&b, "x").is_err());
     }
 
     // ── RSUP-02 regression: supported_numeric_dtype / is_numeric / col_as_f64 /

@@ -17,6 +17,8 @@
 //! After instance data, optional sections follow based on `flags`:
 //! - `HAS_DATA_INDICES (0x2)`: `count × u32` little-endian data indices
 //! - `HAS_TOOLTIPS (0x1)`: length-prefixed string table (field names then row values)
+//! - `HAS_KEYS (0x4)`: length-prefixed string table, one entry per instance
+//!   (spec §4.3 / GH #93 — object-constancy keys for keyed transitions)
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
@@ -60,9 +62,17 @@ const FIELD_Y_OFFSET: usize = 4;
 const PACK_THRESHOLD: usize = 1000;
 
 /// Flag: tooltips string table follows instance data (+ optional data_indices).
-const HAS_TOOLTIPS: u32 = 0x1;
-/// Flag: `count × u32` data-index array follows instance data.
-const HAS_DATA_INDICES: u32 = 0x2;
+///
+/// `pub(crate)` so callers outside this module (the packed-keys decode test
+/// helper in `scene_build.rs`) reference the one definition instead of
+/// re-declaring the literal.
+pub(crate) const HAS_TOOLTIPS: u32 = 0x1;
+/// Flag: `count × u32` data-index array follows instance data. `pub(crate)`
+/// for the same reason as [`HAS_TOOLTIPS`].
+pub(crate) const HAS_DATA_INDICES: u32 = 0x2;
+/// Flag: keys string table follows instance data (GH #93). `pub(crate)` for
+/// the same reason as [`HAS_TOOLTIPS`].
+pub(crate) const HAS_KEYS: u32 = 0x4;
 
 /// Extract packed instance bytes from large homogeneous mark batches.
 ///
@@ -72,7 +82,7 @@ const HAS_DATA_INDICES: u32 = 0x2;
 /// `Uint8Array`, bypassing JSON entirely.
 ///
 /// Byte layout per batch:
-///   `[header 20B][instance_data][data_indices?][tooltips?]`
+///   `[header 20B][instance_data][data_indices?][tooltips?][keys?]`
 ///
 /// Header (20 bytes):
 ///   `[panel_idx: u32][batch_idx: u32][kind: u32][count: u32][flags: u32]`
@@ -80,6 +90,8 @@ const HAS_DATA_INDICES: u32 = 0x2;
 /// After instance data, optional trailing sections appear in flag order:
 ///   - `HAS_DATA_INDICES`: `count × u32` LE data indices
 ///   - `HAS_TOOLTIPS`: length-prefixed string table (see `pack_tooltips`)
+///   - `HAS_KEYS`: length-prefixed string table, one entry per instance (see
+///     `pack_keys`) — spec §4.3 / GH #93 object-constancy keys
 pub fn extract_packed_bytes(scene: &mut SceneGraph) -> Vec<u8> {
     let mut packed = Vec::new();
     for (pi, panel) in scene.panels.iter_mut().enumerate() {
@@ -125,6 +137,31 @@ pub fn extract_packed_bytes(scene: &mut SceneGraph) -> Vec<u8> {
                 }
             }
 
+            // keys — written after tooltips (spec §4.3 / GH #93). Extracted
+            // from the RecordBatch by `scene_build::extract_keys` at the same
+            // seam as tooltips/hrefs/descriptions (row-index based, not tied
+            // to whether `nodes` ends up JSON- or byte-serialized), so this
+            // vector is already node-aligned by the time it reaches the
+            // packer — the guard below re-checks that alignment against the
+            // packed instance count, the packed-path analogue of the JSON
+            // `debug_assert_nodes_metadata_aligned` check.
+            //
+            // The guard runs on every `Some(_)`, BEFORE the emptiness check —
+            // not only when there is a non-empty section to write. A
+            // `Some(vec![])` on an `n > 0` batch is exactly the desync shape
+            // the JSON sibling catches too (`scene_build.rs`'s
+            // `debug_assert_nodes_metadata_aligned` receives `Some(0)` against
+            // `nodes.len()`); hoisting the guard above `!keys.is_empty()`
+            // keeps that failure mode symmetric across both paths instead of
+            // letting the packer silently skip-and-no-op on it.
+            if let Some(ref keys) = batch.keys {
+                crate::render::mark_nodes::debug_assert_packed_keys_aligned(n, keys.len());
+                if !keys.is_empty() {
+                    flags |= HAS_KEYS;
+                    pack_keys(keys, &mut trailing);
+                }
+            }
+
             // Header: panel_idx, batch_idx, kind, count, flags (20 bytes)
             packed.extend_from_slice(&(pi as u32).to_le_bytes());
             packed.extend_from_slice(&(bi as u32).to_le_bytes());
@@ -142,6 +179,9 @@ pub fn extract_packed_bytes(scene: &mut SceneGraph) -> Vec<u8> {
             }
             if flags & HAS_TOOLTIPS != 0 {
                 batch.tooltips = None;
+            }
+            if flags & HAS_KEYS != 0 {
+                batch.keys = None;
             }
         }
     }
@@ -181,6 +221,29 @@ fn pack_tooltips(tooltips: &[ferrum_scene::TooltipContent], buf: &mut Vec<u8>) {
             buf.extend_from_slice(&(val_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(val_bytes);
         }
+    }
+}
+
+// ── Key string-table packing (spec §4.3 / GH #93) ──────────────────
+
+/// Append a keys string table to `buf`.
+///
+/// Mirrors [`pack_tooltips`]'s length-prefixed string-table encoding, minus
+/// the field-name preamble: keys are a flat one-string-per-instance list (no
+/// per-field structure to name), and the entry count is already carried in
+/// the batch's 20-byte header, so the reader does not re-read a count here.
+///
+/// Layout:
+/// ```text
+/// [key_0_len: u32][key_0 UTF-8 bytes]
+/// …
+/// [key_N-1_len: u32][key_N-1 UTF-8 bytes]
+/// ```
+fn pack_keys(keys: &[String], buf: &mut Vec<u8>) {
+    for key in keys {
+        let key_bytes = key.as_bytes();
+        buf.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(key_bytes);
     }
 }
 
@@ -524,6 +587,20 @@ mod tests {
         data_indices: Option<Vec<usize>>,
         tooltips: Option<Vec<ferrum_scene::TooltipContent>>,
     ) -> ferrum_scene::SceneGraph {
+        test_scene_with_keys(kind, nodes, data_indices, tooltips, None)
+    }
+
+    /// Full metadata builder including `keys` — used by the `HAS_KEYS`
+    /// (spec §4.3 / GH #93) round-trip tests below. `test_scene_with_metadata`
+    /// delegates here with `keys: None` so its existing call sites are
+    /// untouched.
+    fn test_scene_with_keys(
+        kind: MarkBatchKind,
+        nodes: Vec<SceneNode>,
+        data_indices: Option<Vec<usize>>,
+        tooltips: Option<Vec<ferrum_scene::TooltipContent>>,
+        keys: Option<Vec<String>>,
+    ) -> ferrum_scene::SceneGraph {
         use ferrum_scene::*;
         SceneGraph {
             width: 500.0,
@@ -559,7 +636,7 @@ mod tests {
                     tooltips,
                     hrefs: None,
                     descriptions: None,
-                    keys: None,
+                    keys,
                     blend: BlendMode::Normal,
                     stroke_cap: None,
                     stroke_join: None,
@@ -1091,5 +1168,258 @@ mod tests {
                 "node {node_b} (second copy of row {row}): expected '{expected}', got '{dec_b}'",
             );
         }
+    }
+
+    // ── HAS_KEYS packed sidecar (spec §4.3 / GH #93) ─────────────────────
+
+    /// Decode a `pack_keys` string table (a flat run of `[len: u32][utf8]`
+    /// entries, `count` of them) back into `Vec<String>`. Mirrors the decode
+    /// the WASM reader (Task 9) will perform.
+    fn decode_keys(bytes: &[u8], count: usize) -> Vec<String> {
+        let mut cursor = 0usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            out.push(
+                std::str::from_utf8(&bytes[cursor..cursor + len])
+                    .unwrap()
+                    .to_string(),
+            );
+            cursor += len;
+        }
+        out
+    }
+
+    /// Round-trip: a packed batch with `keys` set (and nothing else) sets the
+    /// `HAS_KEYS` flag, the trailing bytes decode back to the exact key
+    /// strings in node order, and `batch.keys` is cleared afterward (the
+    /// packed sidecar becomes the sole representation, mirroring how
+    /// `tooltips`/`data_indices` are cleared today).
+    #[test]
+    fn extract_packed_bytes_packs_keys_round_trip() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 7;
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|i| SceneNode::Circle {
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
+                style: test_style(70, 1.0),
+            })
+            .collect();
+        let keys: Vec<String> = (0..n).map(|i| format!("k{i}")).collect();
+
+        let mut scene = test_scene_with_keys(
+            MarkBatchKind::Point,
+            nodes,
+            None,
+            None,
+            Some(keys.clone()),
+        );
+        let bytes = extract_packed_bytes(&mut scene);
+
+        let flags = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        assert_eq!(flags, HAS_KEYS, "only HAS_KEYS set — no data_indices/tooltips");
+
+        let instance_size = n * 16 * 4; // circles only
+        let key_bytes = &bytes[20 + instance_size..];
+        let decoded = decode_keys(key_bytes, n);
+        assert_eq!(decoded, keys, "decoded keys must match source order exactly");
+
+        assert!(
+            scene.panels[0].marks[0].keys.is_none(),
+            "keys must be cleared into the sidecar, mirroring tooltips/data_indices"
+        );
+        assert!(scene.panels[0].marks[0].nodes.is_empty(), "nodes cleared");
+    }
+
+    /// Ordering: when `data_indices`, `tooltips`, and `keys` are all present,
+    /// the trailing sections are written in that fixed order — the contract
+    /// Task 9's WASM reader depends on.
+    #[test]
+    fn extract_packed_bytes_orders_data_indices_then_tooltips_then_keys() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 3;
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|i| SceneNode::Circle {
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
+                style: test_style(70, 1.0),
+            })
+            .collect();
+        let data_indices: Vec<usize> = (0..n).collect();
+        let tooltips: Vec<TooltipContent> = (0..n)
+            .map(|i| TooltipContent {
+                fields: vec![TooltipField {
+                    name: "x".into(),
+                    value: format!("{i}"),
+                }],
+            })
+            .collect();
+        let keys: Vec<String> = (0..n).map(|i| format!("row{i}")).collect();
+
+        let mut scene = test_scene_with_keys(
+            MarkBatchKind::Point,
+            nodes,
+            Some(data_indices),
+            Some(tooltips),
+            Some(keys.clone()),
+        );
+        let bytes = extract_packed_bytes(&mut scene);
+
+        let flags = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+        assert_eq!(flags, HAS_DATA_INDICES | HAS_TOOLTIPS | HAS_KEYS);
+
+        let mut cursor = 20 + n * 16 * 4;
+
+        // data_indices: n × u32
+        for i in 0..n {
+            let idx = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
+            assert_eq!(idx, i as u32);
+            cursor += 4;
+        }
+
+        // tooltips: [num_fields][name]... then n × [value]
+        let num_fields =
+            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        assert_eq!(num_fields, 1);
+        let name_len = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4 + name_len;
+        for _ in 0..n {
+            let val_len =
+                u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4 + val_len;
+        }
+
+        // keys: n × [len][utf8] — must immediately follow the tooltip section.
+        let decoded = decode_keys(&bytes[cursor..], n);
+        assert_eq!(decoded, keys, "keys must follow tooltips, in node order");
+    }
+
+    /// Byte-stability pin (spec §7): a keyless packed stream's exact bytes
+    /// are asserted against a hand-derived expected layout — header words
+    /// computed literally, total length computed as `20 + n * CIRCLE_STRIDE`
+    /// with no trailing-section allowance, and the first/last instance's
+    /// cx/cy read back at their known byte offsets. Comparing two live runs
+    /// of `extract_packed_bytes` (the prior version of this test) proves
+    /// only that the function is deterministic — both sides would drift
+    /// together if a bug made it always emit `HAS_KEYS`. This version fails
+    /// if a future change accidentally sets `HAS_KEYS` (flags word and total
+    /// length both change) for a `keys: None` batch.
+    #[test]
+    fn extract_packed_bytes_keyless_stream_matches_pinned_bytes() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 3;
+        let style = test_style(70, 1.0);
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|i| SceneNode::Circle {
+                cx: i as f64,
+                cy: (i as f64) * 2.0,
+                r: 3.0,
+                style: style.clone(),
+            })
+            .collect();
+
+        let mut scene = test_scene(MarkBatchKind::Point, nodes);
+        let bytes = extract_packed_bytes(&mut scene);
+
+        // Header: panel 0, batch 0, kind=circle(0), count=n, flags=0 —
+        // literal expected words, not derived from any packer helper.
+        let mut expected_header = Vec::with_capacity(20);
+        for word in [0u32, 0, 0, n as u32, 0] {
+            expected_header.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(
+            &bytes[0..20],
+            expected_header.as_slice(),
+            "header must be exactly [panel=0, batch=0, kind=0, count=n, flags=0]"
+        );
+
+        // Total length: header + n instances, nothing else. This is the
+        // assertion an accidental trailing-section emission (HAS_KEYS or
+        // otherwise) on a keyless batch would break.
+        let expected_len = 20 + n * CIRCLE_STRIDE;
+        assert_eq!(
+            bytes.len(),
+            expected_len,
+            "keyless stream must be exactly header + n circle instances, no trailing sections"
+        );
+
+        // Spot-check instance 0 and instance n-1's cx/cy at their known byte
+        // offsets (f32[0] = cx, f32[1] = cy within each CIRCLE_STRIDE block).
+        let read_f32 =
+            |off: usize| -> f32 { f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) };
+        assert!((read_f32(20) - 0.0).abs() < 1e-6, "instance 0 cx");
+        assert!((read_f32(24) - 0.0).abs() < 1e-6, "instance 0 cy");
+        let last_off = 20 + (n - 1) * CIRCLE_STRIDE;
+        assert!(
+            (read_f32(last_off) - (n - 1) as f32).abs() < 1e-3,
+            "instance {} cx",
+            n - 1
+        );
+        assert!(
+            (read_f32(last_off + 4) - ((n - 1) as f32 * 2.0)).abs() < 1e-3,
+            "instance {} cy",
+            n - 1
+        );
+    }
+
+    /// Guard: a packed batch whose `keys` length disagrees with its instance
+    /// count trips the packed-path alignment guard loudly (spec §4.3's
+    /// "fails loudly on both paths" requirement) instead of silently shipping
+    /// a desynced `HAS_KEYS` sidecar.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "instance count")]
+    fn extract_packed_bytes_panics_on_keys_instance_count_mismatch() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 1;
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|i| SceneNode::Circle {
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
+                style: test_style(70, 1.0),
+            })
+            .collect();
+        // One key short of the instance count — the #6 defect class shape.
+        let keys: Vec<String> = (0..n - 1).map(|i| format!("k{i}")).collect();
+
+        let mut scene = test_scene_with_keys(MarkBatchKind::Point, nodes, None, None, Some(keys));
+        let _ = extract_packed_bytes(&mut scene);
+    }
+
+    /// Guard (GH #93): `Some(vec![])` on a non-empty
+    /// batch must trip the same guard as any other length mismatch, matching
+    /// the JSON sibling's behavior (`debug_assert_nodes_metadata_aligned`
+    /// receives `Some(0)` against `nodes.len()` for this exact shape). Before
+    /// the guard was hoisted above the `!keys.is_empty()` check, this shape
+    /// silently skipped both the flag and the check — an asymmetry with the
+    /// JSON path this test pins shut.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "instance count")]
+    fn extract_packed_bytes_panics_on_present_but_empty_keys() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 1;
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|i| SceneNode::Circle {
+                cx: i as f64,
+                cy: i as f64,
+                r: 3.0,
+                style: test_style(70, 1.0),
+            })
+            .collect();
+        // Present-but-empty keys on a 1001-instance batch — desync, not "no keys".
+        let mut scene = test_scene_with_keys(MarkBatchKind::Point, nodes, None, None, Some(vec![]));
+        let _ = extract_packed_bytes(&mut scene);
     }
 }
