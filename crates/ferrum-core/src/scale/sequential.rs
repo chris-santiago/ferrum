@@ -40,6 +40,10 @@ impl SequentialScale {
             scheme: self.scheme.as_ref().filter(|s| !s.is_empty()).cloned(),
             domain: self.domain.map(|d| d.to_vec()),
             reverse: self.reverse,
+            // SequentialScale is name/scheme-string only; gradient stops
+            // are exclusive to a Gradient-backed ContinuousScheme
+            // (PyContinuousScheme::_to_scale_spec_dict).
+            stops: None,
         }
     }
 }

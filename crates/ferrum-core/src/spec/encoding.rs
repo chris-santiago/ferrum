@@ -247,6 +247,33 @@ pub enum ScaleSpec {
         domain: Option<Vec<f64>>,
         #[serde(default)]
         reverse: bool,
+        /// Explicit gradient color stops as `(t, hex)` pairs, carried when
+        /// the scale is backed by a `Gradient`-constructed `ContinuousScheme`
+        /// rather than a named colormap (F-L04-02 second revision, spec
+        /// §4.2 amended 2026-08-28; re-shaped from a colors-only `Vec<String>`
+        /// in the spec reviewer's cycle-3 pass — the field was uncommitted,
+        /// so its shape was still free to change, and a colors-only wire
+        /// form silently discarded the `t` position `fm.Gradient([(t, color),
+        /// ...])` documents and validates).
+        ///
+        /// `(f64, String)` tuples (not a parallel `positions: Vec<f64>` array)
+        /// so the wire shape mirrors the `Gradient(stops: Vec<(f64, String)>)`
+        /// pyfunction's own parameter type exactly — one field, no
+        /// length-must-match-the-other-field invariant to maintain across
+        /// (de)serialization. Serde's default tuple encoding makes each pair
+        /// a 2-element JSON array (`[[0.0,"#ff0000"],[0.9,"#00ff00"],...]`),
+        /// which round-trips a `(f64, String)` losslessly and reads as
+        /// "stop points" at a glance, unlike two same-length arrays a reader
+        /// has to zip mentally.
+        ///
+        /// Mutually exclusive with `scheme` in practice — a `ContinuousScheme`
+        /// tree is built from either a named map or a `Gradient`, never both
+        /// — but not enforced at the type level since the two fields
+        /// serialize independently. Absent for every scheme-name-backed
+        /// spec, so this is a pure addition: the `skip_serializing_if` guard
+        /// keeps every pre-existing wire form byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stops: Option<Vec<(f64, String)>>,
     },
     Diverging {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1392,6 +1419,65 @@ mod tests {
             ScaleSpec::Sequential { scheme, reverse, .. } => {
                 assert_eq!(scheme.as_deref(), Some("viridis"));
                 assert!(reverse);
+            }
+            _ => panic!("expected Sequential variant"),
+        }
+    }
+
+    /// F-L04-02 second revision (spec §4.2, amended 2026-08-28): with
+    /// `stops: None`, the JSON contains no `"stops"` key — byte-identity
+    /// guard for every pre-existing Sequential wire form (scheme-name-backed
+    /// specs never carry stops, so this must not perturb them).
+    #[test]
+    fn scale_spec_sequential_stops_absent_omits_key() {
+        let spec = ScaleSpec::Sequential {
+            scheme: Some("viridis".to_string()),
+            domain: None,
+            reverse: false,
+            stops: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("\"stops\""), "json={json}");
+        let re_parsed: ScaleSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(re_parsed, spec);
+    }
+
+    /// F-L04-02 second revision (spec-reviewer cycle 3): a `Gradient`-backed
+    /// scheme round-trips its `(t, hex)` stop pairs through the wire form
+    /// byte-identically — carrying real, possibly non-uniform `t` positions,
+    /// not just an ordered color list.
+    #[test]
+    fn scale_spec_sequential_stops_round_trip() {
+        let spec = ScaleSpec::Sequential {
+            scheme: None,
+            domain: None,
+            reverse: false,
+            stops: Some(vec![
+                (0.0, "#ff0000".to_string()),
+                (0.9, "#00ff00".to_string()),
+                (1.0, "#0000ff".to_string()),
+            ]),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains("\"stops\":[[0.0,\"#ff0000\"],[0.9,\"#00ff00\"],[1.0,\"#0000ff\"]]"),
+            "json={json}"
+        );
+        let re_parsed: ScaleSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(re_parsed, spec);
+        match &re_parsed {
+            ScaleSpec::Sequential { scheme, stops, .. } => {
+                assert_eq!(scheme, &None);
+                assert_eq!(
+                    stops.as_deref(),
+                    Some(
+                        &[
+                            (0.0, "#ff0000".to_string()),
+                            (0.9, "#00ff00".to_string()),
+                            (1.0, "#0000ff".to_string()),
+                        ][..]
+                    )
+                );
             }
             _ => panic!("expected Sequential variant"),
         }

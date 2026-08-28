@@ -167,14 +167,14 @@ pub fn build_color_scale(
             .or_else(|| composite_numeric_extent(composite_domain))
             .unwrap_or(data_extent);
 
-        let scheme = resolve_continuous_scheme(c_enc, theme, (lo, hi));
+        let (scheme, scheme_warnings) = resolve_continuous_scheme(c_enc, theme, (lo, hi));
         // Gap 2: resolve the diverging midpoint.  Priority:
         //   1. explicit `domain_mid`/`domainMid` field on DivergingScale spec
         //   2. middle element of a 3-tuple domain=[lo, mid, hi]
         //   3. None — geometric center falls out from pure-linear normalization
         // Sequential scales always get None (pure-linear).
         let midpoint = scale_diverging_midpoint(c_enc);
-        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), Vec::new()))
+        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), scheme_warnings))
     } else {
         // T3/categorical: when the chart is faceted (Shared), resolve the domain
         // and sort-context batch from the global FINAL_OUTPUT_KEY batch so that
@@ -265,42 +265,114 @@ pub fn build_color_scale(
     }
 }
 
-/// Resolve the continuous color scheme for an encoding (D1/D4 precedence):
-///   1. `encoding.scheme` (top-level field on `EncodingSpec`)
-///   2. the scale spec's own scheme ([`scale_common_scheme`])
-///   3. the theme's diverging scheme when `(lo, hi)` straddles zero, else its
+/// Resolve the continuous color scheme for an encoding:
+///   1. a `Sequential` spec's `stops` ([`gradient_scheme_from_stops`]) — a
+///      `Gradient`-backed scheme, F-L04-02 second revision
+///   2. `encoding.scheme` (top-level field on `EncodingSpec`, D1/D4)
+///   3. the scale spec's own scheme ([`scale_common_scheme`])
+///   4. the theme's diverging scheme when `(lo, hi)` straddles zero, else its
 ///      sequential scheme
-///   4. hard fallback: Viridis
+///   5. hard fallback: Viridis
 ///
 /// A `Sequential { reverse: true }` spec wraps the result in
-/// [`ContinuousScheme::Reverse`]. Shared by the continuous and the discretizing
-/// paths so both honor the same precedence.
+/// [`ContinuousScheme::Reverse`] — including a stops-resolved `Gradient`, for
+/// robustness against a hand-written spec that sets both fields (every
+/// `_to_scale_spec_dict`-emitted spec already composes reverse into the stop
+/// order itself and always carries `reverse: false` alongside `stops`, so
+/// this is a no-op on that path). Shared by the continuous and the
+/// discretizing paths so both honor the same precedence.
+///
+/// Returns any `RenderWarning`s the resolution produced (currently only a
+/// stops all-or-nothing parse failure); the caller folds them into its
+/// accumulator.
 fn resolve_continuous_scheme(
     enc: &crate::spec::encoding::EncodingSpec,
     theme: &ThemeInputs,
     (lo, hi): (f64, f64),
-) -> crate::render::color::ContinuousScheme {
+) -> (crate::render::color::ContinuousScheme, Vec<crate::render::RenderWarning>) {
     use crate::render::color::{ContinuousScheme, NamedContinuous};
-    let mut scheme = enc
-        .scheme
-        .as_deref()
-        .or(scale_common_scheme(enc))
-        .and_then(NamedContinuous::from_name)
-        .map(ContinuousScheme::Named)
-        .unwrap_or_else(|| {
-            let theme_scheme = if lo < 0.0 && hi > 0.0 {
-                &theme.palette.diverging_scheme
-            } else {
-                &theme.palette.sequential_scheme
-            };
-            NamedContinuous::from_name(theme_scheme)
-                .map(ContinuousScheme::Named)
-                .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
-        });
+    let mut warnings = Vec::new();
+    let mut scheme = gradient_scheme_from_stops(enc, &mut warnings).unwrap_or_else(|| {
+        enc.scheme
+            .as_deref()
+            .or(scale_common_scheme(enc))
+            .and_then(NamedContinuous::from_name)
+            .map(ContinuousScheme::Named)
+            .unwrap_or_else(|| {
+                let theme_scheme = if lo < 0.0 && hi > 0.0 {
+                    &theme.palette.diverging_scheme
+                } else {
+                    &theme.palette.sequential_scheme
+                };
+                NamedContinuous::from_name(theme_scheme)
+                    .map(ContinuousScheme::Named)
+                    .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
+            })
+    });
     if scale_spec_is_reversed(enc) {
         scheme = ContinuousScheme::Reverse(Box::new(scheme));
     }
-    scheme
+    (scheme, warnings)
+}
+
+/// The `stops` list of a `Sequential` scale spec, when present and non-empty.
+fn sequential_stops(enc: &crate::spec::encoding::EncodingSpec) -> Option<&[(f64, String)]> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Sequential { stops: Some(s), .. } if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+/// Build a `ContinuousScheme::Gradient` from a `Sequential` spec's `stops`
+/// (F-L04-02 second revision, spec §4.2 amended 2026-08-28: `Color(scale=
+/// fm.Gradient([...]))` renders via this path instead of refusing). `None`
+/// when the spec carries no usable stops, leaving the caller to fall through
+/// to scheme-name resolution.
+///
+/// Stops carry the real `t` position each pair declared (spec reviewer
+/// cycle 3, finding 1) — parsed via the full-CSS `parse_color` (named
+/// colors, not just hex, work in a gradient's stops), positions passed
+/// through unchanged, not re-spaced to `i / (n - 1)`.
+///
+/// The color parse is all-or-nothing, mirroring `build_color_scale`'s
+/// `explicit_string_range` / `ColorRangeParseFailure` convention (T2's
+/// committed all-or-nothing convention, `render/scale_resolve/color.rs`
+/// lines 211-246): one unparseable stop discards the whole list and pushes a
+/// `ColorRangeParseFailure` warning naming the first offending entry,
+/// falling through to scheme-name resolution rather than rendering a partial
+/// or silently-wrong gradient.
+fn gradient_scheme_from_stops(
+    enc: &crate::spec::encoding::EncodingSpec,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Option<crate::render::color::ContinuousScheme> {
+    let stops = sequential_stops(enc)?;
+    let parsed: Result<Vec<(f64, Color)>, String> = stops
+        .iter()
+        .map(|(t, s)| {
+            crate::render::color::parse_color(s)
+                .map(|c| (*t, c))
+                .map_err(|_| s.clone())
+        })
+        .collect();
+    match parsed {
+        Ok(gradient_stops) if gradient_stops.len() >= 2 => {
+            Some(crate::render::color::ContinuousScheme::Gradient(gradient_stops))
+        }
+        // Fewer than 2 stops can't form a gradient. The `Gradient(...)`
+        // pyfunction now rejects this at construction (spec reviewer cycle
+        // 3, finding 2 — `_to_scale_spec_dict` only ever emits what a valid
+        // `ContinuousScheme::Gradient` carries), so this arm is reachable
+        // only from a hand-written-JSON spec that bypasses that constructor;
+        // falls through with no warning, matching `bucket_colors`' treatment
+        // of a range whose length doesn't fit the partition it can't
+        // describe.
+        Ok(_) => None,
+        Err(entry) => {
+            warnings.push(crate::render::RenderWarning::ColorRangeParseFailure { entry });
+            None
+        }
+    }
 }
 
 /// The bucket partition a discretizing scale spec declares.
@@ -585,7 +657,8 @@ fn bucket_colors(
         }
         return (0..n_buckets).map(|i| entries[i % entries.len()]).collect();
     }
-    let scheme = resolve_continuous_scheme(enc, theme, extent);
+    let (scheme, scheme_warnings) = resolve_continuous_scheme(enc, theme, extent);
+    warnings.extend(scheme_warnings);
     (0..n_buckets)
         .map(|i| {
             let t = if n_buckets <= 1 {

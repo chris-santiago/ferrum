@@ -4829,7 +4829,7 @@ mod positional_extent_classification {
 
     #[test]
     fn sequential_two_elem_domain_is_identity() {
-        let spec = ScaleSpec::Sequential { scheme: None, domain: Some(vec![0.0, 10.0]), reverse: false };
+        let spec = ScaleSpec::Sequential { scheme: None, domain: Some(vec![0.0, 10.0]), reverse: false, stops: None };
         assert_eq!(spec.positional_extent(), Some(vec![0.0, 10.0]));
     }
 
@@ -4871,7 +4871,7 @@ mod positional_extent_classification {
 
     #[test]
     fn sequential_single_elem_domain_is_none_no_panic() {
-        let spec = ScaleSpec::Sequential { scheme: None, domain: Some(vec![5.0]), reverse: false };
+        let spec = ScaleSpec::Sequential { scheme: None, domain: Some(vec![5.0]), reverse: false, stops: None };
         assert_eq!(spec.positional_extent(), None);
     }
 
@@ -5410,6 +5410,116 @@ fn discretizing_spec_without_a_bucket_count_falls_back_to_continuous() {
             "{json} should resolve to Continuous, got {scale:?}"
         );
     }
+}
+
+// ── F-L04-02 second revision: Sequential `stops` → ContinuousScheme::Gradient ──
+
+/// A `Sequential` spec carrying `stops` resolves to a `Gradient`-backed
+/// `Continuous` scale, and `lookup_f64` interpolates at the *declared*
+/// (non-uniform) `t` positions rather than re-spacing them to `i / (n - 1)`
+/// (spec reviewer cycle 3, finding 1 — rust-quality-reviewer cycle-1 gap:
+/// this path had zero Rust unit coverage, only Python SVG-difference tests).
+#[test]
+fn sequential_stops_resolve_to_gradient_and_interpolate_at_declared_t() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "sequential",
+        "stops": [[0.0, "#ff0000"], [0.9, "#00ff00"], [1.0, "#0000ff"]],
+    }));
+    // Data extent (0.0, 10.0) so a data value of 9.0 normalizes to t = 0.9 —
+    // exactly the declared (non-uniform) middle stop's position.
+    let batch = batch_with_numeric_color(vec![0.0, 10.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+    assert!(warnings.is_empty(), "well-formed stops must not warn: {warnings:?}");
+    match &scale {
+        ColorScale::Continuous {
+            scheme: crate::render::color::ContinuousScheme::Gradient(stops),
+            ..
+        } => {
+            assert_eq!(stops.len(), 3);
+            assert_eq!(stops[1].0, 0.9, "declared t must survive, not re-space to i/(n-1)");
+        }
+        other => panic!("expected Continuous with a Gradient scheme, got {other:?}"),
+    }
+    // t = 0.9 lands exactly on the middle stop's own position, so
+    // `sample_gradient` returns that stop's color exactly (u = 0 at the
+    // bracketing pair's lower end) — pins that lookup_f64 actually uses the
+    // declared t, not an evenly-spaced re-derivation (which would place the
+    // 2nd of 3 stops at t = 0.5, not 0.9, and return a red/green blend here
+    // instead of pure green).
+    assert_eq!(rgb(scale.lookup_f64(9.0).unwrap()), (0x00, 0xff, 0x00));
+}
+
+/// The two raw-dict-reachable edges finding 1 (rust-quality-reviewer cycle 1)
+/// found untested: an unparseable stop fires the same `ColorRangeParseFailure`
+/// convention as every other explicit-color-list path, all-or-nothing; and a
+/// `stops` list with fewer than 2 usable entries takes the documented silent
+/// fall-through to plain scheme-name resolution (mirroring `bucket_colors`'
+/// own malformed-partition precedent — `Gradient(...)`'s Python constructor
+/// guards the primary route, so this arm is reachable only from a
+/// hand-written dict spec, e.g. `Color(scale={"type": "sequential", "stops":
+/// [[0.0, "red"]]})`).
+#[test]
+fn sequential_stops_raw_dict_edges() {
+    let batch = batch_with_numeric_color(vec![0.0, 10.0]);
+
+    // Unparseable stop: all-or-nothing, warns naming the bad entry, and the
+    // scheme falls through to scheme-name resolution (Viridis, the hard
+    // fallback, since no scheme name is declared either) — not a partial or
+    // silently-wrong gradient.
+    let bad_stop = spec_with_color_scale_json(serde_json::json!({
+        "type": "sequential",
+        "stops": [[0.0, "notacolor"], [1.0, "blue"]],
+    }));
+    let (scale, warnings) = resolve_color(&bad_stop, &batch);
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            crate::render::RenderWarning::ColorRangeParseFailure { entry } if entry == "notacolor"
+        )),
+        "expected a ColorRangeParseFailure naming the bad entry, got {warnings:?}"
+    );
+    assert!(
+        !matches!(
+            scale,
+            ColorScale::Continuous { scheme: crate::render::color::ContinuousScheme::Gradient(_), .. }
+        ),
+        "an unparseable stop must discard the whole gradient, not render a partial one"
+    );
+
+    // Fewer than 2 usable stops: no warning, silent fall-through (the
+    // documented `Ok(_) => None` arm in `gradient_scheme_from_stops`).
+    let one_stop = spec_with_color_scale_json(serde_json::json!({
+        "type": "sequential",
+        "stops": [[0.0, "red"]],
+    }));
+    let (scale, warnings) = resolve_color(&one_stop, &batch);
+    assert!(warnings.is_empty(), "a < 2-stop fall-through must not warn: {warnings:?}");
+    assert!(
+        !matches!(
+            scale,
+            ColorScale::Continuous { scheme: crate::render::color::ContinuousScheme::Gradient(_), .. }
+        ),
+        "a single stop cannot describe a gradient; must fall through to scheme resolution"
+    );
+}
+
+/// An alpha-carrying `#rrggbbaa` stop survives resolution — the Gradient
+/// pyfunction's docstring advertises 8-digit hex stops (rust-quality-reviewer
+/// cycle-1 finding: nothing pinned this, so a future switch to a 6-digit
+/// formatter in `to_sequential_wire_form` could silently drop stop alpha with
+/// the suite still green).
+#[test]
+fn sequential_stops_alpha_channel_round_trips_through_resolution() {
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "sequential",
+        "stops": [[0.0, "#ff000080"], [1.0, "#0000ffff"]],
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 1.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+    assert!(warnings.is_empty(), "well-formed alpha stops must not warn: {warnings:?}");
+    let at_zero = scale.lookup_f64(0.0).unwrap();
+    assert_eq!((at_zero.red, at_zero.green, at_zero.blue), (0xff, 0x00, 0x00));
+    assert_eq!(at_zero.alpha, 0x80, "alpha must survive stop resolution, not collapse to opaque");
 }
 
 /// `DiscretizedColors` refuses any (bounds, colors) pair that is not a

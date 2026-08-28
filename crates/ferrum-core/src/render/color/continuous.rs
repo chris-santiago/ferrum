@@ -75,6 +75,37 @@ impl NamedContinuous {
         ]
     }
 
+    /// The canonical name this variant round-trips through `from_name`.
+    /// Inverse of `from_name` — kept as an explicit match (mirroring
+    /// `colorous_gradient`'s style) rather than a `list()` index lookup, so
+    /// adding a variant can't silently desync name ordering from data.
+    /// `pub(crate)`: only consumed within this module (by
+    /// `ContinuousScheme::to_sequential_wire_form`) today.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Viridis => "viridis",
+            Self::Plasma => "plasma",
+            Self::Magma => "magma",
+            Self::Inferno => "inferno",
+            Self::Cividis => "cividis",
+            Self::Blues => "blues",
+            Self::Reds => "reds",
+            Self::Greens => "greens",
+            Self::Oranges => "oranges",
+            Self::Purples => "purples",
+            Self::RdBu => "rdbu",
+            Self::CoolBlue => "cool_blue",
+            Self::WarmOchre => "warm_ochre",
+            Self::BlueToRed => "blue_to_red",
+            Self::NightBlue => "night_blue",
+            Self::ElectricLime => "electric_lime",
+            Self::CyanToAmber => "cyan_to_amber",
+            Self::SignalBlue => "signal_blue",
+            Self::EmberOrange => "ember_orange",
+            Self::BlueToViolet => "blue_to_violet",
+        }
+    }
+
     fn colorous_gradient(&self) -> Option<colorous::Gradient> {
         match self {
             Self::Viridis => Some(colorous::VIRIDIS),
@@ -135,6 +166,56 @@ impl ContinuousScheme {
             Self::Reverse(inner) => inner.sample(1.0 - t),
         }
     }
+
+    /// Resolve to this scheme's `ScaleSpec::Sequential` wire form
+    /// (F-L04-02 second revision, spec §4.2 amended 2026-08-28; re-shaped in
+    /// the spec reviewer's cycle-3 pass to carry real `t` positions — see
+    /// `ScaleSpec::Sequential::stops`'s doc comment for why), unwrapping any
+    /// `Reverse` wrapper.
+    ///
+    /// A `Named` scheme resolves to `Named { name, reverse }`, net-XORing the
+    /// reverse flag through nested `Reverse`s so `Reverse(Reverse(Named(_)))`
+    /// correctly resolves back to `reverse: false`.
+    ///
+    /// A `Gradient` scheme resolves to `Gradient { stops }` — its `(t,
+    /// color)` pairs, colors normalized to hex, `t` positions carried as-is
+    /// (not re-spaced). Any `Reverse` wrapper is composed directly into the
+    /// stop positions (`t -> 1 - t`) rather than carried as a separate flag,
+    /// so the render side never has to re-derive it: `ContinuousScheme::
+    /// Gradient`'s stops are ascending by construction (`Gradient(...)`'s
+    /// pyfunction now validates strictly-ascending `t`), and reversing an
+    /// ascending sequence's *order* while mapping each `t -> 1 - t` yields an
+    /// ascending sequence again — `.rev()` then map, no re-sort needed (the
+    /// two order-reversals cancel). This keeps `ScaleSpec::Sequential.reverse`
+    /// meaningful only for the `scheme`-name case; a `stops`-carrying spec is
+    /// always emitted with `reverse: false`.
+    pub(crate) fn to_sequential_wire_form(&self) -> SequentialWireForm {
+        fn walk(scheme: &ContinuousScheme, reverse: bool) -> SequentialWireForm {
+            match scheme {
+                ContinuousScheme::Named(n) => {
+                    SequentialWireForm::Named { name: n.name(), reverse }
+                }
+                ContinuousScheme::Reverse(inner) => walk(inner, !reverse),
+                ContinuousScheme::Gradient(stops) => {
+                    let hex_stops = |t: f64, c: Color| (t, crate::render::color::primitive::to_hex_string(c));
+                    let stops: Vec<(f64, String)> = if reverse {
+                        stops.iter().rev().map(|&(t, c)| hex_stops(1.0 - t, c)).collect()
+                    } else {
+                        stops.iter().map(|&(t, c)| hex_stops(t, c)).collect()
+                    };
+                    SequentialWireForm::Gradient { stops }
+                }
+            }
+        }
+        walk(self, false)
+    }
+}
+
+/// The two ways a [`ContinuousScheme`] serializes onto `ScaleSpec::Sequential`
+/// (see [`ContinuousScheme::to_sequential_wire_form`]).
+pub(crate) enum SequentialWireForm {
+    Named { name: &'static str, reverse: bool },
+    Gradient { stops: Vec<(f64, String)> },
 }
 
 fn sample_gradient(stops: &[(f64, Color)], t: f64) -> Color {
@@ -177,14 +258,14 @@ use pyo3::exceptions::PyValueError;
 /// ``"night_blue"``, ``"electric_lime"``, ``"cyan_to_amber"``,
 /// ``"signal_blue"``, ``"ember_orange"``, ``"blue_to_violet"``.
 ///
-/// Do not call the constructor directly. Obtain an instance via
-/// ``ferrum.continuous_palette(name)`` (named map) or
+/// Construct directly with a colormap name, or obtain an instance via
+/// ``ferrum.continuous_palette(name)`` (equivalent named-map lookup) or
 /// ``ferrum.Gradient(stops)`` (custom gradient).
 ///
 /// Methods
 /// -------
 /// from_name(name) : ContinuousScheme
-///     Look up a built-in colormap by name.
+///     Look up a built-in colormap by name (equivalent to the constructor).
 /// reversed() : ContinuousScheme
 ///     Return a new scheme that samples the inverse of this one (1 - t).
 ///
@@ -198,7 +279,7 @@ use pyo3::exceptions::PyValueError;
 /// >>> import ferrum as fm
 /// >>> scheme = fm.ContinuousScheme("viridis")
 /// >>> fm.Chart(df).mark_point().encode(
-/// ...     x="x", y="y", color=fm.Color("value", scheme=scheme)
+/// ...     x="x", y="y", color=fm.Color("value", scale=scheme)
 /// ... )
 #[pyclass(name = "ContinuousScheme", module = "ferrum._core")]
 #[derive(Debug, Clone)]
@@ -206,6 +287,13 @@ pub struct PyContinuousScheme(pub ContinuousScheme);
 
 #[pymethods]
 impl PyContinuousScheme {
+    /// Construct from a built-in colormap name. Same validation as
+    /// `from_name` — kept as the single lookup so the two never drift.
+    #[new]
+    fn new(name: &str) -> PyResult<Self> {
+        Self::from_name(name)
+    }
+
     #[staticmethod]
     fn from_name(name: &str) -> PyResult<Self> {
         NamedContinuous::from_name(name)
@@ -219,6 +307,47 @@ impl PyContinuousScheme {
     /// Return a new scheme that samples the inverse of this scheme (1 - t).
     fn reversed(&self) -> Self {
         Self(ContinuousScheme::Reverse(Box::new(self.0.clone())))
+    }
+
+    /// Emit this scheme's canonical `ScaleSpec` as a wire dict (SPEC-04
+    /// bridge — mirrors `SequentialScale::_to_scale_spec_dict`).
+    ///
+    /// A named-colormap scheme (`fm.continuous_palette("viridis")`,
+    /// `fm.ContinuousScheme("viridis")`) serializes to
+    /// `{"type": "sequential", "scheme": "viridis", ...}`, identical to
+    /// `fm.SequentialScale(scheme="viridis")` — the two render identically.
+    ///
+    /// A `Gradient`-backed scheme (F-L04-02 second revision, spec §4.2
+    /// amended 2026-08-28 — supersedes the earlier refusal, whose "works via
+    /// `Color(scheme=...)`" premise was verified false) serializes to
+    /// `{"type": "sequential", "stops": [[t, hex], ...], ...}` instead:
+    /// explicit `(t, color)` stop pairs — the real `t` positions, not
+    /// re-spaced (spec reviewer cycle-3: a colors-only wire form silently
+    /// discarded a documented, validated parameter) — with `Reverse`
+    /// composed into the stop positions (see
+    /// `ContinuousScheme::to_sequential_wire_form`). `Color(scale=...)` is
+    /// the only route a `Gradient` renders through; `scheme=` stays
+    /// name-string-only.
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let spec = match self.0.to_sequential_wire_form() {
+            SequentialWireForm::Named { name, reverse } => {
+                crate::spec::encoding::ScaleSpec::Sequential {
+                    scheme: Some(name.to_string()),
+                    domain: None,
+                    reverse,
+                    stops: None,
+                }
+            }
+            SequentialWireForm::Gradient { stops } => {
+                crate::spec::encoding::ScaleSpec::Sequential {
+                    scheme: None,
+                    domain: None,
+                    reverse: false,
+                    stops: Some(stops),
+                }
+            }
+        };
+        crate::scale::core::scale_spec_to_py_dict(py, spec)
     }
 
     fn __repr__(&self) -> String {
@@ -235,16 +364,23 @@ impl PyContinuousScheme {
 /// Parameters
 /// ----------
 /// stops : list[tuple[float, str]]
-///     Pairs of ``t`` in ``[0, 1]`` and CSS color strings.  Each color may
-///     be an ``#rrggbb`` or ``#rrggbbaa`` hex literal, or any of the 148
-///     standard CSS named colors (e.g. ``"steelblue"``, ``"tomato"``,
-///     ``"cornflowerblue"``).
+///     At least 2 pairs of ``t`` in ``[0, 1]`` (strictly increasing) and CSS
+///     color strings.  Each color may be an ``#rrggbb`` or ``#rrggbbaa`` hex
+///     literal, or any of the 148 standard CSS named colors (e.g.
+///     ``"steelblue"``, ``"tomato"``, ``"cornflowerblue"``).
 ///     Endpoints ``(0.0, ...)`` and ``(1.0, ...)`` should be present.
 ///
 /// Returns
 /// -------
 /// ContinuousScheme
 ///     Scheme that interpolates linearly between adjacent stops.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If fewer than 2 stops are given, a ``t`` value is outside ``[0, 1]``
+///     or non-finite, the ``t`` values are not strictly increasing, or a
+///     color string fails to parse.
 ///
 /// Examples
 /// --------
@@ -256,6 +392,38 @@ impl PyContinuousScheme {
 #[pyfunction]
 #[allow(non_snake_case)]
 pub fn Gradient(stops: Vec<(f64, String)>) -> PyResult<PyContinuousScheme> {
+    // Spec reviewer cycle 3 (finding 2): fewer than 2 stops can't describe a
+    // gradient, and the pre-fix version constructed one anyway (only the
+    // color half of each pair was validated), silently rendering as if no
+    // scale had been given at all — a Python-reachable silent-fallback path
+    // this batch exists to close. Reject at the constructor, in the
+    // function's existing "Gradient: {e}" error convention, so the render
+    // side's own `len(stops) < 2` branch is genuinely unreachable except
+    // from a hand-written wire spec that bypasses this constructor.
+    if stops.len() < 2 {
+        return Err(PyValueError::new_err(format!(
+            "Gradient: need at least 2 stops, got {}",
+            stops.len()
+        )));
+    }
+    let ts: Vec<f64> = stops.iter().map(|(t, _)| *t).collect();
+    // Reuses scale::core's shared finite/ascending vocabulary (ThresholdScale
+    // and BinOrdinalScale's constructors, and the discretizing color
+    // resolver, all raise the identical "must be strictly sorted ascending"
+    // sentence for their own boundary lists) — a stop's `t` position is the
+    // same "ordered breakpoints" shape, so this fits without adaptation.
+    crate::scale::core::validate_finite("Gradient: t", &ts)?;
+    if let Some(bad) = ts.iter().find(|t| !(0.0..=1.0).contains(*t)) {
+        return Err(PyValueError::new_err(format!(
+            "Gradient: t must be within [0, 1]; got {bad}"
+        )));
+    }
+    if !crate::scale::core::is_strictly_ascending(&ts) {
+        return Err(PyValueError::new_err(format!(
+            "Gradient: {}",
+            crate::scale::core::not_strictly_ascending_message("stops (by t)")
+        )));
+    }
     let mut color_stops = Vec::with_capacity(stops.len());
     for (t, name) in stops {
         let color = crate::render::color::parse_color(&name)
@@ -372,5 +540,207 @@ mod tests {
         for name in &["reds", "greens", "oranges", "purples"] {
             assert!(NamedContinuous::from_name(name).is_some(), "{name} not found");
         }
+    }
+
+    #[test]
+    fn name_round_trips_through_from_name_for_every_listed_scheme() {
+        for &name in NamedContinuous::list() {
+            let variant = NamedContinuous::from_name(name).unwrap();
+            assert_eq!(variant.name(), name, "name() did not round-trip for {name}");
+        }
+    }
+
+    // --- F-L04-02: PyContinuousScheme constructible + serializable ---
+
+    #[test]
+    fn named_scheme_resolves_name_with_reverse_false() {
+        let s = ContinuousScheme::Named(NamedContinuous::Viridis);
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Named { name, reverse } => {
+                assert_eq!(name, "viridis");
+                assert!(!reverse);
+            }
+            SequentialWireForm::Gradient { .. } => panic!("expected Named"),
+        }
+    }
+
+    #[test]
+    fn reversed_named_scheme_carries_reverse_true() {
+        let s = ContinuousScheme::Reverse(Box::new(
+            ContinuousScheme::Named(NamedContinuous::Viridis)));
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Named { name, reverse } => {
+                assert_eq!(name, "viridis");
+                assert!(reverse);
+            }
+            SequentialWireForm::Gradient { .. } => panic!("expected Named"),
+        }
+    }
+
+    #[test]
+    fn double_reversed_named_scheme_cancels_back_to_false() {
+        let s = ContinuousScheme::Reverse(Box::new(ContinuousScheme::Reverse(Box::new(
+            ContinuousScheme::Named(NamedContinuous::Plasma)))));
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Named { name, reverse } => {
+                assert_eq!(name, "plasma");
+                assert!(!reverse);
+            }
+            SequentialWireForm::Gradient { .. } => panic!("expected Named"),
+        }
+    }
+
+    // --- F-L04-02 second revision: Gradient stops wire form ---
+
+    #[test]
+    fn gradient_scheme_resolves_stops_with_positions_in_order() {
+        let red = from_rgba(255, 0, 0, 255);
+        let blue = from_rgba(0, 0, 255, 255);
+        let s = ContinuousScheme::Gradient(vec![(0.0, red), (1.0, blue)]);
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Gradient { stops } => {
+                assert_eq!(
+                    stops,
+                    vec![(0.0, "#ff0000".to_string()), (1.0, "#0000ff".to_string())]
+                );
+            }
+            SequentialWireForm::Named { .. } => panic!("expected Gradient"),
+        }
+    }
+
+    /// Spec reviewer cycle-3 finding 1: a non-uniform `t` position must
+    /// survive to the wire form, not get re-spaced to `i / (n - 1)`.
+    #[test]
+    fn gradient_scheme_preserves_non_uniform_t_positions() {
+        let red = from_rgba(255, 0, 0, 255);
+        let green = from_rgba(0, 255, 0, 255);
+        let blue = from_rgba(0, 0, 255, 255);
+        let s = ContinuousScheme::Gradient(vec![(0.0, red), (0.9, green), (1.0, blue)]);
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Gradient { stops } => {
+                assert_eq!(
+                    stops,
+                    vec![
+                        (0.0, "#ff0000".to_string()),
+                        (0.9, "#00ff00".to_string()),
+                        (1.0, "#0000ff".to_string()),
+                    ]
+                );
+            }
+            SequentialWireForm::Named { .. } => panic!("expected Gradient"),
+        }
+    }
+
+    #[test]
+    fn reversed_gradient_scheme_composes_t_to_one_minus_t() {
+        let red = from_rgba(255, 0, 0, 255);
+        let green = from_rgba(0, 255, 0, 255);
+        let blue = from_rgba(0, 0, 255, 255);
+        let gradient = ContinuousScheme::Gradient(vec![(0.0, red), (0.9, green), (1.0, blue)]);
+        let s = ContinuousScheme::Reverse(Box::new(gradient));
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Gradient { stops } => {
+                // t -> 1 - t for every stop, re-ordered ascending: (1.0, red)
+                // becomes (0.0, red), (0.9, green) -> (0.1, green), (0.0, blue)
+                // -> (1.0, blue). Computed via subtraction (not a literal) to
+                // avoid a hand-typed float mismatch on the exact bit pattern
+                // `1.0 - 0.9` rounds to.
+                assert_eq!(
+                    stops,
+                    vec![
+                        (1.0 - 1.0, "#0000ff".to_string()),
+                        (1.0 - 0.9, "#00ff00".to_string()),
+                        (1.0 - 0.0, "#ff0000".to_string()),
+                    ]
+                );
+            }
+            SequentialWireForm::Named { .. } => panic!("expected Gradient"),
+        }
+    }
+
+    #[test]
+    fn double_reversed_gradient_scheme_cancels_back_to_forward_order() {
+        let red = from_rgba(255, 0, 0, 255);
+        let blue = from_rgba(0, 0, 255, 255);
+        let gradient = ContinuousScheme::Gradient(vec![(0.0, red), (1.0, blue)]);
+        let s = ContinuousScheme::Reverse(Box::new(ContinuousScheme::Reverse(Box::new(gradient))));
+        match s.to_sequential_wire_form() {
+            SequentialWireForm::Gradient { stops } => {
+                assert_eq!(
+                    stops,
+                    vec![(0.0, "#ff0000".to_string()), (1.0, "#0000ff".to_string())]
+                );
+            }
+            SequentialWireForm::Named { .. } => panic!("expected Gradient"),
+        }
+    }
+
+    #[test]
+    fn py_continuous_scheme_new_matches_from_name() {
+        // #[new] must apply the same validation/lookup as `from_name` — both
+        // are the constructor path `Color(scale=fm.ContinuousScheme("viridis"))`
+        // and `Color(scale=fm.continuous_palette("viridis"))` rely on.
+        let via_new = PyContinuousScheme::new("viridis").unwrap();
+        let via_from_name = PyContinuousScheme::from_name("viridis").unwrap();
+        assert_eq!(via_new.0, via_from_name.0);
+    }
+
+    #[test]
+    fn py_continuous_scheme_new_rejects_unknown_name() {
+        // `PyErr::to_string()` needs an initialized interpreter (fetches the
+        // traceback), which this crate's plain `cargo test` run doesn't set
+        // up (no other test in the crate calls `Python::with_gil`) — assert
+        // on the `Err` shape instead of the formatted message.
+        assert!(PyContinuousScheme::new("not-a-real-colormap").is_err());
+    }
+
+    // --- Spec reviewer cycle 3, finding 2: Gradient(...) degenerate-input rejection ---
+
+    #[test]
+    fn gradient_rejects_zero_stops() {
+        assert!(Gradient(vec![]).is_err());
+    }
+
+    #[test]
+    fn gradient_rejects_one_stop() {
+        assert!(Gradient(vec![(0.0, "red".to_string())]).is_err());
+    }
+
+    #[test]
+    fn gradient_rejects_t_below_zero() {
+        assert!(Gradient(vec![(-0.1, "red".to_string()), (1.0, "blue".to_string())]).is_err());
+    }
+
+    #[test]
+    fn gradient_rejects_t_above_one() {
+        assert!(Gradient(vec![(0.0, "red".to_string()), (1.1, "blue".to_string())]).is_err());
+    }
+
+    #[test]
+    fn gradient_rejects_non_finite_t() {
+        assert!(Gradient(vec![(f64::NAN, "red".to_string()), (1.0, "blue".to_string())]).is_err());
+    }
+
+    #[test]
+    fn gradient_rejects_descending_t() {
+        assert!(Gradient(vec![(0.5, "red".to_string()), (0.2, "blue".to_string())]).is_err());
+    }
+
+    #[test]
+    fn gradient_rejects_duplicate_t() {
+        // Strictly ascending, not merely non-decreasing — equal t values are
+        // rejected too, matching ThresholdScale/BinOrdinalScale's own
+        // strictly-ascending contract.
+        assert!(Gradient(vec![(0.5, "red".to_string()), (0.5, "blue".to_string())]).is_err());
+    }
+
+    #[test]
+    fn gradient_accepts_valid_ascending_stops() {
+        assert!(Gradient(vec![
+            (0.0, "red".to_string()),
+            (0.9, "green".to_string()),
+            (1.0, "blue".to_string()),
+        ])
+        .is_ok());
     }
 }
