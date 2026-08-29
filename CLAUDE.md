@@ -23,6 +23,7 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 | Run tests | `uv run pytest -n auto` |
 | Run scale tests | `uv run pytest -m slow` (10k–50k row tests, skipped by default) |
 | Rust-side tests | `DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo test` |
+| Clippy (core) | `DYLD_LIBRARY_PATH=$(uv run python -c "import sys; print(sys.base_prefix + '/lib')") cargo clippy -p ferrum-core -- -D warnings` |
 | Verify skeleton | `unset CONDA_PREFIX && uv run --no-sync python -c "from ferrum._core import ChartSpec; s=ChartSpec(mark='point', x='a', y='b'); assert s == ChartSpec.from_json(s.to_json()); print('OK')"` |
 | Build WASM module | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --out-dir ../../src/ferrum/_wasm/` |
 | Build WASM (release) | `source ~/.cargo/env && wasm-pack build crates/ferrum-wasm --target web --release --out-dir ../../src/ferrum/_wasm/` |
@@ -99,6 +100,10 @@ Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.to
 - **No global mutable state.** No module-level config objects, no module-level theme rebinding. Themes are values passed to `Chart`; per-chart `.theme()` always wins. The single documented exception is `ferrum.set_default_theme()` (phase 8a+), which mutates a per-thread `contextvars.ContextVar` — scope-bounded, automatic-revert when used as a context manager, and overridden by per-chart `.theme()` at render time. Do not introduce other process-scoped mutators.
 - **`ferrum-spec.md` is the API contract.** If implementation diverges, update the spec with a dated note. Never silently drift.
 - **`cargo test` must pass** before any phase (2+) is marked done. Phase 1 is the only exception.
+- **No seaborn, sklearn, yellowbrick, or scikit-plot imports in `src/ferrum/`.** They exist solely as gallery-audit comparators in isolated PEP 723 envs (see Gallery audit).
+- **No `unsafe` blocks** without clear justification documented in a comment.
+- **Seeded randomness only in transforms** (`rand_chacha`, seed threaded from the spec). Non-seeded randomness breaks byte-deterministic rendering.
+- **No unconditional `extension-module` feature.** Guard with `#[cfg(feature = "extension-module")]`; unconditional use breaks `cargo test`.
 - **Goldens are not blessed until visually inspected.** SVG byte-equality is necessary but not sufficient — historically goldens were committed that rendered with missing elements, blank panels, or mis-stacked bars, and the byte-diff tests still passed because the implementation matched the *broken* golden. Whenever you add or regenerate any `tests/goldens/**/*.svg` (or `tests/test_phase_9_e2e/goldens/*.svg`), you must rasterize it to PNG via `python scripts/snapshot-goldens.py <name>` (or `python scripts/snapshot-goldens.py` for all), `Read` each resulting PNG, and confirm the chart renders correctly **before committing**. The helpers live in `tests/_snapshots.py` (`snapshot_golden()`, `rasterize_svg()`, `find_goldens()`, and `regen_and_verify(golden_path, svg)` — the preferred entry point for regen scripts: writes the SVG, rasterizes the PNG, and prints both paths to stdout in a single call so the inspection PNG cannot be silently skipped). `resvg-py` (in the dev dependency group) is the rasterizer. **Caveat:** `resvg-py` silently drops paths when an SVG contains many thousands of polygon/path elements (observed at ~9.5k paths in dense KDE-contour fills). Before concluding a chart is broken from the PNG, sanity-check the SVG itself — `grep -oE 'd="M' tests/.../foo.svg | wc -l` — and look at the x-range of the first numeric coord on each path. A chart that looks like a tiny patch in the PNG but has thousands of paths spanning the plot extent in the SVG is a *renderer-side* truncation, not a real bug.
 - **Do not `git push`** unless the user explicitly asks.
 - **Confirm before committing to `main`** on non-trivial work. Phase 1 commits directly to main by user decision (greenfield); subsequent phases use feature branches unless the user says otherwise.
@@ -130,7 +135,7 @@ This rule governs all open phases; it does not retroactively reopen closed phase
 | Both Python and Rust | Dispatch both agents with clear boundaries; Python agent handles `.py`, Rust agent handles `.rs` |
 | Read-only exploration, search, or analysis | `Explore` agent (unchanged) |
 
-The coding agents internalize the review principles from `.claude/skills/python-review/` and `.claude/skills/rust-review/` respectively, so code should pass the lite-review gate on first attempt. The orchestrator still handles staging, lite-review dispatch, and commits.
+The coding agents are the chris-code plugin's `python-coder` / `rust-coder` (the repo-local copies were retired 2026-08-28 — the plugin versions carry the same inlined review principles plus the typed-record contract). They internalize their review principles in their own system prompts, so code should pass the lite-review gate on first attempt; the ferrum hard constraints and severity escalations in this file bind them too. The orchestrator still handles staging, lite-review dispatch, and commits.
 
 **Model selection:** Coding agents default to Sonnet (set in their frontmatter). Override to Opus via `model: "opus"` on the Agent call when the task requires significant architectural judgment — e.g., cross-subsystem refactors, complex Rust lifetime/type reasoning, or tasks that would otherwise need multiple re-dispatches.
 
@@ -158,8 +163,8 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Rust extension crate | `crates/ferrum-core/` |
 | Python tests | `tests/` |
 | Golden SVG → PNG snapshot helper | `scripts/snapshot-goldens.py`, `tests/_snapshots.py` |
-| **Coding agents** | **`.claude/agents/{python,rust}-coder.md`** |
-| Lightweight review agents | `.claude/agents/{python,rust}-review-lite.md` |
+| **Coding agents** | **chris-code plugin `python-coder` / `rust-coder`** (local copies retired 2026-08-28) |
+| Lightweight review agents | chris-code plugin `{python,rust}-review-lite` (local copies retired 2026-08-28) |
 | Review verdicts (gitignored) | `.claude/output/review-lite/` |
 | Heavyweight code-review skills | `.claude/skills/{python,rust}-review/` |
 | Gallery audit skill | `.claude/skills/audit-gallery/` |
@@ -305,6 +310,16 @@ A reproducible side-by-side audit of ferrum's default plot output against canoni
 ## Code-quality guardrails
 
 Commit gates and review-lite dispatch are handled by the chris-code plugin (`executing-plans`, `subagent-driven-development`). The rules below are ferrum-specific escalation triggers that go beyond the plugin's defaults.
+
+### Ferrum severity escalations (applied by the commit gates)
+
+The review gates read this file; these hard-constraint violations map to fixed severities regardless of how small the diff is:
+
+- New `matplotlib` / `seaborn` / `sklearn` / `yellowbrick` / `scikit-plot` import in `src/ferrum/**` → **S5**.
+- New `NotImplementedError` or warn-fallback in a chart factory or other Phase 9+ code → **S4**.
+- New `unsafe` block in `ferrum-core` → **S4** minimum; **S5** if it touches data crossing the PyO3 boundary.
+- New non-seeded randomness (`rand::thread_rng`, `SystemRandom`, platform RNG) inside a transform → **S5** (byte-deterministic rule).
+- Unconditional `extension-module` feature use → **S5** (breaks `cargo test`).
 
 **Exception:** Documentation-only changes (`*.md`, `docs/**`, or comments-only diffs in source files) can commit without review-lite dispatch.
 

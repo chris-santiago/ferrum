@@ -137,23 +137,23 @@ User request (coding task)
 
 ## Layer 1 — Coding agents
 
-General-purpose coding agents dispatched by the orchestrator for **all** coding tasks. They embed the review principles from the corresponding heavyweight review skill so code passes the lite-review gate on first attempt.
+General-purpose coding agents dispatched by the orchestrator for **all** coding tasks. As of 2026-08-28 these are the **chris-code plugin's** agents (the repo-local copies were retired: they had drifted behind the plugin's typed-record contract, and their ferrum-specific rules now live in `CLAUDE.md`, which binds every agent running in this repo). They embed their review principles in their own system prompts so code passes the lite-review gate on first attempt.
 
 **Dispatch rule (enforced in CLAUDE.md):** Never use `general-purpose`, `claude`, or `Explore` agents for code that writes or modifies `.py` or `.rs` files.
 
 ### `python-coder`
 
-**File:** `agents/python-coder.md`
+**Source:** chris-code plugin `agents/python-coder.md` (repo-local copy retired 2026-08-28)
 
-General-purpose Python coding agent. Handles features, bug fixes, refactors, and tests in `src/ferrum/`, `tests/`, and `scripts/`. Embeds all 9 operating principles, 12 refactoring heuristics, and the S1–S5 self-review checklist from `/python-review`.
+General-purpose Python coding agent. Handles features, bug fixes, refactors, and tests in `src/ferrum/`, `tests/`, and `scripts/`. Embeds its operating principles, refactoring heuristics, and the S1–S5 self-review checklist in its system prompt; writes a typed record when dispatched inside SDD.
 
 **Tools:** Read, Edit, Write, Bash, Glob, Grep, Agent
 
 ### `rust-coder`
 
-**File:** `agents/rust-coder.md`
+**Source:** chris-code plugin `agents/rust-coder.md` (repo-local copy retired 2026-08-28)
 
-General-purpose Rust coding agent. Handles features, bug fixes, refactors, and tests in `crates/ferrum-core/` and `crates/ferrum-wasm/`. Embeds all 10 operating principles, 10 refactoring heuristics, and the S1–S5 self-review checklist from `/rust-review`.
+General-purpose Rust coding agent. Handles features, bug fixes, refactors, and tests in `crates/ferrum-core/` and `crates/ferrum-wasm/`. Embeds its operating principles, refactoring heuristics, and the S1–S5 self-review checklist in its system prompt; writes a typed record when dispatched inside SDD.
 
 **Tools:** Read, Edit, Write, Bash, Glob, Grep, Agent
 
@@ -165,18 +165,18 @@ Read-only agents dispatched by the orchestrator **before every commit** that tou
 
 ### `python-review-lite`
 
-**File:** `agents/python-review-lite.md`
+**Source:** chris-code plugin `agents/python-review-lite.md` (repo-local copy retired 2026-08-28; the ferrum-specific S5/S4 rules it carried now live in CLAUDE.md's "Ferrum severity escalations")
 
-Reviews staged `*.py` diff against a 10-item idiom checklist + `ruff`. Returns `clean` / `block` / `escalate`.
+Reviews staged `*.py` diff against a trimmed idiom checklist + `ruff`, honoring CLAUDE.md's ferrum severity escalations. Returns `clean` / `block` / `escalate`.
 
 **Verdict path:** `.claude/output/review-lite/<ISO-timestamp>_python.md`
 **Tools:** Read, Grep, Glob, Bash
 
 ### `rust-review-lite`
 
-**File:** `agents/rust-review-lite.md`
+**Source:** chris-code plugin `agents/rust-review-lite.md` (repo-local copy retired 2026-08-28; the ferrum-specific S5/S4 rules it carried now live in CLAUDE.md's "Ferrum severity escalations")
 
-Reviews staged `*.rs` diff against an 11-item idiom checklist + `cargo clippy -D warnings`. Returns `clean` / `block` / `escalate`.
+Reviews staged `*.rs` diff against a trimmed idiom checklist + `cargo clippy -D warnings` (use the Clippy (core) command from CLAUDE.md's build table), honoring CLAUDE.md's ferrum severity escalations. Returns `clean` / `block` / `escalate`.
 
 **Verdict path:** `.claude/output/review-lite/<ISO-timestamp>_rust.md`
 **Tools:** Read, Grep, Glob, Bash
