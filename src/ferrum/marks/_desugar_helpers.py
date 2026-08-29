@@ -38,6 +38,46 @@ SHAP_ORDER_VALUES: tuple[str, ...] = ("abs_mean", "mean", "max", "none")
 SHAP_BEESWARM_COLOR_FIELD = "Feature value"
 
 
+def nominal_color_channel(field_name: str | None):
+    """Bind *field_name* to the color channel typed Nominal, or return
+    ``None`` unchanged when *field_name* is ``None``.
+
+    Shared by every diagnostic desugar that groups per-class/per-group
+    polylines (or ribbon/rule CI bands) by a caller-named discriminator
+    column on a line-or-ribbon mark: the classification-curve family
+    (roc/pr/gain/lift/calibration, ``marks/diagnostic/_classification.py``),
+    PDP/ICE (``marks/diagnostic/_explanation.py``), learning/validation
+    curve CI bands + mean lines (``marks/diagnostic/_selection.py``), and
+    parallel coordinates (``marks/diagnostic/_ranking.py``).
+
+    Left untyped, a plain string field name infers its scale type from the
+    column's runtime dtype: a numeric dtype (e.g. an integer class/model-id
+    column, or any caller-supplied ``color_field`` override that happens to
+    be numeric) infers Quantitative -> Continuous, which is inert on a line
+    or ribbon mark and trips the ``UnsupportedColorScaleOnMark`` warning
+    (the colorbar is suppressed instead of a per-group symbol legend, and
+    on some marks the per-group polylines collapse into one). Every one of
+    these desugars' discriminator fields is categorical in intent regardless
+    of runtime dtype -- a Continuous color scale was never a legitimate
+    reading of "which curve/segment does this row belong to" -- so bind it
+    Nominal explicitly. This also keeps a Utf8-typed column byte-identical,
+    since Nominal is what it would already infer to.
+
+    The ``None`` pass-through lets call sites that build an encoding dict
+    literal (e.g. ``desugar_learning_curve``'s CI-band/line layers, which do
+    not gate the assignment behind ``if color_field is not None``) call this
+    unconditionally: ``_build_layers_list`` already drops an encoding
+    channel whose resolved field is falsy, so a ``None`` here reaches the
+    same "channel absent" outcome a bare ``None`` value did before this
+    helper existed.
+    """
+    if field_name is None:
+        return None
+    from ferrum.encoding import Color
+
+    return Color(field_name, type_="nominal")
+
+
 def shap_beeswarm_color_channel(*, color_bar: bool):
     """Return the ``Color(...)`` channel shared by both places that need it.
 

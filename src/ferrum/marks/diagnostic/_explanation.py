@@ -7,6 +7,7 @@ from typing import Any
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._validate import validate_choice
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -348,7 +349,7 @@ def desugar_pdp(
         # Single polyline per feature, color-coded by feature when faceted.
         line_enc: dict[str, Any] = {"x": "feature_value", "y": "pd_value"}
         if color_field is not None:
-            line_enc["color"] = color_field
+            line_enc["color"] = nominal_color_channel(color_field)
         layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
         return MarkDesugarResult(layers=_apply(layers, user_kw))
 
@@ -363,7 +364,7 @@ def desugar_pdp(
             "y": _Y("pd_value", title="pd_value"),
         }
         if color_field is not None:
-            line_enc["color"] = color_field
+            line_enc["color"] = nominal_color_channel(color_field)
         layers = [
             _Layer(
                 name="ice",
@@ -386,13 +387,13 @@ def desugar_pdp(
         "y": _Y("_pd_ice_value", title="pd_value"),
     }
     if color_field is not None:
-        ice_enc["color"] = color_field
+        ice_enc["color"] = nominal_color_channel(color_field)
     avg_enc: dict[str, Any] = {
         "x": "feature_value",
         "y": "_pd_avg_value",
     }
     if color_field is not None:
-        avg_enc["color"] = color_field
+        avg_enc["color"] = nominal_color_channel(color_field)
     layers = [
         _Layer(
             name="ice",

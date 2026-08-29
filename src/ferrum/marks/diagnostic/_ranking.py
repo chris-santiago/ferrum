@@ -7,6 +7,7 @@ from typing import Any
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._validate import validate_choice
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -126,7 +127,7 @@ def desugar_parallel_coordinates(
     user_kw = _validate("parallel_coordinates", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "feature", "y": "value"}
     if color_field is not None:
-        line_enc["color"] = color_field
+        line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [
         _Layer(
             name="line",

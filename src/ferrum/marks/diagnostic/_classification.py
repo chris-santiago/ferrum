@@ -6,6 +6,8 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.encoding import Color
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -55,7 +57,7 @@ def desugar_roc(
     user_kw = _validate("roc", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
-        line_enc["color"] = color_field
+        line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
     if reference_line:
         layers.append(
@@ -73,7 +75,7 @@ def desugar_roc(
             "text": "_auc_label",
         }
         if color_field is not None:
-            text_enc["color"] = color_field
+            text_enc["color"] = nominal_color_channel(color_field)
         layers.append(
             _Layer(
                 name="auc_label",
@@ -130,7 +132,7 @@ def desugar_pr(
     user_kw = _validate("pr", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
-        line_enc["color"] = color_field
+        line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
     if iso_lines:
         # Iso-F lines are rendered as a separate line layer grouped by
@@ -167,7 +169,7 @@ def desugar_pr(
             "text": "_ap_label",
         }
         if color_field is not None:
-            text_enc["color"] = color_field
+            text_enc["color"] = nominal_color_channel(color_field)
         layers.append(
             _Layer(
                 name="ap_label",
@@ -214,7 +216,7 @@ def desugar_calibration(
         "y": "fraction_positive",
     }
     if color_field is not None:
-        line_enc["color"] = color_field
+        line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
     transforms: list = []
     if reference_line:
@@ -265,7 +267,7 @@ def desugar_gain(
     user_kw = _validate("gain", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
-        line_enc["color"] = color_field
+        line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
 
@@ -293,7 +295,7 @@ def desugar_lift(
     user_kw = _validate("lift", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
-        line_enc["color"] = color_field
+        line_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="line", mark="line", encoding=line_enc)]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
 
@@ -422,8 +424,6 @@ def desugar_confusion(
     ``cmap`` selects the sequential colormap applied to the heat cells.
     ``None`` (default) defers to the theme's sequential scheme.
     """
-    from ferrum.encoding import Color
-
     del x_field, y_field
     # normalize is informational at the mark layer -- see the docstring
     # above and ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS,

@@ -8,6 +8,7 @@ from typing import Any
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._validate import validate_choice
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -69,7 +70,7 @@ def desugar_learning_curve(
                 "x": x_axis,
                 "y": y_axis,
                 "y2": "upper",
-                "color": color_field,
+                "color": nominal_color_channel(color_field),
             },
             mark_kwargs={"opacity": 0.3},
         )
@@ -82,13 +83,13 @@ def desugar_learning_curve(
                 "x": x_axis,
                 "y": y_axis,
                 "y2": "upper",
-                "color": color_field,
+                "color": nominal_color_channel(color_field),
             },
         )
     line_enc: dict[str, Any] = {
         "x": "train_size",
         "y": "mean_score",
-        "color": color_field,
+        "color": nominal_color_channel(color_field),
     }
     layers = [ci_layer, _Layer(name="line", mark="line", encoding=line_enc)]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
@@ -140,7 +141,7 @@ def desugar_validation_curve(
                 "x": x_ch,
                 "y": y_axis,
                 "y2": "upper",
-                "color": color_field,
+                "color": nominal_color_channel(color_field),
             },
             mark_kwargs={"opacity": 0.3},
         )
@@ -153,7 +154,7 @@ def desugar_validation_curve(
                 "x": x_ch,
                 "y": y_axis,
                 "y2": "upper",
-                "color": color_field,
+                "color": nominal_color_channel(color_field),
             },
         )
     layers = [
@@ -161,7 +162,11 @@ def desugar_validation_curve(
         _Layer(
             name="line",
             mark="line",
-            encoding={"x": "param_value", "y": "mean_score", "color": color_field},
+            encoding={
+                "x": "param_value",
+                "y": "mean_score",
+                "color": nominal_color_channel(color_field),
+            },
         ),
     ]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
