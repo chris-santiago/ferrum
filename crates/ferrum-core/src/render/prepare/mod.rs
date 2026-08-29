@@ -702,15 +702,41 @@ pub fn prepare_render_inputs(
 
     // Color legend / colorbar / aux-legend construction (categorical entries,
     // continuous colorbar, conditional-color fallback, per-channel style
-    // overrides, size/shape aux legends, and the same-field color+size merge).
-    // See `legend::build_color_legend` for the full behavior.
+    // overrides, size/shape aux legends, the same-field color+size merge, and
+    // the line/ribbon inert-continuous-color suppression — the last needs
+    // `layers` (built above) to see the mark set consuming the shared color
+    // scale, and `scale_warnings` (already live from `build_axes` above) as
+    // its warnings sink. See `legend::build_color_legend` for the full
+    // behavior.
+    //
+    // `composite_color_has_non_line_ribbon_sibling` (T5b static-composite
+    // fix, spec §4.0's second bullet): under the composite path, `layers`
+    // above only ever sees THIS leaf's own marks — a sibling leaf elsewhere
+    // in an Overlay group (e.g. `fm.layer(line(color=v), point(color=v))`)
+    // is invisible to it, since each leaf renders through its own standalone
+    // `prepare_render_inputs` call. `leaf_scales` (the composite seam,
+    // `render::composite_render::plan_line_ribbon_color_group_exemptions`)
+    // is the one place that already sees the whole group, so its verdict is
+    // read here and threaded down as the extra bit `build_color_legend`
+    // needs. `false` for every standalone (flat/facet) render, since
+    // `leaf_scales` is `None` there.
+    let composite_color_has_non_line_ribbon_sibling = leaf_scales
+        .map(|c| c.color_scale_has_non_line_ribbon_sibling)
+        .unwrap_or(false);
     let legend::ColorLegendBundle {
         legend_entries,
         colorbar,
         legend_title,
         legend_overrides,
         aux_legends,
-    } = legend::build_color_legend(spec, &transformed, &provisional_scales);
+    } = legend::build_color_legend(
+        spec,
+        &transformed,
+        &provisional_scales,
+        &layers,
+        composite_color_has_non_line_ribbon_sibling,
+        &mut scale_warnings,
+    );
 
     Ok(PreparedInputs {
         transform_outputs,

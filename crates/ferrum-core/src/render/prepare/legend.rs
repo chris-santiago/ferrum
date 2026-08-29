@@ -95,10 +95,26 @@ fn resolve_conditional_color_domain(spec: &ChartSpec, transformed: &RecordBatch)
 /// Then derives the legend title, extracts the per-channel legend style
 /// overrides, builds the size/shape aux legends, and applies the same-field
 /// color+size merge (which suppresses the now-redundant colorbar).
+///
+/// `layers` is this panel's prepared layer list (from `build_layers`, already
+/// available at the caller before this is invoked) — the single coherent
+/// point where the color-legend decision can see the mark set consuming the
+/// resolved color scale, which `provisional_scales` alone cannot (spec §4.0,
+/// 2026-08-28: line/ribbon's inert-continuous-color suppression, see
+/// [`inert_numeric_color_on_line_or_ribbon_only`]). Under the composite path
+/// `layers` only ever sees THIS leaf's own marks; `composite_color_has_non_line_ribbon_sibling`
+/// is the composite seam's verdict on whether a sibling leaf ELSEWHERE in the
+/// same Overlay group renders the shared scale (spec-review 2026-08-28
+/// finding — `render::composite_render::plan_line_ribbon_color_group_exemptions`).
+/// `warnings` is the panel's live warnings sink (mirrors `build_axes`'s
+/// `&mut scale_warnings` at the same call site).
 pub(crate) fn build_color_legend(
     spec: &ChartSpec,
     transformed: &RecordBatch,
     provisional_scales: &ResolvedScales,
+    layers: &[super::LayerPrepared],
+    composite_color_has_non_line_ribbon_sibling: bool,
+    warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> ColorLegendBundle {
     use super::super::scale_resolve::ColorScale;
 
@@ -343,29 +359,116 @@ pub(crate) fn build_color_legend(
         title_padding: color_legend.and_then(|l| l.title_padding),
     };
 
+    // spec §4.0 (2026-08-28) / spec-review 2026-08-28 (cycle-3 finding):
+    // computed HERE, before `build_aux_legends`, so the same-field color+size
+    // merge below can also see it — a merge whose color scale is inert on
+    // line/ribbon must not sample it into the size legend's swatches either
+    // (the size legend renders in the neutral/default swatch color, exactly
+    // as if no color merge existed — size's own semantics on line stay a
+    // separate follow-up, out of this wave). Reused again below for the
+    // warning itself, so it is computed exactly once.
+    let inert_consumer_marks = inert_numeric_color_on_line_or_ribbon_only(
+        provisional_scales,
+        layers,
+        composite_color_has_non_line_ribbon_sibling,
+    );
+
     // Multivariate B1: build size/shape auxiliary legends from the resolved
     // scales. A size/shape channel that shares its field with the color channel
     // is merged into the color legend rather than emitted as a separate block.
-    let aux_legends = build_aux_legends(spec, provisional_scales);
+    let aux_legends = build_aux_legends(spec, provisional_scales, inert_consumer_marks.is_some());
 
     // Same-field merge: when color (continuous) and size share a field, the
     // combined block is the size legend whose symbols also carry color
     // (`color_hex`). Suppress the now-redundant colorbar so a single combined
     // legend renders rather than a colorbar plus a size legend.
+    //
+    // Detected as the AND of two conditions (spec-review 2026-08-28, cycle-4
+    // finding, correcting cycle 3): `same_field_numeric_size_color_merge`
+    // alone only proves the FIELD/SCALE-KIND condition holds — it says
+    // nothing about whether `build_aux_legends` actually emitted a merged
+    // Size block. Size legend emission has its own independent gates
+    // (`legend_channel_disabled`, `scales.size.is_some()`,
+    // `size_scale.inner.data_domain()` returning `Some`, non-empty entries),
+    // any of which can make `aux_legends` carry NO `Size` entry even though
+    // the field/scale-kind condition holds — e.g. `mark_point().encode(
+    // color='v:Q', size=Size('v', legend=None))`. Nulling the colorbar in
+    // that case would drop the chart's ONLY color legend for a merge that
+    // never actually happened. Checking for an emitted `AuxLegendInput::Size`
+    // block (rather than reintroducing the `color_hex.is_some()` coupling
+    // cycle 3 correctly broke — that signal is unreliable now that inert
+    // line/ribbon withholds `color_hex` even when Size WAS emitted) captures
+    // exactly "a merged block a user will actually see" without re-deriving
+    // any of `build_aux_legends`'s own emission gates here.
+    //
+    // Keeping the merge (not the inert-check below) as the nuller when both
+    // conditions hold also keeps the warning's `suppressed` field `false`
+    // for the inert-line/ribbon case, per the cycle-2 adjudicated ruling:
+    // the merge, not the inert check, is the one redirecting the legend.
     let colorbar = {
-        let merged_color_size = aux_legends.iter().any(|a| {
-            matches!(
-                a,
-                AuxLegendInput::Size { entries, .. }
-                    if entries.iter().any(|e| e.color_hex.is_some())
-            )
-        });
+        let merged_color_size = same_field_numeric_size_color_merge(spec, provisional_scales)
+            && aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. }));
         if merged_color_size {
             None
         } else {
             colorbar
         }
     };
+
+    // spec §4.0 (2026-08-28), decoupled per the 2026-08-28 spec-review
+    // ruling: loudness is a property of the CHANNEL, not of whether a
+    // colorbar happens to render. A Continuous/Discretizing color scale is
+    // inert on line/ribbon (no per-segment color) whenever EVERY consumer of
+    // it draws with one of those marks — that is true (and the warning must
+    // fire) regardless of `colorbar`'s current state: `Color(v, legend=None)`
+    // warns even though no colorbar was ever built, and the same-field
+    // color+size merge above warns even though ITS colorbar was already
+    // nulled (that case's size legend still carries the inert scale's
+    // colored swatches — observed behavior, no change here). Colorbar
+    // suppression is the ADDITIONAL consequence, applied unconditionally
+    // alongside the warning (a no-op when `colorbar` was already `None`).
+    let colorbar = if let Some(consumer_marks) = inert_consumer_marks {
+        use super::super::scale_resolve::ColorScale;
+        // Explicit arms, no wildcard (spec-review 2026-08-28, cycle-4
+        // finding): `inert_numeric_color_on_line_or_ribbon_only` already
+        // proved `provisional_scales.color` is `Some(Continuous | Discretizing)`
+        // via `ColorScale::input() == ColorInput::Numeric`, so the remaining
+        // arms are unreachable today — but naming them explicitly rather
+        // than `_ =>` means a FUTURE numeric-keyed `ColorScale` variant fails
+        // to compile here (forcing an explicit decision) instead of silently
+        // falling through the wildcard into a runtime panic on a path
+        // reachable from the `render_svg`/`render_composite_svg` PyO3 entries.
+        let scale_kind = match &provisional_scales.color {
+            Some(ColorScale::Continuous { .. }) => "continuous",
+            Some(ColorScale::Discretizing(_)) => "discretizing",
+            Some(ColorScale::Categorical { .. }) | None => {
+                unreachable!("inert_numeric_color_on_line_or_ribbon_only already confirmed a Numeric-keyed scale")
+            }
+        };
+        let mut marks: Vec<String> = Vec::new();
+        for m in &consumer_marks {
+            let name = m.as_str().to_string();
+            if !marks.contains(&name) {
+                marks.push(name);
+            }
+        }
+        // 2026-08-28 spec-review ruling: the message must only claim a
+        // legend was suppressed when one actually existed to suppress —
+        // captured BEFORE nulling `colorbar` below, so `legend=None` and the
+        // same-field color+size merge (whose colorbar was already `None`
+        // when this arm runs) get the accurate "no per-mark effect" wording
+        // instead of a false suppression claim.
+        let suppressed = colorbar.is_some();
+        warnings.push(crate::render::RenderWarning::UnsupportedColorScaleOnMark {
+            marks,
+            scale_kind: scale_kind.to_string(),
+            suppressed,
+        });
+        None
+    } else {
+        colorbar
+    };
+
     let legend_title = if colorbar.is_none() && legend_entries.is_empty() {
         None
     } else {
@@ -396,6 +499,33 @@ fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String>
     explicit.or_else(|| Some(enc.field.clone()))
 }
 
+/// Whether the size channel shares its field with a Numeric-keyed
+/// (`Continuous`/`Discretizing`) color encoding — the same-field merge
+/// FIELD/SCALE-KIND condition, computed once so [`build_aux_legends`]
+/// (whether to sample `color_hex` into the swatches) and its caller (whether
+/// the merge is even a *candidate* to null the colorbar) read one answer
+/// rather than recomputing it independently and risking drift.
+///
+/// This is necessary but not SUFFICIENT for "a merged legend was actually
+/// emitted" — the caller must additionally confirm `build_aux_legends`
+/// actually pushed a `Size` block (size could still be disabled, unscaled,
+/// or empty-domained; see the cycle-4 finding on the colorbar-nulling call
+/// site). Independent of whether the color scale later turns out inert on
+/// line/ribbon — that only gates the SWATCH color, not whether a merge
+/// condition holds at all (spec-review 2026-08-28, cycle-3 finding).
+fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales) -> bool {
+    use super::super::scale_resolve::{ColorInput, ColorScale};
+    let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
+    let color_is_numeric =
+        scales.color.as_ref().map(ColorScale::input) == Some(ColorInput::Numeric);
+    let same_field_as_color = spec
+        .encoding
+        .size
+        .as_ref()
+        .is_some_and(|size_enc| color_field == Some(size_enc.field.as_str()));
+    same_field_as_color && color_is_numeric
+}
+
 /// Build the size/shape auxiliary legend blocks.
 ///
 /// Size: graduated symbols at ~5 nice round values spanning the size domain
@@ -408,7 +538,21 @@ fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String>
 /// expected to be suppressed by the caller — a single combined block. A size or
 /// shape channel that shares its field with a categorical color encoding is
 /// suppressed entirely (the color legend already labels that field).
-fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegendInput> {
+///
+/// `color_is_inert_on_line_or_ribbon` (spec-review 2026-08-28, cycle-3
+/// finding): when `true`, the same-field merge still emits the size legend
+/// (its own semantics on line/ribbon are a separate follow-up, out of this
+/// wave — size is NOT suppressed) but never samples `color_hex` from the
+/// color scale the warning already judged inert: painting graduated swatches
+/// from a scale line/ribbon doesn't honor would repeat the exact misleading
+/// promise spec §4.0 suppresses the colorbar for. Swatches fall back to the
+/// neutral/default color, i.e. a plain size legend, byte-identical to the
+/// no-color-merge case.
+fn build_aux_legends(
+    spec: &ChartSpec,
+    scales: &ResolvedScales,
+    color_is_inert_on_line_or_ribbon: bool,
+) -> Vec<AuxLegendInput> {
     use crate::render::format::format_with_spec;
     use crate::scale::ticks::nice_ticks;
 
@@ -417,10 +561,16 @@ fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegend
     let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
     // Numeric color (continuous or discretizing): the size legend can sample it
     // per value via `lookup_f64`, so a shared field merges into one block.
-    // Categorical color enumerates the field itself, so the aux legend is
+    // Categorical color enumerates the field instead, so the aux legend is
     // suppressed instead.
     let color_is_numeric =
         scales.color.as_ref().map(ColorScale::input) == Some(ColorInput::Numeric);
+    // The full field+scale-kind merge condition, read from the shared
+    // predicate (S1 dedup, spec-review cycle-4) rather than recomputed here —
+    // `same_field_as_color` still needs to stand alone below for the
+    // categorical-suppression branch, which asks a different question
+    // (same field but NOT numeric).
+    let numeric_merge = same_field_numeric_size_color_merge(spec, scales);
 
     let mut out = Vec::new();
 
@@ -447,8 +597,10 @@ fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegend
                         }
                         // Merge color+size on the same continuous field: sample
                         // the color scale at the value so the symbol varies in
-                        // both radius and color.
-                        let color_hex = if same_field_as_color && color_is_numeric {
+                        // both radius and color — UNLESS that color scale was
+                        // judged inert on line/ribbon (spec-review cycle-3),
+                        // in which case swatches stay the neutral default.
+                        let color_hex = if numeric_merge && !color_is_inert_on_line_or_ribbon {
                             scales
                                 .color
                                 .as_ref()
@@ -503,6 +655,90 @@ fn build_aux_legends(spec: &ChartSpec, scales: &ResolvedScales) -> Vec<AuxLegend
     out
 }
 
+/// The mark set of every layer that consumes the resolved color scale, when
+/// that scale is `Continuous`/`Discretizing` (`ColorInput::Numeric`) AND
+/// every one of those layers draws with `Mark::Line` or `Mark::Ribbon` — the
+/// two stroke-continuous marks that cannot render a per-value color today
+/// (spec §4.0, 2026-08-28: line/ribbon fail loudly on this combination
+/// rather than silently rendering a colorbar nothing honors). Returns `None`
+/// (no suppression, no warning) in every other case:
+/// - the scale is `Categorical`, or absent — line/ribbon's categorical color
+///   grouping (NF-A3) is unaffected by this check.
+/// - no layer's (post-inheritance) `encoding.color` is bound — nothing
+///   consumes the scale from this panel's mark set.
+/// - at least one color-consuming layer's mark is something other than
+///   line/ribbon (e.g. `point`) — that layer genuinely renders the mapping,
+///   so the colorbar stays truthful and the caller must not warn.
+///
+/// A "consumer" is any layer whose `encoding.color` resolved to `Some` AND
+/// binds the SAME field the resolved `scales.color` scale was built from —
+/// field-keyed (spec-review 2026-08-28, cycle-2 finding 2 corrected the
+/// composite path this way; cycle-4 finding 2 extends it here so the flat
+/// path — which also serves `LayerChart.interactive()` — agrees). The
+/// resolved field is `layers[0]`'s own color field: `prepare_render_inputs`
+/// feeds `layers[0].encoding` into scale resolution
+/// (`rendering_encoding = layers[0].encoding.clone()`), so that is
+/// definitionally the field `scales.color` was resolved from.
+/// `LayerPrepared::from_chart_and_layer` clones each layer's own encoding,
+/// so per-layer color fields genuinely differ in a merged multi-layer spec
+/// (`fm.layer(line(color='v:Q'), point(color='g:N'))`) — without field-keying,
+/// the point layer's unrelated `g` binding would count as "consuming" the
+/// `v` scale it never reads, wrongly exempting line's inert `v` channel.
+///
+/// Beyond the field match, a consumer's `encoding.color` may be its own
+/// declaration or inherited from the chart level — the same signal every
+/// other color consumer in this pipeline reads (`LayerPrepared::color_is_own`'s
+/// doc comment: "`encoding.color` itself is ALWAYS fully inherited... so
+/// every consumer that reads it directly... sees exactly what main sees").
+/// `color_is_own` itself is NOT the right signal here: it answers "did this
+/// layer ask for color", not "does this layer's resolved encoding include
+/// it" — a layer inheriting color purely from the chart level still paints
+/// by it (as long as it's the same field).
+///
+/// `composite_exempt` short-circuits to `None` regardless of the local mark
+/// set: under the composite path, `layers` only ever contains THIS leaf's
+/// own marks, so a sibling leaf elsewhere in the same Overlay group (e.g.
+/// `fm.layer(line(color=v), point(color=v))`) is invisible to the check
+/// above — the composite seam (`render::composite_render::
+/// plan_line_ribbon_color_group_exemptions`, threaded down via
+/// `LeafScaleContext::color_scale_has_non_line_ribbon_sibling`) already
+/// determined that sibling renders the mapping, so this leaf must not warn
+/// either (spec-review 2026-08-28 finding). `false` for every standalone
+/// (flat/facet) render.
+fn inert_numeric_color_on_line_or_ribbon_only(
+    scales: &ResolvedScales,
+    layers: &[super::LayerPrepared],
+    composite_exempt: bool,
+) -> Option<Vec<crate::spec::mark::Mark>> {
+    use super::super::scale_resolve::{ColorInput, ColorScale};
+    use crate::spec::mark::Mark;
+
+    if composite_exempt {
+        return None;
+    }
+    let is_numeric = scales.color.as_ref().map(ColorScale::input) == Some(ColorInput::Numeric);
+    if !is_numeric {
+        return None;
+    }
+    // The field the resolved color scale was actually built from — see the
+    // doc comment above. `layers[0]` always exists (`build_layers` never
+    // returns an empty `Vec`); if it has no color bound, `scales.color`
+    // could not have resolved (the `is_numeric` check above would have
+    // already returned `None`), so this is unreachable as `None` in
+    // practice but handled defensively rather than indexed/unwrapped.
+    let resolved_field = layers.first().and_then(|l| l.encoding.color.as_ref()).map(|e| e.field.as_str())?;
+    let consumers: Vec<Mark> = layers
+        .iter()
+        .filter(|l| l.encoding.color.as_ref().map(|e| e.field.as_str()) == Some(resolved_field))
+        .map(|l| l.mark)
+        .collect();
+    if !consumers.is_empty() && consumers.iter().all(|m| matches!(m, Mark::Line | Mark::Ribbon)) {
+        Some(consumers)
+    } else {
+        None
+    }
+}
+
 /// Format a single colorbar tick value into a short human-readable label.
 /// Picks decimal precision from the domain span so that small ranges still
 /// show enough digits and large ranges don't waste pixels on noise.
@@ -536,6 +772,7 @@ fn format_colorbar_tick(value: f64, lo: f64, hi: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::prepare::LayerPrepared;
     use crate::render::scale_resolve::ColorScale;
     use crate::spec::mark::Mark;
     use ferrum_scene::{ConditionalEncoding, EncodingValue};
@@ -643,6 +880,30 @@ mod tests {
         RecordBatch::new_empty(std::sync::Arc::new(arrow::datatypes::Schema::empty()))
     }
 
+    /// A `LayerPrepared` fixture with the given mark and (optionally bound)
+    /// color field — for the T5b line/ribbon inert-color-suppression tests,
+    /// which need to construct specific mark sets directly rather than going
+    /// through `build_layers`/Python lowering.
+    fn layer_with_mark_and_color(mark: Mark, color_field: Option<&str>) -> LayerPrepared {
+        LayerPrepared {
+            mark,
+            encoding: crate::spec::encoding::Encoding {
+                color: color_field.map(|f| crate::spec::encoding::EncodingSpec {
+                    field: f.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            independent_y: false,
+            color_is_own: color_field.is_some(),
+        }
+    }
+
     /// A discretizing color scale renders k flat swatches — two gradient stops
     /// per bucket at its own edges — plus one label per bucket boundary, so the
     /// labels the layout distributes linearly land on the band edges.
@@ -656,8 +917,10 @@ mod tests {
         )
         .unwrap();
         let scales = scales_with_color(ColorScale::Discretizing(buckets));
-        let bundle =
-            build_color_legend(&spec_with_color_field("v"), &empty_batch(), &scales);
+        let spec = spec_with_color_field("v");
+        let layers = vec![LayerPrepared::from_chart_only(&spec)];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
 
         assert!(bundle.legend_entries.is_empty(), "buckets render as a colorbar");
         let cb = bundle.colorbar.expect("discretizing color must build a colorbar");
@@ -673,6 +936,7 @@ mod tests {
         );
         assert_eq!(cb.tick_labels, vec!["0", "10", "20"]);
         assert_eq!(cb.domain, None, "bucket boundaries are not an evenly-sampled span");
+        assert!(warnings.is_empty(), "a Point-mark consumer must not trigger the line/ribbon suppression");
     }
 
     /// The continuous colorbar is untouched: 11 interpolated stops and 5 evenly
@@ -685,12 +949,442 @@ mod tests {
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
             midpoint: None,
         });
-        let bundle =
-            build_color_legend(&spec_with_color_field("v"), &empty_batch(), &scales);
+        let spec = spec_with_color_field("v");
+        let layers = vec![LayerPrepared::from_chart_only(&spec)];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
         let cb = bundle.colorbar.expect("continuous color must build a colorbar");
         assert_eq!(cb.stops.len(), 11);
         assert_eq!(cb.tick_labels.len(), 5);
         assert_eq!(cb.domain, Some((0.0, 100.0)));
+        assert!(warnings.is_empty(), "a Point-mark consumer must not trigger the line/ribbon suppression");
+    }
+
+    // ── T5b: line/ribbon inert-continuous-color suppression (spec §4.0, 2026-08-28) ──
+
+    /// A flat `mark_line` chart with a Continuous color scale: the colorbar
+    /// promises a per-value mapping line cannot render, so it must be
+    /// suppressed, and a `RenderWarning` must name the mark + scale kind.
+    #[test]
+    fn line_only_with_continuous_color_suppresses_colorbar_and_warns() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let spec = spec_with_color_field("v");
+        let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_none(), "line cannot render continuous color; colorbar must be suppressed");
+        assert!(bundle.legend_entries.is_empty());
+        assert_eq!(warnings.len(), 1, "exactly one warning must fire");
+        match &warnings[0] {
+            crate::render::RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
+                assert_eq!(marks, &vec!["line".to_string()]);
+                assert_eq!(scale_kind, "continuous");
+                assert!(*suppressed, "a colorbar existed here and was suppressed");
+            }
+            other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+    }
+
+    /// Same hazard, `mark_ribbon`: a Continuous color scale is inert on a
+    /// closed band exactly as it is on a stroked line.
+    #[test]
+    fn ribbon_only_with_continuous_color_suppresses_colorbar_and_warns() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let spec = spec_with_color_field("v");
+        let layers = vec![layer_with_mark_and_color(Mark::Ribbon, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_none(), "ribbon cannot render continuous color; colorbar must be suppressed");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            crate::render::RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
+                assert_eq!(marks, &vec!["ribbon".to_string()]);
+                assert_eq!(scale_kind, "continuous");
+                assert!(*suppressed, "a colorbar existed here and was suppressed");
+            }
+            other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+    }
+
+    /// The Discretizing (Quantize/Quantile/Threshold/BinOrdinal) variant is
+    /// numeric-keyed exactly like Continuous (`ColorInput::Numeric`) and must
+    /// be caught the same way — the spec explicitly covers both.
+    #[test]
+    fn line_only_with_discretizing_color_suppresses_colorbar_and_warns() {
+        use crate::render::color::from_rgba;
+        use crate::render::scale_resolve::DiscretizedColors;
+        let buckets = DiscretizedColors::new(
+            vec![0.0, 10.0, 20.0],
+            vec![from_rgba(255, 0, 0, 255), from_rgba(0, 0, 255, 255)],
+        )
+        .unwrap();
+        let scales = scales_with_color(ColorScale::Discretizing(buckets));
+        let spec = spec_with_color_field("v");
+        let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_none(), "line cannot render a discretizing color scale either");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            crate::render::RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
+                assert_eq!(marks, &vec!["line".to_string()]);
+                assert_eq!(scale_kind, "discretizing");
+                assert!(*suppressed, "a colorbar existed here and was suppressed");
+            }
+            other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+    }
+
+    /// The mixed case: a `line` layer and a `point` layer share the same
+    /// Continuous color field. The point layer genuinely renders the
+    /// mapping, so the colorbar must stay AND no warning may fire — warning
+    /// here would be spurious since the legend is not, in fact, a false
+    /// promise for this chart.
+    #[test]
+    fn mixed_line_and_point_layers_sharing_continuous_color_keeps_colorbar_no_warning() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let spec = spec_with_color_field("v");
+        let layers = vec![
+            layer_with_mark_and_color(Mark::Line, Some("v")),
+            layer_with_mark_and_color(Mark::Point, Some("v")),
+        ];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let cb = bundle.colorbar.expect("a point layer sharing the scale genuinely renders it; colorbar must stay");
+        assert_eq!(cb.stops.len(), 11);
+        assert!(warnings.is_empty(), "a mixed line+point chart sharing the scale must not warn spuriously");
+    }
+
+    /// Categorical color on line is the NF-A3 grouping path (a separate
+    /// fix) and must be completely unaffected by this suppression — it
+    /// never resolves `ColorInput::Numeric`, so the gate never engages.
+    #[test]
+    fn line_only_with_categorical_color_is_unaffected() {
+        let scales = scales_with_color(ColorScale::Categorical {
+            domain: vec!["a".into(), "b".into(), "c".into()],
+            palette: std::borrow::Cow::Owned(vec![]),
+        });
+        let spec = spec_with_color_field("v");
+        let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert_eq!(bundle.legend_entries.len(), 3, "categorical color on line stays byte-identical (NF-A3)");
+        assert!(bundle.colorbar.is_none());
+        assert!(warnings.is_empty(), "categorical color must never trigger the inert-scale suppression");
+    }
+
+    /// Spec-review ruling (2026-08-28): loudness is a property of the
+    /// CHANNEL, not of whether a colorbar would render. `Color(v,
+    /// legend=None)` on a line never builds a colorbar (`legend_disabled`
+    /// short-circuits to `(Vec::new(), None)` before the inert-scale check
+    /// even runs), but the channel is still just as inert, so the warning
+    /// must still fire.
+    #[test]
+    fn line_only_with_continuous_color_and_legend_none_still_warns() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let mut spec = spec_with_color_field("v");
+        spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
+            crate::render::chart_config::LegendStyleSpec {
+                disabled: Some(true),
+                ..Default::default()
+            },
+        ));
+        let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_none(), "legend=None never built a colorbar in the first place");
+        assert!(bundle.legend_entries.is_empty());
+        assert_eq!(warnings.len(), 1, "the inert channel must still warn even with no legend to suppress");
+        match &warnings[0] {
+            crate::render::RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
+                assert_eq!(marks, &vec!["line".to_string()]);
+                assert_eq!(scale_kind, "continuous");
+                assert!(!*suppressed, "no colorbar ever existed here; the message must not claim one was suppressed");
+                let text = format!("{}", warnings[0]);
+                assert!(!text.contains("suppressed"), "{text}");
+            }
+            other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+    }
+
+    /// Spec-review ruling (2026-08-28): the same-field color+size merge
+    /// nulls `colorbar` for a legitimately different reason (its content
+    /// moves into the size legend's colored swatches — unchanged this
+    /// round), but the color CHANNEL on the line mark is still inert, so
+    /// the warning must still fire alongside that merge.
+    #[test]
+    fn line_only_with_continuous_color_and_size_merge_still_warns() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use crate::scale::linear::LinearScale;
+        use crate::render::scale_resolve::{ScaleKind, SizeScale};
+        let mut scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        // Size shares the SAME field ("v") as color, on a genuine numeric
+        // scale — the same-field merge condition `build_aux_legends` checks.
+        scales.size = Some(SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 100.0],
+                vec![10.0, 400.0],
+                false,
+                false,
+            )),
+        });
+        let mut spec = spec_with_color_field("v");
+        spec.encoding.size = Some(crate::spec::encoding::EncodingSpec {
+            field: "v".into(),
+            ..Default::default()
+        });
+        let layers = vec![layer_with_mark_and_color(Mark::Line, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        // Sanity: the merge premise actually held (colorbar nulled by the
+        // merge, not the inert-scale check testing nothing).
+        assert!(bundle.colorbar.is_none());
+        assert_eq!(warnings.len(), 1, "the inert channel must still warn even though the merge already nulled the colorbar");
+        match &warnings[0] {
+            crate::render::RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
+                assert_eq!(marks, &vec!["line".to_string()]);
+                assert_eq!(scale_kind, "continuous");
+                assert!(!*suppressed, "the merge, not this check, already nulled the colorbar; the message must not double-claim suppression");
+                let text = format!("{}", warnings[0]);
+                assert!(!text.contains("suppressed"), "{text}");
+            }
+            other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+        // Spec-review 2026-08-28 (cycle-3 finding): the size legend must
+        // still render (size is NOT suppressed — its own line/ribbon
+        // semantics are a separate follow-up), but every swatch must fall
+        // back to the neutral default — none may carry a graduated color
+        // sampled from the scale the warning just judged inert.
+        let size_entries = bundle.aux_legends.iter().find_map(|a| match a {
+            AuxLegendInput::Size { entries, .. } => Some(entries),
+            _ => None,
+        }).expect("the size legend must still render, unaffected by the color channel's own suppression");
+        assert!(!size_entries.is_empty(), "the size legend must have swatches to check");
+        assert!(
+            size_entries.iter().all(|e| e.color_hex.is_none()),
+            "every swatch must be the neutral default, not a graduated color from the inert scale: {size_entries:?}"
+        );
+    }
+
+    /// The same same-field color+size merge on `mark_point` (a mark that
+    /// genuinely renders per-value color) must be completely unaffected —
+    /// no warning, and the size legend's swatches stay graduated exactly as
+    /// before this fix. Byte-identity control for the cycle-3 finding.
+    #[test]
+    fn point_only_with_continuous_color_and_size_merge_keeps_graduated_swatches() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use crate::scale::linear::LinearScale;
+        use crate::render::scale_resolve::{ScaleKind, SizeScale};
+        let mut scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        scales.size = Some(SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 100.0],
+                vec![10.0, 400.0],
+                false,
+                false,
+            )),
+        });
+        let mut spec = spec_with_color_field("v");
+        spec.encoding.size = Some(crate::spec::encoding::EncodingSpec {
+            field: "v".into(),
+            ..Default::default()
+        });
+        let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_none(), "the merge still folds the colorbar into the size legend");
+        assert!(warnings.is_empty(), "point genuinely renders continuous color; nothing is inert here");
+        let size_entries = bundle.aux_legends.iter().find_map(|a| match a {
+            AuxLegendInput::Size { entries, .. } => Some(entries),
+            _ => None,
+        }).expect("the size legend must render");
+        assert!(!size_entries.is_empty(), "the size legend must have swatches to check");
+        assert!(
+            size_entries.iter().all(|e| e.color_hex.is_some()),
+            "point's swatches must stay graduated — unaffected by the line/ribbon-only fix: {size_entries:?}"
+        );
+    }
+
+    // ── spec-review 2026-08-28, cycle-4: colorbar-nulling must track ────────
+    // ── the merged Size legend ACTUALLY being emitted ────────────────────────
+
+    fn point_color_size_merge_fixture() -> (ResolvedScales, ChartSpec) {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use crate::scale::linear::LinearScale;
+        use crate::render::scale_resolve::{ScaleKind, SizeScale};
+        let mut scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        scales.size = Some(SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 100.0],
+                vec![10.0, 400.0],
+                false,
+                false,
+            )),
+        });
+        let mut spec = spec_with_color_field("v");
+        spec.encoding.size = Some(crate::spec::encoding::EncodingSpec {
+            field: "v".into(),
+            ..Default::default()
+        });
+        (scales, spec)
+    }
+
+    /// The reviewer's exact repro (S3 finding 1): `mark_point().encode(
+    /// color='v:Q', size=Size('v', legend=None))` — the size legend is
+    /// explicitly disabled, so `build_aux_legends` never emits a `Size`
+    /// block despite the field/scale-kind merge condition holding. Nulling
+    /// the colorbar anyway would leave the chart with NO color legend at
+    /// all. The colorbar must be KEPT.
+    #[test]
+    fn point_color_size_merge_with_size_legend_disabled_keeps_colorbar() {
+        let (scales, mut spec) = point_color_size_merge_fixture();
+        spec.encoding.size.as_mut().unwrap().legend = Some(Box::new(
+            crate::render::chart_config::LegendStyleSpec {
+                disabled: Some(true),
+                ..Default::default()
+            },
+        ));
+        let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_some(), "no Size legend was emitted; the colorbar is the chart's only color legend and must survive");
+        assert!(
+            !bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })),
+            "size=None must not emit a Size block"
+        );
+        assert!(warnings.is_empty());
+    }
+
+    /// Test-quality gap (S2 finding): the size CHANNEL is bound in the spec
+    /// but its scale never resolved (`scales.size` stays `None` — e.g. a
+    /// resolution failure upstream). `build_aux_legends` cannot emit a Size
+    /// block without a resolved scale, so the colorbar must stay too.
+    #[test]
+    fn point_color_size_merge_with_unresolved_size_scale_keeps_colorbar() {
+        let (mut scales, spec) = point_color_size_merge_fixture();
+        scales.size = None; // the channel is bound in `spec` but never resolved
+        let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_some(), "no resolved size scale means no Size block; the colorbar must survive");
+        assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
+    }
+
+    /// Test-quality gap (S2 finding): the size scale resolves but produces a
+    /// zero-area pixel range, so every candidate swatch fails the
+    /// `radius > 0.0` filter and `entries` ends up empty — `build_aux_legends`
+    /// pushes no `Size` block in that case either (`if !entries.is_empty()`).
+    /// The colorbar must stay for the same reason as the other two cases.
+    #[test]
+    fn point_color_size_merge_with_empty_size_entries_keeps_colorbar() {
+        use crate::scale::linear::LinearScale;
+        use crate::render::scale_resolve::{ScaleKind, SizeScale};
+        let (mut scales, spec) = point_color_size_merge_fixture();
+        // Zero-width pixel range: to_pixel_f64 always yields area 0.0, so
+        // every candidate radius is 0.0 and gets filtered out.
+        scales.size = Some(SizeScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 100.0],
+                vec![0.0, 0.0],
+                false,
+                false,
+            )),
+        });
+        let layers = vec![layer_with_mark_and_color(Mark::Point, Some("v"))];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_some(), "an empty-entries Size legend is not emitted; the colorbar must survive");
+        assert!(!bundle.aux_legends.iter().any(|a| matches!(a, AuxLegendInput::Size { .. })));
+    }
+
+    // ── spec-review 2026-08-28, cycle-4: the flat-path consumer check ───────
+    // ── must be field-keyed, matching the composite path ─────────────────────
+
+    /// The reviewer's exact repro (S3 finding 2), on the FLAT (non-composite)
+    /// path — the same path `LayerChart.interactive()` shares:
+    /// `line(color='v:Q') + point(color='g:N')` as one chart's `layers`.
+    /// The point layer never reads `v`; it must not exempt line's inert `v`
+    /// channel just because SOME other layer binds SOME color field.
+    #[test]
+    fn flat_line_and_point_on_different_fields_still_warns_and_suppresses() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let spec = spec_with_color_field("v");
+        let layers = vec![
+            layer_with_mark_and_color(Mark::Line, Some("v")),
+            layer_with_mark_and_color(Mark::Point, Some("g")),
+        ];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_none(), "line's inert v channel must still lose its colorbar");
+        assert_eq!(warnings.len(), 1, "point's unrelated field g must not exempt line's v: {warnings:?}");
+        match &warnings[0] {
+            crate::render::RenderWarning::UnsupportedColorScaleOnMark { marks, .. } => {
+                assert_eq!(marks, &vec!["line".to_string()]);
+            }
+            other => panic!("expected UnsupportedColorScaleOnMark, got {other:?}"),
+        }
+    }
+
+    /// Same-field control (paired with the test above): when BOTH layers
+    /// genuinely bind the SAME field, the exemption must still fire —
+    /// field-keying must not turn into "always warn." Flat-path counterpart
+    /// to `mixed_line_and_point_layers_sharing_continuous_color_keeps_colorbar_no_warning`
+    /// (which already covers this shape); restated here explicitly as the
+    /// paired control for this cycle's field-keying fix.
+    #[test]
+    fn flat_line_and_point_on_same_field_stays_exempt() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (0.0, 100.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let spec = spec_with_color_field("v");
+        let layers = vec![
+            layer_with_mark_and_color(Mark::Line, Some("v")),
+            layer_with_mark_and_color(Mark::Point, Some("v")),
+        ];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        assert!(bundle.colorbar.is_some(), "point genuinely renders the shared v mapping; colorbar must stay");
+        assert!(warnings.is_empty(), "same-field point sibling must still exempt line");
     }
 
     #[test]

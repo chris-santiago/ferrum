@@ -273,7 +273,13 @@ pub(crate) fn render_composite_scene(
         .collect();
     let mut contexts = resolve_composite_scales(tree, &resolve_inputs)?;
     drop(resolve_inputs);
-    drop(prepared);
+    // `prepared` stays alive through the line/ribbon exemption pre-pass below
+    // (spec-review cycle-2 fix), which needs each leaf's REAL resolved
+    // layers/marks (`prepared[i].layers`, from `LayerPrepared` — the same
+    // fallback-to-top-level-mark-for-flat-specs / real-sub-layers-for-a-
+    // desugared-mark logic `prepare_render_inputs` already runs) and each
+    // leaf's own resolved color-scale kind (`prepared[i].provisional_scales.color`).
+    // Dropped explicitly right after that pre-pass runs, same as before.
 
     // Figure-legend planning (design §5, GH #16 shared-legend Task 3): mark each
     // participating leaf's per-channel legend suppression and identify the
@@ -307,6 +313,21 @@ pub(crate) fn render_composite_scene(
     let mut warnings: Vec<RenderWarning> = Vec::new();
     let mut overlay_groups = plan_overlay_groups(tree, n);
     impose_shared_overlay_rects(leaves, &mut overlay_groups, &mut contexts, &mut warnings);
+
+    // Line/ribbon inert-continuous-color exemption for all-leaf Overlay
+    // groups (T5b static-composite fix, spec §4.0's second bullet, spec-review
+    // cycle-2 corrections): a sibling leaf in the SAME group that binds the
+    // SAME color FIELD to a mark other than line/ribbon, via a Numeric-keyed
+    // scale, genuinely renders that mapping, so the line/ribbon leaf should
+    // not warn (or lose its colorbar) as if it were the only consumer. Field-
+    // and scale-keyed (not "any sibling with any color binding") and
+    // layers-aware (a leaf's real marks live in `prepared[i].layers`, which
+    // correctly resolves a desugared mark like `mark_ribbon` — whose
+    // top-level `spec.mark` Python leaves at the serde-default `point`
+    // placeholder — to its real `Ribbon` sub-layer). See
+    // `plan_line_ribbon_color_group_exemptions`'s doc comment.
+    plan_line_ribbon_color_group_exemptions(tree, &prepared, &mut contexts);
+    drop(prepared);
 
     // Pass 2/3 (per-leaf render): re-render each leaf with its resolved-domain
     // context so composite-shared channels land on the auto scale path (D4b). A
@@ -779,6 +800,143 @@ fn plan_overlay_group_walk(
             }
             for c in children {
                 plan_overlay_group_walk(c, leaf_cursor, groups);
+            }
+        }
+    }
+}
+
+/// One color-consuming layer inside an Overlay group, for
+/// [`plan_line_ribbon_color_group_exemptions`]'s field/scale-keyed check.
+///
+/// `mark` and `field` come from [`prepare::LayerPrepared`] — the SAME
+/// authority `render/prepare/legend.rs`'s local (non-composite) inert-color
+/// check reads — never straight off `ChartSpec.mark`/`encoding.color`,
+/// which for a desugared mark (`mark_ribbon` chief among them) name a
+/// serde-default placeholder (`point`) at the chart's top level while the
+/// REAL mark lives in one of `spec.layers` (spec-review cycle-2 finding:
+/// `fm.layer(line(color=v:Q), ribbon(color=v:Q))._composite_tree()`'s
+/// second child is `ChartSpec(mark='point', layers=[{mark: 'ribbon', ...}])`).
+/// `LayerPrepared::from_chart_only`/`from_chart_and_layer` already resolve
+/// this correctly (flat spec → its own top-level mark; layered spec → each
+/// real sub-layer), so consulting `prepared[i].layers` handles both shapes
+/// uniformly with no special-casing here.
+struct ColorConsumer {
+    /// Index of this leaf within the group (0-based, group-local).
+    member: usize,
+    field: String,
+    mark: crate::spec::mark::Mark,
+    /// This leaf's OWN resolved color scale is `ColorInput::Numeric`
+    /// (`Continuous`/`Discretizing`) — from `prepared[i].provisional_scales.color`,
+    /// the same per-leaf resolution `render/prepare/legend.rs` itself reads.
+    is_numeric: bool,
+}
+
+/// Mark, for every LINE/RIBBON leaf inside an all-leaf `Overlay` group (the
+/// same #89A group shape [`plan_overlay_groups`] names — `LayerChart`'s
+/// actual shape) whose own resolved color scale is Numeric-keyed AND which
+/// has a sibling leaf in the SAME group binding the SAME color field to a
+/// mark other than line/ribbon via ALSO a Numeric-keyed scale,
+/// [`LeafScaleContext::color_scale_has_non_line_ribbon_sibling`] `= true`
+/// (T5b static-composite fix, spec §4.0's second bullet, spec-review cycle-2
+/// corrections). Field- and scale-keyed per spec §4.0's own justification
+/// ("another mark SHARES the continuous scale") — a sibling on a DIFFERENT
+/// field (even a genuinely-rendered categorical legend on that field) does
+/// NOT exempt the line/ribbon leaf's own, unrelated, still-inert channel
+/// (spec-review cycle-2: `layer(line(color=v:Q), point(color=g:N))` must
+/// still warn about `v` while `g`'s own legend renders untouched).
+///
+/// That sibling genuinely renders the group's shared color mapping, so
+/// `render::prepare::legend::build_color_legend`'s inert-color-on-line-or-
+/// ribbon check — which sees only its OWN leaf's per-panel mark set under the
+/// composite path, since each leaf renders through its own standalone
+/// `prepare_render_inputs` and never the whole group — must not warn (or
+/// suppress a colorbar) for that leaf.
+///
+/// Mirrors [`plan_overlay_groups`]'s leaf-index pre-pass idiom: walked once,
+/// entirely before any leaf is rendered, over the same tree shape that pass
+/// (and [`plan_legend_bands`]) also independently re-walk for STRUCTURE
+/// (which leaves fall in which group) — but, unlike those two, reads leaf
+/// FACTS (marks, color fields, scale kinds) from `prepared` rather than the
+/// tree's own `ChartSpec`, for the `LayerPrepared`/desugar reason above.
+///
+/// An `hconcat`/`vconcat` of two independently line-colored leaves is NOT an
+/// Overlay group — this pass's group-detection gate (`layout == Overlay`,
+/// `children.len() > 1`, all-leaf children) never matches it — so both
+/// leaves are left alone: each still renders, and warns, standalone
+/// (reviewer-blessed: two offending hconcat leaves keep one warning each).
+fn plan_line_ribbon_color_group_exemptions(
+    tree: &CompositeNode,
+    prepared: &[prepare::PreparedInputs],
+    contexts: &mut [LeafScaleContext],
+) {
+    let mut leaf_cursor = 0usize;
+    plan_line_ribbon_color_group_walk(tree, prepared, &mut leaf_cursor, contexts);
+}
+
+fn plan_line_ribbon_color_group_walk(
+    node: &CompositeNode,
+    prepared: &[prepare::PreparedInputs],
+    leaf_cursor: &mut usize,
+    contexts: &mut [LeafScaleContext],
+) {
+    use crate::spec::mark::Mark;
+    use super::scale_resolve::{ColorInput, ColorScale};
+
+    match node {
+        CompositeNode::Leaf { .. } => {
+            *leaf_cursor += 1;
+        }
+        CompositeNode::Hole { .. } => {}
+        CompositeNode::Composite {
+            layout, children, ..
+        } => {
+            if *layout == CompositeLayout::Overlay
+                && children.len() > 1
+                && children
+                    .iter()
+                    .all(|c| matches!(c, CompositeNode::Leaf { .. }))
+            {
+                let group_start = *leaf_cursor;
+                let members = &prepared[group_start..group_start + children.len()];
+
+                // Every color-bound layer across every member's REAL layers
+                // (not the tree's possibly-placeholder top-level mark).
+                let mut consumers: Vec<ColorConsumer> = Vec::new();
+                for (member, prep) in members.iter().enumerate() {
+                    let is_numeric = prep.provisional_scales.color.as_ref().map(ColorScale::input)
+                        == Some(ColorInput::Numeric);
+                    for layer in &prep.layers {
+                        if let Some(enc) = &layer.encoding.color {
+                            consumers.push(ColorConsumer {
+                                member,
+                                field: enc.field.clone(),
+                                mark: layer.mark,
+                                is_numeric,
+                            });
+                        }
+                    }
+                }
+
+                // Exempt exactly the line/ribbon consumers with a same-field,
+                // Numeric-keyed, non-line/ribbon sibling — never the whole
+                // group indiscriminately.
+                for c in &consumers {
+                    if !matches!(c.mark, Mark::Line | Mark::Ribbon) || !c.is_numeric {
+                        continue;
+                    }
+                    let exempted = consumers.iter().any(|other| {
+                        other.member != c.member
+                            && other.field == c.field
+                            && other.is_numeric
+                            && !matches!(other.mark, Mark::Line | Mark::Ribbon)
+                    });
+                    if exempted {
+                        contexts[group_start + c.member].color_scale_has_non_line_ribbon_sibling = true;
+                    }
+                }
+            }
+            for c in children {
+                plan_line_ribbon_color_group_walk(c, prepared, leaf_cursor, contexts);
             }
         }
     }
@@ -3543,6 +3701,352 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// `color_spec()`'s Point-mark twin with `mark: Line` — for the T5b
+    /// static-composite tests (spec-review 2026-08-28 finding).
+    fn line_color_spec() -> ChartSpec {
+        ChartSpec { mark: Mark::Line, ..color_spec() }
+    }
+
+    /// A tree `Leaf` node embedding an arbitrary `spec` (rather than
+    /// `leaf_node`'s hardcoded `scatter_spec()`) — for tests whose fixtures
+    /// need the tree's own `spec` to match `CompositeLeafInput.spec` (some
+    /// consumers, e.g. `plan_legend_bands`, read Leaf facts straight off the
+    /// tree; `plan_line_ribbon_color_group_exemptions` instead reads
+    /// `prepared[i].layers`/`.provisional_scales`, built from
+    /// `CompositeLeafInput`, but keeping both in sync avoids two
+    /// independently-maintained spec shapes per test).
+    fn leaf_node_with(spec: ChartSpec, data: usize) -> CompositeNode {
+        CompositeNode::Leaf {
+            spec: Box::new(spec),
+            data,
+            label: None,
+        }
+    }
+
+    // -- T5b static-composite fix (spec §4.0's second bullet, spec-review 2026-08-28) --
+
+    /// The reviewer's exact static mixed probe:
+    /// `fm.layer(line(color=v), point(color=v))` — both leaves bind the SAME
+    /// continuous field under one `Overlay` group. The point leaf genuinely
+    /// renders the shared mapping, so the line leaf must NOT warn (previously
+    /// a spurious `UnsupportedColorScaleOnMark` fired even though a colorbar
+    /// was, in fact, present). The fix must not depend on leaf order:
+    /// `plan_line_ribbon_color_group_exemptions`'s group check is a
+    /// symmetric `.any()` over the whole group by construction — swapping
+    /// the two children pins that it stays order-independent (0 warnings,
+    /// same surviving-colorbar count, both orders).
+    #[test]
+    fn overlay_mixed_line_and_point_sharing_continuous_color_never_warns_either_order() {
+        fn run(marks_in_order: [ChartSpec; 2]) -> (usize, usize) {
+            let batch = || xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
+            let h0 = LeafHold { spec: marks_in_order[0].clone(), batch: batch(), ..hold() };
+            let h1 = LeafHold { spec: marks_in_order[1].clone(), batch: batch(), ..hold() };
+            let tree = composite(
+                CompositeLayout::Overlay,
+                vec![
+                    leaf_node_with(marks_in_order[0].clone(), 0),
+                    leaf_node_with(marks_in_order[1].clone(), 1),
+                ],
+            );
+            let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+            let (scene, warnings) =
+                render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            let gradient_count = scene
+                .legend
+                .iter()
+                .filter(|n| matches!(n, SceneNode::Raw { svg, .. } if svg.contains("linearGradient")))
+                .count();
+            (warnings.len(), gradient_count)
+        }
+
+        let (warns_line_first, gradients_line_first) = run([line_color_spec(), color_spec()]);
+        assert_eq!(warns_line_first, 0, "line+point sharing a continuous color scale must not warn");
+        assert!(gradients_line_first > 0, "the colorbar must be kept, not blanked");
+
+        let (warns_point_first, gradients_point_first) = run([color_spec(), line_color_spec()]);
+        assert_eq!(warns_point_first, 0, "point+line (swapped order) must not warn either");
+        assert_eq!(
+            gradients_point_first, gradients_line_first,
+            "surviving-colorbar count must be stable regardless of child order"
+        );
+    }
+
+    /// Reviewer-blessed control: an `hconcat` (not `Overlay`) of two
+    /// INDEPENDENT line-only continuous-color leaves is NOT a #89A group —
+    /// `plan_line_ribbon_color_group_exemptions`'s gate (`layout == Overlay`)
+    /// never matches `Hconcat`, so neither leaf is exempted. Each still
+    /// renders, and warns, standalone — pinning that the fix is scoped to
+    /// Overlay groups specifically, not "any leaf with any sibling."
+    #[test]
+    fn hconcat_two_independent_offending_line_leaves_each_warn_once() {
+        let spec = line_color_spec();
+        let batch = || xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
+        let h0 = LeafHold { spec: spec.clone(), batch: batch(), ..hold() };
+        let h1 = LeafHold { spec: spec.clone(), batch: batch(), ..hold() };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_with(spec.clone(), 0), leaf_node_with(spec, 1)],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (_scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let unsupported: Vec<_> = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. }))
+            .collect();
+        assert_eq!(
+            unsupported.len(),
+            2,
+            "each independent line leaf must warn on its own; hconcat is not an Overlay \
+             group, so neither is exempted: {warnings:?}"
+        );
+    }
+
+    // -- spec-review cycle-2: layers-aware + field/scale-keyed exemption ----
+
+    /// The REAL shape Python's `mark_ribbon()` lowers to (spec-review
+    /// cycle-2 finding, evidence dumped in the record):
+    /// `fm.layer(...)._composite_tree()`'s ribbon child is
+    /// `ChartSpec(mark='point', layers=[{mark: 'ribbon', ...}])` — a
+    /// serde-default `Point` PLACEHOLDER at the top level (never actually
+    /// drawn) with the true `Ribbon` mark living inside `spec.layers`.
+    /// Building tests from a flat `mark: Mark::Ribbon` spec instead — the
+    /// trap the reviewer flagged as having bitten twice — passes against
+    /// BOTH a buggy top-level-mark read and the fixed layers-aware one, so
+    /// this fixture mirrors the real lowered shape instead of a convenient
+    /// flat one.
+    fn ribbon_layered_spec(color_field: &str) -> ChartSpec {
+        use crate::spec::layer::Layer;
+        // Verified live against the real lowering (spec-review cycle-2):
+        // `fm.Chart(df).mark_ribbon().encode(x=,y=,y2=,color="v:Q")`'s spec
+        // JSON is `{"mark":"point","encoding":{"x":...,"y":...,
+        // "color":{"field":"v","type":"quantitative"},"y2":...},
+        // "layers":[{"mark":"ribbon","encoding":{"x":...,"y":...,"y2":...}}]}`
+        // — `color` is hoisted to the CHART-level encoding (not present on
+        // the layer's own encoding at all) and inherited down into the
+        // layer at prepare time (`LayerPrepared::from_chart_and_layer`'s
+        // `inherit_from`); `mark` at chart level is the `point` placeholder,
+        // never `ribbon`. This exact shape is what tripped the reviewer's
+        // finding: a top-level-mark read sees `(color: Some, mark: Point)`
+        // and wrongly classifies the leaf as a non-line/ribbon consumer.
+        let mut spec = scatter_spec(); // mark: Point (the real placeholder), x/y at chart level
+        spec.encoding.color = Some(EncodingSpec {
+            field: color_field.into(),
+            type_: Some(EncDataType::Quantitative),
+            ..Default::default()
+        });
+        spec.encoding.y2 = Some(EncodingSpec { field: "y2".into(), ..Default::default() });
+        spec.layers = Some(vec![Layer {
+            mark: Mark::Ribbon,
+            encoding: Encoding {
+                y2: Some(EncodingSpec { field: "y2".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        }]);
+        spec
+    }
+
+    /// `color_spec()`'s Point-mark twin bound to `field` on a DIFFERENT
+    /// column than `"c"` — for the field-keyed exemption tests, which need
+    /// a non-line/ribbon sibling whose color field can differ from the
+    /// line/ribbon leaf's.
+    fn point_color_spec(field: &str, quantitative: bool) -> ChartSpec {
+        ChartSpec {
+            encoding: Encoding {
+                color: Some(EncodingSpec {
+                    field: field.into(),
+                    type_: Some(if quantitative { EncDataType::Quantitative } else { EncDataType::Nominal }),
+                    ..Default::default()
+                }),
+                ..scatter_spec().encoding
+            },
+            ..scatter_spec()
+        }
+    }
+
+    fn xyy2c_batch(xs: &[f64], ys: &[f64], y2s: &[f64], cs: &[f64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("c", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(ys.to_vec())),
+                Arc::new(Float64Array::from(y2s.to_vec())),
+                Arc::new(Float64Array::from(cs.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn unsupported_warning_count(warnings: &[RenderWarning]) -> usize {
+        warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. }))
+            .count()
+    }
+
+    /// `fm.layer(ribbon(color=v:Q), ribbon(color=v:Q))`: both leaves are
+    /// desugared `mark_ribbon` (real mark inside `spec.layers`, `point`
+    /// placeholder at the top). Neither is a non-line/ribbon consumer, so
+    /// NEITHER exempts the other — both must warn and both colorbars must
+    /// be suppressed. Before the layers-aware fix, the top-level-mark read
+    /// saw `point` for both, wrongly classified BOTH as "non-line/ribbon
+    /// consumers", and exempted the whole group (spec-review cycle-2
+    /// finding: live `fm.layer(ribbon(v:Q), ribbon(v:Q)).to_svg()` produced
+    /// 0 warnings and TWO surviving colorbars).
+    #[test]
+    fn overlay_two_ribbon_leaves_sharing_continuous_color_both_warn_no_colorbars() {
+        let spec = ribbon_layered_spec("c"); // matches xyy2c_batch's "c" column
+        let batch = || xyy2c_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[11.0, 21.0, 31.0, 41.0], &[0.0, 5.0, 10.0, 15.0]);
+        let h0 = LeafHold { spec: spec.clone(), batch: batch(), ..hold() };
+        let h1 = LeafHold { spec: spec.clone(), batch: batch(), ..hold() };
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node_with(spec.clone(), 0), leaf_node_with(spec, 1)],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(unsupported_warning_count(&warnings), 2, "both ribbon leaves must warn: {warnings:?}");
+        let gradient_count = scene
+            .legend
+            .iter()
+            .filter(|n| matches!(n, SceneNode::Raw { svg, .. } if svg.contains("linearGradient")))
+            .count();
+        assert_eq!(gradient_count, 0, "neither colorbar may survive");
+    }
+
+    /// `fm.layer(line(color=v:Q), ribbon(color=v:Q))`: a line and a
+    /// (desugared) ribbon share the same field. Both are line/ribbon marks,
+    /// so neither exempts the other — both warn.
+    #[test]
+    fn overlay_line_and_ribbon_leaves_sharing_continuous_color_both_warn() {
+        let line_spec = line_color_spec();
+        let ribbon_spec = ribbon_layered_spec("c"); // matches line_color_spec()'s field ("c", via color_spec())
+        let line_batch = xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
+        let ribbon_batch = xyy2c_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[11.0, 21.0, 31.0, 41.0], &[0.0, 5.0, 10.0, 15.0]);
+        let h0 = LeafHold { spec: line_spec.clone(), batch: line_batch, ..hold() };
+        let h1 = LeafHold { spec: ribbon_spec.clone(), batch: ribbon_batch, ..hold() };
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node_with(line_spec, 0), leaf_node_with(ribbon_spec, 1)],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (_scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(
+            unsupported_warning_count(&warnings), 2,
+            "both line and ribbon must warn — neither is a non-line/ribbon consumer, so \
+             neither can exempt the other (a top-level-mark misread of the ribbon leaf's \
+             placeholder `point` mark would wrongly exempt both): {warnings:?}"
+        );
+    }
+
+    /// The reviewer's live probe for the field-keyed correction:
+    /// `fm.layer(line(color=v:Q), point(color=g:N))` — the point sibling
+    /// binds a DIFFERENT field (`g`, nominal) than the line's (`v`,
+    /// continuous). It must NOT exempt the line's inert `v` channel — that
+    /// sibling never paints `v` at all — while `g`'s own categorical legend
+    /// renders untouched (ordinary per-leaf legend building, unaffected by
+    /// this fix either way).
+    #[test]
+    fn overlay_line_and_point_on_different_fields_warns_re_v_keeps_g_legend() {
+        let line_spec = line_color_spec(); // color field "c" (color_spec()'s field)
+        let point_spec = point_color_spec("g", false); // nominal, different field
+        let line_batch = xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
+        let point_schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let point_batch = RecordBatch::try_new(
+            point_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(arrow::array::StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let h0 = LeafHold { spec: line_spec.clone(), batch: line_batch, ..hold() };
+        let h1 = LeafHold { spec: point_spec.clone(), batch: point_batch, ..hold() };
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node_with(line_spec, 0), leaf_node_with(point_spec, 1)],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        match warnings.iter().find(|w| matches!(w, RenderWarning::UnsupportedColorScaleOnMark { .. })) {
+            Some(RenderWarning::UnsupportedColorScaleOnMark { marks, .. }) => {
+                assert_eq!(marks, &vec!["line".to_string()]);
+            }
+            _ => panic!("line's inert `v`-equivalent field must still warn even with an unrelated-field sibling: {warnings:?}"),
+        }
+        // g's own categorical legend must still render (ordinary per-leaf
+        // legend building — the point leaf's own field, untouched by the
+        // exemption logic either way).
+        let has_g_legend_entry = scene
+            .legend
+            .iter()
+            .any(|n| matches!(n, SceneNode::Text { content, .. } if content == "a" || content == "b"));
+        assert!(has_g_legend_entry, "g's own categorical legend entries must render: {:?}", scene.legend);
+    }
+
+    /// Field-keying isolated from scale-kind: `layer(line(v:Q), point(w:Q))`
+    /// — the sibling is ALSO Numeric-keyed (unlike the reviewer's `g:N`
+    /// probe above, which conflates "different field" with "different scale
+    /// kind" and so cannot alone catch a field-keying regression — an
+    /// `is_numeric`-only check on the sibling would coincidentally still
+    /// reject that probe). Two DIFFERENT numeric fields must still warn:
+    /// the point sibling never paints `v`, so it cannot exempt line's own
+    /// inert `v` channel just because SOME numeric scale exists nearby.
+    #[test]
+    fn overlay_line_and_point_on_different_numeric_fields_still_warns() {
+        let line_spec = line_color_spec(); // color field "c"
+        let point_spec = point_color_spec("w", true); // ALSO quantitative, different field
+        let line_batch = xyc_batch(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0], &[0.0, 5.0, 10.0, 15.0]);
+        let point_schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("w", DataType::Float64, false),
+        ]));
+        let point_batch = RecordBatch::try_new(
+            point_schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0, 400.0])),
+            ],
+        )
+        .unwrap();
+        let h0 = LeafHold { spec: line_spec.clone(), batch: line_batch, ..hold() };
+        let h1 = LeafHold { spec: point_spec.clone(), batch: point_batch, ..hold() };
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node_with(line_spec, 0), leaf_node_with(point_spec, 1)],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (_scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(
+            unsupported_warning_count(&warnings), 1,
+            "point's own numeric field `w` must not exempt line's unrelated numeric field `c`: {warnings:?}"
+        );
     }
 
     #[test]

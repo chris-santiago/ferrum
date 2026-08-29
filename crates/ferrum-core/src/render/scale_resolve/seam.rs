@@ -104,6 +104,20 @@ pub(crate) struct LeafScaleContext {
     /// phantom top gutter in the group's shared rect. `false` (the default)
     /// reserves the band exactly as a standalone chart does.
     pub(crate) suppress_chart_title: bool,
+    /// Layout-stage-only signal (T5b static-composite fix, spec §4.0's second
+    /// bullet): this leaf belongs to an all-leaf `Overlay` group (the same
+    /// #89A groups `plan_overlay_groups` names) that ALSO contains a sibling
+    /// leaf binding `color` to a mark other than line/ribbon — that sibling
+    /// genuinely renders the group's shared color mapping. `render::prepare::
+    /// legend::build_color_legend`'s inert-color-on-line-or-ribbon check sees
+    /// only its OWN leaf's per-panel mark set under the composite path (each
+    /// leaf renders through its own standalone `prepare_render_inputs`, never
+    /// the whole group), so it cannot see a sibling leaf on its own — this
+    /// bit is how the compositor's group-wide view reaches it. Set by
+    /// `composite_render::plan_line_ribbon_color_group_exemptions`, never
+    /// derived here. `false` (the default) leaves the check exactly as a
+    /// standalone chart's.
+    pub(crate) color_scale_has_non_line_ribbon_sibling: bool,
 }
 
 impl LeafScaleContext {

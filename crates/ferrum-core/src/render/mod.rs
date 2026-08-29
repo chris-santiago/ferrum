@@ -389,6 +389,35 @@ pub enum RenderWarning {
     /// doubled-chrome chart is otherwise hard to attribute: the cause is the
     /// layers' own gutter requests, not the overlay.
     OverlayGuttersDiverged { layers: usize },
+    /// A `Continuous`/`Discretizing` (numeric-keyed) color scale was resolved
+    /// while EVERY layer consuming it draws with `Mark::Line`/`Mark::Ribbon`
+    /// — the two stroke-continuous marks that cannot paint a per-value color
+    /// today (spec §4.0, amended 2026-08-28). The channel would otherwise be
+    /// silently inert under a colorbar that promises a mapping nothing on
+    /// the chart honors, so `render/prepare/legend.rs` suppresses that
+    /// colorbar and emits this instead. `marks` names the affected mark(s)
+    /// (deduped, encounter order — e.g. `["line"]`, or `["line", "ribbon"]`
+    /// for a `mark_smooth(ci=True)`-style band+line pair sharing one field);
+    /// `scale_kind` is `"continuous"` or `"discretizing"`. A mixed chart
+    /// where another layer's mark (e.g. `point`) shares the same scale does
+    /// NOT reach this variant — that layer genuinely renders the mapping, so
+    /// the colorbar stays and no warning fires. True gradient-colored
+    /// polylines are a logged feature follow-up, not this fix's scope.
+    ///
+    /// `suppressed` (spec-review 2026-08-28 ruling): the warning itself fires
+    /// whenever the channel is inert, regardless of whether a colorbar would
+    /// have rendered (`Color(v, legend=None)`, or the same-field color+size
+    /// merge whose colorbar was already folded into the size legend, both
+    /// still warn — spec §4.0's loudness is a property of the CHANNEL). But
+    /// the Display text's claim that "its legend was suppressed" is only
+    /// TRUE when a colorbar actually existed to suppress; `suppressed`
+    /// records which happened so the message never asserts a suppression
+    /// that did not occur.
+    UnsupportedColorScaleOnMark {
+        marks: Vec<String>,
+        scale_kind: String,
+        suppressed: bool,
+    },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -452,6 +481,22 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "overlay gutters diverged; {layers} layers render with independent chrome"
             ),
+            RenderWarning::UnsupportedColorScaleOnMark { marks, scale_kind, suppressed } => {
+                let marks = marks.join(", ");
+                if *suppressed {
+                    write!(
+                        f,
+                        "{scale_kind} color scale is not supported on {marks}; the channel has \
+                         no per-mark effect and its legend was suppressed"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{scale_kind} color scale is not supported on {marks}; the channel has \
+                         no per-mark effect"
+                    )
+                }
+            }
         }
     }
 }
@@ -495,6 +540,16 @@ mod tests {
                 reason: "by-column 'grp' not found in data".into(),
             },
             RenderWarning::OverlayGuttersDiverged { layers: 2 },
+            RenderWarning::UnsupportedColorScaleOnMark {
+                marks: vec!["line".into(), "ribbon".into()],
+                scale_kind: "continuous".into(),
+                suppressed: true,
+            },
+            RenderWarning::UnsupportedColorScaleOnMark {
+                marks: vec!["line".into()],
+                scale_kind: "discretizing".into(),
+                suppressed: false,
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -543,6 +598,32 @@ mod tests {
         assert!(diverged_text.contains("overlay gutters diverged"), "{diverged_text}");
         assert!(diverged_text.contains("independent chrome"), "{diverged_text}");
         assert!(!diverged_text.contains("OverlayGuttersDiverged"), "{diverged_text}");
+    }
+
+    /// Spec-review 2026-08-28 (cannot_verify item, resolved this round):
+    /// `UnsupportedColorScaleOnMark`'s Display must not claim a legend was
+    /// suppressed when none ever existed to suppress (`legend=None`, or the
+    /// color+size merge case whose colorbar was folded into the size legend
+    /// for a different reason) — the `suppressed` field branches the message
+    /// so it only asserts what actually happened.
+    #[test]
+    fn render_warning_unsupported_color_scale_message_branches_on_suppressed() {
+        let with_suppression = RenderWarning::UnsupportedColorScaleOnMark {
+            marks: vec!["line".into()],
+            scale_kind: "continuous".into(),
+            suppressed: true,
+        };
+        let text = format!("{with_suppression}");
+        assert!(text.contains("legend was suppressed"), "{text}");
+
+        let without_suppression = RenderWarning::UnsupportedColorScaleOnMark {
+            marks: vec!["line".into()],
+            scale_kind: "continuous".into(),
+            suppressed: false,
+        };
+        let text = format!("{without_suppression}");
+        assert!(!text.contains("suppressed"), "{text}");
+        assert!(text.contains("no per-mark effect"), "{text}");
     }
 
     #[test]
