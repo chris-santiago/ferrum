@@ -1189,27 +1189,76 @@ fn build_panel_mark_batches(
         // separate resolution in `resolve_legend_color_scale`) reads
         // `layer.encoding` directly and is never touched by what follows.
         //
-        // Text-mark exemption (spec §4.4, 2026-08-28 T4 amendment, cycle-4
-        // finding): a `Mark::Text` layer whose `color` channel came purely
+        // Resolved before the own-color exemption below because that
+        // exemption's non-Text branch needs to know whether THIS layer
+        // carries its own literal stroke/fill override.
+        let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
+
+        // Own-color exemption (spec §4.4, 2026-08-28 T4 amendment; widened
+        // batch-A T5d, 2026-08-28): a layer whose `color` channel came purely
         // from chart-level inheritance (`!layer.color_is_own`) must not have
-        // it reach the mark builder's per-row color read — only the layer's
-        // OWN declared `color=` may color text. Clearing it on this
-        // DrawCtx-local copy (not on `layer.encoding` itself) is what makes
-        // `resolve_fill_color` fall through to the fill/font-color
-        // precedence in `marks/text.rs`, without starving the legend or
-        // dodge/stack position grouping the way an earlier revision did by
-        // deleting the channel from `LayerPrepared.encoding` itself (see
-        // `Encoding::inherit_from`'s doc comment for the full history).
+        // it reach the mark builder's per-row color read when doing so would
+        // override that layer's own declared paint — only the layer's OWN
+        // declared `color=` may drive per-row/per-group color variation.
+        // Originally scoped to `Mark::Text` unconditionally (the
+        // `heatmap(annot=True)` colored-cells + colorless-labels shape,
+        // where an un-colored label must NEVER borrow the cells' hue).
+        // Widened here to any OTHER mark, but only when that layer ALSO
+        // carries its own literal `stroke=`/`fill=` override
+        // (`mark_style.paint.{stroke,fill}_is_user_set`) — a chart-level
+        // `color` set for one layer's legend (e.g. a diagnostic chart's
+        // per-class curve) silently repainted a sibling layer's own literal
+        // stroke override with the categorical palette's first color
+        // whenever that sibling declared no color of its own (`fm.roc_chart`'s
+        // grey dashed chance-diagonal `reference` line flipping to the first
+        // class's blue, and fanning out into one duplicate polyline per
+        // class). The literal-override gate is deliberately narrower than
+        // "any non-owning mark": a layer with NO literal paint override that
+        // relies on a genuinely shared chart-level `color` to vary ITS OWN
+        // per-row/per-group fill — e.g. `catplot(kind="box", hue=x)`'s IQR
+        // `rect`/tick-cap/outlier-`point` layers, none of which declare their
+        // own `color=` because the desugar treats the shared x-axis category
+        // as the hue and lets every layer inherit it — must keep inheriting;
+        // an unconditional strip (mirroring the Text rule) silently flattened
+        // every box to the first category's color instead of one color per
+        // box. Clearing `color` on this DrawCtx-local copy (not on
+        // `layer.encoding` itself) is what makes `resolve_fill_color`/
+        // `resolve_stroke_color`/each mark's own per-row lookup fall through
+        // to that mark's fill/stroke/theme-default precedence, without
+        // starving the legend or dodge/stack position grouping the way an
+        // earlier revision did by deleting the channel from
+        // `LayerPrepared.encoding` itself (see `Encoding::inherit_from`'s doc
+        // comment for the full history).
+        //
+        // For a GROUPING mark (line/area/ribbon — `marks/line.rs`'s
+        // `build_color_detail_groups`), the cleared channel is not just a
+        // paint input: it is also the per-group split key. Clearing it
+        // therefore collapses whatever per-color groups that layer's OWN
+        // batch would otherwise have fanned out into back down to a single
+        // merged node/polyline over every row. This is exactly the desired
+        // effect for a literal-stroke layer that is conceptually ONE curve
+        // (the `roc_chart` chance-diagonal is collinear — `y = x` — so the
+        // merge is invisible), but it is a real topology change in general:
+        // a literal-stroke line layer drawn over a batch with real per-group
+        // discontinuities would render one polyline with spurious connecting
+        // segments between what used to be separate groups, not N separate
+        // ones. There is no route back to per-group splitting for such a
+        // layer without giving it its own `color=`/`detail=`, since the
+        // exemption's whole point is that this layer's color channel was
+        // never its own to group by.
         let mut layer_spec_encoding = layer.encoding.clone();
-        if layer.mark == crate::spec::mark::Mark::Text && !layer.color_is_own {
-            layer_spec_encoding.color = None;
+        if !layer.color_is_own {
+            let has_own_literal_paint =
+                mark_style.paint.stroke_is_user_set || mark_style.paint.fill_is_user_set;
+            if layer.mark == crate::spec::mark::Mark::Text || has_own_literal_paint {
+                layer_spec_encoding.color = None;
+            }
         }
         let layer_spec = ChartSpec {
             mark: layer.mark,
             encoding: layer_spec_encoding,
             ..spec.clone()
         };
-        let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
         let ctx = DrawCtx {
             spec: &layer_spec,
             panel,
@@ -3705,6 +3754,237 @@ mod tests {
         let font_color = to_scene_color(ThemeInputs::default().colors.font_color);
         assert!(colors.iter().all(|c| *c != font_color),
             "the text layer's own color channel must not fall back to theme font color; got {colors:?}");
+    }
+
+    // ── Batch-A T5d: the own-color exemption widened to every mark ─────────
+    // Root-caused against `fm.roc_chart`: the desugar's `reference` (chance-
+    // diagonal) `line` layer declares no `color` of its own and a literal
+    // `stroke="#AAAAAA"` override, but shares the primary batch (no
+    // `data_source`) with the `line` layer that DOES own `color="class"`.
+    // The figure function additionally sets the CHART-level `encoding.color`
+    // to the same field (for the shared legend), so `Encoding::inherit_from`
+    // filled the reference layer's `LayerPrepared.encoding.color` in from
+    // the chart level even though the layer never declared it — and, before
+    // this fix, only `Mark::Text` had its inherited-only `color` cleared
+    // before reaching the mark builder. `mark_line`'s own per-row grouping
+    // then read the (inherited) `class` column straight off the reference
+    // layer's shared batch: one dashed polyline per class, each stroked with
+    // that class's legend color, instead of one dashed line in the layer's
+    // own `#AAAAAA`.
+
+    /// Chart-level `color="class"` (mirroring `roc_chart`'s shared-legend
+    /// copy-up) + a two-layer `line`+`line` chart: layer 0 owns
+    /// `color="class"` (the real per-class curves); layer 1 is the
+    /// `reference`-shaped layer — no color of its own, a literal
+    /// `stroke=`/`stroke_dash=` override, no `data_source` (shares layer 0's
+    /// batch, which carries the `class` column). `n_classes` rows repeat per
+    /// class so `build_color_detail_groups` has real multi-point groups to
+    /// fan out over if the leak is present.
+    fn roc_reference_line_layered_spec(n_classes: usize) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let curve_layer = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec { field: "class".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: None, blend: None, name: Some("line".into()),
+            independent_y: false,
+        };
+        let reference_layer = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: Some(MarkKwargsSpec {
+                stroke: Some("#AAAAAA".into()),
+                stroke_dash: Some(vec![4.0, 4.0]),
+                ..Default::default()
+            }),
+            data_source: None, position: None, blend: None, name: Some("reference".into()),
+            independent_y: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                // Mirrors `roc_chart`'s chart-level `color="class"` (set for
+                // the shared legend, not declared by either raw layer above).
+                color: Some(EncodingSpec { field: "class".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None,
+            layers: Some(vec![curve_layer, reference_layer]),
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+
+        let rows_per_class = 4;
+        let n = n_classes * rows_per_class;
+        let xs: Vec<f64> = (0..n).map(|i| (i % rows_per_class) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| xs[i] * 2.0).collect();
+        let classes: Vec<String> = (0..n).map(|i| (i / rows_per_class).to_string()).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("class", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(classes)),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// Every `SceneNode::Polyline`'s stroke color, in one mark batch, in
+    /// emission order.
+    fn polyline_strokes(batch: &ferrum_scene::MarkBatch) -> Vec<ferrum_scene::Color> {
+        batch.nodes.iter()
+            .filter_map(|n| if let SceneNode::Polyline { style, .. } = n { Some(style.color) } else { None })
+            .collect()
+    }
+
+    /// Variant of [`roc_reference_line_layered_spec`] with the "reference"
+    /// layer's literal `mark_style` (`stroke="#AAAAAA"`) removed — the
+    /// `catplot(kind="box", hue=x)` shape: a layer with no color of its own
+    /// AND no literal paint override, sharing the primary batch, relying
+    /// entirely on the chart-level `color` it inherits to vary its own
+    /// per-row/per-group paint. This is the NEGATIVE branch of the gate: it
+    /// must keep fanning out and keep inheriting the legend colors, exactly
+    /// like the curve layer. Both `layered_line_reference_layer_*` tests
+    /// above, and every neighboring `layered_*` test, pass unchanged under a
+    /// blanket `if !layer.color_is_own { color = None }` (the coder's
+    /// rejected first attempt) — this fixture is what actually discriminates
+    /// that regression from the correct, literal-paint-gated fix, so a
+    /// reversion to the blanket form fails HERE in `cargo test`, not only in
+    /// the Python golden (`tests/test_phase_9_e2e.py::test_catplot_box_golden`).
+    fn roc_reference_line_layered_spec_no_own_paint(n_classes: usize) -> (ChartSpec, RecordBatch) {
+        let (mut spec, batch) = roc_reference_line_layered_spec(n_classes);
+        let layers = spec.layers.as_mut().expect("roc_reference_line_layered_spec always sets layers");
+        layers[1].mark_style = None;
+        (spec, batch)
+    }
+
+    /// Binary-shaped repro (2 classes): before the fix, the `reference`
+    /// layer inherited `color="class"` from the chart level and rendered one
+    /// polyline colored with the FIRST class's legend color (`#2563eb`) —
+    /// the exact `roc_chart` symptom (stroke flips `#aaaaaa` → `#2563eb`).
+    /// After the fix: exactly one polyline, stroked with the layer's own
+    /// literal `#AAAAAA`.
+    #[test]
+    fn layered_line_reference_layer_keeps_own_stroke_not_first_class_color() {
+        let (spec, batch) = roc_reference_line_layered_spec(2);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
+            .collect();
+        assert_eq!(line_batches.len(), 2, "expected one mark batch per layer (curve + reference)");
+
+        let reference_strokes = polyline_strokes(line_batches[1]);
+        assert_eq!(reference_strokes.len(), 1,
+            "the reference layer must collapse to exactly one polyline (no color-driven fan-out); got {} polylines with strokes {:?}",
+            reference_strokes.len(), reference_strokes);
+        let gray = ferrum_scene::Color { r: 0xAA, g: 0xAA, b: 0xAA, a: 255 };
+        assert_eq!(reference_strokes[0], gray,
+            "the reference layer's own literal stroke='#AAAAAA' must win over the inherited chart-level \
+             color scale's first-domain-entry color; got {:?}", reference_strokes[0]);
+    }
+
+    /// Multiclass-shaped repro (3 classes, coordinator amendment): before the
+    /// fix the reference layer's per-row `class` read (inherited, not its
+    /// own) fanned the SAME leak out across every class in the domain — one
+    /// dashed polyline per class, each in that class's legend color — instead
+    /// of collapsing to a single line. Guards both the polyline COUNT and the
+    /// per-polyline stroke.
+    #[test]
+    fn layered_line_reference_layer_does_not_fan_out_per_class_on_multiclass() {
+        let (spec, batch) = roc_reference_line_layered_spec(3);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
+            .collect();
+        assert_eq!(line_batches.len(), 2);
+
+        // Control: the curve layer (its OWN color="class") keeps fanning out
+        // one polyline per class — the HIT path must stay unchanged.
+        let curve_strokes = polyline_strokes(line_batches[0]);
+        assert_eq!(curve_strokes.len(), 3,
+            "the curve layer's own color channel must still emit one polyline per class; got {curve_strokes:?}");
+
+        let reference_strokes = polyline_strokes(line_batches[1]);
+        assert_eq!(reference_strokes.len(), 1,
+            "the reference layer must render exactly one polyline regardless of the chart's class \
+             cardinality (no per-class fan-out from an inherited-only color channel); got {} with strokes {:?}",
+            reference_strokes.len(), reference_strokes);
+        let gray = ferrum_scene::Color { r: 0xAA, g: 0xAA, b: 0xAA, a: 255 };
+        assert_eq!(reference_strokes[0], gray,
+            "the reference layer's own literal stroke must win; got {:?}", reference_strokes[0]);
+    }
+
+    /// Negative branch of the gate (the `catplot(kind="box", hue=x)` shape):
+    /// a layer with no color of its own AND no literal `stroke=`/`fill=`
+    /// override must still inherit the chart-level `color` and fan out one
+    /// polyline per class, in that class's legend color — same as its
+    /// sibling curve layer. Proves the fix is gated on
+    /// `mark_style.paint.{stroke,fill}_is_user_set`, not on `color_is_own`
+    /// alone: temporarily blanking the gate back to
+    /// `if !layer.color_is_own { color = None }` (no literal-paint check)
+    /// made this test fail (`reference_strokes.len() == 1`, stroked the
+    /// theme default) while leaving every other test in this module green —
+    /// confirming this is the ONLY Rust-level guard against that regression.
+    #[test]
+    fn layered_line_reference_layer_without_own_paint_still_inherits_and_fans_out() {
+        let (spec, batch) = roc_reference_line_layered_spec_no_own_paint(3);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let line_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Line)
+            .collect();
+        assert_eq!(line_batches.len(), 2);
+
+        let curve_strokes = polyline_strokes(line_batches[0]);
+        assert_eq!(curve_strokes.len(), 3, "control: the curve layer's own color must still fan out");
+
+        let reference_strokes = polyline_strokes(line_batches[1]);
+        assert_eq!(reference_strokes.len(), 3,
+            "a layer with no color of its own AND no literal paint override must keep inheriting the \
+             chart-level color and fan out one polyline per class (the catplot(kind=\"box\") shape); \
+             got {} polyline(s) with strokes {:?}",
+            reference_strokes.len(), reference_strokes);
+
+        // Every inherited stroke must be one of the legend-resolved class
+        // colors the sibling curve layer actually used — not the theme
+        // default/fallback a cleared color channel would produce.
+        for c in &reference_strokes {
+            assert!(curve_strokes.contains(c),
+                "inherited stroke {c:?} is not one of the curve layer's legend colors {curve_strokes:?}");
+        }
+        let mut distinct: Vec<ferrum_scene::Color> = Vec::new();
+        for c in &reference_strokes {
+            if !distinct.contains(c) { distinct.push(*c); }
+        }
+        assert_eq!(distinct.len(), 3,
+            "3 classes must paint 3 distinct inherited colors, matching the legend; got {reference_strokes:?}");
     }
 
     // ── Cycle-4 quality-review findings: the Text color-inheritance

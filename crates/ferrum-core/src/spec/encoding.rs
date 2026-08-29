@@ -851,12 +851,22 @@ impl Encoding {
     /// per-channel asymmetry was an undocumented accident.
     ///
     /// `encoding.color` (like every other channel here) is always fully
-    /// inherited — a `Mark::Text` layer's per-row color READ is instead
-    /// gated downstream, at `scene_build.rs`'s per-layer `DrawCtx`
-    /// construction, using [`LayerPrepared::color_is_own`](crate::render::prepare::LayerPrepared::color_is_own)
-    /// (spec §4.4, 2026-08-28 T4 amendment, cycle-4 finding). An earlier
-    /// revision gated the exemption HERE instead, by deleting `color` from
-    /// the merged `Encoding` for kwarg-less Text layers — but `encoding`
+    /// inherited — a layer's per-row color READ is instead gated downstream,
+    /// at `scene_build.rs`'s per-layer `DrawCtx` construction, using
+    /// [`LayerPrepared::color_is_own`](crate::render::prepare::LayerPrepared::color_is_own)
+    /// (spec §4.4, 2026-08-28 T4 amendment, cycle-4 finding; widened batch-A
+    /// T5d, 2026-08-28 from `Mark::Text`-only, unconditionally, to any OTHER
+    /// mark — but only when that layer ALSO carries its own literal
+    /// `stroke=`/`fill=` override, i.e.
+    /// `mark_style.paint.stroke_is_user_set || fill_is_user_set`
+    /// (`scene_build.rs`'s `build_panel_mark_batches`). A layer with no color
+    /// of its own and no literal paint override still inherits — a blanket,
+    /// unconditional widening regressed `catplot(kind="box", hue=x)`, whose
+    /// box/tick/point layers rely on exactly that inheritance to paint each
+    /// box in its own category's color). An earlier revision gated the
+    /// exemption HERE instead,
+    /// by deleting `color` from the merged `Encoding` for kwarg-less Text
+    /// layers — but `encoding`
     /// (via [`crate::render::prepare::LayerPrepared`]) also feeds the legend
     /// (`resolve_legend_color_scale`, which reads layer 0's `encoding.color`
     /// directly) and dodge/stack position grouping

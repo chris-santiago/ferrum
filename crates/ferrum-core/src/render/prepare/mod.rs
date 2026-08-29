@@ -67,11 +67,20 @@ pub struct LayerPrepared {
     /// `resolve_legend_color_scale`; dodge/stack grouping,
     /// `position::resolve_group_channel`) sees exactly what `main` sees.
     /// This flag exists only so `scene_build.rs`'s per-mark dispatch can
-    /// decide, for a `Mark::Text` layer specifically, whether a per-row
-    /// color READ is honoring the layer's own declaration or would otherwise
-    /// silently color labels from an inherited legend channel that isn't
-    /// theirs — see the comment at that call site in
-    /// `build_panel_mark_batches`. For `from_chart_only` (a chart with no
+    /// decide whether a per-row color READ is honoring the layer's own
+    /// declaration or would otherwise silently paint that layer's marks from
+    /// an inherited legend channel that isn't theirs. Originally scoped to
+    /// `Mark::Text` only, unconditionally; widened batch-A T5d, 2026-08-28 to
+    /// any OTHER mark, but — load-bearing — **only when that layer also
+    /// carries its own literal `stroke=`/`fill=` override**
+    /// (`mark_style.paint.{stroke,fill}_is_user_set`). A layer with no color
+    /// of its own AND no literal paint override (e.g. `catplot(kind="box",
+    /// hue=x)`'s IQR-rect/tick-cap/outlier-point layers, which rely on a
+    /// genuinely shared chart-level `color` to vary their OWN per-row/group
+    /// fill) must keep inheriting — see the comment at that call site in
+    /// `build_panel_mark_batches` for the full precedent and the regression
+    /// an earlier, unconditional-for-every-mark version of this exemption
+    /// caused. For `from_chart_only` (a chart with no
     /// `layers`) there is no parent to inherit from, so "own" and "declared
     /// at all" coincide: the flag is simply whether the chart-level encoding
     /// has a `color` channel (`spec.encoding.color.is_some()`) — `false`,
@@ -101,7 +110,7 @@ impl LayerPrepared {
     /// See [`crate::spec::encoding::Encoding::inherit_from`] for the policy —
     /// this is the plain (mark-agnostic) merge; `encoding.color` on the
     /// result is always fully inherited (see `color_is_own`'s doc comment on
-    /// [`LayerPrepared`] for why a Text-mark exemption does NOT live here).
+    /// [`LayerPrepared`] for why the own-color exemption does NOT live here).
     pub(crate) fn from_chart_and_layer(
         spec: &crate::spec::chart::ChartSpec,
         layer: &crate::spec::layer::Layer,
