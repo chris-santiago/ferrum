@@ -298,7 +298,7 @@ mod tests {
             &ThemeInputs::default(),
         )
         .unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -393,7 +393,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
         mark_style.text.leader_line = Some(true);
 
         let ctx = DrawCtx {
@@ -457,7 +457,7 @@ mod tests {
             &ThemeInputs::default(),
         )
         .unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
 
         let ctx = DrawCtx {
             spec: &spec,
@@ -499,7 +499,7 @@ mod tests {
             &ThemeInputs::default(),
         )
         .unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
 
         let ctx = DrawCtx {
             spec: &spec,
@@ -554,7 +554,7 @@ mod tests {
             &ThemeInputs::default(),
         )
         .unwrap();
-        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
         mark_style.text.leader_line = Some(true);
 
         let ctx = DrawCtx {
@@ -605,7 +605,7 @@ mod tests {
             &ThemeInputs::default(),
         )
         .unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
 
         let ctx = DrawCtx {
             spec: &spec,
@@ -649,7 +649,7 @@ mod tests {
         .unwrap();
 
         // Build a MarkStyle with leader_line = Some(true).
-        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
         mark_style.text.leader_line = Some(true);
 
         let ctx = DrawCtx {
@@ -691,7 +691,7 @@ mod tests {
         .unwrap();
 
         // Default resolve — leader_line stays None.
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
         assert!(
             mark_style.text.leader_line.is_none(),
             "resolve_mark_style should leave leader_line as None by default"

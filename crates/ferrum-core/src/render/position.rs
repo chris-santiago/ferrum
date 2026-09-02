@@ -1085,6 +1085,9 @@ mod tests {
             size: None,
             shape: None,
             opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -1202,7 +1205,7 @@ mod tests {
             false,
         ));
         let (x, y) = if ordinal_on_x { (ord, lin) } else { (lin, ord) };
-        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default() }
+        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default() }
     }
 
     /// Batch with a categorical band column `cat`, a numeric value column `val`,
@@ -1356,6 +1359,9 @@ mod tests {
             size: None,
             shape: None,
             opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -3509,7 +3515,7 @@ mod tests {
             row_facet_key: None,
         };
         let theme = ThemeInputs::default();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
 
         // Real seam: DrawCtx built from the ADJUSTED batch (mirrors
         // scene_build.rs:795-824), dispatched through the real mark-build entry
@@ -3564,7 +3570,7 @@ mod tests {
         let lin = ScaleKind::Linear(LinearScale::new_internal(
             vec![0.0, 100.0], vec![0.0, 100.0], false, false,
         ));
-        ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default() }
+        ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default() }
     }
 
     /// Design-gate finding: the two tests above only exercise

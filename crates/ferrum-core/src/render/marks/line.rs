@@ -206,9 +206,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let cmds = build_line_cmds(&points, interpolate);
             // FA-11: honor the stroke_opacity and fill_opacity channels (the
             // latter was previously dropped) via the complete FillStroke builder.
+            // The Path variant's stroke is not yet threaded for provenance-gated
+            // paint clearing (out of this fix round's scope, mirrors arc.rs); a
+            // cleared constant stroke here still serializes as
+            // `rgba(0,0,0,0.000)`. The linear (non-Path) Polyline variant below
+            // is `StrokeStyle`-shaped and excluded from clearing entirely per
+            // spec (`StrokeStyle.color` has no absent representation).
             let style = to_scene_fill_stroke_full(
                 None,
+                false,
                 Some(stroke_color),
+                false,
                 group_stroke_width,
                 1.0,
                 effective_dash,
@@ -305,7 +313,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 1);
@@ -325,7 +333,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert!(result.nodes.is_empty());
@@ -356,7 +364,7 @@ mod tests {
             detail: Some("sample_id".into()),
             ..Default::default()
         };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 3);
@@ -394,7 +402,7 @@ mod tests {
             detail: Some("sample_id".into()),
             ..Default::default()
         };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 6);
@@ -422,7 +430,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 1);
@@ -466,7 +474,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         // 3 series → 3 polylines; none should be missing due to the integer dtype
@@ -511,7 +519,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -557,7 +565,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         // "basis" interpolation → use_path = true → Path nodes.
         let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -592,7 +600,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -636,7 +644,7 @@ mod tests {
             detail: Some("g".into()),
             ..Default::default()
         };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let polyline_count = result.nodes.iter()
@@ -683,7 +691,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         // "basis" → use_path = true → Path nodes carrying a FillStroke.
         let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -691,10 +699,14 @@ mod tests {
             if let SceneNode::Path { style, .. } = n { Some(style.fill_opacity) } else { None }
         }).collect();
         assert_eq!(fill_opacities.len(), 2, "expected one Path node per group");
-        assert!((fill_opacities[0] - 0.25).abs() < 1e-9,
-            "group A fill_opacity must be 0.25 (was dropped → 1.0 before FA-11); got {}", fill_opacities[0]);
-        assert!((fill_opacities[1] - 0.75).abs() < 1e-9,
-            "group B fill_opacity must be 0.75; got {}", fill_opacities[1]);
+        // Batch A §4.3 (sanctioned): the extent [0.25, 0.75] maps onto the theme
+        // opacity band [0.1, 1.0], so the two groups take the band endpoints.
+        // Before FA-11 the channel was dropped entirely and both were 1.0 — the
+        // distinctness this guards is what matters.
+        assert!((fill_opacities[0] - 0.1).abs() < 1e-9,
+            "group A fill_opacity must be the band min 0.1; got {}", fill_opacities[0]);
+        assert!((fill_opacities[1] - 1.0).abs() < 1e-9,
+            "group B fill_opacity must be the band max 1.0; got {}", fill_opacities[1]);
     }
 
     /// FA-11 guard: without a `fill_opacity` encoding, a `Path`-variant line
@@ -715,7 +727,7 @@ mod tests {
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
-        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let path = result.nodes.iter().find_map(|n| {
@@ -781,7 +793,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
 
         let color_scale = ctx.scales.color.as_ref().expect("Int64 ordinal color must resolve a categorical color scale");
@@ -833,7 +845,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
 
         let color_scale = ctx.scales.color.as_ref().expect("Utf8 color must resolve a categorical color scale");
@@ -891,7 +903,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
 
         // Test premise: an explicit :Q color field must resolve a numeric-keyed
@@ -915,7 +927,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
 
         assert!(matches!(ctx.scales.color, Some(crate::render::scale_resolve::ColorScale::Continuous { .. })),

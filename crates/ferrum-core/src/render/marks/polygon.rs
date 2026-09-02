@@ -221,9 +221,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         acc.push(
             SceneNode::Polygon {
                 rings: vec![exterior],
+                // Polygon fill/stroke are not yet threaded for provenance-gated
+                // paint clearing (out of this fix round's scope, mirrors
+                // arc.rs); a cleared constant fill/stroke here still
+                // serializes as `rgba(0,0,0,0.000)`.
                 style: to_scene_fill_stroke(
                     Some(fill),
+                    false,
                     ctx.mark_style.paint.stroke,
+                    false,
                     ctx.mark_style.paint.stroke_width,
                     group_opacity,
                     None,
@@ -315,7 +321,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 1, "expected 1 polygon");
@@ -342,7 +348,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 2, "expected 2 paths (one per group)");
@@ -370,7 +376,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 3, "expected 3 paths");
@@ -417,11 +423,14 @@ mod tests {
             size: None,
             shape: None,
             opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -480,11 +489,14 @@ mod tests {
             opacity: Some(OpacityScale {
                 inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.8], vec![0.2, 0.8], false, false)),
             }),
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -543,9 +555,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 5.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -595,9 +607,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 5.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -630,7 +642,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -677,9 +689,9 @@ mod tests {
             y: ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![100.0, 0.0], false, false,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let n = result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count();

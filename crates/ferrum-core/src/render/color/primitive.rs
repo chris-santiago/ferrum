@@ -26,6 +26,18 @@ impl std::fmt::Display for ColorParseError {
 
 impl std::error::Error for ColorParseError {}
 
+/// The fully transparent color (`rgba(0, 0, 0, 0)`), CSS's `transparent`
+/// keyword.
+///
+/// This is how an explicit `fill="none"` / `stroke="none"` paint clear travels
+/// through the render pipeline (`draw::resolve_mark_style`): a real color that
+/// paints nothing. Carrying the clear as a color — rather than as a `None`
+/// paired with an "is cleared" flag — means no downstream fallback can
+/// resurrect a paint the user explicitly cleared: `resolve_stroke_color`'s
+/// `unwrap_or(fill)` and `resolve_effective_stroke`'s stroke-width rescue both
+/// only fire on an *absent* stroke, and a cleared stroke is present.
+pub const TRANSPARENT: Color = Srgba::new(0, 0, 0, 0);
+
 pub fn from_rgb(r: u8, g: u8, b: u8) -> Color {
     Srgba::new(r, g, b, 0xFF)
 }
@@ -229,7 +241,12 @@ fn parse_rgb_function(original: &str, lower: &str) -> Result<Color, ColorParseEr
     Ok(from_rgba(r, g, b, (a * 255.0).round() as u8))
 }
 
-pub fn from_hex_str(s: &str) -> Result<Color, ColorParseError> {
+/// Hex-literal arm of [`parse_color`]. Private to this module by design: every
+/// color string the crate reads — theme overrides, legend/axis/title colors,
+/// mark kwargs, the PyO3 background color — goes through [`parse_color`] so no
+/// call site can accept a narrower vocabulary than the one
+/// [`ACCEPTED_COLOR_FORMS`] advertises.
+fn from_hex_str(s: &str) -> Result<Color, ColorParseError> {
     let s = s.trim();
     if !s.starts_with('#') {
         return Err(ColorParseError(s.to_string()));

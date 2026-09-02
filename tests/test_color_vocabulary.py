@@ -148,26 +148,55 @@ class TestInvalidInput:
 
 
 class TestSentinelsAreNotColors:
-    """``to_hex`` correctly rejects ferrum's non-color sentinel literals.
+    """``to_hex`` correctly refuses ferrum's non-color sentinel literals.
 
-    ``"none"`` (clears a fill/stroke paint) and ``"theme:label"`` (a theme
-    lookup token) are NOT colors — they are sentinels consumed elsewhere in
-    the pipeline. This module pins that `parse_color`/`to_hex` treats them
-    as ordinary unrecognized strings (raising, like any other non-color
-    input) specifically so a later regression doesn't make either sentinel
-    silently parseable as a color.
+    ``"none"``/``"transparent"`` (clear a fill/stroke paint at the mark/
+    selection boundaries, spec §4.1 — ``"transparent"`` joined ``"none"`` as
+    a clearing spelling in the 2026-09-01 T8 quality-review supersession)
+    and ``"theme:label"`` (a theme lookup token) are NOT colors — they are
+    sentinels consumed elsewhere in the pipeline. This module pins that
+    `parse_color`/`to_hex` never lets any of the three resolve as a color.
+
+    The two clearing spellings raise a DIFFERENT message than
+    ``"theme:label"`` does (spec §4.1, extended 2026-09-01 T9 re-confirm):
+    ``to_hex`` short-circuits ``"none"``/``"transparent"`` before the parser
+    with a dedicated, sentinel-aware message naming the spelling and
+    stating it clears paint at mark/selection boundaries and has no hex
+    form *here* — never the generic accepted-forms text, which would be
+    self-contradicting for ``"transparent"`` (a real CSS Color 4 keyword).
+    The reason it has no hex form here is the sentinel/vocabulary
+    separation this boundary enforces, not an absence of a hex
+    representation — CSS Color 4 defines ``transparent`` as fully
+    transparent black, ``#00000000``. ``"theme:label"`` has no dedicated
+    handling in ``to_hex`` and still falls through to the parser, raising
+    the ordinary unrecognized-string message.
 
     This is exactly *why* Task 8 (`resolve_mark_style`) and Task 9
     (`MarkBase.__init__` construction-time validation) must check for
-    ``"none"``/``"theme:label"`` and short-circuit *before* calling into
-    `ferrum.color.to_hex`/`parse_color` — if either task's dispatch order is
-    wrong, `fill="none"` or `color="theme:label"` will start raising
-    ``ValueError`` at the call site that no longer short-circuits.
+    ``"none"``/``"transparent"``/``"theme:label"`` and short-circuit
+    *before* calling into `ferrum.color.to_hex`/`parse_color` — if any
+    task's dispatch order is wrong, `fill="none"`/`fill="transparent"` or
+    `color="theme:label"` will start raising at the call site that no
+    longer short-circuits.
     """
 
-    def test_none_is_not_a_color(self) -> None:
-        with pytest.raises(ValueError, match="CSS color name"):
-            fm.color.to_hex("none")
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "none",
+            "None",
+            "NONE",
+            " none ",
+            "transparent",
+            "Transparent",
+            "TRANSPARENT",
+            " transparent ",
+        ],
+    )
+    def test_clearing_sentinel_gets_dedicated_message(self, spelling: str) -> None:
+        with pytest.raises(ValueError, match="clears paint at mark/selection") as excinfo:
+            fm.color.to_hex(spelling)
+        assert "CSS color name" not in str(excinfo.value)
 
     def test_theme_label_sentinel_is_not_a_color(self) -> None:
         with pytest.raises(ValueError, match="CSS color name"):

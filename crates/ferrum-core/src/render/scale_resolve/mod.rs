@@ -33,7 +33,10 @@ use super::RenderError;
 
 // ── Re-exports: sub-module functions ────────────────────────────────────────
 
-pub use self::auxiliary::{build_opacity_scale, build_shape_scale, build_size_scale};
+pub use self::auxiliary::{
+    build_opacity_channel_scale, build_shape_scale, build_size_scale, build_stroke_dash_scale,
+    OpacityChannel,
+};
 pub use self::color::build_color_scale;
 
 // Domain-union helpers re-exported for the composite resolve pass
@@ -773,6 +776,51 @@ impl ShapeScale {
     }
 }
 
+/// An ordinal stroke-dash scale: maps a categorical field onto the canonical
+/// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE) index space (index 0
+/// solid, then each palette pattern), cycling when there are more categories
+/// than slots.
+///
+/// Built by
+/// [`build_stroke_dash_scale`](crate::render::scale_resolve::build_stroke_dash_scale)
+/// ONLY for a categorical `stroke_dash` field. A quantitative field resolves no
+/// scale (`ResolvedScales::stroke_dash` stays `None`) and keeps the numeric
+/// palette-index contract — so for a mark builder, "scale present" means
+/// "look the row's category up here", and "scale absent" means "read the column
+/// as `resolve_stroke_dash` indices", with no third case.
+#[derive(Debug, Clone)]
+pub struct StrokeDashScale {
+    /// Distinct category values, in domain order (sort applied).
+    pub domain: Vec<String>,
+    /// Dasharray per category, aligned with `domain`. An **empty** entry is the
+    /// solid slot — SVG paints no `stroke-dasharray` for it. Prefer
+    /// [`dash_for`](Self::dash_for), which returns the `Option<Vec<f64>>` shape
+    /// mark styles carry, over reading this directly.
+    pub patterns: Vec<Vec<f64>>,
+}
+
+impl StrokeDashScale {
+    /// The dasharray slice for `value`, or `None` when the value is not in the
+    /// domain. An empty slice is the solid slot (see [`patterns`](Self::patterns)).
+    pub fn lookup(&self, value: &str) -> Option<&[f64]> {
+        self.domain
+            .iter()
+            .position(|v| v == value)
+            .map(|i| self.patterns[i].as_slice())
+    }
+
+    /// The dash pattern to put on a mark style for `value`: `None` when the
+    /// value is outside the domain **or** maps to the solid slot — both mean
+    /// "paint no dasharray", which is exactly `MarkStyle::stroke_dash`'s own
+    /// `None`. Call sites assign this result directly; they never index
+    /// `patterns` or test it for emptiness.
+    pub fn dash_for(&self, value: &str) -> Option<Vec<f64>> {
+        self.lookup(value)
+            .filter(|pattern| !pattern.is_empty())
+            .map(<[f64]>::to_vec)
+    }
+}
+
 /// The 8 point shapes available to the shape scale and `mark_point(shape=…)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeKind {
@@ -1035,6 +1083,14 @@ pub struct ResolvedScales {
     pub size: Option<SizeScale>,
     pub shape: Option<ShapeScale>,
     pub opacity: Option<OpacityScale>,
+    // Batch A (spec §4.3): the rest of the appearance family. `fill_opacity` /
+    // `stroke_opacity` resolve exactly like `opacity` (data extent — or the
+    // `scale=` domain — onto the theme opacity band, or the `scale=` range);
+    // `stroke_dash` is `Some` only for a CATEGORICAL dash field, a numeric one
+    // keeping the palette-index contract (see [`StrokeDashScale`]).
+    pub fill_opacity: Option<OpacityScale>,
+    pub stroke_opacity: Option<OpacityScale>,
+    pub stroke_dash: Option<StrokeDashScale>,
     // Phase 8b: paired-channel field names. The x2/y2 axis is shared with x/y
     // (their domain is unioned in `build_axis_scale`); this field surfaces the
     // bound field name so downstream code (mark drawers, legends) can read it
@@ -1048,6 +1104,34 @@ pub struct ResolvedScales {
 }
 
 impl ResolvedScales {
+    /// Assemble the resolved scales from the two positional axes plus the
+    /// auxiliary bundle, filling the remaining slots with their resolver
+    /// defaults: no paired-channel field names, and the shared (empty) y-slots
+    /// — per-slot y resolution is layer-aware and lives in
+    /// `scene_build::resolve_panel_scales`, which has the layer list.
+    ///
+    /// The three resolution paths (single-axis x-only, single-axis y-only, and
+    /// the full x+y path) differ only in how they obtain `x`/`y`; funneling the
+    /// copy of seven auxiliary slots through here keeps a new appearance channel
+    /// from having to be threaded into three literals.
+    fn from_axes_and_auxiliary(x: ScaleKind, y: ScaleKind, aux: AuxiliaryScales) -> Self {
+        let AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash } = aux;
+        ResolvedScales {
+            x,
+            y,
+            color,
+            size,
+            shape,
+            opacity,
+            fill_opacity,
+            stroke_opacity,
+            stroke_dash,
+            x2: None,
+            y2: None,
+            y_slots: YScaleSlots::default(),
+        }
+    }
+
     /// The y-scale a given layer's marks map through. Layers that share the
     /// primary y (the default, and every layer on a chart with no independent
     /// slot) get `y`; an independent layer gets its own slot scale.
@@ -1221,18 +1305,33 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
 
 // ── Private helpers ─────────────────────────────────────────────────────────
 
-/// Build the four auxiliary (non-positional) scales for a chart spec.
+/// The non-positional scales a chart spec resolves, in the order
+/// [`build_auxiliary_scales`] builds them. A named bundle rather than a tuple:
+/// the appearance family (spec §4.3) took it to seven members, past the point
+/// where positional `let (a, b, c, …)` destructuring at the three call sites
+/// reads as anything.
+struct AuxiliaryScales {
+    color: Option<ColorScale>,
+    size: Option<SizeScale>,
+    shape: Option<ShapeScale>,
+    opacity: Option<OpacityScale>,
+    fill_opacity: Option<OpacityScale>,
+    stroke_opacity: Option<OpacityScale>,
+    stroke_dash: Option<StrokeDashScale>,
+}
+
+/// Build the auxiliary (non-positional) scales for a chart spec.
 ///
 /// Computes `force_cat` and `aux_shared` internally from `spec` so the three
 /// dispatch sites in `resolve_scales_with_outputs` share one definition. Warning
-/// push order is: `color_warns` (via `extend`), then `shape_warn` (via `push`).
+/// push order is: color, size, shape, then the opacity family in
+/// `opacity`/`fill_opacity`/`stroke_opacity` order, then `stroke_dash`.
 ///
 /// `leaf_scales` is the 10-pre-b composite seam: `Some` only for a composite leaf
 /// whose parent shares `color`/`size`. It seeds the color/size auto path with the
 /// domain unioned across the composite's leaves, exactly as `leaf_scales`
 /// (x/y) seeds the positional axes. `None` for standalone (flat/facet) renders
 /// reproduces the pre-10-pre-b behavior byte-for-byte.
-#[allow(clippy::type_complexity)]
 fn build_auxiliary_scales(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
@@ -1240,7 +1339,7 @@ fn build_auxiliary_scales(
     theme: &ThemeInputs,
     leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
-) -> Result<(Option<ColorScale>, Option<SizeScale>, Option<ShapeScale>, Option<OpacityScale>), RenderError> {
+) -> Result<AuxiliaryScales, RenderError> {
     // FA-5: area marks always group color discretely; force categorical.
     let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
     // T3: when the chart is faceted, auxiliary non-positional channels (continuous
@@ -1256,9 +1355,20 @@ fn build_auxiliary_scales(
     warnings.extend(size_warns);
     let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
     warnings.extend(shape_warns);
-    let (opacity, opacity_warns) = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-    warnings.extend(opacity_warns);
-    Ok((color, size, shape, opacity))
+    // The three opacity-family channels share one builder (spec §4.3); this
+    // closure is only here so each call site reads as the channel it resolves
+    // rather than repeating the six-argument call.
+    let mut opacity_scale = |channel| -> Result<Option<OpacityScale>, RenderError> {
+        let (scale, warns) = build_opacity_channel_scale(channel, &spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+        warnings.extend(warns);
+        Ok(scale)
+    };
+    let opacity = opacity_scale(OpacityChannel::Opacity)?;
+    let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
+    let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
+    warnings.extend(dash_warns);
+    Ok(AuxiliaryScales { color, size, shape, opacity, fill_opacity, stroke_opacity, stroke_dash })
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1489,6 +1599,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 x: dummy_unit_scale(x_pixel_range, true),
                 y: dummy_unit_scale(y_pixel_range, false),
                 color: None, size: None, shape: None, opacity: None,
+                fill_opacity: None, stroke_opacity: None, stroke_dash: None,
                 x2: None, y2: None, y_slots: YScaleSlots::default(),
             },
             warnings,
@@ -1530,12 +1641,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
             let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
-            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
-            return Ok((ResolvedScales {
-                x, y: dummy_unit_scale(y_pixel_range, false),
-                color, size, shape, opacity, x2: None, y2: None,
-                y_slots: YScaleSlots::default(),
-            }, warnings));
+            let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+            return Ok((ResolvedScales::from_axes_and_auxiliary(
+                x,
+                dummy_unit_scale(y_pixel_range, false),
+                aux,
+            ), warnings));
         }
         if !has_x && has_y {
             let y_enc = spec.encoding.y.as_ref().unwrap();
@@ -1543,12 +1654,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
             let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
-            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
-            return Ok((ResolvedScales {
-                x: dummy_unit_scale(x_pixel_range, true), y,
-                color, size, shape, opacity, x2: None, y2: None,
-                y_slots: YScaleSlots::default(),
-            }, warnings));
+            let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
+            return Ok((ResolvedScales::from_axes_and_auxiliary(
+                dummy_unit_scale(x_pixel_range, true),
+                y,
+                aux,
+            ), warnings));
         }
     }
 
@@ -1624,25 +1735,13 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // it accepts transform_outputs because composite-mark color fields may
     // live in a named output rather than primary.) FA-5 (force_cat) and T3
     // (aux_shared) logic lives in `build_auxiliary_scales`.
-    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
-
-    let x2_field_name = x2_enc.map(|e| e.field.clone());
-    let y2_field_name = y2_enc.map(|e| e.field.clone());
+    let aux = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
 
     Ok((
         ResolvedScales {
-            x,
-            y,
-            color,
-            size,
-            shape,
-            opacity,
-            x2: x2_field_name,
-            y2: y2_field_name,
-            // Per-slot y resolution is layered/layer-aware and lives in
-            // `scene_build::resolve_panel_scales`, which has the layer list.
-            // The single-batch resolver always yields the shared (empty) default.
-            y_slots: YScaleSlots::default(),
+            x2: x2_enc.map(|e| e.field.clone()),
+            y2: y2_enc.map(|e| e.field.clone()),
+            ..ResolvedScales::from_axes_and_auxiliary(x, y, aux)
         },
         warnings,
     ))

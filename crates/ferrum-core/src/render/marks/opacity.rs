@@ -13,9 +13,17 @@
 //! - `bar` alone falls `fill_opacity` back to the `opacity` column when the
 //!   `fill_opacity` column is absent ([`OpacityFallback::BarLike`]); every other
 //!   mark uses [`OpacityFallback::Standard`].
-//! - Scale transforms stay at the call sites. `point`/`rect` map the `opacity`
-//!   channel through a scale themselves; the resolver only returns the
-//!   raw-resolved (finite-checked, clamped, defaulted) encoding values.
+//! - The `opacity` channel's scale transform stays at the call sites:
+//!   `arc`/`point`/`rect`/`polygon` map it through [`resolve_scaled_opacity`]
+//!   themselves, and the resolver returns that channel raw-resolved
+//!   (finite-checked, clamped, defaulted).
+//!
+//! Batch A (spec §4.3) adds the one exception: `fill_opacity`/`stroke_opacity`
+//! now resolve scales of their own ([`crate::render::scale_resolve::ResolvedScales`]),
+//! and the resolver applies them — see [`resolve_scaled_or_raw`] — so every
+//! adopting mark honors `FillOpacity(scale=…)`/`StrokeOpacity(scale=…)` without
+//! five copies of the mapping. A channel with no resolved scale keeps the raw
+//! path exactly.
 //!
 //! Sampling mode matches each mark's current behavior: `point`/`bar`/`rect` are
 //! per-row (`at_row`), while `line`/`area` sample the group's first valid row
@@ -83,6 +91,12 @@ pub(crate) struct OpacityResolver {
     fill_opacity: Option<Vec<Option<f64>>>,
     /// The `stroke_opacity` encoding column (`col_as_f64`), if present.
     stroke_opacity: Option<Vec<Option<f64>>>,
+    /// The resolved `fill_opacity` scale (`ctx.scales.fill_opacity`), if the
+    /// channel resolved one. See [`resolve_scaled_or_raw`].
+    fill_scale: Option<OpacityScale>,
+    /// The resolved `stroke_opacity` scale (`ctx.scales.stroke_opacity`), if the
+    /// channel resolved one.
+    stroke_scale: Option<OpacityScale>,
     /// Controls how an absent `fill_opacity` value is defaulted: `BarLike` falls
     /// back to the `opacity` column (bar's historical behavior), `Standard` uses
     /// the fill default.
@@ -101,6 +115,32 @@ fn resolve(col: &Option<Vec<Option<f64>>>, idx: usize, default: f64) -> f64 {
         .filter(|v| v.is_finite())
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(default)
+}
+
+/// Resolve one opacity-family channel at `idx`, through its resolved scale when
+/// the channel has one.
+///
+/// Batch A (spec §4.3): a bound `fill_opacity`/`stroke_opacity` on a
+/// quantitative field now resolves a scale mapping the column's extent (or the
+/// user's `scale=` domain) onto the theme opacity band (or the user's `scale=`
+/// range), so the row's value maps through it — the same semantics the
+/// `opacity` channel has always had. Before, the raw column value was clamped
+/// into `[0, 1]` and used as an alpha directly.
+///
+/// `None` scale keeps that raw path, which is the only behavior for an unbound
+/// channel and for a bound one whose scale did not resolve, so charts without
+/// these channels are byte-identical.
+#[inline]
+fn resolve_scaled_or_raw(
+    col: &Option<Vec<Option<f64>>>,
+    scale: &Option<OpacityScale>,
+    idx: usize,
+    default: f64,
+) -> f64 {
+    match scale {
+        Some(_) => resolve_scaled_opacity(col, scale, idx, default),
+        None => resolve(col, idx, default),
+    }
 }
 
 impl OpacityResolver {
@@ -128,6 +168,8 @@ impl OpacityResolver {
                 .stroke_opacity
                 .as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            fill_scale: ctx.scales.fill_opacity.clone(),
+            stroke_scale: ctx.scales.stroke_opacity.clone(),
             fallback,
             defaults,
         }
@@ -147,8 +189,8 @@ impl OpacityResolver {
             OpacityFallback::BarLike => resolve(&self.opacity, idx, def_fill),
             OpacityFallback::Standard => def_fill,
         };
-        let fill_opacity = resolve(&self.fill_opacity, idx, fill_default);
-        let stroke_opacity = resolve(&self.stroke_opacity, idx, def_stroke);
+        let fill_opacity = resolve_scaled_or_raw(&self.fill_opacity, &self.fill_scale, idx, fill_default);
+        let stroke_opacity = resolve_scaled_or_raw(&self.stroke_opacity, &self.stroke_scale, idx, def_stroke);
         (opacity, fill_opacity, stroke_opacity)
     }
 
@@ -177,7 +219,15 @@ mod tests {
         fallback: OpacityFallback,
         defaults: (f64, f64, f64),
     ) -> OpacityResolver {
-        OpacityResolver { opacity, fill_opacity, stroke_opacity, fallback, defaults }
+        OpacityResolver {
+            opacity,
+            fill_opacity,
+            stroke_opacity,
+            fill_scale: None,
+            stroke_scale: None,
+            fallback,
+            defaults,
+        }
     }
 
     /// C11 guard: `Standard` and `BarLike` are the only difference and only for
@@ -252,6 +302,83 @@ mod tests {
                 false,
             )),
         }
+    }
+
+    /// Batch A §4.3: with a resolved `fill_opacity` scale, the row's value maps
+    /// through it — `v=0` → band lower, `v=10` → band upper — instead of being
+    /// clamped into `[0, 1]` and used as a raw alpha (which would have given
+    /// 0.0 and 1.0 here, so the assertion discriminates).
+    #[test]
+    fn fill_opacity_maps_through_its_resolved_scale() {
+        let mut r = make(
+            None,
+            Some(vec![Some(0.0), Some(5.0), Some(10.0)]),
+            None,
+            OpacityFallback::Standard,
+            (1.0, 1.0, 1.0),
+        );
+        r.fill_scale = Some(opacity_scale());
+        assert!((r.at_row(0).1 - 0.2).abs() < 1e-9, "band lower, not raw 0.0");
+        assert!((r.at_row(1).1 - 0.6).abs() < 1e-9);
+        assert!((r.at_row(2).1 - 1.0).abs() < 1e-9);
+    }
+
+    /// The same for `stroke_opacity`, and the two scales are independent: a
+    /// fill-only scale leaves the stroke channel on the raw path.
+    #[test]
+    fn stroke_opacity_maps_through_its_own_scale_only() {
+        let values = Some(vec![Some(10.0)]);
+        let mut r = make(
+            None,
+            values.clone(),
+            values,
+            OpacityFallback::Standard,
+            (1.0, 1.0, 1.0),
+        );
+        r.stroke_scale = Some(opacity_scale());
+        let (_, fill, stroke) = r.at_row(0);
+        assert_eq!(fill, 1.0, "no fill scale → raw clamp of 10.0");
+        assert!((stroke - 1.0).abs() < 1e-9, "stroke maps to the band upper");
+        // Discriminating half: a value the two paths disagree on.
+        let mut r = make(
+            None,
+            Some(vec![Some(2.5)]),
+            Some(vec![Some(2.5)]),
+            OpacityFallback::Standard,
+            (1.0, 1.0, 1.0),
+        );
+        r.stroke_scale = Some(opacity_scale());
+        let (_, fill, stroke) = r.at_row(0);
+        assert_eq!(fill, 1.0, "raw path clamps 2.5 to 1.0");
+        assert!((stroke - 0.4).abs() < 1e-9, "scaled path maps 2.5 into the band");
+    }
+
+    /// Absent-case byte-identity guard: with no resolved scales (every chart
+    /// that binds neither channel, and every pre-batch-A chart) the resolution
+    /// is exactly the raw finite-check/clamp path.
+    #[test]
+    fn no_resolved_scale_keeps_the_raw_path() {
+        let col = Some(vec![Some(1.5), Some(f64::NAN), Some(0.6)]);
+        let r = make(None, col.clone(), col, OpacityFallback::Standard, (1.0, 0.9, 0.8));
+        assert_eq!(r.at_row(0), (1.0, 1.0, 1.0), ">1 clamps");
+        assert_eq!(r.at_row(1), (1.0, 0.9, 0.8), "NaN falls to the defaults");
+        assert_eq!(r.at_row(2), (1.0, 0.6, 0.6), "in-range passes through");
+    }
+
+    /// A null fill cell under a resolved scale still falls back through the
+    /// `BarLike` chain (opacity column, then the fill default) — adding the
+    /// scale did not change which value is *chosen*, only how a chosen one maps.
+    #[test]
+    fn null_fill_cell_still_falls_back_under_a_scale() {
+        let mut r = make(
+            Some(vec![Some(0.4)]),
+            Some(vec![None]),
+            None,
+            OpacityFallback::BarLike,
+            (1.0, 1.0, 1.0),
+        );
+        r.fill_scale = Some(opacity_scale());
+        assert_eq!(r.at_row(0).1, 0.4, "falls back to the opacity column, unscaled");
     }
 
     /// MOD-06 guard: a bound `opacity` column maps each value through the scale.

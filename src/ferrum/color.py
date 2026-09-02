@@ -23,6 +23,7 @@ from ferrum._core import (
     palette_sample as _palette_sample,
     parse_color_to_hex as _parse_color_to_hex,
 )
+from ferrum._validate import is_none_color_sentinel
 
 __all__ = ["palette", "to_hex", "sequential", "diverging"]
 
@@ -170,8 +171,14 @@ def to_hex(
     ValueError
         If a string input is not a recognized CSS color name, hex literal, or
         ``rgb()``/``rgba()`` form (the message names the accepted forms); if
-        a tuple input's format is not recognized; or if *scale* is not one of
-        ``"unit"``, ``"byte"``, or ``None``.
+        the string is a paint-clearing sentinel (``"none"``/``"transparent"``,
+        trimmed and case-insensitive) — those spellings clear paint at the
+        mark/selection boundaries (``MarkBase.__init__``, ``selection.py``)
+        and have no hex form here, so the message says that instead of the
+        generic accepted-forms text, which would be self-contradicting for
+        ``"transparent"`` (a real CSS Color 4 keyword); if a tuple input's
+        format is not recognized; or if *scale* is not one of ``"unit"``,
+        ``"byte"``, or ``None``.
 
     Examples
     --------
@@ -188,6 +195,12 @@ def to_hex(
     '#4682b4'
     """
     if isinstance(color, str):
+        if is_none_color_sentinel(color):
+            raise ValueError(
+                f"to_hex({color!r}): {color!r} clears paint at mark/selection "
+                "boundaries (fill=/stroke=/color=), not a color value — it has "
+                "no hex form here"
+            )
         return _parse_color_to_hex(color)
 
     if not isinstance(color, (tuple, list)) or len(color) < 3:

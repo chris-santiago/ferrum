@@ -389,14 +389,14 @@ pub fn build_grid(
                 if band_color_str.eq_ignore_ascii_case("transparent") {
                     continue;
                 }
-                if let Ok(fill) = crate::render::color::from_hex_str(band_color_str) {
+                if let Ok(fill) = crate::render::color::parse_color(band_color_str) {
                     use crate::render::draw::to_scene_fill_stroke;
                     nodes.push(SceneNode::Rect {
                         x: plot_area.x,
                         y: top,
                         w: plot_area.w,
                         h: bot - top,
-                        style: to_scene_fill_stroke(Some(fill), None, 0.0, 1.0, None),
+                        style: to_scene_fill_stroke(Some(fill), false, None, false, 0.0, 1.0, None),
                         corner_radius: 0.0,
                     });
                 }
@@ -1027,6 +1027,40 @@ mod tests {
         // bands: [10..60], [60..160], [160..260], [260..310]
         // colors cycling: #f0f0f0, transparent, #f0f0f0, transparent → 2 rects
         assert_eq!(rect_count, 2, "expected 2 rects (alternating with transparent), got {rect_count}");
+    }
+
+    /// Batch A Task 8 sweep: band colors were hex-only, so a CSS name or an
+    /// `rgb()` string emitted no band at all (the parse failed and the band was
+    /// skipped). All three spellings of one color now paint the same band, and
+    /// the `"transparent"` skip still short-circuits ahead of parsing.
+    #[test]
+    fn build_grid_band_colors_accept_named_and_rgb_forms_identically_to_hex() {
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let theme = ThemeInputs::default();
+        let band_fills = |spelling: &str| -> Vec<_> {
+            build_grid(
+                plot_area,
+                None,
+                Some(&y_axis_with_minors()),
+                &theme,
+                &[spelling.to_string()],
+            )
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Rect { style, .. } => Some(style.fill),
+                _ => None,
+            })
+            .collect()
+        };
+        let hex_fills = band_fills("#4682b4");
+        assert!(!hex_fills.is_empty(), "a band color must emit band rects");
+        for spelling in ["steelblue", "rgb(70, 130, 180)"] {
+            assert_eq!(band_fills(spelling), hex_fills, "{spelling:?} must paint the same bands");
+        }
+        // `"transparent"` is not a parseable color — it is a skip sentinel
+        // checked before parsing, and it still emits nothing.
+        assert!(crate::render::color::parse_color("transparent").is_err());
+        assert!(band_fills("transparent").is_empty(), "'transparent' bands emit no rects");
     }
 
     #[test]

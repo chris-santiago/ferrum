@@ -197,11 +197,16 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         if angle_end <= angle_start { continue; }
 
         // Resolve per-slice fill from color scale, fall back to mark_style.paint.fill.
-        let fill_base = resolve_fill_color(
+        // Arc slices are not yet threaded for provenance-gated paint clearing
+        // (out of this fix round's scope — see the FillStroke clearing
+        // follow-up in the task report); a cleared constant fill/stroke here
+        // still serializes as `rgba(0,0,0,0.000)`, matching pre-c2 behavior.
+        let (fill_base, _) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
             ctx.mark_style.paint.fill,
+            false,
         );
         // Resolve per-row opacity through scale if present; fall back to mark_style.paint.opacity.
         let row_opacity =
@@ -213,7 +218,9 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
+                false,
                 ctx.mark_style.paint.stroke,
+                false,
                 ctx.mark_style.paint.stroke_width,
                 row_opacity,
                 ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -324,11 +331,12 @@ fn build_nominal_theta(
             _ => geom.outer_radius,
         };
 
-        let fill_base = resolve_fill_color(
+        let (fill_base, _) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
             ctx.mark_style.paint.fill,
+            false,
         );
         let row_opacity =
             resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
@@ -341,7 +349,9 @@ fn build_nominal_theta(
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
+                false,
                 ctx.mark_style.paint.stroke,
+                false,
                 ctx.mark_style.paint.stroke_width,
                 row_opacity,
                 ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -446,11 +456,12 @@ fn build_annular(
             _ => geom.outer_radius,
         };
 
-        let fill_base = resolve_fill_color(
+        let (fill_base, _) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
             ctx.mark_style.paint.fill,
+            false,
         );
         let row_opacity =
             resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
@@ -461,7 +472,9 @@ fn build_annular(
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
+                false,
                 ctx.mark_style.paint.stroke,
+                false,
                 ctx.mark_style.paint.stroke_width,
                 row_opacity,
                 ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -629,6 +642,9 @@ mod tests {
             } else {
                 None
             },
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -653,7 +669,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let scales = make_scales(false);
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
         let paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count();
@@ -669,7 +685,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let scales = make_scales(true);
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 
@@ -791,10 +807,13 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, tau], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 80.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: Some("t1".into()), y2: Some("r1".into()),
             y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 
@@ -886,7 +905,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let scales = make_scales(false);
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 
@@ -968,9 +987,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 80.0], vec![100.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 
@@ -1065,10 +1084,13 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, tau], vec![0.0, 200.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 80.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: Some("t1".into()), y2: Some("r1".into()),
             y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 
@@ -1132,7 +1154,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let scales = make_scales(false);
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 
@@ -1299,7 +1321,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let scales = make_scales(false);
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = build(&ctx);
 

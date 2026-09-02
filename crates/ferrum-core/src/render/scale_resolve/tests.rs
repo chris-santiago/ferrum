@@ -745,8 +745,15 @@ fn opacity_scale_defaults_to_0_1_to_1_0() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warns) = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &outputs, false, &theme)
-        .unwrap();
+    let (scale, warns) = build_opacity_channel_scale(
+        OpacityChannel::Opacity,
+        &make_spec_with_opacity().encoding,
+        &batch,
+        &outputs,
+        false,
+        &theme,
+    )
+    .unwrap();
     assert!(warns.is_empty());
     let scale = scale.unwrap();
     assert_eq!(scale.min_opacity(), 0.1);
@@ -5864,5 +5871,490 @@ fn degenerate_quantize_domain_is_a_typed_error() {
     assert!(
         try_resolve_color(&no_domain, &flat).is_ok(),
         "a constant column must still render, not error"
+    );
+}
+
+// ── Batch A §4.3: appearance-channel scales (fill/stroke opacity, stroke dash) ──
+
+/// x/y plus the columns the §4.3 tests bind: `v` (quantitative, extent
+/// `[0.2, 0.9]` — every value already a legal raw alpha, so a test that passes
+/// under the old raw-clamp path and the new scaled path cannot be told apart by
+/// accident), `level` (categorical), and `dash_idx` (numeric palette indices).
+fn appearance_batch() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("v", ArrowDataType::Float64, false),
+        Field::new("level", ArrowDataType::Utf8, false),
+        Field::new("dash_idx", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(Float64Array::from(vec![0.2, 0.55, 0.9])),
+            Arc::new(StringArray::from(vec!["low", "mid", "high"])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+        ],
+    )
+    .unwrap()
+}
+
+/// A point spec on x/y carrying the caller's appearance channels, built by
+/// deserializing the **wire** encoding shape Python emits (`{"fill_opacity":
+/// {"field": …, "type": …, "scale": {"type": "linear", …}}}`) rather than by
+/// hand-assembling `EncodingSpec`/`ScaleSpec` values. A hand-built spec would
+/// prove the builders honor a shape the wire may never carry; this proves they
+/// honor the one it does. Mirrors `spec_with_color_scale_json` above.
+fn appearance_spec(channels: serde_json::Value) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    let mut encoding: Encoding =
+        serde_json::from_value(channels).expect("wire encoding must deserialize");
+    encoding.x = Some(EncodingSpec { field: "x".into(), ..Default::default() });
+    encoding.y = Some(EncodingSpec { field: "y".into(), ..Default::default() });
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding,
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Resolve `spec` against `batch` at a fixed pixel range.
+fn resolve_appearance(
+    spec: &ChartSpec,
+    batch: &RecordBatch,
+) -> (ResolvedScales, Vec<crate::render::RenderWarning>) {
+    let theme = ThemeInputs::default();
+    resolve_scales(spec, batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap()
+}
+
+/// §4.3 default: an unscaled `fill_opacity`/`stroke_opacity` on a quantitative
+/// field maps the column's extent onto the theme opacity band — the semantics
+/// `opacity` already had — instead of passing the raw value through as an alpha.
+///
+/// Discriminating by construction: the column's values (0.2, 0.55, 0.9) are all
+/// legal alphas, so the old raw path would leave them unchanged; the band maps
+/// them to 0.1, 0.55, 1.0. Only the 0.55 midpoint coincides.
+#[test]
+fn unscaled_fill_and_stroke_opacity_map_the_extent_onto_the_theme_band() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {"field": "v", "type": "quantitative"},
+        "stroke_opacity": {"field": "v", "type": "quantitative"},
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+
+    for (name, resolved) in [
+        ("fill_opacity", scales.fill_opacity),
+        ("stroke_opacity", scales.stroke_opacity),
+    ] {
+        let scale = resolved.unwrap_or_else(|| panic!("{name} must resolve a scale"));
+        assert_eq!(
+            (scale.min_opacity(), scale.max_opacity()),
+            (0.1, 1.0),
+            "{name} range must be the theme opacity band"
+        );
+        let at = |v: f64| scale.inner.to_pixel_f64(v).unwrap();
+        assert!((at(0.2) - 0.1).abs() < 1e-9, "{name}: extent min → band min, got {}", at(0.2));
+        assert!((at(0.9) - 1.0).abs() < 1e-9, "{name}: extent max → band max, got {}", at(0.9));
+        assert!((at(0.55) - 0.55).abs() < 1e-9, "{name}: midpoint, got {}", at(0.55));
+    }
+}
+
+/// §4.3: every opacity-family channel honors an explicit `scale=` domain AND
+/// range. Discriminating: under the defaults the same column resolves domain
+/// `[0.2, 0.9]` onto band `[0.1, 1.0]`, so `v = 0.2` would be 0.1; honored, it
+/// is 0.35.
+#[test]
+fn opacity_family_honors_an_explicit_wire_scale() {
+    let batch = appearance_batch();
+    let scale_json = serde_json::json!({
+        "type": "linear", "domain": [0.0, 1.0], "range": [0.25, 0.75],
+    });
+    let spec = appearance_spec(serde_json::json!({
+        "opacity": {"field": "v", "type": "quantitative", "scale": scale_json},
+        "fill_opacity": {"field": "v", "type": "quantitative", "scale": scale_json},
+        "stroke_opacity": {"field": "v", "type": "quantitative", "scale": scale_json},
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+
+    for (name, resolved) in [
+        ("opacity", scales.opacity),
+        ("fill_opacity", scales.fill_opacity),
+        ("stroke_opacity", scales.stroke_opacity),
+    ] {
+        let scale = resolved.unwrap_or_else(|| panic!("{name} must resolve a scale"));
+        assert_eq!(
+            (scale.min_opacity(), scale.max_opacity()),
+            (0.25, 0.75),
+            "{name} must take the scale's range, not the theme band"
+        );
+        let (lo, hi) = scale.inner.data_domain().expect("linear domain");
+        assert!(
+            (lo - 0.0).abs() < 1e-9 && (hi - 1.0).abs() < 1e-9,
+            "{name} must take the scale's domain, not the data extent; got [{lo},{hi}]"
+        );
+        let at_min = scale.inner.to_pixel_f64(0.2).unwrap();
+        assert!(
+            (at_min - 0.35).abs() < 1e-9,
+            "{name}: v=0.2 on domain [0,1] → 0.35, not the extent-relative 0.1; got {at_min}"
+        );
+    }
+}
+
+/// Byte-identity guard (§7): a CONSTANT `fill_opacity`/`stroke_opacity` column
+/// — `encode(fill_opacity="fo")` over a column of `0.3`s, the shape
+/// `tests/test_opacity_semantics.py` pins — resolves NO scale, so every row
+/// keeps its literal alpha. Mapping that degenerate extent onto the band would
+/// silently repaint 0.3 as the band midpoint 0.55 (`LinearScale`'s
+/// degenerate-domain rule, GH #104).
+///
+/// `opacity` is deliberately excluded: a constant column mapping to the band
+/// midpoint is its pre-batch-A behavior, and batch A does not change it.
+#[test]
+fn a_constant_opacity_column_keeps_its_literal_alpha() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("fo", ArrowDataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.3, 0.3, 0.3])),
+        ],
+    )
+    .unwrap();
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {"field": "fo", "type": "quantitative"},
+        "stroke_opacity": {"field": "fo", "type": "quantitative"},
+        "opacity": {"field": "fo", "type": "quantitative"},
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+    assert!(scales.fill_opacity.is_none(), "constant fill_opacity → raw pass-through");
+    assert!(scales.stroke_opacity.is_none(), "constant stroke_opacity → raw pass-through");
+    assert!(
+        scales.opacity.is_some(),
+        "the opacity channel keeps its pre-batch-A resolution over a constant column"
+    );
+
+    // An explicit `scale=` domain is a real domain even over a constant column,
+    // so it still resolves — the guard is about an ABSENT domain, not about
+    // refusing to scale constant data the user described.
+    let scaled = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "fo", "type": "quantitative",
+            "scale": {"type": "linear", "domain": [0.0, 1.0], "range": [0.2, 0.8]},
+        },
+    }));
+    let (scales, _) = resolve_appearance(&scaled, &batch);
+    let scale = scales.fill_opacity.expect("an explicit domain resolves over a constant column");
+    assert!((scale.inner.to_pixel_f64(0.3).unwrap() - 0.38).abs() < 1e-9);
+}
+
+/// Byte-identity guard for the absent case (§7): a chart binding none of the
+/// appearance channels resolves none of the new scales and warns about nothing,
+/// so nothing downstream can behave differently than it did pre-batch-A.
+#[test]
+fn charts_without_appearance_channels_resolve_no_appearance_scales() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({}));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(scales.fill_opacity.is_none(), "no fill_opacity channel → no scale");
+    assert!(scales.stroke_opacity.is_none(), "no stroke_opacity channel → no scale");
+    assert!(scales.stroke_dash.is_none(), "no stroke_dash channel → no scale");
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+}
+
+/// §4.3: a categorical `stroke_dash` field resolves onto the canonical dash
+/// index space — index 0 solid, then each `DASH_PALETTE` pattern in order.
+#[test]
+fn categorical_stroke_dash_maps_onto_the_dash_palette() {
+    use crate::render::pack_instances::stroke_dash_index;
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({
+        "stroke_dash": {"field": "level", "type": "nominal"},
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(warns.is_empty(), "3 categories fit the palette: {warns:?}");
+    let dash = scales.stroke_dash.expect("a categorical dash field must resolve a scale");
+
+    assert_eq!(dash.domain, vec!["low", "mid", "high"], "first-appearance order");
+    assert_eq!(dash.dash_for("low"), None, "index 0 is solid → no dasharray");
+    assert_eq!(dash.dash_for("mid"), Some(vec![6.0, 3.0]));
+    assert_eq!(dash.dash_for("high"), Some(vec![2.0, 3.0]));
+
+    // `lookup` keeps the distinction `dash_for` collapses: solid is an empty
+    // pattern IN the domain, an unknown value is absent from it.
+    assert_eq!(dash.lookup("low"), Some(&[][..]));
+    assert_eq!(dash.lookup("nope"), None);
+    assert_eq!(dash.dash_for("nope"), None);
+
+    // Packed-index parity (§7): each resolved pattern round-trips to the palette
+    // index the GPU path packs, so SVG and WASM draw the same dash.
+    assert!((stroke_dash_index(&dash.dash_for("low")) - 0.0).abs() < 1e-6);
+    assert!((stroke_dash_index(&dash.dash_for("mid")) - 1.0).abs() < 1e-6);
+    assert!((stroke_dash_index(&dash.dash_for("high")) - 2.0).abs() < 1e-6);
+}
+
+/// The numeric contract is untouched (§6): a quantitative `stroke_dash` column
+/// resolves NO scale, so mark builders keep reading it as palette indices.
+#[test]
+fn numeric_stroke_dash_resolves_no_scale() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({"stroke_dash": {"field": "dash_idx"}}));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(
+        scales.stroke_dash.is_none(),
+        "a numeric dash column keeps the index contract, it does not resolve a scale"
+    );
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+}
+
+/// …and the user's declared type wins: the documented
+/// `StrokeDash("group", type_="N")` form resolves categorically even though the
+/// column is numeric.
+#[test]
+fn a_numeric_dash_column_typed_nominal_resolves_categorically() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({
+        "stroke_dash": {"field": "dash_idx", "type": "nominal"},
+    }));
+    let (scales, _) = resolve_appearance(&spec, &batch);
+    let dash = scales.stroke_dash.expect("an explicitly nominal dash field resolves a scale");
+    assert_eq!(dash.domain.len(), 3, "one entry per distinct value: {:?}", dash.domain);
+    assert_eq!(dash.dash_for(&dash.domain[0].clone()), None, "first category is solid");
+    assert_eq!(dash.dash_for(&dash.domain[1].clone()), Some(vec![6.0, 3.0]));
+}
+
+/// §4.3: the dash palette is finite, so more categories than slots cycles — and
+/// says so, mirroring `ShapePaletteOverflowed`. The warning reaches the caller
+/// through `resolve_scales`, which is the registration proof.
+#[test]
+fn stroke_dash_palette_overflow_warns_and_cycles() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("level", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e", "f"])),
+        ],
+    )
+    .unwrap();
+    let spec = appearance_spec(serde_json::json!({
+        "stroke_dash": {"field": "level", "type": "nominal"},
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(
+        warns.contains(&crate::render::RenderWarning::StrokeDashPaletteOverflowed {
+            categories: 6,
+        }),
+        "6 categories over 4 dash slots must warn; got {warns:?}"
+    );
+    let dash = scales.stroke_dash.unwrap();
+    // 4 slots (solid + 3 patterns), so the 5th and 6th categories repeat the
+    // 1st and 2nd — the honest degradation the warning names.
+    assert_eq!(dash.dash_for("e"), dash.dash_for("a"));
+    assert_eq!(dash.dash_for("f"), dash.dash_for("b"));
+}
+
+/// The dash domain honors `sort` through the same primitive the shape scale
+/// uses, so a sorted dash legend and sorted dash assignment cannot diverge.
+#[test]
+fn stroke_dash_domain_honors_sort() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({
+        "stroke_dash": {"field": "level", "type": "nominal", "sort": "descending"},
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(warns.is_empty(), "no warnings expected: {warns:?}");
+    let dash = scales.stroke_dash.unwrap();
+    assert_eq!(dash.domain, vec!["mid", "low", "high"], "descending byte order");
+    assert_eq!(dash.dash_for("mid"), None, "the sorted-first category takes index 0");
+}
+
+/// Facet sharing (T3's rule, extended to the new channels): a faceted chart's
+/// per-panel `fill_opacity` unions the global `__final__` extent, so the same
+/// value paints the same alpha in every panel.
+#[test]
+fn shared_facet_fill_opacity_unions_the_global_domain() {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    let panel_a = t3_op_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 10.0]);
+    let panel_b = t3_op_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 100.0]);
+    let global = t3_op_batch(
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec![1.0, 10.0, 1.0, 100.0],
+    );
+    let outputs = final_outputs(global);
+    let mut spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {"field": "op", "type": "quantitative"},
+    }));
+    spec.facet = Some(FacetSpec {
+        field: "panel".into(),
+        row: None,
+        mode: FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: FacetResolve::default(),
+    });
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    let a = scales_a.fill_opacity.expect("panel A fill_opacity scale");
+    let b = scales_b.fill_opacity.expect("panel B fill_opacity scale");
+
+    let (a_lo, a_hi) = a.inner.data_domain().expect("panel A domain");
+    assert!(
+        a_lo <= 1.0 + 1e-6 && a_hi >= 100.0 - 1e-6,
+        "panel A must span the GLOBAL [1,100] extent, got [{a_lo},{a_hi}]"
+    );
+    let px_a = a.inner.to_pixel_f64(10.0).unwrap();
+    let px_b = b.inner.to_pixel_f64(10.0).unwrap();
+    assert!(
+        (px_a - px_b).abs() < 1e-9,
+        "op=10 must paint the same alpha in both panels; A={px_a}, B={px_b}"
+    );
+    assert!(
+        px_a < 0.5 * (a.min_opacity() + a.max_opacity()),
+        "op=10 sits low on the global domain, so it must be below the band midpoint; got {px_a}"
+    );
+}
+
+// --- Fix round (spec §4.3, amended 2026-09-01, T6 quality review) -------
+
+/// Ruling 1: a non-numeric column bound to `fill_opacity`/`stroke_opacity` is
+/// a typed render error naming the channel and the offending dtype — the
+/// pre-batch-A silent default-alpha fallback (`col_as_f64(...).ok() -> None`
+/// at the mark drawer) is retired as a member of the silent-drop class this
+/// batch remediates. Pins the exact message text (not just "is an error")
+/// because a mixed-channel chart needs the channel disambiguated.
+#[test]
+fn non_numeric_opacity_family_column_raises_a_typed_error() {
+    let batch = appearance_batch(); // "level" is Utf8
+    let theme = ThemeInputs::default();
+    for channel in ["fill_opacity", "stroke_opacity"] {
+        let spec = appearance_spec(serde_json::json!({
+            channel: {"field": "level", "type": "quantitative"},
+        }));
+        let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+            .expect_err(&format!("{channel} over a Utf8 column must raise, not default-alpha"));
+        assert_eq!(
+            err.to_string(),
+            format!("{channel}: column 'level' has unsupported dtype: Utf8"),
+            "message must name the channel and dtype so a mixed-channel chart is diagnosable"
+        );
+    }
+}
+
+/// Ruling 3: an explicit `scale=` range on an opacity-family channel clamps
+/// into `[0.0, 1.0]` before the scale is built, so SVG (which only omits the
+/// attribute at >= 1.0) and the GPU-packed instance buffer (which multiplies
+/// the resolved value directly, uncomparable) read the SAME already-bounded
+/// number — they cannot diverge because there is only one number to diverge
+/// from. Covers both an over-range (`[0, 5]`) and a negative endpoint.
+#[test]
+fn svg_and_packed_alpha_agree_because_the_range_clamps_into_unit_interval() {
+    let batch = appearance_batch();
+    let over_range = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "linear", "domain": [0.0, 1.0], "range": [0.0, 5.0]},
+        },
+    }));
+    let (scales, warns) = resolve_appearance(&over_range, &batch);
+    assert!(warns.is_empty(), "a Linear scale must not warn: {warns:?}");
+    let scale = scales.fill_opacity.expect("fill_opacity must resolve");
+    assert_eq!(
+        (scale.min_opacity(), scale.max_opacity()),
+        (0.0, 1.0),
+        "range=[0,5] must clamp to [0,1], not pass 5.0 through to either backend"
+    );
+    let at_max = scale.inner.to_pixel_f64(1.0).unwrap();
+    assert!(
+        (at_max - 1.0).abs() < 1e-9,
+        "domain max must map to the CLAMPED range max (1.0), not 5.0; got {at_max}"
+    );
+
+    let negative_range = appearance_spec(serde_json::json!({
+        "stroke_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "linear", "domain": [0.0, 1.0], "range": [-2.0, 0.5]},
+        },
+    }));
+    let (scales, _) = resolve_appearance(&negative_range, &batch);
+    let scale = scales.stroke_opacity.expect("stroke_opacity must resolve");
+    assert_eq!(
+        (scale.min_opacity(), scale.max_opacity()),
+        (0.0, 0.5),
+        "a negative endpoint must clamp to 0.0, never a negative alpha"
+    );
+}
+
+/// Ruling 2: an opacity-family `scale=` whose spec is not `Linear` (Log here)
+/// emits `RenderWarning::UnsupportedOpacityScale` naming the channel and the
+/// dropped scale kind, then falls back to the default linear (data extent →
+/// theme band) resolution — never silent. Discriminating: under the pre-fix
+/// behavior this rendered byte-identically to no `scale=` at all with zero
+/// warnings; the fix must both warn AND keep resolving (not error, not drop
+/// the channel).
+#[test]
+fn non_linear_opacity_scale_warns_and_falls_back_to_linear_default() {
+    let batch = appearance_batch();
+    let spec = appearance_spec(serde_json::json!({
+        "fill_opacity": {
+            "field": "v", "type": "quantitative",
+            "scale": {"type": "log", "domain": [1.0, 100.0], "range": [0.2, 0.9]},
+        },
+    }));
+    let (scales, warns) = resolve_appearance(&spec, &batch);
+    assert!(
+        warns.contains(&crate::render::RenderWarning::UnsupportedOpacityScale {
+            channel: "fill_opacity".into(),
+            scale_kind: "log".into(),
+        }),
+        "a non-Linear scale must warn, naming the channel and dropped kind; got {warns:?}"
+    );
+    let scale = scales.fill_opacity.expect("the channel still resolves — degraded, not dropped");
+    // Falls back to the §4.3 default: data extent [0.2, 0.9] onto the theme
+    // band [0.1, 1.0] — NOT the log spec's own domain/range [1,100]/[0.2,0.9].
+    assert_eq!(
+        (scale.min_opacity(), scale.max_opacity()),
+        (0.1, 1.0),
+        "the log spec's range must be dropped in favor of the theme band default"
+    );
+    let at_min = scale.inner.to_pixel_f64(0.2).unwrap();
+    assert!(
+        (at_min - 0.1).abs() < 1e-9,
+        "must resolve via the linear default-extent path, not the log domain; got {at_min}"
     );
 }

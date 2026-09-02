@@ -71,7 +71,15 @@ pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
     EmptyBatch,
     UnknownColumn { name: String },
-    InvalidColor(String),
+    /// A user-supplied color string that `render::color::parse_color` rejects.
+    /// The payload is the `ColorParseError` `parse_color` returned; `Display`
+    /// delegates to it verbatim (which itself pairs the offending value with
+    /// `ACCEPTED_COLOR_FORMS`, spec §6), so the wrapper sentence exists in
+    /// exactly one place rather than being restated here. Raised by
+    /// `draw::resolve_mark_style` for `fill=`/`stroke=` mark kwargs — the
+    /// color boundaries that must refuse rather than silently keep the theme
+    /// default.
+    InvalidColor(color::primitive::ColorParseError),
     /// `channel` is the RESOLVED (post-`CoordFlip`) token the caller acted on —
     /// `coord_flipped` (R3) lets `Display` un-flip it back to what the user
     /// wrote; non-positional channels (e.g. `"color"`) are unaffected either way.
@@ -248,8 +256,12 @@ impl std::fmt::Display for RenderError {
                 write!(f, "input batch is empty (num_rows == 0)"),
             Self::UnknownColumn { name } =>
                 write!(f, "unknown column '{name}' referenced by an encoding"),
-            Self::InvalidColor(s) =>
-                write!(f, "invalid color string: '{s}' (expected #rrggbb or #rrggbbaa)"),
+            // Delegates to `ColorParseError`'s own `Display` rather than
+            // restating the wrapper sentence, so this message and the
+            // `ferrum.color.to_hex` one can never drift (spec §6): the
+            // sentence quoting `ACCEPTED_COLOR_FORMS` exists in exactly one
+            // place, `ColorParseError`'s impl.
+            Self::InvalidColor(e) => write!(f, "{e}"),
             Self::EncodingTypeMismatch { channel, expected, got, coord_flipped } => {
                 let channel = prepare::user_facing_channel(channel, *coord_flipped);
                 write!(f, "encoding '{channel}' expected {expected}, got {got}")
@@ -349,6 +361,13 @@ pub enum RenderWarning {
     OutOfDomainRows { mark: String, count: u64 },
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
+    /// A categorical `stroke_dash` channel named more categories than the dash
+    /// index space has slots (solid plus every
+    /// [`DASH_PALETTE`](crate::render::draw::DASH_PALETTE) pattern), so patterns
+    /// were recycled and two categories draw with the same dash. Mirrors
+    /// [`ShapePaletteOverflowed`](Self::ShapePaletteOverflowed) — the palette is
+    /// finite, so the degradation stays (spec §4.3) but is never silent.
+    StrokeDashPaletteOverflowed { categories: u32 },
     EmptyPanel { panel_index: usize },
     /// An explicit color range string could not be parsed. The entire range is
     /// discarded and the default theme palette is used instead.
@@ -418,6 +437,16 @@ pub enum RenderWarning {
         scale_kind: String,
         suppressed: bool,
     },
+    /// An opacity-family channel (`opacity`/`fill_opacity`/`stroke_opacity`)
+    /// carried an explicit `scale=` whose spec is not `Linear` (spec §4.3,
+    /// amended 2026-09-01, T6 quality review — ruling 2). The curve, domain,
+    /// and range are NOT honored; the channel falls back to the default
+    /// linear resolution (data extent onto the theme opacity band) instead.
+    /// `channel` is the channel name (`"opacity"` / `"fill_opacity"` /
+    /// `"stroke_opacity"`); `scale_kind` is the dropped spec's kind
+    /// (`"log"`, `"pow"`, `"sqrt"`, …). Full non-linear opacity-curve support
+    /// is a logged campaign follow-up, not this batch.
+    UnsupportedOpacityScale { channel: String, scale_kind: String },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -447,6 +476,11 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "shape palette has fewer entries than the {categories} categories; \
                  shapes were recycled"
+            ),
+            RenderWarning::StrokeDashPaletteOverflowed { categories } => write!(
+                f,
+                "stroke dash palette has fewer entries than the {categories} categories; \
+                 dashes were recycled"
             ),
             RenderWarning::EmptyPanel { panel_index } => write!(
                 f,
@@ -497,6 +531,12 @@ impl std::fmt::Display for RenderWarning {
                     )
                 }
             }
+            RenderWarning::UnsupportedOpacityScale { channel, scale_kind } => write!(
+                f,
+                "{channel}: {scale_kind} scale is not supported on opacity-family channels; \
+                 the curve, domain, and range were ignored in favor of the default linear \
+                 resolution"
+            ),
         }
     }
 }
@@ -530,6 +570,7 @@ mod tests {
             RenderWarning::OutOfDomainRows { mark: "point".into(), count: 3 },
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
+            RenderWarning::StrokeDashPaletteOverflowed { categories: 6 },
             RenderWarning::EmptyPanel { panel_index: 1 },
             RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
             RenderWarning::ColorRangeBucketCountMismatch { expected: 3, received: 2 },
@@ -549,6 +590,10 @@ mod tests {
                 marks: vec!["line".into()],
                 scale_kind: "discretizing".into(),
                 suppressed: false,
+            },
+            RenderWarning::UnsupportedOpacityScale {
+                channel: "fill_opacity".into(),
+                scale_kind: "log".into(),
             },
         ] {
             let json = serde_json::to_string(&w).unwrap();
@@ -704,7 +749,7 @@ mod axis_style_fill_from_tests {
 
         assert_eq!(o.label_angle, Some(45.0));
         assert_eq!(o.label_font_size, Some(11.0));
-        assert_eq!(o.label_color, color::from_hex_str("#112233").ok());
+        assert_eq!(o.label_color, color::parse_color("#112233").ok());
         // label_format MUST stay None on the per-channel/fresh-build path.
         assert_eq!(o.label_format, None);
         assert_eq!(o.label_overlap, Some(LabelOverlap::Parity));
@@ -712,14 +757,14 @@ mod axis_style_fill_from_tests {
         assert_eq!(o.tick_extra, Some(true));
         assert_eq!(o.tick_min_step, Some(0.5));
         assert_eq!(o.tick_values, Some(vec![0.0, 1.0, 2.0]));
-        assert_eq!(o.grid_color, color::from_hex_str("#445566").ok());
+        assert_eq!(o.grid_color, color::parse_color("#445566").ok());
         assert_eq!(o.grid_dash, Some(vec![6.0, 3.0]));
         assert_eq!(o.grid_width, Some(1.5));
         assert_eq!(o.grid_opacity, Some(0.4));
-        assert_eq!(o.domain_color, color::from_hex_str("#778899").ok());
+        assert_eq!(o.domain_color, color::parse_color("#778899").ok());
         assert_eq!(o.domain_width, Some(2.0));
         assert_eq!(o.title_font_size, Some(13.0));
-        assert_eq!(o.title_color, color::from_hex_str("#aabbcc").ok());
+        assert_eq!(o.title_color, color::parse_color("#aabbcc").ok());
         assert_eq!(o.title_padding, Some(8.0));
         assert_eq!(o.title_orient, Some(crate::layout::AxisOrient::Right));
         assert_eq!(o.label_padding, Some(3.0));
@@ -824,7 +869,7 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
             theme.grid.grid = enabled;
         }
         if let Some(ref color_str) = grid_cfg.color {
-            if let Ok(c) = color::from_hex_str(color_str) {
+            if let Ok(c) = color::parse_color(color_str) {
                 theme.colors.grid_color = c;
             }
         }
@@ -933,7 +978,7 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
             };
         }
         if let Some(ref c) = title.color {
-            if let Ok(parsed) = color::from_hex_str(c) {
+            if let Ok(parsed) = color::parse_color(c) {
                 theme.colors.title_color = parsed;
             }
         }
@@ -944,7 +989,7 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
             theme.typography.subtitle_font_size = Some(fs);
         }
         if let Some(ref c) = title.subtitle_color {
-            if let Ok(parsed) = color::from_hex_str(c) {
+            if let Ok(parsed) = color::parse_color(c) {
                 theme.colors.subtitle_color = Some(parsed);
             }
         }
@@ -962,7 +1007,7 @@ fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec
         theme.typography.label_font_size = fs;
     }
     if let Some(ref c) = style.label_color {
-        if let Ok(parsed) = color::from_hex_str(c) {
+        if let Ok(parsed) = color::parse_color(c) {
             theme.colors.label_color = parsed;
         }
     }
@@ -973,7 +1018,7 @@ fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec
         theme.axis.axis_line = enabled;
     }
     if let Some(ref c) = style.domain_color {
-        if let Ok(parsed) = color::from_hex_str(c) {
+        if let Ok(parsed) = color::parse_color(c) {
             theme.colors.axis_line_color = parsed;
         }
     }
@@ -984,7 +1029,7 @@ fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec
         theme.grid.grid = enabled;
     }
     if let Some(ref c) = style.grid_color {
-        if let Ok(parsed) = color::from_hex_str(c) {
+        if let Ok(parsed) = color::parse_color(c) {
             theme.colors.grid_color = parsed;
         }
     }
@@ -1227,9 +1272,10 @@ pub(crate) fn axis_style_fill_from(
             *slot = value;
         }
     }
-    let parse_color = |c: &Option<String>| {
-        c.as_deref().and_then(|s| color::from_hex_str(s).ok())
-    };
+    // Full CSS vocabulary (names, `rgb()`, hex) — `None` for absent or
+    // unparseable values, matching the pre-existing "keep the theme default"
+    // behavior of every axis-style color override.
+    let opt_color = |c: &Option<String>| c.as_deref().and_then(|s| color::parse_color(s).ok());
     // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
     // `orient` is the override INPUT (validated against the dimension); the
     // concrete `AxisInput.orient` is re-synced from it by `resolve_orient` after
@@ -1273,16 +1319,16 @@ pub(crate) fn axis_style_fill_from(
     set(&mut o.tick_values, style.values.clone(), fill_only_if_none);
     // Title overrides.
     set(&mut o.title_font_size, style.title_font_size, fill_only_if_none);
-    set(&mut o.title_color, parse_color(&style.title_color), fill_only_if_none);
+    set(&mut o.title_color, opt_color(&style.title_color), fill_only_if_none);
     set(&mut o.title_padding, style.title_padding, fill_only_if_none);
     set(&mut o.label_padding, style.label_padding, fill_only_if_none);
     // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
-    set(&mut o.label_color, parse_color(&style.label_color), fill_only_if_none);
+    set(&mut o.label_color, opt_color(&style.label_color), fill_only_if_none);
     set(&mut o.label_font_size, style.label_font_size, fill_only_if_none);
-    set(&mut o.grid_color, parse_color(&style.grid_color), fill_only_if_none);
+    set(&mut o.grid_color, opt_color(&style.grid_color), fill_only_if_none);
     set(&mut o.grid_dash, style.grid_dash.clone(), fill_only_if_none);
     set(&mut o.grid_width, style.grid_width, fill_only_if_none);
-    set(&mut o.domain_color, parse_color(&style.domain_color), fill_only_if_none);
+    set(&mut o.domain_color, opt_color(&style.domain_color), fill_only_if_none);
     set(&mut o.domain_width, style.domain_width, fill_only_if_none);
     Ok(())
 }
@@ -1440,7 +1486,7 @@ pub(crate) fn apply_color_config_to_color_scale(
                 if r.len() >= 2 {
                     let parsed: Vec<color::Color> = r
                         .iter()
-                        .filter_map(|s| color::from_hex_str(s).ok())
+                        .filter_map(|s| color::parse_color(s).ok())
                         .collect();
                     if parsed.len() >= 2 {
                         // Build a gradient from the parsed stops, evenly spaced.
@@ -1482,7 +1528,7 @@ pub(crate) fn apply_color_config_to_color_scale(
             if let Some(ref range) = cfg.range {
                 let colors: Vec<color::Color> = range
                     .iter()
-                    .filter_map(|hex| color::from_hex_str(hex).ok())
+                    .filter_map(|s| color::parse_color(s).ok())
                     .collect();
                 if !colors.is_empty() {
                     *palette = std::borrow::Cow::Owned(colors);
@@ -1501,7 +1547,7 @@ pub(crate) fn apply_color_config_to_color_scale(
                 // failure.
                 let parsed: Result<Vec<color::Color>, &String> = range
                     .iter()
-                    .map(|s| color::from_hex_str(s).map_err(|_| s))
+                    .map(|s| color::parse_color(s).map_err(|_| s))
                     .collect();
                 match parsed {
                     Ok(colors) => {
@@ -1952,6 +1998,204 @@ mod orchestration_tests {
             &ChartConfig::default(),
         );
         assert!(matches!(result.unwrap_err(), RenderError::InvalidViewport { .. }));
+    }
+
+    /// T8 quality-review finding 2, end-to-end through `render_svg`: a
+    /// `mark_ribbon`-shaped chart with `mark_kwargs={"stroke": "none"}`
+    /// (exactly what `src/ferrum/marks/composite.py`'s ribbon/errorband
+    /// desugar passes) must not emit `stroke="rgba(0,0,0,0.000)"` on the
+    /// ribbon's `<path>` — the cleared paint has to normalize away before it
+    /// reaches the SVG (or interactive scene JSON) serialization, not just
+    /// at the `MarkStyle` level pinned in `draw.rs`/`marks/ribbon.rs`.
+    #[test]
+    fn render_svg_ribbon_cleared_stroke_emits_no_stroke_attribute() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Ribbon,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: Some(MarkKwargsSpec { stroke: Some("none".into()), ..Default::default() }),
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0])),
+            ],
+        )
+        .unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result =
+            render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let svg = result.bytes;
+        assert!(
+            !svg.contains("rgba(0,0,0,0.000)") && !svg.contains("rgba(0, 0, 0, 0.000)"),
+            "a cleared stroke must never serialize as an explicit zero-alpha color; svg={svg:?}"
+        );
+        let path = svg.find("<path ").map(|i| &svg[i..]).expect("ribbon must emit a <path>");
+        let path = &path[..path.find('>').unwrap_or(path.len())];
+        assert!(
+            !path.contains("stroke="),
+            "a cleared stroke must omit the stroke attribute entirely; path tag={path:?}"
+        );
+    }
+
+    /// Build a `mark_point`-shaped `ChartSpec` with the given `fill=`/`opacity=`
+    /// `mark_kwargs`, mirroring `ferrum.mark_point(fill=..., opacity=...)`'s
+    /// wire shape. Shared by the four T8 quality-review c2 pins below.
+    fn point_fill_opacity_spec(fill: Option<&str>, opacity: Option<f64>) -> (ChartSpec, RecordBatch) {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: Some(MarkKwargsSpec {
+                fill: fill.map(String::from),
+                opacity,
+                ..Default::default()
+            }),
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// Extract the first `<circle ...>` tag from an SVG string, for
+    /// attribute-level assertions.
+    fn first_circle_tag(svg: &str) -> &str {
+        let tag = svg.find("<circle ").map(|i| &svg[i..]).expect("must emit a <circle>");
+        &tag[..tag.find('>').unwrap_or(tag.len())]
+    }
+
+    /// T8 quality-review finding 1 (c2 scoping — provenance, never by value):
+    /// `fill="#000000", opacity=0` composes to the same zero-alpha-black
+    /// `Color` value as a genuine `"none"`/`"transparent"` clear, but it was
+    /// never cleared — the paint must keep serializing as an explicit
+    /// `rgba(0,0,0,0.000)`, exactly as pre-batch, per spec §7 byte-identity.
+    #[test]
+    fn render_svg_point_black_fill_opacity_zero_serializes_by_value_not_no_attribute() {
+        let (spec, batch) = point_fill_opacity_spec(Some("#000000"), Some(0.0));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let tag = first_circle_tag(&result.bytes);
+        assert!(
+            tag.contains("fill=\"rgba(0,0,0,0.000)\""),
+            "an un-cleared zero-alpha-black fill must serialize by value, not omit the attribute; circle tag={tag:?}"
+        );
+    }
+
+    /// T8 quality-review finding 1 (c2 scoping): an explicit `fill="#00000000"`
+    /// (8-digit hex) resolves the identical `Color` bytes as a clear sentinel
+    /// by value, but is a real parsed color, never a clear — must serialize
+    /// exactly as pre-batch.
+    #[test]
+    fn render_svg_point_explicit_zero_alpha_hex_serializes_by_value_not_no_attribute() {
+        let (spec, batch) = point_fill_opacity_spec(Some("#00000000"), None);
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let tag = first_circle_tag(&result.bytes);
+        assert!(
+            tag.contains("fill=\"rgba(0,0,0,0.000)\""),
+            "an explicit #00000000 fill must serialize by value, not omit the attribute; circle tag={tag:?}"
+        );
+    }
+
+    /// T8 quality-review finding 1: the genuinely cleared-paint case — a
+    /// literal `fill="none"` mark_kwargs — normalizes to `FillStroke.fill =
+    /// None`, which the SVG walker (`push_fill_stroke`) serializes as the
+    /// literal SVG `fill="none"` keyword (its pre-existing, correct rendering
+    /// of an absent fill — unlike stroke, which omits the attribute entirely;
+    /// `push_fill_stroke`'s fill/stroke asymmetry is unchanged by this fix).
+    /// The pin is that it is `fill="none"`, never `fill="rgba(0,0,0,0.000)"`,
+    /// distinguishing it from the two same-valued-but-not-cleared cases above
+    /// by provenance.
+    #[test]
+    fn render_svg_point_fill_none_emits_svg_none_not_zero_alpha() {
+        let (spec, batch) = point_fill_opacity_spec(Some("none"), None);
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let tag = first_circle_tag(&result.bytes);
+        assert!(
+            tag.contains("fill=\"none\""),
+            "a user-cleared fill must serialize as the literal SVG none keyword; circle tag={tag:?}"
+        );
+        assert!(
+            !result.bytes.contains("rgba(0,0,0,0.000)") && !result.bytes.contains("rgba(0, 0, 0, 0.000)"),
+            "a cleared fill must never serialize as an explicit zero-alpha color; svg={:?}",
+            result.bytes
+        );
+    }
+
+    /// Control (T8 quality-review finding 1): a non-black zero-alpha color
+    /// (`fill="#ff0000", opacity=0`) is unaffected by the fix either way — it
+    /// never aliased `color::TRANSPARENT` by value in the first place (only
+    /// zero-alpha *black* collides with the sentinel byte-for-byte) — and must
+    /// keep serializing explicitly.
+    #[test]
+    fn render_svg_point_red_fill_opacity_zero_serializes_by_value_control() {
+        let (spec, batch) = point_fill_opacity_spec(Some("#ff0000"), Some(0.0));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let tag = first_circle_tag(&result.bytes);
+        assert!(
+            tag.contains("fill=\"rgba(255,0,0,0.000)\""),
+            "the control (non-black zero-alpha) fill must keep serializing by value; circle tag={tag:?}"
+        );
     }
 
     #[test]
@@ -2714,9 +2958,35 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.colors.grid_color, color::from_hex_str("#ff0000").unwrap());
+        assert_eq!(theme.colors.grid_color, color::parse_color("#ff0000").unwrap());
         assert_eq!(theme.sizes.grid_width, 2.0);
         assert_eq!(theme.grid.grid_opacity, 0.5);
+    }
+
+    /// Batch A Task 8 sweep: `configure_grid(color=…)` was hex-only (it read
+    /// through `from_hex_str`), so a CSS name or `rgb()` string silently kept
+    /// the theme default. It now accepts the full vocabulary — and resolves to
+    /// exactly the same color the equivalent hex does.
+    #[test]
+    fn apply_chart_config_grid_color_accepts_named_and_rgb_forms() {
+        let grid_color = |spelling: &str| {
+            let mut theme = ThemeInputs::default();
+            let config = ChartConfig {
+                grid: Some(GridConfigSpec {
+                    color: Some(spelling.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            apply_chart_config(&mut theme, &config);
+            theme.colors.grid_color
+        };
+        let expected = color::parse_color("#4682b4").unwrap();
+        assert_eq!(grid_color("steelblue"), expected, "CSS name must take effect");
+        assert_eq!(grid_color("rgb(70, 130, 180)"), expected, "rgb() must take effect");
+        assert_eq!(grid_color("#4682b4"), expected, "hex is unchanged");
+        // An unparseable value keeps the theme default, as before the sweep.
+        assert_eq!(grid_color("not-a-color"), ThemeInputs::default().colors.grid_color);
     }
 
     #[test]
@@ -2887,12 +3157,12 @@ mod chart_config_application_tests {
         assert_eq!(theme.typography.title_font_size, 22.0);
         assert_eq!(theme.typography.title_font_weight, "700");
         assert_eq!(theme.typography.title_anchor, TextAnchor::End);
-        assert_eq!(theme.colors.title_color, color::from_hex_str("#123456").unwrap());
+        assert_eq!(theme.colors.title_color, color::parse_color("#123456").unwrap());
         assert_eq!(theme.typography.title_offset, 8.0);
         assert_eq!(theme.typography.subtitle_font_size, Some(13.0));
         assert_eq!(
             theme.colors.subtitle_color,
-            Some(color::from_hex_str("#ff0000").unwrap())
+            Some(color::parse_color("#ff0000").unwrap())
         );
     }
 
@@ -3554,13 +3824,13 @@ mod chart_config_application_tests {
         //     theme mark color rather than dropping the row or panicking.
         let scale = color_scale.as_ref().expect("scale survives");
         assert_eq!(
-            draw::resolve_fill_color(Some(scale), Some("b"), None, theme_fallback),
+            draw::resolve_fill_color(Some(scale), Some("b"), None, theme_fallback, false).0,
             theme_fallback,
             "an omitted category must still paint, in the fallback color"
         );
         // The listed categories keep a real scale color, distinct from fallback.
         assert_ne!(
-            draw::resolve_fill_color(Some(scale), Some("a"), None, theme_fallback),
+            draw::resolve_fill_color(Some(scale), Some("a"), None, theme_fallback, false).0,
             theme_fallback,
         );
 
@@ -3690,6 +3960,90 @@ mod chart_config_application_tests {
         );
         assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 255);
         assert!(warnings.is_empty(), "a matching range must not warn: {warnings:?}");
+    }
+
+    /// Batch A Task 8 sweep: all three `configure_color(range=…)` arms —
+    /// continuous gradient, categorical palette, discretizing swatches — were
+    /// hex-only. A CSS name or `rgb()` string was dropped by the first two
+    /// (shortening the gradient / palette, or making the override a silent
+    /// no-op) and reported as a parse failure by the third. All three now
+    /// resolve the full vocabulary, and every spelling of one color produces
+    /// the identical resolved color.
+    ///
+    /// One test rather than three: the three arms share a single sweep and a
+    /// single parser, so pinning them together is what keeps a future
+    /// re-narrowing of *any* of them visible.
+    #[test]
+    fn color_config_range_accepts_named_and_rgb_forms_on_every_arm() {
+        use scale_resolve::{ColorScale, DiscretizedColors};
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+
+        // steelblue / tomato, in the three spellings that must agree.
+        let spellings: [[&str; 2]; 3] = [
+            ["steelblue", "tomato"],
+            ["rgb(70, 130, 180)", "rgb(255, 99, 71)"],
+            ["#4682b4", "#ff6347"],
+        ];
+        let expected = [
+            color::from_rgb(0x46, 0x82, 0xb4),
+            color::from_rgb(0xff, 0x63, 0x47),
+        ];
+        let range = |pair: [&str; 2]| ColorConfigSpec {
+            range: Some(pair.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
+
+        // ── Continuous: the range becomes an evenly spaced gradient. ────────
+        for pair in spellings {
+            let mut scale = Some(ColorScale::Continuous {
+                domain: (0.0, 1.0),
+                scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+                midpoint: None,
+            });
+            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair));
+            assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
+            match scale {
+                Some(ColorScale::Continuous {
+                    scheme: ContinuousScheme::Gradient(stops), ..
+                }) => {
+                    assert_eq!(
+                        stops.iter().map(|&(_, c)| c).collect::<Vec<_>>(),
+                        expected,
+                        "{pair:?} must build the same gradient stops"
+                    );
+                }
+                other => panic!("{pair:?}: expected a Gradient scheme, got {other:?}"),
+            }
+        }
+
+        // ── Categorical: the range replaces the palette. ────────────────────
+        for pair in spellings {
+            let mut scale = Some(categorical_scale(&["a", "b"]));
+            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair));
+            assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
+            match scale {
+                Some(ColorScale::Categorical { palette, .. }) => {
+                    assert_eq!(palette.as_ref(), &expected, "{pair:?} must set the same palette");
+                }
+                other => panic!("{pair:?}: expected Categorical, got {other:?}"),
+            }
+        }
+
+        // ── Discretizing: the range repaints the bucket swatches. ───────────
+        let black = color::from_rgba(0, 0, 0, 255);
+        for pair in spellings {
+            let mut scale = Some(ColorScale::Discretizing(
+                DiscretizedColors::new(vec![0.0, 1.0, 2.0], vec![black; 2]).unwrap(),
+            ));
+            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair));
+            assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
+            let scale = scale.unwrap();
+            assert_eq!(
+                [scale.lookup_f64(0.5).unwrap(), scale.lookup_f64(1.5).unwrap()],
+                expected,
+                "{pair:?} must repaint both buckets alike"
+            );
+        }
     }
 
     /// The discretizing `range` parse is all-or-nothing. Filtering unparseable

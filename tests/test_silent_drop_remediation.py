@@ -1003,12 +1003,17 @@ class TestStrokeOpacitySVG:
         )
         # Extract stroke-opacity values from SVG
         vals = re.findall(r'stroke-opacity="([^"]+)"', svg)
-        # Filter out any gridline/axis stroke-opacities (those come from theme)
-        # We expect the row values 0.3, 0.6, 0.9 to appear
-        float_vals = [float(v) for v in vals]
-        per_row_vals = [v for v in float_vals if v < 1.0]
-        assert len(per_row_vals) >= 3, (
-            f"Expected at least 3 distinct stroke-opacity values; got {per_row_vals}"
+        # Batch A §4.3 (sanctioned change): a varying quantitative
+        # stroke_opacity column maps its extent onto the theme opacity band
+        # [0.1, 1.0] instead of passing raw alphas through, so 0.3/0.6/0.9
+        # render as 0.1/0.55/1.0. The channel still varies per row — what this
+        # test guards — but the previous "value < 1.0" proxy for "a per-row
+        # value" no longer holds for the top row, which lands on the band max.
+        # Asserting the band values directly also keeps theme gridline/axis
+        # stroke-opacities from counting toward the total.
+        rounded = {round(float(v), 2) for v in vals}
+        assert {0.1, 0.55}.issubset(rounded), (
+            f"Expected band-mapped per-row stroke-opacity values; got {sorted(rounded)}"
         )
 
 
@@ -1138,10 +1143,15 @@ class TestFillOpacitySVG:
         )
         svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         vals = re.findall(r'fill-opacity="([^"]+)"', svg)
-        float_vals = [float(v) for v in vals]
-        per_row_vals = [v for v in float_vals if v < 1.0]
-        assert len(per_row_vals) >= 3, (
-            f"Expected at least 3 distinct fill-opacity values; got {per_row_vals}"
+        # Batch A §4.3 (sanctioned change): a varying quantitative fill_opacity
+        # column maps its extent onto the theme opacity band [0.1, 1.0] instead
+        # of passing raw alphas through, so 0.3/0.6/0.9 render as 0.1/0.55/1.0.
+        # Per-row variation — what this test guards — is unchanged; the previous
+        # "value < 1.0" proxy for "a per-row value" no longer holds for the top
+        # row, which lands exactly on the band max.
+        rounded = {round(float(v), 2) for v in vals}
+        assert {0.1, 0.55}.issubset(rounded), (
+            f"Expected band-mapped per-row fill-opacity values; got {sorted(rounded)}"
         )
 
     def test_fill_opacity_1_does_not_emit_attribute(self):

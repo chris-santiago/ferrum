@@ -29,7 +29,7 @@ pub fn build_row_strip_title(
         w: band_w,
         h: panel_h,
         style: crate::render::draw::to_scene_fill_stroke(
-            Some(theme.colors.strip_background_color), None, 0.0, 1.0, None,
+            Some(theme.colors.strip_background_color), false, None, false, 0.0, 1.0, None,
         ),
         corner_radius: 0.0,
     };
@@ -74,7 +74,7 @@ pub fn build_strip_title(
         y: band.y,
         w: band.w,
         h: band.h,
-        style: to_scene_fill_stroke(Some(theme.colors.strip_background_color), None, 0.0, 1.0, None),
+        style: to_scene_fill_stroke(Some(theme.colors.strip_background_color), false, None, false, 0.0, 1.0, None),
         corner_radius: 0.0,
     };
 

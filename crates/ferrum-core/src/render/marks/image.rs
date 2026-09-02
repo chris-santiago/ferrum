@@ -495,7 +495,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -527,7 +527,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -548,7 +548,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -594,7 +594,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -618,7 +618,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -643,7 +643,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -674,7 +674,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -771,7 +771,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -804,7 +804,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -832,7 +832,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = unit_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,

@@ -392,7 +392,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         // 3 horizontal ticks — one per (cat, median) row.
@@ -435,7 +435,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 3);
@@ -477,7 +477,7 @@ mod tests {
 
         // Stroke = #aabbcc (distinctive; different from mark_color and fill)
         let overrides = MarkKwargsSpec { stroke: Some("#aabbcc".into()), ..Default::default() };
-        let mark_style = crate::render::draw::resolve_mark_style(Some(&overrides), &theme, &Mark::Tick);
+        let mark_style = crate::render::draw::resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
         // Confirm fill is NOT #aabbcc (it's still mark_color blue)
         assert_ne!(mark_style.paint.fill.red, 0xAA, "fill should not be the stroke color");
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -526,7 +526,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -591,7 +591,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -675,7 +675,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -730,7 +730,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -776,7 +776,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -819,7 +819,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -864,7 +864,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let default_opacity = mark_style.paint.opacity;
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
@@ -931,7 +931,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         result.nodes.iter().filter_map(|n| {
@@ -1039,10 +1039,13 @@ mod tests {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![3.0, 5.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1098,10 +1101,13 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![3.0, 5.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Ordinal(y_scale),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 

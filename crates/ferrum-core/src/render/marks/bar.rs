@@ -70,10 +70,13 @@ impl StrokeChannels {
     /// clamped, defaulted) by the shared [`OpacityResolver`]; bar's
     /// `fill_opacity ← opacity` fallback lives in that resolver
     /// (`OpacityFallback::BarLike`).
+    #[allow(clippy::too_many_arguments)]
     fn row_fill_stroke(
         &self,
         fill: Option<ferrum_scene::Color>,
+        fill_cleared: bool,
         stroke: Option<ferrum_scene::Color>,
+        stroke_cleared: bool,
         base: &BarBaseStyle<'_>,
         fill_opacity: f64,
         stroke_opacity: f64,
@@ -101,15 +104,24 @@ impl StrokeChannels {
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
-        let effective_stroke = if stroke_width > 0.0 && stroke.is_none() && self.width.is_some() {
-            fill
-        } else {
-            stroke
-        };
+        // The rescue paints the stroke in the fill color, so `effective_stroke`'s
+        // cleared-ness follows the fill's, not the (absent) stroke's.
+        let (effective_stroke, effective_stroke_cleared) =
+            if stroke_width > 0.0 && stroke.is_none() && self.width.is_some() {
+                (fill, fill_cleared)
+            } else {
+                (stroke, stroke_cleared)
+            };
 
+        // Normalize a **user-cleared** paint (provenance from `fill_cleared`/
+        // `effective_stroke_cleared`, never a value test — T8 quality-review c2)
+        // to `None` *after* the width-rescue decision above, not before —
+        // normalizing earlier would make a cleared stroke indistinguishable
+        // from an absent one and wrongly re-trigger the rescue. See
+        // `normalize_scene_paint`'s doc comment.
         let fs = ferrum_scene::FillStroke {
-            fill,
-            stroke: effective_stroke,
+            fill: crate::render::draw::normalize_scene_paint(fill, fill_cleared),
+            stroke: crate::render::draw::normalize_scene_paint(effective_stroke, effective_stroke_cleared),
             stroke_width,
             opacity,
             stroke_dash: effective_dash,
@@ -239,11 +251,12 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let inner_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, base);
         let outer_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, top);
 
-        let fill_color = resolve_fill_color(
+        let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         let fill_c = crate::render::draw::to_scene_color(with_opacity(fill_color, ctx.mark_style.paint.opacity));
         let stroke_sc = ctx.mark_style.paint.stroke.map(crate::render::draw::to_scene_color);
@@ -254,7 +267,10 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             corner_radius: 0.0,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
-        let (style, _) = sc.row_fill_stroke(Some(fill_c), stroke_sc, &base_style, fill_opacity, stroke_opacity, i);
+        let (style, _) = sc.row_fill_stroke(
+            Some(fill_c), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
+            &base_style, fill_opacity, stroke_opacity, i,
+        );
 
         let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
         acc.push(SceneNode::Path { commands, style, closed: true }, i);
@@ -362,11 +378,12 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cx = cx + x_offsets[i];
         let top_y = rect_top_y + y_offsets[i];
 
-        let fill_color = resolve_fill_color(
+        let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
@@ -379,7 +396,10 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
+            &base, fill_opacity, stroke_opacity, i,
+        );
 
         acc.push(SceneNode::Rect {
             x: cx - bar_width / 2.0,
@@ -521,11 +541,12 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (row_base_x, (px - row_base_x).max(0.0))
         };
 
-        let fill_color = resolve_fill_color(
+        let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
@@ -538,7 +559,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
+            &base, fill_opacity, stroke_opacity, i,
+        );
 
         acc.push(SceneNode::Rect {
             x: left_x,
@@ -699,11 +723,12 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (cx - bw / 2.0, bw)
         };
 
-        let fill_color = resolve_fill_color(
+        let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
@@ -716,7 +741,10 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
+            &base, fill_opacity, stroke_opacity, i,
+        );
 
         acc.push(SceneNode::Rect {
             x: rect_x,
@@ -819,11 +847,12 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let rect_x = row_base_x;
         let width = (px_right - row_base_x).max(0.0);
 
-        let fill_color = resolve_fill_color(
+        let (fill_color, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
@@ -836,7 +865,10 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
             corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
+        let (style, cr) = sc.row_fill_stroke(
+            Some(fill_sc), fill_cleared, stroke_sc, ctx.mark_style.paint.stroke_cleared,
+            &base, fill_opacity, stroke_opacity, i,
+        );
 
         acc.push(SceneNode::Rect {
             x: rect_x,
@@ -907,7 +939,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 3, "expected 3 histogram bars");
@@ -944,10 +976,65 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 4);
+    }
+
+    /// T8 quality-review finding 2 extended to bar's own `FillStroke`
+    /// construction: `row_fill_stroke` builds `ferrum_scene::FillStroke`
+    /// directly (bypassing `to_scene_fill_stroke_full`), so a cleared
+    /// `stroke=` must be normalized there too, after the stroke-width rescue
+    /// decision — otherwise the same `rgba(0,0,0,0.000)` leak the ribbon fix
+    /// closed would reopen for `mark_bar(stroke="none")`.
+    #[test]
+    fn bar_cleared_stroke_normalizes_to_none_not_zero_alpha() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+ coord: None,
+ mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a","b","c","d"])),
+            Arc::new(Float64Array::from(vec![1.0,2.0,3.0,4.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let overrides = crate::spec::mark_style::MarkKwargsSpec {
+            stroke: Some("none".into()),
+            ..Default::default()
+        };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Bar).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rect = result.nodes.iter().find(|n| matches!(n, SceneNode::Rect { .. })).unwrap();
+        if let SceneNode::Rect { style, .. } = rect {
+            assert!(
+                style.stroke.is_none(),
+                "a cleared bar stroke must normalize to None, not Some(TRANSPARENT)"
+            );
+        } else {
+            panic!("expected a Rect node");
+        }
     }
 
     #[test]
@@ -979,7 +1066,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 3, "expected 3 horizontal bars");
@@ -1018,7 +1105,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 3, "expected 3 ranged-horizontal bars");
@@ -1052,7 +1139,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 200.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         // Should produce 4 bars (one per row)
@@ -1097,7 +1184,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 200.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
@@ -1151,9 +1238,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![200.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
@@ -1221,9 +1308,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![200.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
@@ -1266,7 +1353,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 200.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
@@ -1311,7 +1398,7 @@ mod tests {
         theme.sizes.bar_corner_radius = 3.0;
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let has_corner_radius = result.nodes.iter().any(|n| {
@@ -1358,7 +1445,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let rect_count = result.nodes.iter()
@@ -1403,7 +1490,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1459,7 +1546,7 @@ mod tests {
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1547,9 +1634,9 @@ mod tests {
                     vec!["a".to_string()], vec![0.0, 100.0], 0.0,
                 )),
                 y: y_scale(),
-                color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+                color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
             };
-            let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
             let result = super::build(&ctx);
             let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
@@ -1593,9 +1680,9 @@ mod tests {
             let scales = ResolvedScales {
                 x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
                 y: y_scale(),
-                color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+                color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
             };
-            let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
             let result = super::build(&ctx);
             let rects: Vec<f64> = result.nodes.iter().filter_map(|n| {
@@ -1665,9 +1752,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 60.0], vec![300.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1755,9 +1842,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1859,9 +1946,9 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1959,7 +2046,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2027,7 +2114,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2111,9 +2198,9 @@ mod tests {
             y: ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 30.0], vec![300.0, 0.0], false, false,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2172,7 +2259,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2229,7 +2316,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2299,7 +2386,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2367,7 +2454,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = crate::render::draw::DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -2425,14 +2512,20 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let fos: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { style, .. } = n { Some(style.fill_opacity) } else { None }
         }).collect();
         assert_eq!(fos.len(), 3, "expected 3 bar rects");
-        let expected = [0.2, 0.5, 0.9];
+        // Batch A §4.3 (sanctioned): the column's extent [0.2, 0.9] maps onto
+        // the theme opacity band [0.1, 1.0] instead of passing through raw, so
+        // the endpoints become the band endpoints and the middle row lands
+        // proportionally between them. Per-row distinctness — what this guard
+        // is for — is unchanged.
+        let band = |v: f64| 0.1 + 0.9 * (v - 0.2) / (0.9 - 0.2);
+        let expected = [band(0.2), band(0.5), band(0.9)];
         for (i, (got, exp)) in fos.iter().zip(expected).enumerate() {
             assert!((got - exp).abs() < 1e-9,
                 "bar row {i} fill_opacity expected {exp}, got {got}");
@@ -2474,7 +2567,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let fos: Vec<f64> = result.nodes.iter().filter_map(|n| {
@@ -2549,7 +2642,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -2577,7 +2670,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
@@ -2637,10 +2730,13 @@ mod tests {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -2677,10 +2773,13 @@ mod tests {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -2735,10 +2834,13 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Ordinal(y_scale),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -2796,7 +2898,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 100.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -2820,7 +2922,7 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -2877,7 +2979,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 300.0], 0.0)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -2903,7 +3005,7 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -2967,7 +3069,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -2993,7 +3095,7 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -3050,7 +3152,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 100.0], 0.0)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let pos = PositionAdjust::Stack {
             by: Some("grp".into()),
@@ -3075,7 +3177,7 @@ mod tests {
             plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
             facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -3131,7 +3233,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -3186,7 +3288,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -3280,12 +3382,12 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["1".into(), "2".into(), "3".into()], vec![0.0, 100.0], 0.0)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         // Sanity: this schema is genuinely stamp-less.
         assert!(!crate::render::position::BatchPositionMeta::from_batch(&batch).stack_value_on_x(), "test batch must carry no value-on-X stamp");
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 

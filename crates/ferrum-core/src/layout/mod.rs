@@ -547,8 +547,9 @@ impl Default for ThemeReferenceLine {
 /// Theme fields actually read by Phase 6 + Phase 7. Kept decoupled from a full
 /// Theme type — Phase 8 grammar will translate ferrum.Theme into this shape.
 ///
-/// Color fields use palette::Srgba<u8>. Task 6 will add a `Color` type alias
-/// and `from_hex_str` helper; for now we construct directly via Srgba::new.
+/// Color fields use palette::Srgba<u8> (the `render::color::Color` alias);
+/// values are constructed directly via Srgba::new, or parsed from user strings
+/// by `render::color::parse_color` at the binding/config boundaries.
 ///
 /// Fields are organized into logical sub-structs. Accessor methods provide
 /// backward-compatible flat access for consumers that prefer `theme.field_name`

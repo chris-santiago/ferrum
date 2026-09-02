@@ -623,7 +623,7 @@ const THEME_KNOWN_KEYS: &[&str] = &[
 ];
 
 /// The color-typed subset of [`THEME_KNOWN_KEYS`] — keys whose values are
-/// color strings (parsed by `parse_color_val`/`from_hex_str` on the Rust
+/// color strings (parsed by `parse_color_val` → `render::color::parse_color` on the Rust
 /// side). Exposed via `theme_color_keys()` so Python can decide whether to
 /// keep a color-key list (e.g. for CSS-shorthand expansion) without
 /// hand-maintaining a third parallel copy. Every entry MUST also appear in
@@ -1283,7 +1283,7 @@ fn config_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RenderConfig> {
     if let Some(v) = d.get_item("background")? {
         let s: String = v.extract()?;
         c.background = Some(
-            super::color::from_hex_str(&s).map_err(|e| PyValueError::new_err(e.to_string()))?,
+            super::color::parse_color(&s).map_err(|e| PyValueError::new_err(e.to_string()))?,
         );
     }
     if let Some(v) = d.get_item("width")? {
@@ -2177,6 +2177,70 @@ mod composite_warning_tests {
                 "expected a color-palette-overflow warning to surface through \
                  render_interactive's emit_warnings call, got: {messages:?}"
             );
+        });
+    }
+}
+
+/// The `background=` render option's color vocabulary (batch-A Task 8 sweep).
+///
+/// This is the one swept color site that only exists at the PyO3 boundary, so
+/// it needs its own `Python::attach` coverage: pre-existing tests of
+/// `background=` are hex-only (`tests/test_bug_hunt_composition_facet.py`), and
+/// nothing else would catch a re-narrowing of this site back to hex.
+#[cfg(test)]
+mod render_config_background_tests {
+    use super::*;
+    use pyo3::types::PyDict;
+
+    /// `background` accepts the full CSS vocabulary, and every spelling of one
+    /// color resolves to the same `Srgba` — `lightgray` is CSS Color 4
+    /// `(211, 211, 211)` = `#d3d3d3`.
+    #[test]
+    fn background_accepts_named_and_rgb_forms_identically_to_hex() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let background = |spelling: &str| {
+                let d = PyDict::new(py);
+                d.set_item("background", spelling).unwrap();
+                config_from_dict(Some(&d))
+                    .unwrap_or_else(|e| panic!("{spelling:?} must parse: {e}"))
+                    .background
+            };
+            let expected = Some(super::super::color::from_rgb(0xd3, 0xd3, 0xd3));
+            for spelling in ["lightgray", "rgb(211, 211, 211)", "#d3d3d3", "#D3D3D3"] {
+                assert_eq!(background(spelling), expected, "{spelling:?} must resolve alike");
+            }
+        });
+    }
+
+    /// An unparseable `background` raises `ValueError` naming the accepted
+    /// forms — this site refuses rather than silently keeping the theme
+    /// background, because it already did so before the sweep.
+    #[test]
+    fn background_invalid_raises_value_error_naming_accepted_forms() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("background", "nope").unwrap();
+            let err = config_from_dict(Some(&d))
+                .expect_err("an unparseable background must raise, not fall back");
+            assert!(err.is_instance_of::<PyValueError>(py), "expected ValueError");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains(crate::render::color::primitive::ACCEPTED_COLOR_FORMS),
+                "message must quote ACCEPTED_COLOR_FORMS verbatim; got {msg:?}"
+            );
+            assert!(msg.contains("nope"), "message must echo the offending value; got {msg:?}");
+        });
+    }
+
+    /// Absent `background` stays `None` — byte-identical to no render option.
+    #[test]
+    fn background_absent_leaves_config_default() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            assert_eq!(config_from_dict(Some(&d)).unwrap().background, None);
         });
     }
 }

@@ -106,11 +106,12 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         let w = (px_hi - px_lo).abs().max(0.5);
         let h = (py_hi - py_lo).abs().max(0.5);
 
-        let fill = resolve_fill_color(
+        let (fill, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_numeric.as_ref().and_then(|v| v.get(i).copied().flatten()),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         // Resolve per-row opacity through scale if present; fall back to mark_style.paint.opacity.
         let row_opacity =
@@ -128,16 +129,20 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
-        let effective_stroke = resolve_effective_stroke(
+        let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
             row_stroke_width,
             ctx.mark_style.paint.stroke,
+            ctx.mark_style.paint.stroke_cleared,
             fill,
+            fill_cleared,
             stroke_width_values.is_some(),
         );
 
         let style = to_scene_fill_stroke_full(
             Some(fill),
+            fill_cleared,
             effective_stroke,
+            effective_stroke_cleared,
             row_stroke_width,
             row_opacity,
             ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -248,11 +253,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
             // Ordinal rects bind only a categorical color column (no continuous
             // path is loaded here), so `num_value` is always None.
-            let fill = resolve_fill_color(
+            let (fill, fill_cleared) = resolve_fill_color(
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
                 None,
                 ctx.mark_style.paint.fill,
+                ctx.mark_style.paint.fill_cleared,
             );
             let row_opacity =
                 resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
@@ -266,16 +272,20 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 .filter(|v| *v >= 0.0 && v.is_finite())
                 .unwrap_or(ctx.mark_style.paint.stroke_width);
 
-            let effective_stroke = resolve_effective_stroke(
+            let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
                 row_stroke_width,
                 ctx.mark_style.paint.stroke,
+                ctx.mark_style.paint.stroke_cleared,
                 fill,
+                fill_cleared,
                 stroke_width_values.is_some(),
             );
 
             let style = to_scene_fill_stroke_full(
                 Some(fill),
+                fill_cleared,
                 effective_stroke,
+                effective_stroke_cleared,
                 row_stroke_width,
                 row_opacity,
                 ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -333,11 +343,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
             // Ordinal rects bind only a categorical color column (no continuous
             // path is loaded here), so `num_value` is always None.
-            let fill = resolve_fill_color(
+            let (fill, fill_cleared) = resolve_fill_color(
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
                 None,
                 ctx.mark_style.paint.fill,
+                ctx.mark_style.paint.fill_cleared,
             );
             let row_opacity =
                 resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
@@ -351,16 +362,20 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 .filter(|v| *v >= 0.0 && v.is_finite())
                 .unwrap_or(ctx.mark_style.paint.stroke_width);
 
-            let effective_stroke = resolve_effective_stroke(
+            let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
                 row_stroke_width,
                 ctx.mark_style.paint.stroke,
+                ctx.mark_style.paint.stroke_cleared,
                 fill,
+                fill_cleared,
                 stroke_width_values.is_some(),
             );
 
             let style = to_scene_fill_stroke_full(
                 Some(fill),
+                fill_cleared,
                 effective_stroke,
+                effective_stroke_cleared,
                 row_stroke_width,
                 row_opacity,
                 ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -470,11 +485,12 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cx = cx + x_offsets[i];
         let cy = cy + y_offsets[i];
 
-        let fill = resolve_fill_color(
+        let (fill, fill_cleared) = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_numeric.as_ref().and_then(|v| v.get(i).copied().flatten()),
             ctx.mark_style.paint.fill,
+            ctx.mark_style.paint.fill_cleared,
         );
         // Resolve per-row opacity (through scale if present).
         let row_opacity =
@@ -493,16 +509,20 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
-        let effective_stroke = resolve_effective_stroke(
+        let (effective_stroke, effective_stroke_cleared) = resolve_effective_stroke(
             row_stroke_width,
             ctx.mark_style.paint.stroke,
+            ctx.mark_style.paint.stroke_cleared,
             fill,
+            fill_cleared,
             stroke_width_values.is_some(),
         );
 
         let style = to_scene_fill_stroke_full(
             Some(fill),
+            fill_cleared,
             effective_stroke,
+            effective_stroke_cleared,
             row_stroke_width,
             row_opacity,
             ctx.mark_style.paint.stroke_dash.as_deref(),
@@ -610,7 +630,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 2, "expected 2 band rects");
@@ -647,7 +667,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 4);
@@ -696,7 +716,7 @@ mod tests {
             &spec, &batch, (0.0, 100.0), (0.0, 100.0),
             &crate::layout::ThemeInputs::default(),
         ).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
@@ -756,7 +776,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(
@@ -821,12 +841,15 @@ mod tests {
             opacity: Some(OpacityScale {
                 inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.8], vec![0.2, 0.8], false, false)),
             }),
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -889,11 +912,14 @@ mod tests {
             opacity: Some(OpacityScale {
                 inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.9], vec![0.2, 0.9], false, false)),
             }),
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None,
             y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales_default, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -949,7 +975,7 @@ mod tests {
             &spec, &batch, (0.0, 100.0), (0.0, 100.0),
             &crate::layout::ThemeInputs::default(),
         ).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(
@@ -991,7 +1017,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert!(result.nodes.iter().all(|n| !matches!(n, SceneNode::Rect { .. })));
@@ -1060,7 +1086,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1127,7 +1153,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1211,10 +1237,10 @@ mod tests {
                 vec![150.0],
                 0.0,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1292,7 +1318,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1361,7 +1387,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales_qr, _) = resolve_scales(&spec_qr, &batch_qr, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style_qr = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style_qr = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx_qr = DrawCtx { spec: &spec_qr, panel: &panel, theme: &theme, scales: &scales_qr, batch: &batch_qr, mark_style: &mark_style_qr };
         let result_qr = super::build(&ctx_qr);
         assert_eq!(result_qr.nodes.len(), 3, "qr: all 3 rows kept → 3 nodes");
@@ -1399,7 +1425,7 @@ mod tests {
             Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
         ]).unwrap();
         let (scales_or, _) = resolve_scales(&spec_or, &batch_or, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style_or = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style_or = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx_or = DrawCtx { spec: &spec_or, panel: &panel, theme: &theme, scales: &scales_or, batch: &batch_or, mark_style: &mark_style_or };
         let result_or = super::build(&ctx_or);
         assert_eq!(result_or.nodes.len(), 3, "or: all 3 rows kept → 3 nodes");
@@ -1434,7 +1460,7 @@ mod tests {
             Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
         ]).unwrap();
         let (scales_hm, _) = resolve_scales(&spec_hm, &batch_hm, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style_hm = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style_hm = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx_hm = DrawCtx { spec: &spec_hm, panel: &panel, theme: &theme, scales: &scales_hm, batch: &batch_hm, mark_style: &mark_style_hm };
         let result_hm = super::build(&ctx_hm);
         assert_eq!(result_hm.nodes.len(), 3, "hm: all 3 rows kept → 3 rect nodes");
@@ -1520,10 +1546,10 @@ mod tests {
                 vec![150.0],
                 0.0,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1616,7 +1642,7 @@ mod tests {
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1697,7 +1723,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         result.nodes.iter().filter_map(|n| {
@@ -1786,10 +1812,13 @@ mod tests {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![2.0, 8.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1848,10 +1877,13 @@ mod tests {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![2.0, 8.0], vec![0.0, 100.0], false, false)),
             y: ScaleKind::Ordinal(y_scale),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 
@@ -1907,10 +1939,13 @@ mod tests {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Ordinal(y_scale),
             color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None, y2: None, y_slots: Default::default(),
         };
 
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 

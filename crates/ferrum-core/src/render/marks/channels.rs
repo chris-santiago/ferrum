@@ -232,6 +232,9 @@ mod tests {
             size: None,
             shape: None,
             opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -369,7 +372,7 @@ mod tests {
             facet_key: None, row: 0, col: 0,
             strip_title: None, row_strip_title: None, row_facet_key: None,
         };
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
         let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales, batch, mark_style: &mark_style };
         color_column_loader(&ctx)
     }

@@ -192,20 +192,29 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         cmds.push(PathCmd::Close);
 
         // Color resolution — mirrors draw().
-        let (fill, stroke) = if has_color_groups {
-            let solid = key
+        // `fill_cleared` (T8 quality-review c2): true only when the color-scale
+        // lookup missed (or there was no group) AND the constant fill was
+        // cleared by a literal "none"/"transparent" — a scale-resolved `solid`
+        // color is never a user paint-clear. `stroke` is always the literal
+        // constant (never scale-driven for ribbon), so `stroke_cleared` follows
+        // it unconditionally.
+        let (fill, fill_cleared, stroke) = if has_color_groups {
+            let looked_up = key
                 .as_deref()
-                .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
-                .unwrap_or(ctx.mark_style.paint.fill);
+                .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)));
+            let fill_cleared = looked_up.is_none() && ctx.mark_style.paint.fill_cleared;
+            let solid = looked_up.unwrap_or(ctx.mark_style.paint.fill);
             let fill = crate::render::color::with_opacity(solid, ctx.mark_style.paint.opacity);
-            (Some(fill), ctx.mark_style.paint.stroke)
+            (Some(fill), fill_cleared, ctx.mark_style.paint.stroke)
         } else {
             let fill = crate::render::color::with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
-            (Some(fill), ctx.mark_style.paint.stroke)
+            (Some(fill), ctx.mark_style.paint.fill_cleared, ctx.mark_style.paint.stroke)
         };
         let style = to_scene_fill_stroke(
             fill,
+            fill_cleared,
             stroke,
+            ctx.mark_style.paint.stroke_cleared,
             ctx.mark_style.paint.stroke_width,
             1.0,
             None,
@@ -309,6 +318,18 @@ mod tests {
     }
 
     fn render(spec: &ChartSpec, batch: &RecordBatch) -> crate::render::draw::MarkBuildResult {
+        render_with_overrides(spec, batch, None)
+    }
+
+    /// Like [`render`], but resolves `mark_style` with the given
+    /// `MarkKwargsSpec` overrides instead of the theme defaults — used to
+    /// exercise a cleared (`"none"`) `fill=`/`stroke=` through the real
+    /// `resolve_mark_style` -> `build` path.
+    fn render_with_overrides(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+        overrides: Option<&crate::spec::mark_style::MarkKwargsSpec>,
+    ) -> crate::render::draw::MarkBuildResult {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
@@ -325,7 +346,7 @@ mod tests {
             &ThemeInputs::default(),
         )
         .unwrap();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Ribbon);
+        let mark_style = resolve_mark_style(overrides, &theme, &Mark::Ribbon).unwrap();
         let ctx = DrawCtx {
             spec,
             panel: &panel,
@@ -355,6 +376,68 @@ mod tests {
             assert!(*closed, "ribbon path must be closed");
             assert!(matches!(commands.first(), Some(ferrum_scene::PathCmd::MoveTo { .. })),
                 "ribbon path must start with MoveTo");
+        }
+    }
+
+    /// T8 quality-review finding 2: a cleared `stroke=` must not serialize as
+    /// an explicit zero-alpha color (`rgba(0,0,0,0.000)` in SVG). Both SVG
+    /// and interactive scene JSON are built from the same `FillStroke`
+    /// (`crate::render::draw::to_scene_fill_stroke`), so pinning
+    /// `style.stroke.is_none()` here covers both outputs — `push_fill_stroke`
+    /// (svg.rs) omits the `stroke=` attribute entirely on `None`, and the
+    /// interactive scene JSON is a direct serde serialization of this same
+    /// node. This is the exact `mark_ribbon`/`mark_errorband` regression the
+    /// finding named: composite.py passes `mark_kwargs={"stroke": "none"}`.
+    #[test]
+    fn ribbon_cleared_stroke_serializes_as_no_stroke_not_zero_alpha() {
+        let spec = ribbon_spec(true);
+        let batch = three_col_batch(
+            vec![0.0, 1.0, 2.0, 3.0, 4.0],
+            vec![0.0, 2.0, 4.0, 6.0, 8.0],
+            vec![1.0, 3.0, 5.0, 7.0, 8.0],
+        );
+        let overrides = crate::spec::mark_style::MarkKwargsSpec {
+            stroke: Some("none".into()),
+            ..Default::default()
+        };
+        let result = render_with_overrides(&spec, &batch, Some(&overrides));
+        let path = result.nodes.iter().find(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).unwrap();
+        if let ferrum_scene::SceneNode::Path { style, .. } = path {
+            assert!(
+                style.stroke.is_none(),
+                "a cleared stroke must normalize to None, not Some(TRANSPARENT), \
+                 so it never serializes as stroke=\"rgba(0,0,0,0.000)\""
+            );
+        } else {
+            panic!("expected a Path node");
+        }
+    }
+
+    /// Same hazard, fill side: a cleared `fill=` must resolve `None` (SVG's
+    /// existing `None -> fill="none"` branch), not `Some(TRANSPARENT)`
+    /// (which would serialize as `fill="rgba(0,0,0,0.000)"`).
+    #[test]
+    fn ribbon_cleared_fill_serializes_as_none_not_zero_alpha() {
+        let spec = ribbon_spec(true);
+        let batch = three_col_batch(
+            vec![0.0, 1.0, 2.0, 3.0, 4.0],
+            vec![0.0, 2.0, 4.0, 6.0, 8.0],
+            vec![1.0, 3.0, 5.0, 7.0, 8.0],
+        );
+        let overrides = crate::spec::mark_style::MarkKwargsSpec {
+            fill: Some("none".into()),
+            ..Default::default()
+        };
+        let result = render_with_overrides(&spec, &batch, Some(&overrides));
+        let path = result.nodes.iter().find(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).unwrap();
+        if let ferrum_scene::SceneNode::Path { style, .. } = path {
+            assert!(
+                style.fill.is_none(),
+                "a cleared fill must normalize to None, not Some(TRANSPARENT), \
+                 so it serializes as fill=\"none\", not fill=\"rgba(0,0,0,0.000)\""
+            );
+        } else {
+            panic!("expected a Path node");
         }
     }
 

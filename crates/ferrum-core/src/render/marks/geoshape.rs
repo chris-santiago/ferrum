@@ -135,9 +135,14 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
     // ── Style setup ───────────────────────────────────────────────────
 
+    // Geoshape fill/stroke are not yet threaded for provenance-gated paint
+    // clearing (out of this fix round's scope, mirrors arc.rs); a cleared
+    // constant fill/stroke here still serializes as `rgba(0,0,0,0.000)`.
     let fill_style = to_scene_fill_stroke(
         Some(fill),
+        false,
         stroke,
+        false,
         ctx.mark_style.paint.stroke_width,
         ctx.mark_style.paint.opacity,
         None,
@@ -267,6 +272,9 @@ mod tests {
             size: None,
             shape: None,
             opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
             x2: None,
             y2: None,
             y_slots: Default::default(),
@@ -295,7 +303,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -327,7 +335,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -359,7 +367,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -406,7 +414,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -520,7 +528,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -560,7 +568,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -609,7 +617,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,
@@ -642,7 +650,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = rect_panel();
         let scales = dummy_scales();
-        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
         let ctx = DrawCtx {
             spec: &spec,
             panel: &panel,

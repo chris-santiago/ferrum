@@ -1192,7 +1192,10 @@ fn build_panel_mark_batches(
         // Resolved before the own-color exemption below because that
         // exemption's non-Text branch needs to know whether THIS layer
         // carries its own literal stroke/fill override.
-        let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark);
+        // Refuses with `RenderError::InvalidColor` on an unparseable
+        // `fill=`/`stroke=` (batch-A Task 8) — the same build-seam refusal
+        // discipline as `validate_mark_encoding` below.
+        let mark_style = draw::resolve_mark_style(layer.mark_style.as_ref(), theme, &layer.mark)?;
 
         // Own-color exemption (spec §4.4, 2026-08-28 T4 amendment; widened
         // batch-A T5d, 2026-08-28): a layer whose `color` channel came purely
@@ -1484,7 +1487,7 @@ fn build_title(
         .unwrap_or_else(|| theme.typography.title_font_weight.clone());
     let resolved_color = title_spec
         .and_then(|t| t.color.as_deref())
-        .and_then(|hex| super::color::from_hex_str(hex).ok())
+        .and_then(|s| super::color::parse_color(s).ok())
         .unwrap_or(theme.colors.title_color);
     let fw = if resolved_font_weight == "normal" {
         None
@@ -1510,7 +1513,7 @@ fn build_title(
     if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
         let resolved_sub_color = title_spec
             .and_then(|t| t.subtitle_color.as_deref())
-            .and_then(|hex| super::color::from_hex_str(hex).ok())
+            .and_then(|s| super::color::parse_color(s).ok())
             .or(theme.colors.subtitle_color)
             .unwrap_or(theme.colors.font_color);
         let resolved_sub_font_size = title_spec
@@ -3082,7 +3085,7 @@ mod tests {
 
         let mut theme = ThemeInputs::default();
         theme.typography.subtitle_font_size = Some(22.0);
-        theme.colors.subtitle_color = Some(super::super::color::from_hex_str("#ff0000").unwrap());
+        theme.colors.subtitle_color = Some(super::super::color::parse_color("#ff0000").unwrap());
 
         let mut nodes = Vec::new();
         build_title(&layout, &spec, &theme, &mut nodes);
@@ -3100,8 +3103,47 @@ mod tests {
         assert_eq!(subtitle_node.font_size, 22.0);
         assert_eq!(
             subtitle_node.color,
-            to_scene_color(super::super::color::from_hex_str("#ff0000").unwrap()),
+            to_scene_color(super::super::color::parse_color("#ff0000").unwrap()),
         );
+    }
+
+    /// Batch A Task 8 sweep: the per-chart `Title(color=…, subtitle_color=…)`
+    /// strings were hex-only, so a CSS name or `rgb()` string silently fell back
+    /// to the theme title color. All three spellings now paint the same text.
+    #[test]
+    fn build_title_colors_accept_named_and_rgb_forms_identically_to_hex() {
+        let title_colors = |spelling: &str| -> (ferrum_scene::Color, ferrum_scene::Color) {
+            let mut spec = spec_with_x_domain_param(Vec::new());
+            spec.title = Some(crate::spec::title::TitleSpec {
+                text: "Main Title".to_string(),
+                subtitle: Some("Sub".to_string()),
+                color: Some(spelling.to_string()),
+                subtitle_color: Some(spelling.to_string()),
+                ..Default::default()
+            });
+            let mut nodes = Vec::new();
+            build_title(&layout_with_subtitle("Sub"), &spec, &ThemeInputs::default(), &mut nodes);
+            let color_of = |want: &str| {
+                nodes
+                    .iter()
+                    .find_map(|n| match n {
+                        SceneNode::Text { content, style, .. } if content == want => {
+                            Some(style.color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("no text node for {want:?}"))
+            };
+            (color_of("Main Title"), color_of("Sub"))
+        };
+        let expected = to_scene_color(super::super::color::parse_color("#4682b4").unwrap());
+        for spelling in ["steelblue", "rgb(70, 130, 180)", "#4682b4"] {
+            assert_eq!(
+                title_colors(spelling),
+                (expected, expected),
+                "{spelling:?} must color both title lines"
+            );
+        }
     }
 
     /// Unset subtitle config → byte-identical default: font_color and 0.85× title size.

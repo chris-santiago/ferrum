@@ -127,9 +127,20 @@ def test_polar_bar_honors_fill_opacity_encoding():
     assert fo_values, (
         "build_polar dropped fill_opacity encoding: no fill-opacity found on path elements"
     )
+    # Batch A §4.3 (sanctioned, spec amendment 2026-09-01): a varying
+    # quantitative fill_opacity column maps its extent onto the theme opacity
+    # band [0.1, 1.0] instead of passing raw alphas through. Extent here is
+    # [0.2, 0.9], so the two 0.2 rows render at the band min 0.1 and the two 0.9
+    # rows at the band max 1.0 — which SVG expresses by OMITTING the attribute.
+    # The channel is still honored per row (what this test guards); the previous
+    # "two distinct attribute values" assertion could not see the max rows.
     numeric_fos = {round(float(v), 6) for v in fo_values}
-    assert len(numeric_fos) >= 2, (
-        f"expected at least two distinct fill-opacity values (0.2 and 0.9), got {numeric_fos}"
+    assert numeric_fos == {0.1}, (
+        f"expected the band-min rows to render fill-opacity 0.1; got {sorted(numeric_fos)}"
+    )
+    assert len(fo_values) == 2, (
+        "expected only the two band-min rows to carry a fill-opacity attribute; "
+        f"the two band-max (1.0) rows must omit it, got {fo_values}"
     )
 
 
@@ -299,9 +310,18 @@ def test_rect_ordinal_range_honors_fill_opacity_encoding():
     assert fo_values, (
         "build_ordinal_range dropped fill_opacity encoding: no fill-opacity on rect elements"
     )
+    # Batch A §4.3 (sanctioned, spec amendment 2026-09-01): the extent [0.2, 0.9]
+    # maps onto the theme opacity band [0.1, 1.0], so row A (0.2) renders at the
+    # band min 0.1 and row B (0.9) at the band max 1.0 — which SVG expresses by
+    # OMITTING the attribute. Per-row honoring is unchanged; the previous "two
+    # distinct attribute values" assertion could not see the band-max row.
     numeric_fos = {round(float(v), 6) for v in fo_values}
-    assert len(numeric_fos) >= 2, (
-        f"expected at least two distinct fill-opacity values (0.2 and 0.9), got {numeric_fos}"
+    assert numeric_fos == {0.1}, (
+        f"expected row A to render the band min fill-opacity 0.1; got {sorted(numeric_fos)}"
+    )
+    assert len(fo_values) == 1, (
+        "expected only row A to carry a fill-opacity attribute; row B is the band "
+        f"max (1.0) and must omit it, got {fo_values}"
     )
 
 

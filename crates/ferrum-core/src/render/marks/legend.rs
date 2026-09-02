@@ -24,7 +24,7 @@ pub fn build_legend(
     let label_fill = legend
         .label_color
         .as_deref()
-        .and_then(|hex| crate::render::color::from_hex_str(hex).ok())
+        .and_then(|s| crate::render::color::parse_color(s).ok())
         .unwrap_or(theme.colors.font_color);
     // Per-legend `label_font_size` override sizes both entry labels and colorbar
     // tick labels. The layout already reserved space at this size; drawing at the
@@ -159,7 +159,7 @@ pub fn build_legend(
         let color = entry
             .color_hex
             .as_deref()
-            .and_then(|hex| crate::render::color::from_hex_str(hex).ok())
+            .and_then(|s| crate::render::color::parse_color(s).ok())
             .or_else(|| {
                 color_scale.and_then(|s| match s.input() {
                     ColorInput::Category => s.lookup(&entry.label),
@@ -177,7 +177,9 @@ pub fn build_legend(
             let kind = crate::render::marks::point::shape_from_str(shape_name);
             let style = crate::render::marks::point::ShapeStyle {
                 fill: Some(color),
+                fill_cleared: false,
                 stroke: None,
+                stroke_cleared: false,
                 stroke_width: 0.0,
                 opacity: 1.0,
                 stroke_opacity: 1.0,
@@ -192,7 +194,7 @@ pub fn build_legend(
                 cx: sx,
                 cy: sy,
                 r: radius,
-                style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
+                style: to_scene_fill_stroke(Some(color), false, None, false, 0.0, 1.0, None),
             });
         } else {
             // A positive `symbol_stroke_width` outlines the swatch in its own
@@ -210,7 +212,7 @@ pub fn build_legend(
                         cx: sx,
                         cy: sy,
                         r: swatch_r,
-                        style: to_scene_fill_stroke(Some(color), swatch_stroke, swatch_stroke_w, 1.0, None),
+                        style: to_scene_fill_stroke(Some(color), false, swatch_stroke, false, swatch_stroke_w, 1.0, None),
                     });
                 }
                 SymbolKind::Square => {
@@ -220,7 +222,7 @@ pub fn build_legend(
                         y: sy - half,
                         w: 2.0 * half,
                         h: 2.0 * half,
-                        style: to_scene_fill_stroke(Some(color), swatch_stroke, swatch_stroke_w, 1.0, None),
+                        style: to_scene_fill_stroke(Some(color), false, swatch_stroke, false, swatch_stroke_w, 1.0, None),
                         corner_radius: 0.0,
                     });
                 }
@@ -698,7 +700,7 @@ mod tests {
     fn label_color_overrides_entry_label_fill() {
         use crate::render::draw::to_scene_color;
         let theme = ThemeInputs::default();
-        let red = to_scene_color(crate::render::color::from_hex_str("#ff0000").unwrap());
+        let red = to_scene_color(crate::render::color::parse_color("#ff0000").unwrap());
         let nodes = build_legend(
             &two_circle_legend_styled(None, None, None, Some("#ff0000".into()), None), None, &theme,
         );
@@ -709,6 +711,37 @@ mod tests {
         assert!(!label_colors.is_empty(), "legend must emit label text nodes");
         for color in label_colors {
             assert_eq!(color, red, "entry label fill must be the label_color override");
+        }
+    }
+
+    /// Batch A Task 8 sweep: `label_color` was hex-only, so a CSS name or an
+    /// `rgb()` string silently fell back to the theme font color. All three
+    /// spellings of one color now produce the same label fill.
+    #[test]
+    fn label_color_accepts_named_and_rgb_forms_identically_to_hex() {
+        use crate::render::draw::to_scene_color;
+        let theme = ThemeInputs::default();
+        let label_fills = |spelling: &str| -> Vec<_> {
+            build_legend(
+                &two_circle_legend_styled(None, None, None, Some(spelling.into()), None),
+                None,
+                &theme,
+            )
+            .iter()
+            .filter_map(|n| if let SceneNode::Text { style, .. } = n { Some(style.color) } else { None })
+            .collect()
+        };
+        let expected = to_scene_color(crate::render::color::parse_color("#4682b4").unwrap());
+        for spelling in ["steelblue", "rgb(70, 130, 180)", "#4682b4"] {
+            let fills = label_fills(spelling);
+            assert!(!fills.is_empty(), "legend must emit label text nodes");
+            for fill in fills {
+                assert_eq!(fill, expected, "{spelling:?} must resolve to the same label fill");
+            }
+        }
+        // Unparseable input keeps the theme font color, as before the sweep.
+        for fill in label_fills("not-a-color") {
+            assert_eq!(fill, to_scene_color(theme.colors.font_color));
         }
     }
 
