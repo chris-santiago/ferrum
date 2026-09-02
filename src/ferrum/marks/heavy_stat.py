@@ -617,11 +617,13 @@ def desugar_raster(
         Numeric x field. Required.
     y_field : str or None
         Numeric y field. Required.
-    aggregate : {"count", "mean", "sum"}, default "count"
-        Aggregation function applied in each pixel cell.
+    aggregate : {"count", "density", "mean", "sum", "any"}, default "count"
+        Aggregation function applied in each pixel cell.  ``"mean"`` and
+        ``"sum"`` require ``field``; ``"count"``, ``"density"``, and
+        ``"any"`` need none.
     field : str or None, default None
         Column to aggregate for ``mean`` or ``sum``; required when
-        ``aggregate`` is not ``"count"``.
+        ``aggregate`` is ``"mean"`` or ``"sum"``, ignored otherwise.
     cmap : str or None, default None
         Colormap applied to the image layer.  ``None`` defers to the theme's
         sequential scheme.

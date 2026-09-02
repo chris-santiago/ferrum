@@ -881,12 +881,13 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        aggregate : str, optional
-            Aggregate function applied to each pixel bin: ``"count"`` (default),
-            ``"sum"``, ``"mean"``, ``"min"``, ``"max"``.  When ``aggregate`` is
-            not ``"count"``, ``field`` must be provided.
+        aggregate : {"count", "density", "mean", "sum", "any"}, optional
+            Aggregate function applied to each pixel bin.  Default ``"count"``.
+            ``"mean"`` and ``"sum"`` require ``field`` (the column to
+            aggregate); ``"count"``, ``"density"``, and ``"any"`` need none.
         field : str or None, optional
-            Column name to aggregate.  Required unless ``aggregate="count"``.
+            Column name to aggregate.  Required when ``aggregate`` is
+            ``"mean"`` or ``"sum"``; ignored otherwise.
         scheme : str or None, optional
             Colour map name.  ``None`` (default) defers to the theme's sequential
             scheme.

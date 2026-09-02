@@ -84,7 +84,7 @@ class _RenderMixin:
         When the chart is over-threshold but ineligible, a guidance warning
         is emitted suggesting ``mark_raster()`` or ``raster=False``.
         """
-        from ferrum.render_config import RenderConfig
+        from ferrum.render_config import _RASTER_AGGREGATES_NEEDING_FIELD, RenderConfig
 
         cfg = self._render_config or RenderConfig()
 
@@ -156,10 +156,19 @@ class _RenderMixin:
         from ferrum._layer import _PendingMark
         from ferrum.marks.heavy_stat import desugar_raster
 
+        # Only forward raster_field to aggregates that actually consume a value
+        # column ("mean"/"sum"). "count"/"density"/"any" need no field, so a
+        # stray raster_field must stay genuinely inert for them -- forwarding
+        # it unconditionally would resolve it in the Rust Raster transform
+        # regardless of aggregate, surfacing a deferred-to-render
+        # "column not found" error for an unused value, which is exactly the
+        # deferred-failure shape RenderConfig.__post_init__ exists to remove.
+        needs_field = cfg.raster_aggregate in _RASTER_AGGREGATES_NEEDING_FIELD
         substituted._pending_stat_mark = _PendingMark(
             "raster",
             {
                 "aggregate": cfg.raster_aggregate,
+                "field": cfg.raster_field if needs_field else None,
                 "cmap": cfg.raster_scheme,
                 "resolution": "screen",
                 "blend": "alpha",
