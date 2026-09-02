@@ -260,22 +260,42 @@ class Axis:
         object.__setattr__(self, "label_map", label_map)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for the renderer, omitting None, defaults, and Python-only fields."""
+        """Serialize to dict for the renderer, omitting None, defaults, and Python-only fields.
+
+        ``label_format`` preset names are resolved to their d3-format/strftime
+        strings via :func:`ferrum.format_presets.resolve_format_field` before
+        serialization (NF-B1); an unrecognized name passes through as an
+        honest raw spec. The resolved ``format_type`` fills
+        ``label_format_type`` only when the caller did not set it explicitly.
+        """
+        from ferrum.format_presets import resolve_format_field
+
+        resolved_format, resolved_format_type = resolve_format_field(
+            self.label_format, self.label_format_type
+        )
         result: dict[str, Any] = {}
         for f in fields(self):
             # Python-only fields have no Rust counterpart — never forward them.
             if f.name in _PYTHON_ONLY_FIELDS:
                 continue
-            val = getattr(self, f.name)
             if f.name == "title":
                 # Three-way title contract (mirrors base.py and prepare.rs):
                 #   _UNSET  → omit key; Rust falls back to field name (default)
                 #   None    → emit ""; Rust treats "" as suppress
                 #   "Foo"   → emit "Foo" verbatim
-                serialized = serialize_title(val)
+                serialized = serialize_title(getattr(self, f.name))
                 if serialized is not None:
                     result["title"] = serialized
                 continue
+            if f.name == "label_format":
+                if resolved_format is not None:
+                    result["label_format"] = resolved_format
+                continue
+            if f.name == "label_format_type":
+                if resolved_format_type is not None:
+                    result["label_format_type"] = resolved_format_type
+                continue
+            val = getattr(self, f.name)
             # Skip None values for all other fields
             if val is None:
                 continue
@@ -297,13 +317,58 @@ def _axis_suppressed_dict() -> dict[str, Any]:
     }
 
 
+_LABEL_FORMAT_KEYS = ("label_format", "labelFormat")
+_LABEL_FORMAT_TYPE_KEYS = ("label_format_type", "labelFormatType")
+
+
+def _resolve_axis_dict_format(value: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a raw axis dict's ``label_format`` preset name before forwarding.
+
+    Mirrors :meth:`Axis.to_dict`'s resolution (NF-B1) so a preset name never
+    reaches the renderer unresolved regardless of whether the caller built an
+    :class:`Axis` or passed a raw dict directly (``fm.X("f", axis={...})``).
+
+    Resolves under either serde-honored spelling the caller used
+    (``label_format``/``labelFormat``, and its type sibling
+    ``label_format_type``/``labelFormatType`` — both pairs are accepted wire
+    spellings per ``AXIS_STYLE_ALIAS_KEYS`` in
+    ``crates/ferrum-core/src/render/chart_config.rs``), and writes the
+    resolved values back under whichever spelling the caller supplied. If
+    the caller already supplied a type key (either spelling), that key is
+    reused; a derived type is never written under a second spelling beside
+    a caller-supplied one.
+
+    Always returns a fresh dict (never the caller's own object), so
+    ``_normalize_axis``'s dict path has one aliasing contract regardless of
+    whether a format key was present.
+    """
+    result = dict(value)
+    format_key = next((k for k in _LABEL_FORMAT_KEYS if k in value), None)
+    if format_key is None:
+        return result
+
+    from ferrum.format_presets import resolve_format_field
+
+    type_key = next((k for k in _LABEL_FORMAT_TYPE_KEYS if k in value), None)
+    spec, format_type = resolve_format_field(
+        value.get(format_key), value.get(type_key) if type_key is not None else None
+    )
+    if spec is not None:
+        result[format_key] = spec
+    if format_type is not None:
+        if type_key is None:
+            type_key = "labelFormatType" if format_key == "labelFormat" else "label_format_type"
+        result[type_key] = format_type
+    return result
+
+
 def _normalize_axis(value: Any) -> dict[str, Any] | None:
     """Normalize an axis kwarg value to a dict or None.
 
     Accepts:
     - Axis instance -> .to_dict()
     - False -> suppression dict
-    - dict -> pass through
+    - dict -> pass through (with ``label_format`` preset resolution)
     - None -> None (meaning "not specified")
     """
     if value is None:
@@ -313,5 +378,5 @@ def _normalize_axis(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Axis):
         return value.to_dict()
     if isinstance(value, dict):
-        return value
+        return _resolve_axis_dict_format(value)
     return None

@@ -143,6 +143,8 @@ chart.encode(
 Per-channel always wins over chart-level configure. Use chart-level for a sensible default
 and per-channel to override for one axis.
 
+`fm.Axis(label_format=...)` accepts named presets the same way chart-level `configure_axis` does — `fm.Axis(label_format="currency")` resolves just like `chart.configure_axis(label_format="currency")` — so the raw `"$,.0f"` above is a choice, not a requirement of the per-channel surface.
+
 ---
 
 ## Examples
@@ -182,15 +184,17 @@ chart = (
     fm.Chart(df)
     .mark_bar()
     .encode(x="segment:N", y="share:Q")
-    .configure_axis(y=True, x=False, label_format="percent")
+    .configure_axis(label_format="percent")
 )
 ```
 
 ![Bar chart with percentage-formatted y axis](../../assets/concepts/format_presets_percent.png)
 
+`configure_axis`'s `x=`/`y=` flags are deprecated and inert on the wire: they no longer reach the renderer, so passing them cannot scope a format to one axis. Use `.configure(axis_x=fm.AxisConfig(label_format="percent"))` / `.configure(axis_y=fm.AxisConfig(label_format="percent"))` to scope a preset to one axis, or the per-channel `fm.Axis(label_format=...)` shown above.
+
 ### SI prefix for large counts
 
 ```python
-chart.configure_axis(y=True, x=False, label_format="si")
+chart.configure_axis(label_format="si")
 # 1500000 → "1.5M", 950000 → "950k"
 ```

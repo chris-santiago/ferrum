@@ -115,19 +115,39 @@ class Legend:
     zindex: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for the renderer, omitting None and default values."""
+        """Serialize to dict for the renderer, omitting None and default values.
+
+        ``format`` preset names are resolved to their d3-format/strftime
+        strings via :func:`ferrum.format_presets.resolve_format_field` before
+        serialization (NF-B1); an unrecognized name passes through as an
+        honest raw spec. The resolved ``format_type`` fills the
+        ``format_type`` field only when the caller did not set it explicitly.
+        """
+        from ferrum.format_presets import resolve_format_field
+
+        resolved_format, resolved_format_type = resolve_format_field(
+            self.format, self.format_type
+        )
         result: dict[str, Any] = {}
         for f in fields(self):
-            val = getattr(self, f.name)
             if f.name == "title":
                 # Three-way title contract (mirrors base.py and prepare.rs):
                 #   _UNSET  → omit key; Rust falls back to field name (default)
                 #   None    → emit ""; Rust treats "" as suppress
                 #   "Foo"   → emit "Foo" verbatim
-                serialized = serialize_title(val)
+                serialized = serialize_title(getattr(self, f.name))
                 if serialized is not None:
                     result["title"] = serialized
                 continue
+            if f.name == "format":
+                if resolved_format is not None:
+                    result["format"] = resolved_format
+                continue
+            if f.name == "format_type":
+                if resolved_format_type is not None:
+                    result["format_type"] = resolved_format_type
+                continue
+            val = getattr(self, f.name)
             # Skip None values for all other fields
             if val is None:
                 continue
@@ -138,13 +158,43 @@ class Legend:
         return result
 
 
+def _resolve_legend_dict_format(value: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a raw legend dict's ``format`` preset name before forwarding.
+
+    Mirrors :meth:`Legend.to_dict`'s resolution (NF-B1) so a preset name
+    never reaches the renderer unresolved regardless of whether the caller
+    built a :class:`Legend` or passed a raw dict directly
+    (``fm.Color("c", legend={...})``). Unlike axis's ``label_format`` /
+    ``labelFormat``, legend's ``format`` / ``format_type`` carry no
+    camelCase serde alias (see ``LEGEND_STYLE_ALIAS_KEYS`` in
+    ``crates/ferrum-core/src/render/chart_config.rs``), so only the
+    snake_case spelling needs resolving here.
+
+    Always returns a fresh dict (never the caller's own object), so
+    ``_normalize_legend``'s dict path has one aliasing contract regardless
+    of whether a format key was present.
+    """
+    result = dict(value)
+    if "format" not in value:
+        return result
+
+    from ferrum.format_presets import resolve_format_field
+
+    spec, format_type = resolve_format_field(value.get("format"), value.get("format_type"))
+    if spec is not None:
+        result["format"] = spec
+    if format_type is not None:
+        result["format_type"] = format_type
+    return result
+
+
 def _normalize_legend(value: Any) -> dict[str, Any] | None:
     """Normalize a legend kwarg value to a dict or None.
 
     Accepts:
     - Legend instance -> .to_dict()
     - None or False -> {"disabled": True} (suppress legend)
-    - dict -> pass through
+    - dict -> pass through (with ``format`` preset resolution)
     - Other truthy values -> None (not specified; reserved)
     """
     if value is None or value is False:
@@ -152,6 +202,6 @@ def _normalize_legend(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Legend):
         return value.to_dict()
     if isinstance(value, dict):
-        return value
+        return _resolve_legend_dict_format(value)
     # Other truthy values are reserved — treat as "not specified".
     return None

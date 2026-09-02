@@ -115,7 +115,10 @@ def test_configure_axis_label_format_preset_currency():
 def test_configure_axis_label_format_invalid_preset_raises():
     """configure_axis(label_format='bogus') should raise ValueError.
 
-    Targets configure.py:AxisConfig.__post_init__ -> resolve_format().
+    NF-B1 (2026-09-02): AxisConfig.label_format is preset-names-only by
+    contract; a raw d3-format spec belongs in the dedicated
+    label_format_raw sibling instead. Targets
+    configure.py:AxisConfig.__init__ -> resolve_format().
     """
     with pytest.raises(ValueError, match="Unknown format preset"):
         fr.Chart(pl.DataFrame({"x": [1.0], "y": [1.0]})).mark_point().encode(

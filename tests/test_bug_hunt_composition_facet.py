@@ -2146,8 +2146,11 @@ def test_format_preset_percent_resolves():
 def test_format_preset_unknown_raises_on_construction():
     """AxisConfig(label_format='bogus') should raise ValueError immediately.
 
-    Targets configure.py AxisConfig.__post_init__ line 115-118: resolve_format
-    is called at construction time for validation.
+    AxisConfig.label_format is preset-names-only by contract (NF-B1,
+    2026-09-02) — it is not one of the raw-spec-accepting surfaces; that's
+    the dedicated, mutually-exclusive label_format_raw sibling instead.
+    Targets configure.py AxisConfig.__init__: resolve_format is called at
+    construction time for validation.
     """
     with pytest.raises(ValueError, match="Unknown format preset"):
         AxisConfig(label_format="bogus_preset")
@@ -3240,15 +3243,17 @@ def test_configure_to_dict_empty_config_is_empty():
 
 
 def test_axis_config_to_dict_defaults_only():
-    """AxisConfig with only defaults (x=True, y=True) should include them.
+    """AxisConfig() with all defaults produces an empty dict.
 
-    Targets configure.py _to_dict_omit_none: x/y are True by default,
-    so they should be in the dict (they are not None).
+    NF-B1 (2026-09-02): x/y are dead, no-op flags — to_dict() never emits
+    them regardless of value, so the wire key gate (which does not accept
+    'x'/'y' in the axis section) never self-refuses. Targets
+    configure.py.AxisConfig.to_dict's explicit x/y strip.
     """
     cfg = AxisConfig()
     d = cfg.to_dict()
-    assert d["x"] is True
-    assert d["y"] is True
+    assert "x" not in d
+    assert "y" not in d
     # None fields should be omitted
     assert "label_angle" not in d
     assert "tick_count" not in d

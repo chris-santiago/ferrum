@@ -140,6 +140,22 @@ def _emit_legend(value: Any, out: dict) -> None:
         out["legend"] = normalized
 
 
+def _emit_format(value: Any, out: dict) -> None:
+    # Resolve a named preset (or pass an already-raw d3-format/strftime spec
+    # through unchanged) so a preset name never reaches Rust unresolved
+    # (NF-B1). The derived format_type is provisional: an explicit
+    # format_type/formatType kwarg — processed later in _SPEC_DICT_ORDER —
+    # overwrites it (explicit-format-wins).
+    if value is None:
+        return
+    from ferrum.format_presets import resolve_format_or_raw
+
+    spec, format_type = resolve_format_or_raw(value)
+    out["format"] = spec
+    if format_type is not None:
+        out["format_type"] = format_type
+
+
 def _emit_format_type(value: Any, out: dict) -> None:
     # Both the camelCase "formatType" (Vega-Lite compat) and snake_case
     # "format_type" honored keys serialize to the snake_case EncodingSpec field.
@@ -194,7 +210,7 @@ _SPEC_DICT_HANDLERS = {
     "stack": _emit_passthrough("stack"),
     "impute": _emit_passthrough("impute"),
     "scheme": _emit_passthrough("scheme"),
-    "format": _emit_passthrough("format"),
+    "format": _emit_format,
     "format_type": _emit_format_type,
     "formatType": _emit_format_type,
     "condition": _emit_condition,

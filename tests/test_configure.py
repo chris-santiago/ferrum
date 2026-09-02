@@ -44,9 +44,15 @@ class TestAxisConfig:
     def test_to_dict_includes_non_none_booleans(self):
         cfg = AxisConfig(x=True, y=False, grid=False)
         d = cfg.to_dict()
-        assert d["x"] is True
-        assert d["y"] is False
         assert d["grid"] is False
+
+    def test_to_dict_omits_deprecated_xy_keys(self):
+        """x/y are vestigial no-ops (BUG 3); the wire schema does not accept
+        them, so to_dict() must never emit either key (NF-B1 gate prep)."""
+        cfg = AxisConfig(x=True, y=False, grid=False)
+        d = cfg.to_dict()
+        assert "x" not in d
+        assert "y" not in d
 
     def test_label_format_and_raw_mutually_exclusive(self):
         with pytest.raises(ValueError, match="mutually exclusive"):
@@ -154,11 +160,12 @@ class TestAxisXYDeprecation:
             AxisConfig(y=False)
 
     def test_axis_config_x_false_still_serializes(self):
-        """Non-breaking: the value is still accepted and flows into to_dict."""
+        """The warning still fires, but to_dict() never emits the dead 'x' key
+        (NF-B1, 2026-09-02): only the sibling field flows through."""
         with pytest.warns(DeprecationWarning):
             cfg = AxisConfig(x=False, label_angle=-45)
         d = cfg.to_dict()
-        assert d["x"] is False
+        assert "x" not in d
         assert d["label_angle"] == -45
 
     def test_axis_config_defaults_do_not_warn(self):

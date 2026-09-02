@@ -57,8 +57,11 @@ class AxisConfig:
     label_color : str, optional
         Tick label color.
     label_format : str, optional
-        Named format preset (see ``ferrum.format_presets``). Mutually exclusive
-        with ``label_format_raw``.
+        Named format preset (see ``ferrum.format_presets``). Must be a
+        recognized preset key; raises ``ValueError`` at construction
+        otherwise. For a raw d3-format/strftime string, use
+        ``label_format_raw`` instead. Mutually exclusive with
+        ``label_format_raw``.
     label_format_raw : str, optional
         Raw d3-format or strftime string passed directly to the renderer.
         Mutually exclusive with ``label_format``.
@@ -239,6 +242,13 @@ class AxisConfig:
                 "AxisConfig: 'label_format' and 'label_format_raw' are mutually exclusive; "
                 "provide at most one."
             )
+        # Eager preset-name validation (NF-B1, 2026-09-02): AxisConfig's
+        # label_format is preset-names-only by contract — it is not one of
+        # the four raw-spec-accepting surfaces. A raw d3-format/strftime
+        # string belongs in the dedicated, mutually-exclusive
+        # label_format_raw field. An unrecognized name is a typed
+        # construction-time refusal, not a silently-passed-through raw spec
+        # (the exact NF-B1 harm class this surface must stay immune to).
         if label_format is not None:
             from ferrum.format_presets import resolve_format
 
@@ -283,14 +293,29 @@ class AxisConfig:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values.
 
-        ``label_format`` preset names are resolved to their d3-format strings
-        before serialization so the Rust side receives a ready-to-use format spec.
+        ``label_format`` preset names are resolved to their d3-format/strftime
+        strings via :func:`ferrum.format_presets.resolve_format_field` before
+        serialization (NF-B1) so the Rust side receives a ready-to-use format
+        spec; ``__init__`` already rejected any unrecognized name at
+        construction, so resolution here always succeeds. The resolved
+        ``format_type`` is threaded onto the wire as ``label_format_type``.
+        The deprecated, no-op ``x``/``y`` flags are never emitted — the wire
+        schema does not accept them.
         """
         d = _to_dict_omit_none(self)
-        if "label_format" in d and d["label_format"] is not None:
-            from ferrum.format_presets import resolve_format
+        d.pop("x", None)
+        d.pop("y", None)
+        if "label_format" in d:
+            from ferrum.format_presets import resolve_format_field
 
-            d["label_format"] = resolve_format(d["label_format"])
+            # AxisConfig has no user-facing label_format_type field; the
+            # preset-derived type is always what gets threaded (label_format
+            # is preset-names-only by contract, enforced in __init__).
+            spec, format_type = resolve_format_field(d["label_format"], None)
+            if spec is not None:
+                d["label_format"] = spec
+            if format_type is not None:
+                d["label_format_type"] = format_type
         return d
 
 

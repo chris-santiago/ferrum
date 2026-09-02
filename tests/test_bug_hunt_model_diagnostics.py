@@ -743,7 +743,12 @@ def test_residuals_chart_with_format_preset_decimal():
 
 def test_format_preset_invalid_name_raises():
     """AxisConfig with an invalid format preset name should raise ValueError
-    at config construction time, not at render time."""
+    at config construction time, not at render time.
+
+    NF-B1 (2026-09-02): AxisConfig.label_format is preset-names-only by
+    contract; a raw d3-format spec belongs in the dedicated
+    label_format_raw sibling instead.
+    """
     from ferrum.configure import AxisConfig
 
     with pytest.raises(ValueError, match="Unknown format preset"):

@@ -639,17 +639,19 @@ class TestConfigureAxisSingleAxis:
     """
 
     def test_axis_config_x_false_in_dict(self):
-        """AxisConfig(x=False) should include x=False in to_dict."""
+        """AxisConfig(x=False) is a deprecated no-op; to_dict() never emits
+        'x' (NF-B1, 2026-09-02) — only sibling fields flow through."""
         cfg = AxisConfig(x=False, label_angle=-45)
         d = cfg.to_dict()
-        assert d["x"] is False
+        assert "x" not in d
         assert d["label_angle"] == -45
 
     def test_axis_config_y_false_in_dict(self):
-        """AxisConfig(y=False) should include y=False in to_dict."""
+        """AxisConfig(y=False) is a deprecated no-op; to_dict() never emits
+        'y' (NF-B1, 2026-09-02) — only sibling fields flow through."""
         cfg = AxisConfig(y=False, label_font_size=14)
         d = cfg.to_dict()
-        assert d["y"] is False
+        assert "y" not in d
         assert d["label_font_size"] == 14
 
     def test_configure_axis_x_false_renders(self, simple_df):

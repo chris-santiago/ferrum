@@ -87,7 +87,9 @@ def test_is_time_preset_returns_false_for_numeric():
 def test_axis_config_label_format_preset_resolves_on_construction():
     """AxisConfig with label_format=<valid preset> must not raise.
     AxisConfig with label_format=<invalid preset> must raise ValueError.
-    Targets configure.py AxisConfig.__post_init__ line 116."""
+    Targets configure.py AxisConfig.__init__ (NF-B1, 2026-09-02:
+    label_format is preset-names-only — a raw spec belongs in the
+    dedicated label_format_raw sibling)."""
     # Valid preset
     config = fr.configure.AxisConfig(label_format="percent")
     d = config.to_dict()

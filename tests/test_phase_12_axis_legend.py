@@ -217,8 +217,16 @@ class TestAxisNormalize:
         assert result == {"title": "X", "grid": False}
 
     def test_dict_passthrough(self):
+        # NF-B1 fix round (2026-09-02): _normalize_axis's dict path now
+        # copies unconditionally (one aliasing contract regardless of
+        # whether a label_format key is present — quality-reviewer finding
+        # on axis.py:358), so it no longer returns the caller's own dict
+        # object. Content still passes through unchanged when there is no
+        # label_format key to resolve.
         d = {"title": "Custom", "ticks": False}
-        assert _normalize_axis(d) is d
+        result = _normalize_axis(d)
+        assert result == d
+        assert result is not d
 
 
 # ---------------------------------------------------------------------------
@@ -289,8 +297,16 @@ class TestLegendNormalize:
         assert result == {"orient": "bottom", "columns": 2}
 
     def test_dict_passthrough(self):
+        # NF-B1 fix round (2026-09-02): _normalize_legend's dict path now
+        # copies unconditionally (one aliasing contract regardless of
+        # whether a format key is present — quality-reviewer finding on
+        # legend.py:196), so it no longer returns the caller's own dict
+        # object. Content still passes through unchanged when there is no
+        # format key to resolve.
         d = {"orient": "left", "title": "Size"}
-        assert _normalize_legend(d) is d
+        result = _normalize_legend(d)
+        assert result == d
+        assert result is not d
 
     def test_other_truthy_reserved(self):
         # Unknown truthy values -> None (reserved)
