@@ -36,6 +36,14 @@
 //! anyway. The explicit-`domain`+`range` rows carry a `scale=` for that reason,
 //! and they assert the refusal's *wording* so the stage it comes from (scale
 //! resolution, uniform) is pinned rather than just its existence.
+//!
+//! All three halves call [`dispatch_mark_build`] on a *flat* spec, and that is
+//! the fourth blind spot the final section closes: a chart the Python API lowers
+//! to LAYERS never reaches a mark builder with the encoding those rows assert
+//! on. `mark_ribbon` is such a chart — `desugar_ribbon` emits one ribbon layer
+//! and the chart-level `color` reaches it only by inheritance — so its color
+//! partition is decided at the layer seam in `render::scene_build`, not by the
+//! reader `ribbon.rs` uses. Those rows therefore render the whole chart.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -531,4 +539,147 @@ fn explicit_domain_and_range_on_a_temporal_color_refuses_uniformly_rather_than_l
              must reach the same outcome for one encoding"
         ),
     }
+}
+
+// ── The layer seam ──────────────────────────────────────────────────────────
+//
+// Everything above builds ONE mark from a flat spec. `mark_ribbon` never
+// reaches a mark builder that way: `desugar_ribbon` lowers it to a chart with a
+// single `ribbon` LAYER whose own encoding is `{x, y, y2}`, so the chart-level
+// `color` arrives only through `Encoding::inherit_from` — and whether it
+// survives to the builder is decided by `scene_build`'s own-color exemption,
+// not by any reader in `marks/`. These rows render the whole chart for that
+// reason, and they compare the bands against the LEGEND the same chart drew,
+// because a mark contradicting its own legend is NF-A3's signature.
+
+/// `fm.Chart(df).mark_ribbon().encode(x="x:Q", y="y:Q", y2="y2:Q",
+/// color="c_utf8:N")` — the exact `Chart.to_spec().to_json()` lowering, layers
+/// and inherited color channel included.
+const RIBBON_UTF8: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x","type":"quantitative"},"y":{"field":"y","type":"quantitative"},"color":{"field":"c_utf8","type":"nominal"},"y2":{"field":"y2","type":"quantitative"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y"},"y2":{"field":"y2"}},"mark_style":{"stroke":"none","opacity":0.3},"name":"ribbon"}]}"#;
+/// The same chart on the `Int64` color column.
+const RIBBON_I64: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x","type":"quantitative"},"y":{"field":"y","type":"quantitative"},"color":{"field":"c_i64","type":"nominal"},"y2":{"field":"y2","type":"quantitative"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y"},"y2":{"field":"y2"}},"mark_style":{"stroke":"none","opacity":0.3},"name":"ribbon"}]}"#;
+/// `mark_area` on the identical data and channels — the reference the intent
+/// review used, and a flat (unlayered) lowering, so it exercises the seam the
+/// ribbon rows do not.
+const AREA_UTF8: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"area","encoding":{"x":{"field":"x","type":"quantitative"},"y":{"field":"y","type":"quantitative"},"color":{"field":"c_utf8","type":"nominal"},"y2":{"field":"y2","type":"quantitative"}}}"#;
+const AREA_I64: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"area","encoding":{"x":{"field":"x","type":"quantitative"},"y":{"field":"y","type":"quantitative"},"color":{"field":"c_i64","type":"nominal"},"y2":{"field":"y2","type":"quantitative"}}}"#;
+
+/// Every `fill="…"` value carried by an element of the given SVG tag, in
+/// document order, as an `#rrggbb` triple with any alpha dropped.
+///
+/// Alpha is dropped because the band and its legend swatch deliberately differ
+/// in it (the band is translucent, the swatch is not) while the hue is the
+/// thing that must agree.
+fn fills_of_tag(svg: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag} ");
+    svg.split(&open)
+        .skip(1)
+        .filter_map(|rest| {
+            let element = rest.split('>').next()?;
+            let value = element.split("fill=\"").nth(1)?.split('"').next()?;
+            parse_fill_rgb(value)
+        })
+        .collect()
+}
+
+/// `#rrggbb`, `#rrggbbaa` and `rgba(r,g,b,a)` → `#rrggbb`. Anything else
+/// (notably `"none"`) is not a color and is skipped.
+fn parse_fill_rgb(value: &str) -> Option<String> {
+    if let Some(hex) = value.strip_prefix('#') {
+        return (hex.len() >= 6).then(|| format!("#{}", &hex[..6]));
+    }
+    let inner = value.strip_prefix("rgba(").or_else(|| value.strip_prefix("rgb("))?;
+    let inner = inner.strip_suffix(')')?;
+    let mut parts = inner.split(',');
+    let mut channel = || parts.next()?.trim().parse::<u8>().ok();
+    let (r, g, b) = (channel()?, channel()?, channel()?);
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// Render a lowered spec against [`parity_batch`] and return
+/// `(mark path fills, legend swatch fills)`.
+///
+/// The legend swatches are the `<circle>` elements: `render_svg` draws a
+/// categorical color legend as one circle + one label per domain entry, and
+/// none of the marks in this section draw circles of their own.
+fn ribbon_bands_and_legend(spec_json: &str) -> (Vec<String>, Vec<String>) {
+    let spec: ChartSpec = serde_json::from_str(spec_json).expect("lowered spec parses");
+    let batch = parity_batch();
+    let theme = ThemeInputs::default();
+    let result = crate::render::render_svg(
+        &spec,
+        &batch,
+        &theme,
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::config::RenderConfig::default(),
+        &crate::render::chart_config::ChartConfig::default(),
+    )
+    .expect("a nominal color column on ribbon/area must render, not refuse");
+    (fills_of_tag(&result.bytes, "path"), fills_of_tag(&result.bytes, "circle"))
+}
+
+/// NF-A3 (ribbon half): a categorical `color` on `mark_ribbon` draws one band
+/// per category, each in that category's legend color — for `Utf8` and `Int64`
+/// alike, and identically to what `mark_area` draws from the same data.
+///
+/// RED before the fix, both dtypes: `mark_ribbon` emitted ONE merged
+/// self-intersecting band in the theme default fill under a two-swatch legend,
+/// because `desugar_ribbon`'s `stroke="none"` set `stroke_is_user_set` and so
+/// tripped `scene_build`'s own-color exemption, which strips an inherited color
+/// channel from any layer carrying its own literal paint. A paint *clear* is
+/// not a paint the inherited color could overwrite, so it must not trip it.
+///
+/// The legend comparison is what makes this discriminating: counting bands
+/// alone would pass a ribbon that split into two bands of the same color, and
+/// the merged-band defect was invisible precisely because the legend enumerated
+/// every category regardless of what drew.
+#[test]
+fn ribbon_paints_one_legend_colored_band_per_category_like_area() {
+    for (dtype, ribbon_spec, area_spec) in [
+        ("Utf8", RIBBON_UTF8, AREA_UTF8),
+        ("Int64", RIBBON_I64, AREA_I64),
+    ] {
+        let (area_bands, area_swatches) = ribbon_bands_and_legend(area_spec);
+        assert_eq!(
+            area_bands, area_swatches,
+            "{dtype}: the `mark_area` reference must itself paint one band per legend \
+             swatch, in swatch order, else this row proves nothing; \
+             bands={area_bands:?} swatches={area_swatches:?}"
+        );
+
+        let (bands, swatches) = ribbon_bands_and_legend(ribbon_spec);
+        assert_eq!(
+            swatches.len(),
+            2,
+            "{dtype}: the legend must enumerate both categories; got {swatches:?}"
+        );
+        assert_eq!(
+            bands, swatches,
+            "{dtype}: `mark_ribbon` must draw one band per category, each in that \
+             category's legend color (bands={bands:?}, legend={swatches:?}). A single \
+             band here is the NF-A3 defect: the ribbon LAYER's inherited color channel \
+             was stripped at the `scene_build` seam, so every category merged into one \
+             polygon in the theme default fill while the legend still listed both."
+        );
+        assert_eq!(
+            bands, area_bands,
+            "{dtype}: ribbon must reach the same partition `mark_area` reaches from the \
+             identical data and channels; ribbon={bands:?} area={area_bands:?}"
+        );
+    }
+}
+
+/// Byte-identity guard (spec §7) for the case the fix does not authorize: a
+/// ribbon with NO color encoding still renders exactly one band, and its SVG is
+/// unchanged by the presence of the `stroke="none"` the desugar always passes.
+///
+/// The exemption's strip is reachable only when a chart-level color channel
+/// exists to inherit, so an uncolored ribbon must be untouched — this pins that
+/// directly rather than trusting the argument.
+#[test]
+fn uncolored_ribbon_still_draws_exactly_one_band() {
+    const RIBBON_NO_COLOR: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x","type":"quantitative"},"y":{"field":"y","type":"quantitative"},"y2":{"field":"y2","type":"quantitative"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y"},"y2":{"field":"y2"}},"mark_style":{"stroke":"none","opacity":0.3},"name":"ribbon"}]}"#;
+    let (bands, swatches) = ribbon_bands_and_legend(RIBBON_NO_COLOR);
+    assert_eq!(bands.len(), 1, "no color encoding → one merged band; got {bands:?}");
+    assert!(swatches.is_empty(), "no color encoding → no legend swatches; got {swatches:?}");
 }

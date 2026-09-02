@@ -1207,8 +1207,9 @@ fn build_panel_mark_batches(
         // `heatmap(annot=True)` colored-cells + colorless-labels shape,
         // where an un-colored label must NEVER borrow the cells' hue).
         // Widened here to any OTHER mark, but only when that layer ALSO
-        // carries its own literal `stroke=`/`fill=` override
-        // (`mark_style.paint.{stroke,fill}_is_user_set`) — a chart-level
+        // carries its own literal `stroke=`/`fill=` override that names a
+        // real color (`*_is_user_set && !*_cleared` — see the clear carve-out
+        // at the predicate below) — a chart-level
         // `color` set for one layer's legend (e.g. a diagnostic chart's
         // per-class curve) silently repainted a sibling layer's own literal
         // stroke override with the categorical palette's first color
@@ -1251,8 +1252,27 @@ fn build_panel_mark_batches(
         // never its own to group by.
         let mut layer_spec_encoding = layer.encoding.clone();
         if !layer.color_is_own {
-            let has_own_literal_paint =
-                mark_style.paint.stroke_is_user_set || mark_style.paint.fill_is_user_set;
+            // A *cleared* paint (`fill="none"` / `stroke="transparent"`) is not
+            // an own literal paint for this purpose (NF-A3 ribbon half, intent
+            // gate). The exemption protects a color the layer declared from
+            // being overwritten by an inherited one; a clear declares no color
+            // at all — it declares the channel unpainted, and the mark builders
+            // carry that intent separately in
+            // `MarkPaint::{fill,stroke}_cleared`, which survive the color scale.
+            // Reading a clear as "own paint" is what made
+            // `mark_ribbon().encode(color=…)` draw ONE merged band in the theme
+            // default fill under a full multi-category legend: `desugar_ribbon`
+            // (and `desugar_errorband`) always pass `stroke="none"`, so every
+            // ribbon layer tripped the exemption and lost the color channel it
+            // groups its bands by — while `mark_area`, whose lowering is flat
+            // and never reaches this seam, partitioned correctly from the same
+            // data. The layers that motivated the widening (e.g. `roc_chart`'s
+            // grey dashed chance diagonal, `stroke="#9ca3af"`) declare a real
+            // color and are unaffected, as is a layer that clears one channel
+            // and paints the other.
+            let has_own_literal_paint = (mark_style.paint.stroke_is_user_set
+                && !mark_style.paint.stroke_cleared)
+                || (mark_style.paint.fill_is_user_set && !mark_style.paint.fill_cleared);
             if layer.mark == crate::spec::mark::Mark::Text || has_own_literal_paint {
                 layer_spec_encoding.color = None;
             }
