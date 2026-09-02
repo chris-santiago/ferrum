@@ -205,14 +205,25 @@ mod tests {
     fn outliers_per_group_iqr_isolates_outlier() {
         pyo3::Python::initialize();
         // Group A: uniform 1..=10, no outliers within group.
-        // Group B: 100..=108 then 1000.0, last value is an extreme outlier within its group.
+        // Group B: 1000..=1008 then 1050.0 — a value that is an outlier WITHIN
+        // group B's own (tight, ~4.5-wide) fence but NOT within the pooled
+        // fence a `groupby=[]` computation would use: pooling A and B gives
+        // Q1≈5.75/Q3≈1004.25 (IQR≈998.5), so the pooled Tukey fence is roughly
+        // [-1492, 2502] — 1050 sits comfortably inside it. This is what makes
+        // the test discriminating against a mutant that ignores `spec.groupby`
+        // (mutation report, `outliers.rs:54`): the prior fixture's 1000 exceeded
+        // BOTH the per-group and the pooled fence, so a mutant computing one
+        // global group instead of two still isolated the same row and both
+        // suites stayed green. With this fixture the pooled computation flags
+        // NO rows, while the per-group computation flags exactly row 1050 —
+        // the two code paths only diverge on this exact value.
         let groups = vec![
             "A", "B", "A", "B", "A", "B", "A", "B", "A", "B",
             "A", "B", "A", "B", "A", "B", "A", "B", "A", "B",
         ];
         let values = vec![
-            1.0, 100.0, 2.0, 101.0, 3.0, 102.0, 4.0, 103.0, 5.0, 104.0,
-            6.0, 105.0, 7.0, 106.0, 8.0, 107.0, 9.0, 108.0, 10.0, 1000.0,
+            1.0, 1000.0, 2.0, 1001.0, 3.0, 1002.0, 4.0, 1003.0, 5.0, 1004.0,
+            6.0, 1005.0, 7.0, 1006.0, 8.0, 1007.0, 9.0, 1008.0, 10.0, 1050.0,
         ];
         let b = batch_g_v(groups, values);
         let spec = OutliersSpec {
@@ -225,7 +236,7 @@ mod tests {
         assert_eq!(out.num_rows(), 1);
         let v_arr = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let g_arr = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(v_arr.value(0), 1000.0);
+        assert_eq!(v_arr.value(0), 1050.0);
         assert_eq!(g_arr.value(0), "B");
     }
 
@@ -251,19 +262,26 @@ mod tests {
     /// violin/bar/boxen accept integer hue via the shared `group_key` idiom.
     /// Two Int64-keyed groups must isolate the outlier to its own group,
     /// exactly matching the Utf8 twin's row-filtering behavior.
+    ///
+    /// Fixture shares the Utf8 twin's group-local-but-not-global-outlier shape
+    /// (see that test's comment) so this test is also discriminating against
+    /// the `&spec.groupby` → `&[]` mutant, not just against non-Int64 dtype
+    /// rejection.
     #[test]
     fn outliers_int64_groupby_isolates_outlier_per_group() {
         pyo3::Python::initialize();
         use arrow::array::Int64Array;
         // Group 1: uniform 1..=10, no outliers within group.
-        // Group 2: 100..=108 then 1000.0, last value is an extreme outlier within its group.
+        // Group 2: 1000..=1008 then 1050.0 — a within-group-2 outlier that
+        // stays inside the pooled (groupby-ignored) fence; see the Utf8
+        // twin's comment for the exact fence arithmetic.
         let groups = vec![
             1, 2, 1, 2, 1, 2, 1, 2, 1, 2,
             1, 2, 1, 2, 1, 2, 1, 2, 1, 2,
         ];
         let values = vec![
-            1.0, 100.0, 2.0, 101.0, 3.0, 102.0, 4.0, 103.0, 5.0, 104.0,
-            6.0, 105.0, 7.0, 106.0, 8.0, 107.0, 9.0, 108.0, 10.0, 1000.0,
+            1.0, 1000.0, 2.0, 1001.0, 3.0, 1002.0, 4.0, 1003.0, 5.0, 1004.0,
+            6.0, 1005.0, 7.0, 1006.0, 8.0, 1007.0, 9.0, 1008.0, 10.0, 1050.0,
         ];
         let b = batch_g_v_int64(groups, values);
         let spec = OutliersSpec {
@@ -281,7 +299,7 @@ mod tests {
         );
         let v_arr = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let g_arr = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(v_arr.value(0), 1000.0);
+        assert_eq!(v_arr.value(0), 1050.0);
         assert_eq!(g_arr.value(0), 2);
     }
 }

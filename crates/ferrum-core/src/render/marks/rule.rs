@@ -548,6 +548,65 @@ mod tests {
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2);
     }
 
+    /// The `x` + `y` tie-break (both bound, no `x2`/`y2`) resolves to a
+    /// **horizontal** span at `y`, spanning the full panel width — not a
+    /// vertical span at `x`. `RuleShape::resolve`'s doc comment states this
+    /// explicitly (this fn's rustdoc, "the documented tie-break"), but before
+    /// this test no assertion checked the emitted geometry: the two tests that
+    /// reach this arm (`color_dtype_parity`'s temporal/non-finite-color rows,
+    /// via `RULE_NO_COLOR`/`RULE_NAN`) only assert per-row *colors*. A mutant
+    /// flipping the arm to `VerticalSpan { x }` renders vertical lines from a
+    /// chart declaring `x=`+`y=` and both suites stay green.
+    #[test]
+    fn x_and_y_both_bound_rule_ties_break_to_horizontal_span() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rule,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 20.0])),
+            Arc::new(Float64Array::from(vec![30.0, 40.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        let lines: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            SceneNode::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
+            _ => None,
+        }).collect();
+        assert_eq!(lines.len(), 2, "expected 2 rules, one per row");
+        for (x1, y1, x2, y2) in lines {
+            assert_eq!(
+                y1, y2,
+                "the x=+y= tie-break must render a HORIZONTAL span (y1 == y2); a \
+                 VerticalSpan mutant would instead pin x1 == x2 here"
+            );
+            assert_eq!(x1, panel.plot_area.x, "a horizontal span starts at the panel's left edge");
+            assert_eq!(
+                x2, panel.plot_area.x + panel.plot_area.w,
+                "a horizontal span must reach the panel's right edge (full panel width), \
+                 not the panel's vertical extent a VerticalSpan mutant would produce"
+            );
+        }
+    }
+
     #[test]
     fn ranged_rule_resolves_per_row_color_encoding() {
         // mark_rule(...).encode(color="dir:N") on a ranged vertical rule must

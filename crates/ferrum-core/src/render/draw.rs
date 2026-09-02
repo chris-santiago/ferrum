@@ -1506,6 +1506,102 @@ mod tests {
         assert!(cleared, "the rescue did not fire (base_stroke was Some), so cleared carries through from base_stroke_cleared");
     }
 
+    /// Full-pipeline proof of the same NF-A7 invariant, at the `resolve_effective_stroke`
+    /// call site the mutation report names (`rect.rs`'s `build_heatmap`, reached via
+    /// `render_svg`): `fm.Chart(df).mark_rect(fill="none").encode(x="xc:N", y="yc:N",
+    /// stroke_width="w:Q")` must emit NO `stroke` attribute on any cell.
+    ///
+    /// The two unit tests above pin `resolve_effective_stroke`'s return value directly
+    /// but neither drives `fill_cleared=true` while the rescue actually fires (the first
+    /// passes `fill_cleared=false`; the second's `base_stroke` is `Some`, so the rescue
+    /// never opens), so neither discriminates the report's exact mutant — swapping the
+    /// rescue's `(Some(fill), fill_cleared)` for `(Some(fill), base_stroke_cleared)`. This
+    /// test drives that branch through the real mark builder: a bound `stroke_width`
+    /// column, a positive per-row width, and no explicit stroke color opens the rescue
+    /// gate, while `fill="none"` supplies `fill_cleared=true` — exactly the case the
+    /// mutant desyncs `cleared` from.
+    #[test]
+    fn fill_none_rect_with_bound_stroke_width_emits_no_stroke_attribute() {
+        use crate::layout::Viewport;
+        use crate::render::chart_config::ChartConfig;
+        use crate::render::config::RenderConfig;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SpecDataType, Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+        use std::sync::Arc;
+
+        let field = |name: &str, t: SpecDataType| {
+            Some(EncodingSpec { field: name.into(), type_: Some(t), ..Default::default() })
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Rect,
+            encoding: Encoding {
+                x: field("xc", SpecDataType::Nominal),
+                y: field("yc", SpecDataType::Nominal),
+                stroke_width: field("w", SpecDataType::Quantitative),
+                ..Default::default()
+            },
+            mark_style: Some(MarkKwargsSpec { fill: Some("none".into()), ..Default::default() }),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("xc", ArrowType::Utf8, false),
+            Field::new("yc", ArrowType::Utf8, false),
+            Field::new("w", ArrowType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(StringArray::from(vec!["p", "q"])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let theme = ThemeInputs::default();
+        let result = crate::render::render_svg(
+            &spec,
+            &batch,
+            &theme,
+            Viewport { width: 600.0, height: 400.0 },
+            &RenderConfig::default(),
+            &ChartConfig::default(),
+        )
+        .expect("a fill=\"none\" heatmap-style rect with a bound stroke_width column must render");
+        let svg = result.bytes;
+        // Filter to the heatmap cells specifically (`fill="none"`), not the
+        // panel background/clip rects `render_svg` also emits, neither of
+        // which carries this mark's paint at all.
+        let cells: Vec<&str> = svg
+            .split("<rect ")
+            .skip(1)
+            .map(|rest| rest.split('>').next().unwrap())
+            .filter(|el| el.contains("fill=\"none\""))
+            .collect();
+        assert_eq!(cells.len(), 2, "expected 2 heatmap cells with a cleared fill; got {cells:?}");
+        for element in cells {
+            assert!(
+                !element.contains("stroke"),
+                "a cleared fill rescued into the stroke slot must stay a cleared paint — no \
+                 `stroke` attribute may appear, got: {element}"
+            );
+        }
+    }
+
     // --- F3: resolve_fill_color categorical + continuous ---
 
     #[test]
