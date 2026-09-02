@@ -160,10 +160,12 @@ def test_resolve_encoding_value_invalid_type_raises():
 
 
 def test_resolve_encoding_value_literal_non_color_string():
-    """_LiteralValue with a non-color string should fall back to opacity kind."""
-    result = _resolve_encoding_value(_LiteralValue("not_a_color"))
-    assert result["kind"] == "opacity"
-    assert result["value"] == 1.0
+    """_LiteralValue with an unparseable string raises ValueError naming the
+    accepted forms (Batch A task 10, NF-A4) -- it no longer falls back to a
+    silent opacity kind/value 1.0; see test_selection_value_color_routing.py
+    for the full parser-routing coverage this finding motivated."""
+    with pytest.raises(ValueError, match="expected a CSS color name"):
+        _resolve_encoding_value(_LiteralValue("not_a_color"))
 
 
 # ── 4. Chart.conditional() with non-existent selection raises ────────────

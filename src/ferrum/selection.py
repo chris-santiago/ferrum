@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
 
+from ferrum._validate import is_none_color_sentinel
 from ferrum.parameter import Parameter, _normalize_bind
 
 
@@ -37,11 +38,12 @@ class SelectionMark:
     Parameters
     ----------
     fill : str, optional
-        Hex colour string for the brush fill (e.g. ``"#4287f5"``).  Defaults
-        to the renderer's built-in blue.
+        Color string for the brush fill — a CSS name, hex
+        (e.g. ``"#4287f5"``), or ``rgb()``/``rgba()`` form.  Defaults to the
+        renderer's built-in blue.
     stroke : str, optional
-        Hex colour string for the brush border.  Defaults to the renderer's
-        built-in grey.
+        Color string for the brush border (same vocabulary as *fill*).
+        Defaults to the renderer's built-in grey.
     fill_opacity : float, default 0.3
         Opacity of the fill (0.0 = transparent, 1.0 = opaque).
     stroke_opacity : float, default 1.0
@@ -73,9 +75,11 @@ class SelectionMark:
             "stroke_width": self.stroke_width,
         }
         if self.fill is not None:
-            d["fill"] = _hex_to_color_dict(self.fill)
+            d["fill"] = _hex_to_color_dict(self.fill, context=f"SelectionMark: fill={self.fill!r}")
         if self.stroke is not None:
-            d["stroke"] = _hex_to_color_dict(self.stroke)
+            d["stroke"] = _hex_to_color_dict(
+                self.stroke, context=f"SelectionMark: stroke={self.stroke!r}"
+            )
         if self.stroke_dash is not None:
             d["stroke_dash"] = self.stroke_dash
         return d
@@ -482,8 +486,11 @@ def value(v: Any) -> "_LiteralValue":
     Parameters
     ----------
     v : str, int, or float
-        The constant to embed.  Hex colour strings (e.g. ``"#cccccc"``) are
-        interpreted as colours.  Numbers are interpreted as opacity values.
+        The constant to embed.  Color strings (a CSS name, hex, e.g.
+        ``"#cccccc"``, or ``rgb()``/``rgba()`` form — validated and
+        normalized by ferrum's one Rust color parser) are interpreted as
+        colours; an unparseable string raises ``ValueError`` naming the
+        accepted forms.  Numbers are interpreted as opacity values.
 
     Returns
     -------
@@ -536,9 +543,10 @@ class _When:
         v : Any
             Value applied when a datum falls inside the selection.  Plain
             values are wrapped via ``value()``; passing an already-wrapped
-            ``value(...)`` is also accepted.  Hex colour strings are
-            interpreted as colours at serialization time (in
-            ``_resolve_encoding_value``), not at this layer.
+            ``value(...)`` is also accepted.  Color strings (CSS name, hex,
+            or ``rgb()``/``rgba()``) are interpreted as colours at
+            serialization time (in ``_resolve_encoding_value``), not at this
+            layer.
 
         Returns
         -------
@@ -565,7 +573,8 @@ class _WhenThen:
         ----------
         v : Any
             Value applied when a datum falls outside the selection.  Plain
-            numbers and hex colour strings are auto-wrapped via ``value()``.
+            numbers and color strings (CSS name, hex, or ``rgb()``/``rgba()``)
+            are auto-wrapped via ``value()``.
 
         Returns
         -------
@@ -609,8 +618,9 @@ def when(parameter: Parameter) -> _When:
 
     ``v_if`` and ``v_else`` may be plain numbers or ``fm.value(...)``
     wrappers; they are wrapped via ``value()`` when not already a
-    ``_LiteralValue``.  Hex colour strings are interpreted as colours at
-    serialization time (in ``_resolve_encoding_value``), not at this layer.
+    ``_LiteralValue``.  Color strings (CSS name, hex, or ``rgb()``/``rgba()``)
+    are interpreted as colours at serialization time (in
+    ``_resolve_encoding_value``), not at this layer.
 
     Parameters
     ----------
@@ -678,36 +688,69 @@ def _to_event_expr(s: str) -> str | dict[str, str]:
     return {"custom": s}
 
 
-def _hex_to_color_dict(hex_str: str) -> dict[str, int]:
-    import warnings
+def _hex_to_color_dict(color_str: str, *, context: str) -> dict[str, int]:
+    """Parse a color string into the wire color dict via the one Rust parser.
 
-    h = hex_str.lstrip("#")
-    if len(h) == 3:
-        h = h[0] * 2 + h[1] * 2 + h[2] * 2
-    elif len(h) == 4:
-        h = h[0] * 2 + h[1] * 2 + h[2] * 2 + h[3] * 2
+    Routes through :func:`ferrum.color.to_hex`, so this accepts the exact
+    vocabulary every other ferrum color boundary accepts (CSS names, hex,
+    ``rgb()``/``rgba()``) — not just hex. Raises ``ValueError`` on anything
+    unparseable; there is no silent fallback.
+
+    Parameters
+    ----------
+    context:
+        Human-readable description of the failing call site (e.g.
+        ``"SelectionMark: fill='nonsense'"`` or
+        ``"fm.value('nonsense') for channel='color'"``), prefixed onto any
+        raised message. Mirrors ``marks/base.py``'s
+        ``_validate_literal_color`` prefix shape, so a bad literal raised
+        several frames inside ``.to_svg()`` (this is a construction-time
+        surface, not a construction-time gate — the failure only surfaces
+        when the conditional/mark is serialized) is traceable back to the
+        call that produced it.
+
+    ``"none"``/``"transparent"`` are refusals here, not the paint-clear they
+    are on the mark-style surface (spec §4.1, amended 2026-09-01, extended to
+    ``"transparent"`` in the 2026-09-01 T8 quality-review supersession): the
+    selection wire's ``{r, g, b, a}`` color dict has no representation for a
+    cleared paint, so a bound selection value can't express either spelling
+    (logged follow-up). Both spellings get the same dedicated message rather
+    than the generic accepted-forms text, since neither is a typo or an
+    unrecognized vocabulary item — each is a real color-clearing request
+    this surface can't fulfil yet. The match is trimmed and case-insensitive
+    (``"None"``, ``"NONE"``, ``" none "``, ``"Transparent"``, ``" transparent "``
+    all count) via the shared ``ferrum._validate.is_none_color_sentinel``
+    predicate — the same one ``marks/base.py``'s ``_is_paint_sentinel``
+    composes from, matching Rust's
+    ``trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("transparent")``
+    (``draw.rs``). This does not extend to ``"theme:label"``, an unrelated
+    sentinel with its own refusal path.
+    """
+    if is_none_color_sentinel(color_str):
+        raise ValueError(
+            f"{context}: selection styling cannot express a cleared paint "
+            "('none'/'transparent'); provide a color"
+        )
+
+    from ferrum.color import to_hex
+
     try:
-        if len(h) == 6:
-            return {
-                "r": int(h[0:2], 16),
-                "g": int(h[2:4], 16),
-                "b": int(h[4:6], 16),
-                "a": 255,
-            }
-        if len(h) == 8:
-            return {
-                "r": int(h[0:2], 16),
-                "g": int(h[2:4], 16),
-                "b": int(h[4:6], 16),
-                "a": int(h[6:8], 16),
-            }
-    except ValueError:
-        pass
-    warnings.warn(
-        f"Unrecognized hex color {hex_str!r}, defaulting to black",
-        stacklevel=2,
-    )
-    return {"r": 0, "g": 0, "b": 0, "a": 255}
+        h = to_hex(color_str).lstrip("#")
+    except ValueError as exc:
+        raise ValueError(f"{context} is not a valid color ({exc})") from exc
+    if len(h) == 8:
+        return {
+            "r": int(h[0:2], 16),
+            "g": int(h[2:4], 16),
+            "b": int(h[4:6], 16),
+            "a": int(h[6:8], 16),
+        }
+    return {
+        "r": int(h[0:2], 16),
+        "g": int(h[2:4], 16),
+        "b": int(h[4:6], 16),
+        "a": 255,
+    }
 
 
 def _resolve_channel(enc: Any) -> str:
@@ -723,9 +766,7 @@ def _resolve_channel(enc: Any) -> str:
         StrokeWidth,
     )
 
-    if isinstance(enc, Color) or (
-        isinstance(enc, _LiteralValue) and isinstance(enc.val, str) and enc.val.startswith("#")
-    ):
+    if isinstance(enc, Color):
         return "color"
     if isinstance(enc, Opacity):
         return "opacity"
@@ -767,8 +808,12 @@ def _resolve_encoding_value(enc: Any, *, channel: str | None = None) -> dict:
     """
     if isinstance(enc, _LiteralValue):
         v = enc.val
-        if isinstance(v, str) and v.startswith("#"):
-            return {"kind": "color", "value": _hex_to_color_dict(v)}
+        if isinstance(v, str):
+            # Routes through the one Rust color parser (ferrum.color.to_hex);
+            # a parseable string is a color, an unparseable one raises
+            # ValueError naming the accepted forms — no silent fallback.
+            context = f"fm.value({v!r}) for channel={channel!r}"
+            return {"kind": "color", "value": _hex_to_color_dict(v, context=context)}
         if isinstance(v, (int, float)):
             fv = float(v)
             if channel == "size":
@@ -784,7 +829,9 @@ def _resolve_encoding_value(enc: Any, *, channel: str | None = None) -> dict:
             if channel == "angle":
                 return {"kind": "angle", "value": fv}
             return {"kind": "opacity", "value": fv}
-        return {"kind": "opacity", "value": 1.0}
+        raise TypeError(
+            f"fm.value(...) accepts a color string or a number, got {type(v).__name__}: {v!r}"
+        )
     from ferrum.encoding.base import ChannelBase
 
     if isinstance(enc, ChannelBase):

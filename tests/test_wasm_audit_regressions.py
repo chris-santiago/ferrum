@@ -37,26 +37,30 @@ def test_html_title_escapes_ampersand(tmp_path):
     assert "&amp;" in title_section
 
 
-# ── R5: malformed hex warns ────────────────────────────────────────────────────
+# ── R5 -> Batch A task 10: malformed hex now raises, not warns ────────────────
 
 
-def test_hex_to_color_dict_warns_on_malformed():
-    """Regression: R5 — malformed hex should warn, not silently return black."""
+def test_hex_to_color_dict_raises_on_malformed():
+    """Regression: R5 -> Batch A task 10 (NF-A4) superseded this — the
+    warn-and-return-black soft path died. Malformed input now raises
+    ``ValueError`` (from the one Rust color parser) naming the accepted
+    forms; it neither warns nor silently returns black."""
+    import pytest
+
     from ferrum.selection import _hex_to_color_dict
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        result = _hex_to_color_dict("#xyz")
-        assert len(w) == 1
-        assert "Unrecognized hex" in str(w[0].message)
-    assert result == {"r": 0, "g": 0, "b": 0, "a": 255}
+        with pytest.raises(ValueError, match="expected a CSS color name"):
+            _hex_to_color_dict("#xyz", context="test: fill='#xyz'")
+        assert len(w) == 0
 
 
 def test_hex_to_color_dict_3char_expands():
     """Regression: 3-char hex shorthand correctly expands."""
     from ferrum.selection import _hex_to_color_dict
 
-    result = _hex_to_color_dict("#abc")
+    result = _hex_to_color_dict("#abc", context="test: fill='#abc'")
     assert result == {"r": 0xAA, "g": 0xBB, "b": 0xCC, "a": 255}
 
 
@@ -64,7 +68,7 @@ def test_hex_to_color_dict_4char_expands():
     """Regression: 4-char hex shorthand correctly expands."""
     from ferrum.selection import _hex_to_color_dict
 
-    result = _hex_to_color_dict("#abcd")
+    result = _hex_to_color_dict("#abcd", context="test: fill='#abcd'")
     assert result == {"r": 0xAA, "g": 0xBB, "b": 0xCC, "a": 0xDD}
 
 
