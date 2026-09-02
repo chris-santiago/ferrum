@@ -1,0 +1,438 @@
+{
+  "AxisConfigSpec.axis_y2.domain": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.domain, but scoped to axis_y2: the only consumer (apply_axis_config_to_theme -> theme.axis.axis_line, render/mod.rs) is GLOBAL ThemeInputs and axis/axis_x/axis_y route through it \u2014 routing axis_y2 through it would leak the override onto the primary x/y axes' theme fallback, so it deliberately does not. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02): a secondary-axis-scoped ThemeInputs split."
+  },
+  "AxisConfigSpec.axis_y2.grid": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.grid, but scoped to axis_y2: the only consumer (apply_axis_config_to_theme -> theme.grid.grid, render/mod.rs) is GLOBAL ThemeInputs and axis/axis_x/axis_y route through it \u2014 routing axis_y2 through it would leak the override onto the primary x/y axes' theme fallback, so it deliberately does not. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02): a secondary-axis-scoped ThemeInputs split."
+  },
+  "AxisConfigSpec.axis_y2.label_format": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.label_format, but scoped to axis_y2: its consumer (apply_label_format_to_axis, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y \u2014 axis_y2's copy reaches AxisStyleOverrides via the same fill-only path axis/axis_x/axis_y use, but has no secondary-axis consumer to read it. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+  },
+  "AxisConfigSpec.axis_y2.tick_extra": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.tick_extra, but scoped to axis_y2: its consumer (prepare::adjust_axis_ticks, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+  },
+  "AxisConfigSpec.axis_y2.tick_min_step": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.tick_min_step, but scoped to axis_y2: its consumer (prepare::adjust_axis_ticks, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+  },
+  "AxisConfigSpec.axis_y2.tick_size": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.tick_size, but scoped to axis_y2: the only consumer (apply_axis_config_to_theme -> theme.sizes.tick_size, render/mod.rs) is GLOBAL ThemeInputs and axis/axis_x/axis_y route through it \u2014 axis_y2 does NOT route through the theme path (would leak scope to the primary axes). Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02): a secondary-axis-scoped tick_size toggle."
+  },
+  "AxisConfigSpec.axis_y2.values": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.values, but scoped to axis_y2: its consumers (apply_label_format_to_axis / sync_projected_fractions_to_tick_values, render/mod.rs::prepare_and_layout) run on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+  },
+  "AxisConfigSpec.domain_max": {
+    "honored": false,
+    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+  },
+  "AxisConfigSpec.domain_min": {
+    "honored": false,
+    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+  },
+  "AxisConfigSpec.label_format_raw": {
+    "honored": true,
+    "reason": "AxisConfigSpec::effective_label_format() -> apply_axis_config_to_axis_input"
+  },
+  "AxisConfigSpec.nice": {
+    "honored": false,
+    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+  },
+  "AxisConfigSpec.zero": {
+    "honored": false,
+    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+  },
+  "AxisStyleSpec.domain": {
+    "honored": true,
+    "reason": "apply_axis_config_to_theme -> theme.axis.axis_line, for axis/axis_x/axis_y (global theme fallback); NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.domain"
+  },
+  "AxisStyleSpec.domain_color": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain_color, consumed by build_axis"
+  },
+  "AxisStyleSpec.domain_width": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.domain_width, consumed by build_axis"
+  },
+  "AxisStyleSpec.grid": {
+    "honored": true,
+    "reason": "apply_axis_config_to_theme -> theme.grid.grid, for axis/axis_x/axis_y (global theme fallback); NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.grid"
+  },
+  "AxisStyleSpec.grid_color": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_color, consumed by build_grid"
+  },
+  "AxisStyleSpec.grid_dash": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_dash, consumed by build_grid"
+  },
+  "AxisStyleSpec.grid_opacity": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_opacity, consumed by build_grid"
+  },
+  "AxisStyleSpec.grid_width": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.grid_width, consumed by build_grid"
+  },
+  "AxisStyleSpec.label_angle": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_angle, read by layout/axis.rs's collision cascade"
+  },
+  "AxisStyleSpec.label_color": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_color, consulted by build_axis/build_grid"
+  },
+  "AxisStyleSpec.label_flush": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_flush, consumed by render/marks/axis.rs edge alignment"
+  },
+  "AxisStyleSpec.label_font_size": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_font_size, consulted by build_axis/build_grid"
+  },
+  "AxisStyleSpec.label_format": {
+    "honored": true,
+    "reason": "effective_label_format()/axis_style_fill_from -> AxisStyleOverrides.label_format, applied by apply_label_format_to_axis, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format"
+  },
+  "AxisStyleSpec.label_format_type": {
+    "honored": false,
+    "reason": "chart-level: no consumer \u2014 apply_label_format_to_axis hardcodes format_type=None. Per-channel fm.Axis(label_format_type=) IS honored via resolve_axis_label_format. Pending Task 4 (D8: format_type threads end to end \u2014 this is the axis half; LegendStyleSpec.format_type is the legend half, same task). Task 2's AxisConfig.to_dict() already emits `label_format_type` on the wire (resolved from a `label_format` preset name); it is in AXIS_STYLE_CANONICAL_KEYS so the wire gate accepts it without self-refusal \u2014 Task 4 flips this entry to honored when apply_label_format_to_axis threads it through."
+  },
+  "AxisStyleSpec.label_overlap": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_overlap, consumed by layout_x_axis's collision cascade (layout/axis.rs). NOT consumed by layout_y_axis (no cull recovery on y). Pending Task 8 (D12: label_overlap honored on y, same policy object as x)"
+  },
+  "AxisStyleSpec.label_padding": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_padding, consumed by layout/axis.rs's standoff calc"
+  },
+  "AxisStyleSpec.labels": {
+    "honored": false,
+    "reason": "chart-level configure_axis(labels=) has no consumer \u2014 AxisInput.show_labels is a plain bool (not Option<bool>), exclusively owned by the per-channel prepare path (prepare/mod.rs, EncodingSpec.axis). Wiring chart-level control needs it widened to Option<bool> \u2014 out of this task's scope. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02: T1's manifest sweep surfaced this)."
+  },
+  "AxisStyleSpec.max_band": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.max_band, consumed by clamp_axis_band (layout/mod.rs)"
+  },
+  "AxisStyleSpec.min_band": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.min_band, consumed by clamp_axis_band (layout/mod.rs)"
+  },
+  "AxisStyleSpec.offset": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.offset, consumed by render/marks/axis.rs"
+  },
+  "AxisStyleSpec.orient": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.orient, consumed by AxisInput::resolve_orient, for axis/axis_x/axis_y. For axis_y2 the override reaches AxisStyleOverrides.orient (fill-only, same as every other field) but has no concrete side to resolve onto: layout::layout_panel_axes unconditionally forces every secondary axis's orient to Right regardless of any override, per-channel or chart-level — deliberate design (secondary axes always stack outward on the right), not a wiring gap, so this is NOT a Task 8 item."
+  },
+  "AxisStyleSpec.tick_count": {
+    "honored": false,
+    "reason": "chart-level: no consumer anywhere \u2014 AxisStyleOverrides has no tick_count field at all. Per-channel fm.Axis(tick_count=) IS honored via encoding_axis_tick_count. Pending Task 8 (D12: chart-level tick_count, fill-only, same consumer as encoding-level)"
+  },
+  "AxisStyleSpec.tick_extra": {
+    "honored": true,
+    "reason": "prepare::adjust_axis_ticks, render/prepare/mod.rs, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_extra"
+  },
+  "AxisStyleSpec.tick_min_step": {
+    "honored": true,
+    "reason": "prepare::adjust_axis_ticks, render/prepare/mod.rs, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_min_step"
+  },
+  "AxisStyleSpec.tick_size": {
+    "honored": true,
+    "reason": "apply_axis_config_to_theme -> theme.sizes.tick_size, for axis/axis_x/axis_y (global theme fallback); NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_size"
+  },
+  "AxisStyleSpec.ticks": {
+    "honored": false,
+    "reason": "same disposition as `labels` \u2014 chart-level has no consumer (AxisInput.show_ticks is a plain bool); per-channel fm.Axis(ticks=) IS honored. Pending Task 8 (D12, same Option<bool> widening as `labels`, spec \u00a74.9 extended 2026-09-02)."
+  },
+  "AxisStyleSpec.title": {
+    "honored": false,
+    "reason": "chart-level: no consumer \u2014 AxisInput.title conflates 'unset' with 'per-channel explicitly suppressed' (title=\"\" -> None), so a naive fill-only-if-None chart-level fill would resurrect an explicitly suppressed per-channel title, inverting the per-channel-wins cascade; needs a tri-state model before it's safe to wire. Per-channel fm.Axis(title=) IS honored via prepare::resolve_axis_title. Python's AxisConfig dataclass doesn't expose a `title` param either today. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02: needs the tri-state model before it's safe to wire)."
+  },
+  "AxisStyleSpec.title_color": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_color"
+  },
+  "AxisStyleSpec.title_font_size": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_font_size"
+  },
+  "AxisStyleSpec.title_orient": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_orient, consumed by layout/axis.rs"
+  },
+  "AxisStyleSpec.title_padding": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.title_padding"
+  },
+  "AxisStyleSpec.translate": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.translate, consumed by layout/axis.rs"
+  },
+  "AxisStyleSpec.values": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.tick_values, consumed by apply_label_format_to_axis / sync_projected_fractions_to_tick_values, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.values"
+  },
+  "AxisStyleSpec.zindex": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.zindex, consumed by layout/axis.rs's draw-order"
+  },
+  "ChartConfig.annotations": {
+    "honored": true,
+    "reason": "AnnotationSpec scene-node builders, render/annotation.rs"
+  },
+  "ChartConfig.axis": {
+    "honored": true,
+    "reason": "apply_axis_config_to_theme + apply_axis_config_to_axis_input(prep.axes.{x,y}), render/mod.rs"
+  },
+  "ChartConfig.axis_x": {
+    "honored": true,
+    "reason": "apply_axis_x_config_to_theme + apply_axis_config_to_axis_input(prep.axes.x), render/mod.rs"
+  },
+  "ChartConfig.axis_y": {
+    "honored": true,
+    "reason": "apply_axis_y_config_to_theme + apply_axis_config_to_axis_input(prep.axes.y), render/mod.rs"
+  },
+  "ChartConfig.axis_y2": {
+    "honored": true,
+    "reason": "apply_axis_config_to_axis_input(prep.axes.secondary_y), render/mod.rs \u2014 D2/F-L07-06, this task"
+  },
+  "ChartConfig.color": {
+    "honored": true,
+    "reason": "apply_chart_config color-scheme block + apply_color_config_to_color_scale, render/mod.rs"
+  },
+  "ChartConfig.grid": {
+    "honored": true,
+    "reason": "apply_chart_config grid block, render/mod.rs; band_colors via scene_build.rs -> render/marks/axis.rs"
+  },
+  "ChartConfig.legend": {
+    "honored": true,
+    "reason": "apply_chart_config legend block (theme fields) + apply_chart_config_to_legend_overrides, render/mod.rs"
+  },
+  "ChartConfig.padding": {
+    "honored": true,
+    "reason": "apply_chart_config padding block, render/mod.rs (top/right/bottom/left only \u2014 see the `auto` field entry)"
+  },
+  "ChartConfig.structural": {
+    "honored": true,
+    "reason": "StructuralSpec (break_axis/inset) consumed by render/mod.rs's structural-feature pass"
+  },
+  "ChartConfig.title": {
+    "honored": true,
+    "reason": "apply_chart_config title block, render/mod.rs (pinned by apply_chart_config_title_overrides)"
+  },
+  "ColorConfigSpec.diverging_scheme": {
+    "honored": true,
+    "reason": "apply_chart_config color-scheme block -> theme.palette.diverging_scheme, render/mod.rs"
+  },
+  "ColorConfigSpec.domain": {
+    "honored": true,
+    "reason": "apply_color_config_to_color_scale, render/mod.rs"
+  },
+  "ColorConfigSpec.range": {
+    "honored": true,
+    "reason": "apply_color_config_to_color_scale, render/mod.rs"
+  },
+  "ColorConfigSpec.scheme": {
+    "honored": true,
+    "reason": "apply_chart_config color-scheme block -> theme.palette.color_scheme, render/mod.rs"
+  },
+  "ColorConfigSpec.sequential_scheme": {
+    "honored": true,
+    "reason": "apply_chart_config color-scheme block -> theme.palette.sequential_scheme, render/mod.rs"
+  },
+  "GridConfigSpec.band_colors": {
+    "honored": true,
+    "reason": "scene_build.rs -> render/marks/axis.rs's alternating grid-band rects"
+  },
+  "GridConfigSpec.color": {
+    "honored": true,
+    "reason": "apply_chart_config grid block -> theme.colors.grid_color, render/mod.rs"
+  },
+  "GridConfigSpec.dash": {
+    "honored": true,
+    "reason": "apply_chart_config grid block -> theme.grid.grid_dash, render/mod.rs"
+  },
+  "GridConfigSpec.opacity": {
+    "honored": true,
+    "reason": "apply_chart_config grid block -> theme.grid.grid_opacity, render/mod.rs"
+  },
+  "GridConfigSpec.width": {
+    "honored": true,
+    "reason": "apply_chart_config grid block -> theme.sizes.grid_width, render/mod.rs"
+  },
+  "GridConfigSpec.x": {
+    "honored": true,
+    "reason": "apply_chart_config grid block -> theme.grid.grid, render/mod.rs"
+  },
+  "GridConfigSpec.y": {
+    "honored": true,
+    "reason": "apply_chart_config grid block -> theme.grid.grid, render/mod.rs"
+  },
+  "LegendStyleSpec.clip_height": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.clip_height, hard-clips via an SVG clipPath"
+  },
+  "LegendStyleSpec.column_padding": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.column_padding"
+  },
+  "LegendStyleSpec.columns": {
+    "honored": true,
+    "reason": "apply_chart_config -> theme.legend.legend_columns; chart-level currently OVERWRITES (not fill-only) \u2014 pending Task 7 (D7)"
+  },
+  "LegendStyleSpec.direction": {
+    "honored": true,
+    "reason": "apply_chart_config -> theme.legend.legend_direction; not yet threaded into estimate_legend_size \u2014 pending Task 7 (D5)"
+  },
+  "LegendStyleSpec.disabled": {
+    "honored": true,
+    "reason": "chart_config_legend_disabled, render/mod.rs \u2014 suppresses legend content"
+  },
+  "LegendStyleSpec.format": {
+    "honored": true,
+    "reason": "prepare/legend.rs's colorbar + size-legend format-spec resolution"
+  },
+  "LegendStyleSpec.format_type": {
+    "honored": false,
+    "reason": "zero consumers anywhere \u2014 pending Task 4 (D8: the legend half of format_type threading)"
+  },
+  "LegendStyleSpec.gradient_length": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendOverrides.gradient_length"
+  },
+  "LegendStyleSpec.gradient_thickness": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendOverrides.gradient_thickness"
+  },
+  "LegendStyleSpec.label_color": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.label_color"
+  },
+  "LegendStyleSpec.label_font_size": {
+    "honored": true,
+    "reason": "apply_chart_config -> theme.typography.label_font_size (SHARED slot \u2014 also resizes axis labels, a known cascade bug); pending Task 7 (D7: a legend-own slot)"
+  },
+  "LegendStyleSpec.label_limit": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.label_limit, truncates with an ellipsis"
+  },
+  "LegendStyleSpec.offset": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.offset"
+  },
+  "LegendStyleSpec.orient": {
+    "honored": true,
+    "reason": "apply_chart_config -> theme.legend.legend_orient + legend_overrides path; chart-level `orient` currently OVERWRITES (not fill-only) \u2014 pending Task 7 (D7: cascade repair, per-channel wins)"
+  },
+  "LegendStyleSpec.padding": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.padding"
+  },
+  "LegendStyleSpec.row_padding": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.row_padding"
+  },
+  "LegendStyleSpec.symbol_size": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.symbol_size"
+  },
+  "LegendStyleSpec.symbol_stroke_width": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.symbol_stroke_width"
+  },
+  "LegendStyleSpec.symbol_type": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendOverrides.symbol_type"
+  },
+  "LegendStyleSpec.tickLabels": {
+    "honored": true,
+    "reason": "LegendOverrides.tick_labels \u2014 explicit colorbar tick labels (SHAP beeswarm)"
+  },
+  "LegendStyleSpec.tick_count": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendOverrides.tick_count, colorbar ticks"
+  },
+  "LegendStyleSpec.tick_min_step": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendOverrides.tick_min_step, colorbar tick thinning"
+  },
+  "LegendStyleSpec.title": {
+    "honored": true,
+    "reason": "legend title 3-way resolution, render/mod.rs"
+  },
+  "LegendStyleSpec.title_font_size": {
+    "honored": true,
+    "reason": "apply_chart_config -> theme.typography.legend_title_font_size; chart-level currently OVERWRITES (not fill-only) \u2014 pending Task 7 (D7)"
+  },
+  "LegendStyleSpec.title_padding": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendStyleOpts.title_padding"
+  },
+  "LegendStyleSpec.type": {
+    "honored": true,
+    "reason": "legend_overrides_from_prep -> LegendOverrides.legend_type"
+  },
+  "LegendStyleSpec.values": {
+    "honored": true,
+    "reason": "colorbar tick-label arm, layout/legend.rs; categorical-legend filter/order NOT yet wired \u2014 pending Task 7 (D6)"
+  },
+  "LegendStyleSpec.zindex": {
+    "honored": true,
+    "reason": "LegendOverrides zindex, coarse draw order relative to marks"
+  },
+  "PaddingConfigSpec.auto": {
+    "honored": false,
+    "reason": "reserved sentinel \u2014 apply_chart_config's own comment records it 'does not disable explicit values' but implements no auto-expand-to-fit-labels behavior either. Pending Task 9 (D10)"
+  },
+  "PaddingConfigSpec.bottom": {
+    "honored": true,
+    "reason": "apply_chart_config padding block -> theme.padding.padding_bottom, render/mod.rs"
+  },
+  "PaddingConfigSpec.left": {
+    "honored": true,
+    "reason": "apply_chart_config padding block -> theme.padding.padding_left, render/mod.rs"
+  },
+  "PaddingConfigSpec.right": {
+    "honored": true,
+    "reason": "apply_chart_config padding block -> theme.padding.padding_right, render/mod.rs"
+  },
+  "PaddingConfigSpec.top": {
+    "honored": true,
+    "reason": "apply_chart_config padding block -> theme.padding.padding_top, render/mod.rs"
+  },
+  "TitleConfigSpec.anchor": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.typography.title_anchor"
+  },
+  "TitleConfigSpec.color": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.colors.title_color"
+  },
+  "TitleConfigSpec.font_size": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.typography.title_font_size"
+  },
+  "TitleConfigSpec.font_weight": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.typography.title_font_weight"
+  },
+  "TitleConfigSpec.offset": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.typography.title_offset"
+  },
+  "TitleConfigSpec.subtitle_color": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.colors.subtitle_color"
+  },
+  "TitleConfigSpec.subtitle_font_size": {
+    "honored": true,
+    "reason": "apply_chart_config title block -> theme.typography.subtitle_font_size"
+  }
+}

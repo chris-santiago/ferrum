@@ -447,6 +447,18 @@ pub enum RenderWarning {
     /// (`"log"`, `"pow"`, `"sqrt"`, …). Full non-linear opacity-curve support
     /// is a logged campaign follow-up, not this batch.
     UnsupportedOpacityScale { channel: String, scale_kind: String },
+    /// A chart-level config section named a surface the chart does not have.
+    /// The sole producer today is `axis_y2` (D2/F-L07-06, spec §4.1): a chart
+    /// with no `independent_y` layer has no secondary y-axis input
+    /// (`AxesInput.secondary_y` is empty) for the override to fill, so it is
+    /// dropped with this warning rather than silently discarded. `section`
+    /// names the config key the user set (currently always `"axis_y2"`, but
+    /// the variant is not axis_y2-specific by name in case a future config
+    /// surface reaches the same "named but absent" shape). `String`, not
+    /// `&'static str`, so `#[derive(Deserialize)]` round-trips through owned
+    /// input (a `&'static str` field forces `Deserialize<'de>` to require
+    /// `'de: 'static`, breaking `serde_json::from_str` on a local `String`).
+    ConfigSurfaceNotPresent { section: String },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -537,6 +549,11 @@ impl std::fmt::Display for RenderWarning {
                  the curve, domain, and range were ignored in favor of the default linear \
                  resolution"
             ),
+            RenderWarning::ConfigSurfaceNotPresent { section } => write!(
+                f,
+                "chart config names '{section}' but the chart has no matching surface; \
+                 the override was not applied"
+            ),
         }
     }
 }
@@ -595,6 +612,7 @@ mod tests {
                 channel: "fill_opacity".into(),
                 scale_kind: "log".into(),
             },
+            RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -643,6 +661,13 @@ mod tests {
         assert!(diverged_text.contains("overlay gutters diverged"), "{diverged_text}");
         assert!(diverged_text.contains("independent chrome"), "{diverged_text}");
         assert!(!diverged_text.contains("OverlayGuttersDiverged"), "{diverged_text}");
+
+        // D2/F-L07-06 (this task): `axis_y2` names a surface the chart lacks.
+        let no_surface = RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() };
+        let no_surface_text = format!("{no_surface}");
+        assert!(no_surface_text.contains("axis_y2"), "{no_surface_text}");
+        assert!(no_surface_text.contains("no matching surface"), "{no_surface_text}");
+        assert!(!no_surface_text.contains("ConfigSurfaceNotPresent"), "{no_surface_text}");
     }
 
     /// Spec-review 2026-08-28 (cannot_verify item, resolved this round):
@@ -1726,6 +1751,34 @@ fn prepare_and_layout(
     // filled it above and now takes effect.
     prep.axes.x.resolve_orient();
     prep.axes.y.resolve_orient();
+    // `axis_y2` (D2/F-L07-06, this task): applies ONLY to the secondary y
+    // axis, via the SAME fill-only per-axis path `axis`/`axis_x`/`axis_y` use
+    // — deliberately NOT the shared-theme path (`apply_axis_config_to_theme`)
+    // those three also feed, since that path is genuinely global and would
+    // leak the "secondary y only" override onto the primary x/y axes'
+    // fallback. A chart with no `independent_y` layer has an empty
+    // `secondary_y` Vec (#52) — nothing to fill, so the override is reported
+    // rather than silently dropped (spec §4.1).
+    //
+    // No `resolve_orient()` call here, unlike the primary x/y pair above:
+    // `layout::layout_panel_axes` unconditionally overwrites every secondary
+    // axis's concrete `orient` to `Right` on a CLONE of this input
+    // (`layout/mod.rs`'s "orient forced `Right`" comment) — every secondary
+    // axis always renders on the right, stacked outward, by design; a
+    // per-channel `fm.Axis(orient=...)` on an `independent_y` layer is
+    // overwritten the same way. So `axis_y2.orient` reaches
+    // `AxisStyleOverrides.orient` (fill-only, like every other field here)
+    // but has no concrete side left to resolve onto — a `resolve_orient()`
+    // call would be a no-op, not a fix, so this block does not carry one.
+    if let Some(ref axis_y2_cfg) = chart_config.axis_y2 {
+        if prep.axes.secondary_y.is_empty() {
+            warnings.push(RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() });
+        } else {
+            for secondary in prep.axes.secondary_y.iter_mut() {
+                apply_axis_config_to_axis_input(secondary, Some(axis_y2_cfg))?;
+            }
+        }
+    }
     // tick_extra / tick_min_step (B5 unit 2): apply AFTER the config merge so the
     // effective value (per-channel wins, chart-level fallback) is on `AxisInput`,
     // then adjust the generated ticks against the provisional scale. No-op when
@@ -2810,6 +2863,192 @@ mod orchestration_tests {
         assert_eq!(
             format!("{err}"),
             "axis orient 'left' is invalid for the x axis (expected 'top' or 'bottom')"
+        );
+    }
+
+    // ── axis_y2 effect tests (D2/F-L07-06, spec review T1 cycle 2) ──────────
+    //
+    // The prior test coverage (chart_config.rs's deserialization tests,
+    // binding.rs's wire-gate tests, this file's RenderWarning round-trip)
+    // proved `axis_y2` PARSES and the warning variant EXISTS — none of them
+    // called `prepare_and_layout` (or any render entry) with `axis_y2` set
+    // against a chart that actually HAS a secondary y axis, so the fill
+    // branch in `prepare_and_layout` (the code this task added) had zero
+    // coverage. These three close that gap.
+
+    /// A primary line layer plus one `independent_y` layer — the same
+    /// fixture shape `prepare_render_inputs_independent_y_layer_produces_
+    /// secondary_axis_input` (`prepare/mod.rs`) uses to prove
+    /// `AxesInput.secondary_y` gets populated; reused here because the
+    /// axis_y2 fill branch has nothing to fill without a real secondary axis
+    /// input to fill it.
+    fn secondary_y_chart() -> (ChartSpec, RecordBatch) {
+        use crate::spec::layer::Layer;
+        let primary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let secondary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y1".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: true,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![primary, secondary]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// `prepare_and_layout`-level proof that the axis_y2 fill branch fires on
+    /// a REAL secondary-y axis input: `chart_config.axis_y2.min_band` lands
+    /// on `prep.axes.secondary_y[0].overrides.min_band` — via the SAME
+    /// `apply_axis_config_to_axis_input` fill-only path `axis`/`axis_x`/
+    /// `axis_y` use — and lands on NEITHER of the primary x/y axes, proving
+    /// the fill is scoped to the secondary axis only.
+    #[test]
+    fn prepare_and_layout_axis_y2_fills_secondary_axis_overrides() {
+        let (spec, batch) = secondary_y_chart();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let chart_config = ChartConfig {
+            axis_y2: Some(AxisConfigSpec {
+                style: chart_config::AxisStyleSpec { min_band: Some(123.0), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let output = prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None)
+            .expect("prepare_and_layout must succeed with axis_y2 set on a chart with a secondary y axis");
+
+        assert_eq!(output.prep.axes.secondary_y.len(), 1, "fixture must produce exactly one secondary axis");
+        assert_eq!(
+            output.prep.axes.secondary_y[0].overrides.min_band,
+            Some(123.0),
+            "axis_y2.min_band must fill the secondary axis's own overrides"
+        );
+        assert_eq!(output.prep.axes.x.overrides.min_band, None, "axis_y2 must not leak onto the primary x axis");
+        assert_eq!(output.prep.axes.y.overrides.min_band, None, "axis_y2 must not leak onto the primary y axis");
+    }
+
+    /// The F-L07-06 flip: end to end through `render_svg` (a real render
+    /// entry, not the internal `prep` struct), `chart_config.axis_y2.
+    /// label_color` now reaches the rendered SVG — the exact repro the
+    /// finding used (`AxisConfig(label_color="#654321")` never appearing in
+    /// the output). RED-proven by commenting out this task's axis_y2 block
+    /// in `prepare_and_layout` (the `if let Some(ref axis_y2_cfg) = chart_
+    /// config.axis_y2 { ... }` above) and re-running: this test fails
+    /// because `#654321` never reaches the SVG. Restored before committing.
+    #[test]
+    fn render_svg_axis_y2_label_color_reaches_secondary_axis_svg() {
+        let (spec, batch) = secondary_y_chart();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let render_config = config::RenderConfig::default();
+        let chart_config = ChartConfig {
+            axis_y2: Some(AxisConfigSpec {
+                style: chart_config::AxisStyleSpec {
+                    label_color: Some("#654321".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let with_override =
+            render_svg(&spec, &batch, &theme, viewport, &render_config, &chart_config).unwrap();
+        assert!(
+            with_override.bytes.contains("fill=\"#654321\""),
+            "axis_y2.label_color must reach the rendered secondary-axis tick labels"
+        );
+
+        // Contrast: the same chart without the override never emits that color.
+        let baseline =
+            render_svg(&spec, &batch, &theme, viewport, &render_config, &ChartConfig::default()).unwrap();
+        assert!(
+            !baseline.bytes.contains("fill=\"#654321\""),
+            "the color must not appear absent an explicit axis_y2 override"
+        );
+    }
+
+    /// The no-secondary-axis case emits `RenderWarning::ConfigSurfaceNotPresent`
+    /// — asserted on the actual `warnings` a render entry returns, not just
+    /// the variant's Display/round-trip coverage in the `tests` module above.
+    #[test]
+    fn render_svg_axis_y2_without_secondary_axis_emits_config_surface_warning() {
+        let (spec, batch) = scatter_3(); // no independent_y layer -> secondary_y is empty
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let render_config = config::RenderConfig::default();
+        let chart_config = ChartConfig {
+            axis_y2: Some(AxisConfigSpec {
+                style: chart_config::AxisStyleSpec { tick_count: Some(3), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = render_svg(&spec, &batch, &theme, viewport, &render_config, &chart_config)
+            .expect("axis_y2 on a chart with no secondary axis must warn, not fail");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2")),
+            "expected a ConfigSurfaceNotPresent{{section: \"axis_y2\"}} warning, got: {:?}",
+            result.warnings
         );
     }
 }

@@ -1185,42 +1185,12 @@ mod theme_dict_tests {
     }
 
     /// Parse the accepted-field set out of a serde `deny_unknown_fields`
-    /// error. serde_json renders the message as:
-    ///
-    /// ```text
-    /// unknown field `x`, expected one of `a`, `b`, … `z` at line 1 column 29
-    /// ```
-    ///
-    /// We slice after the `expected one of ` marker, drop the trailing
-    /// ` at line …` position suffix serde_json appends, then collect every
-    /// backtick-delimited token. Assumption: there is more than one accepted
-    /// field, so serde uses the `expected one of` wording rather than the
-    /// single-field `expected \`only\`` form — `ThemeOverridesSpec` has dozens
-    /// of fields, and `unknown_key_raises` already proves the "one of" form is
-    /// produced, so this holds for as long as the struct stays non-trivial.
-    fn accepted_fields_from_error(msg: &str) -> std::collections::BTreeSet<String> {
-        const MARKER: &str = "expected one of ";
-        let after = msg
-            .find(MARKER)
-            .map(|i| &msg[i + MARKER.len()..])
-            .unwrap_or_else(|| panic!("error missing `{MARKER}` marker: {msg}"));
-        // Strip serde_json's trailing " at line N column M" position suffix so
-        // it cannot be mistaken for a field name; backtick extraction below
-        // ignores it regardless, but trimming keeps the parse intent obvious.
-        let list = after.split(" at line ").next().unwrap_or(after);
-        // Every accepted field is wrapped in a matched pair of backticks.
-        let mut fields = std::collections::BTreeSet::new();
-        let mut rest = list;
-        while let Some(open) = rest.find('`') {
-            let tail = &rest[open + 1..];
-            let close = tail
-                .find('`')
-                .unwrap_or_else(|| panic!("unbalanced backticks in: {msg}"));
-            fields.insert(tail[..close].to_string());
-            rest = &tail[close + 1..];
-        }
-        fields
-    }
+    /// error. Hoisted to `chart_config::accepted_fields_from_deny_unknown_error`
+    /// (this task, 2026-09-02) — the `chart_config`-side wire-key drift tests
+    /// need the same parsing, so this used to be a private copy here; both
+    /// `binding.rs` and `chart_config.rs` are in that task's footprint, so the
+    /// duplicate is hoisted rather than kept (mirror-by-reference rule).
+    use crate::render::chart_config::accepted_fields_from_deny_unknown_error as accepted_fields_from_error;
 
     /// The reverse drift guard for D-THEME-1: a new `Option<_>` field added to
     /// `ThemeOverridesSpec` *without* a matching `THEME_KNOWN_KEYS` entry would
@@ -1299,10 +1269,69 @@ fn chart_config_from_dict(dict: Option<&Bound<'_, PyDict>>) -> PyResult<ChartCon
     match dict {
         None => Ok(ChartConfig::default()),
         Some(d) => {
+            validate_chart_config_keys(d)?;
             let val = crate::pyo3_serde::from_py(d.as_any(), "chart_config")?;
             Ok(val)
         }
     }
+}
+
+/// Wire refusal for `chart_config`'s unknown-key gate (D1, spec §4.1/§6).
+/// Pinned verbatim-substring contract, both languages:
+/// `chart config: unknown key '<k>' in <section>; accepted: <sorted list>`.
+/// Do not reword independently — Python's mirror of this text must match.
+fn chart_config_unknown_key_err(key: &str, section: &str, accepted: &[&str]) -> PyErr {
+    let mut sorted: Vec<&str> = accepted.to_vec();
+    sorted.sort_unstable();
+    PyValueError::new_err(format!(
+        "chart config: unknown key '{key}' in {section}; accepted: {}",
+        sorted.join(", ")
+    ))
+}
+
+/// The wire-key gate for `chart_config` (D1, spec §4.1/§6): refuses an
+/// unknown top-level section, or an unknown key inside a gated section,
+/// BEFORE the dict ever reaches `pyo3_serde::from_py`/serde. Runs first in
+/// `chart_config_from_dict` — necessary because `AxisConfigSpec`/
+/// `LegendConfigSpec` flatten a shared style struct, and serde's own
+/// `deny_unknown_fields` diagnostic (naming the accepted set) is defeated by
+/// that flatten for a NESTED unknown key (see the crate-level note on
+/// `chart_config::AxisStyleSpec`); every section's accepted-key list is
+/// schema-derived (`chart_config::accepted_keys_for_section`), so this
+/// function owns only the dict walk and the pinned error text.
+///
+/// `annotations`/`structural` are validated at the top level only —
+/// `accepted_keys_for_section` returns `None` for them (arrays of
+/// internally-tagged variant structs, each with its own field set; per-item
+/// gating is out of this task's scope, matching Task 8's grid-sub-struct
+/// carve-out).
+fn validate_chart_config_keys(d: &Bound<'_, PyDict>) -> PyResult<()> {
+    for (key_obj, value) in d.iter() {
+        let key: String = key_obj.extract()?;
+        if !super::chart_config::CHART_CONFIG_SECTIONS.contains(&key.as_str()) {
+            return Err(chart_config_unknown_key_err(
+                &key,
+                "chart_config",
+                super::chart_config::CHART_CONFIG_SECTIONS,
+            ));
+        }
+        let Some(accepted) = super::chart_config::accepted_keys_for_section(&key) else {
+            continue;
+        };
+        let Ok(section) = value.cast::<PyDict>() else {
+            // Not a dict (e.g. `None`, or a genuinely malformed value) — let
+            // the subsequent serde deserialize surface the type-mismatch
+            // error; this gate only walks dict-shaped sections.
+            continue;
+        };
+        for (inner_key_obj, _) in section.iter() {
+            let inner_key: String = inner_key_obj.extract()?;
+            if !accepted.contains(&inner_key.as_str()) {
+                return Err(chart_config_unknown_key_err(&inner_key, &key, &accepted));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_err_to_py(e: RenderError) -> PyErr {
@@ -1338,6 +1367,239 @@ fn decode_render_inputs(
         height: viewport.1,
     };
     Ok((batch, t, c, cc, vp))
+}
+
+#[cfg(test)]
+mod chart_config_gate_tests {
+    //! Wire-key gate tests (D1, spec §4.1/§6). RED-proof for this gate (run
+    //! manually, not committed as a test): comment out the
+    //! `validate_chart_config_keys(d)?;` line in `chart_config_from_dict` and
+    //! re-run `chart_config_top_level_unknown_key_refused` — it fails, because
+    //! `pyo3_serde::from_py` alone (before this task's `deny_unknown_fields`
+    //! additions) silently swallowed the bogus key. Restore the line before
+    //! committing.
+
+    use super::*;
+
+    #[test]
+    fn chart_config_top_level_unknown_key_refused() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("bogus_top_level_key", 1).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("unknown top-level key must be refused");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains("chart config: unknown key 'bogus_top_level_key' in chart_config; accepted:"),
+                "message must match the pinned refusal text: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn chart_config_nested_unknown_key_refused_names_section() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let inner = PyDict::new(py);
+            inner.set_item("bogus_nested_key", 1).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("axis_y2", &inner).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("unknown nested key must be refused");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains("chart config: unknown key 'bogus_nested_key' in axis_y2; accepted:"),
+                "message must name the nested section, not the top-level: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn chart_config_deprecated_axis_xy_keys_refused() {
+        // D1/NF-B12: the deprecated `x`/`y` AxisConfig flags are not in the
+        // accepted set — a raw-dict caller still emitting them (or an
+        // AxisConfig.to_dict() that has not yet dropped them) is refused, not
+        // silently swallowed. This is the exact pre-fix repro from F-L07-06's
+        // evidence quote.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let inner = PyDict::new(py);
+            inner.set_item("x", true).unwrap();
+            inner.set_item("y", true).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("axis_x", &inner).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("deprecated x/y keys must be refused");
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("unknown key 'x' in axis_x"), "{msg}");
+        });
+    }
+
+    #[test]
+    fn chart_config_axis_y2_valid_keys_accepted() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let inner = PyDict::new(py);
+            inner.set_item("label_color", "#654321").unwrap();
+            inner.set_item("tick_count", 3).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("axis_y2", &inner).unwrap();
+            let cc = chart_config_from_dict(Some(&d)).expect("valid axis_y2 keys must be accepted");
+            let axis_y2 = cc.axis_y2.expect("axis_y2 must deserialize");
+            assert_eq!(axis_y2.style.label_color.as_deref(), Some("#654321"));
+            assert_eq!(axis_y2.style.tick_count, Some(3));
+        });
+    }
+
+    #[test]
+    fn chart_config_every_gated_section_rejects_a_bogus_key() {
+        // Sweeps every section `accepted_keys_for_section` covers, proving the
+        // gate is wired uniformly rather than for axis_y2 alone.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            for section in ["axis", "axis_x", "axis_y", "axis_y2", "legend", "grid", "padding", "color", "title"] {
+                let inner = PyDict::new(py);
+                inner.set_item("definitely_not_a_real_key", 1).unwrap();
+                let d = PyDict::new(py);
+                d.set_item(section, &inner).unwrap();
+                let res = chart_config_from_dict(Some(&d));
+                let err = match res {
+                    Ok(_) => panic!("section `{section}` must refuse a bogus key"),
+                    Err(e) => e,
+                };
+                let msg = err.value(py).to_string();
+                assert!(
+                    msg.contains(&format!("unknown key 'definitely_not_a_real_key' in {section}")),
+                    "section `{section}`: {msg}"
+                );
+            }
+        });
+    }
+
+    /// Minimal fixture for the byte-identity pin below: the gate itself has
+    /// no opinion about mark/encoding, so any renderable chart works — this
+    /// mirrors `orchestration_tests::scatter_3` (`render/mod.rs`), a private
+    /// helper of that sibling test module and not reachable from here.
+    fn minimal_line_chart() -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    #[test]
+    fn chart_config_from_dict_populated_axis_matches_direct_rust_construction() {
+        // Byte-identity pin (constraint §4), replacing a cycle-2 pin that
+        // could not fail for any reason related to this task (spec review):
+        // `chart_config_from_dict(None)` returns `ChartConfig::default()`
+        // and `Some(&empty dict)` deserializes to the identical value (every
+        // field is `Option` + `#[serde(default)]`), so a None-vs-empty-dict
+        // render comparison only asserted `render_svg_internal` determinism,
+        // not gate neutrality.
+        //
+        // This pin targets the task's riskiest change directly:
+        // `#[serde(deny_unknown_fields)]` added to `AxisConfigSpec`, a
+        // struct that also `#[serde(flatten)]`s `AxisStyleSpec` — a
+        // combination serde's own docs call unsupported (see the doc on
+        // `AxisConfigSpec`). A POPULATED `axis_x` config (label_angle +
+        // tick_values, exercising both the flattened style field and its
+        // alias resolution) is rendered two ways: once through the real
+        // wire path (`chart_config_from_dict` -> PyDict -> deserialize),
+        // once via a `ChartConfig` built directly in Rust with no
+        // PyO3/serde involvement at all. If `deny_unknown_fields`-on-
+        // flatten silently dropped or misread a field on the wire path, the
+        // two renders would diverge.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let (spec, batch) = minimal_line_chart();
+            let theme = ThemeInputs::default();
+            let viewport = Viewport { width: 400.0, height: 300.0 };
+            let render_config = RenderConfig::default();
+
+            let inner = PyDict::new(py);
+            inner.set_item("label_angle", -30.0).unwrap();
+            inner.set_item("tick_values", vec![0.0, 1.0, 2.0]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("axis_x", &inner).unwrap();
+            let cc_from_dict =
+                chart_config_from_dict(Some(&d)).expect("populated axis_x config must be accepted");
+
+            let cc_direct = ChartConfig {
+                axis_x: Some(crate::render::chart_config::AxisConfigSpec {
+                    style: crate::render::chart_config::AxisStyleSpec {
+                        label_angle: Some(-30.0),
+                        values: Some(vec![0.0, 1.0, 2.0]),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let svg_from_dict = render_svg_internal(
+                &spec,
+                &batch,
+                &theme,
+                viewport,
+                &render_config,
+                &cc_from_dict,
+            )
+            .unwrap();
+            let svg_direct = render_svg_internal(
+                &spec,
+                &batch,
+                &theme,
+                viewport,
+                &render_config,
+                &cc_direct,
+            )
+            .unwrap();
+
+            assert_eq!(
+                svg_from_dict.bytes, svg_direct.bytes,
+                "chart_config_from_dict's deserialized ChartConfig must render byte-identically \
+                 to the same config constructed directly in Rust — a divergence here means \
+                 deny_unknown_fields-on-flatten (AxisConfigSpec/AxisStyleSpec) is silently \
+                 dropping or misreading a field on the wire path"
+            );
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
