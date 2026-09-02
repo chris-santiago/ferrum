@@ -8,11 +8,11 @@
 //!   path; only y2 present → ordinal-range; else heatmap.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_effective_stroke, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_effective_stroke, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
+use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::{ColorInput, ColorScale, ScaleKind};
+use crate::render::scale_resolve::ScaleKind;
 
 fn count_distinct(values: &[Option<String>]) -> usize {
     let mut seen = std::collections::HashSet::<&str>::new();
@@ -66,16 +66,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     let n = xs.len();
     if x2s.len() != n || ys.len() != n || y2s.len() != n { return empty_result(); }
 
-    let cfield = color_field(ctx, spec);
-    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
-    let color_numeric: Option<Vec<Option<f64>>> = match (color_input, cfield) {
-        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let color_strings: Option<Vec<Option<String>>> = match (color_input, cfield) {
-        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
+    let (color_strings, color_numeric) = color_column_loader(ctx);
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -199,11 +190,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let panel = ctx.panel.plot_area;
 
-    let cfield = color_field(ctx, spec);
-    let color_strings: Option<Vec<Option<String>>> = match (ctx.scales.color.as_ref().map(ColorScale::input), cfield) {
-        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
+    // The ordinal-range path binds only the categorical half of the shared
+    // loader: its rects have no continuous fill path, so a `Numeric` color
+    // scale's column is loaded and dropped here and every `resolve_fill_color`
+    // below passes `None` for `num_value` (unchanged behavior — see the
+    // comments at those call sites).
+    let (color_strings, _) = color_column_loader(ctx);
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -264,8 +256,9 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let rect_top = py.min(py2) + y_offsets[i];
             let rect_h = (py - py2).abs().max(1.0);
 
-            // Ordinal rects bind only a categorical color column (no continuous
-            // path is loaded here), so `num_value` is always None.
+            // Ordinal rects consume only the categorical half of the color
+            // read (this path has no continuous fill), so `num_value` is
+            // always None — see the loader call at the top of this fn.
             let (fill, fill_cleared) = resolve_fill_color(
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
@@ -360,8 +353,9 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let rect_left = px.min(px2) + x_offsets[i];
             let rect_w = (px - px2).abs().max(1.0);
 
-            // Ordinal rects bind only a categorical color column (no continuous
-            // path is loaded here), so `num_value` is always None.
+            // Ordinal rects consume only the categorical half of the color
+            // read (this path has no continuous fill), so `num_value` is
+            // always None — see the loader call at the top of this fn.
             let (fill, fill_cleared) = resolve_fill_color(
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
@@ -459,16 +453,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let cell_w = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w) / n_x as f64;
     let cell_h = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h) / n_y as f64;
 
-    let cfield = color_field(ctx, spec);
-    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
-    let color_numeric: Option<Vec<Option<f64>>> = match (color_input, cfield) {
-        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let color_strings: Option<Vec<Option<String>>> = match (color_input, cfield) {
-        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
+    let (color_strings, color_numeric) = color_column_loader(ctx);
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
 

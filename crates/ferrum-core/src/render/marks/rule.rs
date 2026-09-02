@@ -48,6 +48,15 @@
 //!   onto an ordinal scale) raises the typed `RenderError::UnsupportedDtype`
 //!   that reader already constructs — propagated with `?`, never discarded.
 //!
+//! The per-row *color* read is held to the same two contracts (NF-A3 sweep
+//! completion, 2026-09-02): it goes through the shared
+//! [`row_colors_from_scale`], which keys on the resolved color scale rather
+//! than the column dtype, and its typed error propagates with `?` too. Before
+//! that it read `col_as_str` and discarded the error with `.ok()?`, so an
+//! `Int*`/`Float*`/`Bool` color column rendered every rule in the theme stroke
+//! while the legend listed the categories — contradicting the invariant stated
+//! eleven lines above it.
+//!
 //! # Totality invariant (spec c2)
 //!
 //! No presence-legal channel combination produces empty output silently.
@@ -58,11 +67,12 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_color,
-    DrawCtx,
+    col_as_f64, col_as_positional_category_str, resolve_stroke_color, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
+use crate::render::marks::channels::{
+    resolve_row_stroke_dash, row_colors_from_scale, stroke_dash_column_loader, DashColumns,
+};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 use crate::render::RenderError;
@@ -199,21 +209,6 @@ fn positional_pixels(
     }
 }
 
-/// Resolve a per-row stroke color from the color encoding + color scale, if both
-/// are present. Each row's category value is mapped through `ctx.scales.color`
-/// (the same path `line.rs`/`point.rs` use). Returns `None` when there is no
-/// color encoding, so callers fall back to the constant mark-style stroke.
-fn rule_color_values(ctx: &DrawCtx) -> Option<Vec<Option<Color>>> {
-    let field = color_field(ctx, ctx.spec)?;
-    let scale = ctx.scales.color.as_ref()?;
-    let cats = col_as_str(ctx.batch, field).ok()?;
-    Some(
-        cats.iter()
-            .map(|c| c.as_deref().and_then(|v| scale.lookup(v)))
-            .collect(),
-    )
-}
-
 /// Build a per-row stroke style for rule segments, applying encoding column values.
 ///
 /// `opacity` / `stroke_opacity` are resolved via the shared [`OpacityResolver`]
@@ -324,7 +319,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let dash_cols = stroke_dash_column_loader(ctx);
-    let color_vals = rule_color_values(ctx);
+    // Per-row stroke color through the shared NF-A3 reader. `?`, not `.ok()`:
+    // this module's doc promises an available typed error is never discarded,
+    // and the color read is held to the same contract as `positional_pixels`.
+    let color_vals = row_colors_from_scale(ctx)?;
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -1717,5 +1715,172 @@ mod tests {
                 "span must sit at the timestamp's pixel");
             assert_eq!(line.0, line.2, "a vertical span keeps one x for both endpoints");
         }
+    }
+
+    // ── NF-A3: the per-row color read obeys this module's own error contract ─
+
+    /// A `Timestamp` color column raises the typed `UnsupportedDtype` the
+    /// reader constructs, propagated with `?`.
+    ///
+    /// RED (verified in place): `rule_color_values` read the color column
+    /// through `col_as_str` and discarded the error with `.ok()?` — eleven
+    /// lines below `positional_pixels`, which honors the opposite invariant
+    /// this module's doc states. The rule then rendered in the theme stroke
+    /// with no diagnostic. `Timestamp` is the one dtype
+    /// `col_as_ordinal_category_str` still refuses (it has no category
+    /// stringification that agrees with the ordinal domain), so it is the
+    /// shape that discriminates "propagates" from "discards" after the swap.
+    #[test]
+    fn rule_propagates_the_color_reads_typed_error() {
+        use arrow::array::TimestampMillisecondArray;
+        use crate::spec::encoding::DataType as SpecType;
+
+        let mut spec = rule_spec(Some(("a", Some(SpecType::Quantitative))), None, None, None);
+        spec.encoding.color =
+            Some(EncodingSpec { field: "when".into(), type_: Some(SpecType::Nominal), ..Default::default() });
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new(
+                "when",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![3.0, 4.0])),
+            Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        // Scale resolution needs a numeric y and must not itself refuse the
+        // temporal color column, so resolve against an x/y-only spec; `build`
+        // runs on the real spec, which is what this test exercises.
+        let scale_spec = rule_spec(
+            Some(("a", Some(SpecType::Quantitative))),
+            Some(("y", Some(SpecType::Quantitative))),
+            None,
+            None,
+        );
+        let (scales, _) = resolve_scales(&scale_spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        // The reader is only reached when a color scale actually resolved; a
+        // fixture without one would pass vacuously.
+        let mut scales = scales;
+        scales.color = Some(crate::render::scale_resolve::ColorScale::Categorical {
+            domain: vec!["0".into(), "86400000".into()],
+            palette: std::borrow::Cow::Owned(vec![
+                crate::render::color::parse_color("#111111").unwrap(),
+                crate::render::color::parse_color("#222222").unwrap(),
+            ]),
+        });
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        // `MarkBuildResult` has no `Debug` impl, so match rather than expect_err.
+        let err = match super::build(&ctx) {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "a color column the reader cannot key on must raise, not render \
+                 every rule in the theme stroke with no diagnostic"
+            ),
+        };
+        assert!(
+            matches!(&err, crate::render::RenderError::UnsupportedDtype { field, .. } if field == "when"),
+            "expected UnsupportedDtype naming the 'when' column; got {err:?}"
+        );
+    }
+
+    /// A color field absent from THIS layer's batch is not an error: it is the
+    /// ordinary layered shape, and the rule falls back to its constant stroke.
+    ///
+    /// `Encoding::inherit_from` pushes the chart-level `color` onto every
+    /// layer, including ones drawing from a different `data_source`. This is
+    /// exactly `mark_qq(line=True)`: the `reference` rule layer reads the
+    /// single-row `qq_line` batch, which carries only the four line-endpoint
+    /// columns, while the chart may well encode `color="cat"` for the point
+    /// layer. Propagating `UnknownColumn` from the color read here would refuse
+    /// that chart outright, so the precondition is checked before the read —
+    /// and this test is what keeps the two apart from each other.
+    #[test]
+    fn rule_treats_a_color_column_absent_from_its_layer_batch_as_no_color() {
+        use crate::spec::encoding::DataType as SpecType;
+
+        let mut spec = rule_spec(
+            Some(("a", Some(SpecType::Quantitative))),
+            Some(("y", Some(SpecType::Quantitative))),
+            Some(("a2", Some(SpecType::Quantitative))),
+            Some(("y2", Some(SpecType::Quantitative))),
+        );
+        spec.encoding.color = Some(EncodingSpec {
+            field: "cat".into(),
+            type_: Some(SpecType::Nominal),
+            ..Default::default()
+        });
+
+        // The layer's own batch — no `cat` column, mirroring `qq_line`.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("a2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            // Every endpoint inside the [0, 1] domain the x/y scales resolve
+            // from `a`/`y`, so neither row is dropped for an out-of-domain
+            // pixel and the count assertion below stays about the color read.
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.5, 0.8])),
+            Arc::new(Float64Array::from(vec![0.5, 0.8])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scale_spec = rule_spec(
+            Some(("a", Some(SpecType::Quantitative))),
+            Some(("y", Some(SpecType::Quantitative))),
+            None,
+            None,
+        );
+        let (mut scales, _) =
+            resolve_scales(&scale_spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        // A color scale IS resolved chart-wide (from the OTHER layer's data),
+        // so the guard has to be the column-presence check, not `scales.color`.
+        scales.color = Some(crate::render::scale_resolve::ColorScale::Categorical {
+            domain: vec!["p".into(), "q".into()],
+            palette: std::borrow::Cow::Owned(vec![
+                crate::render::color::parse_color("#111111").unwrap(),
+                crate::render::color::parse_color("#222222").unwrap(),
+            ]),
+        });
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let result = match super::build(&ctx) {
+            Ok(r) => r,
+            Err(e) => panic!(
+                "an inherited color column this layer's data does not carry must \
+                 not refuse the render; got {e:?}"
+            ),
+        };
+        let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            _ => None,
+        }).collect();
+        assert_eq!(strokes.len(), 2, "both rules must still draw");
+        let distinct: std::collections::BTreeSet<(u8, u8, u8)> =
+            strokes.iter().map(|c| (c.r, c.g, c.b)).collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "both rules must take ONE constant stroke, not two category colors; got {distinct:?}"
+        );
+        assert!(
+            !distinct.contains(&(0x11, 0x11, 0x11)) && !distinct.contains(&(0x22, 0x22, 0x22)),
+            "the stroke must not come from the color scale's palette; got {distinct:?}"
+        );
     }
 }

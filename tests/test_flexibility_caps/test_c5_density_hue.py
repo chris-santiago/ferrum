@@ -93,18 +93,31 @@ class TestDesugaredContourGroupby:
         assert "groupby=[]" in kde_repr, f"Kde2D repr must show empty groupby; got: {kde_repr}"
 
     def test_groupby_fill_layer_colors_by_group(self):
-        """When groupby is set, the polygon layer colors by the group field."""
+        """When groupby is set, the segment layer colors by the group field, typed Nominal.
+
+        The group field half of this assertion is the original contract
+        (color by the group, not by ``level_value``). The Nominal half was
+        added by the Batch-A design-review Cycle-3 sweep: this layer binds a
+        ``segment`` mark, which is in the set whose inert continuous-color
+        handling is *silent*, so an Int64 ``groupby`` column left to infer
+        its scale type drew both groups' isolines in one colour with no
+        warning. Asserting the channel equality plus the decomposed field and
+        type keeps a partial regression (right field, lost typing)
+        distinguishable from a total one.
+        """
+        from ferrum.encoding import Color
+
         result = desugar_contour("x", "y", groupby="g", fill=True)
         layers = result.layers
         assert len(layers) >= 1
         layer = layers[0]
-        enc = layer.encoding
-        color_field = enc.get("color")
-        # color must be the group field, not "level_value"
-        assert color_field == "g", (
-            f"Grouped contour polygon layer must color by group field 'g'; "
-            f"got color={color_field!r}"
+        color_ch = layer.encoding.get("color")
+        assert color_ch == Color("g", type_="nominal"), (
+            f"Grouped contour segment layer must color by group field 'g' typed "
+            f"Nominal; got color={color_ch!r}"
         )
+        assert color_ch.field == "g"
+        assert color_ch.option("type") == "N"
 
     def test_no_groupby_fill_layer_colors_by_level_value(self):
         """Without groupby, polygon layer colors by level_value (byte-stable)."""

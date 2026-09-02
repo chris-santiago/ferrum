@@ -33,6 +33,7 @@ from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.plots._helpers import (
     _color_field_for,
     _compose_compare,
@@ -529,9 +530,20 @@ def lmplot(
             x_range = None
 
     # Shared encoding.
+    #
+    # `hue` is typed Nominal once here and reused on every layer below. It is
+    # a group discriminator: it drives Smooth's `groupby=`, so one fit and one
+    # CI band are produced per level. Left to infer, a numeric hue column read
+    # as Continuous collapsed all of those back into a single rendered fit and
+    # a single band -- a materially wrong statistical chart, drawn silently.
+    # The scatter layer takes the same typing rather than the `point` carve-out
+    # because it shares one color scale with the fit layers in the same layered
+    # chart; typing only the fit half would ask that one scale to be Continuous
+    # and Nominal at once. See `nominal_color_channel` for the rule.
+    hue_ch = nominal_color_channel(hue)
     enc: dict = {"x": x, "y": y}
     if hue is not None:
-        enc["color"] = hue
+        enc["color"] = hue_ch
     enc.update(encode_kwargs)
 
     # ---- Scatter layer (optional) --------------------------------------
@@ -565,7 +577,7 @@ def lmplot(
                     groupby=hue_col,
                     **({"x_range": x_range} if x_range is not None else {}),
                 )
-                .encode(x=x, y=y, color=hue)
+                .encode(x=x, y=y, color=hue_ch)
             )
         else:
             fit = (
@@ -576,7 +588,7 @@ def lmplot(
                     groupby=hue_col,
                     **({"x_range": x_range} if x_range is not None else {}),
                 )
-                .encode(x=x, y=y, color=hue)
+                .encode(x=x, y=y, color=hue_ch)
             )
     elif method == "lm":
         fit = (
@@ -628,8 +640,9 @@ def lmplot(
 
     if hue is not None and method not in ("lm", "loess"):
         # Ensure fit also carries color encoding so per-group fits render
-        # with the same palette as scatter.
-        fit = fit.encode(color=hue)
+        # with the same palette as scatter -- the same Nominal-typed channel
+        # object, so the two layers cannot resolve different scale types.
+        fit = fit.encode(color=hue_ch)
 
     # logx → log scale on x.
     if logx:

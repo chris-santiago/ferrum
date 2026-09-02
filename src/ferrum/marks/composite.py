@@ -28,7 +28,7 @@ from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.color import palette as _named_palette_colors
 from ferrum.encoding import X, Y
-from ferrum.marks._desugar_helpers import resolve_color_groupby
+from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -254,7 +254,7 @@ def desugar_boxplot(
         # same field as cat, the color encoding is redundant with the axis, so
         # it is suppressed to match the errorbar/errorband siblings.
         if split_hue:
-            d["color"] = color_field
+            d["color"] = nominal_color_channel(color_field)
         return d
 
     layers = [
@@ -418,7 +418,7 @@ def desugar_errorbar(
         if y2_col is not None:
             d["y2"] = y2_col
         if split_hue:
-            d["color"] = color_field
+            d["color"] = nominal_color_channel(color_field)
         return d
 
     transforms = [ErrorExtent(field=y_field, groupby=groupby, method=method, name="err")]
@@ -552,13 +552,13 @@ def desugar_errorband(
     def _enc_ribbon() -> dict:
         d: dict = {"x": x_field, "y": Y("lower", title=y_field), "y2": "upper"}
         if split_hue:
-            d["color"] = color_field
+            d["color"] = nominal_color_channel(color_field)
         return d
 
     def _enc_border(y_col: str) -> dict:
         d: dict = {"x": x_field, "y": y_col}
         if split_hue:
-            d["color"] = color_field
+            d["color"] = nominal_color_channel(color_field)
         return d
 
     transforms = [ErrorExtent(field=y_field, groupby=groupby, method=method, name="err")]

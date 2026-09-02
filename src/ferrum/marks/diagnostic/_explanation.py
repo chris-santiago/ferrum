@@ -77,7 +77,7 @@ def desugar_importance(
         group_axis: group_field,
     }
     if color_field is not None:
-        bar_enc["color"] = color_field
+        bar_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="bar", mark="bar", encoding=bar_enc)]
 
     if error_bars:
@@ -232,7 +232,7 @@ def desugar_shap_bar(
         group_axis: group_field,
     }
     if color_field is not None:
-        bar_enc["color"] = color_field
+        bar_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="bar", mark="bar", encoding=bar_enc)]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
 

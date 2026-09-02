@@ -480,21 +480,47 @@ All positional and appearance channels accept:
 > identity.
 
 > **2026-09-02 (batch A, appearance-resolution):** color and appearance-channel
-> resolution honesty fixes, per
-> `.claude/output/specs/2026-08-28-batch-a-appearance-resolution-design.md`.
+> resolution honesty fixes (the api-contract-audit remediation campaign, batch A;
+> follow-ups tracked as GH #107–#128).
 >
-> - **Color vocabulary.** Every color-string boundary (`fill=`/`stroke=`/
->   `color=` mark kwargs at construction, `Color`/`Fill`/`Stroke` scale
->   `range=` entries, and rendering itself) now accepts one shared vocabulary:
->   148 CSS Color 4 named colors (case-insensitive, trimmed), `#rgb`/`#rgba`/
->   `#rrggbb`/`#rrggbbaa` hex, and `rgb(r,g,b)`/`rgba(r,g,b,a)` with integer
->   0-255 channels and a float `0-1` alpha (a percentage-free 0-255 alpha
->   integer is not accepted). An unparseable string raises a typed error
->   naming the accepted forms at every boundary — mark construction raises
->   `ValueError` immediately, Rust rendering raises a typed `RenderError`. The
->   former silent bare-hex normalization (accepting near-hex strings without
->   validation) is removed. `mediumpurple` is corrected to the CSS Color 4
->   value `(147, 112, 219)`.
+> - **Figure-level `hue=` typing.** A figure function's `hue=`/group-color
+>   binding types the color channel nominally (categorical palette, categorical
+>   legend), so an integer-coded category column gets the categorical palette
+>   rather than a continuous ramp or a fabricated colorbar. `catplot` answers
+>   uniformly across all eight kinds (integer group keys reach the box kind too
+>   via the shared group-partition entry point). The one deliberate carve-out:
+>   `relplot(kind="scatter")` keeps seaborn-parity dtype-driven hue — a numeric
+>   hue column there renders a continuous ramp by design (pinned). One tracked
+>   deviation: an untyped `fm.Color(...)` object passed as `hue=` currently
+>   bypasses the nominal typing (GH #130). The boundary is enforced by an AST
+>   completeness test over every color-channel binding in `marks/` and `plots/`.
+> - **Color vocabulary.** Every color-string site now accepts one shared
+>   vocabulary: 148 CSS Color 4 named colors (case-insensitive, trimmed),
+>   `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa` hex, and `rgb(r,g,b)`/`rgba(r,g,b,a)`
+>   with integer 0-255 channels and a float `0-1` alpha (a percentage-free
+>   0-255 alpha integer is not accepted). The former silent bare-hex
+>   normalization (accepting near-hex strings without validation) is removed.
+>   `mediumpurple` is corrected to the CSS Color 4 value `(147, 112, 219)`.
+>   Enforcement is **not** uniform across every site the vocabulary reaches —
+>   an unparseable string raises a typed error naming the accepted forms only
+>   at five mandated strict boundaries: mark construction (`fill=`/`stroke=`/
+>   `color=` kwargs, Python `ValueError` at `MarkBase.__init__`), encoding
+>   resolution at render time (Rust `resolve_mark_style`, typed
+>   `RenderError`), `ferrum.color.to_hex` (Python `ValueError`), selection
+>   styling (`selection.py`, Python `ValueError`), and the `background=`
+>   render/theme override (Rust `RenderConfig`/`ThemeOverrides`, typed error).
+>   Two classes of site keep the full vocabulary but a pre-existing
+>   silent-fallback contract instead of refusal: (1) `Color`/`Fill`/`Stroke`
+>   scale `range=` entries — an unparseable entry emits a `UserWarning` and
+>   discards the **entire** explicit range (not just the bad entry) in favor
+>   of the theme palette, so one bad string silently drops every good one
+>   alongside it; this is a distinct gap from, and not yet covered by, #107,
+>   and is tracked separately as **#126**, scoped to encoding-level `range=`. (2)
+>   the swept chart-config/legend-styling/axis-band/title surfaces named in
+>   #107, which keep their pre-existing silent unparseable→theme-default
+>   fallback because refusal there would make `apply_chart_config`/
+>   `axis_style_fill_from` fallible (tracked follow-up: #107,
+>   "config-surface color refusal policy").
 > - **Two clearing spellings.** `"none"` and `"transparent"` both clear a
 >   mark's fill/stroke paint at the mark boundary, in both Python and Rust,
 >   matched case-insensitively after trimming. (Selection styling diverges —

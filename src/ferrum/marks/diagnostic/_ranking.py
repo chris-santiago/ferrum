@@ -39,7 +39,7 @@ def desugar_rank1d(
     else:
         enc = {"x": "feature", "y": "score"}
     if color_field is not None:
-        enc["color"] = color_field
+        enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="bar", mark="bar", encoding=enc)]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
 

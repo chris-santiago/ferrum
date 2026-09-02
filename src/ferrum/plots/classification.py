@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum.marks._desugar_helpers import _normalize_names
+from ferrum.marks._desugar_helpers import _normalize_names, nominal_color_channel
 from ferrum._overrides import register_layer_names
 from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
@@ -508,9 +508,14 @@ def _calibration_chart_from_source(
 
     from ferrum._layer import _Layer
 
+    # Typed Nominal to match `mark_calibration`'s own desugared line layers,
+    # which route the same `color` field through `nominal_color_channel`. This
+    # point overlay shares their color scale, so binding it as a bare string
+    # would let one scale resolve two ways. (`color` here is the "model"
+    # discriminator column, so Nominal is also its correct reading on merit.)
     point_enc: dict = {"x": "mean_predicted", "y": "fraction_positive"}
     if color is not None:
-        point_enc["color"] = color
+        point_enc["color"] = nominal_color_channel(color)
     chart = chart.layer(
         _Layer(
             mark="point", encoding=point_enc, mark_kwargs={"size": 40, "filled": True}, name="point"

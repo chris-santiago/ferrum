@@ -20,7 +20,7 @@ from ferrum import (
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import resolve_color_groupby
+from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 
 
 def desugar_contour(
@@ -133,7 +133,10 @@ def desugar_contour(
     if groupby is not None:
         # Grouped contour: use isoline (segment) mode so each row is an
         # independent line segment — no polygon grouping needed, no cross-group
-        # level_id collision.  Color by the group column for categorical hue.
+        # level_id collision.  Color by the group column for categorical hue —
+        # typed Nominal, because `segment` is one of the marks whose inert
+        # continuous-color handling is silent: an Int64 `groupby` bound as a
+        # bare string drew both groups' isolines in one colour with no warning.
         # The Contour transform outputs isoline columns:
         #   level_id, level_value, contour_x, contour_y, contour_x2, contour_y2, <groupby>
         layers = [
@@ -145,7 +148,7 @@ def desugar_contour(
                     "y": Y("contour_y", title=y_field),
                     "x2": "contour_x2",
                     "y2": "contour_y2",
-                    "color": groupby,
+                    "color": nominal_color_channel(groupby),
                 },
                 mark_kwargs=None,
                 data_source="contour",
@@ -356,7 +359,7 @@ def desugar_violin(
     # cat, the color encoding is redundant with the axis, so it is suppressed to
     # match the errorbar/errorband siblings.
     if split_hue:
-        body_encoding["color"] = color_field
+        body_encoding["color"] = nominal_color_channel(color_field)
 
     transforms = [
         Violin(
@@ -384,9 +387,13 @@ def desugar_violin(
         else:
             point_encoding = {"x": cat_enc, "y": val_field}
         if color_field is not None:
-            point_encoding["color"] = color_field
+            point_encoding["color"] = nominal_color_channel(color_field)
         # raw points read from the original (unsplit) data, so coloring by the
-        # hue column is always valid regardless of split_hue.
+        # hue column is always valid regardless of split_hue. Typed Nominal
+        # rather than taking the `point` carve-out: this layer shares a chart
+        # (and therefore one color scale) with the violin body layer above,
+        # which is Nominal -- leaving this one to infer would ask that single
+        # scale to be Continuous and Nominal at once for a numeric hue.
         return MarkDesugarResult(
             transforms=transforms,
             layers=[
@@ -412,7 +419,7 @@ def desugar_violin(
             # siblings. (Contrast with the point inner above, which reads the
             # unsplit original data and so always colors by the hue column.)
             if split_hue:
-                quart_encoding["color"] = color_field
+                quart_encoding["color"] = nominal_color_channel(color_field)
             layers.append(
                 _Layer(
                     name=col,

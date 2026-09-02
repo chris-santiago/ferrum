@@ -1448,7 +1448,13 @@ fn sync_projected_fractions_to_tick_values(
 /// [`RenderWarning::ColorDomainOmitsCategories`] so that sanctioned degradation
 /// is distinguishable from a rendering bug (spec §4.2, amended 2026-08-28).
 /// `range` replaces the palette with a heap-allocated `Cow::Owned` slice of
-/// parsed hex colors.
+/// parsed colors, all-or-nothing: one unparseable entry discards the whole
+/// range and reports [`RenderWarning::ColorRangeParseFailure`], matching the
+/// Discretizing arm and `build_color_scale`'s `explicit_string_range` path.
+/// This arm cannot use the "silently skip" convention the Continuous arm keeps:
+/// a categorical palette is indexed by domain position, so a dropped entry
+/// re-points every later category rather than shortening a cycle (spec §4.2,
+/// amended 2026-09-02).
 ///
 /// Discretizing scales: `range` replaces the bucket swatches, all-or-nothing —
 /// one unparseable entry discards the whole range and reports
@@ -1460,10 +1466,13 @@ fn sync_projected_fractions_to_tick_values(
 /// §4.2, amended 2026-08-28 — never a silent drop). `domain` is inapplicable
 /// here: the boundaries come from the scale spec.
 ///
-/// On the Continuous and Categorical arms, invalid color strings are silently
-/// skipped and an override is a no-op when nothing valid is parsed — a
-/// pre-existing convention kept as-is, since a dropped entry there only shortens
-/// a gradient or a cycling palette rather than shifting a fixed bucket mapping.
+/// On the Continuous arm alone, invalid color strings are silently skipped and
+/// the override is a no-op when fewer than two stops parse — a pre-existing
+/// convention kept as-is, since a dropped stop there re-spaces a gradient
+/// (`t = i / (n - 1)` over whatever parsed) rather than shifting a
+/// position-indexed mapping. The Categorical and Discretizing arms are both
+/// all-or-nothing with a `ColorRangeParseFailure`, because both index by
+/// position.
 ///
 /// Returns the warnings the override produced, for the caller to fold into its
 /// accumulator. Empty for every chart with no `configure_color(...)`.
@@ -1526,12 +1535,31 @@ pub(crate) fn apply_color_config_to_color_scale(
                 }
             }
             if let Some(ref range) = cfg.range {
-                let colors: Vec<color::Color> = range
+                // All-or-nothing, mirroring the Discretizing arm below and
+                // `build_color_scale`'s `explicit_string_range` path. A
+                // categorical palette is indexed by DOMAIN POSITION
+                // (`ColorScale::lookup` → `palette[i % palette.len()]`), so
+                // dropping an unparseable entry does not merely shorten a
+                // cycle: it re-points every category after the dropped one.
+                // `range=["red", "notacolor", "blue"]` over domain `[a, b, c]`
+                // silently rendered `a=red, b=blue, c=red` — a wrong mapping,
+                // not a degraded one. One bad entry now discards the whole
+                // range and reports the offending string, leaving the resolved
+                // palette in place (spec §4.2, amended 2026-09-02).
+                let parsed: Result<Vec<color::Color>, &String> = range
                     .iter()
-                    .filter_map(|s| color::parse_color(s).ok())
+                    .map(|s| color::parse_color(s).map_err(|_| s))
                     .collect();
-                if !colors.is_empty() {
-                    *palette = std::borrow::Cow::Owned(colors);
+                match parsed {
+                    Ok(colors) if !colors.is_empty() => {
+                        *palette = std::borrow::Cow::Owned(colors);
+                    }
+                    // An empty `range=[]` describes no palette at all; left
+                    // unapplied with no warning, as before.
+                    Ok(_) => {}
+                    Err(entry) => warnings.push(RenderWarning::ColorRangeParseFailure {
+                        entry: entry.clone(),
+                    }),
                 }
             }
         }
@@ -4342,5 +4370,70 @@ mod chart_config_application_tests {
         );
         assert_eq!(warnings, parse_failure("nope"));
         assert_eq!(scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
+    }
+
+    /// The categorical `range` parse is all-or-nothing too, for a reason the
+    /// Discretizing arm's rationale does not cover: a categorical palette is
+    /// indexed by DOMAIN POSITION (`lookup` → `palette[i % palette.len()]`), so
+    /// dropping an unparseable entry does not shorten a cycling palette — it
+    /// re-points every category after the dropped one.
+    ///
+    /// RED (verified in place): with the former
+    /// `filter_map(|s| parse_color(s).ok())`,
+    /// `range=["red", "notacolor", "blue"]` over domain `[a, b, c]` parsed to
+    /// `[red, blue]` and rendered `a=red`, `b=blue`, `c=red` — silently wrong,
+    /// with no warning, under a doc comment asserting this could not happen.
+    /// The assertion is per-category (which category gets which color), not a
+    /// palette-length check, so a fix that merely shortened the palette would
+    /// still fail it.
+    #[test]
+    fn color_config_range_on_categorical_scale_parses_all_or_nothing() {
+        let red = color::parse_color("red").unwrap();
+        let blue = color::parse_color("blue").unwrap();
+
+        // Control: an all-valid range applies, in listed order.
+        let mut scale = Some(categorical_scale(&["a", "b", "c"]));
+        let warnings = apply_color_config_to_color_scale(
+            &mut scale,
+            &ColorConfigSpec {
+                range: Some(vec!["red".into(), "green".into(), "blue".into()]),
+                ..Default::default()
+            },
+        );
+        assert!(warnings.is_empty(), "a valid range must not warn: {warnings:?}");
+        let applied = scale.as_ref().unwrap();
+        assert_eq!(applied.lookup("a"), Some(red), "a must take the 1st entry");
+        assert_eq!(applied.lookup("c"), Some(blue), "c must take the 3rd entry");
+
+        // One unparseable entry: the whole range is discarded and reported.
+        let resolved = categorical_scale(&["a", "b", "c"]);
+        let (before_a, before_b, before_c) =
+            (resolved.lookup("a"), resolved.lookup("b"), resolved.lookup("c"));
+        let mut scale = Some(resolved);
+        let warnings = apply_color_config_to_color_scale(
+            &mut scale,
+            &ColorConfigSpec {
+                range: Some(vec!["red".into(), "notacolor".into(), "blue".into()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::ColorRangeParseFailure { entry: "notacolor".into() }],
+            "one bad entry must be reported, not silently dropped"
+        );
+        let kept = scale.as_ref().unwrap();
+        assert_eq!(
+            [kept.lookup("a"), kept.lookup("b"), kept.lookup("c")],
+            [before_a, before_b, before_c],
+            "the resolved palette must be left untouched; the old filter_map gave \
+             a=red, b=blue, c=red — a shifted mapping, not a shortened cycle"
+        );
+        assert_ne!(
+            kept.lookup("b"),
+            Some(blue),
+            "b must NOT inherit the third entry's color — that is the shift this \
+             test exists to catch"
+        );
     }
 }

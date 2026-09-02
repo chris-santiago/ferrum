@@ -134,9 +134,7 @@ def test_hex_to_color_dict_none_gets_dedicated_refusal_message(spelling):
     ``is_none_color_sentinel`` predicate, so it hits the same dedicated
     refusal on this surface (the selection wire still can't express a
     cleared paint), trimmed and case-insensitive identically to 'none'."""
-    with pytest.raises(
-        ValueError, match="test: selection styling cannot express a cleared paint"
-    ):
+    with pytest.raises(ValueError, match="test: selection styling cannot express a cleared paint"):
         _hex_to_color_dict(spelling, context="test")
 
 

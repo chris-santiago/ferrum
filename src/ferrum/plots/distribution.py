@@ -26,7 +26,8 @@ from ferrum import (
 )
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
-from ferrum.plots._helpers import _finalize_chart
+from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.plots._helpers import _field_name, _finalize_chart
 
 
 # ---------------------------------------------------------------------------
@@ -324,13 +325,20 @@ def _displot_build(
     chart = Chart(data)
 
     # Encoding: x (required for most kinds), color from hue.
+    #
+    # `hue` is typed Nominal: every displot kind renders a mark that bins,
+    # aggregates, or groups rows by it (hist -> bar, kde -> area, ecdf ->
+    # line, rug -> tick), so a numeric hue column inferring Continuous
+    # produces a fabricated colorbar over a group discriminator rather than
+    # a swatch legend -- silently on the bar/tick kinds. See
+    # `nominal_color_channel` for the rule.
     enc: dict = {}
     if x is not None:
         enc["x"] = x
     if y is not None:
         enc["y"] = y
     if hue is not None:
-        enc["color"] = hue
+        enc["color"] = nominal_color_channel(hue)
     enc.update(encode_kwargs)
 
     # Mark + transforms by kind.
@@ -769,17 +777,27 @@ def _catplot_build(
             enc["x"] = y  # cat_field goes on x
         if x is not None:
             enc["y"] = x  # val_field goes on y
+    # `hue` is typed Nominal for EVERY kind, with no per-kind branch. catplot
+    # is the categorical-plot family: its hue is a group discriminator by
+    # construction (`hue_order=` orders its levels, `dodge=True` offsets by
+    # them), so a Continuous reading is never the right one -- not even on the
+    # point-mark kinds. Uniformity here is the point: before this, one Int64
+    # hue answered three different ways across the eight kinds (violin
+    # categorical, box a typed raise, bar/boxen/strip/swarm/point a silent
+    # fabricated colorbar), and the divergence was invisible in the signature.
     if hue is not None:
-        enc["color"] = hue
+        enc["color"] = nominal_color_channel(hue)
 
     # Wire order → sort on the categorical axis encoding.
     # After the swap above, cat is always on x, so cat_channel is always "x".
     if order is not None and cat_field is not None:
         enc["x"] = _X(cat_field, sort=list(order))
 
-    # Wire hue_order → sort on the color encoding.
+    # Wire hue_order → sort on the color encoding. Typed Nominal for the same
+    # reason as above, and a fortiori: an explicit hue_order= is a statement
+    # that the levels are categories.
     if hue_order is not None and hue is not None:
-        enc["color"] = _Color(hue, sort=list(hue_order))
+        enc["color"] = _Color(hue, sort=list(hue_order), type_="nominal")
 
     enc.update(encode_kwargs)
 
@@ -827,7 +845,20 @@ def _catplot_build(
         if cat_field is None:
             raise ValueError("catplot(kind='count') requires x= (or y= when orient='h')")
         op = AggregateOp(cat_field, "count", "n")
-        chart = chart.transform(Aggregate([op], groupby=[cat_field]))
+        # Group by the hue column too when one is bound. Aggregate emits only
+        # its groupby columns, so grouping by the category alone dropped the
+        # hue column from the transform's output and the color encoding then
+        # referenced a column that no longer existed -- `catplot(kind="count",
+        # hue=...)` raised "unknown column referenced by an encoding" for every
+        # hue dtype. Counting per (category, hue) is also the reading the rest
+        # of this branch already assumes, since `dodge=True` offsets the bars
+        # by hue level, and it matches seaborn's countplot(hue=).
+        count_groupby = [cat_field]
+        if hue is not None:
+            hue_name = _field_name(hue)
+            if hue_name != cat_field:
+                count_groupby.append(hue_name)
+        chart = chart.transform(Aggregate([op], groupby=count_groupby))
         chart = chart.mark_bar(position=position) if position is not None else chart.mark_bar()
         # Remap value axis to the count column.
         # After enc normalisation, val is always on y (cat on x), so "n" always
@@ -1007,7 +1038,13 @@ def _relplot_build(
     if y is not None:
         enc["y"] = y
     if hue is not None:
-        enc["color"] = hue
+        # The one surviving point-mark carve-out in plots/: kind="scatter" is
+        # a single unpaired `point` mark (no sibling layer, no shared color
+        # resolve), so a numeric hue may legitimately read as a gradient --
+        # seaborn does the same. kind="line" groups rows into one polyline per
+        # level, so an inferred Continuous scale collapses every group into a
+        # single line; that one is typed. See `nominal_color_channel`.
+        enc["color"] = hue if kind == "scatter" else nominal_color_channel(hue)
     if size is not None:
         enc["size"] = size
     if style is not None:

@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 use arrow::array::{Array, Float64Array, Int64Array, UInt32Array};
 
 use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{
+    col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx,
+};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
@@ -105,9 +107,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .map(|a| a.as_any().downcast_ref::<Float64Array>().is_some())
         .unwrap_or(false);
 
+    // NF-A3 (spec §4.4, sweep completed 2026-09-02): the category read is
+    // `col_as_ordinal_category_str`, never `col_as_str`. `col_as_str` errors on
+    // every non-`Utf8` dtype, and this branch is reached for every dtype that
+    // is not `Float64` — so an `Int*`/`Bool`/`Float32` color column used to
+    // yield `None` here and paint every polygon the constant mark fill while
+    // the legend enumerated its categories. Identical on `Utf8`.
     let color_str_values: Option<Vec<Option<String>>> =
         if !color_is_quantitative {
-            cf.and_then(|f| col_as_str(ctx.batch, f).ok())
+            cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok())
         } else {
             None
         };
@@ -696,5 +704,75 @@ mod tests {
         let result = super::build(&ctx);
         let n = result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count();
         assert_eq!(n, 3, "Int64 hex_id must produce 3 separate polygons, got {n}");
+    }
+
+    // ── NF-A3: the categorical branch reads every category dtype (§4.4) ──────
+
+    /// An `Int64` nominal color column must fill each group with its category's
+    /// color, not leave every group in the constant mark fill.
+    ///
+    /// The categorical branch here is reached for every dtype that is not
+    /// `Float64` (`color_is_quantitative` is a `Float64Array` downcast), so
+    /// `Int64` lands in it — and `col_as_str` returned `Err` for exactly that
+    /// dtype. RED (verified in place): with `col_as_str`, `color_str_values` is
+    /// `None`, the `(values, scale)` guard below the quantitative branch never
+    /// opens, and all three polygons take `ctx.mark_style.paint.fill` while the
+    /// legend enumerates the three categories. The `Utf8` twin carries the same
+    /// three categories in the same row order and is asserted equal.
+    #[test]
+    fn polygon_fills_groups_from_an_int64_nominal_color() {
+        use arrow::array::{Int64Array, StringArray};
+        use crate::spec::encoding::DataType as SpecType;
+
+        let group_fills = |color_field: Field, color_col: Arc<dyn arrow::array::Array>| -> Vec<String> {
+            let mut spec = polygon_spec(Some("group_id"), Some("grp"));
+            spec.encoding.color.as_mut().unwrap().type_ = Some(SpecType::Nominal);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("group_id", DataType::UInt32, false),
+                color_field,
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 0.5,  2.0, 3.0, 2.5,  4.0, 5.0, 4.5])),
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0,  0.0, 0.0, 1.0,  0.0, 0.0, 1.0])),
+                Arc::new(UInt32Array::from(vec![0u32, 0, 0,  1, 1, 1,  2, 2, 2])),
+                color_col,
+            ]).unwrap();
+            let theme = ThemeInputs::default();
+            let panel = rect_panel();
+            let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+            assert!(scales.color.is_some(), "fixture must resolve a color scale");
+            let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            super::build(&ctx).nodes.iter().filter_map(|n| match n {
+                ferrum_scene::SceneNode::Polygon { style, .. } => {
+                    style.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b))
+                }
+                _ => None,
+            }).collect()
+        };
+
+        let utf8 = group_fills(
+            Field::new("grp", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["1", "1", "1",  "2", "2", "2",  "3", "3", "3"])),
+        );
+        assert_eq!(utf8.len(), 3, "Utf8 reference must produce 3 polygons");
+        assert_eq!(
+            utf8.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "Utf8 reference must give three distinct group fills; got {utf8:?}"
+        );
+
+        let int64 = group_fills(
+            Field::new("grp", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![1_i64, 1, 1,  2, 2, 2,  3, 3, 3])),
+        );
+        assert_eq!(
+            int64, utf8,
+            "an Int64 nominal color column must fill the groups exactly as its \
+             Utf8 twin does; got {int64:?}. Three identical fills here is the \
+             col_as_str drop."
+        );
     }
 }

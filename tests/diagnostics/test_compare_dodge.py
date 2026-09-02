@@ -23,6 +23,7 @@ import polars as pl
 import ferrum
 from ferrum.composition import ConcatChart
 from ferrum.coord import CoordFlip
+from ferrum.encoding import Color
 from ferrum.position import Dodge
 from tests.fixtures import load_dataset, load_fixture
 
@@ -307,7 +308,15 @@ def test_importance_compare_declares_color_and_dodge():
     layer_names = {ly.name for ly in resolved._layers}
     assert {"bar", "errorbar", "value_text"} <= layer_names
     bar = next(ly for ly in resolved._layers if ly.name == "bar")
-    assert bar.encoding.get("color") == "model"
+    # `nominal_color_channel` (Batch-A design-review Cycle 2 sweep) now binds
+    # `desugar_importance`'s bar_enc["color"] through Color(..., type_="nominal")
+    # instead of a bare string, so an Int64 "model" id column can't infer a
+    # continuous scale -- assert both the field name and the Nominal typing,
+    # not just field-name equality with a bare string.
+    color_ch = bar.encoding.get("color")
+    assert color_ch == Color("model", type_="nominal")
+    assert color_ch.field == "model"
+    assert color_ch.option("type") == "N"
 
 
 def test_importance_compare_vertical_bars_are_dodged():
@@ -513,7 +522,12 @@ def test_shap_bar_compare_declares_color_and_dodge():
     assert result._position == Dodge(by="model")
     resolved = result._resolve_pending()
     bar = next(ly for ly in resolved._layers if ly.name == "bar")
-    assert bar.encoding.get("color") == "model"
+    # See test_importance_compare_declares_color_and_dodge's comment:
+    # desugar_shap_bar's bar_enc["color"] is now Nominal-typed too.
+    color_ch = bar.encoding.get("color")
+    assert color_ch == Color("model", type_="nominal")
+    assert color_ch.field == "model"
+    assert color_ch.option("type") == "N"
 
 
 def test_shap_bar_compare_uses_coordflip():
@@ -626,7 +640,12 @@ def test_cv_scores_compare_declares_color_and_dodge():
     assert result._position == Dodge(by="model")
     resolved = result._resolve_pending()
     box_layer = next(ly for ly in resolved._layers if ly.name == "box")
-    assert box_layer.encoding.get("color") == "model"
+    # See test_importance_compare_declares_color_and_dodge's comment:
+    # desugar_boxplot's enc()["color"] is now Nominal-typed too.
+    color_ch = box_layer.encoding.get("color")
+    assert color_ch == Color("model", type_="nominal")
+    assert color_ch.field == "model"
+    assert color_ch.option("type") == "N"
 
 
 def test_cv_scores_compare_box_dodged_per_split_band():

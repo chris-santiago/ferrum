@@ -55,12 +55,27 @@ column (``class``) with. Desugar sweep this file exercises:
   caller-supplied override was unguarded).
 
 ``desugar_discrimination_threshold`` (color="metric", always Utf8 by melt
-construction), ``desugar_confusion`` and ``desugar_class_prediction_error``
-(rect/bar marks -- the inert-color warning only fires for line/ribbon
-marks), ``desugar_silhouette``/``desugar_intercluster_distance``/
-``desugar_decision_boundary`` (rect/point marks, or intentionally
-continuous) were confirmed already safe and are not touched; see
-``.sdd/task-5c-report.md`` for the full per-site sweep reasoning.
+construction) is genuinely safe and not touched. ``desugar_confusion`` and
+``desugar_rank2d`` (rect marks colored by a genuinely continuous quantity --
+cell count, correlation coefficient -- already explicitly wrapped in
+``Color(...)`` at their call sites) and ``desugar_decision_boundary`` /
+``desugar_intercluster_distance`` (rect/point, intentionally continuous or a
+point-mark scatter reading unsplit per-row data) are also unaffected by this
+class of bug and not touched. See ``.sdd/task-5c-report.md`` for that
+original per-site reasoning -- **but note its claim that
+``desugar_class_prediction_error`` and ``desugar_silhouette`` (rect/bar
+marks) were "safe because the inert-color warning only fires for
+line/ribbon" was wrong**: "does not warn" is not "renders correctly", and
+both were found rendering a continuous colorbar for an Int64 discriminator
+column, with no warning at all, in the Batch-A design-review Cycle 2 sweep.
+Both are now fixed the same way as this file's sites, pinned in
+``tests/marks/test_nominal_color_sweep.py`` alongside the rest of that
+cycle's fixes (``desugar_boxplot``/``desugar_errorbar`` in
+``marks/composite.py``, ``desugar_violin`` in ``marks/heavy_stat.py``,
+``desugar_rank1d``/``desugar_importance``/``desugar_shap_bar``, which share
+this file's ``marks/diagnostic/*`` scope but are pinned in that sibling file
+per the repo's findings-scoped test-file convention, since they belong to a
+distinct finding/task rather than this file's original scope).
 
 Byte-identity scope (spec-review round 1, adjudication a): the bare
 ``Chart(df).mark_*()`` path -- these desugars build a layered chart with
@@ -87,20 +102,14 @@ import warnings
 import polars as pl
 
 import ferrum
+from tests._hue_probe import legend_labels
 from tests.fixtures import load_dataset, load_fixture
 
-# Matches a categorical-legend swatch + its label: `<circle r="4" .../><text>label</text>`
-# (render/marks/legend.rs's SymbolKind::Circle branch, swatch radius 4 at the
-# default scale). Deliberately anchored on the swatch circle so this can
-# never match an axis tick label -- a bare `<text>` scan is satisfied by
-# axis ticks ("0", "1", ...) even when no legend renders at all (quality
-# review finding, task 5c).
-_LEGEND_ENTRY_RE = re.compile(r'<circle[^>]*\br="4"[^>]*/><text[^>]*>([^<]+)</text>')
-
-
-def _legend_labels(svg: str) -> list[str]:
-    """Return the label text of each categorical-legend swatch, in order."""
-    return _LEGEND_ENTRY_RE.findall(svg)
+# The categorical-legend swatch regex and its accessor live in
+# tests/_hue_probe.py: this module, tests/marks/test_nominal_color_sweep.py and
+# tests/test_figure_hue_typing.py all assert the same "a discriminator renders a
+# swatch legend, not a colorbar" invariant, and had each grown their own copy.
+_legend_labels = legend_labels
 
 
 def _stroke_hex(svg_element: str) -> str:

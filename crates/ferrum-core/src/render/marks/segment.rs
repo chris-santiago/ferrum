@@ -1,27 +1,36 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{
-    col_as_f64, col_as_str, color_field, resolve_stroke_color, x_field, y_field, DrawCtx,
-};
+use crate::render::draw::{col_as_f64, resolve_stroke_color, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::row_colors_from_scale;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
+use crate::render::RenderError;
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+/// Build one `Line` scene node per row from `(x, y)` to `(x2, y2)`.
+///
+/// Fallible for one reason: the per-row color read propagates the typed
+/// `RenderError` its reader constructs instead of discarding it, matching
+/// `rule.rs` — the sibling that shares this mark's diagonal geometry and the
+/// same shared color reader (`channels::row_colors_from_scale`). Every other
+/// refusal in this builder is a presence/dtype guard that predates that rule
+/// and stays an `Ok(empty())`; #118's silent-empty policy sweep owns those,
+/// not this change.
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let empty = || MarkBuildResult::empty(MarkBatchKind::Segment);
 
     let spec = ctx.spec;
-    let (Some(xf), Some(yf)) = (x_field(ctx, spec), y_field(ctx, spec)) else { return empty(); };
-    let Some(x2f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) else { return empty(); };
-    let Some(y2f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) else { return empty(); };
+    let (Some(xf), Some(yf)) = (x_field(ctx, spec), y_field(ctx, spec)) else { return Ok(empty()); };
+    let Some(x2f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) else { return Ok(empty()); };
+    let Some(y2f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) else { return Ok(empty()); };
 
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
-    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty() };
-    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty() };
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty()) };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty()) };
+    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return Ok(empty()) };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return Ok(empty()) };
 
     // Per-row opacity via the shared OpacityResolver (C7); stroke_width stays
     // local. Segment is a stroke-only mark (no fill / stroke_opacity columns),
@@ -33,17 +42,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    // Per-row stroke color from the color encoding + color scale (same path as
-    // line.rs/point.rs). Only wins when no explicit user stroke override is set.
-    let color_values: Option<Vec<Option<crate::render::color::Color>>> =
-        match (color_field(ctx, spec), ctx.scales.color.as_ref()) {
-            (Some(field), Some(scale)) => col_as_str(ctx.batch, field).ok().map(|cats| {
-                cats.iter()
-                    .map(|c| c.as_deref().and_then(|v| scale.lookup(v)))
-                    .collect()
-            }),
-            _ => None,
-        };
+    // Per-row stroke color through the shared NF-A3 reader (same path as
+    // rule.rs). Only wins when no explicit user stroke override is set.
+    let color_values = row_colors_from_scale(ctx)?;
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
@@ -100,14 +101,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         kind: MarkBatchKind::Segment,
         nodes,
         data_indices: Some(data_indices),
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -181,7 +182,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 2);
     }
 
@@ -248,7 +249,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // Check that the segment line has the correct stroke color
         assert_eq!(result.nodes.len(), 1);
@@ -298,7 +299,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Segment).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
             ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
             _ => None,
@@ -380,7 +381,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Segment).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 nodes survive (row 1 with null y is skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -446,7 +447,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Segment).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2, "expected 2 segments");
         let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
@@ -502,7 +503,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Segment).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 3, "all 3 rows must produce nodes when none are skipped");
         let tooltips = result.tooltips.expect("tooltips must be Some");
@@ -554,7 +555,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Segment).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }

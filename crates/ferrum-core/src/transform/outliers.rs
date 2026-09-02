@@ -1,12 +1,14 @@
 //! Outliers: per-group IQR row filter.
 //! Output schema = input schema, filtered to outlier rows.
 
-use arrow::array::{Array, BooleanArray, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, BooleanArray, Float64Array, RecordBatch};
 use arrow::compute::filter_record_batch;
 use arrow::datatypes::DataType;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
+
+use crate::transform::group_key::group_partition_multi;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -44,69 +46,16 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
         .ok_or_else(|| PyValueError::new_err(format!(
             "stat_outliers: expected Float64Array for column '{}'", spec.field)))?;
 
-    // Validate groupby columns.
-    for g in &spec.groupby {
-        let i = schema.index_of(g).map_err(|_| {
-            PyValueError::new_err(format!("stat_outliers: groupby column '{}' not found", g))
-        })?;
-        let dt = schema.field(i).data_type();
-        if dt != &DataType::Float64 && !matches!(dt, DataType::Utf8) {
-            return Err(PyValueError::new_err(format!(
-                "stat_outliers: groupby column '{}' must be Float64 or Utf8; got {:?}", g, dt
-            )));
-        }
-    }
-
-    // Build group buckets keyed by stringified group values.
-    let groups: std::collections::HashMap<Vec<String>, Vec<usize>> = if spec.groupby.is_empty() {
-        let mut m = std::collections::HashMap::new();
-        m.insert(Vec::new(), (0..n).collect());
-        m
-    } else {
-        let mut m: std::collections::HashMap<Vec<String>, Vec<usize>> =
-            std::collections::HashMap::new();
-        let arrs: Vec<(&dyn Array, DataType)> = spec
-            .groupby
-            .iter()
-            .map(|g| {
-                let i = schema.index_of(g).expect("invariant: groupby columns validated above");
-                let dt = schema.field(i).data_type().clone();
-                (batch.column(i).as_ref(), dt)
-            })
-            .collect();
-        for row in 0..n {
-            let mut key = Vec::with_capacity(arrs.len());
-            for (arr, dt) in &arrs {
-                match dt {
-                    DataType::Float64 => {
-                        let a = arr.as_any().downcast_ref::<Float64Array>()
-                            .expect("invariant: dtype validated as Float64 above");
-                        key.push(if a.is_null(row) {
-                            "__null__".to_string()
-                        } else {
-                            a.value(row).to_bits().to_string()
-                        });
-                    }
-                    DataType::Utf8 => {
-                        let a = arr.as_any().downcast_ref::<StringArray>()
-                            .expect("invariant: dtype validated as Utf8 above");
-                        key.push(if a.is_null(row) {
-                            "__null__".to_string()
-                        } else {
-                            a.value(row).to_string()
-                        });
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            m.entry(key).or_default().push(row);
-        }
-        m
-    };
+    // Partition rows by groupby columns, sharing the group-keying idiom used by
+    // BoxStats/LetterValue/violin (Utf8/LargeUtf8, Float64/Float32,
+    // Int8-64/UInt8-64, Boolean). A null-keyed row is excluded from every group,
+    // matching how the paired BoxStats/LetterValue groupby drops null groups —
+    // an outlier point with no corresponding box would be orphaned otherwise.
+    let (_, group_idx_map, _) = group_partition_multi(batch, &spec.groupby, "stat_outliers")?;
 
     // Compute mask: true = outlier (keep).
     let mut mask = vec![false; n];
-    for indices in groups.values() {
+    for indices in group_idx_map.values() {
         // Collect non-NaN, non-null values for quartile computation.
         let group_values: Vec<f64> = indices
             .iter()
@@ -171,6 +120,7 @@ fn quartiles_q1_q3(values: &[f64]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::StringArray;
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
 
@@ -277,6 +227,62 @@ mod tests {
         let g_arr = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(v_arr.value(0), 1000.0);
         assert_eq!(g_arr.value(0), "B");
+    }
+
+    fn batch_g_v_int64(groups: Vec<i64>, values: Vec<f64>) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(values)),
+                Arc::new(Int64Array::from(groups)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Int64 groupby twin of `outliers_per_group_iqr_isolates_outlier`. Before
+    /// this fix, `stat_outliers` rejected any groupby column that wasn't
+    /// Float64/Utf8 — so `catplot(kind="box", hue=<Int64>)` raised even though
+    /// violin/bar/boxen accept integer hue via the shared `group_key` idiom.
+    /// Two Int64-keyed groups must isolate the outlier to its own group,
+    /// exactly matching the Utf8 twin's row-filtering behavior.
+    #[test]
+    fn outliers_int64_groupby_isolates_outlier_per_group() {
+        pyo3::Python::initialize();
+        use arrow::array::Int64Array;
+        // Group 1: uniform 1..=10, no outliers within group.
+        // Group 2: 100..=108 then 1000.0, last value is an extreme outlier within its group.
+        let groups = vec![
+            1, 2, 1, 2, 1, 2, 1, 2, 1, 2,
+            1, 2, 1, 2, 1, 2, 1, 2, 1, 2,
+        ];
+        let values = vec![
+            1.0, 100.0, 2.0, 101.0, 3.0, 102.0, 4.0, 103.0, 5.0, 104.0,
+            6.0, 105.0, 7.0, 106.0, 8.0, 107.0, 9.0, 108.0, 10.0, 1000.0,
+        ];
+        let b = batch_g_v_int64(groups, values);
+        let spec = OutliersSpec {
+            field: "v".into(),
+            groupby: vec!["g".into()],
+            extent: 1.5,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(out.num_rows(), 1);
+        assert_eq!(
+            out.schema().field(1).data_type(),
+            &DataType::Int64,
+            "groupby column dtype must be preserved, matching the Utf8 twin's dtype preservation"
+        );
+        let v_arr = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let g_arr = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(v_arr.value(0), 1000.0);
+        assert_eq!(g_arr.value(0), 2);
     }
 }
 

@@ -176,6 +176,26 @@ pub fn build_color_scale(
         let midpoint = scale_diverging_midpoint(c_enc);
         Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), scheme_warnings))
     } else {
+        // Every categorical color scale is keyed per row by
+        // `col_as_ordinal_category_str`, so the column must be category-readable
+        // whatever the domain's source. Two of the three sources never read it —
+        // an explicit `scale.domain` (D1, below) and a composite shared domain
+        // (10-pre-b) both supersede `distinct_values_in_order` — so without this
+        // gate a `Timestamp` color column declared `type="nominal"` with an
+        // explicit `domain`+`range` resolved a perfectly well-formed
+        // `Categorical` scale over a column nothing could key: `rule`/`segment`
+        // refused the chart at mark build while `point`/`bar` painted every
+        // element the theme fill under a legend enumerating the declared range.
+        // Refusing on the dtype here makes that uniform, loud, and at scale
+        // resolution, in the same words `distinct_values_in_order` uses — the
+        // default path below is byte-identical, since the gate admits exactly
+        // the dtypes that builder does (pinned by
+        // `arrow_cast::category_readers_accept_exactly_the_dtypes_ensure_category_keyable_does`).
+        crate::render::arrow_cast::ensure_category_keyable(
+            &c_enc.field,
+            located.col.data_type(),
+        )?;
+
         // T3/categorical: when the chart is faceted (Shared), resolve the domain
         // and sort-context batch from the global FINAL_OUTPUT_KEY batch so that
         // every panel assigns the same palette color to the same category string

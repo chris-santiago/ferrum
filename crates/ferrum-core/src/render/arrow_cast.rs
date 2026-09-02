@@ -396,10 +396,68 @@ fn float_as_ordinal_str(v: f64) -> String {
     }
 }
 
+/// The refusal both category-key surfaces return for a column that cannot be
+/// enumerated or keyed as ordinal categories.
+///
+/// One constructor so [`distinct_values_in_order`] and
+/// [`ensure_category_keyable`] refuse in the same words: a caller that gates on
+/// the dtype up front is standing in for the domain build it skipped, and a
+/// user should not be able to tell which one spoke.
+fn unsupported_category_key(field: &str, dtype: &DataType) -> RenderError {
+    RenderError::UnsupportedDtype {
+        field: field.to_string(),
+        dtype: format!("{dtype:?} (cannot enumerate distinct values)"),
+        context: None,
+    }
+}
+
+/// Refuse — without reading the column — any dtype that cannot serve as an
+/// ordinal category key.
+///
+/// [`distinct_values_in_order`] (domain build) and
+/// [`col_as_ordinal_category_str`] (per-row key) accept exactly this dtype set,
+/// so a categorical scale over a column outside it is unserviceable end to end.
+/// This exists for the one resolver branch that builds a categorical *color*
+/// domain without reading the column — an explicit `scale.domain` supersedes
+/// the data-derived domain, so the per-row reader would be the first thing to
+/// touch the column, and only on the marks whose builders propagate its error
+/// (rule/segment refuse; point/bar paint every element one color under a legend
+/// enumerating the declared range). Gating on the dtype there moves the refusal
+/// back to scale resolution, where it is uniform across marks, at O(1) instead
+/// of re-deriving a domain that is about to be discarded.
+///
+/// `category_readers_accept_exactly_the_dtypes_ensure_category_keyable_does`
+/// pins this list against both readers, so widening one without the others
+/// fails there rather than reopening the divergence.
+pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(), RenderError> {
+    let keyable = matches!(
+        dtype,
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Boolean
+    );
+    if keyable {
+        Ok(())
+    } else {
+        Err(unsupported_category_key(field, dtype))
+    }
+}
+
 /// Enumerate distinct values in encounter order, stringified, from a column
 /// whose dtype is one of `Utf8`, `LargeUtf8`, `Int*`, `UInt*`, `Float32`,
-/// `Float64`, or `Boolean`. Returns `Err(UnsupportedDtype)` for any other
-/// dtype.
+/// `Float64`, or `Boolean` — i.e. exactly the set
+/// [`ensure_category_keyable`] admits. Returns `Err(UnsupportedDtype)` for any
+/// other dtype.
 ///
 /// Stringification rules (must agree exactly with `col_as_ordinal_category_str`):
 /// - Utf8 / LargeUtf8 → identity
@@ -452,11 +510,7 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
         push_int!(UInt32Array);
         push_int!(UInt16Array);
         push_int!(UInt8Array);
-        return Err(RenderError::UnsupportedDtype {
-            field: field.to_string(),
-            dtype: format!("{:?} (cannot enumerate distinct values)", col.data_type()),
-            context: None,
-        });
+        return Err(unsupported_category_key(field, col.data_type()));
     }
     Ok(out)
 }
@@ -1100,6 +1154,7 @@ mod tests {
             DataType::Date32 => A::new(Date32Array::from(vec![Some(1i32)])),
             DataType::Date64 => A::new(Date64Array::from(vec![Some(1i64)])),
             DataType::Utf8 => A::new(StringArray::from(vec![Some("x")])),
+            DataType::LargeUtf8 => A::new(LargeStringArray::from(vec![Some("x")])),
             DataType::Boolean => A::new(BooleanArray::from(vec![Some(true)])),
             other => panic!("one_elem_batch_for_dtype: unhandled dtype {other:?}"),
         };
@@ -1217,5 +1272,63 @@ mod tests {
                 "min_max_f64 returned Ok for unsupported {dtype:?}"
             );
         }
+    }
+
+    /// Drift guard for [`ensure_category_keyable`]: it must admit **exactly**
+    /// the dtypes both category readers accept.
+    ///
+    /// The gate exists so a resolver branch can refuse a non-keyable color
+    /// column without building a domain it is about to discard. That is only
+    /// honest while the three agree: a dtype the gate admits but the per-row
+    /// reader refuses puts the refusal back at mark-build time (fatal on
+    /// rule/segment, silent on point/bar — the divergence the gate closed), and
+    /// a dtype the gate refuses but the readers accept rejects a working chart.
+    #[test]
+    fn category_readers_accept_exactly_the_dtypes_ensure_category_keyable_does() {
+        let dtypes = [
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Int64,
+            DataType::Int32,
+            DataType::Int16,
+            DataType::Int8,
+            DataType::UInt64,
+            DataType::UInt32,
+            DataType::UInt16,
+            DataType::UInt8,
+            DataType::Float64,
+            DataType::Float32,
+            DataType::Boolean,
+            // Refused: not category keys. Timestamp is the live one — a
+            // temporal column is a supported *numeric* dtype, so it reaches a
+            // categorical color scale whenever the user declares `type="nominal"`.
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Date32,
+            DataType::Date64,
+            DataType::Duration(TimeUnit::Millisecond),
+        ];
+        let (mut admitted, mut refused) = (0, 0);
+        for dtype in &dtypes {
+            let batch = one_elem_batch_for_dtype(dtype);
+            let gate = ensure_category_keyable("v", dtype).is_ok();
+            if gate { admitted += 1 } else { refused += 1 }
+            assert_eq!(
+                gate,
+                distinct_values_in_order(&batch, "v").is_ok(),
+                "{dtype:?}: ensure_category_keyable disagrees with the domain builder \
+                 (gate={gate})"
+            );
+            assert_eq!(
+                gate,
+                col_as_ordinal_category_str(&batch, "v").is_ok(),
+                "{dtype:?}: ensure_category_keyable disagrees with the per-row reader \
+                 (gate={gate})"
+            );
+        }
+        assert!(
+            admitted > 0 && refused > 0,
+            "the table must exercise both sides of the predicate; got \
+             {admitted} admitted / {refused} refused"
+        );
     }
 }

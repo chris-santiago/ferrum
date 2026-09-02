@@ -934,26 +934,30 @@ pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
     }
 }
 
-/// Dispatch a mark's `build` fn. `Mark::Rule` is the sole fallible mark
-/// builder (batch-A Task 13 spec c2 — the totality invariant, `marks/rule.rs`'s
-/// module doc): its anchor-channel dtype dispatch can raise a typed
-/// `RenderError` when a presence-legal shape's anchor column is neither
-/// ordinal nor numeric-parseable. Every other mark's `build` stays infallible
-/// (unchanged) and is wrapped in `Ok` here. This is every mark's ONLY `build`
-/// call site, so widening this function's return type needed no downstream
-/// signature changes beyond it and its two callers
-/// (`scene_build::build_panel_mark_batches`, and a `position.rs` test helper).
-/// One exhaustive match (not the shared `for_each_mark!` macro the sibling
-/// `Mark::as_str`/`FromStr` impls use) because `Mark::Rule`'s arm has a
-/// different type than the other 14 — the macro's single expansion can't
-/// express that asymmetry. Every arm is written out, and no wildcard, so a
-/// future `Mark` variant is a compile error here rather than a silent miss;
-/// the fallible arm returns its `Result` directly and the infallible ones wrap
-/// in `Ok`, which needs no early return and leaves no unreachable arm to
-/// panic from at this `pub` boundary.
+/// Dispatch a mark's `build` fn. `Mark::Rule` and `Mark::Segment` are the
+/// fallible mark builders (batch-A Task 13 spec c2 — the totality invariant,
+/// `marks/rule.rs`'s module doc): rule's anchor-channel dtype dispatch can
+/// raise a typed `RenderError` when a presence-legal shape's anchor column is
+/// neither ordinal nor numeric-parseable, and both marks propagate the typed
+/// error from the shared per-row color reader
+/// (`marks::channels::row_colors_from_scale`) rather than discarding it into a
+/// silently theme-colored render (NF-A3 sweep completion, 2026-09-02). Every
+/// other mark's `build` stays infallible (unchanged) and is wrapped in `Ok`
+/// here. This is every mark's ONLY `build` call site, so widening this
+/// function's return type needed no downstream signature changes beyond it and
+/// its two callers (`scene_build::build_panel_mark_batches`, and a
+/// `position.rs` test helper). One exhaustive match (not the shared
+/// `for_each_mark!` macro the sibling `Mark::as_str`/`FromStr` impls use)
+/// because the fallible arms have a different type than the other 13 — the
+/// macro's single expansion can't express that asymmetry. Every arm is written
+/// out, and no wildcard, so a future `Mark` variant is a compile error here
+/// rather than a silent miss; the fallible arms return their `Result` directly
+/// and the infallible ones wrap in `Ok`, which needs no early return and leaves
+/// no unreachable arm to panic from at this `pub` boundary.
 pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult, RenderError> {
     match mark {
         Mark::Rule => super::marks::rule::build(ctx),
+        Mark::Segment => super::marks::segment::build(ctx),
         Mark::Point => Ok(super::marks::point::build(ctx)),
         Mark::Line => Ok(super::marks::line::build(ctx)),
         Mark::Bar => Ok(super::marks::bar::build(ctx)),
@@ -964,7 +968,6 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
         Mark::Polygon => Ok(super::marks::polygon::build(ctx)),
         Mark::Image => Ok(super::marks::image::build(ctx)),
         Mark::Ribbon => Ok(super::marks::ribbon::build(ctx)),
-        Mark::Segment => Ok(super::marks::segment::build(ctx)),
         Mark::Arc => Ok(super::marks::arc::build(ctx)),
         Mark::Label => Ok(super::marks::label::build(ctx)),
         Mark::Geoshape => Ok(super::marks::geoshape::build(ctx)),

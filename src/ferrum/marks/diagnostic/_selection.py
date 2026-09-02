@@ -243,7 +243,11 @@ def desugar_cv_scores(
         ]
         return MarkDesugarResult(layers=_apply(layers, user_kw))
     # kind == "strip" (validated above)
-    color_ch = color_field if color_field is not None else "split"
+    # Typed Nominal like the `bar` kind's "split" binding above: both spellings
+    # of this field are group discriminators (the compare path additionally
+    # drives Dodge(by=color_field) with it), so cv_scores answers the same way
+    # for every kind rather than diverging on `kind=`.
+    color_ch = nominal_color_channel(color_field if color_field is not None else "split")
     point_enc = {"x": "split", "y": Y("score", title="score"), "color": color_ch}
     if color_field is not None:
         # Compare/dodge path: the chart-level position=Dodge(by=color_field)

@@ -492,7 +492,12 @@ def desugar_class_prediction_error(
         _Layer(
             name="bar",
             mark="bar",
-            encoding={"x": "actual", "y": "value", "color": color_field},
+            # `predicted` is a class-id column that can be numeric; a bare
+            # string infers Continuous and silently renders a colorbar
+            # instead of per-class stacked-segment colors (no warning --
+            # UnsupportedColorScaleOnMark only fires for line/ribbon). Bind
+            # Nominal explicitly (see nominal_color_channel's docstring).
+            encoding={"x": "actual", "y": "value", "color": nominal_color_channel(color_field)},
             position=bar_stack,
         ),
     ]

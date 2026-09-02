@@ -7,10 +7,19 @@
 //!   column is read for `Categorical` *and* scale-less charts; the numeric column
 //!   for `Continuous` charts. This is byte-identical to `point`'s former inline
 //!   `(color_values_str, color_values_f64)` block and to `bar`'s prior
-//!   `load_color_columns` helper. (`rect` deliberately does **not** use this: its
-//!   three draw paths each load a different subset and omit the scale-less
-//!   categorical branch, so unifying it would change `rect`'s behavior — see the
-//!   note on that mark.)
+//!   `load_color_columns` helper. `text`, `rect` (three draw paths) and `arc`
+//!   (three draw paths) all route through it too as of the NF-A3 sweep
+//!   completion (2026-09-02): the scale-less categorical branch those six sites
+//!   used to omit is inert for them, because `resolve_fill_color` returns the
+//!   constant fallback whenever no color scale resolved, so adopting the shared
+//!   loader is byte-identical for them apart from the dtype fix it carries.
+//!
+//! - [`row_colors_from_scale`] — the same read for `rule`/`segment`, whose paint
+//!   resolution consumes an already-looked-up `Color` rather than the raw
+//!   category string. It is a thin adapter *over* `color_column_loader`'s
+//!   fallible core, so there is exactly one `(scale → column)` decision in the
+//!   crate; it only differs in being fallible, so the reader's typed error
+//!   propagates instead of being discarded into a theme-colored render.
 //!
 //! - [`polar_channel_resolver`] — the theta→angle / radius→radial channel mapping
 //!   under the Python polar remapping, shared by `arc` and `bar::build_polar`.
@@ -25,13 +34,43 @@
 //!   `tick` repeat this exact substitution, so it is unified here rather than
 //!   left as ten copies of the same `.map(f64::abs).unwrap_or(..)` line.
 
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, DrawCtx};
+use crate::render::color::Color;
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, resolve_stroke_dash, DrawCtx};
 use crate::render::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
+use crate::render::RenderError;
 use crate::spec::coord::PolarThetaChannel;
 use crate::spec::encoding::Encoding;
 
-/// `(categorical_string_column, numeric_column)` for the color encoding.
-pub(crate) type ColorColumns = (Option<Vec<Option<String>>>, Option<Vec<Option<f64>>>);
+/// The per-row color column a resolved [`ColorScale`] wants, already read.
+///
+/// One value rather than a `(categorical, numeric)` pair: [`ColorInput`]
+/// partitions the scale variants, so exactly one representation is ever loaded,
+/// and consumers that must act on the choice ([`row_colors_from_scale`]) match
+/// the data instead of re-deriving the dispatch from the scale. A pair made
+/// `(Some, Some)` representable, let the load and the lookup disagree without a
+/// type error, and would have turned a future third [`ColorInput`] variant into
+/// a silent "no color" rather than a non-exhaustive match.
+pub(crate) enum ColorColumns {
+    /// Category keys (`col_as_ordinal_category_str`), looked up via
+    /// [`ColorScale::lookup`].
+    Category(Vec<Option<String>>),
+    /// Numeric values (`col_as_f64`), sampled via [`ColorScale::lookup_f64`].
+    Numeric(Vec<Option<f64>>),
+    /// No per-row color applies: no color field, or a field this batch does not
+    /// carry.
+    None,
+}
+
+/// The two-slot spelling of [`ColorColumns`]: `(categorical, numeric)`, at most
+/// one `Some`.
+///
+/// The adapter shape [`color_column_loader`] hands the eight builders that feed
+/// both slots straight to
+/// [`resolve_fill_color`](crate::render::draw::resolve_fill_color) and index
+/// whichever is populated. [`ColorColumns`] is the canonical form; this exists
+/// because those consumers never dispatch on the choice, so a match would buy
+/// them nothing.
+pub(crate) type ColorColumnPair = (Option<Vec<Option<String>>>, Option<Vec<Option<f64>>>);
 
 /// Band-pixel extent for a mark's width/size/extent formula (band-geometry
 /// unification design §6 consumer contract): `scale`'s explicit range extent
@@ -56,18 +95,135 @@ pub(crate) fn band_extent_or(scale: &ScaleKind, fallback: f64) -> f64 {
 /// [`ColorInput::Numeric`] ones. The numeric branch reads `col_as_f64` so the
 /// caller can sample via `lookup_f64` without an `f64 → String → f64`
 /// round-trip.
-pub(crate) fn color_column_loader(ctx: &DrawCtx) -> ColorColumns {
+///
+/// The categorical read is [`col_as_ordinal_category_str`], never `col_as_str`
+/// (NF-A3, spec §4.4 — completed 2026-09-02). `col_as_str` returns `Err` for
+/// every non-`Utf8` dtype, and the `.ok()` here swallows it, so an
+/// `Int*`/`Float*`/`Bool` categorical color column used to yield `None` for
+/// every row: each mark then fell back to the palette's first color while the
+/// legend — built from the dtype-wide `distinct_values_in_order` — enumerated
+/// every category. `col_as_ordinal_category_str` is a strict superset
+/// (identical on `Utf8`, same `Err` on `Timestamp`) and stringifies exactly the
+/// way `distinct_values_in_order` builds the domain, so the per-row key always
+/// matches a domain entry. Utf8 columns are byte-identical.
+///
+/// Returns the [`ColorColumnPair`] the eight consuming builders destructure
+/// inline; [`ColorColumns`] is the same answer as one value, for the caller
+/// that dispatches on it.
+pub(crate) fn color_column_loader(ctx: &DrawCtx) -> ColorColumnPair {
+    match color_columns(ctx).unwrap_or(ColorColumns::None) {
+        ColorColumns::Category(v) => (Some(v), None),
+        ColorColumns::Numeric(v) => (None, Some(v)),
+        ColorColumns::None => (None, None),
+    }
+}
+
+/// The fallible core of [`color_column_loader`]: the crate's single
+/// `(color scale, color field) → which column to read` decision.
+///
+/// Split out so [`row_colors_from_scale`] can consume the same decision *and*
+/// the typed error, rather than re-deriving the read with a policy of its own.
+/// It returns [`ColorColumns`] rather than the pair so that decision is carried
+/// as data: the consumer matches what was loaded instead of asking
+/// [`ColorScale::input`] a second time and trusting the two answers to agree.
+fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
     let field = color_field(ctx, ctx.spec);
     let input = ctx.scales.color.as_ref().map(ColorScale::input);
-    let categorical = match (input, field) {
-        (Some(ColorInput::Category) | None, Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
+    Ok(match (input, field) {
+        (Some(ColorInput::Category) | None, Some(f)) => {
+            ColorColumns::Category(col_as_ordinal_category_str(ctx.batch, f)?)
+        }
+        (Some(ColorInput::Numeric), Some(f)) => ColorColumns::Numeric(col_as_f64(ctx.batch, f)?),
+        _ => ColorColumns::None,
+    })
+}
+
+/// Per-row stroke [`Color`] resolved from the color encoding through the
+/// resolved color scale, for the stroke-only marks that consume a resolved
+/// color rather than the raw category string (`rule`, `segment`).
+///
+/// The counterpart to [`color_column_loader`] for marks whose paint resolution
+/// consumes a resolved [`Color`] instead of feeding raw columns to
+/// [`resolve_fill_color`](crate::render::draw::resolve_fill_color). It is that
+/// loader's fallible core plus the per-row lookup, so the two readers cannot
+/// disagree about which column a scale wants: the dispatch on
+/// [`ColorScale::input`] here is the same one `resolve_fill_color` performs,
+/// and the `Category`/`Numeric` treatment matches it row for row.
+///
+/// - [`ColorInput::Category`] → the [`col_as_ordinal_category_str`] column,
+///   resolved via [`ColorScale::lookup`]. `Int*`/`Float*`/`Bool` category
+///   columns resolve to their real colors instead of collapsing to the theme
+///   stroke; `Utf8` is byte-identical (NF-A3, spec §4.4).
+/// - [`ColorInput::Numeric`] → the [`col_as_f64`] column, finite-filtered,
+///   resolved via [`ColorScale::lookup_f64`]. Two things ride on reading the
+///   numeric column here rather than stringifying and leaning on `lookup`'s
+///   internal `value.parse()`. First, `Timestamp` is a supported *numeric*
+///   dtype and not a supported *category* dtype, so a temporal color encoding
+///   (which always resolves a numeric-keyed scale) renders a gradient on these
+///   marks exactly as it does on `point`, instead of refusing the whole chart
+///   on a read no numeric scale ever needed. Second, `float_as_ordinal_str`
+///   renders a non-finite value as `"NaN"`, which `f64::from_str` accepts, so
+///   the string path fed `NaN` into `normalize_continuous` and painted pure
+///   black; the `is_finite` filter (the same one `resolve_fill_color` carries)
+///   makes a non-finite row fall back to the constant mark-style paint, which
+///   is what a gap should look like.
+///
+/// `Ok(None)` means "no per-row color applies", and callers fall back to their
+/// constant mark-style stroke. Three shapes reach it, all structural rather
+/// than failures: no color encoding, no resolved color scale, and — the third —
+/// a color field this layer's batch does not carry at all. That last one is
+/// ordinary in a layered chart: `Encoding::inherit_from` pushes the chart-level
+/// `color` onto every layer, including ones drawing from a different
+/// `data_source` (a `mark_qq` reference line reads the single-row `qq_line`
+/// batch, which has none of the user's columns). Every other mark treats that
+/// case the same way, so it is checked explicitly here rather than left to fall
+/// out of a swallowed `UnknownColumn`. The producer-side quirk this compensates
+/// for is owned by **#106** (`_Layer` needs first-class encoding-inheritance
+/// control); when that lands, this guard is what should be re-examined.
+///
+/// A dtype the *selected* reader genuinely cannot key on is a different thing:
+/// the typed [`RenderError::UnsupportedDtype`] it constructs is returned for the
+/// caller to propagate with `?`, never discarded into a silently theme-colored
+/// render (spec §4.4; `rule.rs`'s module doc states this invariant and
+/// `rule_color_values` used to violate it). After the `ColorInput` dispatch the
+/// only surface that still reaches is a category-keyed scale over a column
+/// `col_as_ordinal_category_str` refuses, and **scale resolution now refuses
+/// that column first, for every mark alike**: `build_color_scale`'s categorical
+/// branch gates on
+/// [`ensure_category_keyable`](crate::render::arrow_cast::ensure_category_keyable)
+/// before it resolves a domain from any source. It did not always — an explicit
+/// `scale.domain` (and a composite shared domain) skips
+/// `distinct_values_in_order` entirely, so a `Timestamp` column declared
+/// `type="nominal"` with an explicit `domain`+`range` used to resolve a
+/// well-formed `Categorical` scale that this reader then refused on `rule`/
+/// `segment` while `point`/`bar` swallowed the same error and painted every
+/// element one color under a four-swatch legend. So this branch's refusal is a
+/// backstop, not a policy: `color_dtype_parity::
+/// nominal_timestamp_color_is_refused_at_scale_resolution_for_every_mark` pins
+/// that the refusal happens at scale resolution (it asserts the resolver's
+/// wording), including for the explicit-`domain`+`range` shape, so a widening of
+/// the gate that does not widen this reader fails there rather than
+/// reintroducing the per-mark divergence.
+pub(crate) fn row_colors_from_scale(
+    ctx: &DrawCtx,
+) -> Result<Option<Vec<Option<Color>>>, RenderError> {
+    let (Some(field), Some(scale)) = (color_field(ctx, ctx.spec), ctx.scales.color.as_ref()) else {
+        return Ok(None);
     };
-    let numeric = match (input, field) {
-        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
-    (categorical, numeric)
+    if ctx.batch.column_by_name(field).is_none() {
+        return Ok(None);
+    }
+    Ok(match color_columns(ctx)? {
+        ColorColumns::Category(vals) => Some(
+            vals.into_iter().map(|v| v.as_deref().and_then(|s| scale.lookup(s))).collect(),
+        ),
+        ColorColumns::Numeric(vals) => Some(
+            vals.into_iter()
+                .map(|v| v.filter(|x| x.is_finite()).and_then(|x| scale.lookup_f64(x)))
+                .collect(),
+        ),
+        ColorColumns::None => None,
+    })
 }
 
 /// Per-row `stroke_dash` channel columns, loaded once per mark build (T12).
@@ -472,7 +628,7 @@ mod tests {
         spec: &ChartSpec,
         batch: &arrow::record_batch::RecordBatch,
         scales: &ResolvedScales,
-    ) -> ColorColumns {
+    ) -> ColorColumnPair {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },

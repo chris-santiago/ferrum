@@ -625,9 +625,15 @@ pub struct SwatchCountMismatch {
 /// variants themselves, so a new variant is classified once, here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorInput {
-    /// Category strings (`col_as_str`), resolved via [`ColorScale::lookup`].
+    /// Category keys, read with `col_as_ordinal_category_str`
+    /// and resolved via [`ColorScale::lookup`]. Never `col_as_str`, which
+    /// refuses every non-`Utf8` dtype (NF-A3, spec §4.4): the domain is built by
+    /// `distinct_values_in_order`, so the per-row key must be stringified the
+    /// same dtype-wide way or it matches no domain entry.
     Category,
-    /// Numeric values (`col_as_f64`), resolved via [`ColorScale::lookup_f64`].
+    /// Numeric values, read with `col_as_f64` and resolved via
+    /// [`ColorScale::lookup_f64`], non-finite rows filtered out by the caller so
+    /// a gap falls back to constant paint instead of sampling the scheme.
     Numeric,
 }
 

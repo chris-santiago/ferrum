@@ -211,9 +211,7 @@ def test_heatmap_robust_with_inf_value_excludes_inf_from_percentile():
     """robust='s percentile computation shares _heatmap_finite_values with the
     one-sided fill, so the same inf-exclusion fix applies there too (the S3
     fix's stated side effect)."""
-    df = pl.DataFrame(
-        {"a": [-2.0, 0.0, 2.0, float("inf")], "b": [1.0, -1.0, 0.5, float("-inf")]}
-    )
+    df = pl.DataFrame({"a": [-2.0, 0.0, 2.0, float("inf")], "b": [1.0, -1.0, 0.5, float("-inf")]})
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         chart = fr.heatmap(df, annot=False, robust=True)

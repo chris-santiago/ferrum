@@ -6,8 +6,12 @@ These utilities are internal to the marks package and not part of the public API
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from ferrum.encoding.base import ChannelBase
 
 #: Feature-ranking / display-ordering vocabulary shared by
 #: ``Chart.mark_shap_beeswarm(order=)`` and the ``shap_chart`` figure-function
@@ -38,30 +42,65 @@ SHAP_ORDER_VALUES: tuple[str, ...] = ("abs_mean", "mean", "max", "none")
 SHAP_BEESWARM_COLOR_FIELD = "Feature value"
 
 
-def nominal_color_channel(field_name: str | None):
-    """Bind *field_name* to the color channel typed Nominal, or return
-    ``None`` unchanged when *field_name* is ``None``.
+def nominal_color_channel(field: "str | ChannelBase | None") -> "ChannelBase | None":
+    """Bind *field* to the color channel typed Nominal.
 
-    Shared by every diagnostic desugar that groups per-class/per-group
-    polylines (or ribbon/rule CI bands) by a caller-named discriminator
-    column on a line-or-ribbon mark: the classification-curve family
-    (roc/pr/gain/lift/calibration, ``marks/diagnostic/_classification.py``),
-    PDP/ICE (``marks/diagnostic/_explanation.py``), learning/validation
-    curve CI bands + mean lines (``marks/diagnostic/_selection.py``), and
-    parallel coordinates (``marks/diagnostic/_ranking.py``).
+    The rule, not an enumeration: **every** encoding whose color channel
+    carries a caller-named group/class discriminator -- a composite-mark
+    desugar layer's ``color_field``/``groupby``, or a figure function's
+    public ``hue=`` -- must route that field through this helper rather
+    than binding it as a bare string, on any mark that groups, stacks,
+    aggregates, or fills rows by it (``bar``, ``line``, ``ribbon``,
+    ``polygon``, ``rect``, ``rule``, ``segment``, ``tick``, and the
+    ``smooth`` fit/CI-band pair). A field that is intentionally continuous
+    by design (a heatmap cell value, a correlation coefficient, a
+    decision-boundary ``z``, a contour ``level_value``) is not a
+    "discriminator" at all and is explicitly wrapped in ``Color(...)`` at
+    its call site instead -- that is a different, deliberate binding, not
+    an instance of the bug this helper fixes.
+
+    The one carve-out is a ``point`` mark that is the *sole* consumer of
+    the discriminator in its chart: a point layer scattering one mark per
+    original row (not per aggregated group) can legitimately take either a
+    Nominal or a genuinely Continuous color field, so raw-string binding
+    there is not a defect (verified empirically -- point layers render a
+    sensible gradient for a numeric field, not a misleading legend). The
+    "sole consumer" qualifier is load-bearing and was added when this rule
+    reached the figure functions: as soon as a point layer shares one color
+    scale with a grouping layer -- ``regplot``'s scatter beside its
+    ``smooth`` fit, ``pairplot``'s scatter panels beside its ``kde``
+    diagonal under ``resolve={"color": "shared"}``, ``jointplot``'s centre
+    beside its marginals -- typing only the grouping half would ask one
+    shared scale to be Continuous and Nominal at once. Those point layers
+    take the Nominal typing too. In ``src/ferrum/plots`` the carve-out
+    therefore survives at exactly one site: ``relplot(kind="scatter")``,
+    a single unpaired ``point`` mark, which keeps dtype inference so a
+    numeric ``hue=`` still renders a gradient (seaborn parity).
+
+    An already-constructed channel object passes through untouched: that is
+    the caller stating the type explicitly (``fm.Color("grp",
+    type_="quantitative")``), and this helper does not overrule it. Only a
+    bare field-name string -- the shape that silently infers -- is typed.
+    ``None`` passes through as ``None``.
 
     Left untyped, a plain string field name infers its scale type from the
     column's runtime dtype: a numeric dtype (e.g. an integer class/model-id
     column, or any caller-supplied ``color_field`` override that happens to
-    be numeric) infers Quantitative -> Continuous, which is inert on a line
-    or ribbon mark and trips the ``UnsupportedColorScaleOnMark`` warning
-    (the colorbar is suppressed instead of a per-group symbol legend, and
-    on some marks the per-group polylines collapse into one). Every one of
-    these desugars' discriminator fields is categorical in intent regardless
-    of runtime dtype -- a Continuous color scale was never a legitimate
-    reading of "which curve/segment does this row belong to" -- so bind it
-    Nominal explicitly. This also keeps a Utf8-typed column byte-identical,
-    since Nominal is what it would already infer to.
+    be numeric) infers Quantitative -> Continuous. On a line or ribbon mark
+    this trips the ``UnsupportedColorScaleOnMark`` warning (the colorbar is
+    suppressed instead of a per-group symbol legend, and on some marks the
+    per-group polylines collapse into one); on a bar, rect, polygon, rule,
+    segment, or tick mark it renders silently -- no warning at all -- as a
+    continuous colorbar standing in for what should be a categorical swatch
+    legend, which is the more dangerous failure because nothing signals it.
+    ``segment`` is the shape that proved the silence is not theoretical:
+    ``desugar_contour(groupby=<Int64>)`` drew two distributions' isolines in
+    one colour with no diagnostic at all. Every
+    one of these discriminator fields is categorical in intent
+    regardless of runtime dtype -- a Continuous color scale was never a
+    legitimate reading of "which curve/segment/group does this row belong
+    to" -- so bind it Nominal explicitly. This also keeps a Utf8-typed
+    column byte-identical, since Nominal is what it would already infer to.
 
     The ``None`` pass-through lets call sites that build an encoding dict
     literal (e.g. ``desugar_learning_curve``'s CI-band/line layers, which do
@@ -70,12 +109,17 @@ def nominal_color_channel(field_name: str | None):
     channel whose resolved field is falsy, so a ``None`` here reaches the
     same "channel absent" outcome a bare ``None`` value did before this
     helper existed.
+
+    ``tests/test_color_binding_completeness.py`` enforces this rule by AST
+    scan over ``src/ferrum/marks`` and ``src/ferrum/plots``, so a new call
+    site that binds a bare name to a color channel fails a test rather than
+    waiting for a reviewer to find the wrong chart.
     """
-    if field_name is None:
-        return None
+    if field is None or not isinstance(field, str):
+        return field
     from ferrum.encoding import Color
 
-    return Color(field_name, type_="nominal")
+    return Color(field, type_="nominal")
 
 
 def shap_beeswarm_color_channel(*, color_bar: bool):

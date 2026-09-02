@@ -287,9 +287,11 @@ pub(crate) type GroupPartitionMulti = (
 ///
 /// The single grouping entry point for all per-group transforms (bin, kde,
 /// kde_2d, smooth, ...): first-appearance group order, null-key skip,
-/// dtype-preservation. When `group_cols` is empty, returns an empty partition
-/// (all rows unsorted). A single-element `group_cols` yields the conventional
-/// single-column grouping.
+/// dtype-preservation. When `group_cols` is empty, every row keys to the empty
+/// `Vec`, so the result is ONE all-rows group — `stat_outliers`' ungrouped path
+/// depends on exactly this (batch A migrated it off an explicit all-rows
+/// insert), so tightening this to an empty partition silently breaks it. A
+/// single-element `group_cols` yields the conventional single-column grouping.
 ///
 /// **Null-key policy:** a row is skipped if ANY of its group-column values is null.
 /// This mirrors the single-column behaviour (a null in the groupby column is not

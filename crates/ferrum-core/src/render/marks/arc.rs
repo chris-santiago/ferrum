@@ -1,14 +1,13 @@
 use ferrum_scene::{MarkBatchKind, PathCmd, SceneNode};
 
-use crate::render::arrow_cast::{col_as_f64, col_as_ordinal_category_str, col_as_str};
+use crate::render::arrow_cast::{col_as_f64, col_as_ordinal_category_str};
 use crate::render::color::with_opacity;
 use crate::render::draw::{
-    color_field, resolve_fill_color, to_scene_fill_stroke, DrawCtx, MarkBuildResult,
-    MetadataColumns,
+    resolve_fill_color, to_scene_fill_stroke, DrawCtx, MarkBuildResult, MetadataColumns,
 };
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::color_column_loader;
 use crate::render::marks::opacity::resolve_scaled_opacity;
-use crate::render::scale_resolve::{ColorInput, ColorScale};
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 use crate::spec::encoding::DataType as SpecDataType;
 
@@ -161,16 +160,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     }
 
     // Per-slice color: read color encoding field and look up in the color scale.
-    let cfield = ctx.spec.encoding.color.as_ref().map(|e| e.field.as_str());
-    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
-    let color_str: Option<Vec<Option<String>>> = match (color_input, cfield) {
-        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let color_f64: Option<Vec<Option<f64>>> = match (color_input, cfield) {
-        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
+    let (color_str, color_f64) = color_column_loader(ctx);
 
     // Per-row opacity encoding.
     let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity
@@ -294,16 +284,7 @@ fn build_nominal_theta(
     };
 
     // Per-row color columns.
-    let cfield = color_field(ctx, ctx.spec);
-    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
-    let color_str: Option<Vec<Option<String>>> = match (color_input, cfield) {
-        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let color_f64: Option<Vec<Option<f64>>> = match (color_input, cfield) {
-        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
+    let (color_str, color_f64) = color_column_loader(ctx);
     let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -411,16 +392,7 @@ fn build_annular(
         radius2_field.and_then(|f| col_as_f64(ctx.batch, f).ok());
 
     // Per-slice color (mirrors the legacy path).
-    let cfield = ctx.spec.encoding.color.as_ref().map(|e| e.field.as_str());
-    let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
-    let color_str: Option<Vec<Option<String>>> = match (color_input, cfield) {
-        (Some(ColorInput::Category), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let color_f64: Option<Vec<Option<f64>>> = match (color_input, cfield) {
-        (Some(ColorInput::Numeric), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
+    let (color_str, color_f64) = color_column_loader(ctx);
     let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -1327,5 +1299,83 @@ mod tests {
 
         let paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count();
         assert_eq!(paths, 2, "the pad-exceeds-sweep row must be skipped, leaving 2 wedges");
+    }
+
+    // ── NF-A3: the pie path's per-slice color read (spec §4.4) ───────────────
+
+    /// An `Int64` nominal color column must tint the slices, not leave all
+    /// three in the first palette color.
+    ///
+    /// RED (verified in place): the three inline `(color_input, cfield)`
+    /// matches this file carried read `col_as_str`, which returns `Err` for
+    /// `Int64`; `.ok()` swallowed it, `color_str` was `None`, and every slice
+    /// took `resolve_fill_color`'s constant fallback while the legend
+    /// enumerated all three categories. The `Utf8` twin is built from the same
+    /// categories in the same row order and asserted equal, so the test cannot
+    /// pass by collapsing both.
+    #[test]
+    fn arc_tints_slices_from_an_int64_nominal_color() {
+        use arrow::array::Int64Array;
+
+        let slice_fills = |color_field: Field, color_col: Arc<dyn arrow::array::Array>| -> Vec<String> {
+            let mut spec = polar_spec(false);
+            spec.encoding.color =
+                Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() });
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("val", DataType::Float64, false),
+                color_field,
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+                Arc::new(Float64Array::from(vec![10.0, 30.0, 60.0])),
+                color_col,
+            ]).unwrap();
+            let theme = ThemeInputs::default();
+            let panel = make_panel();
+            let mut scales = make_scales(false);
+            // Resolve the color scale through the production resolver rather
+            // than hand-building one: a hand-built `Categorical` would pin the
+            // domain strings this test is trying to prove the reader agrees
+            // with. Arc's polar spec binds no `y`, and `resolve_scales`
+            // requires both positional channels, so the color scale is taken
+            // from an equivalent cartesian spec over the same batch.
+            let mut scale_spec = spec.clone();
+            scale_spec.mark = Mark::Point;
+            scale_spec.coord = None;
+            scale_spec.encoding.y =
+                Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() });
+            let (resolved, _) = crate::render::scale_resolve::resolve_scales(
+                &scale_spec, &batch, (0.0, 200.0), (0.0, 200.0), &theme,
+            ).unwrap();
+            scales.color = resolved.color;
+            assert!(scales.color.is_some(), "fixture must resolve a color scale");
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            build(&ctx).nodes.iter().filter_map(|n| match n {
+                SceneNode::Path { style, .. } => style.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)),
+                _ => None,
+            }).collect()
+        };
+
+        let utf8 = slice_fills(
+            Field::new("grp", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["1", "2", "3"])),
+        );
+        assert_eq!(utf8.len(), 3, "Utf8 reference must produce 3 slices");
+        assert_eq!(
+            utf8.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "Utf8 reference must give three distinct slice fills; got {utf8:?}"
+        );
+
+        let int64 = slice_fills(
+            Field::new("grp", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![1_i64, 2, 3])),
+        );
+        assert_eq!(
+            int64, utf8,
+            "an Int64 nominal color column must tint the slices exactly as its \
+             Utf8 twin does; got {int64:?}. Three identical fills here is the \
+             col_as_str drop."
+        );
     }
 }

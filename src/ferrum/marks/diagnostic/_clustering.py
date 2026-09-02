@@ -6,6 +6,7 @@ from typing import Any
 
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -45,7 +46,12 @@ def desugar_silhouette(
         "y2": "_silhouette_y_hi",
     }
     if color_field is not None:
-        rect_enc["color"] = color_field
+        # `cluster` is documented Int64 (KMeans-style integer labels), so a
+        # bare string here infers Continuous and silently renders a
+        # colorbar instead of a per-cluster swatch legend -- no warning,
+        # since UnsupportedColorScaleOnMark only fires for line/ribbon.
+        # Bind Nominal explicitly (see nominal_color_channel's docstring).
+        rect_enc["color"] = nominal_color_channel(color_field)
     layers: list = [_Layer(name="rect", mark="rect", encoding=rect_enc)]
     if zero_line:
         layers.append(

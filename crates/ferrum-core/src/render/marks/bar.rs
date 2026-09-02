@@ -10,18 +10,9 @@ use crate::layout::Rect;
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
+use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ScaleKind, StrokeDashScale};
-
-/// Load the per-row color-encoding columns for fill resolution via the shared
-/// [`color_column_loader`](crate::render::marks::channels::color_column_loader)
-/// (C9): the categorical string column for `Categorical` (and scale-less) charts,
-/// the numeric column for `Continuous` charts. Byte-identical to the prior local
-/// helper and to `point`'s inline split.
-fn load_color_columns(ctx: &DrawCtx) -> crate::render::marks::channels::ColorColumns {
-    crate::render::marks::channels::color_column_loader(ctx)
-}
 
 #[inline]
 fn row_cat(col: &Option<Vec<Option<String>>>, i: usize) -> Option<&str> {
@@ -225,7 +216,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         0.0
     };
 
-    let (color_values, color_values_f64) = load_color_columns(ctx);
+    let (color_values, color_values_f64) = color_column_loader(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
@@ -339,7 +330,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // (byte-identical) when undodged or at low/default padding.
     let bar_width = pos_meta.clamp_width(bar_width_raw);
 
-    let (color_values, color_values_f64) = load_color_columns(ctx);
+    let (color_values, color_values_f64) = color_column_loader(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
@@ -498,7 +489,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // comment — byte-identical no-op when undodged or at low/default padding.
     let bar_height = pos_meta.clamp_width(bar_height_raw);
 
-    let (color_values, color_values_f64) = load_color_columns(ctx);
+    let (color_values, color_values_f64) = color_column_loader(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
@@ -674,7 +665,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         None
     };
 
-    let (color_values, color_values_f64) = load_color_columns(ctx);
+    let (color_values, color_values_f64) = color_column_loader(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
@@ -807,7 +798,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         None
     };
 
-    let (color_values, color_values_f64) = load_color_columns(ctx);
+    let (color_values, color_values_f64) = color_column_loader(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique

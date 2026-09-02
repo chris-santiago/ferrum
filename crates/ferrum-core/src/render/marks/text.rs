@@ -6,7 +6,10 @@
 //! `format_numeric(y)`.
 
 use crate::layout::TextAnchor;
-use crate::render::draw::{col_as_f64, col_as_str, resolve_fill_color, x_field, y_field, DrawCtx};
+use crate::render::draw::{
+    col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field,
+    DrawCtx,
+};
 use crate::render::format::{format_numeric, format_time, format_with_spec};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::color_column_loader;
@@ -34,14 +37,22 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
     let y_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
 
+    // The ordinal reads use `col_as_positional_category_str`, the same reader
+    // `point`/`bar`/`tick`/`rule` use for an ordinal positional channel (NF-A3,
+    // spec §4.4 — swept 2026-09-02). `col_as_str` errors on every non-`Utf8`
+    // dtype and the `.ok()` swallowed it, so an `Int*`/`Float*`/`Bool` category
+    // column on an ordinal axis left BOTH halves `None` and `build` took the
+    // `return empty()` below — every label silently dropped from an otherwise
+    // intact panel. Identical on `Utf8` apart from a null row, which now lands
+    // in the FA-9 null band like every other positional mark's does.
     let xs_f: Option<Vec<Option<f64>>> =
         if !x_ordinal { col_as_f64(ctx.batch, xf).ok() } else { None };
     let xs_s: Option<Vec<Option<String>>> =
-        if x_ordinal { col_as_str(ctx.batch, xf).ok() } else { None };
+        if x_ordinal { col_as_positional_category_str(ctx.batch, xf).ok() } else { None };
     let ys_f: Option<Vec<Option<f64>>> =
         if !y_ordinal { col_as_f64(ctx.batch, yf).ok() } else { None };
     let ys_s: Option<Vec<Option<String>>> =
-        if y_ordinal { col_as_str(ctx.batch, yf).ok() } else { None };
+        if y_ordinal { col_as_positional_category_str(ctx.batch, yf).ok() } else { None };
 
     let n_x = match (&xs_f, &xs_s) {
         (Some(v), _) => v.len(),
@@ -924,5 +935,82 @@ mod tests {
             "a bound color channel must override fill='#ff0000'; got {colors:?}");
         assert_ne!(colors[0], colors[1],
             "channel-resolved colors must still vary per category; got {colors:?}");
+    }
+
+    // ── NF-A3: ordinal positional reads key off the scale, not the dtype ─────
+
+    /// An `Int64` nominal `x` on an ordinal scale must place its labels, not
+    /// drop them.
+    ///
+    /// RED (verified in place): with `col_as_str` here, the read returns `Err`
+    /// for `Int64`, `.ok()` swallows it, BOTH `xs_f` (skipped — the scale is
+    /// ordinal) and `xs_s` end up `None`, and `build` takes the `n_x` match's
+    /// `return empty()`. Every data label vanishes from an otherwise intact
+    /// panel — the silent-empty class `rule.rs` eliminated, still live in a
+    /// reader choice. The Utf8 twin is asserted alongside so the test cannot
+    /// pass by producing zero labels for both.
+    #[test]
+    fn text_places_labels_on_an_int64_ordinal_x() {
+        use arrow::array::{Int64Array, StringArray};
+        use crate::spec::encoding::DataType as SpecType;
+
+        let build_for = |x_field: Field, x_col: arrow::array::ArrayRef| -> Vec<String> {
+            let spec = ChartSpec {
+                data: DataRef::default(),
+                mark: Mark::Text,
+                encoding: Encoding {
+                    x: Some(EncodingSpec { field: "x".into(), type_: Some(SpecType::Nominal), ..Default::default() }),
+                    y: Some(EncodingSpec { field: "y".into(), type_: Some(SpecType::Quantitative), ..Default::default() }),
+                    text: Some(EncodingSpec { field: "lbl".into(), ..Default::default() }),
+                    ..Default::default()
+                },
+                transforms: Vec::new(), facet: None, layers: None, coord: None,
+                mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+                selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+                params: Vec::new(),
+            };
+            let schema = Arc::new(Schema::new(vec![
+                x_field,
+                Field::new("y", DataType::Float64, false),
+                Field::new("lbl", DataType::Utf8, false),
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+                x_col,
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["one", "two", "three"])),
+            ]).unwrap();
+            let theme = ThemeInputs::default();
+            let panel = PanelLayout {
+                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                facet_key: None, row: 0, col: 0,
+                strip_title: None, row_strip_title: None, row_facet_key: None,
+            };
+            let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+            assert!(
+                matches!(scales.x, crate::render::scale_resolve::ScaleKind::Ordinal(_)),
+                "fixture must resolve an ordinal x scale, else it exercises the numeric branch"
+            );
+            let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            super::build(&ctx).nodes.iter().filter_map(|n| match n {
+                ferrum_scene::SceneNode::Text { content, .. } => Some(content.clone()),
+                _ => None,
+            }).collect()
+        };
+
+        let utf8 = build_for(
+            Field::new("x", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["10", "20", "30"])),
+        );
+        assert_eq!(utf8, vec!["one", "two", "three"],
+            "Utf8 reference: all three labels must render");
+
+        let int64 = build_for(
+            Field::new("x", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![10_i64, 20, 30])),
+        );
+        assert_eq!(int64, utf8,
+            "an Int64 nominal x must place the same three labels as its Utf8 twin; \
+             got {int64:?}. An empty vec here is the col_as_str drop.");
     }
 }

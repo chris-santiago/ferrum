@@ -35,6 +35,7 @@ from typing import Any
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.plots._helpers import (
     _field_name,
     _finalize_chart,
@@ -300,9 +301,16 @@ def _pairplot_build(
         if hue is not None:
             reg_kwargs["groupby"] = _field_name(hue)
         off = Chart(data).mark_smooth(method="lm", **reg_kwargs)
+    # `hue` is typed Nominal on BOTH the off-diagonal and diagonal templates.
+    # The two share one color scale (`resolve={"color": "shared"}` below, which
+    # also drives the single figure-level legend), so they must agree on its
+    # type: the diagonal is always a grouping mark (hist/kde), and letting the
+    # off-diagonal panels infer Continuous from a numeric hue would ask one
+    # shared scale to be two types at once. See `nominal_color_channel`.
+    hue_ch = nominal_color_channel(hue)
     enc: dict = {"x": Repeat.column, "y": Repeat.row}
     if hue is not None:
-        enc["color"] = hue
+        enc["color"] = hue_ch
     # markers as list: map each hue level to a shape via Shape encoding. The
     # scale dict needs an explicit "type": "ordinal" -- without it, a
     # string-only range (no domain) makes the Rust scale resolver assume a
@@ -329,7 +337,7 @@ def _pairplot_build(
     if effective_diag_kind not in (None, "none") and symmetric:
         diag_enc: dict = {"x": Repeat.column}
         if hue is not None:
-            diag_enc["color"] = hue
+            diag_enc["color"] = hue_ch
         if effective_diag_kind == "hist":
             # No explicit groupby needed: histogram's _prep_groupby_from_color
             # (marks/_desugar dispatch table) auto-derives Bin's groupby from
@@ -1372,9 +1380,17 @@ def _jointplot_build(
 
     jk = dict(joint_kws or {})
 
+    # `hue` is typed Nominal once and reused on the centre and both marginals.
+    # They share one color scale (`resolve={"color": "shared"}` below, which
+    # also drives the single figure-level legend) and the marginals are always
+    # grouping marks (hist/kde/rug/box), so the centre takes the same typing
+    # even when it is a `point` mark -- one shared scale cannot be Continuous
+    # for one panel and Nominal for another. See `nominal_color_channel`.
+    hue_ch = nominal_color_channel(hue)
+
     enc_center: dict = {"x": x, "y": y}
     if hue is not None:
-        enc_center["color"] = hue
+        enc_center["color"] = hue_ch
     enc_center.update(encode_kwargs)
 
     # Apply xlim/ylim as scale domain overrides on center encodings.
@@ -1478,7 +1494,7 @@ def _jointplot_build(
     if xlim is not None:
         enc_top["x"] = _X(x, scale={"domain": list(xlim)})
     if hue is not None:
-        enc_top["color"] = hue
+        enc_top["color"] = hue_ch
     if marginal_kind == "hist":
         top = Chart(data).mark_histogram(**mk).encode(**enc_top)
     elif marginal_kind == "kde":
@@ -1496,7 +1512,7 @@ def _jointplot_build(
         box_top_enc: dict = {"x": enc_top["x"], "y": box_cat_col}
         box_top_kwargs = dict(mk)
         if hue is not None:
-            box_top_enc["color"] = hue
+            box_top_enc["color"] = hue_ch
             # Every hue level shares the same synthetic category, so without
             # dodging the boxes stack fully on top of each other.
             box_top_kwargs.setdefault("position", Dodge(by=_field_name(hue)))
@@ -1509,7 +1525,7 @@ def _jointplot_build(
     if ylim is not None:
         enc_right["y"] = _Y(y, scale={"domain": list(ylim)})
     if hue is not None:
-        enc_right["color"] = hue
+        enc_right["color"] = hue_ch
     if marginal_kind == "hist":
         right = Chart(data).mark_histogram(orientation="horizontal", **mk).encode(**enc_right)
     elif marginal_kind == "kde":
@@ -1523,7 +1539,7 @@ def _jointplot_build(
         box_right_enc: dict = {"x": box_cat_col, "y": enc_right["y"]}
         box_right_kwargs = dict(mk)
         if hue is not None:
-            box_right_enc["color"] = hue
+            box_right_enc["color"] = hue_ch
             box_right_kwargs.setdefault("position", Dodge(by=_field_name(hue)))
         right = Chart(box_data).mark_boxplot(**box_right_kwargs).encode(**box_right_enc)
 
