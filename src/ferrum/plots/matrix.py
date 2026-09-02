@@ -9,11 +9,23 @@ pairplot, heatmap, clustermap, jointplot.
 ``ferrum.figure.joint``.  Both are merged here as they share the
 "matrix / multi-panel" domain concern.
 
-Internal helper
----------------
+Internal helpers
+----------------
 _ensure_id_column — materialises a synthetic row-identity column when
 the input has no non-numeric id column (used by ``heatmap`` and
 ``clustermap``).
+
+_heatmap_finite_values — flattens ``heatmap``'s numeric value columns to a
+finite-valued (NaN- and inf-dropped) array; shared by ``robust=`` percentile
+clipping and the one-sided ``vmin=``/``vmax=`` data-extent fill.
+
+_heatmap_finite_extent — the ``(min, max)`` of ``_heatmap_finite_values``;
+shared by the one-sided fill and the ``center=`` out-of-domain warning check.
+
+_heatmap_resolve_color_domain — owns the one-sided ``vmin=``/``vmax=`` fill
+policy and every domain-related ``UserWarning`` (fill failure, inverted
+domain, ``center=`` out-of-domain); ``_heatmap_build`` only assembles
+``scale_kwargs`` from its result.
 """
 
 from __future__ import annotations
@@ -412,11 +424,32 @@ def heatmap(
         Color of the cell border stroke.
     vmin : float or None, optional
         Minimum of the color scale domain.  Overrides ``robust`` when set.
+        Must be finite -- ``inf``, ``-inf``, and ``NaN`` raise ``ValueError``
+        immediately, before any chart construction (see ``center`` for the
+        same rule).  When only one of ``vmin``/``vmax`` is given, the other
+        endpoint is filled from the data extent of every numeric value
+        column -- the PRE-mask extent (matching ``robust=``'s existing
+        convention), so a cell hidden by ``mask=`` can still define the
+        filled endpoint.  If the data has no finite values to fill from
+        (e.g. an all-NaN value column), a ``UserWarning`` is emitted naming
+        the reason and the color-domain override is dropped rather than
+        silently discarded.  If the given bound falls on the far side of the
+        data extent (e.g. ``vmin`` above the data max), the fill produces an
+        inverted domain; it still renders, but the descending domain
+        collapses every cell to a single uniform color -- not a reversed
+        ramp -- and emits a ``UserWarning`` naming both endpoints.
     vmax : float or None, optional
         Maximum of the color scale domain.  Overrides ``robust`` when set.
+        See ``vmin`` for the finiteness requirement, one-sided fill, and
+        all-NaN behavior.
     center : float or None, optional
-        Value to center a diverging color scale on (maps to
-        ``scale.domainMid``).
+        Value to center a diverging color scale on (maps to the Diverging
+        scale's ``domainMid``).  Must be finite -- ``inf``, ``-inf``, and
+        ``NaN`` raise ``ValueError`` immediately, before any chart
+        construction.  A ``center`` outside the effective ``[vmin, vmax]``
+        domain still renders deterministically -- as a one-sided compressed
+        ramp instead of a symmetric diverging one -- but emits a
+        ``UserWarning`` since the diverging effect collapses.
     robust : bool, default False
         When ``True`` and ``vmin``/``vmax`` are unset, clip the color scale
         to the 2nd and 98th percentiles of the data.
@@ -453,7 +486,8 @@ def heatmap(
     Raises
     ------
     ValueError
-        If ``data`` has no numeric columns.
+        If ``data`` has no numeric columns, or if ``vmin``/``vmax``/``center``
+        is given a non-finite value (``inf``, ``-inf``, or ``NaN``).
 
     Examples
     --------
@@ -464,8 +498,24 @@ def heatmap(
 
     >>> fm.heatmap(wide_df, annot=False, vmin=0, vmax=1, cmap="greens")
     """
+    import math
+
     from ferrum._coerce import to_arrow_table
     from ferrum.marks._desugar_helpers import resolve_cmap_alias
+
+    # Refuse a non-finite vmin/vmax/center up front, before any table work
+    # or wire emission: a finite-looking kwarg that is actually inf/-inf/NaN
+    # would otherwise reach scale_kwargs["domain"]/"domainMid" unchecked and
+    # serialize as JSON Infinity/-Infinity/NaN, which the Rust spec parser
+    # rejects with an opaque `ValueError: scale: expected value ...` that
+    # names neither the kwarg nor the reason.
+    for kwarg_name, kwarg_value in (("vmin", vmin), ("vmax", vmax), ("center", center)):
+        if kwarg_value is not None and not math.isfinite(kwarg_value):
+            raise ValueError(
+                f"heatmap: {kwarg_name}={kwarg_value!r} must be finite; "
+                "non-finite bounds (inf, -inf, NaN) cannot be represented in "
+                "the color scale domain"
+            )
 
     tbl = to_arrow_table(data)
     # Identify id column (first non-numeric) and value columns (numeric).
@@ -510,6 +560,139 @@ def heatmap(
     )
 
 
+def _heatmap_finite_values(tbl: Any, value_cols: list[str]) -> Any:
+    """Flatten ``heatmap``'s numeric value columns to a finite-valued 1-D array.
+
+    Shared by ``robust=`` percentile clipping and the one-sided ``vmin=``/
+    ``vmax=`` data-extent fill in :func:`_heatmap_build`, both of which need
+    the same flat, finite-valued view of the heatmap's cells. Filters with
+    ``np.isfinite`` (not just ``~np.isnan``): a stray ``+inf``/``-inf`` cell
+    must not leak into a filled ``vmin=``/``vmax=`` domain or a ``robust=``
+    percentile -- either would serialize as JSON ``Infinity``/``-Infinity``
+    and crash the Rust spec parser instead of degrading deterministically.
+
+    Returns
+    -------
+    numpy.ndarray
+        1-D ``float64`` array with NaN and +/-inf removed; empty when
+        *value_cols* has no finite values (e.g. all-NaN or empty data).
+    """
+    import numpy as np
+
+    all_vals: list[Any] = []
+    for c in value_cols:
+        all_vals.extend(tbl[c].to_pylist())
+    arr = np.asarray(all_vals, dtype=float)
+    return arr[np.isfinite(arr)]
+
+
+def _heatmap_finite_extent(tbl: Any, value_cols: list[str]) -> tuple[float, float] | None:
+    """Return ``(min, max)`` of :func:`_heatmap_finite_values`, or ``None`` when empty.
+
+    Shared by the one-sided ``vmin=``/``vmax=`` fill and the ``center=``
+    out-of-domain check in :func:`_heatmap_build`. Reads the PRE-mask table
+    (matching ``robust=``'s existing convention), so a masked-out cell can
+    still define the filled endpoint or the effective domain.
+    """
+    arr = _heatmap_finite_values(tbl, value_cols)
+    if not arr.size:
+        return None
+    return float(arr.min()), float(arr.max())
+
+
+def _heatmap_resolve_color_domain(
+    tbl: Any,
+    value_cols: list[str],
+    vmin: float | None,
+    vmax: float | None,
+    center: float | None,
+) -> tuple[float | None, float | None]:
+    """Resolve ``heatmap``'s color-domain endpoints and emit every
+    domain-related ``UserWarning``, so :func:`_heatmap_build` only has to
+    assemble ``scale_kwargs`` from the result.
+
+    Owns three policies, all data-dependent and all deterministic (never a
+    silent no-op, never an error):
+
+    - **One-sided fill.** When exactly one of ``vmin``/``vmax`` is given, the
+      missing endpoint is filled from the PRE-mask data extent (matching
+      ``robust=``'s existing convention -- see the ``heatmap`` docstring's
+      ``vmin``/``vmax`` sections), so a lone bound still produces a full
+      2-element domain.
+    - **Fill failure.** When there is no finite data anywhere to fill from
+      (e.g. an all-NaN value column), the one-sided bound cannot be
+      completed: warn naming the reason and drop it (return ``(None,
+      None)``) rather than silently discarding the user's explicit bound
+      into an inert half-domain.
+    - **Inverted-domain warning.** When the filled domain comes out inverted
+      (the given bound falls on the far side of the data extent used to fill
+      the other -- e.g. ``vmin=50`` with a data max of 10), warn naming both
+      endpoints and that the descending domain collapses every cell to a
+      single uniform color (per spec §4.2's flat-collapse note), not a
+      reversed ramp; the inverted domain is still returned and still renders
+      (deterministic, not silently corrected).
+    - **center= out-of-domain warning.** When ``center`` is set and falls
+      outside the effective ``[vmin, vmax]`` -- explicit/filled when known,
+      else the data-derived extent -- warn that the diverging ramp collapses
+      to a one-sided compressed ramp; render is unaffected.
+
+    Returns
+    -------
+    tuple[float | None, float | None]
+        The resolved ``(vmin, vmax)`` -- both ``None`` when no domain should
+        be emitted (neither was requested, or a one-sided fill could not be
+        completed).
+    """
+    import warnings
+
+    if (vmin is None) != (vmax is None):
+        given_name, given_value = ("vmin", vmin) if vmin is not None else ("vmax", vmax)
+        missing_name = "vmax" if vmin is not None else "vmin"
+        extent = _heatmap_finite_extent(tbl, value_cols)
+        if extent is not None:
+            lo, hi = extent
+            if vmin is None:
+                vmin = lo
+            if vmax is None:
+                vmax = hi
+            if vmin > vmax:
+                warnings.warn(
+                    f"heatmap: one-sided {given_name}={given_value} produced an "
+                    f"inverted domain [{vmin}, {vmax}] (the filled {missing_name} "
+                    "landed on the opposite side of the given bound); the "
+                    "descending domain collapses the continuous color ramp to a "
+                    "single uniform color, not a reversed ramp -- every cell "
+                    "renders the same color.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+        else:
+            warnings.warn(
+                f"heatmap: {given_name}={given_value} was given but {missing_name} "
+                "could not be filled from the data extent (the heatmap's numeric "
+                "columns have no finite values); the color-domain override is dropped.",
+                UserWarning,
+                stacklevel=4,
+            )
+            vmin = vmax = None
+
+    if center is not None:
+        if vmin is not None and vmax is not None:
+            effective = (vmin, vmax)
+        else:
+            effective = _heatmap_finite_extent(tbl, value_cols)
+        if effective is not None and not (effective[0] <= center <= effective[1]):
+            warnings.warn(
+                f"heatmap: center={center} lies outside the effective color "
+                f"domain [{effective[0]}, {effective[1]}]; the diverging color "
+                "ramp collapses to a one-sided compressed ramp instead of centering.",
+                UserWarning,
+                stacklevel=4,
+            )
+
+    return vmin, vmax
+
+
 def _heatmap_build(
     data: Any,
     *,
@@ -546,11 +729,7 @@ def _heatmap_build(
     if robust:
         import numpy as np
 
-        all_vals = []
-        for c in value_cols:
-            all_vals.extend(tbl[c].to_pylist())
-        arr = np.asarray(all_vals, dtype=float)
-        arr = arr[~np.isnan(arr)]
+        arr = _heatmap_finite_values(tbl, value_cols)
         if vmin is None and arr.size:
             vmin = float(np.percentile(arr, 2.0))
         if vmax is None and arr.size:
@@ -621,17 +800,23 @@ def _heatmap_build(
         enc["color"] = encode_kwargs.pop("color")
     enc.update(encode_kwargs)
 
-    # Apply color scale (cmap / vmin / vmax / center).
+    # Apply color scale (cmap / vmin / vmax / center). The fill, the
+    # inverted-domain warning, the fill-failure warning, and the center=
+    # out-of-domain warning are all owned by _heatmap_resolve_color_domain;
+    # this block only assembles the wire kwargs from its result.
     if vmin is not None or vmax is not None or center is not None or cmap is not None:
         from ferrum.encoding import Color
 
-        scale_kwargs: dict = {"type": "linear"}
+        vmin, vmax = _heatmap_resolve_color_domain(tbl, value_cols, vmin, vmax, center)
+
+        # center= selects a Diverging scale (midpoint = center, scheme =
+        # cmap); no new wire field — `domainMid` is the existing Diverging
+        # field.
+        scale_kwargs: dict = {"type": "diverging" if center is not None else "linear"}
         if vmin is not None and vmax is not None:
             scale_kwargs["domain"] = [vmin, vmax]
         if cmap is not None:
             scale_kwargs["scheme"] = cmap
-        # `center` is a diverging-scale hint; Rust scale resolution may use it
-        # when present.
         if center is not None:
             scale_kwargs["domainMid"] = center
         if len(scale_kwargs) > 1:  # > just "type"
