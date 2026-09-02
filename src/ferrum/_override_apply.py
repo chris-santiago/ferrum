@@ -5,7 +5,9 @@
 ``width``/``height``).  Because the Rust spec deserializers silently drop unknown
 fields, a misspelled path cannot fail-loud on the Rust side; validation is
 therefore Python-side against a registry built **at import from the live schemas**
-so the valid-leaf sets cannot drift from the typed surface.
+so the valid-leaf sets stay synchronized with the typed surface, except for
+deprecated keys (``x``/``y`` on ``AxisConfig``) which are intentionally
+excluded and refused with a typed error.
 
 This module is a pure transform: it resolves paths, validates a whole override
 dict, and builds a plain :class:`OverridePayload` data object.  It never imports
@@ -18,7 +20,9 @@ Targets
 chart-config
     ``x_axis_``/``y_axis_``/``axis_``/``legend_``/``title_``/``grid_``/
     ``padding_``/``color_`` prefixes.  Valid leaves are the ``dataclasses.fields``
-    of the matching :mod:`ferrum.configure` class.  Folds into
+    of the matching :mod:`ferrum.configure` class, minus deprecated keys
+    (``x``/``y`` on ``AxisConfig``) which are refused with
+    :class:`~ferrum.exceptions.FerrumOverrideError`.  Folds into
     ``{target_key: {leaf: value}}``.
 encoding-scale
     ``<channel>_scale_<leaf>`` for each scale-bearing encoding channel.  Valid
@@ -160,6 +164,10 @@ class OverridePayload:
 # Leaf-set introspection (no hand-maintained lists)
 # ---------------------------------------------------------------------------
 
+# Deprecated AxisConfig leaf names (x/y) that are excluded from the override registry.
+# Shared by both the registry exclusion and the deprecated-path-map builder to prevent drift.
+_DEPRECATED_AXIS_LEAVES = frozenset({"x", "y"})
+
 
 def _config_leaves(config_cls: type) -> frozenset[str]:
     """Return the valid override leaves for a :mod:`ferrum.configure` dataclass."""
@@ -282,7 +290,14 @@ class _PrefixRule(NamedTuple):
 
 def _build_chart_config_rules() -> list[_PrefixRule]:
     """Build the chart-config prefix rules, longest-prefix-first within axis."""
-    axis_leaves = _config_leaves(AxisConfig)
+    # ``x``/``y`` are still ``AxisConfig`` dataclass fields (the deprecated,
+    # no-op show/hide flags — see ``AxisConfig.x``/``.y``), but
+    # ``AxisConfig.to_dict()`` never emits them and the Rust wire schema does
+    # not accept them. Excluded here so a deprecated ``axis_x=...`` /
+    # ``axis_y=...`` override spelling refuses at this Python boundary with
+    # the standard "Unknown override path" error (naming the kwarg), instead
+    # of resolving and then hard-failing as an opaque wire-gate ValueError.
+    axis_leaves = _config_leaves(AxisConfig) - _DEPRECATED_AXIS_LEAVES
     # ``x_axis_`` / ``y_axis_`` MUST be ordered before ``axis_`` so the longest
     # prefix wins (``x_axis_grid_color`` is not mis-split as ``axis_…``).
     return [
@@ -429,6 +444,38 @@ def resolve(path: str) -> ResolvedPath | None:
     return None
 
 
+def _build_deprecated_paths() -> dict[str, str]:
+    """Build deprecated override paths from the axis-leaves exclusion set.
+
+    The ``AxisConfig`` dataclass has ``x`` and ``y`` fields, but they are
+    deprecated no-ops. The three axis-config prefixes (``x_axis_``, ``y_axis_``,
+    ``axis_``) all use the same ``axis_leaves`` set, which excludes these keys.
+    This function derives all six possible deprecated spellings (3 prefixes × 2
+    excluded leaves) and maps each to its documented replacement, so users get
+    a specific error message instead of a misdirecting difflib suggestion.
+    """
+    # The three axis-config prefixes that use the excluded leaves.
+    axis_prefixes = ["x_axis_", "y_axis_", "axis_"]
+    # The documented replacement for each deprecated leaf.
+    replacements = {
+        "x": "Chart.axis(x=False)",
+        "y": "Chart.axis(y=False)",
+    }
+
+    paths = {}
+    for prefix in axis_prefixes:
+        for leaf in _DEPRECATED_AXIS_LEAVES:
+            path = f"{prefix}{leaf}"
+            paths[path] = replacements[leaf]
+    return paths
+
+
+# Deprecated override path spellings that have documented replacements.
+# Derived from the axis-leaves exclusion set and axis-config prefixes to ensure
+# all six spellings (3 prefixes × 2 excluded leaves) get accurate hints.
+_DEPRECATED_PATHS: dict[str, str] = _build_deprecated_paths()
+
+
 def _suggestion(path: str) -> str:
     """Return a '` Did you mean: 'x'?`' suffix when a close known path exists."""
     matches = difflib.get_close_matches(path, _KNOWN_PATHS, n=1)
@@ -442,10 +489,13 @@ def validate(overrides: dict[str, Any]) -> None:
 
     Each key is resolved through the registry.  An unknown prefix, or a known
     prefix with a leaf that is not a valid field of its target, raises
-    :class:`~ferrum.exceptions.FerrumOverrideError` naming the offending path and
-    — when a close match exists among the known paths — suggesting the nearest one
-    via :func:`difflib.get_close_matches`.  Keys are checked in iteration order and
-    the error is raised on the first failure (fail-fast).
+    :class:`~ferrum.exceptions.FerrumOverrideError` naming the offending path.
+    Deprecated paths with documented replacements raise with a specific message
+    naming the replacement (e.g., ``x_axis_x`` → ``Chart.axis(x=False)``).
+    For other unknown paths, a suggestion is offered when a close match exists
+    among the known paths via :func:`difflib.get_close_matches`.
+    Keys are checked in iteration order and the error is raised on the first
+    failure (fail-fast).
 
     Parameters
     ----------
@@ -459,6 +509,12 @@ def validate(overrides: dict[str, Any]) -> None:
     """
     for path in overrides:
         if resolve(path) is None:
+            # Check if this is a known deprecated path with a documented replacement.
+            if path in _DEPRECATED_PATHS:
+                replacement = _DEPRECATED_PATHS[path]
+                raise FerrumOverrideError(
+                    f"Unknown override path {path!r} (deprecated). Use {replacement} instead."
+                )
             raise FerrumOverrideError(f"Unknown override path {path!r}.{_suggestion(path)}")
 
 

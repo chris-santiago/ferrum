@@ -349,7 +349,19 @@ class TestOverrideRegistryParity:
     )
     def test_chart_config_leaves_match_dataclass_fields(self, prefix, config_cls):
         rule = next(r for r in oa._PREFIX_RULES if r.prefix == prefix)
-        assert rule.valid_leaves == frozenset(f.name for f in fields(config_cls))
+        actual_fields = frozenset(f.name for f in fields(config_cls))
+        expected = actual_fields
+        if config_cls is AxisConfig:
+            # ``x``/``y`` are deprecated no-op AxisConfig fields that
+            # ``AxisConfig.to_dict()`` never emits and the wire schema does
+            # not accept; the override registry excludes them too (see
+            # ``_build_chart_config_rules``) so the deprecated spelling
+            # refuses at the override boundary, not as an opaque wire error.
+            # Verify that x/y are actually present in the dataclass fields,
+            # so deleting them fails this test deliberately.
+            assert {"x", "y"} <= actual_fields
+            expected = expected - {"x", "y"}
+        assert rule.valid_leaves == expected
 
     def test_mark_leaves_match_valid_mark_kwargs(self):
         rule = next(r for r in oa._PREFIX_RULES if r.prefix == "mark_")
@@ -445,6 +457,23 @@ class TestOverrideResolve:
         assert oa.resolve("mark_notathing") is None
         assert oa.resolve("x_axis_lable_angle") is None
 
+    def test_deprecated_axis_xy_leaves_resolve_none(self):
+        # RED-proof: ``AxisConfig.x``/``.y`` are dataclass fields that
+        # ``AxisConfig.to_dict()`` never emits and the wire schema does not
+        # accept (see ``_build_chart_config_rules``'s exclusion comment). If
+        # the exclusion regresses (``x``/``y`` re-added to ``axis_leaves``),
+        # these resolve to a leaf again and this assertion flips.
+        assert oa.resolve("axis_x") is None
+        assert oa.resolve("axis_y") is None
+
+    def test_valid_axis_leaf_still_resolves(self):
+        # Control: a real AxisConfig leaf under the general ``axis_`` prefix
+        # is unaffected by the ``x``/``y`` exclusion.
+        r = oa.resolve("axis_grid")
+        assert r is not None
+        assert r.location.target_key == "axis"
+        assert r.location.leaf == "grid"
+
     def test_typed_equivalent_present_for_config_and_properties(self):
         assert oa.resolve("x_axis_label_angle").typed_equivalent == (
             ".configure_axis(label_angle=...)"
@@ -487,6 +516,18 @@ class TestOverrideValidate:
         oa.validate(
             {"x_axis_label_angle": -45, "width": 900, "mark_size": 50, "color_scheme": "viridis"}
         )
+
+    @pytest.mark.parametrize(
+        "deprecated_path",
+        ["axis_x", "axis_y", "x_axis_x", "x_axis_y", "y_axis_x", "y_axis_y"],
+    )
+    def test_deprecated_axis_xy_leaf_raises_naming_the_kwarg(self, deprecated_path):
+        # All six deprecated axis-key spellings (3 prefixes × 2 deprecated leaves)
+        # must refuse with a typed, kwarg-naming FerrumOverrideError that names
+        # both the offending path AND points at the documented replacement
+        # ``Chart.axis(x=False)`` or ``Chart.axis(y=False)``.
+        with pytest.raises(FerrumOverrideError, match=rf"{deprecated_path}.*Chart\.axis"):
+            oa.validate({deprecated_path: True})
 
 
 class TestOverrideBuildPayload:
@@ -540,6 +581,21 @@ class TestOverrideBuildPayload:
     def test_build_payload_validates_before_building(self):
         with pytest.raises(FerrumOverrideError, match="bogus_thing"):
             oa.build_payload({"x_axis_label_angle": -45, "bogus_thing": 1})
+
+    @pytest.mark.parametrize(
+        "deprecated_path",
+        ["axis_x", "axis_y", "x_axis_x", "x_axis_y", "y_axis_x", "y_axis_y"],
+    )
+    def test_deprecated_axis_xy_leaf_raises_at_build_payload(self, deprecated_path):
+        with pytest.raises(FerrumOverrideError, match=rf"{deprecated_path}.*Chart\.axis"):
+            oa.build_payload({deprecated_path: True})
+
+    def test_valid_axis_leaf_still_builds(self):
+        # Control: a real AxisConfig leaf under the general ``axis_`` prefix
+        # still builds a chart-config payload, unaffected by the ``x``/``y``
+        # exclusion.
+        payload = oa.build_payload({"axis_grid": False})
+        assert payload.chart_config == {"axis": {"grid": False}}
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +762,22 @@ class TestOverrideRenderErrors:
     def test_known_prefix_bad_leaf_raises_at_render(self, base_chart):
         with pytest.raises(FerrumOverrideError, match="mark_notathing"):
             base_chart.override(mark_notathing=1).to_svg()
+
+    @pytest.mark.parametrize(
+        "deprecated_path",
+        ["axis_x", "axis_y", "x_axis_x", "x_axis_y", "y_axis_x", "y_axis_y"],
+    )
+    def test_deprecated_axis_xy_leaf_raises_typed_at_render_not_wire_error(
+        self, base_chart, deprecated_path
+    ):
+        # The seam this pins: before the fix, deprecated axis spellings resolved
+        # and reached the Rust wire gate, which hard-fails with an opaque
+        # ``ValueError`` naming an unrecognized wire key. They must now refuse at
+        # the override boundary with a typed, kwarg-naming ``FerrumOverrideError``
+        # that names both the offending path and the documented replacement
+        # Chart.axis(x/y=False).
+        with pytest.raises(FerrumOverrideError, match=rf"{deprecated_path}.*Chart\.axis"):
+            base_chart.override(**{deprecated_path: True}).to_svg()
 
 
 class TestOverrideRenderMultiMark:
