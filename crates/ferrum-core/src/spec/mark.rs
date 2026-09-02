@@ -22,11 +22,12 @@ pub enum Mark {
     Geoshape,
 }
 
-/// Single source of truth for the 12 primitive `Mark` variants. Mirrors the
-/// `for_each_transform!` pattern in `transform/core.rs` — every site that
-/// enumerates marks (as_str, from_str, render::draw::dispatch_mark) drives
-/// off this table. The lowercase form is encoded as the second column so
-/// it doubles as both the serde tag and the `render::marks` submodule name.
+/// Single source of truth for the primitive `Mark` variants. Mirrors the
+/// `for_each_transform!` pattern in `transform/core.rs` — the name mappings
+/// (`as_str`, `from_str`) drive off this table. The lowercase form is encoded
+/// as the second column so it doubles as both the serde tag and the
+/// `render::marks` submodule name. `render::draw`'s build dispatch spells its
+/// arms out explicitly instead; see the rationale at that match.
 #[macro_export]
 macro_rules! for_each_mark {
     ($mac:ident) => {
@@ -49,7 +50,6 @@ macro_rules! for_each_mark {
         }
     };
 }
-pub use for_each_mark;
 
 impl Mark {
     pub fn as_str(&self) -> &'static str {

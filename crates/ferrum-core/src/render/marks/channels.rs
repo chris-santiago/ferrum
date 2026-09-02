@@ -25,8 +25,8 @@
 //!   `tick` repeat this exact substitution, so it is unified here rather than
 //!   left as ten copies of the same `.map(f64::abs).unwrap_or(..)` line.
 
-use crate::render::draw::{col_as_f64, col_as_str, color_field, DrawCtx};
-use crate::render::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, DrawCtx};
+use crate::render::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
 use crate::spec::coord::PolarThetaChannel;
 use crate::spec::encoding::Encoding;
 
@@ -68,6 +68,68 @@ pub(crate) fn color_column_loader(ctx: &DrawCtx) -> ColorColumns {
         _ => None,
     };
     (categorical, numeric)
+}
+
+/// Per-row `stroke_dash` channel columns, loaded once per mark build (T12).
+///
+/// Mirrors [`color_column_loader`]'s categorical/numeric split, gated on
+/// [`ResolvedScales::stroke_dash`] instead of the color scale's
+/// [`ColorInput`]: a *categorical* field (scale resolved) loads the
+/// ordinal-category string column, so [`resolve_row_stroke_dash`] can look
+/// each row up in the [`StrokeDashScale`]; a *numeric* field (no scale
+/// resolved — see that struct's "no third case" doc) loads the `f64` column,
+/// unchanged from the pre-T12 palette-index read. At most one of the two is
+/// `Some`.
+pub(crate) struct DashColumns {
+    pub(crate) categorical: Option<Vec<Option<String>>>,
+    numeric: Option<Vec<Option<f64>>>,
+}
+
+/// Load [`DashColumns`] for `ctx`'s `stroke_dash` encoding, if any.
+pub(crate) fn stroke_dash_column_loader(ctx: &DrawCtx) -> DashColumns {
+    let field = ctx.spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str());
+    let is_categorical = ctx.scales.stroke_dash.is_some();
+    let categorical = match (is_categorical, field) {
+        (true, Some(f)) => col_as_ordinal_category_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let numeric = match (is_categorical, field) {
+        (false, Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
+    DashColumns { categorical, numeric }
+}
+
+/// Resolve row `i`'s dash pattern from [`DashColumns`], falling back to
+/// `base` (the mark style's literal `stroke_dash`) when the row carries no
+/// value of its own.
+///
+/// Categorical rows resolve through [`StrokeDashScale::dash_for`] directly:
+/// a value outside the domain or mapped to the palette's solid slot both
+/// mean "no dasharray" per that method's own contract, so a resolved
+/// (possibly solid) categorical hit is assigned as-is, never re-rescued by
+/// `base` — `base` only stands in for a row with NO categorical value at all
+/// (a null category). Numeric rows keep the pre-T12 contract byte-identically:
+/// `resolve_stroke_dash` on a finite index, falling back to `base` for a
+/// null/non-finite value.
+pub(crate) fn resolve_row_stroke_dash(
+    cols: &DashColumns,
+    scale: Option<&StrokeDashScale>,
+    i: usize,
+    base: Option<&[f64]>,
+) -> Option<Vec<f64>> {
+    if let (Some(values), Some(scale)) = (&cols.categorical, scale) {
+        return match values.get(i).and_then(|o| o.as_deref()) {
+            Some(v) => scale.dash_for(v),
+            None => base.map(<[f64]>::to_vec),
+        };
+    }
+    cols.numeric
+        .as_ref()
+        .and_then(|v| v.get(i).copied().flatten())
+        .filter(|v| v.is_finite())
+        .and_then(resolve_stroke_dash)
+        .or_else(|| base.map(<[f64]>::to_vec))
 }
 
 /// The angular (`theta`) and radial (`radius`) field/scale assignment for a polar
@@ -147,9 +209,25 @@ pub(crate) fn polar_channel_resolver<'a>(
 ///   is retained (detail subdivides each color group without its own legend).
 /// - Neither: a single group over all row indices `0..n_rows`.
 ///
+/// After the (color, detail) split above, `dash_values` (T12, spec §4.3)
+/// subdivides each resulting group further by per-row stroke-dash category —
+/// the series partition key extends from (color, detail) to (color, detail,
+/// stroke_dash-field) so a categorical `stroke_dash` encoding draws one
+/// polyline (or, for `ribbon`, one closed-polygon band) per distinct style
+/// even within a single color/detail group. `None` (a numeric `stroke_dash`
+/// field, or none at all) skips this step entirely, which is the pre-T12
+/// grouping, byte-identical. `line` and `ribbon` (T12 fix round, spec §4.3
+/// amended 2026-09-01) both pass `dash_cols.categorical.as_ref()`, so a
+/// categorical `stroke_dash` field subdivides both; `area`'s caller still
+/// always passes `None` since it does not consume the `stroke_dash` channel
+/// today.
+///
 /// # Arguments
 /// - `color_values`: optional per-row color strings (loaded by the caller).
 /// - `detail_values`: optional per-row detail strings (loaded by the caller).
+/// - `dash_values`: optional per-row stroke-dash category strings (loaded by
+///   the caller from [`DashColumns::categorical`](DashColumns), only when a
+///   categorical `stroke_dash` scale resolved).
 /// - `has_color_scale`: whether a resolved color scale is present; gates the
 ///   color-only branch (matches `&ctx.scales.color` being `Some(_)`).
 /// - `n_rows`: total row count, used for the fallback all-rows group.
@@ -157,14 +235,15 @@ pub(crate) fn polar_channel_resolver<'a>(
 /// # Returns
 /// `Vec<(Option<String>, Vec<usize>)>` — one entry per group. The `Option<String>`
 /// is the color legend key for that group (`None` in the detail-only and
-/// fallback cases).
+/// fallback cases); a dash-subdivided group repeats its parent's key.
 pub(crate) fn build_color_detail_groups(
     color_values: Option<&Vec<Option<String>>>,
     detail_values: Option<&Vec<Option<String>>>,
+    dash_values: Option<&Vec<Option<String>>>,
     has_color_scale: bool,
     n_rows: usize,
 ) -> Vec<(Option<String>, Vec<usize>)> {
-    match (color_values, detail_values, has_color_scale) {
+    let groups = match (color_values, detail_values, has_color_scale) {
         // Color only: one group per color category; key retained for legend.
         (Some(cv), None, true) => {
             let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
@@ -208,7 +287,35 @@ pub(crate) fn build_color_detail_groups(
         }
         // No color, no detail (or color present but no scale): single group.
         _ => vec![(None, (0..n_rows).collect())],
+    };
+    match dash_values {
+        Some(dv) => subdivide_by_dash(groups, dv),
+        None => groups,
     }
+}
+
+/// Subdivide each `(color_key, rows)` group by per-row stroke-dash category
+/// (T12), preserving the parent's color key on every subgroup. Rows within a
+/// parent group are re-partitioned in first-encounter order of their dash
+/// category, so subgroup ordering — and therefore the node/metadata alignment
+/// invariant (#6) — stays deterministic.
+fn subdivide_by_dash(
+    groups: Vec<(Option<String>, Vec<usize>)>,
+    dash_values: &[Option<String>],
+) -> Vec<(Option<String>, Vec<usize>)> {
+    let mut out = Vec::with_capacity(groups.len());
+    for (key, rows) in groups {
+        let mut sub: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+        for i in rows {
+            let dash_key = dash_values.get(i).cloned().flatten();
+            match sub.iter().position(|(dk, _)| dk == &dash_key) {
+                Some(p) => sub[p].1.push(i),
+                None => sub.push((dash_key, vec![i])),
+            }
+        }
+        out.extend(sub.into_iter().map(|(_, sub_rows)| (key.clone(), sub_rows)));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -427,7 +534,7 @@ mod tests {
     #[test]
     fn groups_color_only_with_scale_partitions_by_color() {
         let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A"), sv("B")];
-        let groups = super::build_color_detail_groups(Some(&cv), None, true, 4);
+        let groups = super::build_color_detail_groups(Some(&cv), None, None, true, 4);
         assert_eq!(groups.len(), 2, "two color keys → two groups");
         assert_eq!(groups[0].0, sv("A"));
         assert_eq!(groups[0].1, vec![0, 2]);
@@ -440,7 +547,7 @@ mod tests {
     #[test]
     fn groups_color_only_without_scale_is_single_group() {
         let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A")];
-        let groups = super::build_color_detail_groups(Some(&cv), None, false, 3);
+        let groups = super::build_color_detail_groups(Some(&cv), None, None, false, 3);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, None);
         assert_eq!(groups[0].1, vec![0, 1, 2]);
@@ -451,7 +558,7 @@ mod tests {
     #[test]
     fn groups_detail_only_strips_key_to_none() {
         let dv: Vec<Option<String>> = vec![sv("s0"), sv("s1"), sv("s0"), sv("s1")];
-        let groups = super::build_color_detail_groups(None, Some(&dv), false, 4);
+        let groups = super::build_color_detail_groups(None, Some(&dv), None, false, 4);
         assert_eq!(groups.len(), 2, "two detail values → two groups");
         // Keys are stripped to None in both groups.
         assert!(groups.iter().all(|(k, _)| k.is_none()), "detail-only keys must all be None");
@@ -469,7 +576,7 @@ mod tests {
         // 4 rows: (A,x), (A,y), (B,x), (B,y)
         let cv: Vec<Option<String>> = vec![sv("A"), sv("A"), sv("B"), sv("B")];
         let dv: Vec<Option<String>> = vec![sv("x"), sv("y"), sv("x"), sv("y")];
-        let groups = super::build_color_detail_groups(Some(&cv), Some(&dv), true, 4);
+        let groups = super::build_color_detail_groups(Some(&cv), Some(&dv), None, true, 4);
         assert_eq!(groups.len(), 4, "4 distinct (color, detail) pairs → 4 groups");
         // Color key is retained; each group has exactly one row.
         assert_eq!(groups[0], (sv("A"), vec![0]));
@@ -482,9 +589,50 @@ mod tests {
     /// no-color case).
     #[test]
     fn groups_no_color_no_detail_is_single_group() {
-        let groups = super::build_color_detail_groups(None, None, false, 5);
+        let groups = super::build_color_detail_groups(None, None, None, false, 5);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, None);
         assert_eq!(groups[0].1, vec![0, 1, 2, 3, 4]);
+    }
+
+    // ── dash_values subdivision (T12, spec §4.3) ────────────────────────────
+
+    /// T12 guard: `dash_values` subdivides a color group further, retaining
+    /// the color key on every subgroup — the (color, detail, dash) partition
+    /// extension.
+    #[test]
+    fn groups_color_and_dash_subdivides_within_color_key() {
+        // 4 rows, one color "A", two dash categories "solid"/"dashed" interleaved.
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("A"), sv("A"), sv("A")];
+        let dv: Vec<Option<String>> = vec![sv("solid"), sv("dashed"), sv("solid"), sv("dashed")];
+        let groups = super::build_color_detail_groups(Some(&cv), None, Some(&dv), true, 4);
+        assert_eq!(groups.len(), 2, "one color key x two dash categories = 2 groups");
+        assert_eq!(groups[0], (sv("A"), vec![0, 2]));
+        assert_eq!(groups[1], (sv("A"), vec![1, 3]));
+    }
+
+    /// T12 guard: `dash_values = None` (numeric `stroke_dash` field, or none
+    /// bound) leaves grouping byte-identical to the pre-T12 (color, detail)
+    /// partition — no subdivision happens.
+    #[test]
+    fn groups_no_dash_values_is_byte_identical_to_pre_t12() {
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A"), sv("B")];
+        let groups = super::build_color_detail_groups(Some(&cv), None, None, true, 4);
+        assert_eq!(groups.len(), 2, "two color keys → two groups, unaffected by absent dash_values");
+        assert_eq!(groups[0], (sv("A"), vec![0, 2]));
+        assert_eq!(groups[1], (sv("B"), vec![1, 3]));
+    }
+
+    /// T12 guard: dash-only (no color, no detail) partitions by dash category
+    /// with the key stripped to `None` — mirrors the detail-only branch's
+    /// "no legend key from this axis" contract.
+    #[test]
+    fn groups_dash_only_partitions_with_none_key() {
+        let dv: Vec<Option<String>> = vec![sv("solid"), sv("dashed"), sv("solid")];
+        let groups = super::build_color_detail_groups(None, None, Some(&dv), false, 3);
+        assert_eq!(groups.len(), 2, "two dash categories → two groups");
+        assert!(groups.iter().all(|(k, _)| k.is_none()));
+        assert_eq!(groups[0].1, vec![0, 2]);
+        assert_eq!(groups[1].1, vec![1]);
     }
 }

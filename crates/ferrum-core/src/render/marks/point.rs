@@ -3,8 +3,9 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ScaleKind, ShapeKind};
 
@@ -59,7 +60,12 @@ pub(crate) struct ShapeStyle {
     pub opacity: f64,
     pub stroke_opacity: f64,
     pub fill_opacity: f64,
-    pub stroke_dash_idx: Option<f64>,
+    /// The resolved dasharray pattern, already looked up from either the
+    /// numeric `DASH_PALETTE` index contract or a categorical
+    /// `StrokeDashScale` (T12) — callers pass the fully-resolved value
+    /// (`channels::resolve_row_stroke_dash`'s output) rather than a raw
+    /// index, since a categorical field has no numeric index to pass here.
+    pub stroke_dash: Option<Vec<f64>>,
     pub angle: f64,
 }
 
@@ -72,13 +78,12 @@ pub(crate) fn emit_shape_nodes(
 ) -> Vec<ferrum_scene::SceneNode> {
     let ShapeStyle {
         fill, fill_cleared, stroke, stroke_cleared, stroke_width, opacity, stroke_opacity,
-        fill_opacity, stroke_dash_idx, angle,
+        fill_opacity, stroke_dash, angle,
     } = style;
     use crate::render::draw::{to_scene_fill_stroke_full, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
-    let dash_vec: Option<Vec<f64>> = stroke_dash_idx.and_then(resolve_stroke_dash);
-    let dash_ref: Option<&[f64]> = dash_vec.as_deref();
+    let dash_ref: Option<&[f64]> = stroke_dash.as_deref();
 
     match kind {
         ShapeKind::Circle => {
@@ -274,9 +279,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    let stroke_dash_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // T12: categorical resolves through ctx.scales.stroke_dash (StrokeDashScale);
+    // numeric keeps the DASH_PALETTE index contract byte-identically.
+    let dash_cols = stroke_dash_column_loader(ctx);
 
     let angle_values: Option<Vec<Option<f64>>> = spec.encoding.angle
         .as_ref()
@@ -408,10 +413,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .filter(|v| *v >= 0.0 && v.is_finite())
             .unwrap_or(effective_sw);
 
-        let row_stroke_dash = stroke_dash_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite());
+        let row_stroke_dash = resolve_row_stroke_dash(
+            &dash_cols,
+            ctx.scales.stroke_dash.as_ref(),
+            i,
+            ctx.mark_style.paint.stroke_dash.as_deref(),
+        );
 
         let row_angle = angle_values
             .as_ref()
@@ -442,7 +449,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 opacity: row_opacity,
                 stroke_opacity: row_stroke_opacity,
                 fill_opacity: row_fill_opacity,
-                stroke_dash_idx: row_stroke_dash,
+                stroke_dash: row_stroke_dash,
                 angle: row_angle,
             },
         );
@@ -911,7 +918,7 @@ mod tests {
             opacity: 1.0,
             stroke_opacity: 1.0,
             fill_opacity: 1.0,
-            stroke_dash_idx: None,
+            stroke_dash: None,
             angle: 0.0,
         }
     }
@@ -1115,7 +1122,7 @@ mod tests {
             opacity: opacity_val,
             stroke_opacity: stroke_opacity_val,
             fill_opacity: 1.0,
-            stroke_dash_idx: None,
+            stroke_dash: None,
             angle: 0.0,
         };
 
@@ -1129,7 +1136,7 @@ mod tests {
             opacity: opacity_val,
             stroke_opacity: stroke_opacity_val,
             fill_opacity: style.fill_opacity,
-            stroke_dash_idx: style.stroke_dash_idx,
+            stroke_dash: style.stroke_dash.clone(),
             angle: style.angle,
         });
         assert_eq!(cross_nodes.len(), 2, "Cross must emit 2 Line nodes");
@@ -1162,7 +1169,7 @@ mod tests {
             opacity: opacity_val,
             stroke_opacity: stroke_opacity_val,
             fill_opacity: style.fill_opacity,
-            stroke_dash_idx: style.stroke_dash_idx,
+            stroke_dash: style.stroke_dash.clone(),
             angle: style.angle,
         });
         assert_eq!(vline_nodes.len(), 1, "VLine must emit 1 Line node");
@@ -1193,7 +1200,7 @@ mod tests {
             opacity: opacity_val,
             stroke_opacity: stroke_opacity_val,
             fill_opacity: style.fill_opacity,
-            stroke_dash_idx: style.stroke_dash_idx,
+            stroke_dash: style.stroke_dash.clone(),
             angle: style.angle,
         });
         assert_eq!(hline_nodes.len(), 1, "HLine must emit 1 Line node");
@@ -1236,6 +1243,195 @@ mod tests {
             "index 1 should be dashed [6,3]");
         assert_eq!(circles[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
             "index 2 should be dotted [2,3]");
+    }
+
+    /// T12: a categorical `stroke_dash` field resolves through
+    /// `ctx.scales.stroke_dash` (`StrokeDashScale::dash_for`) instead of the
+    /// numeric palette-index contract — each row's dash matches its category,
+    /// not its row position.
+    #[test]
+    fn stroke_dash_categorical_encoding_resolves_through_scale() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // First-appearance domain order: solid, dashed, dotted.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["solid", "dashed", "dotted"])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_some(), "a categorical stroke_dash field must resolve a StrokeDashScale");
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let circles: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style) } else { None }
+        }).collect();
+        assert_eq!(circles.len(), 3);
+        assert!(circles[0].stroke_dash.is_none(), "'solid' (domain index 0) must be the solid slot");
+        assert_eq!(circles[1].stroke_dash.as_deref(), Some([6.0, 3.0].as_ref()),
+            "'dashed' (domain index 1) must be the long-dash pattern");
+        assert_eq!(circles[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
+            "'dotted' (domain index 2) must be the short-dash pattern");
+    }
+
+    /// T12: a literal `mark_point(stroke_dash=[...])` with NO stroke_dash
+    /// encoding now takes effect. Pre-T12 this fell back to nothing —
+    /// `MarkStyle::stroke_dash` was never read by point.rs — silently
+    /// dropping the literal (a member of the silent-drop class this batch
+    /// remediates); other marks (line/rule/bar/rect) already honored it.
+    #[test]
+    fn stroke_dash_literal_with_no_encoding_now_applies() {
+        let spec = three_row_spec();
+        let batch = three_row_batch();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = crate::spec::mark_style::MarkKwargsSpec {
+            stroke_dash: Some(vec![6.0, 3.0]),
+            ..Default::default()
+        };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let circles: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Circle { style, .. } = n { Some(style) } else { None }
+        }).collect();
+        assert_eq!(circles.len(), 3);
+        for (i, circle) in circles.iter().enumerate() {
+            assert_eq!(circle.stroke_dash.as_deref(), Some([6.0, 3.0].as_ref()),
+                "row {i}: literal stroke_dash must apply when no encoding is bound");
+        }
+    }
+
+    /// T12 fix round (spec §4.3, amended 2026-09-01, Issue 2 pin): the spec
+    /// reviewer's missing pin — `mark_point(filled=False, stroke_dash=[6,3])`
+    /// with no `stroke_dash` encoding — through the full `render_svg`
+    /// pipeline, not just the internal `ShapeStyle` field the test above
+    /// pins. `filled=False` is the realistic usage this ruling names: a
+    /// hollow marker's visible outline IS its stroke, so the dash pattern is
+    /// only meaningful there. Proves the literal reaches the actual
+    /// `stroke-dasharray` SVG attribute end to end.
+    #[test]
+    fn stroke_dash_literal_filled_false_no_encoding_emits_svg_dasharray() {
+        let mut spec = three_row_spec();
+        spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
+            filled: Some(false),
+            stroke_dash: Some(vec![6.0, 3.0]),
+            ..Default::default()
+        });
+        let batch = three_row_batch();
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = crate::render::config::RenderConfig::default();
+        let result = crate::render::render_svg(
+            &spec, &batch, &theme, viewport, &config, &crate::render::chart_config::ChartConfig::default(),
+        ).unwrap();
+        let svg = &result.bytes;
+
+        assert_eq!(svg.matches("<circle ").count(), 3, "3 rows must draw 3 hollow circles: {svg}");
+        assert_eq!(svg.matches("stroke-dasharray=\"6,3\"").count(), 3,
+            "every hollow point must carry the literal stroke_dash as a real SVG dasharray attribute: {svg}");
+    }
+
+    /// T12 fix round (spec §4.3, amended 2026-09-01, Issue 2 pin): the
+    /// reviewer's other missing pin — a NUMERIC `stroke_dash` encoding whose
+    /// per-row index is null falls back to the mark's literal `stroke_dash`,
+    /// per `resolve_row_stroke_dash`'s numeric branch
+    /// (`channels.rs`: `.or_else(|| base.map(<[f64]>::to_vec))`). Pre-T12,
+    /// point.rs read no literal at all, so a null numeric index row drew
+    /// solid; this fix round's ruling is to KEEP this fallback (the reviewer
+    /// judged it consistent with line/bar's own `.or(base_dash)` idiom) and
+    /// pin it. Reproduces the reviewer's live repro exactly:
+    /// `mark_point(filled=False, stroke_dash=[9,1])` +
+    /// `StrokeDash('sd', type_='quantitative')` with `sd=[1.0, None, 2.0]`
+    /// through the full `render_svg` pipeline, asserting the actual SVG
+    /// dasharrays in row order: `["6,3", "9,1", "2,3"]` — row 0 resolves
+    /// `DASH_PALETTE[0]` via its own index, row 1 (null index) inherits the
+    /// literal `[9,1]`, row 2 resolves `DASH_PALETTE[1]`.
+    #[test]
+    fn stroke_dash_numeric_null_index_row_inherits_literal_fallback() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sd", DataType::Float64, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0), None, Some(2.0)])),
+        ]).unwrap();
+        let mut spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec {
+            filled: Some(false),
+            stroke_dash: Some(vec![9.0, 1.0]),
+            ..Default::default()
+        });
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = crate::render::config::RenderConfig::default();
+        let result = crate::render::render_svg(
+            &spec, &batch, &theme, viewport, &config, &crate::render::chart_config::ChartConfig::default(),
+        ).unwrap();
+        let svg = &result.bytes;
+
+        let circle_tags: Vec<&str> = svg.split("<circle ").skip(1).collect();
+        assert_eq!(circle_tags.len(), 3, "expected 3 circle elements: {svg}");
+        let extract_dash = |tag: &str| -> Option<String> {
+            let attrs = &tag[..tag.find('>').unwrap_or(tag.len())];
+            attrs.find("stroke-dasharray=\"").map(|start| {
+                let rest = &attrs[start + "stroke-dasharray=\"".len()..];
+                rest[..rest.find('"').unwrap()].to_string()
+            })
+        };
+        let dashes: Vec<Option<String>> = circle_tags.iter().map(|t| extract_dash(t)).collect();
+        assert_eq!(
+            dashes,
+            vec![Some("6,3".to_string()), Some("9,1".to_string()), Some("2,3".to_string())],
+            "row order must match the reviewer's live repro shape [\"6,3\",\"9,1\",\"2,3\"]: {svg}"
+        );
     }
 
     #[test]

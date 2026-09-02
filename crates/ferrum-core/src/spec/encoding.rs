@@ -947,6 +947,29 @@ impl Encoding {
         ov!(x, y, color, size, shape, opacity, x2, y2, text, tooltip, tooltip_fields, href, description, key, url,
             stroke_width, stroke_opacity, stroke_dash, angle, fill_opacity);
     }
+
+    /// Swap the positional channels between the x and y roles (`CoordFlip`).
+    ///
+    /// The ONE expression of the flip mapping in this crate: `x`↔`y` and
+    /// `x2`↔`y2` always travel together, so paired endpoints (segment, ribbon,
+    /// ranged rule) stay self-consistent under the flip. Every stage that has
+    /// to move an encoding between the pre-flip (authored) and post-flip
+    /// (rendered) coordinate spaces calls this rather than re-deriving the
+    /// mapping locally — spec §4.4, "Extended 2026-09-02":
+    ///
+    /// - [`crate::render::prepare::LayerPrepared::flip_coords`] applies it to
+    ///   each layer's rendering encoding (and swaps the `x_is_own`/`y_is_own`
+    ///   provenance flags with it, since those describe these same slots).
+    /// - [`crate::render::scale_resolve::numeric_domain_union`] applies it to
+    ///   read a still-authored `spec.layers` encoding in the post-flip space
+    ///   its `channel` argument names.
+    ///
+    /// A second, hand-rolled swap at either site would be a second flip
+    /// convention to keep in sync; there is deliberately only this one.
+    pub(crate) fn flip_positional(&mut self) {
+        std::mem::swap(&mut self.x, &mut self.y);
+        std::mem::swap(&mut self.x2, &mut self.y2);
+    }
 }
 
 #[cfg(test)]

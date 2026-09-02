@@ -2000,6 +2000,247 @@ mod orchestration_tests {
         assert!(matches!(result.unwrap_err(), RenderError::InvalidViewport { .. }));
     }
 
+    // ── T12: stroke_dash consumption end-to-end (spec §4.3) ─────────────────
+    // Audit F-L01/F-L07: `relplot(style=)` used to warn about dash recycling
+    // while drawing zero `stroke-dasharray` attributes — the T6 `StrokeDashScale`
+    // had no consumer. These prove the consumer through the full `render_svg`
+    // pipeline: a categorical field draws distinct dasharrays with a legend, a
+    // numeric field keeps the pre-T12 `DASH_PALETTE` index contract, and the
+    // palette-overflow warning now corresponds to real drawn dashes.
+
+    fn line_spec_with_stroke_dash(color_field: Option<&str>) -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: color_field.map(|f| EncodingSpec { field: f.into(), type_: None, ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        }
+    }
+
+    /// Headline fix: a categorical `stroke_dash` field draws N distinct
+    /// polylines (one per style category, spec §4.3's (color, detail,
+    /// dash-field) partition extension) with N distinct dasharray patterns,
+    /// plus a stroke-dash aux legend entry per category.
+    #[test]
+    fn render_svg_categorical_stroke_dash_draws_distinct_polylines_and_legend() {
+        let spec = line_spec_with_stroke_dash(None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // 3 style categories (first-appearance order: solid, dashed, dotted),
+        // 3 points each so every polyline connects (points.len() >= 2).
+        let xs: Vec<f64> = (0..9).map(|i| (i % 3) as f64).collect();
+        let ys: Vec<f64> = (0..9).map(|i| i as f64).collect();
+        let sds: Vec<&str> = (0..9).map(|i| match i / 3 { 0 => "solid", 1 => "dashed", _ => "dotted" }).collect();
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(sds)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let svg = &result.bytes;
+
+        assert_eq!(svg.matches("<polyline ").count(), 3,
+            "3 distinct style categories must draw 3 polylines, not 1 merged line: {svg}");
+        // "solid" cycles to DASH_PALETTE slot 0 (no attribute); "dashed"/"dotted"
+        // cycle to slots 1/2, each carrying a distinct dasharray — once on the
+        // data polyline, once more on its aux-legend swatch line (4 total).
+        assert_eq!(svg.matches("stroke-dasharray=").count(), 4,
+            "2 of the 3 categories (dashed, dotted) must carry a stroke-dasharray \
+             attribute on both their polyline and legend swatch: {svg}");
+        assert!(svg.contains("stroke-dasharray=\"6,3\""), "expected the long-dash pattern: {svg}");
+        assert!(svg.contains("stroke-dasharray=\"2,3\""), "expected the short-dash pattern: {svg}");
+
+        // Aux legend: one entry per dash category (not suppressed — no color
+        // encoding shares the field).
+        assert_eq!(result.layout.aux_legends.len(), 1, "expected one stroke-dash aux legend block");
+        let entries = &result.layout.aux_legends[0].entries;
+        assert_eq!(entries.len(), 3, "3 dash categories -> 3 legend entries");
+        let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, vec!["solid", "dashed", "dotted"]);
+        for label in ["solid", "dashed", "dotted"] {
+            assert!(svg.contains(&format!(">{label}<")), "legend must render the '{label}' label: {svg}");
+        }
+    }
+
+    /// Numeric byte-identity (spec §6): a numeric `stroke_dash` column keeps
+    /// resolving no scale and reading `DASH_PALETTE` indices directly — the
+    /// T12 consumer wiring must not disturb this pre-existing contract.
+    #[test]
+    fn render_svg_numeric_stroke_dash_keeps_dash_palette_index_contract() {
+        let spec = line_spec_with_stroke_dash(Some("g"));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("sd", DataType::Float64, false),
+        ]));
+        // 3 color groups x 3 rows; each group's stroke_dash column carries a
+        // single DASH_PALETTE index (0 solid, 1 long dash, 2 short dash) —
+        // the group's first row is what the pre-T12 code sampled too.
+        let xs: Vec<f64> = (0..9).map(|i| (i % 3) as f64).collect();
+        let ys: Vec<f64> = (0..9).map(|i| i as f64).collect();
+        let gs: Vec<&str> = (0..9).map(|i| match i / 3 { 0 => "a", 1 => "b", _ => "c" }).collect();
+        let sds: Vec<f64> = (0..9).map(|i| (i / 3) as f64).collect();
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(Float64Array::from(sds)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let svg = &result.bytes;
+
+        assert_eq!(svg.matches("<polyline ").count(), 3, "3 color groups must draw 3 polylines: {svg}");
+        assert_eq!(svg.matches("stroke-dasharray=").count(), 2,
+            "index 0 (solid) carries no attribute; indices 1/2 do: {svg}");
+        assert!(svg.contains("stroke-dasharray=\"6,3\""));
+        assert!(svg.contains("stroke-dasharray=\"2,3\""));
+        // A numeric stroke_dash field never resolves a StrokeDashScale, so no
+        // aux legend is built for it.
+        assert!(result.layout.aux_legends.is_empty(),
+            "a numeric stroke_dash field must not produce a dash aux legend");
+    }
+
+    /// Palette overflow (spec §4.3): more style categories than
+    /// `DASH_PALETTE` slots (4: solid + 3 patterns) still draws every
+    /// polyline — cycling the palette — while emitting
+    /// `RenderWarning::StrokeDashPaletteOverflowed`. Before T12 this warning
+    /// fired over a chart with zero dasharray attributes; now the warning
+    /// corresponds to real (cycled) drawn dashes.
+    #[test]
+    fn render_svg_stroke_dash_overflow_warns_and_still_draws_cycled_dashes() {
+        let spec = line_spec_with_stroke_dash(None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // 5 categories (> 4 slots), 2 rows each.
+        let xs: Vec<f64> = (0..10).map(|i| (i % 2) as f64).collect();
+        let ys: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let sds: Vec<String> = (0..10).map(|i| format!("cat{}", i / 2)).collect();
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(sds)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+
+        assert!(
+            result.warnings.iter().any(|w| matches!(
+                w,
+                RenderWarning::StrokeDashPaletteOverflowed { categories: 5 }
+            )),
+            "expected a StrokeDashPaletteOverflowed{{categories: 5}} warning; got {:?}",
+            result.warnings
+        );
+        let svg = &result.bytes;
+        assert_eq!(svg.matches("<polyline ").count(), 5, "all 5 categories must still draw, cycling the palette: {svg}");
+        assert!(svg.matches("stroke-dasharray=").count() >= 1,
+            "the overflow warning must correspond to real drawn dashes, not a silent no-op: {svg}");
+    }
+
+    /// Fix round (T12 spec review Issue 1, spec §4.3 amended 2026-09-01): a
+    /// categorical `stroke_dash` on **ribbon** must partition paths, never
+    /// render one merged path under a multi-entry dashed legend. Mirrors
+    /// `render_svg_categorical_stroke_dash_draws_distinct_polylines_and_legend`
+    /// above but for `Mark::Ribbon`: 3 style categories -> 3 `<path>` bands
+    /// with 3 distinct dasharray values (one per non-solid category, doubled
+    /// by the legend swatch), and the aux legend's 3 entries/labels agree
+    /// with what actually drew.
+    #[test]
+    fn render_svg_categorical_stroke_dash_on_ribbon_draws_distinct_paths_and_legend() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Ribbon,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // 3 style categories (first-appearance order: solid, dashed, dotted),
+        // 3 rows each so every band connects (indices.len() >= 2 after the
+        // group's connectivity gate).
+        let xs: Vec<f64> = (0..9).map(|i| (i % 3) as f64).collect();
+        let ys: Vec<f64> = (0..9).map(|i| i as f64).collect();
+        let y2s: Vec<f64> = (0..9).map(|i| i as f64 + 1.0).collect();
+        let sds: Vec<&str> = (0..9).map(|i| match i / 3 { 0 => "solid", 1 => "dashed", _ => "dotted" }).collect();
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float64Array::from(y2s)),
+            Arc::new(StringArray::from(sds)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let result = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default()).unwrap();
+        let svg = &result.bytes;
+
+        assert_eq!(svg.matches("<path ").count(), 3,
+            "3 distinct style categories must draw 3 ribbon bands, not 1 merged path: {svg}");
+        // "solid" cycles to DASH_PALETTE slot 0 (no attribute); "dashed"/"dotted"
+        // cycle to slots 1/2, each carrying a distinct dasharray — once on the
+        // data path, once more on its aux-legend swatch line (4 total).
+        assert_eq!(svg.matches("stroke-dasharray=").count(), 4,
+            "2 of the 3 categories (dashed, dotted) must carry a stroke-dasharray \
+             attribute on both their band and legend swatch: {svg}");
+        assert!(svg.contains("stroke-dasharray=\"6,3\""), "expected the long-dash pattern: {svg}");
+        assert!(svg.contains("stroke-dasharray=\"2,3\""), "expected the short-dash pattern: {svg}");
+
+        // Legend agrees with the drawing: one aux-legend entry per category
+        // actually drawn, same labels, same order.
+        assert_eq!(result.layout.aux_legends.len(), 1, "expected one stroke-dash aux legend block");
+        let entries = &result.layout.aux_legends[0].entries;
+        assert_eq!(entries.len(), 3, "3 dash categories -> 3 legend entries");
+        let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, vec!["solid", "dashed", "dotted"]);
+        for label in ["solid", "dashed", "dotted"] {
+            assert!(svg.contains(&format!(">{label}<")), "legend must render the '{label}' label: {svg}");
+        }
+    }
+
     /// T8 quality-review finding 2, end-to-end through `render_svg`: a
     /// `mark_ribbon`-shaped chart with `mark_kwargs={"stroke": "none"}`
     /// (exactly what `src/ferrum/marks/composite.py`'s ribbon/errorband

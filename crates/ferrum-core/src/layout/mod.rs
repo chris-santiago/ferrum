@@ -36,7 +36,8 @@ pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
     AuxLegendInput, LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides,
-    LegendStyleOpts, LegendSuppression, ShapeLegendEntry, SizeLegendEntry, SymbolKind,
+    LegendStyleOpts, LegendSuppression, ShapeLegendEntry, SizeLegendEntry, StrokeDashLegendEntry,
+    SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};

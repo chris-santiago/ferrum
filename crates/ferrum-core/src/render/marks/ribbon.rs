@@ -20,7 +20,7 @@
 
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::build_color_detail_groups;
+use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
@@ -116,9 +116,23 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(ColorInput::Numeric) => None,
         }
     });
+    // T12 fix round (spec §4.3, amended 2026-09-01): a categorical `stroke_dash`
+    // field extends ribbon's series partition key from (color) to (color,
+    // stroke_dash-field) — mirrors line.rs's `dash_cols.categorical` wiring
+    // exactly, so a two-category `stroke_dash` encoding draws two distinct
+    // bands instead of one merged polygon under a multi-entry dashed legend.
+    // `stroke_dash_column_loader` gates the categorical column on a resolved
+    // `StrokeDashScale`; a numeric (or absent) `stroke_dash` field yields
+    // `categorical == None`, which skips subdivision entirely — grouping stays
+    // byte-identical to pre-fix for that case (ribbon still does not consume a
+    // numeric or literal-only `stroke_dash`, only the categorical-scale case
+    // this round authorizes).
+    let dash_cols = stroke_dash_column_loader(ctx);
+
     let groups = build_color_detail_groups(
         color_values.as_ref(),
         None,
+        dash_cols.categorical.as_ref(),
         ctx.scales.color.is_some(),
         n,
     );
@@ -210,6 +224,25 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let fill = crate::render::color::with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
             (Some(fill), ctx.mark_style.paint.fill_cleared, ctx.mark_style.paint.stroke)
         };
+        // Dash resolution mirrors line.rs: sampled once from the group's
+        // representative row. Only a resolved categorical `StrokeDashScale`
+        // (dash_cols.categorical == Some) applies a pattern here — a numeric
+        // or absent `stroke_dash` field keeps `None`, preserving byte-identity
+        // for every case this fix round did not authorize: ribbon still never
+        // resolves a numeric-index `stroke_dash`. Within the categorical
+        // case, though, `resolve_row_stroke_dash` falls back to the mark
+        // literal when the representative row's own dash category is null —
+        // so a literal-only `stroke_dash` CAN reach a band's paint here, in
+        // that one corner. Harmless (the band's dash still matches what a
+        // per-row lookup would draw for that same null category), but real.
+        let dash_vec = dash_cols.categorical.as_ref().and_then(|_| {
+            resolve_row_stroke_dash(
+                &dash_cols,
+                ctx.scales.stroke_dash.as_ref(),
+                representative_row,
+                ctx.mark_style.paint.stroke_dash.as_deref(),
+            )
+        });
         let style = to_scene_fill_stroke(
             fill,
             fill_cleared,
@@ -217,7 +250,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.mark_style.paint.stroke_cleared,
             ctx.mark_style.paint.stroke_width,
             1.0,
-            None,
+            dash_vec.as_deref(),
         );
         acc.push(
             ferrum_scene::SceneNode::Path {

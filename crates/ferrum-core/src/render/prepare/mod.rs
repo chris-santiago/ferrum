@@ -88,6 +88,29 @@ pub struct LayerPrepared {
     /// there too (the exemption is a no-op on an already-absent channel
     /// either way).
     pub color_is_own: bool,
+    /// Whether THIS layer's own (pre-merge) encoding declared an `x` / `y`
+    /// channel, as opposed to `encoding.x` / `encoding.y` (above) having been
+    /// filled in by [`Encoding::inherit_from`](crate::spec::encoding::Encoding::inherit_from)
+    /// from the chart level. The positional analog of [`color_is_own`], added
+    /// for the same reason (batch-A Task 13 spec c3, 2026-09-01): a reference
+    /// line declares the axis it belongs to by declaring exactly one
+    /// positional channel, and an inherited channel from a chart that happens
+    /// to set chart-level `x`/`y` must not be allowed to flip that axis. Like
+    /// `color_is_own`, this changes nothing about `encoding` itself — every
+    /// consumer that reads the merged positional channels (scale domains, the
+    /// axis builders, position grouping) sees exactly what it saw before; the
+    /// flags exist only so `scene_build.rs`'s per-layer `DrawCtx` construction
+    /// can decide whether a `Mark::Rule` layer's span axis is its own
+    /// declaration or borrowed. For `from_chart_only` (a chart with no
+    /// `layers`) there is no parent to inherit from, so "own" and "declared at
+    /// all" coincide.
+    ///
+    /// [`color_is_own`]: LayerPrepared::color_is_own
+    pub x_is_own: bool,
+    /// Whether THIS layer declared its own `y` channel — see [`x_is_own`].
+    ///
+    /// [`x_is_own`]: LayerPrepared::x_is_own
+    pub y_is_own: bool,
 }
 
 impl LayerPrepared {
@@ -103,6 +126,8 @@ impl LayerPrepared {
             blend: None,
             independent_y: false,
             color_is_own: spec.encoding.color.is_some(),
+            x_is_own: spec.encoding.x.is_some(),
+            y_is_own: spec.encoding.y.is_some(),
         }
     }
 
@@ -121,6 +146,10 @@ impl LayerPrepared {
         // 2026-08-28 T4 amendment, cycle-4 finding — see `color_is_own`'s doc
         // comment on [`LayerPrepared`]).
         let color_is_own = layer.encoding.color.is_some();
+        // Same capture-before-merge for the positional channels (batch-A Task
+        // 13 spec c3) — see `x_is_own`'s doc comment on [`LayerPrepared`].
+        let x_is_own = layer.encoding.x.is_some();
+        let y_is_own = layer.encoding.y.is_some();
         let mut encoding = layer.encoding.clone();
         // Layers routed to their own data via data_source are self-contained —
         // only inherit non-positional channels (color, size, etc.) from the
@@ -163,7 +192,38 @@ impl LayerPrepared {
             blend: layer.blend,
             independent_y: layer.independent_y,
             color_is_own,
+            x_is_own,
+            y_is_own,
         }
+    }
+
+    /// Swap every coordinate-space field between the x and y roles (CoordFlip).
+    ///
+    /// The provenance flags are coordinate-space-consistent (spec §4.4,
+    /// "Extended 2026-09-02, T13 spec c4"): whatever stage swaps the positional
+    /// channels swaps `x_is_own`/`y_is_own` with them, so a flag always
+    /// describes the slot its channel currently occupies, and a coord-flipped
+    /// rule span renders exactly as its unflipped counterpart does on the other
+    /// axis. The swap therefore lives here as ONE operation over the whole
+    /// coordinate-space group rather than as a sequence of field swaps at the
+    /// call site: a coordinate-space field added to this struct later is an
+    /// omission visible in this single method instead of a silent half-swap
+    /// somewhere in the pipeline.
+    ///
+    /// The invariant is load-bearing for `scene_build`'s rule own-span-axis
+    /// normalization. Flags left behind by the swap would describe the PRE-flip
+    /// slots while `encoding` held the POST-flip ones, so the normalization
+    /// would clear the layer's OWN channel and keep the inherited one: the
+    /// exact inversion of its intent, refusing `mark_rule().encode(x=...)`
+    /// under `CoordFlip` and drawing an inherited column's values for a flipped
+    /// layered reference line.
+    fn flip_coords(&mut self) {
+        // The channel swap itself (x↔y with x2↔y2, Phase 10c-pre) is
+        // `Encoding::flip_positional` — the crate's single expression of the
+        // flip mapping, shared with `numeric_domain_union`'s coordinate-space
+        // -aware layer read so the two can never disagree.
+        self.encoding.flip_positional();
+        std::mem::swap(&mut self.x_is_own, &mut self.y_is_own);
     }
 }
 
@@ -870,8 +930,9 @@ fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &Char
     }
 }
 
-/// Build the per-layer prepared inputs, applying the CoordFlip x↔y / x2↔y2 swap
-/// to every layer when `coord_flipped` (SPINE-12).
+/// Build the per-layer prepared inputs, applying [`LayerPrepared::flip_coords`]
+/// to every layer when `coord_flipped` (SPINE-12) — the whole coordinate-space
+/// group (channels AND their provenance flags) swaps together.
 ///
 /// Single-layer charts (`spec.layers == None`) produce exactly one
 /// [`LayerPrepared`] from the chart-level mark + encoding; multi-layer charts
@@ -889,14 +950,7 @@ fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
     }
     raw.into_iter()
         .map(|mut lp| {
-            let tmp = lp.encoding.x.take();
-            lp.encoding.x = lp.encoding.y.take();
-            lp.encoding.y = tmp;
-            // Phase 10c-pre: x2/y2 must swap together with x/y so paired
-            // endpoints (segment, ribbon) remain self-consistent under flip.
-            let tmp2 = lp.encoding.x2.take();
-            lp.encoding.x2 = lp.encoding.y2.take();
-            lp.encoding.y2 = tmp2;
+            lp.flip_coords();
             lp
         })
         .collect()

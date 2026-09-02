@@ -3528,7 +3528,7 @@ mod tests {
             batch: &adjusted,
             mark_style: &mark_style,
         };
-        let result = dispatch_mark_build(&spec.mark, &ctx);
+        let result = dispatch_mark_build(&spec.mark, &ctx).unwrap();
         let rects: Vec<(f64, f64)> = result
             .nodes
             .iter()

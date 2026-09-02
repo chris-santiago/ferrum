@@ -359,17 +359,26 @@ class StrokeDash(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
     the legend in the rendered SVG.  ``scale`` (explicit scale override) and
-    ``title`` (legend title) are also honored.
+    ``title`` (legend title) are also honored.  ``sort`` is honored: pass
+    ``"ascending"``, ``"descending"``, a list of strings for an explicit domain
+    order, or a channel shorthand such as ``"-y"`` to sort by the per-category
+    aggregate of another channel — mirroring ``Shape``, since the Rust
+    ``build_stroke_dash_scale`` domain builder already reads it.  ``condition``
+    is accepted but reserved for future use.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="x", y="y", stroke_dash=fm.StrokeDash("group", type_="N"))
+    >>> fm.Chart(df).encode(x="x", y="y", stroke_dash=fm.StrokeDash("group", sort="descending"))
     """
 
     _channel_name = "stroke_dash"
 
-    _honored_kwargs = APPEARANCE_FULL  # {"type","legend","scale","title"}
+    # {"type","legend","scale","title","condition","sort"} — sort added
+    # 2026-09-01 (batch-A T12 spec-review addendum, spec §4.3) so a user's
+    # sort= reaches the wire; Rust's build_stroke_dash_scale already read it.
+    _honored_kwargs = APPEARANCE_SORT
 
 
 class Angle(ChannelBase):

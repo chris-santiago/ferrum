@@ -110,6 +110,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let groups = build_color_detail_groups(
         color_values.as_ref(),
         detail_values.as_ref(),
+        // area does not consume the `stroke_dash` channel (T12 scope: line,
+        // rule, point, bar, rect only) — grouping stays byte-identical.
+        None,
         ctx.scales.color.is_some(),
         n_rows,
     );

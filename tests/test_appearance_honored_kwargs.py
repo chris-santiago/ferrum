@@ -13,6 +13,14 @@ Rust-side ``OpacityScale``/``StrokeDashScale`` builders (Task 6, concurrent).
 StrokeWidth and Angle are unaffected: both stay on ``APPEARANCE_BASE``
 because their scale resolution is out of scope by design (per-row constants,
 ``spec/encoding.rs:746``).
+
+**Further deliberate contract change (2026-09-01, batch-A T12 spec-review
+addendum):** StrokeDash moves a second time, from ``APPEARANCE_FULL`` to
+``APPEARANCE_SORT`` — mirroring Shape, ``sort=`` (and, as a consequence of
+the role hierarchy, ``condition``) is now honored too. The Rust-side
+``build_stroke_dash_scale`` domain builder (T6, ``auxiliary.rs:394``) already
+read ``dash_enc.sort``; the Python channel was silently dropping it before
+this change. StrokeOpacity is unaffected and stays on ``APPEARANCE_FULL``.
 """
 
 from __future__ import annotations
@@ -48,7 +56,9 @@ _EXPECTED: dict[type, frozenset[str]] = {
     # StrokeOpacity/StrokeDash gained "scale"/"title" 2026-08-28 (batch-A §4.3).
     StrokeOpacity: frozenset({"type", "scale", "title", "legend"}),
     StrokeWidth: frozenset({"type", "legend"}),
-    StrokeDash: frozenset({"type", "scale", "title", "legend"}),
+    # StrokeDash gained "sort"/"condition" 2026-09-01 (batch-A T12 spec-review
+    # addendum) — moved to APPEARANCE_SORT, mirroring Shape.
+    StrokeDash: frozenset({"type", "scale", "title", "legend", "condition", "sort"}),
     Angle: frozenset({"type", "legend"}),
 }
 

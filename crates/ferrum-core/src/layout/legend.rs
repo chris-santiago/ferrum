@@ -176,6 +176,13 @@ pub struct LegendEntryLayout {
     /// the theme mark color (size/shape legend).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_hex: Option<String>,
+    /// Stroke-dash-legend swatch pattern (T12). When `Some`, the renderer's
+    /// `SymbolKind::Line` swatch draws with this dasharray instead of solid;
+    /// `None` for color/size/shape entries and for a dash entry mapped to the
+    /// palette's solid slot (byte-identical to every pre-T12 `Line`-kind entry,
+    /// which had no dash concept at all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash_pattern: Option<Vec<f64>>,
 }
 
 use super::text_metrics::TextMetrics;
@@ -697,6 +704,7 @@ pub fn layout_legend(
                         symbol_radius: None,
                         shape_name: None,
                         color_hex: None,
+                        dash_pattern: None,
                     }
                 })
                 .collect()
@@ -735,6 +743,7 @@ pub fn layout_legend(
                         symbol_radius: None,
                         shape_name: None,
                         color_hex: None,
+                        dash_pattern: None,
                     }
                 })
                 .collect()
@@ -1088,19 +1097,34 @@ pub struct ShapeLegendEntry {
     pub shape_name: String,
 }
 
-/// Input for one auxiliary legend block (size or shape) stacked below the
-/// color legend. Built in `prepare.rs`; consumed by [`layout_aux_legends`].
+/// A stroke-dash-legend category (T12): the formatted label and the dasharray
+/// pattern the [`StrokeDashScale`](crate::render::scale_resolve::StrokeDashScale)
+/// assigned to it. An empty `dash` is the solid slot — the renderer draws a
+/// plain (undashed) line swatch for it, mirroring
+/// [`StrokeDashScale::patterns`](crate::render::scale_resolve::StrokeDashScale::patterns)'s
+/// own empty-means-solid convention.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrokeDashLegendEntry {
+    pub label: String,
+    pub dash: Vec<f64>,
+}
+
+/// Input for one auxiliary legend block (size, shape, or stroke-dash) stacked
+/// below the color legend. Built in `prepare.rs`; consumed by
+/// [`layout_aux_legends`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuxLegendInput {
     Size { title: Option<String>, entries: Vec<SizeLegendEntry> },
     Shape { title: Option<String>, entries: Vec<ShapeLegendEntry> },
+    StrokeDash { title: Option<String>, entries: Vec<StrokeDashLegendEntry> },
 }
 
 /// The optional title of an aux legend block, regardless of variant.
 fn aux_title(input: &AuxLegendInput) -> Option<&str> {
     match input {
-        AuxLegendInput::Size { title, .. } | AuxLegendInput::Shape { title, .. } =>
-            title.as_deref(),
+        AuxLegendInput::Size { title, .. }
+        | AuxLegendInput::Shape { title, .. }
+        | AuxLegendInput::StrokeDash { title, .. } => title.as_deref(),
     }
 }
 
@@ -1121,6 +1145,10 @@ fn estimate_aux_block_size(
             entries.iter().map(|e| e.label.as_str()).collect(),
             SYMBOL_WIDTH,
         ),
+        AuxLegendInput::StrokeDash { entries, .. } => (
+            entries.iter().map(|e| e.label.as_str()).collect(),
+            SYMBOL_WIDTH,
+        ),
     };
     let max_label_w = labels
         .iter()
@@ -1133,7 +1161,7 @@ fn estimate_aux_block_size(
             .iter()
             .map(|e| 2.0 * e.radius)
             .fold(line_h, f64::max),
-        AuxLegendInput::Shape { .. } => line_h,
+        AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => line_h,
     };
     let entry_w = max_symbol_w + SYMBOL_LABEL_GAP + max_label_w;
     let width = entry_w + 2.0 * LEGEND_OUTER_PAD;
@@ -1304,7 +1332,7 @@ fn layout_aux_block(
     let max_radius = match input {
         AuxLegendInput::Size { entries, .. } =>
             entries.iter().map(|e| e.radius).fold(SYMBOL_WIDTH / 2.0, f64::max),
-        AuxLegendInput::Shape { .. } => SYMBOL_WIDTH / 2.0,
+        AuxLegendInput::Shape { .. } | AuxLegendInput::StrokeDash { .. } => SYMBOL_WIDTH / 2.0,
     };
     let symbol_col_x = block_rect.x + LEGEND_OUTER_PAD + max_radius;
     let label_x = block_rect.x + LEGEND_OUTER_PAD + 2.0 * max_radius + SYMBOL_LABEL_GAP;
@@ -1327,6 +1355,7 @@ fn layout_aux_block(
                     symbol_radius: Some(e.radius),
                     shape_name: None,
                     color_hex: e.color_hex.clone(),
+                    dash_pattern: None,
                 });
                 row_top += row_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1344,6 +1373,29 @@ fn layout_aux_block(
                     symbol_radius: None,
                     shape_name: Some(e.shape_name.clone()),
                     color_hex: None,
+                    dash_pattern: None,
+                });
+                row_top += line_h + LEGEND_ENTRY_ROW_PAD;
+            }
+        }
+        AuxLegendInput::StrokeDash { entries: des, .. } => {
+            for e in des {
+                let cy = row_top + line_h / 2.0;
+                entries.push(LegendEntryLayout {
+                    label: e.label.clone(),
+                    label_anchor_x: label_x,
+                    label_anchor_y: cy + label_font_size * 0.35,
+                    symbol_anchor_x: symbol_col_x,
+                    symbol_anchor_y: cy,
+                    symbol_kind: SymbolKind::Line,
+                    symbol_radius: None,
+                    shape_name: None,
+                    color_hex: None,
+                    // Empty pattern is the solid slot (StrokeDashScale's own
+                    // convention) — `None` here draws a plain line swatch,
+                    // matching how `MarkStyle::stroke_dash: None` paints no
+                    // dasharray.
+                    dash_pattern: if e.dash.is_empty() { None } else { Some(e.dash.clone()) },
                 });
                 row_top += line_h + LEGEND_ENTRY_ROW_PAD;
             }
@@ -1377,6 +1429,7 @@ mod tests {
                 symbol_radius: None,
                 shape_name: None,
                 color_hex: None,
+                dash_pattern: None,
             }],
             title: None,
             colorbar: None,

@@ -184,7 +184,7 @@ pub fn build_legend(
                 opacity: 1.0,
                 stroke_opacity: 1.0,
                 fill_opacity: 1.0,
-                stroke_dash_idx: None,
+                stroke_dash: None,
                 angle: 0.0,
             };
             nodes.extend(crate::render::marks::point::emit_shape_nodes(kind, sx, sy, 5.0 * swatch_scale, style));
@@ -229,6 +229,10 @@ pub fn build_legend(
                 SymbolKind::Line => {
                     // A line swatch has no fill; `symbol_stroke_width` overrides the
                     // theme line width when set so the legend line thickens too.
+                    // `dash_pattern` (T12) is `Some` only for a stroke-dash aux
+                    // legend entry — every other `Line`-kind entry (color legend
+                    // for Mark::Line, etc.) carries `None` and draws solid,
+                    // byte-identical to pre-T12.
                     let line_w = symbol_stroke_w.unwrap_or(theme.sizes.line_stroke_width);
                     let half_len = 6.0 * swatch_scale;
                     nodes.push(SceneNode::Line {
@@ -236,7 +240,7 @@ pub fn build_legend(
                         y1: sy,
                         x2: sx + half_len,
                         y2: sy,
-                        style: to_scene_stroke(color, line_w, 1.0, None, None, None),
+                        style: to_scene_stroke(color, line_w, 1.0, entry.dash_pattern.as_deref(), None, None),
                     });
                 }
             }
@@ -401,6 +405,7 @@ mod tests {
                     symbol_radius: None,
                     shape_name: None,
                     color_hex: None,
+                    dash_pattern: None,
                 },
                 LegendEntryLayout {
                     label: "b".into(),
@@ -412,6 +417,7 @@ mod tests {
                     symbol_radius: None,
                     shape_name: None,
                     color_hex: None,
+                    dash_pattern: None,
                 },
             ],
             title: None,
@@ -444,6 +450,7 @@ mod tests {
             symbol_radius: Some(r),
             shape_name: None,
             color_hex: None,
+            dash_pattern: None,
         };
         let legend = LegendLayout {
             rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },
@@ -490,6 +497,7 @@ mod tests {
                 symbol_radius: None,
                 shape_name: Some("diamond".into()),
                 color_hex: None,
+                dash_pattern: None,
             }],
             title: None,
             colorbar: None,
@@ -536,6 +544,7 @@ mod tests {
             symbol_radius: None,
             shape_name: None,
             color_hex: Some("#1f77b4".into()),
+            dash_pattern: None,
         };
         LegendLayout {
             rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },

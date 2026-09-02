@@ -611,6 +611,7 @@ fn aux_block_is_empty(a: &AuxLegendInput) -> bool {
     match a {
         AuxLegendInput::Size { entries, .. } => entries.is_empty(),
         AuxLegendInput::Shape { entries, .. } => entries.is_empty(),
+        AuxLegendInput::StrokeDash { entries, .. } => entries.is_empty(),
     }
 }
 

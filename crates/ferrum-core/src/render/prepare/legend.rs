@@ -9,7 +9,7 @@
 
 use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendOrient, ShapeLegendEntry,
-    SizeLegendEntry, SymbolKind,
+    SizeLegendEntry, StrokeDashLegendEntry, SymbolKind,
 };
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
@@ -526,18 +526,23 @@ fn same_field_numeric_size_color_merge(spec: &ChartSpec, scales: &ResolvedScales
     same_field_as_color && color_is_numeric
 }
 
-/// Build the size/shape auxiliary legend blocks.
+/// Build the size/shape/stroke-dash auxiliary legend blocks.
 ///
 /// Size: graduated symbols at ~5 nice round values spanning the size domain
 /// (`nice_ticks`), each scaled to the size scale's pixel radius and labeled
 /// with the value. Shape: one glyph per category in the shape scale.
+/// Stroke-dash (T12): one dashed-line swatch per category in the
+/// [`StrokeDashScale`](crate::render::scale_resolve::StrokeDashScale), beside
+/// shape's block, entry-style like shape rather than graduated like size.
 ///
 /// Same-field merge (Vega-Lite behavior): when the size channel shares its
 /// field with a *continuous* color encoding, the size legend's symbols also
 /// carry the color the shared field maps to (`color_hex`), and the colorbar is
-/// expected to be suppressed by the caller — a single combined block. A size or
-/// shape channel that shares its field with a categorical color encoding is
-/// suppressed entirely (the color legend already labels that field).
+/// expected to be suppressed by the caller — a single combined block. A size,
+/// shape, or stroke-dash channel that shares its field with a categorical
+/// color encoding is suppressed entirely (the color legend already labels
+/// that field) — stroke-dash mirrors shape's suppression condition exactly,
+/// it has no same-field color+dash merge of its own.
 ///
 /// `color_is_inert_on_line_or_ribbon` (spec-review 2026-08-28, cycle-3
 /// finding): when `true`, the same-field merge still emits the size legend
@@ -646,6 +651,34 @@ fn build_aux_legends(
             if !entries.is_empty() {
                 out.push(AuxLegendInput::Shape {
                     title: aux_legend_title(shape_enc),
+                    entries,
+                });
+            }
+        }
+    }
+
+    // ── Stroke-dash legend (T12) ─────────────────────────────────────────
+    if let (Some(dash_scale), Some(dash_enc)) = (&scales.stroke_dash, &spec.encoding.stroke_dash) {
+        let disabled = legend_channel_disabled(spec.encoding.stroke_dash.as_ref());
+        let same_field_as_color = color_field == Some(dash_enc.field.as_str());
+        // Stroke-dash always maps a categorical field (a quantitative field
+        // resolves no scale and stays index-based, see StrokeDashScale's own
+        // doc); if color encodes the same categorical field, the color legend
+        // already enumerates it — suppress, mirroring shape's condition above.
+        let suppressed = disabled || same_field_as_color;
+        if !suppressed {
+            let entries: Vec<StrokeDashLegendEntry> = dash_scale
+                .domain
+                .iter()
+                .zip(dash_scale.patterns.iter())
+                .map(|(label, pattern)| StrokeDashLegendEntry {
+                    label: label.clone(),
+                    dash: pattern.clone(),
+                })
+                .collect();
+            if !entries.is_empty() {
+                out.push(AuxLegendInput::StrokeDash {
+                    title: aux_legend_title(dash_enc),
                     entries,
                 });
             }
@@ -904,6 +937,8 @@ mod tests {
             blend: None,
             independent_y: false,
             color_is_own: color_field.is_some(),
+            x_is_own: false,
+            y_is_own: false,
         }
     }
 

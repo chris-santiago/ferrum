@@ -8,10 +8,11 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::ScaleKind;
+use crate::render::scale_resolve::{ScaleKind, StrokeDashScale};
 
 /// Load the per-row color-encoding columns for fill resolution via the shared
 /// [`color_column_loader`](crate::render::marks::channels::color_column_loader)
@@ -44,20 +45,26 @@ struct BarBaseStyle<'a> {
 /// The `opacity` / `fill_opacity` / `stroke_opacity` channels are resolved by
 /// the shared [`OpacityResolver`] (FA-11) and passed into
 /// [`row_fill_stroke`](StrokeChannels::row_fill_stroke); this struct owns only
-/// the stroke-geometry channels (`width`, `dash`, `angle`).
-struct StrokeChannels {
+/// the stroke-geometry channels (`width`, `dash`, `angle`). `dash` (T12) is
+/// the shared [`DashColumns`] loader — categorical *or* numeric, never both —
+/// paired with `dash_scale` (borrowed from `ctx.scales.stroke_dash`, `'a`
+/// tied to the `DrawCtx`'s own lifetime, not this struct's short-lived
+/// `load` call) so [`row_fill_stroke`] can resolve through
+/// [`resolve_row_stroke_dash`] exactly like `line`/`point`/`rect`.
+struct StrokeChannels<'a> {
     width: Option<Vec<Option<f64>>>,
-    dash: Option<Vec<Option<f64>>>,
+    dash: DashColumns,
+    dash_scale: Option<&'a StrokeDashScale>,
     angle: Option<Vec<Option<f64>>>,
 }
 
-impl StrokeChannels {
-    fn load(ctx: &DrawCtx) -> Self {
+impl<'a> StrokeChannels<'a> {
+    fn load(ctx: &DrawCtx<'a>) -> Self {
         Self {
             width: ctx.spec.encoding.stroke_width.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
-            dash: ctx.spec.encoding.stroke_dash.as_ref()
-                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
+            dash: stroke_dash_column_loader(ctx),
+            dash_scale: ctx.scales.stroke_dash.as_ref(),
             angle: ctx.spec.encoding.angle.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
         }
@@ -90,11 +97,7 @@ impl StrokeChannels {
             .filter(|v| *v >= 0.0 && v.is_finite())
             .unwrap_or(base_sw);
 
-        let dash_vec: Option<Vec<f64>> = self.dash.as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .filter(|v| v.is_finite())
-            .and_then(resolve_stroke_dash);
-        let effective_dash = dash_vec.as_deref().or(base_dash).map(|d| d.to_vec());
+        let effective_dash = resolve_row_stroke_dash(&self.dash, self.dash_scale, i, base_dash);
 
         let angle = self.angle.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
@@ -1364,6 +1367,56 @@ mod tests {
         for w in &rects {
             assert!((w - 60.0).abs() < 1e-6, "all-identical-x bars should use the 20%-of-plot-width fallback, got {w}");
         }
+    }
+
+    /// T12: bar's `StrokeChannels` resolves a categorical `stroke_dash`
+    /// field through `ctx.scales.stroke_dash` (`StrokeDashScale::dash_for`)
+    /// rather than the numeric palette-index contract, mirroring
+    /// line/point/rect.
+    #[test]
+    fn bar_stroke_dash_categorical_encoding_resolves_through_scale() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // First-appearance domain order: solid, dashed, dotted.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 15.0])),
+            Arc::new(StringArray::from(vec!["solid", "dashed", "dotted"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 200.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_some(), "a categorical stroke_dash field must resolve a StrokeDashScale");
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3);
+        assert!(rects[0].stroke_dash.is_none(), "'solid' (domain index 0) must be the solid slot");
+        assert_eq!(rects[1].stroke_dash.as_deref(), Some([6.0, 3.0].as_ref()),
+            "'dashed' (domain index 1) must be the long-dash pattern");
+        assert_eq!(rects[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
+            "'dotted' (domain index 2) must be the short-dash pattern");
     }
 
     #[test]

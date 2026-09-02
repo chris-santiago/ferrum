@@ -10,6 +10,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_effective_stroke, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ColorScale, ScaleKind};
 
@@ -84,6 +85,10 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // T12: rect gains the stroke_dash read it lacked — numeric keeps the
+    // DASH_PALETTE index contract byte-identically; categorical resolves
+    // through ctx.scales.stroke_dash.
+    let dash_cols = stroke_dash_column_loader(ctx);
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -137,6 +142,12 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             fill_cleared,
             stroke_width_values.is_some(),
         );
+        let row_dash = resolve_row_stroke_dash(
+            &dash_cols,
+            ctx.scales.stroke_dash.as_ref(),
+            i,
+            ctx.mark_style.paint.stroke_dash.as_deref(),
+        );
 
         let style = to_scene_fill_stroke_full(
             Some(fill),
@@ -145,7 +156,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             effective_stroke_cleared,
             row_stroke_width,
             row_opacity,
-            ctx.mark_style.paint.stroke_dash.as_deref(),
+            row_dash.as_deref(),
             row_fill_opacity,
             1.0,
             0.0,
@@ -202,6 +213,8 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // T12: rect gains the stroke_dash read it lacked (both orientations below).
+    let dash_cols = stroke_dash_column_loader(ctx);
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
@@ -280,6 +293,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 fill_cleared,
                 stroke_width_values.is_some(),
             );
+            let row_dash = resolve_row_stroke_dash(
+                &dash_cols,
+                ctx.scales.stroke_dash.as_ref(),
+                i,
+                ctx.mark_style.paint.stroke_dash.as_deref(),
+            );
 
             let style = to_scene_fill_stroke_full(
                 Some(fill),
@@ -288,7 +307,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 effective_stroke_cleared,
                 row_stroke_width,
                 row_opacity,
-                ctx.mark_style.paint.stroke_dash.as_deref(),
+                row_dash.as_deref(),
                 row_fill_opacity,
                 1.0,
                 0.0,
@@ -370,6 +389,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 fill_cleared,
                 stroke_width_values.is_some(),
             );
+            let row_dash = resolve_row_stroke_dash(
+                &dash_cols,
+                ctx.scales.stroke_dash.as_ref(),
+                i,
+                ctx.mark_style.paint.stroke_dash.as_deref(),
+            );
 
             let style = to_scene_fill_stroke_full(
                 Some(fill),
@@ -378,7 +403,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 effective_stroke_cleared,
                 row_stroke_width,
                 row_opacity,
-                ctx.mark_style.paint.stroke_dash.as_deref(),
+                row_dash.as_deref(),
                 row_fill_opacity,
                 1.0,
                 0.0,
@@ -456,6 +481,8 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // T12: rect gains the stroke_dash read it lacked.
+    let dash_cols = stroke_dash_column_loader(ctx);
 
     // Optional text annotation channel for heatmap cells.
     let text_enc = spec.encoding.text.as_ref();
@@ -517,6 +544,12 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             fill_cleared,
             stroke_width_values.is_some(),
         );
+        let row_dash = resolve_row_stroke_dash(
+            &dash_cols,
+            ctx.scales.stroke_dash.as_ref(),
+            i,
+            ctx.mark_style.paint.stroke_dash.as_deref(),
+        );
 
         let style = to_scene_fill_stroke_full(
             Some(fill),
@@ -525,7 +558,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             effective_stroke_cleared,
             row_stroke_width,
             row_opacity,
-            ctx.mark_style.paint.stroke_dash.as_deref(),
+            row_dash.as_deref(),
             row_fill_opacity,
             1.0,
             0.0,
@@ -866,6 +899,58 @@ mod tests {
             alpha0, alpha1,
             "per-row opacity encoding must produce different alphas; both were {alpha0}"
         );
+    }
+
+    /// T12: `build_quantitative_range` (the free-floating x/x2/y/y2 rect path)
+    /// resolves a categorical `stroke_dash` field through
+    /// `ctx.scales.stroke_dash`, mirroring the heatmap and ordinal-range paths.
+    #[test]
+    fn quantitative_range_stroke_dash_categorical_encoding_resolves_through_scale() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y",  DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // First-appearance domain order: solid, dashed, dotted.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(arrow::array::Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(arrow::array::Float64Array::from(vec![0.0, 0.0, 0.0])),
+            Arc::new(arrow::array::Float64Array::from(vec![1.0, 1.0, 1.0])),
+            Arc::new(StringArray::from(vec!["solid", "dashed", "dotted"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_some(), "a categorical stroke_dash field must resolve a StrokeDashScale");
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3);
+        assert!(rects[0].stroke_dash.is_none(), "'solid' (domain index 0) must be the solid slot");
+        assert_eq!(rects[1].stroke_dash.as_deref(), Some([6.0, 3.0].as_ref()),
+            "'dashed' (domain index 1) must be the long-dash pattern");
+        assert_eq!(rects[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
+            "'dotted' (domain index 2) must be the short-dash pattern");
     }
 
     /// W18: build_heatmap also already reads opacity encoding (Phase 10 added it).
@@ -1266,6 +1351,59 @@ mod tests {
         assert_eq!(t1, "tip_c",
             "node 1 tooltip must be row 2's ('tip_c'), not row 1's ('tip_b'); \
              got '{t1}'. Fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// T12: rect gains the `stroke_dash` read it lacked. A categorical field
+    /// resolves through `ctx.scales.stroke_dash` (`StrokeDashScale::dash_for`)
+    /// on the heatmap path, mirroring line/point/bar.
+    #[test]
+    fn heatmap_stroke_dash_categorical_encoding_resolves_through_scale() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "xcat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "ycat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                stroke_dash: Some(EncodingSpec { field: "sd".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("xcat", DataType::Utf8, false),
+            Field::new("ycat", DataType::Utf8, false),
+            Field::new("sd", DataType::Utf8, false),
+        ]));
+        // First-appearance domain order: solid, dashed, dotted. Distinct
+        // x/y per row so every cell is independent (no overplotting).
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["A", "B", "C"])),
+            Arc::new(StringArray::from(vec!["p", "q", "r"])),
+            Arc::new(StringArray::from(vec!["solid", "dashed", "dotted"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        assert!(scales.stroke_dash.is_some(), "a categorical stroke_dash field must resolve a StrokeDashScale");
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3);
+        assert!(rects[0].stroke_dash.is_none(), "'solid' (domain index 0) must be the solid slot");
+        assert_eq!(rects[1].stroke_dash.as_deref(), Some([6.0, 3.0].as_ref()),
+            "'dashed' (domain index 1) must be the long-dash pattern");
+        assert_eq!(rects[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
+            "'dotted' (domain index 2) must be the short-dash pattern");
     }
 
     /// Href channel alignment test for `build_quantitative_range`.

@@ -17,9 +17,9 @@
 //! - Otherwise: one polyline over all rows in batch order.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::build_color_detail_groups;
+use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
@@ -137,9 +137,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
+    // T12: a categorical `stroke_dash` field extends the series partition key
+    // (color, detail) -> (color, detail, stroke_dash-field), spec §4.3, so
+    // distinct style categories draw as distinct polylines rather than all
+    // sampling the first row's dash within their color/detail group. A
+    // numeric field (or none) yields `dash_cols.categorical == None`, which
+    // skips subdivision entirely — byte-identical grouping.
+    let dash_cols = stroke_dash_column_loader(ctx);
+
     let groups = build_color_detail_groups(
         color_values.as_ref(),
         detail_values.as_ref(),
+        dash_cols.categorical.as_ref(),
         ctx.scales.color.is_some(),
         n_rows,
     );
@@ -149,8 +158,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     // opacity / fill_opacity / stroke_opacity resolution (shared resolver, FA-11).
     // Defaults: opacity → mark_style.paint.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
@@ -189,11 +196,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| *v >= 0.0 && v.is_finite())
             .unwrap_or(ctx.mark_style.paint.stroke_width);
-        let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
-            .and_then(|v| v.get(first).copied().flatten())
-            .filter(|v| v.is_finite())
-            .and_then(resolve_stroke_dash);
-        let effective_dash = dash_vec.as_deref().or(ctx.mark_style.paint.stroke_dash.as_deref());
+        let dash_vec = resolve_row_stroke_dash(
+            &dash_cols,
+            ctx.scales.stroke_dash.as_ref(),
+            first,
+            ctx.mark_style.paint.stroke_dash.as_deref(),
+        );
+        let effective_dash = dash_vec.as_deref();
 
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>

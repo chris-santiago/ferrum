@@ -1257,6 +1257,39 @@ fn build_panel_mark_batches(
                 layer_spec_encoding.color = None;
             }
         }
+        // Own-span-axis normalization for rule (spec §4.4, batch-A Task 13
+        // spec c3, 2026-09-01). A reference-line layer declares the axis it
+        // belongs to by declaring exactly one positional channel — the
+        // diagnostic desugars all do this (`{"x": "_ref_zero"}` for a vertical
+        // zero line, `{"y": "_ref_zero"}` for a horizontal one). When the
+        // chart ALSO sets a chart-level `x`/`y`, `Encoding::inherit_from`
+        // fills in the opposite channel, and rule's shape derivation would
+        // then see a two-channel pattern that is not the layer's own shape:
+        // `shap_chart(kind="beeswarm")`'s vertical zero line inherited the
+        // chart's ordinal `y="feature"` and rendered as one full-width
+        // HORIZONTAL span per row; `alpha_selection_chart`'s and
+        // `pca_scree_chart`'s vertical markers did the same. Clearing the
+        // inherited-only channel on this DrawCtx-LOCAL copy (never on
+        // `layer.encoding`, exactly as the own-color exemption above) keeps
+        // every other consumer — scale domains, axis chrome, position
+        // grouping, the legend — reading the merged encoding unchanged, while
+        // the geometry sees the shape the layer actually declared.
+        //
+        // Deliberately narrow: only when the layer declared exactly one of
+        // `x`/`y` and the merged encoding binds neither `x2` nor `y2`. A rule
+        // whose ranged/diagonal shape is assembled partly from inherited
+        // channels keeps assembling it, and a layer that declares both
+        // channels itself keeps `RuleShape::resolve`'s documented tie-break.
+        if layer.mark == crate::spec::mark::Mark::Rule
+            && layer_spec_encoding.x2.is_none()
+            && layer_spec_encoding.y2.is_none()
+        {
+            match (layer.x_is_own, layer.y_is_own) {
+                (true, false) => layer_spec_encoding.y = None,
+                (false, true) => layer_spec_encoding.x = None,
+                _ => {}
+            }
+        }
         let layer_spec = ChartSpec {
             mark: layer.mark,
             encoding: layer_spec_encoding,
@@ -1271,8 +1304,14 @@ fn build_panel_mark_batches(
             mark_style: &mark_style,
         };
 
-        validate_mark_encoding(&layer.mark, &layer.encoding, prep.coord_flipped)?;
-        let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
+        // Validate the encoding the mark builder will actually see — the
+        // DrawCtx-local copy, not the pre-normalization merge — so the refusal
+        // gate and the geometry can never disagree about a layer's shape
+        // (batch-A Task 13 spec c3). Only rule's own-span-axis normalization
+        // above touches a positional channel, so every other mark's gate
+        // decision is unchanged.
+        validate_mark_encoding(&layer.mark, &layer_spec.encoding, prep.coord_flipped)?;
+        let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
 
         // For CoordPolar, transform all mark nodes from Cartesian pixel
         // space to polar pixel space. Arc marks (Mark::Arc) handle their
@@ -2532,13 +2571,27 @@ fn remap_coord(
 ///   Horizontal-band areas belong to `mark_rect`; vertical bands use `y2`.
 /// - `mark_bar` with both `x2` AND `y2` bound: a 2-D extent (width AND height
 ///   from separate columns) defines a rectangle, not a bar.  Use `mark_rect`.
+/// - `mark_rule` with a channel pattern rule has no geometry for: delegated in
+///   full to [`crate::render::marks::rule::RuleShape::resolve`], the same
+///   derivation the renderer uses to pick its shape (batch-A Task 13 spec c3,
+///   ruled 2026-09-01). Running one function in both places is the point: the
+///   gate cannot accept a pattern `marks/rule.rs::build` has no branch for,
+///   which is how a presence-legal shape used to fall through to a blank
+///   panel. Refused patterns are a second endpoint with no anchor to pair it
+///   with (`x2`/`y2` bound with no `x`/`y` to range from) and nothing
+///   positional bound at all. **Totality invariant (spec c2):** once a shape
+///   resolves, `build` renders it or raises a typed `RenderError` — there is
+///   no terminal fallback left to fall through to. See `marks/rule.rs`'s
+///   module doc for the shape table and the scale-keyed positional read.
 ///
 /// `channel`/`mark`'s bare-channel checks act on `encoding`, which is the
 /// RESOLVED (post-`CoordFlip`) layer encoding — so is `channel`/`hint_alt_channel`
 /// on the resulting error; `coord_flipped` (R3) lets `Display` un-flip them back
 /// to the token the user actually wrote. `mark_bar`'s hint names both x2 AND y2
 /// (flip-symmetric: whichever letters the user wrote, both are still bound after
-/// the swap), so it carries no `hint_alt_channel`.
+/// the swap), so it carries no `hint_alt_channel`. `channel: "positional"` names
+/// the whole family since no single bound channel is at fault, unlike
+/// `mark_area`/`mark_bar` above.
 fn validate_mark_encoding(
     mark: &crate::spec::mark::Mark,
     encoding: &crate::spec::encoding::Encoding,
@@ -2561,6 +2614,16 @@ fn validate_mark_encoding(
                 hint_alt_channel: None,
                 coord_flipped,
             })
+        }
+        // Rule's gate IS its geometry derivation: the same
+        // `RuleShape::resolve` the renderer calls, run here so an unsupported
+        // channel pattern is refused before any mark is built (batch-A Task 13
+        // spec c3). One function, so the gate cannot accept a pattern the
+        // renderer has no branch for — the drift that let a presence-legal
+        // shape fall through to a blank panel.
+        Mark::Rule => {
+            crate::render::marks::rule::RuleShape::resolve(encoding, coord_flipped)?;
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -2979,6 +3042,8 @@ mod tests {
             blend: None,
             independent_y,
             color_is_own: false,
+            x_is_own: false,
+            y_is_own: true,
         }
     }
 
@@ -6048,6 +6113,436 @@ mod tests {
             flipped_text,
             "mark_bar: channel 'x2 and y2' is not supported; a 2-D extent (both x2= and y2=) is a rectangle; use mark_rect instead"
         );
+    }
+
+    // ── Batch-A Task 13: `Mark::Rule`'s presence-only channel validation ─────
+
+    fn rule_encoding(
+        x: Option<&str>,
+        y: Option<&str>,
+        x2: Option<&str>,
+        y2: Option<&str>,
+    ) -> crate::spec::encoding::Encoding {
+        use crate::spec::encoding::EncodingSpec;
+        crate::spec::encoding::Encoding {
+            x: x.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+            y: y.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+            x2: x2.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+            y2: y2.map(|f| EncodingSpec { field: f.into(), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
+    /// The presence-invalid shapes rule.rs's `build` used to fall through to a
+    /// silent `empty()` for (audit F-L06 class): a ranged-`y` shape (`y` +
+    /// `y2`) with no `x` to anchor each row's segment, and no positional
+    /// channel bound at all. Both are refused up front by
+    /// `validate_mark_encoding` — which is now `RuleShape::resolve` itself
+    /// (batch-A Task 13 spec c3) — with the message naming every supported
+    /// shape.
+    #[test]
+    fn unsupported_channel_combination_rule_names_supported_shapes() {
+        let y2_without_x = rule_encoding(None, Some("lo"), None, Some("hi"));
+        let err = validate_mark_encoding(&Mark::Rule, &y2_without_x, false)
+            .expect_err("y2 without x must be rejected for mark_rule");
+        assert_eq!(
+            format!("{err}"),
+            "mark_rule: channel 'positional' is not supported; mark_rule supports: y= alone \
+             (horizontal span), x= alone (vertical span), x=+y=+y2= (ranged vertical segment), \
+             y=+x=+x2= (ranged horizontal segment), or x=+y=+x2=+y2= (diagonal segment)"
+        );
+
+        let nothing_bound = rule_encoding(None, None, None, None);
+        let err2 = validate_mark_encoding(&Mark::Rule, &nothing_bound, false)
+            .expect_err("no positional channel at all must be rejected for mark_rule");
+        assert_eq!(format!("{err2}"), format!("{err}"), "both invalid shapes share one message");
+    }
+
+    // ── Batch-A Task 13 spec c3: a rule layer's span axis is its OWN ────────
+    //
+    // These exercise the FULL `prepare → layout → build_scene` pipeline
+    // because the defect lived at the layer-inheritance seam
+    // (`LayerPrepared::from_chart_and_layer` → the DrawCtx-local encoding copy
+    // in `build_panel_mark_batches`), which a unit test that builds `DrawCtx`
+    // by hand cannot see.
+
+    /// `shap_chart(kind="beeswarm")`'s exact lowered shape, mirrored: a chart
+    /// whose CHART-LEVEL encoding binds a numeric `x` and an ORDINAL `y`, a
+    /// point layer declaring both, and a `rule` layer declaring ONLY
+    /// `x="_ref_zero"` — the zero-line sentinel column
+    /// (`ferrum._constant_columns._inject_constant`) with one non-null row and
+    /// the rest null, so the layer draws exactly one reference line. Verified
+    /// against the live `chart.to_dict()` of `ferrum.shap_chart(..., kind=
+    /// "beeswarm")` before being written down here.
+    fn beeswarm_shaped_zero_line_spec() -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "shap_value".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "feature".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: None, blend: None, name: Some("point".into()),
+            independent_y: false,
+        };
+        let reference_layer = Layer {
+            mark: Mark::Rule,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "_ref_zero".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: Some(MarkKwargsSpec {
+                stroke: Some("#AAAAAA".into()),
+                stroke_dash: Some(vec![4.0, 4.0]),
+                ..Default::default()
+            }),
+            data_source: None, position: None, blend: None, name: Some("reference".into()),
+            independent_y: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "shap_value".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "feature".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None,
+            layers: Some(vec![point_layer, reference_layer]),
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+
+        let features = ["f0", "f0", "f1", "f1"];
+        let shap = vec![-2.0_f64, 1.5, 0.5, -0.75];
+        // `_inject_constant`: value in row 0, null everywhere else.
+        let ref_zero = Float64Array::from(vec![Some(0.0_f64), None, None, None]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("shap_value", DataType::Float64, false),
+            Field::new("feature", DataType::Utf8, false),
+            Field::new("_ref_zero", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(shap)),
+            Arc::new(StringArray::from(features.to_vec())),
+            Arc::new(ref_zero),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// Every `SceneNode::Line`'s endpoints in one mark batch, in emission order.
+    fn line_endpoints(batch: &ferrum_scene::MarkBatch) -> Vec<(f64, f64, f64, f64)> {
+        batch.nodes.iter().filter_map(|n| match n {
+            SceneNode::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
+            _ => None,
+        }).collect()
+    }
+
+    /// The cycle-3 regression, pinned: a rule layer that declares only `x`
+    /// must render ONE vertical span at that x, whatever the chart-level
+    /// encoding inherits into it. Before the fix, the inherited ordinal
+    /// `y="feature"` hijacked the shape into the horizontal-span mode and the
+    /// layer drew one full-width horizontal span per row across the feature
+    /// band centers, ignoring `x` entirely (in the real chart: 1000 spans and
+    /// a 116 KB SVG on a blessed golden).
+    ///
+    /// Both halves of the ruling are load-bearing here, and each fails this
+    /// test alone when reverted:
+    /// - Relaxing `RuleShape::resolve`'s horizontal-span arm to accept a bound
+    ///   `x` (the pre-fix `if let Some(yf)` gate) restores the hijack.
+    /// - Dropping the own-span-axis normalization in
+    ///   `build_panel_mark_batches` sends this shape to the `x`+`y` tie-break,
+    ///   which is also a horizontal span.
+    #[test]
+    fn rule_layer_own_x_span_is_not_hijacked_by_inherited_ordinal_y() {
+        let (spec, batch) = beeswarm_shaped_zero_line_spec();
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let rule_batches: Vec<&ferrum_scene::MarkBatch> = panel.marks.iter()
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Rule)
+            .collect();
+        assert_eq!(rule_batches.len(), 1, "expected exactly one rule mark batch (the reference layer)");
+
+        let lines = line_endpoints(rule_batches[0]);
+        assert_eq!(lines.len(), 1,
+            "the zero-line layer must draw exactly one line (its anchor column has one non-null row); \
+             got {} — more than one means the inherited ordinal y drove the geometry",
+            lines.len());
+        let (x1, y1, x2, y2) = lines[0];
+        assert_eq!(x1, x2, "a vertical zero line must keep one x for both endpoints; got x1={x1}, x2={x2}");
+        assert_ne!(y1, y2, "a vertical zero line must span the panel height, not collapse");
+        let plot = panel.plot_area;
+        assert!((y1 - plot.y).abs() < 1e-9 && (y2 - (plot.y + plot.h)).abs() < 1e-9,
+            "the span must run the full panel height ({}..{}); got {y1}..{y2}", plot.y, plot.y + plot.h);
+        assert!(x1 > plot.x && x1 < plot.x + plot.w,
+            "the line must sit inside the panel at the x=0 position; got x={x1} for plot {plot:?}");
+    }
+
+    /// The mirror, and the negative control for the normalization's direction:
+    /// a rule layer declaring only `y` on a chart with a chart-level `x` keeps
+    /// rendering a horizontal span (this is `residuals_chart`'s `y="_ref_zero"`
+    /// layer, whose behavior must not change).
+    #[test]
+    fn rule_layer_own_y_span_is_not_flipped_by_inherited_x() {
+        let (mut spec, batch) = beeswarm_shaped_zero_line_spec();
+        {
+            let layers = spec.layers.as_mut().expect("fixture always sets layers");
+            let enc = &mut layers[1].encoding;
+            enc.x = None;
+            enc.y = Some(crate::spec::encoding::EncodingSpec {
+                field: "_ref_zero".into(),
+                ..Default::default()
+            });
+        }
+        // A numeric y-scale for the horizontal span to land on.
+        spec.encoding.y = Some(crate::spec::encoding::EncodingSpec {
+            field: "shap_value".into(),
+            ..Default::default()
+        });
+        spec.layers.as_mut().unwrap()[0].encoding.y = spec.encoding.y.clone();
+
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let rule_batch = panel.marks.iter()
+            .find(|m| m.kind == ferrum_scene::MarkBatchKind::Rule)
+            .expect("the reference layer must emit a rule batch");
+        let lines = line_endpoints(rule_batch);
+        assert_eq!(lines.len(), 1, "one non-null anchor row → one horizontal span");
+        let (x1, y1, x2, y2) = lines[0];
+        assert_eq!(y1, y2, "a horizontal span must keep one y for both endpoints");
+        let plot = panel.plot_area;
+        assert!((x1 - plot.x).abs() < 1e-9 && (x2 - (plot.x + plot.w)).abs() < 1e-9,
+            "the span must run the full panel width ({}..{}); got {x1}..{x2}", plot.x, plot.x + plot.w);
+    }
+
+    // ── Task 13 spec c4 (spec §4.4, "Extended 2026-09-02"): the positional
+    // provenance flags are coordinate-space-consistent ───────────────────────
+    //
+    // `prepare::build_layers` swaps `encoding.x`↔`y` (and `x2`↔`y2`) under
+    // `CoordFlip`; `LayerPrepared::flip_coords` swaps `x_is_own`/`y_is_own`
+    // WITH them, so a flag always describes the slot its channel now occupies
+    // and a coord-flipped rule span renders exactly as its unflipped
+    // counterpart does on the other axis. Pinned at BOTH `LayerPrepared`
+    // constructors — `from_chart_only` (flat) and `from_chart_and_layer`
+    // (layered) — because the flags are captured separately in each.
+    //
+    // Every `*_SPEC_JSON` below is the VERBATIM `chart.to_dict()` of the
+    // public-API call named in its doc comment (captured 2026-09-02), parsed
+    // through the same serde path `ChartSpec.from_json` uses, so these
+    // fixtures cannot drift from what Python actually lowers.
+
+    fn spec_from_lowered_json(json: &str) -> ChartSpec {
+        serde_json::from_str(json).expect("lowered spec JSON must deserialize as a ChartSpec")
+    }
+
+    /// Every line emitted by every rule batch in panel 0, in emission order.
+    fn rule_lines(scene: &ferrum_scene::SceneGraph) -> Vec<(f64, f64, f64, f64)> {
+        scene.panels[0]
+            .marks
+            .iter()
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Rule)
+            .flat_map(line_endpoints)
+            .collect()
+    }
+
+    /// `fm.Chart(df).mark_rule(stroke_dash=[4, 4]).encode(x="z").coord(fm.CoordFlip())`
+    const FLIPPED_OWN_X_RULE_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "rule", "encoding": {"x": {"field": "z"}}, "coord": {"kind": "flip"}, "mark_style": {"stroke_dash": [4.0, 4.0]}}"#;
+
+    /// `fm.Chart(df).mark_rule(stroke_dash=[4, 4]).encode(y="z")` — the
+    /// unflipped counterpart of [`FLIPPED_OWN_X_RULE_SPEC_JSON`].
+    const UNFLIPPED_OWN_Y_RULE_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "rule", "encoding": {"y": {"field": "z"}}, "mark_style": {"stroke_dash": [4.0, 4.0]}}"#;
+
+    /// `pl.DataFrame({"z": [1.0, 2.0, 3.0, 4.0]})`.
+    fn z_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new(vec![Field::new("z", DataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))])
+            .unwrap()
+    }
+
+    /// FLAT path (`LayerPrepared::from_chart_only`): a coord-flipped rule that
+    /// declares only `x` renders exactly what its unflipped `y=` counterpart
+    /// renders — four full-width horizontal spans, at identical pixels.
+    ///
+    /// RED (verified in place): drop `std::mem::swap(&mut self.x_is_own, &mut
+    /// self.y_is_own)` from `LayerPrepared::flip_coords` and the flags still
+    /// describe the PRE-flip slots — `(x_is_own, y_is_own) == (true, false)`
+    /// against a post-flip encoding holding `y`. The own-span-axis
+    /// normalization then clears the very channel the layer owns, handing
+    /// `RuleShape::resolve` an all-absent encoding, and the render REFUSES the
+    /// shape (`UnsupportedChannel`, whose own message advertises "x= alone").
+    #[test]
+    fn coord_flipped_rule_span_matches_its_unflipped_counterpart() {
+        let batch = z_batch();
+        let flipped = rule_lines(&build_scene_for(
+            &spec_from_lowered_json(FLIPPED_OWN_X_RULE_SPEC_JSON),
+            &batch,
+        ));
+        let unflipped = rule_lines(&build_scene_for(
+            &spec_from_lowered_json(UNFLIPPED_OWN_Y_RULE_SPEC_JSON),
+            &batch,
+        ));
+        assert_eq!(
+            flipped.len(),
+            4,
+            "one horizontal span per row of `z`; got {flipped:?}"
+        );
+        for (x1, y1, x2, y2) in &flipped {
+            assert_eq!(y1, y2, "a flipped `x=` span is HORIZONTAL; got {x1},{y1} → {x2},{y2}");
+        }
+        assert_eq!(
+            flipped, unflipped,
+            "a coord-flipped rule span must render exactly as its unflipped counterpart \
+             does on the other axis (spec §4.4, 2026-09-02)"
+        );
+    }
+
+    /// LAYERED path (`LayerPrepared::from_chart_and_layer`), the reviewer's
+    /// cycle-4 repro: `fm.layer(fm.Chart(df).mark_bar(orient="horizontal")
+    /// .encode(x=fm.X("cat", type_="ordinal"), y="v"), fm.Chart(df)
+    /// .mark_rule(stroke_dash=[4, 4]).encode(x=fm.X("z", type_="ordinal")))`.
+    /// `orient="horizontal"` is what sets `coord={"kind": "flip"}` here.
+    ///
+    /// The rule layer declares `x` and inherits `y="v"` from chart level, so
+    /// it must draw ONE line at its OWN `z` value ("b", the second of four
+    /// ordinal bands) and none at the bar's inherited `v` values. Under flip
+    /// that own channel occupies the y slot, so the mirror spec (identical but
+    /// unflipped) draws the same single line vertically on the x axis.
+    ///
+    /// RED (verified in place): without the flag swap this emits FOUR lines,
+    /// one per row at the bar's `v` positions — `z` discarded entirely.
+    #[test]
+    fn coord_flipped_layered_rule_draws_its_own_channel_not_the_inherited_one() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        const FLIPPED: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "bar", "encoding": {"x": {"field": "cat", "type": "ordinal"}, "y": {"field": "v", "scale": {"type": "linear", "clamp": false, "nice": false, "zero": true}}}, "layers": [{"mark": "bar", "encoding": {"x": {"field": "cat", "type": "ordinal"}, "y": {"field": "v"}}}, {"mark": "rule", "encoding": {"x": {"field": "z", "type": "ordinal"}}, "mark_style": {"stroke_dash": [4.0, 4.0]}}], "coord": {"kind": "flip"}}"#;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            // `z` names one existing category, in one row: the reference line
+            // the layer owns. The remaining rows are null, exactly as
+            // `_inject_constant` leaves them.
+            Field::new("z", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+                Arc::new(Float64Array::from(vec![9.0, 3.0, 6.0, 1.0])),
+                Arc::new(StringArray::from(vec![Some("b"), None, None, None])),
+            ],
+        )
+        .unwrap();
+
+        let mut unflipped_spec = spec_from_lowered_json(FLIPPED);
+        unflipped_spec.coord = None;
+
+        let flipped_scene = build_scene_for(&spec_from_lowered_json(FLIPPED), &batch);
+        let flipped = rule_lines(&flipped_scene);
+        assert_eq!(
+            flipped.len(),
+            1,
+            "the rule layer's own `z` has ONE non-null row → one line; {} means the \
+             inherited `v` drove the geometry",
+            flipped.len()
+        );
+        let (x1, y1, x2, y2) = flipped[0];
+        assert_eq!(y1, y2, "under flip the layer's own channel spans HORIZONTALLY");
+        let plot = flipped_scene.panels[0].plot_area;
+        assert!(
+            (x1 - plot.x).abs() < 1e-9 && (x2 - (plot.x + plot.w)).abs() < 1e-9,
+            "the span must run the full panel width ({}..{}); got {x1}..{x2}",
+            plot.x,
+            plot.x + plot.w
+        );
+        assert!(
+            y1 > plot.y + plot.h * 0.25 && y1 < plot.y + plot.h * 0.5,
+            "the span must sit on the SECOND of four ordinal bands (`z` == \"b\"); got y={y1} \
+             for plot {plot:?}"
+        );
+
+        let unflipped_scene = build_scene_for(&unflipped_spec, &batch);
+        let unflipped = rule_lines(&unflipped_scene);
+        assert_eq!(unflipped.len(), 1, "the mirror draws one line too; got {unflipped:?}");
+        let (ux1, uy1, ux2, uy2) = unflipped[0];
+        let uplot = unflipped_scene.panels[0].plot_area;
+        assert_eq!(ux1, ux2, "unflipped, that same own channel spans VERTICALLY");
+        assert!(
+            (uy1 - uplot.y).abs() < 1e-9 && (uy2 - (uplot.y + uplot.h)).abs() < 1e-9,
+            "the mirror span must run the full panel height; got {uy1}..{uy2}"
+        );
+        assert!(
+            ux1 > uplot.x + uplot.w * 0.25 && ux1 < uplot.x + uplot.w * 0.5,
+            "the mirror must sit on the same second band; got x={ux1} for plot {uplot:?}"
+        );
+    }
+
+    /// A second endpoint with no anchor to pair it with is refused by name,
+    /// not silently drawn as some other shape that ignores it (batch-A Task 13
+    /// spec c3). `x`+`x2` with no `y` and `x`+`y2` with no `y` both used to
+    /// slip past the presence gate (it only asked whether `x` was bound) and
+    /// then render a plain vertical span, dropping the second endpoint
+    /// entirely — the same "silently WRONG" class as the span/ranged hijacks.
+    #[test]
+    fn validate_mark_encoding_rule_refuses_second_endpoint_without_its_anchor() {
+        let unsupported = [
+            rule_encoding(Some("x"), None, Some("x2"), None),
+            rule_encoding(Some("x"), None, None, Some("y2")),
+            rule_encoding(Some("x"), None, Some("x2"), Some("y2")),
+            rule_encoding(None, Some("y"), Some("x2"), None),
+            rule_encoding(None, None, Some("x2"), Some("y2")),
+        ];
+        for enc in &unsupported {
+            let err = validate_mark_encoding(&Mark::Rule, enc, false)
+                .expect_err("a dangling second endpoint must be refused, not silently dropped");
+            assert!(
+                format!("{err}").contains("mark_rule supports:"),
+                "the refusal must name the supported set; got {err}"
+            );
+        }
+    }
+
+    /// Every one of rule's five supported channel-presence shapes (module doc
+    /// on `marks/rule.rs`) must pass validation — a regression guard against
+    /// the presence-check above being drawn too tightly and newly rejecting a
+    /// combination `marks/rule.rs::build` already knows how to render. Covers
+    /// both flipped and unflipped, since the check reads only channel
+    /// presence (`channel: "positional"` is not `x`/`y`/`x2`/`y2`, so
+    /// `with_coord_flipped`'s un-flip is a no-op either way).
+    #[test]
+    fn validate_mark_encoding_rule_accepts_all_five_supported_shapes() {
+        let shapes = [
+            rule_encoding(None, Some("y"), None, None),          // horizontal span
+            rule_encoding(Some("x"), None, None, None),          // vertical span
+            rule_encoding(Some("x"), Some("y"), None, Some("y2")), // ordinal-x ranged
+            rule_encoding(Some("x"), Some("y"), Some("x2"), None), // ordinal-y ranged
+            rule_encoding(Some("x"), Some("y"), Some("x2"), Some("y2")), // diagonal
+        ];
+        for coord_flipped in [false, true] {
+            for enc in &shapes {
+                assert!(
+                    validate_mark_encoding(&Mark::Rule, enc, coord_flipped).is_ok(),
+                    "shape {enc:?} (coord_flipped={coord_flipped}) must be accepted for mark_rule"
+                );
+            }
+        }
     }
 
     // ── R1 port (bug_hunt_draw.rs / bug_hunt_render_pipeline.rs): break-axis

@@ -17,7 +17,11 @@ unification, not a contract change. **Dated note (2026-08-28, batch-A
 appearance-resolution spec §4.3):** that invariant no longer holds for every
 role. StrokeOpacity/StrokeDash moved from ``APPEARANCE_BASE`` to
 ``APPEARANCE_FULL`` as a deliberate contract change — see those constants'
-docstrings below. The appearance-channel membership is pinned by
+docstrings below. **Further dated note (2026-09-01, batch-A T12 spec-review
+addendum):** StrokeDash moved a second time, from ``APPEARANCE_FULL`` to
+``APPEARANCE_SORT`` (mirroring Shape), so ``sort=`` reaches the wire instead
+of being silently dropped while Rust's ``build_stroke_dash_scale`` already
+reads it. The appearance-channel membership is pinned by
 ``tests/test_appearance_honored_kwargs.py``, which documents each intentional
 change with a dated comment.
 
@@ -88,14 +92,18 @@ POLAR_PRIMARY = frozenset({"type", "stack"})
 APPEARANCE_BASE = frozenset({"type", "legend"})
 
 #: Adds an explicit scale override and legend title. (FillOpacity,
-#: StrokeOpacity, StrokeDash — batch-A §4.3 opens the wire gate so these two
-#: serialize ``scale=``/``title=`` instead of warn-and-drop.)
+#: StrokeOpacity — batch-A §4.3 opens the wire gate so these two serialize
+#: ``scale=``/``title=`` instead of warn-and-drop. StrokeDash started here
+#: too on 2026-08-28 but moved up to ``APPEARANCE_SORT`` on 2026-09-01 — see
+#: that constant's docstring.)
 APPEARANCE_FULL = APPEARANCE_BASE | {"scale", "title"}
 
 #: Adds a conditional encoding. (Size, Opacity.)
 APPEARANCE_CONDITION = APPEARANCE_FULL | {"condition"}
 
-#: Adds an explicit domain-order sort. (Shape.)
+#: Adds an explicit domain-order sort. (Shape; StrokeDash as of 2026-09-01,
+#: batch-A T12 spec-review addendum — mirrors Shape since the Rust
+#: ``build_stroke_dash_scale`` domain builder already reads ``sort``.)
 APPEARANCE_SORT = APPEARANCE_CONDITION | {"sort"}
 
 #: Adds a named color scheme. (Fill, Stroke.)

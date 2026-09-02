@@ -403,6 +403,8 @@ fn sort_domain_by_aggregate(
 ///     (T4 fix). Non-faceted and `Independent`-mode callers pass `false`,
 ///     keeping the per-panel-only behavior byte-identical.
 ///   - The paired field (x2/y2) follows the same lookup discipline.
+///   - Every OTHER layer's fields for this channel are unioned too, read in
+///     the channel's own coordinate space — see the `spec.layers` loop below.
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
     field: &str,
@@ -460,22 +462,68 @@ pub(in crate::render) fn numeric_domain_union(
     // Identity transform. The primary field (from the chart-level encoding)
     // only covers the LHS data. We must also include the RHS layer's field so
     // the shared scale domain spans both layers' data ranges.
+    //
+    // Also covers each OTHER layer's paired channel field (x2 for "x", y2 for
+    // "y") — batch-A Task 13. Before this, a layer's OWN x2/y2 was never
+    // unioned in here (only its bare x/y was), which this module's own
+    // doc comment above already names as required "when a layer's
+    // data_source points at a named transform whose output extends past the
+    // primary batch" (the `calibration_chart` `ReferenceLine` example) — that
+    // prior example happens to need only bare x/y (its endpoints are two
+    // ROWS of one field, not one row's x2/y2), so the gap stayed latent until
+    // `mark_qq(line=True)`'s reference-diagonal `rule` layer, whose single-row
+    // endpoints live in x/y AND x2/y2 (`qq_line_x_start`/`_end`,
+    // `qq_line_y_start`/`_end`), all four on a named `data_source` distinct
+    // from the primary/chart field. Without this, `qq_line_y_end` was never
+    // reachable by any domain union, so `to_pixel_f64` returned `None` for
+    // the far endpoint and the reference diagonal silently drew 0 nodes even
+    // though `marks/rule.rs`'s four-numeric branch resolved correctly.
     if let Some(layers) = &spec.layers {
+        // COORDINATE SPACE (spec §4.4, "Extended 2026-09-02, T13 quality
+        // review", ruling 1). `channel`/`field` name the axis being resolved,
+        // i.e. the POST-flip space: the caller derived them from the rendering
+        // encoding `prepare::build_layers` already swapped. `spec.layers`, by
+        // contrast, is the spec as AUTHORED — `prepare` swaps its own
+        // `LayerPrepared` copies, never the spec — so under `CoordFlip` a
+        // layer's `y`/`y2` is what post-flip occupies the x axis. Reading the
+        // layer's like-named channel therefore unions the WRONG axis: a rule
+        // layer's `y2` widening the y domain when its endpoint lives on x is a
+        // visible axis blowout (the y axis running to the far endpoint while
+        // the endpoint itself is unreachable on x). Move the layer encoding
+        // into the channel's own space first, via the same
+        // `Encoding::flip_positional` `LayerPrepared::flip_coords` applies, and
+        // both sides of every read below live in one space.
+        let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
         for layer in layers {
             // An `independent_y` layer resolves its own y-slot (secondary-y-axis,
             // GH #52) and must not widen the primary/shared y domain — that would
             // couple the left axis to a scale it does not own. Its x stays shared,
             // so only the y channel skips. Byte-stable for all-shared charts: the
             // flag defaults false, so this never fires without an independent layer.
+            // Names the axis SLOT (the layer owns a second y axis), not an
+            // encoding channel, so it reads `channel` directly and is unaffected
+            // by the coordinate-space normalization below.
             if channel == "y" && layer.independent_y {
                 continue;
             }
-            let layer_field = match channel {
-                "x" => layer.encoding.x.as_ref().map(|e| e.field.as_str()),
-                "y" => layer.encoding.y.as_ref().map(|e| e.field.as_str()),
-                _ => None,
+            let flipped = coord_flipped.then(|| {
+                let mut e = layer.encoding.clone();
+                e.flip_positional();
+                e
+            });
+            let encoding = flipped.as_ref().unwrap_or(&layer.encoding);
+            let layer_fields: [Option<&str>; 2] = match channel {
+                "x" => [
+                    encoding.x.as_ref().map(|e| e.field.as_str()),
+                    encoding.x2.as_ref().map(|e| e.field.as_str()),
+                ],
+                "y" => [
+                    encoding.y.as_ref().map(|e| e.field.as_str()),
+                    encoding.y2.as_ref().map(|e| e.field.as_str()),
+                ],
+                _ => [None, None],
             };
-            if let Some(lf) = layer_field {
+            for lf in layer_fields.into_iter().flatten() {
                 if lf != field {
                     // Ignore errors — the field may not exist in all batches
                     // (e.g. when it lives in a named output that isn't loaded yet).
@@ -684,5 +732,108 @@ mod tests {
             }
             other => panic!("expected SortSpecIgnored, got {other:?}"),
         }
+    }
+
+    // ── Task 13 (spec §4.4, "Extended 2026-09-02, T13 quality review",
+    // ruling 1): the layer union reads each layer's fields in the coordinate
+    // space of the channel being resolved ─────────────────────────────────────
+    //
+    // Two properties, pinned together because one is the other's control:
+    //   1. a layer's `x2`/`y2` past its bare `x`/`y` widens THAT channel's
+    //      domain (the batch-A T13 union fix — `mark_qq(line=True)`'s reference
+    //      diagonal was unreachable without it), and
+    //   2. under `CoordFlip` it widens the OTHER axis, because `spec.layers`
+    //      is the AUTHORED encoding while `channel`/`field` name the rendered
+    //      (post-flip) axis.
+    //
+    // Both `*_SPEC_JSON`s are the VERBATIM `chart.to_dict()` of the public-API
+    // call in their doc comment (captured 2026-09-02), parsed through the same
+    // serde path `ChartSpec.from_json` uses, so they cannot drift from what
+    // Python lowers.
+
+    /// `fm.Chart(df).mark_point().encode(x="b", y="a")` layered (`+`) with
+    /// `fm.Chart(df).mark_rule().encode(y="a", y2="big")`.
+    const LAYERED_Y2_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "rule", "encoding": {"y": {"field": "a"}, "y2": {"field": "big"}}}]}"#;
+
+    /// The same layering with `.coord(fm.CoordFlip())` on the primary chart —
+    /// the reviewer's A/B probe. `prepare::build_layers` swaps the RENDERING
+    /// encodings, so the resolved x axis holds `a` and the y axis holds `b`,
+    /// while `layers` below still reads exactly as authored.
+    const LAYERED_Y2_FLIPPED_SPEC_JSON: &str = r#"{"data": {"kind": "named", "name": "default"}, "mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}, "layers": [{"mark": "point", "encoding": {"x": {"field": "b"}, "y": {"field": "a"}}}, {"mark": "rule", "encoding": {"y": {"field": "a"}, "y2": {"field": "big"}}}], "coord": {"kind": "flip"}}"#;
+
+    /// `pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0], "big": [1000.0, 2000.0]})`
+    /// — three disjoint numeric ranges, so which field reached the union is
+    /// readable straight off the returned extent.
+    fn abc_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+            Field::new("big", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1000.0, 2000.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Resolve one axis's auto-inferred extent for a lowered spec, exactly as
+    /// `build_axis_scale` does (no named transform outputs, no facet union).
+    fn axis_extent(spec_json: &str, channel: &str, field: &str) -> (f64, f64) {
+        let spec: ChartSpec =
+            serde_json::from_str(spec_json).expect("lowered spec JSON must deserialize");
+        let batch = abc_batch();
+        numeric_domain_union(channel, field, None, &batch, &HashMap::new(), &spec, false)
+            .expect("every field in the fixture is Float64")
+    }
+
+    /// Unflipped: the rule layer's `y2` (1000..2000) extends past its bare `y`
+    /// (`a`, 1..2), so the y domain must reach 2000 — otherwise the layer's own
+    /// far endpoint projects to `None` and the reference line silently draws
+    /// nothing. The x axis is the control: `big` belongs to the y channel, so
+    /// it must not leak there.
+    #[test]
+    fn layer_paired_endpoint_widens_its_own_channel_only() {
+        assert_eq!(
+            axis_extent(LAYERED_Y2_SPEC_JSON, "y", "a"),
+            (1.0, 2000.0),
+            "the layer's y2 must widen the y domain past its bare y"
+        );
+        assert_eq!(
+            axis_extent(LAYERED_Y2_SPEC_JSON, "x", "b"),
+            (3.0, 4.0),
+            "a y-channel field must never widen the x domain"
+        );
+    }
+
+    /// Flipped: the SAME authored `y2` now lives on the rendered x axis, so it
+    /// must widen x and leave y at `b`'s own extent — the exact mirror of the
+    /// unflipped case above.
+    ///
+    /// RED (verified in place): read `layer.encoding` instead of its
+    /// flip-normalized copy and this fails at the first assertion with
+    /// `(1.0, 4.0)` — x picks up the sibling layer's authored `x` (`b`) and
+    /// still never reaches the rule's own far endpoint on the axis that
+    /// endpoint actually occupies, while y (unasserted once x fails, `(1.0,
+    /// 2000.0)` when checked alone) blows out to 2000 on an axis no mark uses
+    /// there. That pair is the reviewer's live A/B probe.
+    #[test]
+    fn coord_flipped_layer_paired_endpoint_widens_the_other_axis() {
+        assert_eq!(
+            axis_extent(LAYERED_Y2_FLIPPED_SPEC_JSON, "x", "a"),
+            (1.0, 2000.0),
+            "under CoordFlip the authored y2 occupies the x axis and must widen it"
+        );
+        assert_eq!(
+            axis_extent(LAYERED_Y2_FLIPPED_SPEC_JSON, "y", "b"),
+            (3.0, 4.0),
+            "under CoordFlip the y axis holds the authored x field; an authored \
+             y/y2 must not widen it"
+        );
     }
 }
