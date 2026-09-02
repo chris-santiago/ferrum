@@ -421,6 +421,135 @@ class TestEncodeSmoke:
         assert mark_count == 4, f"Expected 4 rendered marks, got {mark_count}"
 
 
+class TestAppearanceScaleWireGate:
+    """StrokeOpacity/StrokeDash ``scale=`` (and ``title=``) now reach the wire.
+
+    Batch-A appearance-resolution spec §4.3 (2026-08-28): these two channels
+    moved from ``APPEARANCE_BASE`` to ``APPEARANCE_FULL`` in ``_honored.py``
+    so ``scale=``/``title=`` serialize instead of warn-and-drop. Task 6
+    (concurrent, Rust) is the consumer — these tests pin the Python-side wire
+    contract independent of whether the Rust scale resolver has landed yet;
+    a render must not error either way.
+    """
+
+    @pytest.fixture()
+    def opacity_df(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0],
+                "y": [1.0, 2.0, 3.0, 4.0],
+                "sw": [0.1, 0.4, 0.7, 0.95],
+                "cat": ["a", "b", "a", "b"],
+            }
+        )
+
+    def test_stroke_opacity_scale_serializes(self, opacity_df: pl.DataFrame):
+        """StrokeOpacity(scale=LinearScale(...)) reaches the wire, not dropped."""
+        chart = (
+            fr.Chart(opacity_df)
+            .mark_point()
+            .encode(
+                x="x",
+                y="y",
+                stroke_opacity=fr.StrokeOpacity(
+                    "sw",
+                    scale=fr.LinearScale(domain=[0.0, 1.0], range=[0.2, 1.0]),
+                    title="Opacity",
+                ),
+            )
+        )
+        json_str = chart.to_json()
+        assert '"stroke_opacity"' in json_str
+        assert '"scale":{"type":"linear"' in json_str
+        assert '"title":"Opacity"' in json_str
+        svg = chart.to_svg()
+        assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
+
+    def test_stroke_dash_scale_serializes(self, opacity_df: pl.DataFrame):
+        """StrokeDash(scale=OrdinalScale(...)) reaches the wire, not dropped."""
+        chart = (
+            fr.Chart(opacity_df)
+            .mark_line()
+            .encode(
+                x="x",
+                y="y",
+                color="cat",
+                stroke_dash=fr.StrokeDash(
+                    "cat",
+                    scale=fr.OrdinalScale(domain=["a", "b"]),
+                    title="Category",
+                ),
+            )
+        )
+        json_str = chart.to_json()
+        assert '"stroke_dash"' in json_str
+        assert '"scale":{"type":"ordinal"' in json_str
+        assert '"title":"Category"' in json_str
+        svg = chart.to_svg()
+        assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
+
+    def test_stroke_opacity_no_scale_still_omits_scale_key(self, opacity_df: pl.DataFrame):
+        """Absent-case byte-identity: no scale= means no "scale" key on the wire."""
+        chart = (
+            fr.Chart(opacity_df)
+            .mark_point()
+            .encode(x="x", y="y", stroke_opacity=fr.StrokeOpacity("sw"))
+        )
+        json_str = chart.to_json()
+        assert '"stroke_opacity":{"field":"sw"}' in json_str
+
+    def test_stroke_dash_no_scale_still_omits_scale_key(self, opacity_df: pl.DataFrame):
+        """Absent-case byte-identity: no scale= means no "scale" key on the wire."""
+        chart = (
+            fr.Chart(opacity_df).mark_line().encode(x="x", y="y", stroke_dash=fr.StrokeDash("cat"))
+        )
+        json_str = chart.to_json()
+        assert '"stroke_dash":{"field":"cat"}' in json_str
+
+    def test_override_flat_path_widening_pins_stroke_opacity_and_stroke_dash(
+        self, opacity_df: pl.DataFrame
+    ):
+        """Emergent widening of Chart.override()'s flat-path registry, pinned.
+
+        ``_override_apply._scale_bearing_channels()`` (src/ferrum/_override_apply.py)
+        derives its channel list from each channel class's ``_honored_kwargs`` at
+        import time. Moving StrokeOpacity/StrokeDash onto ``APPEARANCE_FULL``
+        automatically widened that registry: ``stroke_opacity_scale_*`` and
+        ``stroke_dash_scale_*`` flat-override paths (e.g.
+        ``.override(stroke_opacity_scale_range=[...])``) became valid, the same
+        way ``fill_opacity_scale_*`` already was. This is coherent (the registry
+        is meant to track ``_honored_kwargs`` exactly) but was untested before
+        this pin — assert both new paths resolve, build a correctly shaped
+        payload, and round-trip through a real ``.override()`` render without
+        error.
+        """
+        from ferrum import _override_apply as oa
+
+        opacity_resolved = oa.resolve("stroke_opacity_scale_domain")
+        assert opacity_resolved is not None
+        assert opacity_resolved.target is oa.Target.ENCODING_SCALE
+        assert opacity_resolved.location.target_key == "stroke_opacity"
+        assert opacity_resolved.location.leaf == "domain"
+
+        dash_resolved = oa.resolve("stroke_dash_scale_range")
+        assert dash_resolved is not None
+        assert dash_resolved.target is oa.Target.ENCODING_SCALE
+        assert dash_resolved.location.target_key == "stroke_dash"
+        assert dash_resolved.location.leaf == "range"
+
+        payload = oa.build_payload({"stroke_opacity_scale_domain": [0.0, 1.0]})
+        assert payload.encoding == {"stroke_opacity": {"scale": {"domain": [0.0, 1.0]}}}
+
+        chart = (
+            fr.Chart(opacity_df)
+            .mark_point()
+            .encode(x="x", y="y", stroke_opacity=fr.StrokeOpacity("sw"))
+            .override(stroke_opacity_scale_domain=[0.0, 1.0], stroke_opacity_scale_range=[0.2, 1.0])
+        )
+        svg = chart.to_svg()
+        assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
+
+
 class TestPositionalExtent:
     """Regression guard for the SPEC-04 positional-channel truncation fix (issue #38)
     and the same bug class in DivergingScale (issue #40).

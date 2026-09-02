@@ -4,6 +4,15 @@ This test exists so that any accidental membership change (kwarg added or
 removed from a channel's contract) fails loudly rather than silently.  The
 expected sets below are the canonical contract; they must match exactly what
 each channel declared before the C5 declaration de-duplication refactor.
+
+**Deliberate contract change (2026-08-28, batch-A appearance-resolution
+spec §4.3):** StrokeOpacity and StrokeDash move from ``APPEARANCE_BASE`` to
+``APPEARANCE_FULL`` — ``scale=`` and ``title=`` are now honored (serialized
+to the wire) instead of warn-and-drop. This opens the wire gate for the
+Rust-side ``OpacityScale``/``StrokeDashScale`` builders (Task 6, concurrent).
+StrokeWidth and Angle are unaffected: both stay on ``APPEARANCE_BASE``
+because their scale resolution is out of scope by design (per-row constants,
+``spec/encoding.rs:746``).
 """
 
 from __future__ import annotations
@@ -36,9 +45,10 @@ _EXPECTED: dict[type, frozenset[str]] = {
     Fill: frozenset({"type", "scale", "title", "legend", "condition", "scheme"}),
     Stroke: frozenset({"type", "scale", "title", "legend", "condition", "scheme"}),
     FillOpacity: frozenset({"type", "scale", "title", "legend"}),
-    StrokeOpacity: frozenset({"type", "legend"}),
+    # StrokeOpacity/StrokeDash gained "scale"/"title" 2026-08-28 (batch-A §4.3).
+    StrokeOpacity: frozenset({"type", "scale", "title", "legend"}),
     StrokeWidth: frozenset({"type", "legend"}),
-    StrokeDash: frozenset({"type", "legend"}),
+    StrokeDash: frozenset({"type", "scale", "title", "legend"}),
     Angle: frozenset({"type", "legend"}),
 }
 

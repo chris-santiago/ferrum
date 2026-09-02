@@ -11,10 +11,15 @@ are self-documenting rather than hand-written ``frozenset([...])`` literals
 scattered across the channel modules. They compose upward (each adds to the one
 below it) so a reader can see at a glance what each role layers on.
 
-Membership here is IDENTICAL to the per-class literals the channel modules
-declared before this consolidation — this is a vocabulary unification, not a
-contract change. The appearance-channel membership is additionally pinned by
-``tests/test_appearance_honored_kwargs.py``.
+Membership here was IDENTICAL to the per-class literals the channel modules
+declared before this consolidation — that consolidation was a vocabulary
+unification, not a contract change. **Dated note (2026-08-28, batch-A
+appearance-resolution spec §4.3):** that invariant no longer holds for every
+role. StrokeOpacity/StrokeDash moved from ``APPEARANCE_BASE`` to
+``APPEARANCE_FULL`` as a deliberate contract change — see those constants'
+docstrings below. The appearance-channel membership is pinned by
+``tests/test_appearance_honored_kwargs.py``, which documents each intentional
+change with a dated comment.
 
 Role: this module answers "which *kwargs* does one channel *instance*
 honor" (e.g. does ``X(...)`` accept ``sort=``; does ``Color(...)`` accept
@@ -78,10 +83,13 @@ POLAR_PRIMARY = frozenset({"type", "stack"})
 # ---------------------------------------------------------------------------
 
 #: Minimum appearance contract — data type + legend suppression/customization.
-#: (StrokeOpacity, StrokeWidth, StrokeDash, Angle.)
+#: (StrokeWidth, Angle — both documented as per-row constants with no scale
+#: resolution; see ``spec/encoding.rs:746``.)
 APPEARANCE_BASE = frozenset({"type", "legend"})
 
-#: Adds an explicit scale override and legend title. (FillOpacity.)
+#: Adds an explicit scale override and legend title. (FillOpacity,
+#: StrokeOpacity, StrokeDash — batch-A §4.3 opens the wire gate so these two
+#: serialize ``scale=``/``title=`` instead of warn-and-drop.)
 APPEARANCE_FULL = APPEARANCE_BASE | {"scale", "title"}
 
 #: Adds a conditional encoding. (Size, Opacity.)

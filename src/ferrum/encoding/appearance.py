@@ -288,11 +288,16 @@ class StrokeOpacity(ChannelBase):
         Column name to map to stroke opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    scale : Scale, optional
+        Explicit scale override.
+    title : str, optional
+        Legend title override.
 
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.
+    the legend in the rendered SVG.  ``scale`` (explicit scale override) and
+    ``title`` (legend title) are also honored.
 
     Examples
     --------
@@ -302,7 +307,7 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
 
-    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
+    _honored_kwargs = APPEARANCE_FULL  # {"type","legend","scale","title"}
 
 
 class StrokeWidth(ChannelBase):
@@ -345,11 +350,16 @@ class StrokeDash(ChannelBase):
         Column name (typically nominal or ordinal) to map to dash pattern.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    scale : Scale, optional
+        Explicit scale override.
+    title : str, optional
+        Legend title override.
 
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.
+    the legend in the rendered SVG.  ``scale`` (explicit scale override) and
+    ``title`` (legend title) are also honored.
 
     Examples
     --------
@@ -359,7 +369,7 @@ class StrokeDash(ChannelBase):
 
     _channel_name = "stroke_dash"
 
-    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
+    _honored_kwargs = APPEARANCE_FULL  # {"type","legend","scale","title"}
 
 
 class Angle(ChannelBase):
