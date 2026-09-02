@@ -21,6 +21,9 @@ Rust parser and normalizes correctly), not to re-verify the color table.
 
 from __future__ import annotations
 
+import re
+
+import polars as pl
 import pytest
 
 import ferrum as fm
@@ -201,3 +204,79 @@ class TestSentinelsAreNotColors:
     def test_theme_label_sentinel_is_not_a_color(self) -> None:
         with pytest.raises(ValueError, match="CSS color name"):
             fm.color.to_hex("theme:label")
+
+    # -----------------------------------------------------------------
+    # Cross-language end-to-end pin (Batch A Task 14, Lane A). Every test
+    # above this point exercises exactly one language: `to_hex` proves the
+    # Python-only half of the "theme:label" contract (it raises, matching
+    # `_is_paint_sentinel`'s docstring claim that Rust's `draw.rs` treats it
+    # identically) but never proves the Rust half actually agrees --  a
+    # mirror asserted, not exercised (see this class's docstring, "Task 8
+    # ... Task 9" paragraph, and `ferrum/marks/base.py:61`). A regression in
+    # either language alone passed every test above unnoticed:
+    #   * Python regression: `_is_paint_sentinel` (base.py:67) stops
+    #     matching `"theme:label"` -> `MarkBase.__init__` calls
+    #     `_validate_literal_color`, which raises `ValueError` at
+    #     construction instead of letting the sentinel through.
+    #   * Rust regression: `resolve_paint_color` (draw.rs) drops its
+    #     `value == "theme:label"` arm -> the sentinel falls through to
+    #     `parse_color`, which raises `RenderError::InvalidColor` at
+    #     `.to_svg()` instead of resolving `theme.colors.label_color`.
+    # One assertion below exercises both arms in sequence: construction
+    # must succeed (Python's exact-match arm) AND the render must reflect
+    # the theme's `label_color` (Rust's exact-match arm) -- not a
+    # hardcoded default, so the assertion cannot pass by accident.
+    # -----------------------------------------------------------------
+
+    def test_theme_label_sentinel_renders_theme_label_color_end_to_end_via_color_kwarg(
+        self,
+    ) -> None:
+        df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+        chart = fm.Chart(df).mark_point(color="theme:label").encode(x="x", y="y")
+
+        svg_a = chart.theme(fm.Theme(label_color="#123456")).to_svg()
+        assert 'fill="#123456"' in svg_a
+
+        # A second, distinct theme value proves the render is driven by the
+        # theme (Rust's sentinel arm actually consulting `theme.colors.
+        # label_color`), not a coincidental match against one hardcoded hex.
+        svg_b = chart.theme(fm.Theme(label_color="#abcdef")).to_svg()
+        assert 'fill="#abcdef"' in svg_b
+        assert svg_a != svg_b
+
+    def test_theme_label_sentinel_renders_theme_label_color_end_to_end_via_fill_kwarg(
+        self,
+    ) -> None:
+        df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
+        chart = (
+            fm.Chart(df)
+            .mark_point(fill="theme:label")
+            .encode(x="x", y="y")
+            .theme(fm.Theme(label_color="#654321"))
+        )
+        svg = chart.to_svg()
+        assert 'fill="#654321"' in svg
+
+    def test_theme_label_sentinel_construction_does_not_raise(self) -> None:
+        """Isolates the Python-side arm of the two tests above: passing
+        ``"theme:label"`` to ``mark_point`` must not raise at construction
+        time (the exact-match short-circuit in ``_is_paint_sentinel`` must
+        fire before ``_validate_literal_color``/``to_hex`` ever sees it)."""
+        df = pl.DataFrame({"x": [0.0], "y": [0.0]})
+        fm.Chart(df).mark_point(color="theme:label").encode(x="x", y="y")
+        fm.Chart(df).mark_point(fill="theme:label").encode(x="x", y="y")
+
+    def test_theme_label_sentinel_is_not_a_literal_hex_passthrough(self) -> None:
+        """Discriminating guard: the rendered fill must equal the THEME's
+        resolved label color, not merely "some hex string" -- rules out a
+        vacuous regex match against an unrelated fill in the SVG."""
+        df = pl.DataFrame({"x": [0.0], "y": [0.0]})
+        svg = (
+            fm.Chart(df)
+            .mark_point(color="theme:label")
+            .encode(x="x", y="y")
+            .theme(fm.Theme(label_color="#0f0f0f"))
+            .to_svg()
+        )
+        circle_fills = re.findall(r'<circle[^>]*fill="(#[0-9a-fA-F]{6})"', svg)
+        assert circle_fills == ["#0f0f0f"]

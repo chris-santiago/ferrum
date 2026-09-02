@@ -210,6 +210,17 @@ Layer(data=None, mark=None, *, encoding=None, stat=None, transform=None)
 
 Most users use `mark_*()` methods on `Chart` instead of constructing `Layer` directly.
 
+> **2026-09-02 (batch A):** hoisted paint no longer leaks into a sibling
+> layer. Python's `LayerChart` lowering copies layer-0's mark kwargs up to
+> chart level (a compatibility fallback for chart-level rendering paths),
+> but every layer still keeps its own copy — a layer with no `mark_style` of
+> its own now strips that inherited paint (`fill`/`stroke` cleared) rather
+> than rendering in it, regardless of mark type. `mark_bar(fill="red") +
+> mark_point()` now renders the point layer in its own default color, not
+> red; `mark_text(fill="red") + mark_bar()` no longer renders the bars red.
+> A flat (no-layers) chart is unaffected, and a layer's own paint — when it
+> sets one — always wins.
+
 ---
 
 #### `ferrum.ModelSource`
@@ -317,11 +328,11 @@ Encoding channels are typed objects passed as keyword arguments to `.encode()`. 
 | `Opacity(field, *, scale=None, legend=None)` | Overall opacity |
 | `FillOpacity(field, ...)` | Fill opacity |
 | `StrokeOpacity(field, ...)` | Stroke opacity |
-| `StrokeWidth(field, *, scale=None)` | Stroke width |
-| `StrokeDash(field, *, scale=None)` | Dash pattern |
+| `StrokeWidth(field, *, legend=None)` | Stroke width — per-row constant, `scale=` accepted but not honored (see 2026-09-02 note below) |
+| `StrokeDash(field, *, scale=None, legend=None, title=None, sort=None)` | Dash pattern |
 | `Size(field, *, scale=None, legend=None)` | Point size or line width |
 | `Shape(field, *, scale=None, legend=None)` | Point shape (circle, square, cross, diamond, triangle-*) |
-| `Angle(field, *, scale=None)` | Point rotation angle |
+| `Angle(field, *, legend=None)` | Point rotation angle — per-row constant, `scale=` accepted but not honored (see 2026-09-02 note below) |
 
 #### Text / Detail / Tooltip
 
@@ -468,6 +479,81 @@ All positional and appearance channels accept:
 > for mesh-backed marks (line/area/path), which carry no per-mark
 > identity.
 
+> **2026-09-02 (batch A, appearance-resolution):** color and appearance-channel
+> resolution honesty fixes, per
+> `.claude/output/specs/2026-08-28-batch-a-appearance-resolution-design.md`.
+>
+> - **Color vocabulary.** Every color-string boundary (`fill=`/`stroke=`/
+>   `color=` mark kwargs at construction, `Color`/`Fill`/`Stroke` scale
+>   `range=` entries, and rendering itself) now accepts one shared vocabulary:
+>   148 CSS Color 4 named colors (case-insensitive, trimmed), `#rgb`/`#rgba`/
+>   `#rrggbb`/`#rrggbbaa` hex, and `rgb(r,g,b)`/`rgba(r,g,b,a)` with integer
+>   0-255 channels and a float `0-1` alpha (a percentage-free 0-255 alpha
+>   integer is not accepted). An unparseable string raises a typed error
+>   naming the accepted forms at every boundary — mark construction raises
+>   `ValueError` immediately, Rust rendering raises a typed `RenderError`. The
+>   former silent bare-hex normalization (accepting near-hex strings without
+>   validation) is removed. `mediumpurple` is corrected to the CSS Color 4
+>   value `(147, 112, 219)`.
+> - **Two clearing spellings.** `"none"` and `"transparent"` both clear a
+>   mark's fill/stroke paint at the mark boundary, in both Python and Rust,
+>   matched case-insensitively after trimming. (Selection styling diverges —
+>   see §3.10.) A paint the user actually cleared (never a paint that merely
+>   evaluates to transparent, e.g. an explicit `fill="#00000000"`) serializes
+>   as no attribute at all on `mark_point`, `mark_rect`, `mark_bar`, and
+>   `mark_ribbon` (which covers `mark_errorband`). Other marks (line/rule/
+>   tick/segment stroke, and arc/area/geoshape/polygon) still serialize a
+>   cleared paint as a zero-alpha value — visually identical, byte-different;
+>   unifying this onto the shared clearing path is a logged follow-up.
+> - **`FillOpacity`/`StrokeOpacity`/`Opacity`/`StrokeDash` `scale=` is now
+>   honored end to end** (previously silently dropped for the first three;
+>   `StrokeDash` gained a real `scale=` implementation the same batch).
+>   Default (no explicit `scale=`) for `FillOpacity`/`StrokeOpacity` on a
+>   quantitative field resolves domain = data extent, range =
+>   `[theme.sizes.opacity_min, opacity_max]` — matching `Opacity`'s existing
+>   semantics — except when the column's data extent is degenerate (min ==
+>   max) and no explicit `scale=` domain is given, in which case no scale
+>   resolves and each row keeps its own literal alpha instead of being
+>   repainted to the band midpoint (GH #104; `Opacity` itself is excluded
+>   from this carve-out and keeps its pre-batch behavior of repainting a
+>   constant column to the midpoint). Resolved opacity range endpoints
+>   always clamp into `[0.0, 1.0]` before scale construction, so an explicit
+>   `range=[0, 5]` cannot produce an out-of-gamut alpha. A non-numeric column
+>   bound to `fill_opacity`/`stroke_opacity` is a typed render error naming
+>   the channel and dtype (previously a silent default-alpha fallback). A
+>   non-Linear `scale=` (Log/Pow/Sqrt) on any opacity-family channel emits a
+>   `RenderWarning` naming the channel and the dropped scale type, then falls
+>   back to Linear resolution — the curve, domain, and range are not honored
+>   yet (logged follow-up).
+> - **`StrokeWidth`/`Angle` `scale=` is still not honored.** Both remain
+>   per-row constants by documented design (`spec/encoding.rs:746`); the
+>   table above lists only the kwargs each channel actually honors (`type`,
+>   `legend`). This corrects a stale advertisement — earlier phase notes
+>   implied `scale=` reached the wire for these two channels; it never did,
+>   and this batch made no change to that.
+> - **`StrokeDash` full contract.** `scale=` and `title=` are honored
+>   (2026-08-28); `sort=` is honored (2026-09-01, mirrors `Shape`, since the
+>   Rust `build_stroke_dash_scale` domain builder already read it);
+>   `condition=` is accepted on the wire but not yet consumed by any builder
+>   (reserved). A categorical `stroke_dash` column groups `mark_line`/
+>   `mark_ribbon` series by (color, detail, stroke_dash) instead of merging
+>   distinct dash categories into one polyline. `mark_line`, `mark_rule`,
+>   `mark_point`, `mark_bar`, and `mark_rect` (rect newly gained the read)
+>   all honor a bound `stroke_dash` channel: a **numeric** column keeps the
+>   pre-existing `DASH_PALETTE`-index contract byte-identically; a
+>   **string/categorical** column resolves through the new
+>   `StrokeDashScale`. A dedicated dash-swatch legend renders beside
+>   `Shape`'s aux legend. A literal `stroke_dash=[...]` mark kwarg on
+>   `mark_point` now applies to the point's stroke (previously silently
+>   dropped) — see `mark_point`'s docstring.
+> - **Continuous/discretizing color on `mark_line`/`mark_ribbon` fails
+>   loudly.** These stroke-continuous marks cannot render per-segment color;
+>   binding a continuous or discretizing `Color` scale to either now
+>   suppresses the misleading gradient/colorbar legend and emits a
+>   `RenderWarning` naming the mark and the unsupported scale kind, instead
+>   of silently rendering one solid, wrong color under a full colorbar. True
+>   gradient-colored polylines are a logged feature follow-up.
+
 ---
 
 ### 3.3 Marks
@@ -498,6 +584,28 @@ Marks are constructors that accept visual property overrides as keyword argument
 | `mark_geoshape(...)` | Choropleth / geographic shape | `projection` |
 | `mark_segment(...)` | Line segment between (x,y) and (x2,y2). Requires X, Y, X2, Y2 encoding channels. Used for dumbbell charts, slope graphs, network edges, and free-form annotations. | `stroke`, `stroke_width`, `stroke_dash`, `stroke_cap` (`"butt"`\|`"round"`\|`"square"`), `arrow` (bool), `arrow_size` |
 | `mark_label(...)` | Text with a solid background fill box. All `mark_text` parameters, plus: | `background_fill`, `background_stroke`, `background_stroke_width`, `background_padding`, `background_corner_radius` |
+
+> **2026-09-02 (batch A — `mark_rule` totality and layered domain union):**
+> `mark_rule` now covers every presence-legal channel combination: an input
+> that passes the presence gate either renders as real geometry or raises a
+> typed `UnsupportedChannelCombination` error listing the supported shapes —
+> it can no longer fall through to a silently empty render. This batch adds
+> an all-four-numeric `(x, x2, y, y2)` diagonal/segment shape (what
+> `mark_qq(line=True)` needs to render its reference diagonal), a
+> numeric-`x` + `y` + `y2` vertical span, and a numeric-`y` + `x` + `x2`
+> horizontal span (the latter two were previously a silent blank panel or
+> silently wrong geometry). The anchor read is keyed off the resolved scale
+> kind, not the raw column dtype, so an ordinal scale on an `Int`/`Float`/
+> `Utf8` column still takes the categorical (banded) reading; a null
+> ordinal-anchor row now bands at the null category exactly as `mark_point`/
+> `mark_bar` do, instead of being silently skipped. Making the diagonal
+> shape actually visible required fixing `numeric_domain_union` to include a
+> layer's `x2`/`y2` fields when computing shared axis domains — it
+> previously unioned only bare `x`/`y`, so a layered chart whose `x2`/`y2`
+> extended past its `x`/`y` (band charts, error bars, the new rule diagonal)
+> could render geometry outside the visible axis domain. The fix is global,
+> not rule-specific: any layered chart with wider `x2`/`y2` extents may now
+> resolve a correspondingly wider axis domain than before this batch.
 
 #### Composite Marks (expand to multiple primitive layers)
 
@@ -978,6 +1086,32 @@ Scales map data domain values to visual range values. Attached to encoding chann
 | `ScaleQuantize(domain, range)` | Quantize |
 | `ScaleBinOrdinal(bins, scheme=None)` | Binned ordinal |
 
+> **2026-09-02 (batch A — discretizing color scales honored):**
+> `Color(scale=...)` now honors `ScaleQuantize`, `ScaleQuantile`,
+> `ScaleThreshold`, and `ScaleBinOrdinal` with real bucketed semantics
+> instead of collapsing to a continuous linear scale. **Quantize** buckets a
+> `domain=[lo, hi]` (explicit, or the data extent when omitted) into
+> `len(range)` uniform buckets. **Quantile** buckets at data quantiles.
+> **Threshold** takes `k` explicit domain thresholds mapping to `k + 1`
+> colors. **BinOrdinal** takes explicit bin boundaries with scheme-derived
+> or explicit colors. Bucket colors: an explicit string `range=` wins; else
+> a **categorical** scheme name contributes its entries in declaration
+> order (cycling with a `RenderWarning` when the bucket count exceeds the
+> palette length); else a sequential/diverging scheme is sampled at evenly
+> spaced points. A descending `domain=[hi, lo]` (Quantize) or a
+> fully-descending threshold/bin-boundary list normalizes to ascending with
+> the swatch order reversed; a non-monotonic boundary list (reachable only
+> via raw-dict scales that bypass the `pyclass` constructors' validation) is
+> a typed render error. `configure_color(range=...)` whose length mismatches
+> the resolved bucket count emits a `RenderWarning` naming both counts
+> rather than silently truncating or padding. The colorbar legend renders
+> discrete labeled swatches for a discretizing scale instead of an
+> interpolated gradient. `fm.continuous_palette(name)` (`ContinuousScheme`)
+> is constructible and usable as `Color(scale=...)`, equivalent to
+> `ScaleSequential(scheme=name)`; `Color(scale=fm.Gradient([...]))` is also
+> implemented — explicit gradient stops thread through to the render path
+> and compose with `reverse`.
+
 #### Color Scheme Constants (`ferrum.schemes`)
 
 **Categorical:** `okabe_ito` *(default)*, `tableau10`, `set1`, `set2`, `paired`, `pastel`, `dark2`
@@ -1245,6 +1379,22 @@ Or via chart-level `.conditional(sel, color=..., else_color=...)`.
 > `Chart.conditional(spec)` likewise auto-registers the spec's source selection
 > when it carries one. A bare number with no channel context (e.g. via
 > `fm.value(0.5)` outside an `encode` key) defaults to the `opacity` channel.
+
+> **2026-09-02 (batch A):** selection styling (`SelectionMark(fill=...)` and
+> `fm.value(<string>)` used as a color) now routes color strings through the
+> same 148-name/hex/`rgb()` parser as mark construction (see §3.3's color
+> vocabulary note) — a parseable string resolves to a color dict, a number
+> still resolves to opacity, and an unparseable string raises `ValueError`
+> naming the accepted forms; the former silent opacity-`1.0` fallback for a
+> bad string is removed. Selection styling deliberately **diverges** from
+> the mark boundary on the two clearing spellings (`"none"`/`"transparent"`):
+> the selection wire dict has no cleared-paint representation, so both are
+> refused with a message naming the reason ("selection styling cannot
+> express '`none`' (no paint); provide a color") rather than the generic
+> accepted-forms text. A wire representation for a cleared-paint selection
+> is a logged follow-up, not silently absent. A non-string, non-number
+> literal passed to `fm.value(...)` now raises `TypeError` (matches the
+> sibling terminal raise) instead of silently falling through.
 
 ---
 
@@ -1802,6 +1952,25 @@ ferrum.clustermap(data, *, method="ward", metric="euclidean",
                   cmap="viridis", z_score=None, standard_scale=None,
                   figsize=None, dendrogram_ratio=0.2, theme=None)
 ```
+
+> **2026-09-02 (batch A — heatmap domain/border honesty):** `vmin=`/
+> `vmax=`/`center=`/`robust=` are honored end to end via a Diverging (when
+> `center=` is set) or Linear color scale's explicit `domain=`; previously
+> these fell through to an unscaled render. `vmin`/`vmax`/`center` must be
+> finite — `inf`/`-inf`/`NaN` raise `ValueError` immediately, before any
+> chart construction. When only one of `vmin=`/`vmax=` is given, the other
+> endpoint fills from the pre-mask finite data extent (matching `robust=`'s
+> existing convention); if there is no finite data to fill from, the fill is
+> dropped with a `UserWarning` naming the reason rather than silently
+> discarding the user's explicit bound. A one-sided fill that lands on the
+> wrong side of the given bound, or an explicit `vmin > vmax`, still renders
+> — deterministically as a single flat color, not a reversed ramp — with a
+> `UserWarning` naming both endpoints. A `center=` outside the effective
+> `[vmin, vmax]` renders as a one-sided compressed ramp with a
+> `UserWarning`, never silently and never as an error. `linewidths=`/
+> `linecolor=` are honored (default `linewidths=0.5`, `linecolor="white"`)
+> — every heatmap now ships default white 0.5px cell borders;
+> `linewidths=0` disables the border.
 
 #### Joint Distribution
 

@@ -707,6 +707,9 @@ class Chart(
             ``"-"`` / ``"hline"``.
         stroke_width : float, optional
             Stroke width in pixels.
+        stroke_dash : str or list, optional
+            Dash pattern, e.g. ``"4,2"``.  Applies to the point outline
+            stroke.
         position : Position, optional
             Position adjustment — ``fm.Jitter()``, ``fm.Dodge()``, etc.
 
