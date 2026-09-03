@@ -158,7 +158,7 @@ Notes:
 | `tick_color` | str | Tick mark color. |
 | `tick_size` | float | Tick mark length. |
 | `tick_width` | float | Tick mark width. |
-| `cull_threshold` | int | Tick-label count above which crowded labels are culled. Set to `0` to disable culling. |
+| `cull_threshold` | int | Minimum pixel gap required between adjacent tick labels; labels are dropped until the remaining ones are at least this many pixels apart. Set to `0` to disable culling entirely. |
 
 ### Marks
 

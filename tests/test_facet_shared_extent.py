@@ -138,14 +138,30 @@ class TestHistogramFacetSingleGroup:
         assert hi >= 20.0, f"Shared hi={hi} does not cover Panel B max=20.0"
 
     def test_three_panels_share_x_extent(self) -> None:
-        """Three panels with disjoint ranges all share one global extent."""
+        """Three panels with disjoint ranges all share one global extent.
+
+        `cull_threshold=0` disables the (unrelated, spec §4.6) tick-label
+        density gate -- this test's fixture packs enough x-axis ticks that
+        the default threshold culls the rightmost tick, which shrinks the
+        rendered-tick-extent PROXY this test reads without touching the
+        underlying shared domain it's actually asserting on (see
+        `x_axis_extents`'s docstring: rendered ticks are a proxy for a
+        domain that exists only Rust-side).
+        """
         df = pl.DataFrame(
             {
                 "val": ([1.0, 2.0, 3.0] * 5 + [10.0, 11.0, 12.0] * 5 + [20.0, 21.0, 22.0] * 5),
                 "cat": ["A"] * 15 + ["B"] * 15 + ["C"] * 15,
             }
         )
-        svg = fm.Chart(df).mark_histogram().encode(x="val:Q", y="count").facet(col="cat").to_svg()
+        svg = (
+            fm.Chart(df)
+            .mark_histogram()
+            .encode(x="val:Q", y="count")
+            .facet(col="cat")
+            .theme(fm.Theme(cull_threshold=0))
+            .to_svg()
+        )
         extents = x_axis_extents(svg)
         assert len(extents) == 3, f"Expected 3 panels, found {len(extents)}"
         assert extents_all_equal(extents), (

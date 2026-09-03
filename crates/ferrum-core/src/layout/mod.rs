@@ -829,6 +829,7 @@ fn reserve_axis_bands(
             axes.x.overrides.label_angle,
             metrics,
             estimated_slot_w,
+            theme.cull_threshold,
             axes.x.overrides.label_padding,
             theme.sizes.tick_size,
             axes.x.show_labels,

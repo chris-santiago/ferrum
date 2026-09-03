@@ -689,11 +689,42 @@ fn rotated_x_label_extent(
     tick_size + label_pad + sin_abs * font_size + sin_abs * max_label_w + cos_abs * line_h
 }
 
+/// Horizontal footprint (px, in the slot direction) that a tick label rotated
+/// by `angle` occupies, for judging whether a rotated label still collides
+/// with its neighbor. TRANSPOSE of `rotated_y_label_extent`'s horizontal
+/// term (`cos_abs * max_label_w + sin_abs * line_h`) — the same relationship
+/// that formula already encodes for y labels: as `angle` rotates a label
+/// toward vertical, its footprint shrinks from the full label width toward
+/// the line height (the text's own stroke "thickness"), never to zero.
+///
+/// This corrects F-L07-04 (spec §4.6): `cos(±90°)` in IEEE-754 `f64` is not
+/// exactly zero (~6.12e-17), so a bare `label_w * cos(angle)` collision check
+/// (the pre-fix formula) treats a vertical label as having ~0 horizontal
+/// footprint, which auto-passes the rotation stage for any real label width —
+/// making the cull (S4) and elide (S5) stages of the cascade unreachable.
+/// Adding the `sin(angle) * line_h` term gives -90° a real fit test: a
+/// vertical label genuinely occupies about one line-height of horizontal
+/// space, so a candidate angle only "passes" when it truly fits (a
+/// genuinely-fitting rotation still wins), and the cascade falls through to
+/// culling when even -90° doesn't fit the slot.
+fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
+    let rad = angle.to_radians();
+    let sin_abs = rad.sin().abs();
+    let cos_abs = rad.cos().abs();
+    cos_abs * label_w + sin_abs * line_h
+}
+
 /// Estimate the vertical space (in pixels) needed below the x-axis to
 /// accommodate tick labels, accounting for how the collision cascade is likely
 /// to resolve. Called by the layout orchestrator **before** the plot rect is
 /// finalized, so it uses worst-case inputs (longest label, estimated slot
 /// width). Over-reservation is acceptable; under-reservation causes clipping.
+///
+/// `cull_threshold` (spec §4.6, D9, spec-review cycle 2) shrinks every
+/// stage's fit budget by that many pixels — SYNC'd with
+/// `cascade_collision_recovery`'s identical treatment; see that function's
+/// doc for why the gap has to move with the fit test itself rather than
+/// only floor a stride once collision was already detected by pure overlap.
 ///
 /// Algorithm (mirrors the cascade order in `cascade_collision_recovery`):
 /// 1. If `label_angle_override` is set, use that angle directly.
@@ -751,6 +782,7 @@ pub(crate) fn estimate_x_label_band(
     label_angle_override: Option<f64>,
     metrics: &dyn TextMetrics,
     estimated_slot_w: f64,
+    cull_threshold: u32,
     label_padding: Option<f64>,
     tick_size: f64,
     show_labels: bool,
@@ -791,7 +823,14 @@ pub(crate) fn estimate_x_label_band(
         );
     }
 
-    let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
+    // `cull_threshold` (spec-review cycle 2) must shrink this predictor's
+    // budget exactly as it shrinks `cascade_collision_recovery`'s — a
+    // positive threshold can force the REAL cascade past flat/wrap/a
+    // shallow rotation even when raw overlap would have been fine, and the
+    // predictor must reach the same conclusion or it under-reserves the
+    // band (clipping risk). At `cull_threshold == 0` this is a no-op.
+    let cull_gap = cull_threshold as f64;
+    let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE) - cull_gap;
 
     // S0 — flat (#97, spec §4.1): the same `tick_size + label_pad_eff` standoff
     // the renderer draws below the axis line, plus one line of text — but only
@@ -830,10 +869,14 @@ pub(crate) fn estimate_x_label_band(
     }
 
     // S2/S3 — rotation: find the first angle in the cascade that resolves
-    // collision (same logic as `cascade_collision_recovery` S3).
+    // collision (same logic as `cascade_collision_recovery` S3; SYNC'd
+    // sibling — the fit test must move with that function's, or the
+    // estimator and the real cascade disagree on which angle wins). Budget
+    // is `estimated_slot_w - cull_gap`, matching S3's `s3_budget` exactly
+    // (no `LABEL_OVERLAP_TOLERANCE` here either, mirroring that stage).
+    let s3_budget = estimated_slot_w - cull_gap;
     for &angle in &ANGLE_CASCADE[1..] {
-        let cos_factor = angle.to_radians().cos().abs();
-        if max_label_w * cos_factor <= estimated_slot_w {
+        if rotated_x_label_footprint(angle, max_label_w, line_h) <= s3_budget {
             // SYNC (see `rotated_x_label_extent`): full geometric extent of the
             // rotated label, shared with the title placement.
             return rotated_x_label_extent(
@@ -1245,10 +1288,43 @@ fn elide_to_fit(
 /// `max_width`.
 ///
 /// Split strategy — first applicable rule wins:
-/// 1. Underscore: split on `_` boundaries.
-/// 2. Space: greedy line-fill — pack words until adding the next would exceed
-///    `max_width`, then start a new line.
-/// 3. camelCase: split at lowercase->uppercase transitions.
+/// 1. Underscore: split on `_` boundaries (unconditional — every segment
+///    gets its own line regardless of whether a shorter combined form
+///    would fit).
+/// 2. Space: greedy line-fill — pack as many words per line as fit under
+///    `max_width` (the label's own NATURAL, minimal-line wrap; pre-task
+///    behavior, restored in spec-review cycle 4 — see `wrap_label_to_line_count`
+///    below for the axis-uniform variant).
+/// 3. camelCase: split at lowercase->uppercase transitions (unconditional,
+///    like Rule 1).
+///
+/// This is the label's OWN natural wrap in isolation. `cascade_collision_recovery`'s
+/// S1 stage additionally enforces that every sibling label in an axis
+/// resolves to the SAME line count once a positive `cull_threshold` is in
+/// effect (spec §4.6's "the cascade degrades uniformly") — see
+/// `wrap_label_to_line_count`'s doc for why that's a SEPARATE function
+/// rather than a change to this one: `cull_threshold == 0` must reproduce
+/// this function's un-adjusted, potentially non-uniform, pre-task output
+/// exactly (spec-review cycle 4, byte-identity requirement).
+///
+/// Rule 2 (space) is the VERBATIM pre-task `String`-accumulator loop
+/// (quality-review cycle 2): two prior attempts to replicate this algorithm
+/// through a `Vec<&str>` accumulator each introduced a NEW divergence for
+/// labels with an EMPTY split-word (a leading, trailing, or doubled space)
+/// — cycle 1's un-filtered `Vec` let an empty word survive into the joined
+/// line as a stray space or phantom line; cycle 6's filtered `Vec` deleted
+/// empty words outright, which matches pre-task only for a LEADING empty
+/// word (`String::push_str("")` on an empty string is a true no-op) and
+/// diverges for a trailing or interior one (pre-task's
+/// `format!("{} {}", current, word)` inserts a joining space and MEASURES
+/// it, which can change which line a word lands on and hence the label's
+/// LINE COUNT — not just cosmetic whitespace). Rather than a third attempt
+/// to reproduce the original's quirks through a different data structure,
+/// this is the original structure: fidelity here is exact by construction.
+/// The `Vec`-based `greedy_pack_words` (below) still exists, but only as
+/// the uniformization path's (`pack_words_to_line_count`) OWN starting
+/// point — a context where the contract is axis-wide uniform line counts,
+/// not byte-identity to this function.
 fn wrap_label(
     label: &str,
     max_width: f64,
@@ -1264,7 +1340,7 @@ fn wrap_label(
         return Some(segments.join("\n"));
     }
 
-    // Rule 2: space — greedy line-fill.
+    // Rule 2: space — greedy line-fill (pack as many words per line as fit).
     if label.contains(' ') {
         let words: Vec<&str> = label.split(' ').collect();
         // Any single word that exceeds max_width makes wrapping impossible.
@@ -1273,7 +1349,7 @@ fn wrap_label(
         }
         let mut lines: Vec<String> = Vec::new();
         let mut current = String::new();
-        for word in &words {
+        for &word in &words {
             if current.is_empty() {
                 current.push_str(word);
             } else {
@@ -1322,6 +1398,198 @@ fn wrap_label(
 
     // No break points found.
     None
+}
+
+/// Greedily pack `words` onto as few lines as fit within `max_width` — the
+/// `Vec<&str>`-group-producing counterpart to `wrap_label`'s Rule 2 loop,
+/// used ONLY as `pack_words_to_line_count`'s (and hence
+/// `wrap_label_to_line_count`'s) own starting point before forcing
+/// additional lines via `split_balanced`. Returns word groups (not yet
+/// joined) rather than strings, since the uniformization path needs real
+/// word boundaries to split further.
+///
+/// This is a DELIBERATELY separate implementation from `wrap_label`'s Rule
+/// 2, not a shared extraction of it (quality-review cycle 2): the two
+/// functions serve different contracts. `wrap_label` (`cull_threshold == 0`)
+/// must be byte-identical to pre-task, including pre-task's own quirky
+/// treatment of empty split-words (see `wrap_label`'s doc); this function
+/// feeds ONLY the uniform-degradation path (`cull_threshold > 0`), where the
+/// contract is "every sibling label resolves to the same line count," not
+/// byte-identity to anything. Empty words (from a leading/trailing/doubled
+/// space, e.g. `" Foo"` splitting to `["", "Foo"]`) are simply dropped
+/// before packing here — a valid, simpler choice for a path that owns its
+/// own semantics rather than needing to reproduce another function's.
+fn greedy_pack_words<'a>(
+    words: &[&'a str],
+    max_width: f64,
+    font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> Vec<Vec<&'a str>> {
+    let mut lines: Vec<Vec<&'a str>> = Vec::new();
+    let mut current: Vec<&'a str> = Vec::new();
+    for &word in words.iter().filter(|w| !w.is_empty()) {
+        if current.is_empty() {
+            current.push(word);
+        } else {
+            let mut candidate = current.clone();
+            candidate.push(word);
+            let candidate_str = candidate.join(" ");
+            if metrics.measure_width(&candidate_str, font_size) > max_width {
+                lines.push(current);
+                current = vec![word];
+            } else {
+                current = candidate;
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Split `words` (already known to jointly fit on one line) into two
+/// non-empty groups at whichever boundary minimizes the WIDER of the two
+/// resulting lines — the most width-balanced 2-way split. Used by
+/// `pack_words_to_line_count` to grow a group into more lines without ever
+/// producing an unbalanced (e.g. "one word alone") split when a balanced
+/// one is available.
+fn split_balanced<'a>(
+    words: &[&'a str],
+    font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let k = words.len();
+    let mut best_split = 1;
+    let mut best_max_w = f64::INFINITY;
+    for i in 1..k {
+        let left = words[..i].join(" ");
+        let right = words[i..].join(" ");
+        let m = metrics
+            .measure_width(&left, font_size)
+            .max(metrics.measure_width(&right, font_size));
+        if m < best_max_w {
+            best_max_w = m;
+            best_split = i;
+        }
+    }
+    (words[..best_split].to_vec(), words[best_split..].to_vec())
+}
+
+/// Force `words`' natural (minimal) greedy pack (`greedy_pack_words`) up to
+/// exactly `target_lines` lines, by repeatedly splitting the group with the
+/// most words into two width-balanced halves (`split_balanced`) until the
+/// line count matches. Splitting only ever shrinks a line's width, so the
+/// `max_width` fit `greedy_pack_words` already established is preserved
+/// throughout — this never degrades to one-word-per-line unless `words`
+/// itself has too few words to reach `target_lines` any other way. Returns
+/// fewer than `target_lines` groups only in that case (nothing left to
+/// split).
+fn pack_words_to_line_count<'a>(
+    words: &[&'a str],
+    target_lines: usize,
+    max_width: f64,
+    font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> Vec<Vec<&'a str>> {
+    let mut groups = greedy_pack_words(words, max_width, font_size, metrics);
+    while groups.len() < target_lines {
+        let widest = groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| g.len() > 1)
+            .max_by_key(|(_, g)| g.len());
+        let Some((idx, _)) = widest else { break };
+        let group = groups.remove(idx);
+        let (left, right) = split_balanced(&group, font_size, metrics);
+        groups.insert(idx, right);
+        groups.insert(idx, left);
+    }
+    groups
+}
+
+/// Like `wrap_label`, but forces the result onto exactly `target_lines`
+/// lines wherever the label's own natural (minimal) wrap would use fewer —
+/// spec-review cycle 4's uniform-degradation fix. `cascade_collision_recovery`'s
+/// S1 stage calls this (instead of re-deriving uniformity by hand) once
+/// `cull_threshold > 0`, so every sibling label in the axis resolves to the
+/// SAME line count without ever degrading to one-word-per-line packing —
+/// `"United States of America"` still packs 2+2 (`"United States"` /
+/// `"of America"`), never four stacked single words.
+///
+/// Only the space rule (Rule 2) is retargeted this way: underscore (Rule 1)
+/// and camelCase (Rule 3) already split unconditionally at every one of
+/// their boundaries, so their line count is fixed by the label's own
+/// structure, not by width — forcing MORE lines than a label has break
+/// points is undefined, so those rules fall through to `wrap_label`
+/// unchanged, as does the empty/unsplittable case and any label whose
+/// natural line count already meets or exceeds `target_lines`.
+fn wrap_label_to_line_count(
+    label: &str,
+    target_lines: usize,
+    max_width: f64,
+    font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> Option<String> {
+    if !label.contains('_') && label.contains(' ') {
+        let words: Vec<&str> = label.split(' ').collect();
+        if words.iter().any(|w| metrics.measure_width(w, font_size) > max_width) {
+            return None;
+        }
+        let groups = pack_words_to_line_count(&words, target_lines, max_width, font_size, metrics);
+        let lines: Vec<String> = groups.into_iter().map(|g| g.join(" ")).collect();
+        return Some(lines.join("\n"));
+    }
+    wrap_label(label, max_width, font_size, metrics)
+}
+
+/// Uniform-degradation post-process for a wrap stage's natural (per-label)
+/// result — spec §4.6, spec-review cycle 4/5. Shared by `cascade_collision_recovery`'s
+/// S1 and S2b, the two wrap-invoking stages of the cascade (`estimate_x_label_band`'s
+/// own S1 wrap call is the only other `wrap_label` call site, and needs no
+/// equivalent treatment: its band-height reservation only ever depends on
+/// the maximum line count across labels, unaffected by whether shorter
+/// siblings are later uniformized up to it).
+///
+/// At `cull_threshold == 0`, returns `natural_labels` unchanged — this is
+/// the pre-task, per-label wrap result byte-for-byte (spec-review cycle 4's
+/// byte-identity requirement; pre-task never uniformized either, so
+/// preserving whatever raggedness it could produce at `0` IS the contract,
+/// not a violation of it). At `cull_threshold > 0`, computes
+/// `target_lines` as the max natural line count across the axis's sibling
+/// labels, then re-packs (via `wrap_label_to_line_count`) any label whose
+/// natural count falls short — every sibling resolves to the SAME line
+/// count without ever collapsing past what's structurally necessary to
+/// reach it (multi-word labels keep packing multiple words per line).
+fn uniformize_wrapped_labels(
+    raw_labels: &[String],
+    natural_labels: Vec<String>,
+    cull_threshold: u32,
+    max_width: f64,
+    font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> Vec<String> {
+    if cull_threshold == 0 {
+        return natural_labels;
+    }
+    let target_lines = natural_labels
+        .iter()
+        .map(|w| w.matches('\n').count() + 1)
+        .max()
+        .unwrap_or(1);
+    raw_labels
+        .iter()
+        .zip(natural_labels.iter())
+        .map(|(raw, natural)| {
+            let natural_lines = natural.matches('\n').count() + 1;
+            if natural_lines >= target_lines {
+                natural.clone()
+            } else {
+                wrap_label_to_line_count(raw, target_lines, max_width, font_size, metrics)
+                    .unwrap_or_else(|| natural.clone())
+            }
+        })
+        .collect()
 }
 
 /// Shared body for `layout_x_axis`'s and `layout_y_axis`'s `label_angle`
@@ -1391,9 +1659,218 @@ fn stamp_override_angle_with_elide(
     (ticks, warning)
 }
 
+/// Try, in cascade order, S0 (flat) -> S1 (wrap) -> S2a (font-reduced flat)
+/// -> S2b (font-reduced wrap) -> S3 (rotate) against `labels` within
+/// `slot_w`, honoring `cull_threshold`'s pixel-gap budget identically at
+/// every stage (spec §4.6, D9 — see `cascade_collision_recovery`'s doc for
+/// why the gap has to shrink every stage's budget, not just floor S4's
+/// stride). Returns `None` if no stage resolves collision, i.e. even -90°
+/// rotation doesn't fit `labels` within `slot_w`.
+///
+/// Shared by `cascade_collision_recovery`'s initial attempt (all N tick
+/// labels, `slot_w` = the per-tick budget) AND its S4 cull stage's
+/// RE-ATTEMPT at the culled stride (round-8 fix, orchestrator golden-PNG
+/// gate finding): S4 computes a stride from -90°'s footprint alone — the
+/// SMALLEST possible footprint of any presentation — so a stride wide
+/// enough for rotated survivors to fit says nothing about whether a
+/// LESS-degraded presentation (flat, wrapped, font-reduced) would ALSO now
+/// fit the wider per-surviving-label budget the stride opens up. Without
+/// this re-attempt, culled survivors always inherited the rotated
+/// presentation the stride's own fit test happened to use, even when e.g. a
+/// handful of short numeric labels at a wide culled pitch trivially fit
+/// flat — rotated sparse labels are strictly worse than flat ones. Calling
+/// this function again at the culled stride, against survivor labels only,
+/// re-derives the least-degraded presentation that ACTUALLY fits the
+/// density the cull just produced; a genuinely wide label set that still
+/// doesn't fit flat/wrapped/font-reduced at the wider pitch legitimately
+/// keeps -90° rotation, since S3's loop inside this second call re-tries
+/// every angle again.
+fn resolve_presentation(
+    labels: &[String],
+    slot_w: f64,
+    label_font_size: f64,
+    cull_threshold: u32,
+    metrics: &dyn TextMetrics,
+) -> Option<CascadeResult> {
+    let all_visible = vec![true; labels.len()];
+    let widths: Vec<f64> = labels
+        .iter()
+        .map(|s| metrics.measure_width(s, label_font_size))
+        .collect();
+    let line_h = metrics.line_height(label_font_size);
+
+    // See `cascade_collision_recovery`'s doc for why `cull_threshold` must
+    // shrink every stage's budget, not just S4's stride floor.
+    let cull_gap = cull_threshold as f64;
+    let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE) - cull_gap;
+
+    // S0 — Flat: if no label exceeds the threshold, done.
+    if widths.iter().all(|w| *w <= threshold) {
+        return Some(CascadeResult {
+            labels: labels.to_vec(),
+            angle: 0.0,
+            font_size: None,
+            visible: all_visible,
+            strategy: CascadeStrategy::Flat,
+        });
+    }
+
+    // S1 — Wrap: try wrapping all labels. All must successfully wrap AND fit.
+    let wrapped: Vec<Option<String>> = labels
+        .iter()
+        .map(|l| wrap_label(l, threshold, label_font_size, metrics))
+        .collect();
+    let all_wrap_ok = wrapped.iter().all(|w| w.is_some());
+    if all_wrap_ok {
+        let wrapped_labels: Vec<String> = wrapped.into_iter().flatten().collect();
+        let all_fit = wrapped_labels
+            .iter()
+            .all(|w| measure_multiline_width(w, label_font_size, metrics) <= threshold);
+        if all_fit {
+            // Uniform-degradation requirement (spec §4.6, spec-review
+            // cycles 4/5) — see `uniformize_wrapped_labels`'s doc.
+            let final_labels = uniformize_wrapped_labels(
+                labels,
+                wrapped_labels,
+                cull_threshold,
+                threshold,
+                label_font_size,
+                metrics,
+            );
+            return Some(CascadeResult {
+                labels: final_labels,
+                angle: 0.0,
+                font_size: None,
+                visible: all_visible,
+                strategy: CascadeStrategy::Wrapped,
+            });
+        }
+    }
+
+    // S2 — Font shrink: try at reduced font size. If it doesn't help, proceed
+    // at ORIGINAL font size (rotation at smaller fonts is hard to read).
+    let reduced_fs = label_font_size * FONT_SHRINK_FACTOR;
+    let reduced_widths: Vec<f64> = labels
+        .iter()
+        .map(|s| metrics.measure_width(s, reduced_fs))
+        .collect();
+
+    // S2a: reduced font, flat.
+    if reduced_widths.iter().all(|w| *w <= threshold) {
+        return Some(CascadeResult {
+            labels: labels.to_vec(),
+            angle: 0.0,
+            font_size: Some(reduced_fs),
+            visible: all_visible,
+            strategy: CascadeStrategy::FontReduced,
+        });
+    }
+
+    // S2b: reduced font + wrapping. Same uniform-degradation treatment as S1.
+    let wrapped_reduced: Vec<Option<String>> = labels
+        .iter()
+        .map(|l| wrap_label(l, threshold, reduced_fs, metrics))
+        .collect();
+    let all_wrap_reduced_ok = wrapped_reduced.iter().all(|w| w.is_some());
+    if all_wrap_reduced_ok {
+        let wrapped_labels: Vec<String> = wrapped_reduced.into_iter().flatten().collect();
+        let all_fit = wrapped_labels
+            .iter()
+            .all(|w| measure_multiline_width(w, reduced_fs, metrics) <= threshold);
+        if all_fit {
+            let final_labels = uniformize_wrapped_labels(
+                labels,
+                wrapped_labels,
+                cull_threshold,
+                threshold,
+                reduced_fs,
+                metrics,
+            );
+            return Some(CascadeResult {
+                labels: final_labels,
+                angle: 0.0,
+                font_size: Some(reduced_fs),
+                visible: all_visible,
+                strategy: CascadeStrategy::FontReduced,
+            });
+        }
+    }
+
+    // S3 — Graduated rotation: try each angle from ANGLE_CASCADE (skip 0.0, already tried).
+    // Use ORIGINAL labels and ORIGINAL font size. `rotated_x_label_footprint`
+    // (not a bare `cos(angle)` projection) gives -90° a real fit test — see
+    // its doc for why the naive projection made this stage auto-pass and
+    // culling (S4) unreachable (spec §4.6, F-L07-04). The budget is
+    // `slot_w - cull_gap` (no `LABEL_OVERLAP_TOLERANCE`, matching this
+    // stage's pre-existing convention) so a positive `cull_threshold`
+    // tightens rotation too — a genuinely-fitting rotation only wins when it
+    // ALSO satisfies the requested gap (spec-review cycle 2).
+    let s3_budget = slot_w - cull_gap;
+    for &angle in &ANGLE_CASCADE[1..] {
+        let all_fit = widths
+            .iter()
+            .all(|w| rotated_x_label_footprint(angle, *w, line_h) <= s3_budget);
+        if all_fit {
+            return Some(CascadeResult {
+                labels: labels.to_vec(),
+                angle,
+                font_size: None,
+                visible: all_visible,
+                strategy: CascadeStrategy::Rotated { angle },
+            });
+        }
+    }
+
+    None
+}
+
+/// Merge a presentation's SURVIVOR-only label text back into the full,
+/// original-length label vector `layout_x_axis` expects (S4 cull
+/// re-selection, round 8): visible indices consume the next resolved
+/// survivor label IN ORDER (both `visible` and `survivor_labels` were built
+/// by iterating the same original index order, so they stay aligned);
+/// culled indices keep their untouched original text, since a culled tick
+/// never renders (`TickLayout.culled`) and its text is therefore inert.
+fn merge_survivor_labels(
+    original: &[String],
+    visible: &[bool],
+    survivor_labels: Vec<String>,
+) -> Vec<String> {
+    let mut survivors = survivor_labels.into_iter();
+    original
+        .iter()
+        .zip(visible)
+        .map(|(orig, vis)| {
+            if *vis {
+                survivors.next().unwrap_or_else(|| orig.clone())
+            } else {
+                orig.clone()
+            }
+        })
+        .collect()
+}
+
 /// Run the graduated collision cascade (spec SS4.1). Tries recovery strategies in
 /// order (S0 flat -> S1 wrap -> S2 font shrink -> S3 rotate -> S4 cull -> S5 elide),
 /// returning as soon as one resolves all collisions.
+///
+/// `cull_threshold` (spec §4.6, F-L07-04 / D9) is the minimum pixel gap
+/// required between adjacent VISIBLE tick labels — `Theme.cull_threshold`'s
+/// docstring — not a label-count gate, and not merely an S4 stride floor
+/// (spec-review cycle 2): it shrinks the fit BUDGET of every stage, S0
+/// through S3, since "does this arrangement leave at least `cull_threshold`
+/// px between labels" is a stronger question than "do labels overlap at
+/// all." A stage only resolves collision when it ALSO satisfies the gap —
+/// so a chart whose labels already fit flat (or rotate cleanly) with plenty
+/// of raw overlap headroom can still need culling once a large
+/// `cull_threshold` is requested. `0` disables S4 (culling) entirely — every
+/// earlier stage's budget collapses back to the pure-overlap check (no gap
+/// requirement beyond non-overlap), and a densely-collided axis falls to S5
+/// (elision) instead of ever dropping a label. Any positive value enables
+/// S4, which then drops just enough labels (by stride) to satisfy the same
+/// additive gap requirement the earlier stages enforce. See
+/// `rotated_x_label_footprint`'s doc for why -90° rotation (S3's last angle)
+/// is a real fit test rather than an automatic pass.
 ///
 /// `label_overlap` (B5 unit 6b) biases the cascade onto an explicit primitive
 /// instead of running the graduated flow:
@@ -1405,6 +1882,12 @@ fn stamp_override_angle_with_elide(
 ///   angle.
 /// - `None` / [`LabelOverlap::Greedy`] runs the unmodified cascade (default),
 ///   keeping default output byte-identical.
+///
+/// S4 (cull) re-selects survivors' presentation at the culled density via
+/// `resolve_presentation` (round-8 fix, orchestrator golden-PNG gate
+/// finding) — see that function's doc for why a stride computed against
+/// -90°'s footprint doesn't by itself justify keeping -90° rotation once
+/// the stride opens up more room per surviving label.
 fn cascade_collision_recovery(
     labels: &[String],
     slot_w: f64,
@@ -1457,135 +1940,118 @@ fn cascade_collision_recovery(
         None | Some(LabelOverlap::Greedy) => {}
     }
 
-    // Measure all labels at their original font size.
+    // S0 through S3 — flat / wrap / font-reduced / rotate, all against the
+    // full N-label set at `slot_w`. See `resolve_presentation`'s doc; it is
+    // the extracted, reusable body of these four stages, shared with S4's
+    // post-cull re-attempt below.
+    if let Some(result) = resolve_presentation(labels, slot_w, label_font_size, cull_threshold, metrics) {
+        return result;
+    }
+
+    // Neither flat, wrap, font-reduced, nor even -90° rotation fit every
+    // label within `slot_w` — proceed to S4 (cull) / S5 (elide). Both need
+    // the full-label widths/line-height `resolve_presentation` already
+    // computed and discarded internally; recompute once here.
     let widths: Vec<f64> = labels
         .iter()
         .map(|s| metrics.measure_width(s, label_font_size))
         .collect();
+    let line_h = metrics.line_height(label_font_size);
+    let cull_gap = cull_threshold as f64;
 
-    let threshold = slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
-
-    // S0 — Flat: if no label exceeds the threshold, done.
-    if widths.iter().all(|w| *w <= threshold) {
-        return CascadeResult {
-            labels: labels.to_vec(),
-            angle: 0.0,
-            font_size: None,
-            visible: all_visible,
-            strategy: CascadeStrategy::Flat,
-        };
-    }
-
-    // S1 — Wrap: try wrapping all labels. All must successfully wrap AND fit.
-    let wrapped: Vec<Option<String>> = labels
-        .iter()
-        .map(|l| wrap_label(l, threshold, label_font_size, metrics))
-        .collect();
-    let all_wrap_ok = wrapped.iter().all(|w| w.is_some());
-    if all_wrap_ok {
-        let wrapped_labels: Vec<String> = wrapped.into_iter().flatten().collect();
-        let all_fit = wrapped_labels
-            .iter()
-            .all(|w| measure_multiline_width(w, label_font_size, metrics) <= threshold);
-        if all_fit {
-            return CascadeResult {
-                labels: wrapped_labels,
-                angle: 0.0,
-                font_size: None,
-                visible: all_visible,
-                strategy: CascadeStrategy::Wrapped,
-            };
-        }
-    }
-
-    // S2 — Font shrink: try at reduced font size. If it doesn't help, proceed
-    // at ORIGINAL font size (rotation at smaller fonts is hard to read).
-    let reduced_fs = label_font_size * FONT_SHRINK_FACTOR;
-    let reduced_widths: Vec<f64> = labels
-        .iter()
-        .map(|s| metrics.measure_width(s, reduced_fs))
-        .collect();
-
-    // S2a: reduced font, flat.
-    if reduced_widths.iter().all(|w| *w <= threshold) {
-        return CascadeResult {
-            labels: labels.to_vec(),
-            angle: 0.0,
-            font_size: Some(reduced_fs),
-            visible: all_visible,
-            strategy: CascadeStrategy::FontReduced,
-        };
-    }
-
-    // S2b: reduced font + wrapping.
-    let wrapped_reduced: Vec<Option<String>> = labels
-        .iter()
-        .map(|l| wrap_label(l, threshold, reduced_fs, metrics))
-        .collect();
-    let all_wrap_reduced_ok = wrapped_reduced.iter().all(|w| w.is_some());
-    if all_wrap_reduced_ok {
-        let wrapped_labels: Vec<String> = wrapped_reduced.into_iter().flatten().collect();
-        let all_fit = wrapped_labels
-            .iter()
-            .all(|w| measure_multiline_width(w, reduced_fs, metrics) <= threshold);
-        if all_fit {
-            return CascadeResult {
-                labels: wrapped_labels,
-                angle: 0.0,
-                font_size: Some(reduced_fs),
-                visible: all_visible,
-                strategy: CascadeStrategy::FontReduced,
-            };
-        }
-    }
-
-    // S3 — Graduated rotation: try each angle from ANGLE_CASCADE (skip 0.0, already tried).
-    // Use ORIGINAL labels and ORIGINAL font size.
-    for &angle in &ANGLE_CASCADE[1..] {
-        let cos_factor = angle.to_radians().cos().abs();
-        let all_fit = widths.iter().all(|w| *w * cos_factor <= slot_w);
-        if all_fit {
-            return CascadeResult {
-                labels: labels.to_vec(),
-                angle,
-                font_size: None,
-                visible: all_visible,
-                strategy: CascadeStrategy::Rotated { angle },
-            };
-        }
-    }
-
-    // S4 — Tick culling: only if labels.len() > cull_threshold.
-    // Use -90 degrees (last/steepest angle in cascade).
+    // S4 — Tick culling: PIXEL-GAP semantic (spec §4.6, F-L07-04 / D9).
+    // `cull_threshold` is the minimum required pixel gap between adjacent
+    // VISIBLE tick labels (`Theme.cull_threshold`'s docstring), not a label
+    // COUNT gate — `cull_threshold == 0` disables culling entirely: the
+    // cascade falls through to S5 elision instead of ever dropping a label,
+    // regardless of how many labels there are.
+    // Use -90 degrees (last/steepest angle in cascade) for the STRIDE
+    // computation below — the smallest possible footprint of any
+    // presentation, so it gives the minimum stride any presentation could
+    // need. The PRESENTATION actually used for the survivors is re-derived
+    // afterward (round 8 fix, see below).
     let best_angle = *ANGLE_CASCADE.last().unwrap(); // -90.0
     let cos_best = best_angle.to_radians().cos().abs();
 
-    if n as u32 > cull_threshold {
-        // Find max projected width at the best angle.
+    if cull_threshold > 0 {
+        // Find max footprint at the best angle (same real-fit formula as S3 —
+        // a bare `w * cos_best` projection is ~0 at -90° and would never
+        // trigger culling; see `rotated_x_label_footprint`'s doc).
         let max_projected = widths
             .iter()
-            .map(|w| *w * cos_best)
+            .map(|w| rotated_x_label_footprint(best_angle, *w, line_h))
             .fold(0.0_f64, f64::max);
 
-        // Compute minimum stride N where max_projected <= slot_w * N.
-        let stride = if max_projected <= 0.0 || slot_w <= 0.0 {
+        // Minimum stride N such that the widest rotated label's footprint
+        // PLUS the required `cull_threshold` gap fits within N slots — the
+        // SAME additive gap requirement S0-S3 enforce above
+        // (`footprint <= effective_slot_w - cull_threshold`), just solved
+        // for stride instead of a fixed angle:
+        //   footprint + cull_threshold <= N * slot_w
+        //   N >= (footprint + cull_threshold) / slot_w
+        // A zero-width label set still culls down to a spaced subset when
+        // `slot_w` alone can't satisfy `cull_threshold` (spec-review cycle 2:
+        // "threshold larger than any gap culls down to a spaced subset").
+        let stride = if slot_w <= 0.0 {
             1_u32
         } else {
-            (max_projected / slot_w).ceil().max(1.0) as u32
+            ((max_projected + cull_gap) / slot_w).ceil().max(1.0) as u32
         };
 
         if stride > 1 {
             let visible: Vec<bool> = (0..n).map(|i| i % stride as usize == 0).collect();
+
+            // Round-8 fix (orchestrator golden-PNG gate): `stride` was
+            // sized against -90°'s footprint alone, the SMALLEST footprint
+            // of any presentation — it says nothing about whether a
+            // LESS-degraded presentation now fits the wider
+            // per-surviving-label budget the stride opens up. Re-run the
+            // presentation cascade (flat -> wrap -> font-reduced -> rotate,
+            // same stage order) at the culled density, against only the
+            // labels that will actually render, so e.g. a handful of short
+            // numeric labels culled to a wide pitch render FLAT instead of
+            // inheriting the -90° rotation that made culling necessary at
+            // the ORIGINAL, narrower pitch. `resolve_presentation` is
+            // guaranteed to return `Some` here: the stride was sized so
+            // -90° fits every survivor's (a subset of all N labels')
+            // footprint at `effective_slot_w`, and S3's own loop inside
+            // this second call re-tries -90° again — the `None` arm is a
+            // defensive fallback only, kept in case of a floating-point
+            // boundary surprise, and reproduces the pre-fix outcome
+            // (rotated survivors) if it were ever hit.
+            let effective_slot_w = stride as f64 * slot_w;
+            let survivor_labels: Vec<String> = labels
+                .iter()
+                .zip(&visible)
+                .filter(|(_, v)| **v)
+                .map(|(l, _)| l.clone())
+                .collect();
+            let (final_labels, angle, font_size) = match resolve_presentation(
+                &survivor_labels,
+                effective_slot_w,
+                label_font_size,
+                cull_threshold,
+                metrics,
+            ) {
+                Some(presentation) => (
+                    merge_survivor_labels(labels, &visible, presentation.labels),
+                    presentation.angle,
+                    presentation.font_size,
+                ),
+                None => (labels.to_vec(), best_angle, None),
+            };
+
             return CascadeResult {
-                labels: labels.to_vec(),
-                angle: best_angle,
-                font_size: None,
+                labels: final_labels,
+                angle,
+                font_size,
                 visible,
                 strategy: CascadeStrategy::Culled { stride },
             };
         }
 
-        // stride == 1 means all fit at -90 without culling — return as rotated.
+        // stride == 1 means labels already sit >= cull_threshold apart at
+        // -90 without dropping any — return as rotated, not culled.
         return CascadeResult {
             labels: labels.to_vec(),
             angle: best_angle,
@@ -1596,12 +2062,52 @@ fn cascade_collision_recovery(
     }
 
     // S5 — Elision: last resort. Use -90 degrees. Elide labels that still collide.
+    // Per-label fit uses the same real footprint as S3/S4 (`rotated_x_label_footprint`)
+    // rather than a bare `w * cos_best` projection — reaching S5 means at least one
+    // label's TRUE footprint exceeded `slot_w` at every cascade angle (the S3 loop
+    // above already tried -90°), so the elide decision must agree with that, or
+    // S5 silently elides nothing (the same auto-pass bug one stage further downstream).
+    //
+    // BUT: the elide REMEDY (`elide_to_fit`, which shortens the label's TEXT)
+    // can only ever shrink the footprint's WIDTH term (`cos_best * w`) — it
+    // cannot touch the WIDTH-INDEPENDENT `sin_best * line_h` term (quality-
+    // review finding S3). At -90°, `cos_best` is ~6.12e-17 (not exactly 0 in
+    // IEEE-754 `f64`), so for any REALISTIC label width that term is
+    // negligible: truncating the text changes the rendered footprint by a
+    // fraction of a pixel, never enough to matter, and `elide_to_fit`
+    // degenerates to its own `ellipsis_w >= max_width` early return — a bare
+    // "…", zero information, for a remedy that could never have satisfied
+    // the constraint it exists to answer. (The only case where the width
+    // term is NOT negligible is an astronomically large mocked width, e.g.
+    // `cascade_s5_elision`'s `1e18`-px test double: `cos_best * 1e18 ≈ 61px`,
+    // a real, non-negligible reduction elision can actually deliver.)
+    //
+    // Elision is therefore gated on whether truncation could plausibly move
+    // the needle at all: if even the WIDEST label's own width contributes
+    // less than `ELIDE_MIN_WIDTH_CONTRIBUTION_PX` to its footprint, no
+    // amount of truncation across the axis can help, and eliding anyway
+    // would only destroy content for nothing — fall back to `Rotated` with
+    // every label intact at `best_angle`, the pre-task outcome for a
+    // `cull_threshold` the user explicitly set to `0` (disabling culling),
+    // rather than collapsing a legible axis into an axis of bare ellipses.
+    const ELIDE_MIN_WIDTH_CONTRIBUTION_PX: f64 = 1.0;
+    let max_width_contribution = widths.iter().fold(0.0_f64, |acc, w| acc.max(cos_best * w));
+    if max_width_contribution < ELIDE_MIN_WIDTH_CONTRIBUTION_PX {
+        return CascadeResult {
+            labels: labels.to_vec(),
+            angle: best_angle,
+            font_size: None,
+            visible: all_visible,
+            strategy: CascadeStrategy::Rotated { angle: best_angle },
+        };
+    }
+
     let mut elided_count: u32 = 0;
     let elided_labels: Vec<String> = labels
         .iter()
         .enumerate()
         .map(|(i, label)| {
-            let projected = widths[i] * cos_best;
+            let projected = rotated_x_label_footprint(best_angle, widths[i], line_h);
             if projected > slot_w {
                 elided_count += 1;
                 let budget = if cos_best > 1e-6 { slot_w / cos_best } else { slot_w };
@@ -2051,7 +2557,7 @@ mod tests {
         let m = mock(10.0); // 10 px/char
         let labels = vec!["ab".into(), "cd".into()]; // 20 px each
         // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, 4.0, true);
         // Flat band == tick_size(4.0) + label_pad_eff(2.0) + line_height(11) = 19.2.
         let expected = 4.0 + 2.0 + m.line_height(11.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
@@ -2066,7 +2572,7 @@ mod tests {
         // "aa_bb_cc": flat width 80; segments "aa"/"bb"/"cc" are 20 px each.
         let labels = vec!["aa_bb_cc".into()];
         // Slot 50 → threshold 45: flat (80) fails, segments (20) fit → 3 lines.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, 0, None, 4.0, true);
         let expected = 4.0 + 2.0 + 3.0 * m.line_height(11.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
@@ -2079,7 +2585,7 @@ mod tests {
         // 12-char label, no break points → 120 px, cannot wrap.
         let labels = vec!["abcdefghijkl".into()];
         let slot = 30.0; // threshold 27 < 120 → not flat, no wrap → rotate/vertical.
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, 0, None, 4.0, true);
         // Must exceed the flat single-line band (a rotated/vertical reservation).
         assert!(band > m.line_height(11.0), "rotated band must exceed flat: {band}");
     }
@@ -2091,7 +2597,7 @@ mod tests {
         let m = mock(10.0);
         let labels = vec!["abc".into()];
         // label_padding=None → label_pad_eff defaults to 2.0; tick_size=4.0.
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, None, 4.0, true);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, 0, None, 4.0, true);
         let expected = rotated_x_label_extent(-45.0, 30.0, 11.0, m.line_height(11.0), 4.0, 2.0);
         assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
@@ -2478,7 +2984,7 @@ mod tests {
             layout_x_axis(&input, panel_area, 0, font_size, 13.0, 4.0, 8, tick_size, &m);
 
         let band =
-            estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, None, tick_size, true);
+            estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, 0, None, tick_size, true);
 
         let theme = crate::layout::ThemeInputs::default();
         let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None);
@@ -2758,8 +3264,13 @@ mod tests {
     fn x_axis_collision_triggers_graduated_rotation() {
         // 8 labels of 80px each in 400px panel. slot_w=50, threshold=45.
         // No break points (L0..L7), so wrapping/shrink fail.
-        // Cascade tries rotation: -30 -> cos(30)*80=69.3>50, -45 -> cos(45)*80=56.6>50,
-        // -60 -> cos(60)*80=40<=50 -> passes at -60.
+        // Cascade tries rotation using the real footprint (cos*w + sin*line_h,
+        // line_h = 11*1.2 = 13.2; spec §4.6 / F-L07-04 fix):
+        //   -30: cos(30)*80 + sin(30)*13.2 = 69.28 + 6.6 = 75.88 > 50 -> fail.
+        //   -45: cos(45)*80 + sin(45)*13.2 = 56.57 + 9.34 = 65.91 > 50 -> fail.
+        //   -60: cos(60)*80 + sin(60)*13.2 = 40.00 + 11.43 = 51.43 > 50 -> fail
+        //        (the pre-fix bare-cos check alone, 40<=50, used to pass here).
+        //   -90: cos(90)*80 + sin(90)*13.2 ~= 0 + 13.2 = 13.2 <= 50 -> pass at -90!
         let input = AxisInput::new(
             AxisOrient::Bottom,
             None,
@@ -2770,7 +3281,7 @@ mod tests {
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
-            assert_eq!(t.label_angle, -60.0);
+            assert_eq!(t.label_angle, -90.0);
             assert!(!t.elided);
         }
     }
@@ -3209,6 +3720,99 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    /// Quality-review cycle 1 finding: a leading space splits to an empty
+    /// first word (`" AB CD".split(' ')` == `["", "AB", "CD"]`);
+    /// `wrap_label`'s `String` accumulator must drop that empty word exactly
+    /// like pre-task did (`String::push_str("")` on an empty string is a
+    /// no-op, so `current` stays empty and the NEXT real word starts fresh
+    /// with no separator), not carry it into the joined line as a stray
+    /// leading space. "AB"(2*10=20px) and "CD"(20px) each fit alone but
+    /// "AB CD" combined (5*10=50px) exceeds max_width=30, so this forces an
+    /// actual 2-line split — the case the original bug corrupted.
+    #[test]
+    fn wrap_leading_space_drops_empty_word_not_stray_space() {
+        let m = mock(10.0);
+        let result = wrap_label(" AB CD", 30.0, 11.0, &m);
+        assert_eq!(
+            result,
+            Some("AB\nCD".to_string()),
+            "leading space must not survive into the wrapped line"
+        );
+    }
+
+    /// Quality-review cycle 2 finding: a trailing empty word that FITS is
+    /// pre-task-genuine kept content, not dropped -- `format!("{} {}",
+    /// current, word)` inserts a joining space and MEASURES it, so a
+    /// trailing space that's within budget stays on the line. "AB CD "
+    /// splits to `["AB", "CD", ""]`; at max_width=30 (`mock(10.0)`,
+    /// `fixed_width` counts every char INCLUDING spaces), the candidate for
+    /// the trailing "" is `"CD "` == 3 chars == 30.0px, and `30.0 > 30.0` is
+    /// FALSE, so pre-task keeps it: `current = "CD "`.
+    ///
+    /// Oracle derived on paper by hand-tracing the removed `String`-loop
+    /// (`git show` of the pre-cycle-6 body) against `fixed_width(10.0)`'s
+    /// exact per-character arithmetic (not a rebuilt base-commit extension).
+    #[test]
+    fn wrap_trailing_empty_word_that_fits_keeps_pretask_trailing_space() {
+        let m = mock(10.0);
+        let result = wrap_label("AB CD ", 30.0, 11.0, &m);
+        assert_eq!(
+            result,
+            Some("AB\nCD ".to_string()),
+            "a trailing empty word whose joining space still fits must be \
+             kept, matching pre-task's format!-and-measure behavior"
+        );
+    }
+
+    /// Companion: a trailing empty word that OVERFLOWS its line IS dropped
+    /// (pre-task's final `if !current.is_empty()` guard: the word becomes
+    /// `current = "".to_string()` after the overflow push, and an empty
+    /// `current` is never pushed as its own line). Same fixture, tighter
+    /// budget (25 instead of 30) so `"CD "` (30px) no longer fits.
+    #[test]
+    fn wrap_trailing_empty_word_that_overflows_is_dropped() {
+        let m = mock(10.0);
+        let result = wrap_label("AB CD ", 25.0, 11.0, &m);
+        assert_eq!(
+            result,
+            Some("AB\nCD".to_string()),
+            "a trailing empty word that overflows its line must be dropped, \
+             not pushed as a phantom extra (empty) line"
+        );
+    }
+
+    /// Quality-review cycle 2 finding, headline case: a DOUBLED interior
+    /// space is a LINE-COUNT divergence, not just whitespace cosmetics.
+    /// "AB  CD" (two spaces) splits to `["AB", "", "CD"]`. At max_width=60,
+    /// pre-task keeps everything on one line (the doubled space measures
+    /// into the combined candidate, which still fits): `"AB  CD"`. At
+    /// max_width=50, the SAME candidate (`"AB  CD"` == 60px) no longer
+    /// fits, so pre-task splits — but the interior empty word already
+    /// landed on the FIRST line's `current` (`"AB "`, 30px, fit) before the
+    /// real second word arrived, so the split lands as `"AB "` / `"CD"`,
+    /// TWO lines with a trailing space on the first — not `"AB CD"` on one
+    /// (what a same-space-collapsing implementation would produce).
+    #[test]
+    fn wrap_doubled_interior_space_keeps_pretask_line_count() {
+        let m = mock(10.0);
+        let fits_one_line = wrap_label("AB  CD", 60.0, 11.0, &m);
+        assert_eq!(
+            fits_one_line,
+            Some("AB  CD".to_string()),
+            "a doubled space that still fits combined must stay on one line, \
+             double space preserved"
+        );
+
+        let splits_two_lines = wrap_label("AB  CD", 50.0, 11.0, &m);
+        assert_eq!(
+            splits_two_lines,
+            Some("AB \nCD".to_string()),
+            "a doubled space that no longer fits combined must split into \
+             pre-task's exact two lines (\"AB \" / \"CD\"), not collapse the \
+             doubled space away"
+        );
+    }
+
     // --- measure_multiline_width test (via axis.rs import) ---
 
     #[test]
@@ -3288,18 +3892,23 @@ mod tests {
     #[test]
     fn cascade_s3_rotation() {
         // Labels without break points that collide flat.
-        // "ABCDEFGHIJ" = 10*10 = 100px. slot_w=80, threshold=72.
+        // "ABCDEFGHIJ" = 10*10 = 100px. slot_w=80, threshold=72. line_h = 11*1.2 = 13.2.
         // S1: no break points -> fails.
         // S2: fixed_width ignores font_size -> still 100 -> fails.
-        // S3: -30: cos(30)*100=86.6>80 -> fail. -45: cos(45)*100=70.7<=80 -> pass!
+        // S3 (real footprint = cos*w + sin*line_h, spec §4.6 / F-L07-04 fix):
+        //   -30: cos(30)*100 + sin(30)*13.2 = 86.60 + 6.6 = 93.20 > 80 -> fail.
+        //   -45: cos(45)*100 + sin(45)*13.2 = 70.71 + 9.34 = 80.05 > 80 -> fail
+        //        (barely — this is the exact margin the pre-fix bare-cos check
+        //        missed: 70.71<=80 alone used to auto-pass here).
+        //   -60: cos(60)*100 + sin(60)*13.2 = 50.00 + 11.43 = 61.43 <= 80 -> pass!
         let labels: Vec<String> = vec![
             "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
             "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
         let result = cascade_collision_recovery(&labels, 80.0, 11.0, 8, None, &m);
-        assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -45.0 });
-        assert_eq!(result.angle, -45.0);
+        assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -60.0 });
+        assert_eq!(result.angle, -60.0);
         assert!(result.font_size.is_none());
         assert!(result.visible.iter().all(|v| *v));
         // Labels unchanged (not wrapped, not elided).
@@ -3308,99 +3917,100 @@ mod tests {
 
     #[test]
     fn cascade_s3_picks_shallowest_angle() {
-        // Labels that fit at -30. 6 chars * 10 = 60px. slot_w=55.
+        // Pure angle-selection test (isolated from the cull_threshold gap
+        // feature via cull_threshold=0 — see `cascade_gap_requirement_*`
+        // below for that interaction). Labels that fit at -45 (not the
+        // shallower -30, once the real footprint formula is used).
+        // 6 chars * 10 = 60px. slot_w=55. line_h = 11*1.2 = 13.2.
         // threshold=49.5. 60>49.5 -> collision.
         // S1: no break points -> fails.
         // S2: fixed_width ignores font_size -> fails.
-        // S3: -30: cos(30)*60=51.96<=55 -> pass at -30!
+        // S3 (real footprint, spec §4.6 / F-L07-04 fix; cull_threshold=0 so
+        // the budget is plain `slot_w`, no gap term):
+        //   -30: cos(30)*60 + sin(30)*13.2 = 51.96 + 6.6 = 58.56 > 55 -> fail
+        //        (the pre-fix bare-cos check alone, 51.96<=55, used to pass here).
+        //   -45: cos(45)*60 + sin(45)*13.2 = 42.43 + 9.34 = 51.76 <= 55 -> pass at -45!
         let labels: Vec<String> = vec![
             "ABCDEF".into(), "GHIJKL".into(), "MNOPQR".into(), "STUVWX".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 55.0, 11.0, 8, None, &m);
-        assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -30.0 });
-        assert_eq!(result.angle, -30.0);
+        let result = cascade_collision_recovery(&labels, 55.0, 11.0, 0, None, &m);
+        assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -45.0 });
+        assert_eq!(result.angle, -45.0);
     }
 
+    /// F-L07-04 / spec §4.6 RED proof: culling is reachable at REALISTIC label
+    /// widths, not just via an unrealistic mocked width (see
+    /// `cascade_s4_culling_direct` below, which predates this fix and used a
+    /// 1e18-px mock specifically because the old bare-`cos(angle)` fit check
+    /// made -90° auto-pass for any real label width — the bug this test now
+    /// pins the fix for). 20 labels of realistic width, no break points (so
+    /// wrap/shrink can't resolve them), and a slot narrower than one line
+    /// height (`line_h = 11*1.2 = 13.2`, `slot_w = 10.0`) so even the
+    /// steepest rotation (-90°) genuinely doesn't fit — its true footprint is
+    /// ~`line_h` (13.2), not ~0. With `n(20) > cull_threshold(8)`, this must
+    /// resolve to `Culled`, not an always-passing `Rotated`.
     #[test]
-    fn cascade_s4_culling() {
-        // 20 labels in a narrow panel. slot_w=10, each label=15 chars*10=150px.
-        // Labels have no break points (all uppercase).
-        // 20 > cull_threshold=8 -> culling is eligible.
-        // S0-S2 fail (150 >> 9 threshold).
-        // S3: even at -90, cos(90)*150 ~ 0 <= 10 -> all fit.
-        // Wait, S3 at -90 passes because projected width ~= 0. So culling
-        // won't fire if -90 resolves it. We need labels where even -90
-        // doesn't fully resolve.
-        //
-        // Actually, cos(-90) is not exactly 0 in floating point; it's ~1.8e-16.
-        // So 150 * 1.8e-16 ~ 2.7e-14, which is <= 10. S3 passes at -90.
-        //
-        // To test culling, we need the S3 check to use `w * cos_factor <= slot_w`
-        // but our cascade uses this exact check. At -90 degrees, cos is effectively
-        // 0 so ANY width fits. Culling only triggers when even -90 doesn't work.
-        //
-        // That can't happen with real floating-point cos. So culling is only for
-        // when labels.len() > cull_threshold AND rotation resolves but leaves too
-        // many labels at -90. Actually re-reading the spec more carefully:
-        //
-        // S4 triggers when S3 fails (all ANGLE_CASCADE angles tried, none work).
-        // But -90 always works (cos ~= 0). Unless slot_w is 0, which would be
-        // degenerate. Let me re-read my implementation...
-        //
-        // Actually, the issue is more subtle. I need to test where cull_threshold
-        // is LOW so that culling fires instead of S3. But the cascade is linear:
-        // S3 is tried before S4. If -90 resolves all collisions in S3, we never
-        // reach S4.
-        //
-        // Looking at real use cases: S4 makes sense when we WANT to reduce the
-        // number of visible labels even though -90 technically fits them all.
-        // But in our implementation, S3 genuinely resolves it first.
-        //
-        // Let me re-examine the cascade design: S4 fires only when S3 fails.
-        // With floating-point cos(-90) ~ 0, S3 basically never fails. This
-        // means S4 only fires in truly degenerate cases (slot_w = 0).
-        //
-        // For testing purposes, let's verify culling works when S3 does fail.
-        // We can simulate this by ensuring cos(-90) * max_width > slot_w,
-        // but that requires enormous label widths or slot_w=0.
-        //
-        // Alternative: slot_w very small (e.g., 1e-16), so even cos(-90)*w > slot_w.
-        // 20 labels in 0.00000001px panel -> slot_w = 5e-10.
-        // cos(-90)*150 = ~2.7e-14 > 5e-10? No, 2.7e-14 < 5e-10. Still fits.
-        //
-        // In practice, S4 fires when we have a rounding scenario. Let me just
-        // test cascade_collision_recovery directly with slot_w=0.
+    fn cascade_s4_culling_at_realistic_widths() {
+        // "LONGCATEGORY00".."LONGCATEGORY19" = 14 chars * 10px/char = 140px each.
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
         let m = mock(10.0);
-        // slot_w so small that even -90 can't resolve: use width check with
-        // a mock that doesn't honor cos (since fixed_width ignores font_size,
-        // and we're testing the cascade logic itself).
-        //
-        // Actually, to make S4 fire, we need ALL angles in S3 to fail.
-        // cos(-90 deg) ≈ 6.12e-17. For 14-char labels: 140 * 6.12e-17 ≈ 8.6e-15.
-        // This is only > slot_w if slot_w < 8.6e-15. That's effectively zero.
-        //
-        // slot_w = 0 triggers degenerate path. Let's use slot_w at exactly 0.
-        let result = cascade_collision_recovery(&labels, 0.0, 11.0, 8, None, &m);
-        // With slot_w=0, threshold=0, all labels collide.
-        // S0-S2: fail (width > 0).
-        // S3: for each angle, w*cos_factor <= 0 only if cos_factor=0 exactly.
-        //   cos(-90) is not exactly 0 in IEEE 754, but 140*6.12e-17 ≈ 8.6e-15 > 0.
-        //   So S3 might still pass. Depends on precision.
-        // If S3 does pass at -90, S4 won't fire. Let's check.
-        //
-        // Due to floating-point behavior, let's verify whatever stage actually fires.
-        // This test documents the behavior regardless.
-        assert!(
-            matches!(result.strategy,
-                CascadeStrategy::Rotated { .. } |
-                CascadeStrategy::Culled { .. } |
-                CascadeStrategy::Elided { .. }
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
+        match result.strategy {
+            CascadeStrategy::Culled { stride } => {
+                // max footprint at -90 ~= line_h = 13.2; stride is the additive
+                // gap-inclusive formula (spec-review cycle 2):
+                // ceil((13.2 + cull_threshold(8)) / slot_w(10)) = ceil(2.12) = 3.
+                assert_eq!(stride, 3, "expected stride 3, got {stride}");
+                let visible_count = result.visible.iter().filter(|v| **v).count();
+                assert!(visible_count < 20, "some labels should be culled");
+                assert!(result.visible[0], "first label should be visible");
+            }
+            other => panic!(
+                "expected Culled at a slot narrower than one line height; got {:?}",
+                other
             ),
-            "expected rotation, culling, or elision; got {:?}",
+        }
+        assert_eq!(result.angle, -90.0);
+    }
+
+    /// F-L07-04 pin: `cull_threshold = 0` disables culling entirely (spec
+    /// §4.6), even for the same dense/narrow scenario that culls above —
+    /// falls through to S5 elision instead.
+    #[test]
+    fn cascade_cull_threshold_zero_never_culls() {
+        let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
+        let m = mock(10.0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
+        assert!(
+            !matches!(result.strategy, CascadeStrategy::Culled { .. }),
+            "cull_threshold=0 must never cull; got {:?}",
             result.strategy
         );
+    }
+
+    /// F-L07-04 pin: a rotation that genuinely fits still wins over culling,
+    /// even when `n > cull_threshold` — culling is a fallback for labels that
+    /// truly don't fit at any angle (INCLUDING the requested gap, spec-review
+    /// cycle 2), not a blanket density trigger. Same 20 labels as
+    /// `cascade_s4_culling_at_realistic_widths`, but `slot_w = 22.0`: with
+    /// `cull_threshold = 8`, S3's budget is `22 - 8 = 14`, just above -90°'s
+    /// footprint (`line_h = 13.2`) — the exact boundary the gap-aware S3
+    /// budget makes meaningful (at `slot_w = 20.0`, the pre-this-fix budget
+    /// used in an earlier draft of this test, `20 - 8 = 12 < 13.2` would fail
+    /// and cull instead — the gap requirement, once folded into S3, changes
+    /// which slot widths count as "genuinely fits").
+    #[test]
+    fn cascade_genuinely_fitting_rotation_wins_over_culling() {
+        let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
+        let m = mock(10.0);
+        let result = cascade_collision_recovery(&labels, 22.0, 11.0, 8, None, &m);
+        assert_eq!(
+            result.strategy,
+            CascadeStrategy::Rotated { angle: -90.0 },
+            "a genuinely-fitting rotation must win over culling"
+        );
+        assert!(result.visible.iter().all(|v| *v), "no labels should be culled");
     }
 
     #[test]
@@ -3433,50 +4043,53 @@ mod tests {
         assert_eq!(result.angle, -90.0);
     }
 
-    /// R1 (§9.1 mutation set): the cull predicate `n as u32 > cull_threshold`
-    /// was never truly mirrored — bug_hunt_layout.rs's cull tests re-implemented
-    /// this same comparison locally rather than exercising the real cascade.
-    /// Neither `cascade_s4_culling_direct` (n=20) nor `cascade_s5_elision`
-    /// (n=6) sits at the threshold itself, so a `>` -> `>=` mutation of the
-    /// real predicate would survive both undetected. This test pins the exact
-    /// boundary: n == cull_threshold must NOT enter S4 (falls through to S5
-    /// elision), n == cull_threshold + 1 must.
+    /// F-L07-04 / D9 boundary pin: `cull_threshold` gates culling as an
+    /// all-or-nothing switch on the PIXEL-GAP semantic (spec §4.6), not a
+    /// label-count predicate — `0` disables culling entirely regardless of
+    /// how badly labels collide, and any positive value re-enables it.
+    /// Same labels/slot in both branches, only `cull_threshold` differs, so
+    /// this isolates exactly the switch (supersedes the pre-fix count-gate
+    /// boundary this test used to pin: `n as u32 > cull_threshold`).
     #[test]
-    fn cascade_s4_cull_threshold_boundary_is_strict_greater_than() {
+    fn cascade_cull_threshold_zero_vs_one_boundary() {
         let m = MockMetrics { measure: |_text: &str, _fs: f64| 1e18, line_h_factor: 1.2 };
-        let cull_threshold = 8u32;
+        let labels: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
 
-        let labels_at: Vec<String> = (0..8).map(|i| format!("VeryLongLabel{i}")).collect();
-        let at_boundary =
-            cascade_collision_recovery(&labels_at, 10.0, 11.0, cull_threshold, None, &m);
+        let disabled = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
         assert!(
-            matches!(at_boundary.strategy, CascadeStrategy::Elided { .. }),
-            "n == cull_threshold must NOT enter S4 culling; expected Elided, got {:?}",
-            at_boundary.strategy
+            matches!(disabled.strategy, CascadeStrategy::Elided { .. }),
+            "cull_threshold=0 must disable culling entirely; expected Elided, got {:?}",
+            disabled.strategy
         );
 
-        let labels_over: Vec<String> = (0..9).map(|i| format!("VeryLongLabel{i}")).collect();
-        let over_boundary =
-            cascade_collision_recovery(&labels_over, 10.0, 11.0, cull_threshold, None, &m);
+        let enabled = cascade_collision_recovery(&labels, 10.0, 11.0, 1, None, &m);
         assert!(
-            matches!(over_boundary.strategy, CascadeStrategy::Culled { .. }),
-            "n == cull_threshold + 1 must enter S4 culling; expected Culled, got {:?}",
-            over_boundary.strategy
+            matches!(enabled.strategy, CascadeStrategy::Culled { .. }),
+            "cull_threshold=1 must enable culling; expected Culled, got {:?}",
+            enabled.strategy
         );
     }
 
     #[test]
     fn cascade_s5_elision() {
-        // Extreme density with few labels (below cull_threshold), so culling
-        // is skipped and elision fires as last resort.
-        // 6 labels (< cull_threshold=8) with enormous widths -> S3 fails for all
-        // angles -> S4 skipped (6 < 8) -> S5 elision.
+        // cull_threshold=0 (disabled, spec §4.6 / F-L07-04), so culling is
+        // skipped entirely and elision fires as the last resort.
+        // 6 labels with enormous (1e18) widths -> S3 fails for all angles ->
+        // S4 skipped (cull_threshold=0) -> S5 elision. The 1e18 mock is
+        // deliberate, not incidental (quality-review finding S3): at -90°,
+        // `cos_best ≈ 6.12e-17` makes the footprint's width term negligible
+        // for any REALISTIC label width, so elision can only ever fire
+        // where truncating the text delivers a REAL reduction --
+        // `cos_best * 1e18 ≈ 61px`, well above `ELIDE_MIN_WIDTH_CONTRIBUTION_PX`.
+        // See `cascade_s5_realistic_widths_falls_back_to_rotated_not_elision`
+        // for the realistic-width companion, where elision is a no-op remedy
+        // and the cascade must NOT destroy the labels' content.
         let labels: Vec<String> = (0..6).map(|i| format!("VeryLongLabel{}", i)).collect();
         let m = MockMetrics {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
         match result.strategy {
             CascadeStrategy::Elided { count } => {
                 assert!(count > 0, "expected some labels elided");
@@ -3492,6 +4105,170 @@ mod tests {
                 lbl
             );
         }
+    }
+
+    /// Quality-review finding S3 RED proof: reaching S5 with REALISTIC label
+    /// widths (not an astronomical mock) must NOT destroy content. 20 labels
+    /// of realistic width (140px, `cascade_s4_culling_at_realistic_widths`'s
+    /// fixture) in a slot narrower than one line height (`slot_w=10 <
+    /// line_h=13.2`), `cull_threshold=0` (disabled, so S4 is skipped and S5
+    /// would be reached) — the elide predicate (`~line_h`, width-independent
+    /// at -90°) can never be satisfied by the elide remedy (text truncation,
+    /// which only shrinks the width term) for widths this small
+    /// (`cos_best * 140 ≈ 8.6e-15`, far below the 1px feasibility floor), so
+    /// the cascade must fall back to `Rotated` with every label INTACT --
+    /// the pre-task outcome for a threshold the user explicitly disabled --
+    /// rather than collapse all 20 labels to a bare, information-free "…".
+    #[test]
+    fn cascade_s5_realistic_widths_falls_back_to_rotated_not_elision() {
+        let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
+        let m = mock(10.0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 0, None, &m);
+        assert_eq!(
+            result.strategy,
+            CascadeStrategy::Rotated { angle: -90.0 },
+            "elision that cannot reduce the footprint must fall back to Rotated, not Elided"
+        );
+        assert_eq!(
+            result.labels, labels,
+            "labels must render INTACT (no truncation) when elision cannot help"
+        );
+        assert!(result.visible.iter().all(|v| *v), "no labels should be culled");
+    }
+
+    /// Round-8 RED proof (orchestrator golden-PNG gate finding, `configure/
+    /// density_styled.svg`): culling opens up the per-surviving-label pitch,
+    /// and a presentation earlier than -90° rotation must be re-tried at
+    /// that WIDER pitch rather than blindly inheriting the angle that made
+    /// the original, narrower pitch's stride computation pass. 13 short
+    /// numeric labels ("1", "1.5", ..., "7", widest = "1.5"/"2.5"/etc at 3
+    /// chars = 30px) at `slot_w=12` genuinely don't fit at any angle
+    /// (`s3_budget = 12 - cull_threshold(8) = 4`, far below -90°'s
+    /// ~line_h=13.2 footprint) -> S4 culls with
+    /// `stride = ceil((13.2 + 8) / 12) = 2`. The 7 stride-2 survivors
+    /// ("1".."7") are single digits (10px each); at the CULLED pitch
+    /// (`effective_slot_w = 24`), S0's flat threshold is
+    /// `24*0.9 - 8 = 13.6 >= 10` — they fit FLAT. Pre-fix, this resolved to
+    /// `Culled { stride: 2 }` at `angle: -90.0` unconditionally (rotated
+    /// sparse single digits, strictly worse than flat); RED-proven in place
+    /// (temporarily forced the post-cull branch back to
+    /// `(labels.to_vec(), best_angle, None)`, rebuilt, confirmed this test
+    /// failed with `angle == -90.0`; reverted, rebuilt, confirmed it passes).
+    #[test]
+    fn cascade_culled_survivors_reselect_flat_when_it_now_fits() {
+        let labels: Vec<String> = vec![
+            "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let m = mock(10.0);
+        let result = cascade_collision_recovery(&labels, 12.0, 11.0, 8, None, &m);
+        match result.strategy {
+            CascadeStrategy::Culled { stride } => {
+                assert_eq!(stride, 2, "expected stride 2, got {stride}");
+            }
+            other => panic!("expected Culled at slot_w=12; got {:?}", other),
+        }
+        assert_eq!(
+            result.angle, 0.0,
+            "culled survivors that fit flat at the culled pitch must render flat, not inherit -90° rotation"
+        );
+        assert!(result.font_size.is_none(), "flat presentation uses the original font size");
+        // Survivors keep their original (unwrapped, unelided) text.
+        let survivor_texts: Vec<&str> = result
+            .labels
+            .iter()
+            .zip(&result.visible)
+            .filter(|(_, v)| **v)
+            .map(|(l, _)| l.as_str())
+            .collect();
+        assert_eq!(survivor_texts, vec!["1", "2", "3", "4", "5", "6", "7"]);
+    }
+
+    /// Round-8 companion pin: the re-selection at the culled pitch must NOT
+    /// force flat where flat genuinely still doesn't fit — a wide label set
+    /// culled to a wider (but still insufficient for flat/wrap) pitch
+    /// legitimately keeps -90° rotation. Same fixture as
+    /// `cascade_s4_culling_at_realistic_widths` (140px labels, no break
+    /// points, so wrap/font-shrink can never resolve them regardless of
+    /// pitch): stride 3 widens the pitch to 30px, still far short of the
+    /// 140px flat requirement, so -90° (whose footprint is ~line_h
+    /// regardless of label width, per `rotated_x_label_footprint`'s doc)
+    /// remains the only presentation that fits.
+    #[test]
+    fn cascade_culled_survivors_stay_rotated_when_still_too_wide() {
+        let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
+        let m = mock(10.0);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
+        match result.strategy {
+            CascadeStrategy::Culled { stride } => {
+                assert_eq!(stride, 3, "expected stride 3, got {stride}");
+            }
+            other => panic!("expected Culled; got {:?}", other),
+        }
+        assert_eq!(
+            result.angle, -90.0,
+            "wide labels that still don't fit flat/wrapped at the culled pitch must legitimately stay rotated"
+        );
+        assert!(result.font_size.is_none());
+    }
+
+    /// Round-8 estimator-sync check (`estimate_x_label_band` must not
+    /// UNDER-reserve for whatever presentation the real cascade picks
+    /// post-cull — flagged explicitly by the coordinator since a cascade/
+    /// estimator mismatch here is the exact seam that bit spec-review cycle
+    /// 1). The estimator has no notion of culling: whenever S0-S3 fail at
+    /// its (pre-layout) `estimated_slot_w`, it always reserves the FULL
+    /// vertical (-90°) extent as a conservative fallback, regardless of
+    /// what S4 later decides. That fallback (`tick_size + label_pad_eff +
+    /// font_size + max_label_w`) is provably >= any less-degraded
+    /// presentation's actual need for a non-degenerate (nonzero-width)
+    /// label set — flat only needs `tick_size + label_pad_eff + line_h`,
+    /// and `font_size + max_label_w > line_h` for any label wider than a
+    /// sliver — so over-reservation, not under-reservation, is the only
+    /// possible drift when the real cascade later resolves to Flat via this
+    /// round's fix. Verified directly against the exact fixture that now
+    /// culls-to-flat above.
+    #[test]
+    fn estimate_x_label_band_over_reserves_for_culled_to_flat_survivors() {
+        let labels: Vec<String> = vec![
+            "1", "1.5", "2", "2.5", "3", "3.5", "4", "4.5", "5", "5.5", "6", "6.5", "7",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let m = mock(10.0);
+        let label_font_size = 11.0;
+        let tick_size = 4.0;
+        let label_pad_eff = 2.0;
+
+        // The real cascade, at this fixture, resolves Culled { stride: 2 }
+        // at angle 0.0 (flat) — see the pin above.
+        let cascade_result = cascade_collision_recovery(&labels, 12.0, label_font_size, 8, None, &m);
+        assert_eq!(cascade_result.angle, 0.0);
+
+        // The actual space flat rendering needs.
+        let line_h = m.line_height(label_font_size);
+        let actual_flat_need = tick_size + label_pad_eff + line_h;
+
+        // The estimator's prediction, called with the SAME inputs (pre-layout,
+        // before it can know culling will happen).
+        let estimated = estimate_x_label_band(
+            &labels,
+            label_font_size,
+            None,
+            &m,
+            12.0,
+            8,
+            None,
+            tick_size,
+            true,
+        );
+        assert!(
+            estimated >= actual_flat_need,
+            "estimator ({estimated}) must not under-reserve relative to the actual flat need ({actual_flat_need})"
+        );
     }
 
     #[test]
@@ -3581,7 +4358,9 @@ mod tests {
     fn cascade_s5_elision_fires_labels_elided_warning() {
         // Verify that the LabelsElided warning fires only for S5 (elision),
         // not for S3 (rotation) or other stages.
-        // 6 labels below cull_threshold with enormous widths -> elision.
+        // cull_threshold=0 (disabled) + 6 labels with enormous widths ->
+        // elision (spec §4.6 / F-L07-04: cull_threshold gates S4, not a
+        // label count).
         let input = AxisInput::new(
             AxisOrient::Bottom,
             None,
@@ -3593,7 +4372,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 0, 4.0, &m);
         assert!(
             matches!(warning, Some(AxisLabelWarning::LabelsElided { .. })),
             "expected LabelsElided warning; got {:?}",
@@ -3627,7 +4406,7 @@ mod tests {
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
         let expected = tick_size + 2.0 + line_h; // label_pad_eff default = 2.0
         assert!(
             (band - expected).abs() < 1e-9,
@@ -3650,7 +4429,7 @@ mod tests {
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
         let expected = tick_size + 2.0 + 2.0 * line_h;
         assert!(
             (band - expected).abs() < 1e-9,
@@ -3679,14 +4458,14 @@ mod tests {
         // Flat case (same fixture as `estimate_flat_labels`).
         let flat_labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
         let flat_off =
-            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, None, tick_size, false);
+            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, 0, None, tick_size, false);
         assert!(
             (flat_off - line_h).abs() < 1e-9,
             "labels-off flat band should be pre-#97 line_h={line_h}, got {flat_off}"
         );
         // Contrast: labels drawn DOES gain the #97 standoff for the same input.
         let flat_on =
-            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, None, tick_size, true);
+            estimate_x_label_band(&flat_labels, 11.0, None, &m, 100.0, 0, None, tick_size, true);
         assert!(
             (flat_on - (tick_size + 2.0 + line_h)).abs() < 1e-9,
             "labels-on flat band should still be tick_size + label_pad_eff + line_h"
@@ -3703,7 +4482,7 @@ mod tests {
         // pins the EXACT pre-batch value, not just "insensitive to padding".
         let padding_delta = 40.0 - 2.0;
         let flat_off_padded = estimate_x_label_band(
-            &flat_labels, 11.0, None, &m, 100.0, Some(40.0), tick_size, false,
+            &flat_labels, 11.0, None, &m, 100.0, 0, Some(40.0), tick_size, false,
         );
         assert!(
             (flat_off_padded - (line_h + padding_delta)).abs() < 1e-9,
@@ -3721,14 +4500,14 @@ mod tests {
         let m6 = mock(6.0);
         let line_h6 = m6.line_height(11.0);
         let wrapped_off =
-            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, None, tick_size, false);
+            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, 0, None, tick_size, false);
         assert!(
             (wrapped_off - 2.0 * line_h6).abs() < 1e-9,
             "labels-off wrapped band should be pre-#97 2*line_h={}, got {wrapped_off}",
             2.0 * line_h6
         );
         let wrapped_on =
-            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, None, tick_size, true);
+            estimate_x_label_band(&wrapped_labels, 11.0, None, &m6, 100.0, 0, None, tick_size, true);
         assert!(
             (wrapped_on - (tick_size + 2.0 + 2.0 * line_h6)).abs() < 1e-9,
             "labels-on wrapped band should still be tick_size + label_pad_eff + 2*line_h"
@@ -3741,13 +4520,17 @@ mod tests {
 
     #[test]
     fn estimate_rotated_labels() {
-        // Labels with no break points that collide flat and can't wrap, but fit at -45°.
-        // "ABCDEFGHIJ" = 10 * 10 = 100px. estimated_slot_w = 80.
+        // Labels with no break points that collide flat and can't wrap, but fit at -60°
+        // once the real footprint formula is used (spec §4.6 / F-L07-04 fix).
+        // "ABCDEFGHIJ" = 10 * 10 = 100px. estimated_slot_w = 80. line_h = 11*1.2 = 13.2.
         // threshold = 80 * 0.9 = 72. 100 > 72 -> collision.
         // S1: no break points -> wrap fails for all.
-        // S2/S3: -30: cos(30)*100 = 86.6 > 80 -> fail.
-        //        -45: cos(45)*100 = 70.7 <= 80 -> pass.
-        // Expected margin = 100 * sin(45°) + line_h * cos(45°).
+        // S2/S3 (real footprint = cos*w + sin*line_h):
+        //   -30: cos(30)*100 + sin(30)*13.2 = 86.60 + 6.6 = 93.20 > 80 -> fail.
+        //   -45: cos(45)*100 + sin(45)*13.2 = 70.71 + 9.34 = 80.05 > 80 -> fail
+        //        (the pre-fix bare-cos check alone, 70.7<=80, used to pass here).
+        //   -60: cos(60)*100 + sin(60)*13.2 = 50.00 + 11.43 = 61.43 <= 80 -> pass!
+        // Expected margin = 100 * sin(60°) + line_h * cos(60°).
         let labels: Vec<String> = vec![
             "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
             "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
@@ -3755,11 +4538,11 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, 0, None, tick_size, true);
         // Full geometric extent (mirrors the render pivot): the old too-tight
         // formula was `sin·max_w + cos·line_h`; the band now adds the pivot
         // offset `tick_size + label_pad + sin·font_size` on top of it.
-        let angle_rad = (-45.0_f64).to_radians();
+        let angle_rad = (-60.0_f64).to_radians();
         let sin_abs = angle_rad.sin().abs();
         let cos_abs = angle_rad.cos().abs();
         let label_pad = 2.0; // default
@@ -3770,7 +4553,7 @@ mod tests {
             + cos_abs * line_h;
         assert!(
             (band - expected).abs() < 1e-6,
-            "rotated -45° band should be {expected}, got {band}"
+            "rotated -60° band should be {expected}, got {band}"
         );
     }
 
@@ -3782,7 +4565,7 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, 0, None, tick_size, true);
         // At -90°: sin=1, cos=0 → full vertical extent =
         // tick_size + label_pad + font_size + max_label_w.
         let label_pad = 2.0; // default
@@ -3800,7 +4583,7 @@ mod tests {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, 0, None, tick_size, true);
         // Full geometric extent at -45° (mirrors the render pivot).
         let angle_rad = (-45.0_f64).to_radians();
         let sin_abs = angle_rad.sin().abs();
@@ -3821,7 +4604,7 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, None, 4.0, true);
+        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, 0, None, 4.0, true);
         assert!(
             (band - line_h).abs() < 1e-9,
             "empty labels should return line_height={line_h}, got {band}"
@@ -3838,7 +4621,7 @@ mod tests {
             line_h_factor: 1.2,
         };
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, 0, None, tick_size, true);
         // Vertical fallback: tick_size + label_pad + font_size + max_label_w.
         // At 1e18 the additive terms vanish into float epsilon, so the band is
         // dominated by max_label_w (1e18). Compare with a generous tolerance.
@@ -3859,9 +4642,11 @@ mod tests {
 
     #[test]
     fn estimate_rotated_band_grew_by_pivot_offset() {
-        // Labels that collide flat and resolve at -45° (same setup as
-        // `estimate_rotated_labels`). The NEW band must exceed the OLD too-tight
-        // formula (`sin·max_label_w + cos·line_h`) by exactly the pivot offset
+        // Labels that collide flat and resolve at -60° (same setup as
+        // `estimate_rotated_labels`; spec §4.6 / F-L07-04 fix moved the
+        // resolved angle from -45° to -60° once the real footprint formula
+        // is used). The NEW band must exceed the OLD too-tight formula
+        // (`sin·max_label_w + cos·line_h`) by exactly the pivot offset
         // `tick_size + label_pad + sin·font_size`. Both sides computed explicitly.
         let labels: Vec<String> = vec![
             "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
@@ -3873,10 +4658,10 @@ mod tests {
         let line_h = m.line_height(font_size);
         let max_label_w = 100.0; // 10 chars * 10px
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, 0, None, tick_size, true);
 
-        // Cascade resolves at -45° here.
-        let angle_rad = (-45.0_f64).to_radians();
+        // Cascade resolves at -60° here.
+        let angle_rad = (-60.0_f64).to_radians();
         let sin_abs = angle_rad.sin().abs();
         let cos_abs = angle_rad.cos().abs();
 
@@ -3899,7 +4684,7 @@ mod tests {
         let m = MockMetrics { measure: |_, _| 5_000.0, line_h_factor: 1.2 };
         let font_size = 11.0;
         let tick_size = 4.0;
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, 0, None, tick_size, true);
         let label_pad = 2.0; // default
         let expected = tick_size + label_pad + font_size + 5_000.0;
         assert!(
@@ -3917,8 +4702,8 @@ mod tests {
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 0.0, true);
-        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 8.0, true);
+        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, 0.0, true);
+        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, 0, None, 8.0, true);
         let expected_ts0 = 0.0 + 2.0 + line_h;
         assert!(
             (band_ts0 - expected_ts0).abs() < 1e-9,
@@ -3943,8 +4728,8 @@ mod tests {
         ];
         let m = mock(10.0);
         let tick_size = 4.0;
-        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(2.0), tick_size, true);
-        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(12.0), tick_size, true);
+        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, 0, Some(2.0), tick_size, true);
+        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, 0, Some(12.0), tick_size, true);
         let delta = 12.0 - 2.0;
         assert!(
             (band_wider - band_default - delta).abs() < 1e-6,
@@ -3980,7 +4765,7 @@ mod tests {
         let true_extent =
             tick_size + label_pad + sin_abs * (font_size + max_label_w) + cos_abs * descent;
 
-        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size, true);
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, 0, None, tick_size, true);
         assert!(
             band >= true_extent,
             "band ({band}) must cover the true label extent ({true_extent}) so the \
@@ -4363,7 +5148,7 @@ mod tests {
         //     cos(-60)*80 = 40.0 ≤ 40 → passes at -60.
         let labels: Vec<String> = (0..6).map(|i| format!("L{i}")).collect();
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, label_padding, 4.0, true)
+        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, 0, label_padding, 4.0, true)
     }
 
     #[test]
@@ -4613,4 +5398,5 @@ mod tests {
             "the plot-region shrink must equal the gutter's growth exactly"
         );
     }
+
 }

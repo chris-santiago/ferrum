@@ -196,6 +196,20 @@ def _tick_texts(svg: str) -> list[str]:
     return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
 
+# Extracted to tests/_temporal_ticks.py (shared with sibling test modules) --
+# quality-review cycle 1 finding: this module and
+# tests/test_axis_label_culling.py each carried an independently-drifted copy
+# of the shape parser (one matching a month token by set membership, the
+# other by a looser regex that also matched non-month words). Aliased to the
+# original private names here so existing call sites in this module are
+# unchanged.
+from tests._temporal_ticks import MONTH_ABBREVS as _MONTH_ABBREVS  # noqa: E402
+from tests._temporal_ticks import month_year_tick_shapes as _month_year_tick_shapes  # noqa: E402
+from tests._temporal_ticks import (  # noqa: E402
+    reconstruct_month_year_labels as _reconstruct_month_year_labels,
+)
+
+
 def test_d3_numeric_grouping_format(two_cat_numeric_df: pl.DataFrame) -> None:
     """Axis(label_format=',.0f') produces comma-grouped labels like '10,000'."""
     svg = (
@@ -245,7 +259,20 @@ def test_d3_percent_format(two_cat_fraction_df: pl.DataFrame) -> None:
 
 
 def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
-    """Axis(label_format='%b %Y') on a :T x-axis produces 'Jan 2020'-style labels."""
+    """Axis(label_format='%b %Y') on a :T x-axis produces 'Jan 2020'-style labels.
+
+    At the DEFAULT theme, this 18-month axis's real per-tick slot width is
+    narrow enough that the spec §4.6 pixel-gap requirement genuinely isn't
+    satisfiable flat for every tick (verified: the fixture wraps starting at
+    `cull_threshold=4`, comfortably below the default of 8) -- so the
+    cascade's wrap stage legitimately engages. What must NOT happen (the
+    spec-review cycle 3 regression this pins) is a RAGGED per-label mix,
+    where sibling ticks of the identical "%b %Y" format wrap differently
+    from each other purely because of real-font width variance across month
+    names; every tick must degrade the SAME way (spec §4.6: "the cascade
+    degrades uniformly"). `_month_year_tick_shapes`/`_reconstruct_month_year_labels`
+    tolerate either uniform outcome (all one-line or all wrapped).
+    """
     svg = (
         fm.Chart(monthly_date_df)
         .mark_line()
@@ -256,12 +283,18 @@ def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
         .to_svg()
     )
     tick_labels = _tick_texts(svg)
-    # Must have at least one label matching the '<MonthAbbrev> <Year>' pattern.
-    month_year_labels = [t for t in tick_labels if re.match(r"[A-Z][a-z]{2} 20\d{2}$", t)]
-    assert month_year_labels, f"expected at least one 'MMM YYYY' label; got {tick_labels}"
+    shapes = _month_year_tick_shapes(tick_labels)
+    assert shapes, f"expected at least one 'MMM YYYY' tick; got {tick_labels}"
+    assert len(set(shapes)) == 1, (
+        "every 'MMM YYYY' tick must wrap the SAME way (spec §4.6 -- the "
+        f"cascade degrades uniformly, never a ragged one-line/two-line mix); "
+        f"got per-tick shapes {shapes} from raw ticks {tick_labels}"
+    )
+    month_year_labels = _reconstruct_month_year_labels(tick_labels)
     # Specifically confirm 'Jan 2020' (the first tick in the domain) is present.
     assert "Jan 2020" in month_year_labels, (
-        f"expected 'Jan 2020' among month-year labels; got {month_year_labels}"
+        f"expected 'Jan 2020' among month-year labels; got {month_year_labels} "
+        f"(raw ticks: {tick_labels})"
     )
 
 
@@ -1805,16 +1838,28 @@ def _is_date_formatted(texts: list[str]) -> bool:
 
 
 def _is_epoch_integer(texts: list[str]) -> bool:
-    """Return True if any tick looks like a raw epoch integer (large integer, no date format)."""
-    for t in texts:
+    """Return True if any tick looks like a raw epoch integer (large integer, no date format).
+
+    A large standalone integer immediately adjacent (in tick order) to a
+    month abbreviation is treated as a legitimate wrapped "%b %Y"-style date
+    component -- the label-collision cascade may split a "Jan 2020" tick
+    onto two lines once the axis needs to wrap (spec §4.6's pixel-gap
+    requirement) -- not a raw epoch value.
+    """
+    for i, t in enumerate(texts):
         try:
             v = int(t)
-            # Epoch-ms values for 2020 are around 1.578e12. Epoch-days are ~18000.
-            # Filter out small axis values that are just data values (e.g. 0–30).
-            if v > 1000:
-                return True
         except ValueError:
-            pass
+            continue
+        # Epoch-ms values for 2020 are around 1.578e12. Epoch-days are ~18000.
+        # Filter out small axis values that are just data values (e.g. 0–30).
+        if v <= 1000:
+            continue
+        prev_is_month = i > 0 and texts[i - 1] in _MONTH_ABBREVS
+        next_is_month = i + 1 < len(texts) and texts[i + 1] in _MONTH_ABBREVS
+        if prev_is_month or next_is_month:
+            continue
+        return True
     return False
 
 
@@ -1826,6 +1871,13 @@ def test_t2b_date_column_without_annotation_gets_temporal_ticks(
     Before the fix, the unannotated Date column fell through to a linear scale
     and rendered raw epoch-integer tick values. After the fix, the type is
     inferred as temporal and the D3 chrono formatter emits human-readable dates.
+
+    At the default theme, real-font width variance may wrap a "Mon YYYY"
+    tick onto two lines (spec §4.6's pixel-gap requirement, genuinely not
+    satisfiable flat for every tick of this 18-month fixture) -- `_is_epoch_
+    integer` tolerates a standalone year immediately adjacent to a month
+    abbreviation as a legitimate wrapped date component, not a raw epoch
+    value (see its own doc).
     """
     svg = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").to_svg()
     texts = _tick_texts(svg)
@@ -2553,6 +2605,10 @@ def test_r6_layered_mark_x_temporal_inferred_via_build_layers_list(
     date-formatted axis ticks (not raw epoch integers) even when the temporal
     type is inferred rather than explicit, and the chart is layered (e.g.
     a scatter + smoothed line overlay).
+
+    See `test_t2b_date_column_without_annotation_gets_temporal_ticks`'s
+    docstring for why `_is_epoch_integer` tolerates a legitimately wrapped
+    date component at the default theme.
     """
     chart = fm.Chart(_t2b_monthly_df).mark_point().encode(x="date", y="val:Q") + fm.Chart(
         _t2b_monthly_df
