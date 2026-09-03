@@ -36,7 +36,7 @@
 //! small tick values. [`validate_d3_format_spec`] performs the SAME tokenize
 //! pass but requires the whole string to be consumed; callers run it ONCE per
 //! resolved (format, format_type) pair before any per-value formatting
-//! begins (`render::mod::validate_chart_format_specs`), not per tick/label.
+//! begins (`render::config_apply::validate_chart_format_specs`), not per tick/label.
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
@@ -190,7 +190,7 @@ fn try_format_time_spec(dt: DateTime<Utc>, pattern: &str) -> Option<String> {
 /// skipped from d3-grammar validation on the premise `chrono` handles it
 /// "leniently" — it does not; `format_time_spec` panics on exactly this
 /// input. Called once per resolved (format, format_type) pair by
-/// `render::mod::validate_chart_format_specs`, the same chokepoint
+/// `render::config_apply::validate_chart_format_specs`, the same chokepoint
 /// `validate_d3_format_spec` uses.
 pub(crate) fn validate_strftime_spec(pattern: &str) -> Result<(), String> {
     chrono::format::StrftimeItems::new(pattern)

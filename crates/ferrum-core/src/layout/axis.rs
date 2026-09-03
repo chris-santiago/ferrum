@@ -100,7 +100,7 @@ pub enum LabelOverlap {
 /// lights one up.
 ///
 /// Both the per-channel parse path (`render::prepare::encoding_axis_style_overrides`)
-/// and the chart-level apply path (`render::apply_axis_style_to_axis_input`) write
+/// and the chart-level apply path (`render::config_apply::apply_axis_style_to_axis_input`) write
 /// here uniformly via the `is_none()` fill-only pattern, so a higher-precedence
 /// source (per-channel, or an earlier config layer) always wins. The resolved
 /// concrete axis side is computed from [`orient`](Self::orient) into
@@ -125,7 +125,7 @@ pub(crate) struct AxisStyleOverrides {
     /// before this bundle is ever consulted, so a per-channel THREADED
     /// `label_format` — the only kind that reaches this bundle — is always
     /// numeric by construction and never needs this field). Read by
-    /// `render::apply_label_format_to_axis` to decide whether the deferred
+    /// `render::config_apply::apply_label_format_to_axis` to decide whether the deferred
     /// `label_format` string is a `chrono` strftime pattern or a d3 spec.
     pub label_format_type: Option<String>,
     /// Set by the per-channel prepare path (`prepare::build_axis_input`)
@@ -145,7 +145,7 @@ pub(crate) struct AxisStyleOverrides {
     /// one (`configure_axis(label_format="date_iso")` re-deriving RAW
     /// temporal values and overwriting an already-formatted `fm.Axis(
     /// label_format="%b %d")` axis — the batch's hard per-channel-wins
-    /// cascade constraint, violated). `render::apply_axis_config_to_axis_input`'s
+    /// cascade constraint, violated). `render::config_apply::apply_axis_config_to_axis_input`'s
     /// chart-level fill-only gate consults THIS flag, not `label_format
     /// .is_none()` alone, so a per-channel-claimed axis is never touched —
     /// chart-level's fill (and therefore `apply_label_format_to_axis`'s
@@ -269,7 +269,7 @@ impl AxisStyleOverrides {
     ///
     /// The `label_format.is_none() && !label_format_claimed` predicate this
     /// method now owns used to be hand-copied at its two call sites
-    /// (`render::apply_axis_config_to_axis_input`, `axis_style_fill_from`'s
+    /// (`render::config_apply::apply_axis_config_to_axis_input`, `axis_style_fill_from`'s
     /// own defensive fallback write) — the SAME "is this slot actually
     /// unclaimed" question, expressed twice, on a `pub(crate)` field with no
     /// accessor discipline. A fix for the cascade-inversion bug this

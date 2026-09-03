@@ -20,7 +20,7 @@ impl LegendOrient {
     /// before placement is resolved.
     ///
     /// One body for the per-channel reader (`render::prepare::legend`) and the
-    /// chart-level one (`render::apply_legend_cascade_to_theme`): they read the
+    /// chart-level one (`render::config_apply::apply_legend_cascade_to_theme`): they read the
     /// same token from the same schema field at two cascade levels, so a
     /// hand-copied match would be two vocabularies waiting to drift.
     pub fn parse(token: &str) -> Option<LegendOrient> {

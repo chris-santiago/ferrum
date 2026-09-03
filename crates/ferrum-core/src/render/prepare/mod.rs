@@ -1034,7 +1034,7 @@ pub(crate) struct SecondaryYAxes {
 /// The scales are carried out because the secondary axes' post-config tick
 /// adjustments (`adjust_axis_ticks` / `apply_label_format_to_axis` /
 /// `sync_projected_fractions_to_tick_values`) run in
-/// `render::prepare_and_layout`, AFTER `axis_y2`'s config has been merged onto
+/// `render::config_apply`'s pipeline, AFTER `axis_y2`'s config has been merged onto
 /// the axis inputs — and each of those needs the scale the axis was derived
 /// from. Without this the secondary axes had no scale to re-derive against,
 /// which is exactly why `axis_y2`'s `label_format`/`tick_extra`/`tick_min_step`/
@@ -1216,7 +1216,8 @@ fn build_secondary_y_axis_inputs(
         // R3: one of the two chains that RESOLVE `coord_flipped` (the other is
         // `build_axes`, just above; the third production chain to
         // `InvalidAxisOrient` — the chart-level `configure_axis` apply block in
-        // `render::mod::prepare_and_layout` — is a deliberate EXEMPTION, not a
+        // `render::config_apply`'s `fill_axis_slots_specific_before_shared` — is
+        // a deliberate EXEMPTION, not a
         // sibling; see the field doc on `RenderError::InvalidAxisOrient` for the
         // full three-chain account). A per-layer `fm.Axis(orient=...)` on an
         // independent-y layer validates against the RESOLVED `Channel::Y`
@@ -1730,7 +1731,7 @@ pub(crate) fn adjust_axis_ticks(
 
             // Quality-review S3 fix (2026-09-03): a chart-level TIME format
             // (`label_format_type == "time"`) is applied AFTER this fn runs,
-            // by `render::apply_label_format_to_axis`, which re-derives raw
+            // by `render::config_apply::apply_label_format_to_axis`, which re-derives raw
             // epoch-ms values via `scale.temporal_tick_values(tick_count)` —
             // an UN-thinned, full-length vec that can no longer line up with
             // `tick_labels` once thinning just dropped entries above, so its
@@ -1817,7 +1818,7 @@ pub(crate) fn resolve_axis_label_format(
 ///   would fail). Returns `(formatted, None)`.
 /// - **Numeric** axis (or any non-temporal): the spec is threaded forward as the
 ///   `label_format_override` (D3 root-cause fix for `prepare.rs:538`), and the
-///   labels are returned unchanged. `render/mod.rs::apply_label_format_to_axis`
+///   labels are returned unchanged. `render::config_apply::apply_label_format_to_axis`
 ///   then applies it centrally — lossless because numeric label strings reparse
 ///   to f64. Threading (not pre-applying) also lets chart-level
 ///   `configure_axis` defer to the per-channel override via its `is_none()` gate.
@@ -4048,7 +4049,7 @@ mod tests {
 
     /// Quality-review S3 fix (2026-09-03): a chart-level TIME format must
     /// survive `tick_min_step` thinning, not silently revert to the DEFAULT
-    /// spacing-keyed granularity. Root cause: `render::apply_label_format_to_axis`
+    /// spacing-keyed granularity. Root cause: `render::config_apply::apply_label_format_to_axis`
     /// (which runs AFTER this fn) re-derives raw temporal values via
     /// `scale.temporal_tick_values(tick_count)` — an UN-thinned, full-length
     /// vec — so its `values.len() == axis.tick_labels.len()` guard fails once
@@ -4172,7 +4173,7 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::render::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style).unwrap();
+        crate::render::config_apply::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style).unwrap();
         assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel must win over configure_axis");
     }
 
@@ -4214,8 +4215,8 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg)).unwrap();
-        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg)).unwrap();
+        crate::render::config_apply::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg)).unwrap();
+        crate::render::config_apply::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg)).unwrap();
 
         // Per-channel x suppression survives the conflicting chart-level toggle.
         // Same pre-`apply_show_defaults` raw-slot read as above.

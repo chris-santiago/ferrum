@@ -163,7 +163,8 @@ pub(crate) fn build_color_legend(
     // so direct-label diagnostic charts can opt out of redundant legends.
     //
     // COUPLING (GH #74): the chart-level ``configure_legend(orient="none")``
-    // mirror in ``render::mod::prepare_and_layout`` post-hoc clears the SAME
+    // mirror in ``render::config_apply::suppress_legend_if_chart_level_disabled``
+    // post-hoc clears the SAME
     // legend-content fields this branch leaves empty (entries, colorbar, plus
     // the chart-wide extras aux_legends/title). If a new legend-content field
     // is added to ``PreparedInputs`` and wired here, wire it into that clear

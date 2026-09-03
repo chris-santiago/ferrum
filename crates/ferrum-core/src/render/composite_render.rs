@@ -491,9 +491,10 @@ fn capture_leaf_bundle(
         &po.effective_theme,
         leaf.chart_config,
     )?;
-    let mut overrides = super::legend_overrides_from_prep(&po.prep);
-    super::apply_chart_config_to_legend_overrides(&mut overrides, leaf.chart_config);
-    let title = super::effective_legend_title(&po.prep);
+    // The SAME projection `apply_chart_config_pipeline` runs for this leaf's own
+    // layout (passes 16–18), called rather than restated — this used to be a
+    // verbatim three-line copy of that slice of the pass order.
+    let (overrides, title) = super::resolve_leaf_legend_overrides(&po.prep, leaf.chart_config);
     Ok(LeafLegendBundle {
         entries: po.prep.legend_entries.clone(),
         colorbar: po.prep.colorbar.clone(),
