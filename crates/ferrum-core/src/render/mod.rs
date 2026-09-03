@@ -221,7 +221,7 @@ pub enum RenderError {
 /// or a resolved/physical/user-typed-literal token (resolve with `false`,
 /// like the chart-level chain and `SortSpecIgnored`). This decision was
 /// missed once already (the `build_secondary_y_axis_inputs` chain went
-/// unpatched through cycle 1, when the placeholder discipline was prose-only)
+/// unpatched when the placeholder discipline was prose-only)
 /// — it must still be made deliberately at review time, not assumed, but a
 /// missed call chain now fails to compile instead of silently defaulting.
 pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> RenderError {
@@ -469,7 +469,7 @@ pub enum RenderWarning {
     /// the colorbar stays and no warning fires. True gradient-colored
     /// polylines are a logged feature follow-up, not this fix's scope.
     ///
-    /// `suppressed` (spec-review 2026-08-28 ruling): the warning itself fires
+    /// `suppressed`: the warning itself fires
     /// whenever the channel is inert, regardless of whether a colorbar would
     /// have rendered (`Color(v, legend=None)`, or the same-field color+size
     /// merge whose colorbar was already folded into the size legend, both
@@ -485,7 +485,7 @@ pub enum RenderWarning {
     },
     /// An opacity-family channel (`opacity`/`fill_opacity`/`stroke_opacity`)
     /// carried an explicit `scale=` whose spec is not `Linear` (spec §4.3,
-    /// amended 2026-09-01, T6 quality review — ruling 2). The curve, domain,
+    /// amended 2026-09-01). The curve, domain,
     /// and range are NOT honored; the channel falls back to the default
     /// linear resolution (data extent onto the theme opacity band) instead.
     /// `channel` is the channel name (`"opacity"` / `"fill_opacity"` /
@@ -765,7 +765,6 @@ mod tests {
         assert!(!unknown_text.contains("LegendValuesUnknown"), "{unknown_text}");
     }
 
-    /// Spec-review 2026-08-28 (cannot_verify item, resolved this round):
     /// `UnsupportedColorScaleOnMark`'s Display must not claim a legend was
     /// suppressed when none ever existed to suppress (`legend=None`, or the
     /// color+size merge case whose colorbar was folded into the size legend
@@ -1380,14 +1379,14 @@ pub(crate) fn apply_axis_config_to_axis_input(
     // per-channel spec) already set the override.
     //
     // `label_format.is_none()` ALONE is not a reliable "unclaimed" test (D8
-    // cascade-inversion fix, spec review cycle 2): a per-channel TEMPORAL
+    // cascade-inversion fix): a per-channel TEMPORAL
     // format is applied EAGERLY to `AxisInput.tick_labels` in
     // `prepare::build_axis_tick_inputs` and threads `label_format = None`
     // back (nothing left to defer) — indistinguishable, by `label_format`
     // alone, from "no per-channel format was ever set". `label_format_claimed`
     // (set in `prepare::build_axis_input` from `resolve_axis_label_format`'s
     // own result) carries that distinction; the mechanized
-    // `fill_chart_level_label_format` (quality-review S2, cycle 3) checks
+    // `fill_chart_level_label_format` checks
     // BOTH, so a per-channel-claimed axis is never touched, even when its
     // `label_format` slot happens to read `None`. See
     // `AxisStyleOverrides::label_format_claimed`'s doc for the full account
@@ -1563,12 +1562,12 @@ pub(crate) fn axis_style_fill_from(
     // the common case (it only re-derives the SAME `style.label_format`
     // that caller's fill already found — see that caller's doc). But when
     // the caller's fill is correctly SKIPPED for a per-channel-claimed axis
-    // (`label_format_claimed`, D8 cascade-inversion fix, spec review cycle
-    // 2), `o.label_format` is still `None` reaching here. Routes through
+    // (`label_format_claimed`, D8 cascade-inversion fix),
+    // `o.label_format` is still `None` reaching here. Routes through
     // the SAME mechanized `fill_chart_level_label_format` the caller uses
-    // (quality-review S2, cycle 3) rather than hand-re-deriving the
+    // rather than hand-re-deriving the
     // "unclaimed" predicate a second time — this is exactly the two-writer
-    // duplication that finding closed.
+    // duplication that fix closed.
     if fill_only_if_none {
         o.fill_chart_level_label_format(style.label_format.clone(), style.label_format_type.clone());
     }
@@ -2006,7 +2005,7 @@ struct PipelineOutput {
 /// per-channel). A spec classified as a TIME pattern is validated against
 /// the `chrono` strftime grammar instead of the d3 one
 /// ([`format::validate_strftime_spec`]) — NOT exempted from validation.
-/// (Quality-review cycle-2 correction: an earlier revision of this
+/// (Correction: an earlier revision of this
 /// doc/code claimed `chrono` is "separately lenient" and skipped validating
 /// time patterns entirely. That premise was false — `format::format_time_spec`
 /// panics on a malformed pattern (`chrono`'s `DelayedFormat` `Display`
@@ -2017,7 +2016,7 @@ struct PipelineOutput {
 /// boundary instead of the typed refusal this fn exists to give.)
 ///
 /// **Two time-classification rules, matched to the two real runtime rules**
-/// (quality-review cycle-3 correction — a single shared LOOSE rule here
+/// (correction — a single shared LOOSE rule here
 /// falsely refused a valid raw d3 percent spec on the chart-level axis
 /// surface): `check_loose` uses [`format::is_time_format_spec`] (the `%`
 /// -containment heuristic) for the ONE surface that actually auto-detects
@@ -2105,7 +2104,7 @@ fn validate_chart_format_specs(spec: &ChartSpec, chart_config: &ChartConfig) -> 
         let format_type = cfg.effective_label_format_type();
         let Some(f) = fmt else { return Ok(()) };
         check_with(f, format_type == Some("time")).map_err(|err| {
-            // Quality-review cycle-4 fix: when the STRICT check above failed
+            // When the STRICT check above failed
             // as d3 (format_type wasn't explicitly "time") but the SAME
             // string IS a valid strftime pattern, the true problem is NOT
             // "your d3 spec is malformed" — chart-level axis config
@@ -2117,7 +2116,7 @@ fn validate_chart_format_specs(spec: &ChartSpec, chart_config: &ChartConfig) -> 
             // the real cause instead of restating the (also technically
             // true, but misleading) d3-grammar complaint.
             //
-            // Cycle-5 correction (quality-review cycle-3 finding, recurring
+            // Correction (recurring
             // at this exact site): `validate_strftime_spec` alone is NOT a
             // "looks like a date pattern" test — `chrono`'s `StrftimeItems`
             // parses ANY `%`-free literal text successfully (there is
@@ -2738,7 +2737,7 @@ mod orchestration_tests {
 
     #[test]
     fn render_svg_refuses_chart_level_raw_strftime_with_diagnosing_message() {
-        // Quality-review cycle-4 fix: a raw strftime-shaped spec on the
+        // A raw strftime-shaped spec on the
         // chart-level axis surface must be refused with a message naming
         // the REAL cause (this surface is numeric-only) rather than
         // restating the misleading "your d3 spec is malformed" complaint —
@@ -2771,9 +2770,8 @@ mod orchestration_tests {
 
     #[test]
     fn render_svg_percent_free_typo_on_chart_level_raw_keeps_d3_grammar_message() {
-        // Quality-review cycle-5 fix (recurring at this exact site, cycle-3
-        // finding): the negative control the reviewer required alongside the
-        // cycle-4 re-diagnosis fix. `"curency"` — the batch's own headline
+        // The negative control the reviewer required alongside the
+        // re-diagnosis fix. `"curency"` — the batch's own headline
         // NF-B1 repro — has NO `%` at all, so `chrono`'s `StrftimeItems`
         // trivially parses it as pure literal text (`validate_strftime_spec`
         // returns `Ok`) even though it is NOT a date/time pattern by any
@@ -2827,7 +2825,7 @@ mod orchestration_tests {
     fn render_svg_accepts_valid_but_unusual_specs_on_every_surface() {
         // The refusal must never false-positive on genuinely valid d3 specs.
         // `y` here is NON-temporal (`scatter_3`'s plain `EncodingSpec`, no
-        // `type_` set) — quality-review cycle-3 pin: "*>8.1%" auto-detects as
+        // `type_` set) — pin: "*>8.1%" auto-detects as
         // a TIME candidate by the `%`-containment heuristic (no explicit
         // format_type), but `y`'s declared type is not Temporal, so it must
         // validate as the (valid) d3 percent spec it actually is, matching
@@ -2852,6 +2850,87 @@ mod orchestration_tests {
         };
         render_svg(&spec, &batch, &theme, viewport, &config, &chart_config)
             .expect("valid-but-unusual specs must not be refused");
+    }
+
+    // ── Batch B design review S4 (2026-09-03): `configure_axis(nice=True)`
+    // on a log axis must delegate to `LogScale`'s own `nice()`, not the
+    // inline linear `nice_step` rounding every kind used to share. ─────────
+
+    /// RED-proof of the reviewer-reproduced crash: `fm.Chart(df).mark_point()
+    /// .encode(x=fm.X("a"), y=fm.Y("v", scale=fm.LogScale()))
+    /// .configure_axis(nice=True).to_svg()`. `y`'s data domain `(10, 1000)`
+    /// is exactly the shape that trips the pre-fix bug: the OLD
+    /// kind-independent `nice_step(10, 1000, 10)` rounds to a step of 100,
+    /// and `floor(10 / 100) * 100 == 0` — driving the low bound to 0, which
+    /// `LogScale::validate_user_domain` (rightly) refuses, so the whole
+    /// chart died with `InvalidScaleDomainConfig` instead of rendering. The
+    /// fixed dispatch (`ScaleKind::niced_domain` → `LogScale::nice_domain_pair`)
+    /// rounds in LOG space instead (nearest power of 10: `[10, 1000]`,
+    /// already exactly a power of the base), so this must render.
+    #[test]
+    fn render_svg_log_axis_configure_axis_nice_true_renders_instead_of_refusing() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: None,
+                    scale: Some(crate::spec::encoding::ScaleSpec::Log {
+                        base: 10.0,
+                        common: crate::spec::encoding::ContinuousScaleCommon {
+                            domain: None,
+                            range: None,
+                            clamp: false,
+                            padding: None,
+                            scheme: None,
+                            domain_param: None,
+                        },
+                        nice: false,
+                    }),
+                    ..Default::default()
+                }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 100.0, 1000.0])),
+            ],
+        )
+        .unwrap();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        // `.configure_axis(nice=True)` is the SHARED `axis` key (applies to
+        // both x and y, matching the Python surface).
+        let chart_config = ChartConfig {
+            axis: Some(AxisConfigSpec { nice: Some(true), ..Default::default() }),
+            ..Default::default()
+        };
+        render_svg(&spec, &batch, &theme, viewport, &config, &chart_config).expect(
+            "a log y-axis under configure_axis(nice=True) must render, not refuse with \
+             InvalidScaleDomainConfig",
+        );
     }
 
     // ── Quality-review S4 (2026-09-03): malformed %-bearing specs on a
@@ -3109,7 +3188,7 @@ mod orchestration_tests {
             "the overflow warning must correspond to real drawn dashes, not a silent no-op: {svg}");
     }
 
-    /// Fix round (T12 spec review Issue 1, spec §4.3 amended 2026-09-01): a
+    /// spec §4.3 (amended 2026-09-01): a
     /// categorical `stroke_dash` on **ribbon** must partition paths, never
     /// render one merged path under a multi-entry dashed legend. Mirrors
     /// `render_svg_categorical_stroke_dash_draws_distinct_polylines_and_legend`
@@ -3189,7 +3268,7 @@ mod orchestration_tests {
         }
     }
 
-    /// T8 quality-review finding 2, end-to-end through `render_svg`: a
+    /// End-to-end through `render_svg`: a
     /// `mark_ribbon`-shaped chart with `mark_kwargs={"stroke": "none"}`
     /// (exactly what `src/ferrum/marks/composite.py`'s ribbon/errorband
     /// desugar passes) must not emit `stroke="rgba(0,0,0,0.000)"` on the
@@ -3254,7 +3333,7 @@ mod orchestration_tests {
 
     /// Build a `mark_point`-shaped `ChartSpec` with the given `fill=`/`opacity=`
     /// `mark_kwargs`, mirroring `ferrum.mark_point(fill=..., opacity=...)`'s
-    /// wire shape. Shared by the four T8 quality-review c2 pins below.
+    /// wire shape. Shared by the four pins below.
     fn point_fill_opacity_spec(fill: Option<&str>, opacity: Option<f64>) -> (ChartSpec, RecordBatch) {
         use crate::spec::mark_style::MarkKwargsSpec;
         let spec = ChartSpec {
@@ -3303,7 +3382,7 @@ mod orchestration_tests {
         &tag[..tag.find('>').unwrap_or(tag.len())]
     }
 
-    /// T8 quality-review finding 1 (c2 scoping — provenance, never by value):
+    /// By provenance, never by value:
     /// `fill="#000000", opacity=0` composes to the same zero-alpha-black
     /// `Color` value as a genuine `"none"`/`"transparent"` clear, but it was
     /// never cleared — the paint must keep serializing as an explicit
@@ -3322,7 +3401,7 @@ mod orchestration_tests {
         );
     }
 
-    /// T8 quality-review finding 1 (c2 scoping): an explicit `fill="#00000000"`
+    /// An explicit `fill="#00000000"`
     /// (8-digit hex) resolves the identical `Color` bytes as a clear sentinel
     /// by value, but is a real parsed color, never a clear — must serialize
     /// exactly as pre-batch.
@@ -3340,7 +3419,7 @@ mod orchestration_tests {
         );
     }
 
-    /// T8 quality-review finding 1: the genuinely cleared-paint case — a
+    /// The genuinely cleared-paint case — a
     /// literal `fill="none"` mark_kwargs — normalizes to `FillStroke.fill =
     /// None`, which the SVG walker (`push_fill_stroke`) serializes as the
     /// literal SVG `fill="none"` keyword (its pre-existing, correct rendering
@@ -3368,7 +3447,7 @@ mod orchestration_tests {
         );
     }
 
-    /// Control (T8 quality-review finding 1): a non-black zero-alpha color
+    /// Control: a non-black zero-alpha color
     /// (`fill="#ff0000", opacity=0`) is unaffected by the fix either way — it
     /// never aliased `color::TRANSPARENT` by value in the first place (only
     /// zero-alpha *black* collides with the sentinel byte-for-byte) — and must
@@ -3479,7 +3558,7 @@ mod orchestration_tests {
         let cfg = config::RenderConfig::default();
         let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg, &ChartConfig::default()).unwrap().bytes;
 
-        let prep = prepare::prepare_render_inputs(&spec, &batch, &theme, &ChartConfig::default(), None).unwrap();
+        let mut prep = prepare::prepare_render_inputs(&spec, &batch, &theme, &ChartConfig::default(), None).unwrap();
         let mut warnings = prep.warnings.clone();
 
         // Mirror `prepare_and_layout`'s effective-theme construction by CALLING
@@ -3496,6 +3575,10 @@ mod orchestration_tests {
             &ChartConfig::default(),
         );
         let theme_ref = &effective_theme;
+        // Bottom of the grid/domain precedence chain (D4, spec §4.3), same as
+        // `prepare_and_layout` above — every axis that expressed no opinion of
+        // its own now takes the effective theme's, before `compute_layout`.
+        prep.axes.apply_show_defaults(theme_ref);
         // Same three-way resolution as prepare_and_layout (v0.15.1 suppress fix).
         let effective_legend_title = match prep.legend_overrides.title.as_deref() {
             Some(s) if s.trim().is_empty() => None,
@@ -3735,7 +3818,7 @@ mod orchestration_tests {
         );
     }
 
-    // ── axis_y2 effect tests (D2/F-L07-06, spec review T1 cycle 2) ──────────
+    // ── axis_y2 effect tests (D2/F-L07-06) ──────────
     //
     // The prior test coverage (chart_config.rs's deserialization tests,
     // binding.rs's wire-gate tests, this file's RenderWarning round-trip)
@@ -4521,8 +4604,8 @@ mod chart_config_application_tests {
 
     #[test]
     fn apply_chart_config_padding_auto_does_not_block_explicit_sides() {
-        // auto=true (opt-in; `False` is the Python default since spec-review
-        // cycle 2) must NOT block explicit side values.
+        // auto=true (opt-in; `False` is the Python default) must NOT block
+        // explicit side values.
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             padding: Some(PaddingConfigSpec {
@@ -4542,8 +4625,7 @@ mod chart_config_application_tests {
         // The one line this function actually adds to this block
         // (render/mod.rs's `if let Some(auto) = pad.auto { theme.padding
         // .padding_auto = auto; }`) — the plumbing this test exists for was
-        // previously covered only end to end from Python (spec-review
-        // cycle 6, S1).
+        // previously covered only end to end from Python.
         assert!(theme.padding.padding_auto);
     }
 
@@ -5350,7 +5432,7 @@ mod chart_config_application_tests {
         assert_eq!(axis.tick_labels, vec!["1st", "2nd", "3rd", "11th"]);
     }
 
-    /// D8 cascade-inversion fix (spec review cycle 2): `label_format_claimed`
+    /// D8 cascade-inversion fix: `label_format_claimed`
     /// must block the chart-level fill EVEN THOUGH `label_format` itself
     /// reads `None` — the exact shape `prepare::build_axis_input` produces
     /// for a per-channel TEMPORAL format (applied eagerly, threads `None`

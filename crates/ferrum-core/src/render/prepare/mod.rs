@@ -2444,10 +2444,19 @@ mod tests {
         let y_enc = EncodingSpec { field: "v".into(), ..Default::default() };
         let scale = linear_scale_0_10();
 
-        let x = build_axis_input(Channel::X, Some(&x_enc), Some(&x_enc), &scale, 10, &theme)
+        let mut x = build_axis_input(Channel::X, Some(&x_enc), Some(&x_enc), &scale, 10, &theme)
             .expect("x axis input");
-        let y = build_axis_input(Channel::Y, Some(&y_enc), Some(&y_enc), &scale, 10, &theme)
+        let mut y = build_axis_input(Channel::Y, Some(&y_enc), Some(&y_enc), &scale, 10, &theme)
             .expect("y axis input");
+        // `build_axis_input` alone never folds in the theme default
+        // (`AxesInput::apply_show_defaults` does that at chart-config-resolve
+        // time); do it here too, exactly as production does, so the
+        // `show_domain()`/`show_grid()` checks below don't trip their
+        // debug-only unresolved-precondition assert.
+        x.overrides.show_domain.get_or_insert(theme.axis.axis_line);
+        x.overrides.show_grid.get_or_insert(theme.grid.grid);
+        y.overrides.show_domain.get_or_insert(theme.axis.axis_line);
+        y.overrides.show_grid.get_or_insert(theme.grid.grid);
 
         // Orient defaults differ by channel.
         assert_eq!(x.orient, AxisOrient::Bottom);
@@ -4184,11 +4193,16 @@ mod tests {
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
-        // Per-channel suppression is set in prep; y is untouched (defaults true).
-        assert!(!prep.axes.x.show_grid(), "per-channel grid=False set in prep");
-        assert!(!prep.axes.x.show_domain(), "per-channel domain=False set in prep");
-        assert!(prep.axes.y.show_grid(), "y grid default true");
-        assert!(prep.axes.y.show_domain(), "y domain default true");
+        // Probing `prep.axes.{x,y}` HERE, before `AxesInput::apply_show_defaults`
+        // has run (that fold happens later, right before layout, in real
+        // production), is the point of this assertion — so read the raw
+        // override slot with the same `unwrap_or(true)` fallback `show_grid()`/
+        // `show_domain()` apply, rather than through those accessors, which
+        // now assert this precondition in debug builds.
+        assert!(!prep.axes.x.overrides.show_grid.unwrap_or(true), "per-channel grid=False set in prep");
+        assert!(!prep.axes.x.overrides.show_domain.unwrap_or(true), "per-channel domain=False set in prep");
+        assert!(prep.axes.y.overrides.show_grid.unwrap_or(true), "y grid default true");
+        assert!(prep.axes.y.overrides.show_domain.unwrap_or(true), "y domain default true");
 
         // Chart-level configure_axis(grid=True, domain=True) applies to BOTH axes
         // via the shared `axis` key, the same wire step `prepare_and_layout` runs.
@@ -4204,17 +4218,18 @@ mod tests {
         crate::render::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg)).unwrap();
 
         // Per-channel x suppression survives the conflicting chart-level toggle.
+        // Same pre-`apply_show_defaults` raw-slot read as above.
         assert!(
-            !prep.axes.x.show_grid(),
+            !prep.axes.x.overrides.show_grid.unwrap_or(true),
             "per-channel grid=False must survive configure_axis(grid=True)"
         );
         assert!(
-            !prep.axes.x.show_domain(),
+            !prep.axes.x.overrides.show_domain.unwrap_or(true),
             "per-channel domain=False must survive configure_axis(domain=True)"
         );
         // The other axis (no per-channel override) is unaffected: still shown.
-        assert!(prep.axes.y.show_grid(), "y axis show_grid unaffected");
-        assert!(prep.axes.y.show_domain(), "y axis show_domain unaffected");
+        assert!(prep.axes.y.overrides.show_grid.unwrap_or(true), "y axis show_grid unaffected");
+        assert!(prep.axes.y.overrides.show_domain.unwrap_or(true), "y axis show_domain unaffected");
     }
 
     #[test]

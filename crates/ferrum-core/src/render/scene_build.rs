@@ -3632,7 +3632,7 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep = super::super::prepare::prepare_render_inputs(
+        let mut prep = super::super::prepare::prepare_render_inputs(
             spec,
             batch,
             &theme,
@@ -3640,6 +3640,11 @@ mod tests {
             None,
         )
         .unwrap();
+        // Mirror the real orchestration (`render::mod`'s `render_svg`/interactive
+        // entry points): `apply_show_defaults` is the bottom of the grid/domain
+        // precedence chain, run once here right before layout so `AxisLayout
+        // .show_grid`/`show_domain` carry the final per-axis answer.
+        prep.axes.apply_show_defaults(&theme);
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
@@ -5338,13 +5343,16 @@ mod tests {
             line_h_factor: 1.2,
         };
 
+        let mut primary_input = AxisInput::new(
+            AxisOrient::Left,
+            Some("Primary".into()),
+            vec!["0".into(), "5".into(), "10".into()],
+            None,
+        );
+        primary_input.overrides.show_domain = Some(true);
+        primary_input.overrides.show_grid = Some(true);
         let (primary_y, _warn) = crate::layout::axis::layout_y_axis(
-            &AxisInput::new(
-                AxisOrient::Left,
-                Some("Primary".into()),
-                vec!["0".into(), "5".into(), "10".into()],
-                None,
-            ),
+            &primary_input,
             panel.plot_area,
             0,
             11.0,
@@ -5369,6 +5377,7 @@ mod tests {
             None,
         );
         secondary_input.overrides.show_grid = Some(true); // deliberately try to leak into the grid
+        secondary_input.overrides.show_domain = Some(true);
         let (secondary_y, _warn2) = crate::layout::axis::layout_y_axis(
             &secondary_input,
             panel.plot_area,
@@ -5514,7 +5523,7 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep = super::super::prepare::prepare_render_inputs(
+        let mut prep = super::super::prepare::prepare_render_inputs(
             &spec,
             &batch,
             &theme,
@@ -5522,6 +5531,8 @@ mod tests {
             None,
         )
         .unwrap();
+        // Mirror the real orchestration, same as `build_scene_for` above.
+        prep.axes.apply_show_defaults(&theme);
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
@@ -5750,7 +5761,7 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep = super::super::prepare::prepare_render_inputs(
+        let mut prep = super::super::prepare::prepare_render_inputs(
             &spec,
             &batch,
             &theme,
@@ -5758,6 +5769,8 @@ mod tests {
             None,
         )
         .unwrap();
+        // Mirror the real orchestration, same as `build_scene_for` above.
+        prep.axes.apply_show_defaults(&theme);
 
         // The plan itself: two secondary layers (indices 1, 2) on slots 1, 2.
         assert!(prep.y_slot_plan.has_independent());
@@ -5885,7 +5898,7 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep = super::super::prepare::prepare_render_inputs(
+        let mut prep = super::super::prepare::prepare_render_inputs(
             &spec,
             &batch,
             &theme,
@@ -5893,6 +5906,8 @@ mod tests {
             None,
         )
         .unwrap();
+        // Mirror the real orchestration, same as `build_scene_for` above.
+        prep.axes.apply_show_defaults(&theme);
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(

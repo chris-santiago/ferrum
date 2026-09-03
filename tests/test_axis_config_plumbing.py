@@ -540,17 +540,36 @@ class TestScaleDomainRefusals:
         with pytest.raises(ValueError, match=r"AxisConfig: domain_max=.* must be a finite number"):
             fm.AxisConfig(domain_max=bad)
 
-    def test_degenerate_domain_refused_on_the_bypass_path_too(self, chart):
-        """`.override(...)` writes leaves straight onto the wire, bypassing
-        `AxisConfig.__post_init__`, so Rust backstops it with the same words."""
+    def test_degenerate_domain_refused_at_the_override_construction_seam(self, chart):
+        """Design-review remediation (F1): `.override(...)` no longer
+        bypasses `AxisConfig.__post_init__`'s cross-field check by
+        constructing each leaf in isolation. `y_axis_domain_min`/
+        `y_axis_domain_max` are grouped into one combined
+        `AxisConfig(domain_min=..., domain_max=...)` construction
+        (`_chart_config_wire_fragment`), which raises the SAME
+        degenerate-domain message direct `AxisConfig(domain_min=10.0,
+        domain_max=10.0)` construction raises — not the axis-qualified
+        Rust-side backstop sentence this path previously fell through to
+        (a DIFFERENT sentence than the construction-time one
+        `_validate_domain_bounds` quotes verbatim from Rust, reached only
+        because the Python check never ran)."""
+        with pytest.raises(
+            ValueError, match=r"domain endpoints must differ \(lo != hi\)"
+        ) as direct:
+            fm.AxisConfig(domain_min=10.0, domain_max=10.0)
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             bypass = chart.override(y_axis_domain_min=10.0, y_axis_domain_max=10.0)
             with pytest.raises(
                 ValueError, match=r"domain endpoints must differ \(lo != hi\)"
-            ) as excinfo:
+            ) as via_override:
                 bypass.to_svg()
-        assert "y axis" in str(excinfo.value), "the refusal must name the axis"
+
+        assert str(via_override.value) == str(direct.value), (
+            "the override path must refuse with the SAME message AxisConfig's own "
+            "construction does, not a different Rust-side backstop sentence"
+        )
 
 
 class TestLogScaleDomainConfig:
@@ -721,11 +740,15 @@ class TestOverrideMatchesItsTypedEquivalent:
     """One validation authority per leaf, closing the class rather than symptoms.
 
     Every chart-config override leaf routes through the dataclass it was
-    derived from (`_override_apply._leaf_wire_fragment`), so it accepts what
-    that dataclass accepts, refuses what it refuses, and serializes the same
-    way. Three separate leaks closed by one seam — each pinned below by its own
-    verbatim repro — plus a parity sweep so a FUTURE validator added to any
-    config class is covered without anyone remembering this file.
+    derived from (`_override_apply._chart_config_wire_fragment`), so it
+    accepts what that dataclass accepts, refuses what it refuses, and
+    serializes the same way. Three separate leaks closed by one seam — each
+    pinned below by its own verbatim repro — plus a parity sweep so a FUTURE
+    validator added to any config class is covered without anyone
+    remembering this file. See `TestOverrideCrossFieldValidators` below for
+    the cross-field coverage `_chart_config_wire_fragment` closes by
+    constructing each section from its whole set of named leaves, not one
+    leaf at a time.
     """
 
     @staticmethod
@@ -842,6 +865,66 @@ class TestOverrideMatchesItsTypedEquivalent:
             self._override(chart, axis_label_format="date_iso")
             == chart.configure_axis(label_format="date_iso").to_svg()
         )
+
+
+class TestOverrideCrossFieldValidators:
+    """Cross-field `AxisConfig` validators must fire on the override spelling.
+
+    Design-review finding F1: `_chart_config_wire_fragment` (formerly
+    `_leaf_wire_fragment`) used to construct the owning dataclass one leaf at
+    a time, so a validator that inspects TWO fields together never saw both
+    in the same construction and never fired — even though its own docstring
+    claimed every validator "today and later" covered the override spelling.
+    `build_payload` now groups every leaf named for one section (e.g. every
+    `axis_*` key in one `.override(...)` call) before constructing
+    `AxisConfig` once from the combined set, so a cross-field validator sees
+    exactly what a single `AxisConfig(...)` call with the same kwargs would.
+    """
+
+    @staticmethod
+    def _override(chart, **kwargs):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return chart.override(**kwargs).to_svg()
+
+    def test_label_format_and_label_format_raw_are_mutually_exclusive(self, chart):
+        """Reviewer's exact repro: `AxisConfig(label_format=..., label_format_raw=...)`
+        refuses at construction; the override spelling of the same two leaves
+        (built one-leaf-at-a-time before this fix) silently combined them and
+        reached the wire, where Rust's raw-first precedence picked a winner
+        no construction-time check had ever seen."""
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            fm.AxisConfig(label_format="percent", label_format_raw=",.2f")
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            self._override(chart, axis_label_format="percent", axis_label_format_raw=",.2f")
+
+    def test_degenerate_domain_bounds_refuse_through_override_too(self, chart):
+        """The second cross-field pair `AxisConfig.__init__` validates:
+        `domain_min == domain_max` is a degenerate, zero-width domain.
+        `_validate_domain_bounds` was written to quote Rust's own message
+        verbatim, so a bare substring match on "domain endpoints must
+        differ" alone cannot discriminate old from new behavior here (both
+        the construction-time AND the Rust render-time backstop contain that
+        phrase). Before this fix the override spelling built each bound in
+        isolation (each one alone is valid) and only failed later, at
+        render, with a DIFFERENT — axis-qualified — Rust-side sentence than
+        `AxisConfig`'s own construction-time refusal; asserting exact text
+        equality is what actually proves the override path now raises from
+        the SAME construction-time check, not a different downstream one."""
+        with pytest.raises(ValueError, match="domain endpoints must differ") as direct:
+            fm.AxisConfig(domain_min=5, domain_max=5)
+        with pytest.raises(ValueError, match="domain endpoints must differ") as via_override:
+            self._override(chart, axis_domain_min=5, axis_domain_max=5)
+        assert str(via_override.value) == str(direct.value)
+
+    def test_valid_combined_leaves_still_reach_the_wire_together(self, chart):
+        """The fix must not turn a legitimate combined section into a
+        refusal: two independently-valid, non-conflicting leaves for the
+        same section still both reach the wire from one `.override(...)`
+        call."""
+        out = self._override(chart, axis_label_angle=-45.0, axis_tick_count=3)
+        expected = chart.configure_axis(label_angle=-45.0, tick_count=3).to_svg()
+        assert out == expected
 
 
 class TestGridStyleValueRefusals:

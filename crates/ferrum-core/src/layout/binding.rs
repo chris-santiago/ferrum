@@ -102,13 +102,21 @@ pub fn compute_layout(
     let mut theme = ThemeInputs::default();
     theme.legend.legend_orient = parse_legend_orient(legend_orient)?;
 
-    let axes = AxesInput {
+    let mut axes = AxesInput {
         x: AxisInput::new(AxisOrient::Bottom, x_title, x_tick_labels, label_angle),
         y: AxisInput::new(AxisOrient::Left, y_title, y_tick_labels, None),
         show_x: true,
         show_y: true,
         secondary_y: Vec::new(),
     };
+    // Bottom of the grid/domain precedence chain (D4, spec §4.3), same as the
+    // full `render_svg`/interactive orchestration: every axis that expressed
+    // no opinion of its own now takes the theme's, before `compute_layout`
+    // reads `show_domain`/`show_grid`. This standalone layout-only binding
+    // has no chart config to fold in beyond the default theme constructed
+    // above, but the fold itself is not optional — `AxisInput::show_domain`/
+    // `show_grid` assert this has run (debug builds).
+    axes.apply_show_defaults(&theme);
 
     let groups: Vec<FacetGroup> = facet_groups
         .unwrap_or_default()

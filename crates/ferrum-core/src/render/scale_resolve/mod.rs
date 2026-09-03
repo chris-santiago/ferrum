@@ -288,6 +288,39 @@ impl ScaleKind {
         dispatch_continuous!(self, set_domain_pair, [lo, hi]);
     }
 
+    /// Round `(lo, hi)` outward to "nice" values, using THIS scale kind's own
+    /// `nice()` rounding rather than a re-derived, kind-independent
+    /// approximation — the fix for the batch-B design review's S4: chart-level
+    /// `configure_axis(nice=True)` used to round every kind with the same
+    /// linear `nice_step`, which can drive a log axis's bound to 0 (refused
+    /// by every log-scale constructor) and rounds a time axis to raw
+    /// epoch-ms instead of calendar boundaries. `(lo, hi)` — not `self`'s
+    /// current domain — is what gets rounded, so a caller can nice a domain
+    /// already widened by `zero=true` without writing it back first;
+    /// `set_data_domain`'s own dispatch is reused on a clone to seed that.
+    ///
+    /// `(lo, hi)` unchanged for an ordinal scale (no numeric domain to
+    /// round) — same "nothing to do" contract as
+    /// [`data_domain`](Self::data_domain)/[`set_data_domain`](Self::set_data_domain);
+    /// the one caller ([`positional::apply_axis_domain_config`](super::positional::apply_axis_domain_config))
+    /// never reaches this on an ordinal axis regardless (it refuses first).
+    pub(in crate::render) fn niced_domain(&self, lo: f64, hi: f64) -> (f64, f64) {
+        if matches!(self, ScaleKind::Ordinal(_)) {
+            return (lo, hi);
+        }
+        let mut seeded = self.clone();
+        seeded.set_data_domain(lo, hi);
+        let [nlo, nhi] = match seeded {
+            ScaleKind::Linear(s) => s.nice_domain_pair(),
+            ScaleKind::Time(s) => s.nice_domain_pair(),
+            ScaleKind::Log(s) => s.nice_domain_pair(),
+            ScaleKind::Symlog(s) => s.nice_domain_pair(),
+            ScaleKind::Pow(s) => s.nice_domain_pair(),
+            ScaleKind::Ordinal(_) => unreachable!("returned above"),
+        };
+        (nlo, nhi)
+    }
+
     /// Pixel-range used when constructing this scale (lo, hi).
     pub fn pixel_range(&self) -> (f64, f64) {
         let r = dispatch_all!(self, range_pair);

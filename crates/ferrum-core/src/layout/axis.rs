@@ -140,8 +140,8 @@ pub(crate) struct AxisStyleOverrides {
     ///
     /// `label_format.is_none()` alone CANNOT distinguish "no per-channel
     /// format claimed this axis" from "a per-channel format already fully
-    /// applied" — cycle 1 of this task (D8) missed exactly this, letting a
-    /// chart-level time preset win the cascade over an explicit per-channel
+    /// applied" — missing that distinction (D8) let a chart-level time
+    /// preset win the cascade over an explicit per-channel
     /// one (`configure_axis(label_format="date_iso")` re-deriving RAW
     /// temporal values and overwriting an already-formatted `fm.Axis(
     /// label_format="%b %d")` axis — the batch's hard per-channel-wins
@@ -267,14 +267,13 @@ impl AxisStyleOverrides {
     /// [`label_format_claimed`](Self::label_format_claimed)'s doc — or by an
     /// earlier chart-level layer that already filled `label_format`).
     ///
-    /// Quality-review S2 (2026-09-03): the `label_format.is_none() &&
-    /// !label_format_claimed` predicate this method now owns used to be
-    /// hand-copied at its two call sites
+    /// The `label_format.is_none() && !label_format_claimed` predicate this
+    /// method now owns used to be hand-copied at its two call sites
     /// (`render::apply_axis_config_to_axis_input`, `axis_style_fill_from`'s
     /// own defensive fallback write) — the SAME "is this slot actually
     /// unclaimed" question, expressed twice, on a `pub(crate)` field with no
-    /// accessor discipline. The cycle-2 fix for the cascade-inversion bug
-    /// this predicate exists to enforce was itself caught missing the second
+    /// accessor discipline. A fix for the cascade-inversion bug this
+    /// predicate exists to enforce was itself found missing the second
     /// writer, proving the hand-copy was already load-bearing and already
     /// fragile. Mechanizing it here means a THIRD writer of `label_format`
     /// has exactly one correct way to write it, not a predicate to
@@ -431,14 +430,35 @@ impl AxisInput {
     /// default has not been folded in yet ([`AxesInput::apply_show_defaults`]);
     /// `true` is that theme field's own default, so an un-resolved axis reads
     /// the same as an unconfigured one.
+    ///
+    /// The `None` fallback below is a real, load-bearing runtime behavior
+    /// (an axis this function is called on before `apply_show_defaults` has
+    /// run must still return something), so the precondition is enforced
+    /// only in debug builds rather than folded into the fallback's meaning:
+    /// `AxesInput::apply_show_defaults` is the sole production caller
+    /// obligated to fill this slot before `AxisLayout::from_input` reads it
+    /// (in turn consumed by `render::marks::axis::build_axis`/`build_grid`),
+    /// and any call site that reaches here with the slot still unresolved is
+    /// a bug the `true` default was silently masking.
     pub fn show_domain(&self) -> bool {
+        debug_assert!(
+            self.overrides.show_domain.is_some(),
+            "AxisInput::show_domain() read before AxesInput::apply_show_defaults() \
+             folded in the theme default"
+        );
         self.overrides.show_domain.unwrap_or(true)
     }
 
     /// Whether gridlines from this axis render. Same "resolved by
     /// [`AxesInput::apply_show_defaults`], defaults to the theme field's own
-    /// default" contract as [`show_domain`](Self::show_domain).
+    /// default" contract — and the same debug-only precondition assert — as
+    /// [`show_domain`](Self::show_domain).
     pub fn show_grid(&self) -> bool {
+        debug_assert!(
+            self.overrides.show_grid.is_some(),
+            "AxisInput::show_grid() read before AxesInput::apply_show_defaults() \
+             folded in the theme default"
+        );
         self.overrides.show_grid.unwrap_or(true)
     }
 
@@ -926,7 +946,7 @@ fn rotated_x_label_footprint(angle: f64, label_w: f64, line_h: f64) -> f64 {
 /// finalized, so it uses worst-case inputs (longest label, estimated slot
 /// width). Over-reservation is acceptable; under-reservation causes clipping.
 ///
-/// `cull_threshold` (spec §4.6, D9, spec-review cycle 2) shrinks every
+/// `cull_threshold` (spec §4.6, D9) shrinks every
 /// stage's fit budget by that many pixels — SYNC'd with
 /// `cascade_collision_recovery`'s identical treatment; see that function's
 /// doc for why the gap has to move with the fit test itself rather than
@@ -1029,7 +1049,7 @@ pub(crate) fn estimate_x_label_band(
         );
     }
 
-    // `cull_threshold` (spec-review cycle 2) must shrink this predictor's
+    // `cull_threshold` must shrink this predictor's
     // budget exactly as it shrinks `cascade_collision_recovery`'s — a
     // positive threshold can force the REAL cascade past flat/wrap/a
     // shallow rotation even when raw overlap would have been fine, and the
@@ -1177,8 +1197,8 @@ fn rotated_y_label_extent(
 /// 2026-08-27 to retire that specific corner as a reservation for labels that
 /// don't exist).
 ///
-/// **Standoff gate (`visible: bool`, spec §4.1 amended 2026-08-27, extended
-/// cycle 2):** the new standoff applies only to an axis that actually DRAWS
+/// **Standoff gate (`visible: bool`, spec §4.1 amended 2026-08-27):** the
+/// standoff applies only to an axis that actually DRAWS
 /// its labels — visible AND labels shown. Two independent knobs feed this:
 ///
 /// 1. `.axis(show=False)` (`AxesInput.show_x`/`show_y`, passed in as
@@ -1356,7 +1376,7 @@ pub fn layout_y_axis(
         });
     let (mut ticks, warning) = if let Some(override_angle) = effective_angle {
         // R2: label_angle_override always applies (there is no cascade to
-        // bypass on y). Shared body (quality-review fix 4): see
+        // bypass on y). Shared body: see
         // `stamp_override_angle_with_elide`'s doc for the x/y transpose
         // (y's projection factor is `sin|angle|` against `cascade_slot_h`).
         let sin_factor = override_angle.to_radians().sin().abs();
@@ -1493,7 +1513,12 @@ fn resolve_y_overlap(
             // last keep — the vertical analogue of x's stride.
             let mut slots_since_kept = f64::INFINITY;
             for _ in labels {
-                let keep = slots_since_kept * slot_h >= line_h;
+                // The `INFINITY` seed means "no label kept yet, so the next one
+                // always clears" — but `INFINITY * 0.0` (a zero-height slot) is
+                // `NaN`, and `NaN >= line_h` is false, silently dropping the
+                // first label instead of keeping it. Test the seed explicitly
+                // rather than relying on the arithmetic to carry that meaning.
+                let keep = slots_since_kept.is_infinite() || slots_since_kept * slot_h >= line_h;
                 visible.push(keep);
                 slots_since_kept = if keep { 1.0 } else { slots_since_kept + 1.0 };
             }
@@ -1577,7 +1602,7 @@ fn elide_to_fit(
 ///    would fit).
 /// 2. Space: greedy line-fill — pack as many words per line as fit under
 ///    `max_width` (the label's own NATURAL, minimal-line wrap; pre-task
-///    behavior, restored in spec-review cycle 4 — see `wrap_label_to_line_count`
+///    behavior — see `wrap_label_to_line_count`
 ///    below for the axis-uniform variant).
 /// 3. camelCase: split at lowercase->uppercase transitions (unconditional,
 ///    like Rule 1).
@@ -1589,15 +1614,15 @@ fn elide_to_fit(
 /// `wrap_label_to_line_count`'s doc for why that's a SEPARATE function
 /// rather than a change to this one: `cull_threshold == 0` must reproduce
 /// this function's un-adjusted, potentially non-uniform, pre-task output
-/// exactly (spec-review cycle 4, byte-identity requirement).
+/// exactly (byte-identity requirement).
 ///
-/// Rule 2 (space) is the VERBATIM pre-task `String`-accumulator loop
-/// (quality-review cycle 2): two prior attempts to replicate this algorithm
-/// through a `Vec<&str>` accumulator each introduced a NEW divergence for
-/// labels with an EMPTY split-word (a leading, trailing, or doubled space)
-/// — cycle 1's un-filtered `Vec` let an empty word survive into the joined
-/// line as a stray space or phantom line; cycle 6's filtered `Vec` deleted
-/// empty words outright, which matches pre-task only for a LEADING empty
+/// Rule 2 (space) is the VERBATIM pre-task `String`-accumulator loop: two
+/// prior attempts to replicate this algorithm through a `Vec<&str>`
+/// accumulator each introduced a NEW divergence for labels with an EMPTY
+/// split-word (a leading, trailing, or doubled space) — an un-filtered
+/// `Vec` let an empty word survive into the joined line as a stray space or
+/// phantom line; a filtered `Vec` deleted empty words outright, which
+/// matches pre-task only for a LEADING empty
 /// word (`String::push_str("")` on an empty string is a true no-op) and
 /// diverges for a trailing or interior one (pre-task's
 /// `format!("{} {}", current, word)` inserts a joining space and MEASURES
@@ -1693,7 +1718,7 @@ fn wrap_label(
 /// word boundaries to split further.
 ///
 /// This is a DELIBERATELY separate implementation from `wrap_label`'s Rule
-/// 2, not a shared extraction of it (quality-review cycle 2): the two
+/// 2, not a shared extraction of it: the two
 /// functions serve different contracts. `wrap_label` (`cull_threshold == 0`)
 /// must be byte-identical to pre-task, including pre-task's own quirky
 /// treatment of empty split-words (see `wrap_label`'s doc); this function
@@ -1794,7 +1819,7 @@ fn pack_words_to_line_count<'a>(
 
 /// Like `wrap_label`, but forces the result onto exactly `target_lines`
 /// lines wherever the label's own natural (minimal) wrap would use fewer —
-/// spec-review cycle 4's uniform-degradation fix. `cascade_collision_recovery`'s
+/// the uniform-degradation fix. `cascade_collision_recovery`'s
 /// S1 stage calls this (instead of re-deriving uniformity by hand) once
 /// `cull_threshold > 0`, so every sibling label in the axis resolves to the
 /// SAME line count without ever degrading to one-word-per-line packing —
@@ -1828,7 +1853,7 @@ fn wrap_label_to_line_count(
 }
 
 /// Uniform-degradation post-process for a wrap stage's natural (per-label)
-/// result — spec §4.6, spec-review cycle 4/5. Shared by `cascade_collision_recovery`'s
+/// result — spec §4.6. Shared by `cascade_collision_recovery`'s
 /// S1 and S2b, the two wrap-invoking stages of the cascade (`estimate_x_label_band`'s
 /// own S1 wrap call is the only other `wrap_label` call site, and needs no
 /// equivalent treatment: its band-height reservation only ever depends on
@@ -1836,8 +1861,8 @@ fn wrap_label_to_line_count(
 /// siblings are later uniformized up to it).
 ///
 /// At `cull_threshold == 0`, returns `natural_labels` unchanged — this is
-/// the pre-task, per-label wrap result byte-for-byte (spec-review cycle 4's
-/// byte-identity requirement; pre-task never uniformized either, so
+/// the pre-task, per-label wrap result byte-for-byte (the byte-identity
+/// requirement; pre-task never uniformized either, so
 /// preserving whatever raggedness it could produce at `0` IS the contract,
 /// not a violation of it). At `cull_threshold > 0`, computes
 /// `target_lines` as the max natural line count across the axis's sibling
@@ -1877,7 +1902,7 @@ fn uniformize_wrapped_labels(
 }
 
 /// Shared body for `layout_x_axis`'s and `layout_y_axis`'s `label_angle`
-/// override branch (R2, quality-review fix 4): stamp `override_angle` onto
+/// override branch (R2): stamp `override_angle` onto
 /// every tick, then elide-to-fit any label whose rotated footprint still
 /// collides with its neighbor's per-tick budget — no cull recovery, on
 /// either axis (spec SS7 for x; R2 for y).
@@ -1953,8 +1978,7 @@ fn stamp_override_angle_with_elide(
 ///
 /// Shared by `cascade_collision_recovery`'s initial attempt (all N tick
 /// labels, `slot_w` = the per-tick budget) AND its S4 cull stage's
-/// RE-ATTEMPT at the culled stride (round-8 fix, orchestrator golden-PNG
-/// gate finding): S4 computes a stride from -90°'s footprint alone — the
+/// RE-ATTEMPT at the culled stride: S4 computes a stride from -90°'s footprint alone — the
 /// SMALLEST possible footprint of any presentation — so a stride wide
 /// enough for rotated survivors to fit says nothing about whether a
 /// LESS-degraded presentation (flat, wrapped, font-reduced) would ALSO now
@@ -2011,8 +2035,8 @@ fn resolve_presentation(
             .iter()
             .all(|w| measure_multiline_width(w, label_font_size, metrics) <= threshold);
         if all_fit {
-            // Uniform-degradation requirement (spec §4.6, spec-review
-            // cycles 4/5) — see `uniformize_wrapped_labels`'s doc.
+            // Uniform-degradation requirement (spec §4.6) — see
+            // `uniformize_wrapped_labels`'s doc.
             let final_labels = uniformize_wrapped_labels(
                 labels,
                 wrapped_labels,
@@ -2088,7 +2112,7 @@ fn resolve_presentation(
     // `slot_w - cull_gap` (no `LABEL_OVERLAP_TOLERANCE`, matching this
     // stage's pre-existing convention) so a positive `cull_threshold`
     // tightens rotation too — a genuinely-fitting rotation only wins when it
-    // ALSO satisfies the requested gap (spec-review cycle 2).
+    // ALSO satisfies the requested gap.
     let s3_budget = slot_w - cull_gap;
     for &angle in &ANGLE_CASCADE[1..] {
         let all_fit = widths
@@ -2110,7 +2134,7 @@ fn resolve_presentation(
 
 /// Merge a presentation's SURVIVOR-only label text back into the full,
 /// original-length label vector `layout_x_axis` expects (S4 cull
-/// re-selection, round 8): visible indices consume the next resolved
+/// re-selection): visible indices consume the next resolved
 /// survivor label IN ORDER (both `visible` and `survivor_labels` were built
 /// by iterating the same original index order, so they stay aligned);
 /// culled indices keep their untouched original text, since a culled tick
@@ -2140,8 +2164,8 @@ fn merge_survivor_labels(
 ///
 /// `cull_threshold` (spec §4.6, F-L07-04 / D9) is the minimum pixel gap
 /// required between adjacent VISIBLE tick labels — `Theme.cull_threshold`'s
-/// docstring — not a label-count gate, and not merely an S4 stride floor
-/// (spec-review cycle 2): it shrinks the fit BUDGET of every stage, S0
+/// docstring — not a label-count gate, and not merely an S4 stride floor:
+/// it shrinks the fit BUDGET of every stage, S0
 /// through S3, since "does this arrangement leave at least `cull_threshold`
 /// px between labels" is a stronger question than "do labels overlap at
 /// all." A stage only resolves collision when it ALSO satisfies the gap —
@@ -2168,8 +2192,7 @@ fn merge_survivor_labels(
 ///   keeping default output byte-identical.
 ///
 /// S4 (cull) re-selects survivors' presentation at the culled density via
-/// `resolve_presentation` (round-8 fix, orchestrator golden-PNG gate
-/// finding) — see that function's doc for why a stride computed against
+/// `resolve_presentation` — see that function's doc for why a stride computed against
 /// -90°'s footprint doesn't by itself justify keeping -90° rotation once
 /// the stride opens up more room per surviving label.
 fn cascade_collision_recovery(
@@ -2253,7 +2276,7 @@ fn cascade_collision_recovery(
     // computation below — the smallest possible footprint of any
     // presentation, so it gives the minimum stride any presentation could
     // need. The PRESENTATION actually used for the survivors is re-derived
-    // afterward (round 8 fix, see below).
+    // afterward (see below).
     let best_angle = *ANGLE_CASCADE.last().unwrap(); // -90.0
     let cos_best = best_angle.to_radians().cos().abs();
 
@@ -2274,8 +2297,8 @@ fn cascade_collision_recovery(
         //   footprint + cull_threshold <= N * slot_w
         //   N >= (footprint + cull_threshold) / slot_w
         // A zero-width label set still culls down to a spaced subset when
-        // `slot_w` alone can't satisfy `cull_threshold` (spec-review cycle 2:
-        // "threshold larger than any gap culls down to a spaced subset").
+        // `slot_w` alone can't satisfy `cull_threshold`
+        // ("threshold larger than any gap culls down to a spaced subset").
         let stride = if slot_w <= 0.0 {
             1_u32
         } else {
@@ -2285,8 +2308,7 @@ fn cascade_collision_recovery(
         if stride > 1 {
             let visible: Vec<bool> = (0..n).map(|i| i % stride as usize == 0).collect();
 
-            // Round-8 fix (orchestrator golden-PNG gate): `stride` was
-            // sized against -90°'s footprint alone, the SMALLEST footprint
+            // `stride` was sized against -90°'s footprint alone, the SMALLEST footprint
             // of any presentation — it says nothing about whether a
             // LESS-degraded presentation now fits the wider
             // per-surviving-label budget the stride opens up. Re-run the
@@ -2465,7 +2487,7 @@ pub fn layout_x_axis(
 
     let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
         // label_angle_override always bypasses the cascade (spec SS7). Shared
-        // body (quality-review fix 4): see `stamp_override_angle_with_elide`'s
+        // body: see `stamp_override_angle_with_elide`'s
         // doc for the x/y transpose (x's projection factor is `cos|angle|`
         // against `cascade_slot_w`).
         let cos_factor = override_angle.to_radians().cos().abs();
@@ -2580,8 +2602,8 @@ pub fn layout_x_axis(
             .filter(|t| !t.culled)
             .map(|t| metrics.measure_width(&t.label, label_font_size))
             .fold(0.0_f64, f64::max);
-        // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side extension,
-        // cycle 5): mirrors `layout_y_axis`'s title-placement gate (the
+        // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side
+        // extension): mirrors `layout_y_axis`'s title-placement gate (the
         // comment above its own `compute_y_label_band_width` call) — a
         // titled x axis can still have `input.show_labels == false`
         // (`fm.Axis(labels=False)`, a title with no drawn tick labels), and
@@ -2645,6 +2667,52 @@ pub fn layout_x_axis(
 mod tests {
     use super::*;
 
+    /// Test helper: `AxisInput::new` plus the theme-default fold
+    /// `AxesInput::apply_show_defaults` performs in production, so per-axis
+    /// layout tests that don't care about domain/grid visibility (the
+    /// overwhelming majority — the theme's own `true` default is what every
+    /// unconfigured axis renders) don't have to know about the
+    /// `show_domain()`/`show_grid()` precondition those accessors now assert
+    /// in debug builds. A test that DOES care overwrites `input.overrides
+    /// .show_domain`/`.show_grid` afterward, same as before.
+    fn axis_input(
+        orient: AxisOrient,
+        title: Option<String>,
+        tick_labels: Vec<String>,
+        label_angle: Option<f64>,
+    ) -> AxisInput {
+        let new = AxisInput::new;
+        let mut input = new(orient, title, tick_labels, label_angle);
+        input.overrides.show_domain = Some(true);
+        input.overrides.show_grid = Some(true);
+        input
+    }
+
+    // ── S3 hardening (batch B design review): apply_show_defaults precondition ──
+
+    /// A default-constructed `AxisInput` (via the real `AxisInput::new`, not
+    /// the `axis_input()` test helper above, which resolves the defaults
+    /// itself) has never had `AxesInput::apply_show_defaults` run against it,
+    /// so `overrides.show_domain` is still `None`. Reading `show_domain()` in
+    /// that state must trip the debug-only precondition assert rather than
+    /// silently returning the non-conservative `true` fallback.
+    #[test]
+    #[should_panic(expected = "AxesInput::apply_show_defaults")]
+    #[cfg(debug_assertions)]
+    fn axis_input_show_domain_asserts_before_apply_show_defaults() {
+        let input = AxisInput::new(AxisOrient::Bottom, None, vec![], None);
+        let _ = input.show_domain();
+    }
+
+    /// Same precondition, `show_grid()` twin.
+    #[test]
+    #[should_panic(expected = "AxesInput::apply_show_defaults")]
+    #[cfg(debug_assertions)]
+    fn axis_input_show_grid_asserts_before_apply_show_defaults() {
+        let input = AxisInput::new(AxisOrient::Bottom, None, vec![], None);
+        let _ = input.show_grid();
+    }
+
     // ── 385: AxisLayout::from_input field parity ─────────────────────────────
 
     /// `AxisLayout::from_input` threads every per-axis override onto the layout.
@@ -2655,7 +2723,7 @@ mod tests {
         let red = Srgba::new(255u8, 0, 0, 255);
         let blue = Srgba::new(0u8, 0, 255, 255);
         let green = Srgba::new(0u8, 255, 0, 255);
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Bottom,
             Some("T".into()),
             vec!["a".into()],
@@ -2726,15 +2794,15 @@ mod tests {
     #[test]
     fn axis_resolve_orient_defaults_and_override() {
         // x axis, no override → Bottom.
-        let mut x = AxisInput::new(AxisOrient::Bottom, None, vec![], None);
+        let mut x = axis_input(AxisOrient::Bottom, None, vec![], None);
         x.resolve_orient();
         assert_eq!(x.orient, AxisOrient::Bottom);
         // y axis, no override → Left.
-        let mut y = AxisInput::new(AxisOrient::Left, None, vec![], None);
+        let mut y = axis_input(AxisOrient::Left, None, vec![], None);
         y.resolve_orient();
         assert_eq!(y.orient, AxisOrient::Left);
         // x axis with explicit Top override wins.
-        let mut xt = AxisInput::new(AxisOrient::Bottom, None, vec![], None);
+        let mut xt = axis_input(AxisOrient::Bottom, None, vec![], None);
         xt.overrides.orient = Some(AxisOrient::Top);
         xt.resolve_orient();
         assert_eq!(xt.orient, AxisOrient::Top);
@@ -2890,7 +2958,7 @@ mod tests {
 
     #[test]
     fn y_axis_label_band_uses_longest_label() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "100".into(), "10000".into()],
@@ -2906,7 +2974,7 @@ mod tests {
 
     #[test]
     fn y_axis_label_band_empty_labels_returns_zero() {
-        let input = AxisInput::new(AxisOrient::Left, None, vec![], None);
+        let input = axis_input(AxisOrient::Left, None, vec![], None);
         let m = mock(10.0);
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true), 0.0);
         // Byte-identical regardless of visibility (spec §4.1: empty label
@@ -2923,7 +2991,7 @@ mod tests {
     /// an accident of the early-return's placement before the angle branch.
     #[test]
     fn y_axis_label_band_empty_labels_with_rotated_override_returns_zero() {
-        let input = AxisInput::new(AxisOrient::Left, None, vec![], Some(-45.0));
+        let input = axis_input(AxisOrient::Left, None, vec![], Some(-45.0));
         let m = mock(10.0);
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, true), 0.0);
         assert_eq!(compute_y_label_band_width(&input, 11.0, &m, 4.0, false), 0.0);
@@ -2939,7 +3007,7 @@ mod tests {
     /// regardless of visibility.
     #[test]
     fn y_axis_label_band_hidden_axis_keeps_bare_max_label_w() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "100".into(), "10000".into()],
@@ -2969,20 +3037,20 @@ mod tests {
         );
     }
 
-    /// #97 spec §4.1 (amended 2026-08-27, extended cycle 2): the standoff
+    /// #97 spec §4.1 (amended 2026-08-27): the standoff
     /// gate must key off "labels actually drawn", not just "axis shown" — a
     /// SHOWN axis (`visible: true`) with `fm.Axis(labels=False)`
     /// (`AxisInput.show_labels = false`) draws no tick label text
     /// (`render/marks/axis.rs`'s `if axis.show_labels && !tick.culled`
     /// guard), so it must ALSO keep the pre-#97 bare `max_label_w`
-    /// reservation, byte-for-byte, same as a hidden axis. RED-proven: the
-    /// cycle-1 gate (`!visible && angle == 0.0`) alone left this case
+    /// reservation, byte-for-byte, same as a hidden axis. RED-proven: an
+    /// earlier gate (`!visible && angle == 0.0`) alone left this case
     /// unguarded — `visible` is `true` here, so the standoff still applied —
     /// matching the reviewer's probe (`fm.Axis(labels=False)` on a shown y
     /// axis grew `cx` under `label_padding`).
     #[test]
     fn y_axis_label_band_labels_off_on_shown_axis_keeps_bare_max_label_w() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "100".into(), "10000".into()],
@@ -3056,7 +3124,7 @@ mod tests {
     /// through `rotated_y_label_extent` instead of the flat max-width formula.
     #[test]
     fn y_axis_label_band_width_honors_explicit_angle() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             None,
             vec!["abcdefghij".into()], // 10 chars
@@ -3079,9 +3147,9 @@ mod tests {
     fn y_axis_label_band_width_continuous_at_theta_zero() {
         let labels = vec!["0".into(), "100".into(), "10000".into()];
         let m = mock(10.0);
-        let no_override = AxisInput::new(AxisOrient::Left, None, labels.clone(), None);
-        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels.clone(), Some(0.0));
-        let tiny_angle = AxisInput::new(AxisOrient::Left, None, labels, Some(1e-6));
+        let no_override = axis_input(AxisOrient::Left, None, labels.clone(), None);
+        let explicit_zero = axis_input(AxisOrient::Left, None, labels.clone(), Some(0.0));
+        let tiny_angle = axis_input(AxisOrient::Left, None, labels, Some(1e-6));
 
         let band_none = compute_y_label_band_width(&no_override, 11.0, &m, 4.0, true);
         let band_zero = compute_y_label_band_width(&explicit_zero, 11.0, &m, 4.0, true);
@@ -3102,7 +3170,7 @@ mod tests {
     /// label collides, so nothing is elided.
     #[test]
     fn layout_y_axis_stamps_override_angle_on_every_tick() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "1".into(), "2".into(), "3".into()],
@@ -3126,7 +3194,7 @@ mod tests {
     /// the per-tick vertical budget.
     #[test]
     fn layout_y_axis_elides_via_override_when_angle_forced() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             None,
             (0..20).map(|i| format!("Label_{}", i)).collect(),
@@ -3169,9 +3237,9 @@ mod tests {
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
 
-        let no_override = AxisInput::new(AxisOrient::Left, None, labels.clone(), None);
-        let explicit_zero = AxisInput::new(AxisOrient::Left, None, labels.clone(), Some(0.0));
-        let tiny_angle = AxisInput::new(AxisOrient::Left, None, labels, Some(1e-6));
+        let no_override = axis_input(AxisOrient::Left, None, labels.clone(), None);
+        let explicit_zero = axis_input(AxisOrient::Left, None, labels.clone(), Some(0.0));
+        let tiny_angle = axis_input(AxisOrient::Left, None, labels, Some(1e-6));
 
         let (axis_none, warn_none) =
             layout_y_axis(&no_override, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
@@ -3205,7 +3273,7 @@ mod tests {
         let m = mock(10.0);
         let tick_size = 4.0;
         let font_size = 11.0;
-        let input = AxisInput::new(AxisOrient::Left, None, labels, None);
+        let input = axis_input(AxisOrient::Left, None, labels, None);
         let panel_area = Rect { x: 100.0, y: 0.0, w: 300.0, h: 200.0 };
         let (axis, _) = layout_y_axis(&input, panel_area, 0, font_size, 13.0, 4.0, tick_size, &m);
 
@@ -3242,7 +3310,7 @@ mod tests {
         let tick_size = 4.0;
         let font_size = 11.0;
         let max_label_w = 50.0; // "10000" = 5 chars * 10px/char
-        let input = AxisInput::new(AxisOrient::Left, None, labels, Some(-45.0));
+        let input = axis_input(AxisOrient::Left, None, labels, Some(-45.0));
         let band = compute_y_label_band_width(&input, font_size, &m, tick_size, true);
 
         let angle_rad = (-45.0_f64).to_radians();
@@ -3264,7 +3332,7 @@ mod tests {
         let m = mock(10.0);
         let tick_size = 4.0;
         let font_size = 11.0;
-        let input = AxisInput::new(AxisOrient::Bottom, None, labels, None);
+        let input = axis_input(AxisOrient::Bottom, None, labels, None);
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let (axis, _) =
             layout_x_axis(&input, panel_area, 0, font_size, 13.0, 4.0, 8, tick_size, &m);
@@ -3291,7 +3359,7 @@ mod tests {
 
     #[test]
     fn y_axis_layout_uniform_tick_positions() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             Some("Price".into()),
             vec!["0".into(), "1".into(), "2".into(), "3".into()],
@@ -3322,7 +3390,7 @@ mod tests {
     /// slots would be 137.5 / 212.5 / 287.5 / 362.5, far from the band centers.
     #[test]
     fn x_axis_uses_categorical_positions_when_present() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
@@ -3340,7 +3408,7 @@ mod tests {
     /// uniform-slot formula, byte-identical to before this seam.
     #[test]
     fn x_axis_falls_back_to_uniform_center_without_categorical_positions() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
@@ -3359,7 +3427,7 @@ mod tests {
     /// against the panel-uniform slots (75 / 125 / 175 / 225 over `y=50, h=200`).
     #[test]
     fn y_axis_uses_categorical_positions_when_present() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Left,
             None,
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
@@ -3376,7 +3444,7 @@ mod tests {
     /// Without `categorical_positions`, the y-axis keeps uniform-slot placement.
     #[test]
     fn y_axis_falls_back_to_uniform_center_without_categorical_positions() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             None,
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
@@ -3435,7 +3503,7 @@ mod tests {
 
     #[test]
     fn y_axis_right_orient_places_line_on_right_edge() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Right,
             Some("Price".into()),
             vec!["0".into(), "1".into(), "2".into()],
@@ -3457,7 +3525,7 @@ mod tests {
 
     #[test]
     fn y_axis_horizontal_title_orient_renders_flat() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Left,
             Some("Price".into()),
             vec!["0".into(), "1".into()],
@@ -3473,7 +3541,7 @@ mod tests {
 
     #[test]
     fn x_axis_top_orient_places_line_on_top_edge() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Top,
             Some("Feature".into()),
             vec!["a".into(), "b".into(), "c".into()],
@@ -3495,7 +3563,7 @@ mod tests {
     fn x_axis_default_orient_unchanged() {
         // Regression guard: a Bottom x-axis still places the line at the panel
         // bottom and a flat title below it (byte-identity sentinel).
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             Some("Feature".into()),
             vec!["a".into(), "b".into()],
@@ -3513,7 +3581,7 @@ mod tests {
 
     #[test]
     fn x_axis_no_collision_keeps_labels_flat() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
@@ -3532,7 +3600,7 @@ mod tests {
 
     #[test]
     fn x_axis_uniform_tick_positions_along_axis() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
@@ -3558,7 +3626,7 @@ mod tests {
         //   -60: cos(60)*80 + sin(60)*13.2 = 40.00 + 11.43 = 51.43 > 50 -> fail
         //        (the pre-fix bare-cos check alone, 40<=50, used to pass here).
         //   -90: cos(90)*80 + sin(90)*13.2 ~= 0 + 13.2 = 13.2 <= 50 -> pass at -90!
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..8).map(|i| format!("L{}", i)).collect(),
@@ -3575,7 +3643,7 @@ mod tests {
 
     #[test]
     fn x_axis_rotates_at_custom_angle_override() {
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..8).map(|i| format!("L{}", i)).collect(),
@@ -3594,7 +3662,7 @@ mod tests {
         // 6 labels of 95px each in 600px panel. slot_w=100, threshold=90.
         // 95>90 -> collision. No break points -> S1/S2 fail.
         // S3: -30 -> cos(30)*95=82.3<=100 -> passes at -30.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..6).map(|i| format!("L{}", i)).collect(),
@@ -3614,7 +3682,7 @@ mod tests {
     fn x_axis_elides_via_override_when_angle_forced() {
         // With label_angle_override, bypass cascade. 20 labels of 7+ chars each
         // in 200px panel. Override at -45, some labels will need elision.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..20).map(|i| format!("Label_{}", i)).collect(),
@@ -3640,7 +3708,7 @@ mod tests {
         // S1-S2 fail (segments too wide for 9px threshold).
         // S3: at -90, cos(90)~0, projected~0 <= slot_w -> passes at -90.
         // No elision needed.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..20).map(|i| format!("Label_{}", i)).collect(),
@@ -3659,7 +3727,7 @@ mod tests {
     #[test]
     fn x_axis_elision_unicode_safe() {
         // Use label_angle_override to bypass the cascade and force elision.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["héllo wörld".into(); 20],
@@ -3683,7 +3751,7 @@ mod tests {
         include_minor: bool,
         minor_positions: Vec<f64>,
     ) -> AxisInput {
-        let mut input = AxisInput::new(orient, None, labels, None);
+        let mut input = axis_input(orient, None, labels, None);
         // Mirror prepare.rs: the gate empties `minor` when off. With no major
         // fractions supplied, presence of the projection is driven by the
         // minors here (these fixtures pre-date the continuous-major path).
@@ -3891,7 +3959,7 @@ mod tests {
         // 8 + 0.5*584 = 300 — coinciding with a major at f=0.5. The naive
         // origin+f*extent would give 0.5*600 = 300 here only because the panel
         // origin is 0 and f=0.5 is the midpoint; use f=0.25 to separate them.
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["lo".into(), "hi".into()],
@@ -3920,7 +3988,7 @@ mod tests {
 
         // Cross-check: a MAJOR projected at the same fraction 0.25 lands at the
         // same pixel. Reuse the same inset path via projected_tick_fractions.
-        let mut major_input = AxisInput::new(
+        let mut major_input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["q".into()],
@@ -4007,7 +4075,7 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    /// Quality-review cycle 1 finding: a leading space splits to an empty
+    /// A leading space splits to an empty
     /// first word (`" AB CD".split(' ')` == `["", "AB", "CD"]`);
     /// `wrap_label`'s `String` accumulator must drop that empty word exactly
     /// like pre-task did (`String::push_str("")` on an empty string is a
@@ -4027,7 +4095,7 @@ mod tests {
         );
     }
 
-    /// Quality-review cycle 2 finding: a trailing empty word that FITS is
+    /// A trailing empty word that FITS is
     /// pre-task-genuine kept content, not dropped -- `format!("{} {}",
     /// current, word)` inserts a joining space and MEASURES it, so a
     /// trailing space that's within budget stays on the line. "AB CD "
@@ -4037,7 +4105,7 @@ mod tests {
     /// FALSE, so pre-task keeps it: `current = "CD "`.
     ///
     /// Oracle derived on paper by hand-tracing the removed `String`-loop
-    /// (`git show` of the pre-cycle-6 body) against `fixed_width(10.0)`'s
+    /// (`git show` of the pre-task body) against `fixed_width(10.0)`'s
     /// exact per-character arithmetic (not a rebuilt base-commit extension).
     #[test]
     fn wrap_trailing_empty_word_that_fits_keeps_pretask_trailing_space() {
@@ -4068,7 +4136,7 @@ mod tests {
         );
     }
 
-    /// Quality-review cycle 2 finding, headline case: a DOUBLED interior
+    /// Headline case: a DOUBLED interior
     /// space is a LINE-COUNT divergence, not just whitespace cosmetics.
     /// "AB  CD" (two spaces) splits to `["AB", "", "CD"]`. At max_width=60,
     /// pre-task keeps everything on one line (the doubled space measures
@@ -4246,7 +4314,7 @@ mod tests {
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
                 // max footprint at -90 ~= line_h = 13.2; stride is the additive
-                // gap-inclusive formula (spec-review cycle 2):
+                // gap-inclusive formula:
                 // ceil((13.2 + cull_threshold(8)) / slot_w(10)) = ceil(2.12) = 3.
                 assert_eq!(stride, 3, "expected stride 3, got {stride}");
                 let visible_count = result.visible.iter().filter(|v| **v).count();
@@ -4278,15 +4346,15 @@ mod tests {
 
     /// F-L07-04 pin: a rotation that genuinely fits still wins over culling,
     /// even when `n > cull_threshold` — culling is a fallback for labels that
-    /// truly don't fit at any angle (INCLUDING the requested gap, spec-review
-    /// cycle 2), not a blanket density trigger. Same 20 labels as
+    /// truly don't fit at any angle (INCLUDING the requested gap), not a
+    /// blanket density trigger. Same 20 labels as
     /// `cascade_s4_culling_at_realistic_widths`, but `slot_w = 22.0`: with
     /// `cull_threshold = 8`, S3's budget is `22 - 8 = 14`, just above -90°'s
     /// footprint (`line_h = 13.2`) — the exact boundary the gap-aware S3
-    /// budget makes meaningful (at `slot_w = 20.0`, the pre-this-fix budget
-    /// used in an earlier draft of this test, `20 - 8 = 12 < 13.2` would fail
-    /// and cull instead — the gap requirement, once folded into S3, changes
-    /// which slot widths count as "genuinely fits").
+    /// budget makes meaningful (at `slot_w = 20.0`, a gap-unaware budget,
+    /// `20 - 8 = 12 < 13.2` would fail and cull instead — the gap
+    /// requirement, once folded into S3, changes which slot widths count as
+    /// "genuinely fits").
     #[test]
     fn cascade_genuinely_fitting_rotation_wins_over_culling() {
         let labels: Vec<String> = (0..20).map(|i| format!("LONGCATEGORY{:02}", i)).collect();
@@ -4363,7 +4431,7 @@ mod tests {
         // skipped entirely and elision fires as the last resort.
         // 6 labels with enormous (1e18) widths -> S3 fails for all angles ->
         // S4 skipped (cull_threshold=0) -> S5 elision. The 1e18 mock is
-        // deliberate, not incidental (quality-review finding S3): at -90°,
+        // deliberate, not incidental: at -90°,
         // `cos_best ≈ 6.12e-17` makes the footprint's width term negligible
         // for any REALISTIC label width, so elision can only ever fire
         // where truncating the text delivers a REAL reduction --
@@ -4394,7 +4462,7 @@ mod tests {
         }
     }
 
-    /// Quality-review finding S3 RED proof: reaching S5 with REALISTIC label
+    /// RED proof: reaching S5 with REALISTIC label
     /// widths (not an astronomical mock) must NOT destroy content. 20 labels
     /// of realistic width (140px, `cascade_s4_culling_at_realistic_widths`'s
     /// fixture) in a slot narrower than one line height (`slot_w=10 <
@@ -4423,8 +4491,7 @@ mod tests {
         assert!(result.visible.iter().all(|v| *v), "no labels should be culled");
     }
 
-    /// Round-8 RED proof (orchestrator golden-PNG gate finding, `configure/
-    /// density_styled.svg`): culling opens up the per-surviving-label pitch,
+    /// RED proof (`configure/density_styled.svg`): culling opens up the per-surviving-label pitch,
     /// and a presentation earlier than -90° rotation must be re-tried at
     /// that WIDER pitch rather than blindly inheriting the angle that made
     /// the original, narrower pitch's stride computation pass. 13 short
@@ -4473,7 +4540,7 @@ mod tests {
         assert_eq!(survivor_texts, vec!["1", "2", "3", "4", "5", "6", "7"]);
     }
 
-    /// Round-8 companion pin: the re-selection at the culled pitch must NOT
+    /// Companion pin: the re-selection at the culled pitch must NOT
     /// force flat where flat genuinely still doesn't fit — a wide label set
     /// culled to a wider (but still insufficient for flat/wrap) pitch
     /// legitimately keeps -90° rotation. Same fixture as
@@ -4501,11 +4568,10 @@ mod tests {
         assert!(result.font_size.is_none());
     }
 
-    /// Round-8 estimator-sync check (`estimate_x_label_band` must not
+    /// Estimator-sync check (`estimate_x_label_band` must not
     /// UNDER-reserve for whatever presentation the real cascade picks
-    /// post-cull — flagged explicitly by the coordinator since a cascade/
-    /// estimator mismatch here is the exact seam that bit spec-review cycle
-    /// 1). The estimator has no notion of culling: whenever S0-S3 fail at
+    /// post-cull — a cascade/estimator mismatch here is a seam that has bitten
+    /// this code before). The estimator has no notion of culling: whenever S0-S3 fail at
     /// its (pre-layout) `estimated_slot_w`, it always reserves the FULL
     /// vertical (-90°) extent as a conservative fallback, regardless of
     /// what S4 later decides. That fallback (`tick_size + label_pad_eff +
@@ -4514,8 +4580,8 @@ mod tests {
     /// label set — flat only needs `tick_size + label_pad_eff + line_h`,
     /// and `font_size + max_label_w > line_h` for any label wider than a
     /// sliver — so over-reservation, not under-reservation, is the only
-    /// possible drift when the real cascade later resolves to Flat via this
-    /// round's fix. Verified directly against the exact fixture that now
+    /// possible drift when the real cascade later resolves to Flat.
+    /// Verified directly against the exact fixture that now
     /// culls-to-flat above.
     #[test]
     fn estimate_x_label_band_over_reserves_for_culled_to_flat_survivors() {
@@ -4620,7 +4686,7 @@ mod tests {
     #[test]
     fn cascade_override_bypasses() {
         // label_angle_override = Some(-90.0) -> cascade not called.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             vec![
@@ -4648,7 +4714,7 @@ mod tests {
         // cull_threshold=0 (disabled) + 6 labels with enormous widths ->
         // elision (spec §4.6 / F-L07-04: cull_threshold gates S4, not a
         // label count).
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..6).map(|i| format!("VeryLongLabel{}", i)).collect(),
@@ -4670,7 +4736,7 @@ mod tests {
     #[test]
     fn cascade_rotation_no_warning() {
         // When rotation resolves collision, no LabelsElided warning should fire.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..8).map(|i| format!("L{}", i)).collect(),
@@ -4724,8 +4790,8 @@ mod tests {
         );
     }
 
-    /// #97 spec §4.1 x-side extension (cycle 4, issue #97 gap): the standoff
-    /// gate applied to the y band in cycle 2 must ALSO apply to the x band's
+    /// #97 spec §4.1 x-side extension (issue #97 gap): the standoff
+    /// gate applied to the y band must ALSO apply to the x band's
     /// flat/wrapped branches — a SHOWN x axis whose labels never draw
     /// (`fm.Axis(labels=False)` → `AxisInput.show_labels = false`,
     /// `render/marks/axis.rs`'s `if axis.show_labels && !tick.culled` guard)
@@ -5096,7 +5162,7 @@ mod tests {
         // Long labels in a narrow panel force rotation; with a title present the
         // title `anchor_y` must sit at or below the full rotated-label extent so
         // it cannot overlap the longest label.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             Some("Feature".into()),
             // No underscores/spaces/camelCase boundaries → wrap is impossible, so
@@ -5156,7 +5222,7 @@ mod tests {
         // anchor_y now goes through the SAME `rotated_x_label_extent` call as
         // rotated labels (continuous at θ=0), so it includes the
         // tick_size + label_pad_eff standoff instead of a bare line_height.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             Some("Price".into()),
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
@@ -5190,7 +5256,7 @@ mod tests {
         );
     }
 
-    /// #97 spec §4.1 x-side extension (cycle 5, issue #97 gap): a titled x
+    /// #97 spec §4.1 x-side extension (issue #97 gap): a titled x
     /// axis with `fm.Axis(labels=False)` (`AxisInput.show_labels = false`)
     /// must place its title at the SAME `anchor_y` the pre-#97 flat-only
     /// special case gave (`git show HEAD`: bare `line_h`, no
@@ -5202,7 +5268,7 @@ mod tests {
     /// same fixture as `x_axis_title_flat_matches_unified_band_formula`.
     #[test]
     fn x_axis_title_labels_off_matches_pre_97_flat_value() {
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Bottom,
             Some("Price".into()),
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
@@ -5264,7 +5330,7 @@ mod tests {
         fractions: Vec<f64>,
         padding_frac: f64,
     ) -> AxisInput {
-        let mut input = AxisInput::new(orient, None, labels, None);
+        let mut input = axis_input(orient, None, labels, None);
         input.tick_projection = Some(TickProjection {
             padding_frac,
             major: fractions,
@@ -5318,7 +5384,7 @@ mod tests {
     fn x_axis_categorical_keeps_uniform_slot_centers() {
         // No projected fractions → byte-identical uniform-slot placement.
         // This reproduces the pre-change positions for n=4 in a 100..500 panel.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
@@ -5360,7 +5426,7 @@ mod tests {
     #[test]
     fn y_axis_categorical_keeps_uniform_slot_centers() {
         // No projected fractions → uniform-slot placement (pre-change positions).
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Left,
             Some("Price".into()),
             vec!["0".into(), "1".into(), "2".into(), "3".into()],
@@ -5412,7 +5478,7 @@ mod tests {
         // projected fractions (categorical), the uniform slot (100px) easily fits
         // 70px labels, so the cascade stays flat. This pins that the rotation in
         // the continuous case is caused by the min-gap logic, not the labels.
-        let input = AxisInput::new(
+        let input = axis_input(
             AxisOrient::Bottom,
             None,
             (0..6).map(|i| format!("L{i}")).collect(),
@@ -5516,11 +5582,24 @@ mod tests {
         assert_eq!(greedy.labels, default.labels);
     }
 
+    /// S1 (batch B design review): a zero-height slot made the Greedy arm's
+    /// `slots_since_kept * slot_h` product `NaN` on the very first label
+    /// (`INFINITY * 0.0`), and `NaN >= line_h` is `false` — silently dropping
+    /// the first label instead of always keeping it as the cascade's anchor.
+    #[test]
+    fn resolve_y_overlap_greedy_zero_slot_height_keeps_first_label() {
+        let labels = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let visible = resolve_y_overlap(Some(LabelOverlap::Greedy), &labels, 0.0, 11.0, &m)
+            .expect("Greedy always returns Some");
+        assert!(visible[0], "the first label must always be kept");
+    }
+
     #[test]
     fn layout_x_axis_parity_culls_alternating_ticks() {
         // End-to-end through layout_x_axis: a parity override on a dense axis
         // marks alternating ticks culled.
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Bottom,
             None,
             dense_labels(),
@@ -5538,7 +5617,7 @@ mod tests {
     fn layout_x_axis_show_all_culls_nothing_on_dense_axis() {
         // A dense axis that the default cascade would cull renders every label
         // when label_overlap = ShowAll.
-        let mut input = AxisInput::new(
+        let mut input = axis_input(
             AxisOrient::Bottom,
             None,
             dense_labels(),
@@ -5560,7 +5639,7 @@ mod tests {
     // functions instead of the mirror's inlined `fs * 1.2 + padding` formula.
 
     fn titled_input(title_font_size: Option<f64>, title_padding: Option<f64>) -> AxisInput {
-        let mut input = AxisInput::new(AxisOrient::Bottom, Some("Title".into()), vec!["a".into()], None);
+        let mut input = axis_input(AxisOrient::Bottom, Some("Title".into()), vec!["a".into()], None);
         input.overrides.title_font_size = title_font_size;
         input.overrides.title_padding = title_padding;
         input
@@ -5602,7 +5681,7 @@ mod tests {
     #[test]
     fn x_title_gutter_no_title_is_zero() {
         let m = mock(0.0);
-        let mut input = AxisInput::new(AxisOrient::Bottom, None, vec!["a".into()], None);
+        let mut input = axis_input(AxisOrient::Bottom, None, vec!["a".into()], None);
         input.overrides.title_font_size = Some(100.0);
         let gutter = compute_x_title_width(&input, 13.0, 8.0, &m);
         assert_eq!(gutter, 0.0, "no title should mean zero gutter");

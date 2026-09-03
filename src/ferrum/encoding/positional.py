@@ -51,12 +51,19 @@ class X(ChannelBase):
     - ``impute`` — an imputation dict applied before mapping.
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
-    - ``legend`` — a ``Legend(...)`` instance, ``None`` / ``False`` to suppress,
-      or a raw legend dict.  Honored (NF-B13): routed to the same per-channel
-      legend-override path ``Color(legend=...)`` uses, so it takes effect on
-      the chart's legend even though ``x``/``y`` carry no legend of their
-      own.  Per-channel precedence is ``color`` > ``x`` > ``y``; if
-      ``Color(legend=...)`` is also set, its value wins field-by-field.
+    - ``legend`` — a ``Legend(...)`` instance or a raw legend dict.  Honored
+      (NF-B13): routed to the same per-channel legend-override *style* path
+      ``Color(legend=...)`` uses, so an explicit ``Legend(orient=...)`` (or
+      similar) takes effect on the chart's legend even though ``x`` carries
+      no legend of its own.  Per-channel precedence is ``color`` > ``x`` >
+      ``y``; if ``Color(legend=...)`` is also set, its value wins
+      field-by-field.  Bare ``legend=None`` / ``legend=False`` is a no-op
+      (nothing is serialized) rather than a suppression: there is no "x's
+      own legend" for that spelling to suppress, so — unlike
+      ``Color``/``Size``/``Shape``, which each own a legend surface —
+      ``x`` cannot reach across channels and blank a different one's
+      legend. Suppress the rendered legend from the channel that actually
+      owns it, e.g. ``Color(legend=None)``.
 
     Examples
     --------
@@ -70,6 +77,7 @@ class X(ChannelBase):
     _channel_name = "x"
     _honored_kwargs = PRIMARY_POSITIONAL
     _stack_kwarg = True
+    _has_own_legend = False
 
 
 class Y(ChannelBase):
@@ -108,12 +116,19 @@ class Y(ChannelBase):
     - ``impute`` — an imputation dict applied before mapping.
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
-    - ``legend`` — a ``Legend(...)`` instance, ``None`` / ``False`` to suppress,
-      or a raw legend dict.  Honored (NF-B13): routed to the same per-channel
-      legend-override path ``Color(legend=...)`` uses, so it takes effect on
-      the chart's legend even though ``x``/``y`` carry no legend of their
-      own.  Per-channel precedence is ``color`` > ``x`` > ``y``; if
-      ``Color(legend=...)`` is also set, its value wins field-by-field.
+    - ``legend`` — a ``Legend(...)`` instance or a raw legend dict.  Honored
+      (NF-B13): routed to the same per-channel legend-override *style* path
+      ``Color(legend=...)`` uses, so an explicit ``Legend(orient=...)`` (or
+      similar) takes effect on the chart's legend even though ``y`` carries
+      no legend of its own.  Per-channel precedence is ``color`` > ``x`` >
+      ``y``; if ``Color(legend=...)`` is also set, its value wins
+      field-by-field.  Bare ``legend=None`` / ``legend=False`` is a no-op
+      (nothing is serialized) rather than a suppression: there is no "y's
+      own legend" for that spelling to suppress, so — unlike
+      ``Color``/``Size``/``Shape``, which each own a legend surface —
+      ``y`` cannot reach across channels and blank a different one's
+      legend. Suppress the rendered legend from the channel that actually
+      owns it, e.g. ``Color(legend=None)``.
 
     Examples
     --------
@@ -126,6 +141,7 @@ class Y(ChannelBase):
     _channel_name = "y"
     _honored_kwargs = PRIMARY_POSITIONAL
     _stack_kwarg = True
+    _has_own_legend = False
 
 
 class X2(ChannelBase):

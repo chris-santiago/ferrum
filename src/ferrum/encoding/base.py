@@ -134,7 +134,34 @@ def _emit_axis(value: Any, out: dict) -> None:
 
 
 def _emit_legend(value: Any, out: dict) -> None:
-    # Accept Legend instances, None/False (suppression), or raw dicts.
+    # For a channel that owns a legend surface (Color, Size, Shape, ...):
+    # accept Legend instances, None/False (suppress THIS channel's legend),
+    # or raw dicts.
+    normalized = _normalize_legend(value)
+    if normalized is not None:
+        out["legend"] = normalized
+
+
+def _emit_legend_cascade_only(value: Any, out: dict) -> None:
+    """Emit ``legend=`` for a channel with no legend surface of its own (X, Y).
+
+    X/Y contribute *style overrides* to the shared color-legend cascade
+    (NF-B13) — precedence ``color`` > ``x`` > ``y`` — but render no legend
+    block themselves. On Color/Size/Shape, bare ``None``/``False`` means
+    "suppress THIS channel's own legend"; X/Y have no "this channel's
+    legend" for that spelling to mean, so reusing :func:`_emit_legend`
+    here made ``X(legend=None)`` reach across channels and suppress
+    color's legend — the exact cross-channel leak the None-means-unspecified
+    rule this batch codifies everywhere else was written to prevent.
+
+    Bare ``None``/``False`` is therefore a no-op: nothing is serialized,
+    exactly as if ``legend=`` had been omitted. An explicit ``Legend(...)``
+    instance or a raw dict — including one that spells
+    ``{"disabled": True}`` itself — is an unambiguous, typed ask and still
+    routes through the normal cascade via :func:`_normalize_legend`.
+    """
+    if value is None or value is False:
+        return
     normalized = _normalize_legend(value)
     if normalized is not None:
         out["legend"] = normalized
@@ -241,6 +268,13 @@ class ChannelBase:
     # ``_validate`` normalizes their ``stack=`` kwarg.  Non-stacking channels
     # leave it False and the normalization is skipped.
     _stack_kwarg: ClassVar[bool] = False
+    # Whether this channel renders a legend block of its own (Color, Size,
+    # Shape, ...).  X and Y set this False: they contribute style overrides
+    # to the shared color-legend cascade (NF-B13) but own no legend surface,
+    # so bare ``legend=None``/``False`` on them cannot mean "suppress THIS
+    # channel's legend" the way it does on Color/Size/Shape — see
+    # `_emit_legend_cascade_only`.
+    _has_own_legend: ClassVar[bool] = True
 
     def __init__(self, field: Any = None, **kwargs: Any) -> None:
         # Phase 9: accept _RepeatPlaceholder as a sentinel value alongside str.
@@ -362,7 +396,12 @@ class ChannelBase:
         serialized iff the channel honors it.  Each honored key routes through
         `_SPEC_DICT_HANDLERS` to its serializer; keys with no handler
         (``bin``/``aggregate``) are honored for the warn guard but consumed via
-        `to_implicit_transforms`, so they contribute nothing here.
+        `to_implicit_transforms`, so they contribute nothing here.  ``legend``
+        is the one key whose serializer depends on more than its own value:
+        a channel with no legend surface of its own (``_has_own_legend =
+        False`` — X, Y) routes through `_emit_legend_cascade_only` instead of
+        `_emit_legend`, so a bare ``None``/``False`` cannot suppress a
+        different channel's legend (see that function's docstring).
 
         Keys are emitted in `_SPEC_DICT_ORDER` so the dict layout is
         stable regardless of ``frozenset`` iteration order.
@@ -370,6 +409,9 @@ class ChannelBase:
         out: dict = {"field": self.field}
         for key in _SPEC_DICT_ORDER:
             if key not in self._honored_kwargs or key not in self._kwargs:
+                continue
+            if key == "legend" and not self._has_own_legend:
+                _emit_legend_cascade_only(self._kwargs[key], out)
                 continue
             handler = _SPEC_DICT_HANDLERS.get(key)
             if handler is None:

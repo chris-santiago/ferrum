@@ -162,6 +162,13 @@ impl SymlogScale {
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] { self.data.domain }
 
+    /// This scale's domain endpoints rounded outward to "nice" values — the
+    /// exact rounding `SymlogScale(nice=True)` applies at construction — see
+    /// [`LinearScale::nice_domain_pair`](super::linear::LinearScale::nice_domain_pair)
+    /// for why `ScaleKind::niced_domain` dispatches to a kind-specific
+    /// method like this one instead of a shared inline rounding.
+    pub(crate) fn nice_domain_pair(&self) -> [f64; 2] { self.data.clone().nice().domain }
+
     /// Replace this scale's data-space domain in place, keeping its range and
     /// every kind-specific parameter.
     ///

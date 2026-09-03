@@ -7,6 +7,40 @@ from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
 from ferrum._title_sentinel import TitleParam, _UNSET, _UnsetType, is_unspecified, serialize_title
+from ferrum._validate import validate_choice
+
+#: Accepted ``label_overlap`` tokens — Rust's `parse_label_overlap`
+#: (``crates/ferrum-core/src/render/prepare/mod.rs``) real, distinct-behavior
+#: vocabulary: ``"true"`` shows every label (no collision culling),
+#: ``"false"``/``"greedy"`` are two spellings of the cascade default cull,
+#: ``"parity"`` is stride-2 decimation, ``"rotate"`` forces the rotate stage.
+#: Deliberately excludes ``"hide"`` — some earlier docstrings advertised it,
+#: but Rust's parser has never given it distinct behavior (an unrecognized
+#: token silently falls back to ``"greedy"``); rather than keep documenting
+#: a spelling that silently means something else, it is refused here.
+_VALID_LABEL_OVERLAP_TOKENS: frozenset[str] = frozenset(
+    {"true", "false", "greedy", "parity", "rotate"}
+)
+
+
+def validate_label_overlap(owner: str, value: str) -> None:
+    """Raise ``ValueError`` when *value* is not a recognized ``label_overlap`` token.
+
+    The one shared validator for every Python surface that accepts a
+    ``label_overlap`` token — the per-channel :class:`Axis` dataclass,
+    chart-level ``AxisConfig``/``configure_axis`` (:mod:`ferrum.configure`),
+    the raw axis-dict normalize path, and — via ``AxisConfig`` construction
+    in ``_override_apply._chart_config_wire_fragment`` —
+    ``.override(axis_label_overlap=...)`` — so the vocabulary and the
+    ``ValueError`` wording cannot drift between surfaces (mirrors
+    :func:`ferrum.legend.validate_legend_orient`'s shape). Rust's own
+    ``parse_label_overlap`` stays total over this vocabulary (an
+    unrecognized token there silently falls back to the cascade default,
+    ``Greedy``); this is the loud boundary check the spec places in Python
+    instead.
+    """
+    validate_choice(owner, "label_overlap", value, _VALID_LABEL_OVERLAP_TOKENS)
+
 
 # Fields whose Python default (``True``/``False``/``"greedy"``) matches the
 # renderer's own built-in default.  These are declared with ``_UNSET`` (not
@@ -75,9 +109,12 @@ class Axis:
         even as ``False`` — always reaches the wire (same omit-vs-explicit
         contract as ``ticks``).
     label_overlap : str, optional
-        Label overlap strategy ("greedy", "parity", "rotate").  Omitting
-        ``label_overlap`` keeps the renderer's own default (``"greedy"``, the
-        graduated collision cascade); passing it explicitly — even as
+        Label overlap strategy: ``"greedy"`` (the graduated collision
+        cascade), ``"parity"`` (stride-2 decimation), ``"rotate"`` (force the
+        rotate stage), or ``"true"``/``"false"`` (show every label / the
+        ``"greedy"`` alias). An unrecognized token raises ``ValueError`` at
+        construction. Omitting ``label_overlap`` keeps the renderer's own
+        default (``"greedy"``); passing it explicitly — even as
         ``"greedy"`` — always reaches the wire (same omit-vs-explicit contract
         as ``ticks``).
     label_format : str, optional
@@ -237,6 +274,9 @@ class Axis:
             owner="Axis",
             stacklevel=2,
         )
+
+        if not is_unspecified(label_overlap):
+            validate_label_overlap("Axis.label_overlap", label_overlap)  # type: ignore[arg-type]
 
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "orient", orient)
@@ -400,7 +440,9 @@ def _normalize_axis(value: Any) -> dict[str, Any] | None:
     Accepts:
     - Axis instance -> .to_dict()
     - False -> suppression dict
-    - dict -> pass through (with ``label_format`` preset resolution)
+    - dict -> pass through (with ``label_format`` preset resolution and
+      ``label_overlap`` token validation — a raw dict bypasses ``Axis``'s
+      own construction-time check, so it gets the identical one here)
     - None -> None (meaning "not specified")
     """
     if value is None:
@@ -410,5 +452,7 @@ def _normalize_axis(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Axis):
         return value.to_dict()
     if isinstance(value, dict):
+        if "label_overlap" in value and not is_unspecified(value["label_overlap"]):
+            validate_label_overlap("axis dict", value["label_overlap"])
         return _resolve_axis_dict_format(value)
     return None

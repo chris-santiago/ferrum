@@ -54,7 +54,7 @@ AxisConfig(
 | `label_color` | `str | None` | `None` | Tick label color |
 | `label_format` | `str | None` | `None` | Named format preset; see [Format Presets](format-presets.md) |
 | `label_format_raw` | `str | None` | `None` | Raw d3-format or strftime string |
-| `label_overlap` | `str | None` | `None` | Overlap strategy: `"parity"`, `"greedy"`, `"rotate"`, or `"hide"` |
+| `label_overlap` | `str | None` | `None` | Overlap strategy: `"greedy"`, `"parity"`, `"rotate"`, or `"true"`/`"false"` |
 | `tick_count` | `int | None` | `None` | Suggested number of ticks |
 | `tick_size` | `float | None` | `None` | Tick mark length in pixels |
 | `tick_values` | `list | None` | `None` | Explicit tick positions |

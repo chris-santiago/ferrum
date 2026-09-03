@@ -167,6 +167,18 @@ impl LinearScale {
         self.data.domain
     }
 
+    /// This scale's domain endpoints rounded outward to "nice" values — the
+    /// exact rounding `LinearScale(nice=True)` applies at construction
+    /// (`LinearScaleData::nice`, `nice_step` with a count-10 tick target) —
+    /// without mutating `self`. `ScaleKind::niced_domain` dispatches here so
+    /// the chart-level `configure_axis(nice=True)` cascade
+    /// (`scale_resolve::apply_axis_domain_config`) rounds identically to the
+    /// encoding-level `Scale(nice=True)` surface, on THIS scale's own domain,
+    /// rather than re-implementing linear rounding at the config seam.
+    pub(crate) fn nice_domain_pair(&self) -> [f64; 2] {
+        self.data.clone().nice().domain
+    }
+
     /// Replace this scale's data-space domain in place, keeping its range and
     /// every kind-specific parameter.
     ///

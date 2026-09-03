@@ -5,7 +5,7 @@ table at ``crates/ferrum-core/src/render/chart_config_manifest.json``,
 generated and consumed by a test in
 ``crates/ferrum-core/src/render/chart_config.rs`` (Task 1, closed
 2026-09-02) — enumerates every serde field of the wire config schema. This
-module carries two legs:
+module carries three legs:
 
 1. **Python-vs-Python parity** (the original leg): each chart-level config
    dataclass in ``configure.py`` is paired with the
@@ -24,13 +24,25 @@ module carries two legs:
    manifest is complete relative to the Rust struct fields, not relative to
    Python) — see the spec-reviewer's ``cannot_verify[0]`` and the
    quality-reviewer's ``lossiness[1]`` findings on task 2, cycle 2.
+3. **``object.__setattr__`` mirror completeness** (2026-09-03, design-review
+   remediation, finding F3): ``AxisConfig``/``Axis`` are
+   ``dataclass(init=False)`` with hand-written ``__init__``s that mirror
+   every field three times (field declaration, ``__init__`` parameter,
+   ``object.__setattr__`` line); a dropped ``object.__setattr__`` line
+   silently leaves that field at its class default. This leg mechanically
+   derives the field list, the constructor's parameters, and the constructor
+   source's ``object.__setattr__`` calls and asserts all three agree, so a
+   missing mirror line fails loudly instead of silently. This is a cheap
+   structural guard, not the full ``init=False`` refactor (a separate filed
+   follow-up).
 """
 
 from __future__ import annotations
 
 import inspect
 import json
-from dataclasses import fields
+import re
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +51,7 @@ import pytest
 
 import ferrum as fm
 from ferrum._configure_mixin import ConfigureMixin
+from ferrum.axis import Axis
 from ferrum.configure import (
     AxisConfig,
     ColorConfig,
@@ -363,6 +376,100 @@ def test_manifest_twin_is_red_provable():
     }
     assert _unexplained_gaps(synthetic_manifest) == ["ColorConfigSpec.totally_made_up_field"]
     assert "ColorConfigSpec.totally_made_up_field" not in _EXPECTED_PYTHON_ABSENT
+
+
+# ---------------------------------------------------------------------------
+# Leg 3 — object.__setattr__ mirror completeness (2026-09-03, design-review
+# remediation, finding F3).
+#
+# `AxisConfig` and `Axis` are `dataclass(init=False)` with hand-written
+# `__init__`s that mirror every field three times: field declaration,
+# `__init__` parameter, and `object.__setattr__(self, "<name>", <name>)`
+# line. A dropped `object.__setattr__` line silently leaves that field at its
+# class default and the caller's value vanishes — the precise "accepted on
+# one surface, silently lost on another" failure class legs 1/2 above exist
+# to catch, reproduced structurally inside these two classes' own
+# hand-written constructors. This leg does not attempt the full `init=False`
+# refactor (a separate filed follow-up); it is a cheap structural guard that
+# mechanically derives the field list, the constructor's parameter list, and
+# the constructor source's `object.__setattr__` calls, and asserts all three
+# agree.
+# ---------------------------------------------------------------------------
+
+_SETATTR_NAME_RE = re.compile(r'object\.__setattr__\(\s*self\s*,\s*"([^"]+)"')
+
+
+def _setattr_names(cls: type) -> set[str]:
+    """Return the field names ``object.__setattr__`` writes inside ``cls.__init__``."""
+    source = inspect.getsource(cls.__init__)
+    return set(_SETATTR_NAME_RE.findall(source))
+
+
+# Each entry: (dataclass, alias-only __init__ params). Alias-only params
+# (the deprecated `min_extent=`/`max_extent=` spellings) resolve into a
+# different canonical field (`min_band`/`max_band`) before construction and
+# so never get their own `object.__setattr__` line or dataclass field of
+# their own — the same documented-exception shape as `_MANIFEST`'s
+# `method_only` above.
+_SETATTR_MIRROR_TARGETS = (
+    (AxisConfig, frozenset({"min_extent", "max_extent"})),
+    (Axis, frozenset({"min_extent", "max_extent"})),
+)
+
+
+@pytest.mark.parametrize(
+    "config_cls,alias_only_params",
+    _SETATTR_MIRROR_TARGETS,
+    ids=[cls.__name__ for cls, _ in _SETATTR_MIRROR_TARGETS],
+)
+def test_setattr_mirrors_every_field(config_cls, alias_only_params):
+    """Every dataclass field has exactly one ``object.__setattr__`` line in
+    ``__init__``, and every constructor parameter maps to a real field
+    (modulo the documented deprecated-alias params)."""
+    dataclass_fields = {f.name for f in fields(config_cls)}
+    setattr_names = _setattr_names(config_cls)
+    params = {n for n in inspect.signature(config_cls.__init__).parameters if n != "self"}
+
+    missing_setattr = dataclass_fields - setattr_names
+    assert not missing_setattr, (
+        f"{config_cls.__name__}.__init__ has no object.__setattr__ line for "
+        f"field(s) {sorted(missing_setattr)} — a caller's value for this "
+        "field would silently vanish, left at the class default"
+    )
+
+    orphaned_setattr = setattr_names - dataclass_fields
+    assert not orphaned_setattr, (
+        f"{config_cls.__name__}.__init__ has object.__setattr__ line(s) for "
+        f"non-field name(s) {sorted(orphaned_setattr)}"
+    )
+
+    missing_param = dataclass_fields - params - alias_only_params
+    assert not missing_param, (
+        f"{config_cls.__name__} field(s) {sorted(missing_param)} have no "
+        "matching __init__ parameter"
+    )
+
+
+def test_setattr_mirror_check_is_red_provable():
+    """``_setattr_names`` discriminates rather than vacuously passing.
+
+    A synthetic frozen, ``init=False`` dataclass whose hand-written
+    ``__init__`` drops one ``object.__setattr__`` line must surface as a
+    gap — the RED proof this leg's completeness claim rests on.
+    """
+
+    @dataclass(frozen=True, init=False)
+    class _SyntheticAxisLike:
+        kept: int | None = None
+        dropped: int | None = None  # __init__ below never assigns this
+
+        def __init__(self, kept: int | None = None, dropped: int | None = None) -> None:
+            object.__setattr__(self, "kept", kept)
+            # BUG (deliberate, for this test): no object.__setattr__ for "dropped".
+
+    dataclass_fields = {f.name for f in fields(_SyntheticAxisLike)}
+    setattr_names = _setattr_names(_SyntheticAxisLike)
+    assert dataclass_fields - setattr_names == {"dropped"}
 
 
 # ---------------------------------------------------------------------------

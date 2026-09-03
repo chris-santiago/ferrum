@@ -526,6 +526,16 @@ impl AxisDomainConfig {
 /// explicit `min`/`max` clamps — so an explicit bound is never re-rounded away
 /// by `nice`, and `zero` cannot re-widen past an explicit bound.
 ///
+/// `nice` delegates to [`ScaleKind::niced_domain`], which dispatches to THIS
+/// scale kind's own `nice()` rather than re-deriving a kind-independent
+/// rounding here — a log axis nices in log space (power-of-`base` rounding)
+/// and a time axis nices calendar-aware, matching exactly what the
+/// encoding-level `Scale(nice=True)` surface would produce on the same
+/// domain. Rounding every kind with the same linear `nice_step` (the
+/// pre-fix behavior) could drive a log axis's bound to 0 — refused by every
+/// log-scale constructor, so `configure_axis(nice=True)` on a log axis used
+/// to raise `InvalidScaleDomainConfig` instead of rendering.
+///
 /// `zero` and `nice` are ONE-DIRECTIONAL by design, and the `false` spelling
 /// is a deliberate no-op rather than an oversight: both name an opt-in
 /// widening of an already-resolved domain, and there is nothing on the other
@@ -566,11 +576,9 @@ pub(in crate::render) fn apply_axis_domain_config(
         d_hi = d_hi.max(0.0);
     }
     if cfg.nice == Some(true) {
-        let step = crate::scale::ticks::nice_step(d_lo, d_hi, DEFAULT_NICE_TICK_COUNT);
-        if step.is_finite() && step != 0.0 {
-            d_lo = (d_lo / step).floor() * step;
-            d_hi = (d_hi / step).ceil() * step;
-        }
+        let (nlo, nhi) = scale.niced_domain(d_lo, d_hi);
+        d_lo = nlo;
+        d_hi = nhi;
     }
     if let Some(min) = cfg.min {
         d_lo = min;
@@ -581,7 +589,7 @@ pub(in crate::render) fn apply_axis_domain_config(
     // The computed domain must survive everything its own scale kind would
     // have refused at construction — a config-written domain is a USER-set
     // domain, so it meets the user-set contract, not the auto-inferred
-    // fallback (spec §4.2, quality review cycle 2). Two layers, both quoting
+    // fallback (spec §4.2). Two layers, both quoting
     // the constructors' own sentences so the words never drift:
     //
     //   1. KIND-INDEPENDENT: a degenerate pair, which every continuous
@@ -612,16 +620,112 @@ pub(in crate::render) fn apply_axis_domain_config(
     Ok(())
 }
 
-/// The tick count `nice=true` rounds against — the same 10 the continuous
-/// scales' own `nice()` implementations use (`LinearScale::nice`,
-/// `LogScale::nice`), so a chart-level `nice` lands on the same bounds an
-/// encoding-level `Scale(nice=True)` would.
-const DEFAULT_NICE_TICK_COUNT: usize = 10;
-
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};
     use crate::render::scale_resolve::ScaleKind;
+    use crate::scale::linear::LinearScale;
+    use crate::scale::log::LogScale;
+    use crate::scale::pow::PowScale;
+    use crate::scale::symlog::SymlogScale;
+    use crate::scale::time::TimeScale;
+
+    // ── Batch B design review S4 (2026-09-03): `ScaleKind::niced_domain` ────
+    //
+    // Reviewer-prescribed property test: `configure_axis(nice=True)`'s
+    // dispatch point (`ScaleKind::niced_domain`) must land on exactly the
+    // domain each continuous kind's OWN `nice=True` construction produces —
+    // the encoding-level `Scale(nice=True)` surface — for all five
+    // continuous kinds. The "direct" side below constructs via
+    // `<Kind>Scale::new_internal(..., nice: true)`, the exact crate-internal
+    // constructor the Python-facing `#[new]` delegates to for its own `nice`
+    // handling (verified by reading each — `if nice { d = d.nice(); }`),
+    // rather than the private `#[new]` itself, which isn't reachable from
+    // this module. Before the fix this property held only for
+    // Linear/Pow/Symlog (which happen to share the same `nice_step`
+    // rounding), by coincidence rather than by design; Log and Time
+    // genuinely diverged.
+
+    /// Linear: count-10 `nice_step` rounding.
+    #[test]
+    fn niced_domain_matches_linear_scale_nice_true() {
+        let domain = vec![3.0, 847.0];
+        let range = vec![0.0, 500.0];
+        let auto = ScaleKind::Linear(LinearScale::new_internal(
+            domain.clone(), range.clone(), false, false,
+        ));
+        let direct = LinearScale::new_internal(domain.clone(), range, false, true);
+        let [want_lo, want_hi] = direct.domain_pair();
+        assert_eq!(auto.niced_domain(domain[0], domain[1]), (want_lo, want_hi));
+    }
+
+    /// Log: power-of-`base` rounding — the S4 bug's own kind. `(10, 1000)` is
+    /// the reviewer-reproduced repro's domain shape (see
+    /// `render::orchestration_tests::render_svg_log_axis_configure_axis_nice_true_renders_instead_of_refusing`),
+    /// which the pre-fix `nice_step` rounding drove to a `0` lower bound.
+    #[test]
+    fn niced_domain_matches_log_scale_nice_true() {
+        let domain = vec![10.0, 1000.0];
+        let range = vec![0.0, 500.0];
+        let auto = ScaleKind::Log(LogScale::new_internal(
+            domain.clone(), range.clone(), 10.0, false, false,
+        ));
+        let direct = LogScale::new_internal(domain.clone(), range, 10.0, false, true);
+        let [want_lo, want_hi] = direct.domain_pair();
+        assert_eq!(auto.niced_domain(domain[0], domain[1]), (want_lo, want_hi));
+        // And, concretely, neither bound is 0 — the shape of the bug this
+        // property test exists to catch.
+        assert_ne!(want_lo, 0.0);
+    }
+
+    /// Symlog: shares Linear's `nice_step` rounding on its (already-linear)
+    /// domain representation.
+    #[test]
+    fn niced_domain_matches_symlog_scale_nice_true() {
+        let domain = vec![3.0, 847.0];
+        let range = vec![0.0, 500.0];
+        let auto = ScaleKind::Symlog(SymlogScale::new_internal(
+            domain.clone(), range.clone(), 1.0, false, false,
+        ));
+        let direct = SymlogScale::new_internal(domain.clone(), range, 1.0, false, true);
+        let [want_lo, want_hi] = direct.domain_pair();
+        assert_eq!(auto.niced_domain(domain[0], domain[1]), (want_lo, want_hi));
+    }
+
+    /// Pow: shares Linear's `nice_step` rounding on its raw (untransformed)
+    /// domain (verified by reading `PowScaleData::nice`, which is
+    /// structurally identical to `LinearScaleData::nice`). `PowScale::new_internal`
+    /// has no `nice` parameter (production never constructs an auto Pow scale
+    /// with `nice: true` — `build_axis_scale` always passes `nice: false`),
+    /// so the "direct" side here hand-derives the expected bounds via the
+    /// same shared `nice_step` primitive `PowScaleData::nice` calls, rather
+    /// than a from-scratch scale construction.
+    #[test]
+    fn niced_domain_matches_pow_scale_nice_true() {
+        let domain = vec![3.0, 847.0];
+        let range = vec![0.0, 500.0];
+        let auto = ScaleKind::Pow(PowScale::new_internal(domain.clone(), range, 0.5, false));
+        let step = crate::scale::ticks::nice_step(domain[0], domain[1], 10);
+        let want_lo = (domain[0] / step).floor() * step;
+        let want_hi = (domain[1] / step).ceil() * step;
+        assert_eq!(auto.niced_domain(domain[0], domain[1]), (want_lo, want_hi));
+    }
+
+    /// Time: calendar-aware rounding (month/year boundaries via `chrono`),
+    /// not a raw epoch-ms `nice_step` round — the other divergent kind the
+    /// design review named alongside Log.
+    #[test]
+    fn niced_domain_matches_time_scale_nice_true() {
+        // ~400 days apart, in epoch-ms.
+        let domain = vec![1_700_000_000_000.0, 1_734_560_000_000.0];
+        let range = vec![0.0, 500.0];
+        let auto = ScaleKind::Time(TimeScale::new_internal(
+            domain.clone(), range.clone(), false, false,
+        ));
+        let direct = TimeScale::new_internal(domain.clone(), range, false, true);
+        let [want_lo, want_hi] = direct.domain_pair();
+        assert_eq!(auto.niced_domain(domain[0], domain[1]), (want_lo, want_hi));
+    }
 
     /// Issue #39: an explicit two-entry range is honored verbatim, and marked
     /// explicit for band-geometry consumers.

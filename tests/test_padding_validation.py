@@ -371,9 +371,7 @@ class TestPaddingAutoEdgeTickOverhang:
         shape) and never mentions `auto` must NOT silently gain expansion on
         the other three sides — the exact regression finding 3 named."""
         base = self._clipping_repro_chart()
-        svg_one_side = (
-            base.configure_padding(top=5).properties(width=400, height=200).to_svg()
-        )
+        svg_one_side = base.configure_padding(top=5).properties(width=400, height=200).to_svg()
         svg_one_side_explicit_no_auto = (
             base.configure_padding(top=5, auto=False).properties(width=400, height=200).to_svg()
         )
@@ -385,9 +383,7 @@ class TestPaddingAutoEdgeTickOverhang:
         consumer (`ChartConfig.padding.auto` -> `theme.padding.padding_auto`
         -> `auto_padding_for_edge_ticks`), so they must render byte-identically."""
         base = self._clipping_repro_chart()
-        svg_configure = (
-            base.configure_padding(auto=True).properties(width=400, height=200).to_svg()
-        )
+        svg_configure = base.configure_padding(auto=True).properties(width=400, height=200).to_svg()
         with pytest.warns(DeprecationWarning, match="padding_auto"):
             svg_override = (
                 base.override(padding_auto=True).properties(width=400, height=200).to_svg()
@@ -396,8 +392,8 @@ class TestPaddingAutoEdgeTickOverhang:
 
     def test_override_padding_auto_false_matches_configure_padding_auto_false(self):
         """The `False` spelling of both paths also converges (T8's
-        `_leaf_wire_fragment` pinned `.override(padding_auto=False)` reaching
-        the wire; this pins it reaching the SAME rendered geometry as
+        `_chart_config_wire_fragment` pinned `.override(padding_auto=False)`
+        reaching the wire; this pins it reaching the SAME rendered geometry as
         `configure_padding(auto=False)`, not just "doesn't crash")."""
         base = self._clipping_repro_chart()
         svg_configure = (
@@ -459,7 +455,9 @@ class TestPaddingAutoAxisTitleRecentering:
     def _title_x(cls, chart) -> float:
         svg = chart.properties(width=270, height=200).to_svg()
         m = re.search(
-            r'<text[^>]*x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>' + re.escape(cls.TITLE) + r"</text>",
+            r'<text[^>]*x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>'
+            + re.escape(cls.TITLE)
+            + r"</text>",
             svg,
         )
         assert m is not None, f"expected the x-axis title text in the SVG: {svg}"
@@ -484,7 +482,9 @@ class TestPaddingAutoAxisTitleRecentering:
         only an explicit `auto=True` engages recentering."""
         base = self._repro_chart()
         svg_no_call = base.properties(width=270, height=200).to_svg()
-        svg_auto_false = base.configure_padding(auto=False).properties(width=270, height=200).to_svg()
+        svg_auto_false = (
+            base.configure_padding(auto=False).properties(width=270, height=200).to_svg()
+        )
         assert svg_no_call == svg_auto_false
 
 
@@ -566,7 +566,9 @@ class TestPaddingAutoTitleAndTickComposition:
     def _title_x(chart, width: int, height: int, title: str) -> float:
         svg = chart.properties(width=width, height=height).to_svg()
         m = re.search(
-            r'<text[^>]*x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>' + re.escape(title) + r"</text>",
+            r'<text[^>]*x="(-?[\d.]+)"[^>]*text-anchor="middle"[^>]*>'
+            + re.escape(title)
+            + r"</text>",
             svg,
         )
         assert m is not None, f"expected the x-axis title text in the SVG: {svg}"
@@ -650,8 +652,12 @@ class TestPaddingAutoTitleAndTickComposition:
         convention).
         """
         chart = self._repro_chart(self.INFEASIBLE_TITLE)
-        svg_auto_false = chart.configure_padding(auto=False).properties(width=280, height=200).to_svg()
-        svg_auto_true = chart.configure_padding(auto=True).properties(width=280, height=200).to_svg()
+        svg_auto_false = (
+            chart.configure_padding(auto=False).properties(width=280, height=200).to_svg()
+        )
+        svg_auto_true = (
+            chart.configure_padding(auto=True).properties(width=280, height=200).to_svg()
+        )
         assert svg_auto_true == svg_auto_false, (
             "an infeasible title's auto=True render must be byte-identical to "
             "auto=False — the tick pass's own correction must be suppressed "
@@ -671,23 +677,11 @@ class TestPaddingExceedsViewportMessage:
     def test_huge_top_padding_names_caller_value_and_side(self):
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
         with pytest.raises(ValueError, match=r"padding top=1000000000 exceeds"):
-            (
-                fr.Chart(df)
-                .mark_point()
-                .encode(x="x", y="y")
-                .configure_padding(top=1e9)
-                .to_svg()
-            )
+            (fr.Chart(df).mark_point().encode(x="x", y="y").configure_padding(top=1e9).to_svg())
 
     def test_huge_right_padding_names_right_not_top(self):
         """A different side set huge must name THAT side, not `"top"`
         (proving the fix picks the actual offending side, not a hardcoded one)."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
         with pytest.raises(ValueError, match=r"padding right=1000000000 exceeds"):
-            (
-                fr.Chart(df)
-                .mark_point()
-                .encode(x="x", y="y")
-                .configure_padding(right=1e9)
-                .to_svg()
-            )
+            (fr.Chart(df).mark_point().encode(x="x", y="y").configure_padding(right=1e9).to_svg())

@@ -323,16 +323,28 @@ def _build_chart_config_rules() -> list[_PrefixRule]:
     # prefix wins (``x_axis_grid_color`` is not mis-split as ``axis_…``).
     return [
         _PrefixRule(
-            "x_axis_", Target.CHART_CONFIG, "axis_x", axis_leaves, ".configure_axis({leaf}=...)",
-            config_cls=AxisConfig
+            "x_axis_",
+            Target.CHART_CONFIG,
+            "axis_x",
+            axis_leaves,
+            ".configure_axis({leaf}=...)",
+            config_cls=AxisConfig,
         ),
         _PrefixRule(
-            "y_axis_", Target.CHART_CONFIG, "axis_y", axis_leaves, ".configure_axis({leaf}=...)",
-            config_cls=AxisConfig
+            "y_axis_",
+            Target.CHART_CONFIG,
+            "axis_y",
+            axis_leaves,
+            ".configure_axis({leaf}=...)",
+            config_cls=AxisConfig,
         ),
         _PrefixRule(
-            "axis_", Target.CHART_CONFIG, "axis", axis_leaves, ".configure_axis({leaf}=...)",
-            config_cls=AxisConfig
+            "axis_",
+            Target.CHART_CONFIG,
+            "axis",
+            axis_leaves,
+            ".configure_axis({leaf}=...)",
+            config_cls=AxisConfig,
         ),
         _PrefixRule(
             "legend_",
@@ -340,7 +352,7 @@ def _build_chart_config_rules() -> list[_PrefixRule]:
             "legend",
             _config_leaves(LegendConfig),
             ".configure_legend({leaf}=...)",
-            config_cls=LegendConfig
+            config_cls=LegendConfig,
         ),
         _PrefixRule(
             "title_",
@@ -348,7 +360,7 @@ def _build_chart_config_rules() -> list[_PrefixRule]:
             "title",
             _config_leaves(TitleConfig),
             ".configure_title({leaf}=...)",
-            config_cls=TitleConfig
+            config_cls=TitleConfig,
         ),
         _PrefixRule(
             "grid_",
@@ -356,7 +368,7 @@ def _build_chart_config_rules() -> list[_PrefixRule]:
             "grid",
             _config_leaves(GridConfig),
             ".configure_grid({leaf}=...)",
-            config_cls=GridConfig
+            config_cls=GridConfig,
         ),
         _PrefixRule(
             "padding_",
@@ -364,7 +376,7 @@ def _build_chart_config_rules() -> list[_PrefixRule]:
             "padding",
             _config_leaves(PaddingConfig),
             ".configure_padding({leaf}=...)",
-            config_cls=PaddingConfig
+            config_cls=PaddingConfig,
         ),
         _PrefixRule(
             "color_",
@@ -372,7 +384,7 @@ def _build_chart_config_rules() -> list[_PrefixRule]:
             "color",
             _config_leaves(ColorConfig),
             ".configure_color({leaf}=...)",
-            config_cls=ColorConfig
+            config_cls=ColorConfig,
         ),
     ]
 
@@ -568,57 +580,69 @@ def validate(overrides: dict[str, Any]) -> None:
             validate_pixel_value(f"override {path!r}", value)
 
 
-def _leaf_wire_fragment(config_cls: type | None, leaf: str, value: Any) -> dict[str, Any]:
-    """Validate and serialize one chart-config override leaf, via its owner.
+def _chart_config_wire_fragment(config_cls: type | None, leaves: dict[str, Any]) -> dict[str, Any]:
+    """Validate and serialize a chart-config section's override leaves, via its owner.
 
     An override leaf is the *deprecated spelling of the same request* its
     advertised typed equivalent expresses — the registry says so itself
-    (``.configure_grid({leaf}=...)``). So the leaf must accept exactly what
-    that method accepts, refuse exactly what it refuses, and reach the wire in
-    exactly the same shape. The way to guarantee all three is to let the
-    owning dataclass answer, rather than to re-implement its answers here:
-    construct it with this one leaf and take what ``to_dict()`` emits.
+    (``.configure_grid({leaf}=...)``). So the leaves named for one section
+    (e.g. every ``x_axis_*`` key in one ``.override(...)`` call) must accept
+    exactly what the equivalent ``configure_axis(...)`` call accepts, refuse
+    exactly what it refuses, and reach the wire in exactly the same shape.
+    The way to guarantee all three is to let the owning dataclass answer,
+    rather than to re-implement its answers here: construct it with every
+    leaf named for this section **at once** and take what ``to_dict()``
+    emits.
 
-    That makes the dataclass the single validation authority per leaf, so
-    every validator the config surface has today **and every one added
-    later** covers the override spelling automatically — no per-symptom hook
-    to remember. It closes three separate leaks in one stroke:
-    ``override(grid_x="nonsense")`` (was serde's untagged-enum message, one
-    call away from the surface that refuses it properly),
-    ``override(x_axis_domain_min=nan)`` (was a json serializer artifact — a
-    bare ``NaN`` token that fails *before* Rust's gate can run, so no
-    render-side backstop can reach it), and ``override(axis_title=None)``
-    (was a no-op, where ``configure_axis(title=None)`` suppresses).
+    Constructing with the combined set — not one leaf at a time — is what
+    makes the dataclass the single validation authority per *section*, not
+    merely per leaf. A single-leaf construction can only run validators that
+    look at one field; ``AxisConfig``'s cross-field validators
+    (``label_format``/``label_format_raw`` mutual exclusion,
+    ``_validate_domain_bounds``'s ``domain_min``/``domain_max`` pair) need
+    both fields present in the same call to fire at all, so
+    ``override(axis_label_format="percent", axis_label_format_raw=",.2f")``
+    previously built each leaf in isolation, silently combined two
+    individually-valid fragments into a combination the typed surface
+    refuses, and let Rust's raw-first precedence pick a winner no
+    construction-time check ever saw. Building one instance from the whole
+    section closes that gap the same way the single-leaf construction closed
+    the original three: ``override(grid_x="nonsense")`` (was serde's
+    untagged-enum message), ``override(x_axis_domain_min=nan)`` (was a json
+    serializer artifact), and ``override(axis_title=None)`` (was a no-op).
 
-    Returning a fragment rather than a single value is load-bearing: a leaf
-    can serialize to more than one wire key — ``label_format`` resolves a
-    preset and emits ``label_format_type`` alongside it — and taking only
-    ``[leaf]`` would drop the companion and mis-classify the format.
+    Returning a fragment rather than a value dict as-is is load-bearing: a
+    leaf can serialize to more than one wire key — ``label_format`` resolves
+    a preset and emits ``label_format_type`` alongside it — and taking only
+    the named leaves would drop the companion and mis-classify the format.
 
     The empty-construction baseline is subtracted for the mirror-image
     reason. ``to_dict()`` emits every non-``None`` field, including the
-    class's own DEFAULTS, so a one-leaf instance carries keys the caller never
-    named: ``PaddingConfig`` declares ``auto: bool = False``, so
+    class's own DEFAULTS, so an instance carries keys the caller never named:
+    ``PaddingConfig`` declares ``auto: bool = False``, so
     ``PaddingConfig(left=70).to_dict()`` is ``{"auto": False, "left": 70.0}``.
-    Merging that fragment would inject an unsolicited ``auto`` onto the wire
-    AND overwrite an explicit sibling leaf in kwarg order — ``override(
-    padding_auto=True, padding_left=70)`` would resolve to ``auto: False``
-    while the reversed spelling resolved to ``auto: True``, the exact parity
-    this seam exists to guarantee. Dropping any key the leaf did not name that
-    a default-constructed instance also emits keeps derived companions (absent
-    from the baseline) and drops injected defaults (present in it), so a
-    fragment can only contain keys the leaf itself produced.
+    Merging that fragment would inject an unsolicited ``auto`` onto the wire.
+    Building the section from one combined construction call also retires
+    the kwarg-order hazard the single-leaf version had to reason about
+    separately: ``override(padding_auto=True, padding_left=70)`` and the
+    reversed spelling both become one ``PaddingConfig(auto=True, left=70)``
+    call regardless of which key the caller wrote first, so there is no
+    order for the two spellings to disagree on. Dropping any key the section
+    did not name that a default-constructed instance also emits keeps
+    derived companions (absent from the baseline) and drops injected
+    defaults (present in it), so a fragment can only contain keys the named
+    leaves themselves produced.
 
     ``config_cls is None`` (encoding-scale, mark and coord prefixes, whose
     leaves are not owned by a ``ferrum.configure`` dataclass) keeps the raw
-    single-key behavior; those surfaces have their own validation stories and
+    multi-key behavior; those surfaces have their own validation stories and
     are outside the class this closes.
     """
     if config_cls is None:
-        return {leaf: value}
-    fragment = config_cls(**{leaf: value}).to_dict()
+        return dict(leaves)
+    fragment = config_cls(**leaves).to_dict()
     baseline = config_cls().to_dict()
-    return {k: v for k, v in fragment.items() if k == leaf or k not in baseline}
+    return {k: v for k, v in fragment.items() if k in leaves or k not in baseline}
 
 
 def build_payload(overrides: dict[str, Any]) -> OverridePayload:
@@ -629,6 +653,15 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
     a pure transform: it constructs and returns a plain data object and touches no
     ``Chart``.  Paths with a typed equivalent are recorded in ``deprecations`` so
     the consumer can warn before applying.
+
+    Chart-config leaves are grouped by section (``target_key``) before the
+    owning dataclass is constructed, so every leaf named for one section in
+    this call — e.g. both ``axis_label_format`` and ``axis_label_format_raw``
+    — reaches the owning ``configure.py`` dataclass in a **single** combined
+    construction. That is what lets cross-field validators (mutual
+    exclusion, paired-bounds checks) fire on the override spelling exactly
+    as they do on the typed ``configure_*(...)`` surface; see
+    :func:`_chart_config_wire_fragment`.
 
     Parameters
     ----------
@@ -647,7 +680,8 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
     """
     validate(overrides)
 
-    chart_config: dict[str, dict[str, Any]] = {}
+    chart_config_leaves: dict[str, dict[str, Any]] = {}
+    chart_config_classes: dict[str, type | None] = {}
     encoding: dict[str, dict[str, dict[str, Any]]] = {}
     mark_style: dict[str, Any] = {}
     coord: dict[str, Any] = {}
@@ -662,12 +696,11 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
 
         if resolved.target is Target.CHART_CONFIG:
             assert loc.target_key is not None
-            # One validation authority per leaf: the owning config dataclass
-            # (see `_leaf_wire_fragment`). `update`, not `[leaf] =`, because a
-            # leaf may serialize to several wire keys.
-            chart_config.setdefault(loc.target_key, {}).update(
-                _leaf_wire_fragment(resolved.config_cls, loc.leaf, value)
-            )
+            # Collect every leaf for this section first; the owning
+            # dataclass is constructed once, from the whole section, after
+            # the loop (see `_chart_config_wire_fragment`).
+            chart_config_leaves.setdefault(loc.target_key, {})[loc.leaf] = value
+            chart_config_classes[loc.target_key] = resolved.config_cls
         elif resolved.target is Target.ENCODING_SCALE:
             assert loc.target_key is not None
             channel = encoding.setdefault(loc.target_key, {})
@@ -681,6 +714,11 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
 
         if resolved.typed_equivalent is not None:
             deprecations.append((path, resolved.typed_equivalent))
+
+    chart_config = {
+        target_key: _chart_config_wire_fragment(chart_config_classes[target_key], leaves)
+        for target_key, leaves in chart_config_leaves.items()
+    }
 
     return OverridePayload(
         chart_config=chart_config,

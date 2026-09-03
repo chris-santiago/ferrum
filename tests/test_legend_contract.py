@@ -18,9 +18,12 @@ What is pinned:
   gradient with the ticks beneath it (D5).
 - **``values`` on a categorical legend.** Filters and orders the entries,
   mirroring the colorbar arm; unknown names warn and are skipped (D6/F-L04-05).
-- **``X(legend=)`` / ``Y(legend=)``.** The positional channels' documented
-  ``legend=`` kwarg reaches the same per-channel override path ``Color``'s does
-  (NF-B13, user-adjudicated: implement).
+- **``X(legend=)`` / ``Y(legend=)``.** An explicit ``Legend(...)``/dict on the
+  positional channels reaches the same per-channel override path ``Color``'s
+  does (NF-B13, user-adjudicated: implement). Bare ``None``/``False`` is a
+  no-op (design-review remediation, batch B): ``x``/``y`` own no legend
+  surface of their own, so that spelling cannot suppress a different
+  channel's legend the way ``Color(legend=None)`` suppresses its own.
 - **``orient="none"`` per channel.** Suppresses that channel's legend, matching
   the chart-level spelling.
 - **Cascade (D7).** Per-channel beats chart-level on ``orient``/``columns``/
@@ -491,41 +494,87 @@ def test_color_channel_legend_beats_a_positional_one(cat_df):
     assert "from x" not in drawn, drawn
 
 
-def test_x_legend_none_suppresses_the_chart_legend(cat_df):
-    """``X(legend=None)`` suppresses the whole chart's legend.
+def test_x_legend_none_is_a_no_op_leaves_the_color_legend_intact(cat_df):
+    """``X(legend=None)`` must NOT suppress the color channel's legend.
 
-    Disclosed behavior change (NF-B13): before X/Y gained a real legend
-    consumer, ``disabled`` was the one field of the positional ``legend=``
-    dict nothing read, so ``X(legend=None)`` (which normalizes to
-    ``{"disabled": True}``) did nothing. Routing every field of the
-    per-channel legend override through one cascade — the alternative of
-    special-casing ``disabled`` out — would leave positional.py's documented
-    "``None``/``False`` to suppress" claim false, which this batch forbids.
+    Design-review remediation (finding 4, cross-channel leak): ``x`` owns no
+    legend surface of its own, so bare ``None`` on it cannot mean "suppress
+    THIS channel's legend" the way it does on ``Color``/``Size``/``Shape``.
+    Routing it through the same ``{"disabled": True}`` mapping those
+    channels use reached across channels and blanked ``color``'s legend
+    instead — the exact cross-channel action at a distance the
+    None-means-unspecified rule (``ferrum._title_sentinel.is_unspecified``)
+    forbids everywhere else. The fix makes bare ``None``/``False`` on
+    ``x``/``y`` a no-op: the rendered chart is byte-identical to one that
+    never named ``legend=`` on ``x`` at all.
     """
-    chart = (
-        fm.Chart(cat_df)
-        .mark_point()
-        .encode(x=fm.X("x", type_="Q", legend=None), y="y:Q", color="cat:N")
-        .properties(**WIDE)
-    )
-    svg, _ = render(chart)
-    drawn = texts(svg)
+
+    def chart(x_channel):
+        return (
+            fm.Chart(cat_df)
+            .mark_point()
+            .encode(x=x_channel, y="y:Q", color="cat:N")
+            .properties(**WIDE)
+        )
+
+    with_none, _ = render(chart(fm.X("x", type_="Q", legend=None)))
+    plain, _ = render(chart(fm.X("x", type_="Q")))
+    assert with_none == plain, "X(legend=None) must be a no-op, not a suppression"
+    drawn = texts(with_none)
     for label in CATEGORIES:
-        assert label not in drawn, f"X(legend=None) must suppress the legend; got {drawn}"
+        assert label in drawn, f"X(legend=None) must leave the color legend intact; got {drawn}"
 
 
-def test_y_legend_false_suppresses_the_chart_legend(cat_df):
+def test_y_legend_false_is_a_no_op_leaves_the_color_legend_intact(cat_df):
     """The ``Y`` twin, and the ``False`` spelling rather than ``None``."""
+
+    def chart(y_channel):
+        return (
+            fm.Chart(cat_df)
+            .mark_point()
+            .encode(x="x:Q", y=y_channel, color="cat:N")
+            .properties(**WIDE)
+        )
+
+    with_false, _ = render(chart(fm.Y("y", type_="Q", legend=False)))
+    plain, _ = render(chart(fm.Y("y", type_="Q")))
+    assert with_false == plain, "Y(legend=False) must be a no-op, not a suppression"
+    drawn = texts(with_false)
+    for label in CATEGORIES:
+        assert label in drawn, f"Y(legend=False) must leave the color legend intact; got {drawn}"
+
+
+def test_x_legend_explicit_disabled_dict_still_suppresses(cat_df):
+    """A typed, explicit ask still works: ``X(legend={"disabled": True})`` is
+    not the bare-``None``/``False`` spelling — it is an unambiguous request
+    routed through the normal cascade, unaffected by the no-op fix above."""
     chart = (
         fm.Chart(cat_df)
         .mark_point()
-        .encode(x="x:Q", y=fm.Y("y", type_="Q", legend=False), color="cat:N")
+        .encode(x=fm.X("x", type_="Q", legend={"disabled": True}), y="y:Q", color="cat:N")
         .properties(**WIDE)
     )
     svg, _ = render(chart)
     drawn = texts(svg)
     for label in CATEGORIES:
-        assert label not in drawn, f"Y(legend=False) must suppress the legend; got {drawn}"
+        assert label not in drawn, (
+            f"X(legend={{'disabled': True}}) must still suppress the legend; got {drawn}"
+        )
+
+
+def test_color_legend_none_still_suppresses_its_own_legend(cat_df):
+    """``Color`` owns a legend surface, so its bare ``legend=None`` keeps
+    suppressing — the no-op fix above is scoped to ``x``/``y`` only."""
+    chart = (
+        fm.Chart(cat_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", color=fm.Color("cat", legend=None))
+        .properties(**WIDE)
+    )
+    svg, _ = render(chart)
+    drawn = texts(svg)
+    for label in CATEGORIES:
+        assert label not in drawn, f"Color(legend=None) must still suppress; got {drawn}"
 
 
 def test_x_legend_dict_override_takes_effect(cat_df):

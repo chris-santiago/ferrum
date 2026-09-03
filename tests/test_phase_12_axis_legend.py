@@ -250,6 +250,66 @@ class TestAxisNormalize:
         assert result is not d
 
 
+class TestLabelOverlapValidation:
+    """Design-review finding F2: one loud ``label_overlap`` validator on
+    every Python surface that accepts the token, reconciled to Rust's real
+    accepted vocabulary (``parse_label_overlap`` in
+    ``crates/ferrum-core/src/render/prepare/mod.rs``): ``"true"``,
+    ``"false"``, ``"greedy"``, ``"parity"``, ``"rotate"``. ``"hide"`` was
+    advertised on ``AxisConfig``'s docstring but has never had distinct
+    behavior in Rust — an unrecognized token there silently falls back to
+    ``"greedy"`` — so it is refused here rather than kept as a spelling that
+    silently means something else.
+    """
+
+    @pytest.mark.parametrize("token", ["true", "false", "greedy", "parity", "rotate"])
+    def test_every_real_token_is_accepted_on_axis(self, token):
+        assert Axis(label_overlap=token).to_dict() == {"label_overlap": token}
+
+    @pytest.mark.parametrize("token", ["true", "false", "greedy", "parity", "rotate"])
+    def test_every_real_token_is_accepted_on_axisconfig(self, token):
+        assert fm.AxisConfig(label_overlap=token).to_dict()["label_overlap"] == token
+
+    def test_hide_is_refused_not_silently_coerced(self):
+        # Previously silently reached the wire and Rust bound it to "greedy"
+        # (the cascade default) with no signal to the caller that "hide" had
+        # never had its own behavior.
+        with pytest.raises(ValueError, match="label_overlap"):
+            Axis(label_overlap="hide")
+        with pytest.raises(ValueError, match="label_overlap"):
+            fm.AxisConfig(label_overlap="hide")
+
+    def test_unrecognized_token_is_refused_on_axis(self):
+        with pytest.raises(ValueError, match="label_overlap"):
+            Axis(label_overlap="nonsense")
+
+    def test_unrecognized_token_is_refused_on_axisconfig(self):
+        with pytest.raises(ValueError, match="label_overlap"):
+            fm.AxisConfig(label_overlap="nonsense")
+
+    def test_unrecognized_token_is_refused_in_the_raw_axis_dict(self):
+        # A raw dict bypasses Axis.__init__; _normalize_axis's dict branch
+        # must apply the identical check.
+        with pytest.raises(ValueError, match="label_overlap"):
+            _normalize_axis({"label_overlap": "nonsense"})
+
+    def test_unrecognized_token_is_refused_through_override(self):
+        # Free via AxisConfig construction in
+        # _override_apply._chart_config_wire_fragment. `.override(...)` only
+        # stores the kwargs; validation runs when the payload is built, at
+        # render time.
+        chart = fm.Chart(pl.DataFrame({"a": [1, 2], "b": [3, 4]})).mark_point().encode(x="a", y="b")
+        with pytest.raises(ValueError, match="label_overlap"):
+            chart.override(axis_label_overlap="nonsense").to_svg()
+
+    def test_explicit_none_is_unspecified_not_a_refusal(self):
+        # Matches the shared is_unspecified gate every other Axis-defaulted
+        # field already uses.
+        assert Axis(label_overlap=None).to_dict() == {}
+        assert fm.AxisConfig(label_overlap=None).to_dict() == {}
+        assert _normalize_axis({"label_overlap": None}) == {"label_overlap": None}
+
+
 # ---------------------------------------------------------------------------
 # Legend tests
 # ---------------------------------------------------------------------------

@@ -307,6 +307,16 @@ impl LogScale {
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] { self.data.domain }
 
+    /// This scale's domain endpoints rounded outward to the nearest power of
+    /// `base` — the exact rounding `LogScale(nice=True)` applies at
+    /// construction (`LogScaleData::nice`) — without mutating `self`.
+    /// `ScaleKind::niced_domain` dispatches here so the chart-level
+    /// `configure_axis(nice=True)` cascade rounds a log axis in LOG space
+    /// rather than the count-10 linear rounding `nice_step` would give (the
+    /// S4 bug this method exists to fix: linear rounding can drive a log
+    /// axis's bound to 0, which every log-scale constructor refuses).
+    pub(crate) fn nice_domain_pair(&self) -> [f64; 2] { self.data.clone().nice().domain }
+
     /// Replace this scale's data-space domain in place, keeping its range and
     /// every kind-specific parameter.
     ///

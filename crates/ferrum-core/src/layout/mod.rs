@@ -245,7 +245,7 @@ pub enum LayoutError {
     InvalidViewport { width: f64, height: f64 },
     InvalidFacetSpec(String),
     /// `padding` and `side` are the CALLER'S actual value and the specific
-    /// side that overflowed (D10, spec §4.7, T6 quality-review repro:
+    /// side that overflowed (D10, spec §4.7 — repro:
     /// `configure_padding(top=1e9)` previously reported the theme's default
     /// 16 instead of the caller's 1e9). `side` names one of
     /// `"top"|"right"|"bottom"|"left"` — the one whose resolved inset is
@@ -301,7 +301,7 @@ pub struct ThemePadding {
     /// an axis title that would otherwise render past the viewport edge.
     /// Read by [`compute_layout`](super::compute_layout), which composes
     /// every reader's correction SEQUENTIALLY and sums the result per side,
-    /// then caps it against the viewport (spec-review cycle 6 — an earlier
+    /// then caps it against the viewport (an earlier
     /// elementwise-max merge was unsound; see the composition note on
     /// `compute_layout`'s own padding step and each reader's own doc for
     /// why); a side the caller DID set is never touched (explicit always
@@ -850,7 +850,7 @@ fn reserve_axis_bands(
         .overrides
         .label_font_size
         .unwrap_or(theme.typography.label_font_size);
-    // Standoff gate (#97, spec §4.1 amended 2026-08-27, extended cycle 2;
+    // Standoff gate (#97, spec §4.1 amended 2026-08-27;
     // #94 phantom-margin family): `axes.show_y` is `.axis(y=False)`'s
     // chart-level toggle (JointChart marginals, ClusterMap dendrograms). It
     // does NOT empty `axes.y.tick_labels` — only `layout_y_axis`'s emission
@@ -934,7 +934,7 @@ fn reserve_axis_bands(
     // `label_font_size`/`title_font_size`/`title_padding` overrides exactly
     // like the primary's reservation above, and — mirroring the primary
     // `y_band` clamp above — its own `min_band`/`max_band` overrides too
-    // (quality review finding: these were silently dropped for secondary
+    // (these were previously silently dropped for secondary
     // axes even though `build_axis_input` populates them per layer). Empty
     // `axes.secondary_y` (the pre-#52 default) makes `secondary_y_total`
     // zero, so the shrink below is a no-op and default output stays
@@ -992,7 +992,7 @@ fn reserve_axis_bands(
 /// caller set one, else the theme's flat default. This is the "floor"
 /// `padding.auto` (D10) never lowers and never needs to reduce: every
 /// auto-padding reader starts from it, and `compute_layout`'s own feasibility
-/// cap (spec-review cycle 6, finding 2) treats it as the space auto must
+/// cap treats it as the space auto must
 /// never encroach on, so all three read the identical quantity instead of
 /// each re-deriving `padding_<side>.unwrap_or(padding)` by hand.
 fn base_padding_insets(theme: &ThemeInputs) -> Inset {
@@ -1008,8 +1008,7 @@ fn base_padding_insets(theme: &ThemeInputs) -> Inset {
 /// contribution for one axis (left/right or top/bottom, after every
 /// auto-padding reader has been combined) — down so applying it can never
 /// convert a chart that renders at `auto=false` into a
-/// `LayoutError::PaddingExceedsViewport` refusal (spec-review cycle 6,
-/// finding 2: `recentering_padding`'s feasible branch is intentionally
+/// `LayoutError::PaddingExceedsViewport` refusal (`recentering_padding`'s feasible branch is intentionally
 /// unbounded in isolation — it solves for whatever shift the title needs,
 /// with no notion of a shared budget — so nothing capped the MERGED total
 /// against the viewport it was being added to; a large enough `extra`
@@ -1052,8 +1051,8 @@ fn cap_auto_contribution(
 /// The y-axis gutter width `padding.auto` (D10) treats as the "cushion"
 /// already available on whichever side the y-axis sits: label band + title
 /// gutter, clamped through `clamp_axis_band` exactly like
-/// `reserve_axis_bands` clamps its own `y_band` (spec-review cycle 2 fix —
-/// the cushion estimate previously used the UNCLAMPED sum, so
+/// `reserve_axis_bands` clamps its own `y_band` (a fix for the
+/// cushion estimate previously using the UNCLAMPED sum, so
 /// `fm.Axis(max_band=...)` capping the real gutter smaller than this
 /// estimate made the cushion look bigger than it really is, silently
 /// under-reserving `extra_left`/`extra_right` below). Shared by
@@ -1192,7 +1191,7 @@ fn auto_padding_for_edge_ticks(
 /// `half_extent`, whose baseline center sits at `baseline_center` along a
 /// `span`-long viewport axis, no longer overflows either edge.
 ///
-/// Derivation (spec-review cycle 2, F-L07-08 finding 1 — the symmetric-only
+/// Derivation (F-L07-08 — the symmetric-only
 /// derivation this replaces incorrectly concluded a centered element could
 /// NEVER be rescued by padding; that holds only when both sides expand by
 /// the SAME amount): expanding the low side's padding by `x` shifts the
@@ -1224,7 +1223,7 @@ fn auto_padding_for_edge_ticks(
 /// `span`-long viewport axis — independent of `baseline_center` (the
 /// `2*half_extent <= span` bound below the derivation cancels it out; see
 /// `recentering_padding`'s own doc for the full derivation). Split out
-/// (spec-review cycle 7, finding 1) because `recentering_padding`'s own
+/// because `recentering_padding`'s own
 /// `(extra_low, extra_high)` output is `(0.0, 0.0)` in TWO different
 /// situations a caller composing it with another auto-padding pass must
 /// tell apart: "already centered, nothing to do" and "genuinely too wide
@@ -1270,7 +1269,7 @@ fn recentering_padding(baseline_center: f64, half_extent: f64, span: f64) -> (f6
 /// genuine residual (see [`recentering_padding`]).
 ///
 /// `base` is the outer padding to solve against — NOT re-derived from
-/// `theme.padding` here (spec-review cycle 6, finding 1): `compute_layout`
+/// `theme.padding` here: `compute_layout`
 /// passes the padding AFTER `auto_padding_for_edge_ticks`'s own correction
 /// is folded in, so this function's solve — the last word on outer
 /// padding, since nothing after it adds more — sees the geometry the tick
@@ -1288,19 +1287,18 @@ fn recentering_padding(baseline_center: f64, half_extent: f64, span: f64) -> (f6
 /// invalidate.
 ///
 /// Gated on `axes.show_x`/`axes.show_y` — mirrors
-/// `auto_padding_for_edge_ticks`'s own gate (spec-review cycle 6, finding
-/// 3): `AxisInput.title` is populated independently of the chart-level
+/// `auto_padding_for_edge_ticks`'s own gate: `AxisInput.title` is populated independently of the chart-level
 /// show flag, so without this gate a `.axis(x=False)` chart with a title
 /// set would still pay for recentering a title `layout_panel_axes` never
 /// draws.
 ///
-/// Reuses [`clamped_y_gutter`] (spec-review cycle 2 fix, same `max_band`
+/// Reuses [`clamped_y_gutter`] (same `max_band`
 /// gap as `auto_padding_for_edge_ticks`) for the x-title's left/right
 /// baseline-center estimate, and the x-axis's own clamped band (its label
 /// band plus title gutter, via the same `clamp_axis_band` `reserve_axis_bands`
 /// applies) for the y-title's top/bottom baseline-center estimate. Both
 /// estimates ignore the legend gutter and secondary-y bands (documented,
-/// disclosed gap, sign corrected spec-review cycle 6: ignoring a real
+/// disclosed gap: ignoring a real
 /// right-side legend or secondary-y band makes `baseline_center` LARGER
 /// than the true plot center, which asks the solver for MORE right
 /// padding than actually needed and can push the title further past its
@@ -1315,8 +1313,7 @@ fn recentering_padding(baseline_center: f64, half_extent: f64, span: f64) -> (f6
 /// Also reports, per axis, whether that axis's title is in the genuine
 /// residual regime (title wider than the viewport itself,
 /// `!recentering_is_feasible`) via `AxisTitleAutoPadding::x_infeasible`/
-/// `y_infeasible` — `compute_layout` needs this (spec-review cycle 7,
-/// finding 1): this function's own `(extra_low, extra_high)` for that axis
+/// `y_infeasible` — `compute_layout` needs this: this function's own `(extra_low, extra_high)` for that axis
 /// is `(0.0, 0.0)` either way in that regime, but a same-axis tick-pass
 /// contribution folded into `base` is NOT zero and, being asymmetric,
 /// still shifts the title's center with nothing here able to counteract
@@ -1410,7 +1407,7 @@ fn auto_padding_for_axis_titles(
 }
 
 /// [`auto_padding_for_axis_titles`]'s return shape: the extra `Inset` it
-/// computed, plus (spec-review cycle 7, finding 1) per-axis feasibility
+/// computed, plus per-axis feasibility
 /// flags `compute_layout` uses to suppress a same-axis
 /// [`auto_padding_for_edge_ticks`] contribution when this pass's own
 /// correction is in the genuine residual regime — see both functions' docs.
@@ -1887,8 +1884,7 @@ pub fn compute_layout(
     // expands a side with no explicit override to also contain (a) a
     // continuous axis's edge-tick-label overhang, and (b) an axis title
     // that would otherwise clip past the viewport edge — composed
-    // SEQUENTIALLY, not merged by elementwise max (spec-review cycle 6,
-    // finding 1): the tick pass is solved first, against the untouched
+    // SEQUENTIALLY, not merged by elementwise max: the tick pass is solved first, against the untouched
     // base, and its own guarantee is monotone under later additions on
     // either side; the title pass is solved LAST, against the
     // tick-adjusted base (`auto_padding_for_axis_titles`'s `base`
@@ -1901,13 +1897,13 @@ pub fn compute_layout(
     // the tick pass — a tick-only expansion on one side silently moved the
     // center the title pass had solved for, re-clipping a title auto
     // claims to protect. The combined per-side total is then capped
-    // against the viewport (finding 2, `cap_auto_contribution`): auto is
+    // against the viewport (`cap_auto_contribution`): auto is
     // best-effort and must never convert a chart that renders at
     // `auto=false` into a `PaddingExceedsViewport` refusal, or report a
     // padding value the caller never set. Computed once, only when
     // requested, so a non-auto chart's inset is unchanged.
     //
-    // Spec-review cycle 7, finding 1: when a title's own recentering is
+    // When a title's own recentering is
     // INFEASIBLE (`AxisTitleAutoPadding::x_infeasible`/`y_infeasible` —
     // the title is wider than the viewport itself, the documented genuine
     // residual), its own contribution is already `(0.0, 0.0)`, but the
@@ -1963,7 +1959,7 @@ pub fn compute_layout(
     let inner = viewport_rect.shrink(inset);
     if inner.w <= 0.0 || inner.h <= 0.0 {
         // Report the CALLER's actual value and the specific side responsible
-        // (D10, spec §4.7 — the T6 quality-review repro:
+        // (D10, spec §4.7 — repro:
         // `configure_padding(top=1e9)` previously reported the theme
         // DEFAULT 16, not the caller's 1e9). `Rect::shrink` collapses both
         // `inner.w` and `inner.h` to 0 together once either axis fails, so
@@ -2083,6 +2079,26 @@ pub fn compute_layout(
 mod tests {
     use super::*;
 
+    /// Test helper: `AxisInput::new` plus the theme-default fold
+    /// `AxesInput::apply_show_defaults` performs in production (against
+    /// `ThemeInputs::default()`, which every test in this module uses), so
+    /// `compute_layout` tests that hand-build an `AxesInput` don't have to
+    /// know about the `show_domain()`/`show_grid()` precondition those
+    /// accessors now assert in debug builds. A test that DOES care overwrites
+    /// `input.overrides.show_domain`/`.show_grid` afterward, same as before.
+    fn axis_input(
+        orient: AxisOrient,
+        title: Option<String>,
+        tick_labels: Vec<String>,
+        label_angle: Option<f64>,
+    ) -> AxisInput {
+        let new = AxisInput::new;
+        let mut input = new(orient, title, tick_labels, label_angle);
+        input.overrides.show_domain = Some(true);
+        input.overrides.show_grid = Some(true);
+        input
+    }
+
     #[test]
     fn layout_result_round_trip_empty() {
         let r = LayoutResult {
@@ -2169,13 +2185,13 @@ mod tests {
 
     fn dummy_axes() -> AxesInput {
         AxesInput {
-            x: AxisInput::new(
+            x: axis_input(
                 AxisOrient::Bottom,
                 None,
                 vec!["0".into(), "1".into(), "2".into(), "3".into()],
                 None,
             ),
-            y: AxisInput::new(
+            y: axis_input(
                 AxisOrient::Left,
                 None,
                 vec!["0".into(), "5".into(), "10".into()],
@@ -2346,7 +2362,7 @@ mod tests {
     fn n_secondary_axes(n: usize) -> Vec<AxisInput> {
         (1..=n)
             .map(|i| {
-                AxisInput::new(
+                axis_input(
                     AxisOrient::Right,
                     Some(format!("Sec{i}")),
                     vec!["0".into(), "50".into(), "100".into()],
@@ -2424,7 +2440,7 @@ mod tests {
         let theme = default_theme_inputs();
 
         let mut axes = dummy_axes();
-        let mut sec = AxisInput::new(
+        let mut sec = axis_input(
             AxisOrient::Right,
             Some("Sec1".into()),
             vec!["0".into(), "50".into(), "100".into()],
@@ -2445,7 +2461,7 @@ mod tests {
         }
     }
 
-    /// Quality-review fix 2 regression: a secondary-y elision warning and an
+    /// Regression: a secondary-y elision warning and an
     /// x-axis elision warning emitted in the SAME panel must carry distinct,
     /// non-colliding identities. Pre-fix, the secondary-y push used
     /// `axis_layouts.len() + secondary_y_axis_layouts.len()` — an index into
@@ -2467,13 +2483,13 @@ mod tests {
         // 20 long unsplittable x labels + a forced override angle: the
         // override branch's own collision check (not the graduated cascade)
         // deterministically elides regardless of `cull_threshold`.
-        axes.x = AxisInput::new(
+        axes.x = axis_input(
             AxisOrient::Bottom,
             None,
             (0..20).map(|i| format!("Label_{i}")).collect(),
             Some(-45.0),
         );
-        let sec = AxisInput::new(
+        let sec = axis_input(
             AxisOrient::Right,
             None,
             (0..20).map(|i| format!("Sec_{i}")).collect(),
@@ -2540,7 +2556,7 @@ mod tests {
         // 20 tightly-packed rotated labels per panel — same forcing recipe as
         // the collision-identity test above, sized to still collide inside a
         // single facet cell (roughly half the single-panel width/height).
-        let sec = AxisInput::new(
+        let sec = axis_input(
             AxisOrient::Right,
             None,
             (0..20).map(|i| format!("Sec_{i}")).collect(),
@@ -2616,8 +2632,8 @@ mod tests {
     /// (not the primary's), narrowing the plot area and pushing every
     /// subsequent slot's stacked offset outward by the same delta — mirroring
     /// the primary y-axis's `min_band_reserves_larger_left_band` behavior.
-    /// Regression test for the silently-dropped-override bug found in the
-    /// secondary-y-axis-design (#52) quality review: `clamp_axis_band` was
+    /// Regression test for the silently-dropped-override bug in
+    /// secondary-y-axis-design (#52): `clamp_axis_band` was
     /// applied to the primary y band but not per-secondary-axis bands.
     #[test]
     fn compute_layout_secondary_y_min_band_widens_its_own_band_and_shifts_offsets() {
@@ -2937,7 +2953,7 @@ mod tests {
         }
     }
 
-    /// D10, spec §4.7 — the T6 quality-review repro: `configure_padding(top=
+    /// D10, spec §4.7 — repro: `configure_padding(top=
     /// 1e9)` previously reported the theme DEFAULT (16), not the caller's
     /// 1e9, and never named which side. `padding_top` is the only side set
     /// (mirroring `configure_padding(top=1e9)` — the other three sides stay
@@ -2984,14 +3000,14 @@ mod tests {
     /// A continuous x-axis (`tick_projection: Some`) whose last tick's label
     /// is a long number, at a narrow viewport with default (16px) padding.
     fn continuous_x_axes_with_long_last_label() -> AxesInput {
-        let mut x = AxisInput::new(
+        let mut x = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["0".into(), "999999".into()],
             None,
         );
         x.tick_projection = Some(TickProjection { padding_frac: 0.0, major: vec![0.0, 1.0], minor: vec![] });
-        let y = AxisInput::new(
+        let y = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "5".into(), "10".into()],
@@ -3024,14 +3040,14 @@ mod tests {
     /// number, paired with a y-axis whose `max_band` caps its reserved
     /// gutter well below its natural (unclamped) width.
     fn continuous_x_axes_with_long_first_label_and_capped_y_band() -> AxesInput {
-        let mut x = AxisInput::new(
+        let mut x = axis_input(
             AxisOrient::Bottom,
             None,
             vec!["-999999999999999".into(), "0".into()],
             None,
         );
         x.tick_projection = Some(TickProjection { padding_frac: 0.0, major: vec![0.0, 1.0], minor: vec![] });
-        let mut y = AxisInput::new(
+        let mut y = axis_input(
             AxisOrient::Left,
             None,
             vec!["0".into(), "5".into(), "10".into()],
@@ -3041,7 +3057,7 @@ mod tests {
         AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
     }
 
-    /// Spec-review cycle 2, finding 2: the cushion estimate previously used
+    /// The cushion estimate previously used
     /// the UNCLAMPED y label band, so `fm.Axis(max_band=...)` capping the
     /// REAL reserved gutter smaller made the cushion look bigger than it
     /// really is and silently under-reserved `extra.left`. Hand-derived
@@ -3070,7 +3086,7 @@ mod tests {
     /// Integration-level sibling of
     /// `padding_auto_prevents_last_x_tick_label_from_overhanging_the_viewport`,
     /// through the real `compute_layout` path, pinning the reviewer's live
-    /// repro (spec-review cycle 2, finding 2): a long first x tick label
+    /// repro: a long first x tick label
     /// clips past the LEFT canvas edge, identically under auto=True and
     /// auto=False, when the cushion estimate ignores `max_band`. After the
     /// fix, `auto=True` keeps it within bounds.
@@ -3202,7 +3218,7 @@ mod tests {
         assert_eq!(without_auto, with_auto);
     }
 
-    // ── padding.auto: axis-title recentering (spec-review cycle 2, finding 1) ──
+    // ── padding.auto: axis-title recentering ──
 
     #[test]
     fn recentering_padding_no_correction_when_already_fits() {
@@ -3240,8 +3256,7 @@ mod tests {
     /// `recentering_is_feasible` is the SAME `2*half_extent <= span` test
     /// `recentering_padding` uses internally, exposed so `compute_layout`
     /// can tell "no correction needed" apart from "genuinely infeasible" —
-    /// both of which `recentering_padding` collapses to `(0.0, 0.0)` (spec-
-    /// review cycle 7, finding 1).
+    /// both of which `recentering_padding` collapses to `(0.0, 0.0)`.
     #[test]
     fn recentering_is_feasible_matches_recentering_padding_own_bound() {
         assert!(recentering_is_feasible(20.0, 200.0), "well within span");
@@ -3254,13 +3269,13 @@ mod tests {
     /// A short-tick-label chart (so `auto_padding_for_edge_ticks` contributes
     /// nothing, isolating the title-only effect) with a long x-axis title.
     fn axes_with_wide_x_title() -> AxesInput {
-        let x = AxisInput::new(
+        let x = axis_input(
             AxisOrient::Bottom,
             Some("A Wide X Axis Title".into()), // 19 chars
             vec!["0".into(), "1".into()],
             None,
         );
-        let y = AxisInput::new(AxisOrient::Left, None, vec!["0".into(), "1".into()], None);
+        let y = axis_input(AxisOrient::Left, None, vec!["0".into(), "1".into()], None);
         AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
     }
 
@@ -3346,7 +3361,7 @@ mod tests {
         );
     }
 
-    /// The genuine residual (spec-review cycle 2, finding 1's narrowed
+    /// The genuine residual (a narrowed
     /// claim): a title wider than the viewport ITSELF cannot be fully
     /// rescued by any padding arrangement. `padding.auto=true` must not
     /// turn this into a hard failure (no `PaddingExceedsViewport`), and —
@@ -3354,7 +3369,7 @@ mod tests {
     /// the same axis (a short 2-tick label, no `max_band`, no overhang) —
     /// it renders BYTE-IDENTICAL to `auto=false`: the title pass's own
     /// contribution is `(0.0, 0.0)` and there is nothing else to compose it
-    /// with. (Spec-review cycle 7, finding 1: this is NOT the general
+    /// with. (This is NOT the general
     /// guarantee — see
     /// `padding_auto_never_worsens_an_infeasible_title_when_a_tick_correction_also_fires`
     /// below for the composed case, where a same-axis tick correction used
@@ -3391,8 +3406,8 @@ mod tests {
         );
     }
 
-    /// The composed sibling of the test above (spec-review cycle 7, finding
-    /// 1): cycle 6's `padding_auto_keeps_title_on_canvas_when_a_tick_correction_also_fires`
+    /// The composed sibling of the test above:
+    /// `padding_auto_keeps_title_on_canvas_when_a_tick_correction_also_fires`
     /// proved the FEASIBLE case, where the title pass's solve, evaluated
     /// against the tick-adjusted base, fully recenters the title. This is
     /// the INFEASIBLE case — same tick-overhang fixture
@@ -3446,7 +3461,7 @@ mod tests {
         )
         .expect("auto-padded layout should still render, not refuse");
 
-        // The genuine guarantee (cycle 7): never worse than auto=false.
+        // The genuine guarantee: never worse than auto=false.
         // Since this axis's combined auto contribution is suppressed to
         // exactly zero in the infeasible regime, the two renders are
         // byte-identical -- not merely "no worse".
@@ -3458,7 +3473,7 @@ mod tests {
         );
     }
 
-    // ── padding.auto: composition (spec-review cycle 6, findings 1/2/3) ─────
+    // ── padding.auto: composition ─────
 
     #[test]
     fn cap_auto_contribution_passes_through_when_it_already_fits() {
@@ -3841,13 +3856,13 @@ mod tests {
             .collect();
 
         let axes = AxesInput {
-            x: AxisInput::new(
+            x: axis_input(
                 AxisOrient::Bottom,
                 Some("x_title".into()),
                 vec!["0".into(), "1".into()],
                 None,
             ),
-            y: AxisInput::new(
+            y: axis_input(
                 AxisOrient::Left,
                 Some("y_title".into()),
                 vec!["0".into(), "5".into()],
@@ -3917,13 +3932,13 @@ mod tests {
 
         // Short flat labels: "A"=10px fits in slot_w=600/4=150.
         let short_axes = AxesInput {
-            x: AxisInput::new(
+            x: axis_input(
                 AxisOrient::Bottom,
                 None,
                 vec!["A".into(), "B".into(), "C".into(), "D".into()],
                 None,
             ),
-            y: AxisInput::new(
+            y: axis_input(
                 AxisOrient::Left,
                 None,
                 vec!["0".into(), "5".into(), "10".into()],
@@ -3937,13 +3952,13 @@ mod tests {
         // Long labels with -45° override: "ABCDEFGHIJ"=100px. Angle override forces
         // margin = 100*sin(45°) + line_h*cos(45°) ≈ 70.7 + 9.3 = 80.
         let long_axes = AxesInput {
-            x: AxisInput::new(
+            x: axis_input(
                 AxisOrient::Bottom,
                 None,
                 vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into(), "UVWXYZABCD".into(), "EFGHIJKLMN".into()],
                 Some(-45.0),
             ),
-            y: AxisInput::new(
+            y: axis_input(
                 AxisOrient::Left,
                 None,
                 vec!["0".into(), "5".into(), "10".into()],
@@ -3994,15 +4009,15 @@ mod tests {
         let y_labels = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into(), "UVWXYZABCD".into()];
 
         let flat_axes = AxesInput {
-            x: AxisInput::new(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
-            y: AxisInput::new(AxisOrient::Left, None, y_labels.clone(), None),
+            x: axis_input(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
+            y: axis_input(AxisOrient::Left, None, y_labels.clone(), None),
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
         };
         let rotated_axes = AxesInput {
-            x: AxisInput::new(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
-            y: AxisInput::new(AxisOrient::Left, None, y_labels, Some(-45.0)),
+            x: axis_input(AxisOrient::Bottom, None, vec!["A".into(), "B".into()], None),
+            y: axis_input(AxisOrient::Left, None, y_labels, Some(-45.0)),
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),
@@ -4042,13 +4057,13 @@ mod tests {
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
 
         let axes_no_x = AxesInput {
-            x: AxisInput::new(
+            x: axis_input(
                 AxisOrient::Bottom,
                 None,
                 vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()],
                 None,
             ),
-            y: AxisInput::new(AxisOrient::Left, None, vec!["0".into(), "5".into()], None),
+            y: axis_input(AxisOrient::Left, None, vec!["0".into(), "5".into()], None),
             show_x: false,
             show_y: false,
             secondary_y: Vec::new(),
@@ -4371,8 +4386,8 @@ mod tests {
         let spec = two_way_grid_spec();
         let groups = two_way_2x2_groups();
         let axes = AxesInput {
-            x: AxisInput::new(AxisOrient::Bottom, Some("x".into()), vec!["0".into(), "5".into()], None),
-            y: AxisInput::new(AxisOrient::Left, Some("y".into()), vec!["0".into(), "5".into()], None),
+            x: axis_input(AxisOrient::Bottom, Some("x".into()), vec!["0".into(), "5".into()], None),
+            y: axis_input(AxisOrient::Left, Some("y".into()), vec!["0".into(), "5".into()], None),
             show_x: true,
             show_y: true,
             secondary_y: Vec::new(),

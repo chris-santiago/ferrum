@@ -12,6 +12,7 @@ from typing import Any
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
 from ferrum._title_sentinel import _UNSET, TitleParam, is_unspecified, serialize_title
 from ferrum._validate import validate_choice, validate_fraction_value, validate_pixel_value
+from ferrum.axis import validate_label_overlap
 from ferrum.legend import validate_legend_direction, validate_legend_orient
 
 
@@ -114,7 +115,11 @@ class AxisConfig:
         Raw d3-format or strftime string passed directly to the renderer.
         Mutually exclusive with ``label_format``.
     label_overlap : str, optional
-        Label overlap strategy: ``"parity"``, ``"greedy"``, ``"rotate"``, or ``"hide"``.
+        Label overlap strategy: ``"greedy"`` (the graduated collision
+        cascade, the default), ``"parity"`` (stride-2 decimation),
+        ``"rotate"`` (force the rotate stage), or ``"true"``/``"false"``
+        (show every label / the ``"greedy"`` alias). An unrecognized token
+        raises ``ValueError`` at construction naming the accepted set.
     tick_count : int, optional
         Suggested number of ticks.
     tick_size : float, optional
@@ -335,6 +340,9 @@ class AxisConfig:
             resolve_format(label_format)
 
         _validate_domain_bounds(domain_min, domain_max)
+
+        if label_overlap is not None:
+            validate_label_overlap("AxisConfig.label_overlap", label_overlap)
 
         object.__setattr__(self, "x", x)
         object.__setattr__(self, "y", y)

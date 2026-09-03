@@ -103,6 +103,19 @@ impl TimeScale {
         self.data.domain
     }
 
+    /// This scale's domain endpoints rounded outward to the nearest calendar
+    /// interval — the exact rounding `TimeScale(nice=True)` applies at
+    /// construction (`time_nice`) — without mutating `self`. Unlike the other
+    /// four continuous kinds, this is CALENDAR-aware (month/year boundaries
+    /// via `chrono`), not a raw epoch-ms `nice_step` round: before
+    /// `ScaleKind::niced_domain` existed, the chart-level `configure_axis(
+    /// nice=True)` cascade rounded every kind with the same linear
+    /// `nice_step`, silently landing a time axis on the wrong bounds. See
+    /// [`LinearScale::nice_domain_pair`](super::linear::LinearScale::nice_domain_pair).
+    pub(crate) fn nice_domain_pair(&self) -> [f64; 2] {
+        self.time_nice().domain_pair()
+    }
+
     /// Replace this scale's data-space domain in place, keeping its range and
     /// every kind-specific parameter.
     ///
