@@ -346,6 +346,8 @@ Encoding channels are typed objects passed as keyword arguments to `.encode()`. 
 | `Description(field)` | Accessible description per mark |
 | `Key(field)` | Identity key for animated transitions |
 
+> **Dated note (2026-09-03, batch B tasks 2/4):** `Text(format=...)`/`TooltipField(format=...)` resolve named format presets (`"currency"`, `"date_iso"`, `"ordinal"`, …) through the same shared resolver as `Axis`/`Legend` — see the format-preset dated note under §3.7 `Axis` for the full five-surface contract.
+
 #### Facet (used with `.facet()`)
 
 | Class | Description |
@@ -1248,7 +1250,17 @@ Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, 
 > incl. `s % p r g`, plus the `~` trim flag); **time** uses `chrono` strftime
 > (`%b %Y`, `%Y-%m-%d`, `%H:%M`), replacing the prior hand-rolled date math.
 
+> **Dated note (2026-09-03, batch B tasks 2/4 — format presets are honored everywhere, chart-level time formatting works, malformed specs refuse):** a named format preset (`ferrum.format_presets.ALL_PRESETS` — e.g. `"currency"`, `"percent"`, `"date_iso"`, `"ordinal"`) now resolves through one shared function (`resolve_format_or_raw`) on **all five** surfaces that accept a format string: chart-level `AxisConfig(label_format=...)`/`configure_axis(label_format=...)`, per-channel `Axis(label_format=...)`, per-channel `Legend(format=...)`, encoding `format=` (`Text`, `TooltipField`, and any channel routed through the shared encoding emitter), and the raw-dict normalize paths for both axis and legend (including the camelCase serde-alias spellings, e.g. `labelFormat`). Previously only `Axis(label_format=...)` resolved presets; the other four surfaces passed a preset name straight to Rust's d3-format parser, which rendered it as literal control characters into the SVG. A name that isn't a recognized preset is treated as an already-valid raw d3-format/strftime spec and passed through unchanged — this function never raises. `AxisConfig.label_format` is the one preset-names-only exception: it validates eagerly at construction (raises `ValueError` for an unrecognized name) since it has no raw-spec sibling field of its own; a raw d3-format/strftime string belongs in the parallel `label_format_raw` field instead (mutually exclusive with `label_format`).
+>
+> Chart-level **time** presets now actually format tick labels as dates: `configure_axis(label_format="date_iso")` previously rendered `300.000000%` (the chart-level path never threaded `format_type` through to the formatter); it now renders ISO dates as expected. `"ordinal"` produces real ordinal suffixes (`1st`, `2nd`, `3rd`, `4th`, …, with the `11th`–`13th` exceptions), not raw integers. `label_format=`/`format=` compose with `values=` in both directions on the surfaces that accept both. An explicit per-channel format (`Axis(label_format=...)`, `X(..., format=...)`) always beats a conflicting chart-level `configure_axis(...)` value — a cascade inversion that previously let chart-level silently win regardless of which was actually set, fixed at the one write site both former hand-copied call sites shared. **Malformed format specs now raise a typed error** (`RenderError::InvalidFormatSpec`) instead of emitting control characters into the SVG or, for a malformed time-with-trailing-token spec (e.g. `"curency%"`), panicking through the PyO3 boundary; the diagnosis routes real `%`-directive strftime specs before the ambiguous date/time guess, so the error names the actual problem. `configure_axis(x=..., y=...)` remain deprecated, inert flags (`Chart.axis(x=/y=)`, documented below, is the replacement for axis visibility; they carry no formatting meaning).
+
 > **Dated note (2026-09-03, batch B task 7 — explicit-equals-default now serializes):** the seven fields shown above with a concrete default (`ticks`, `tick_extra`, `grid`, `labels`, `label_flush`, `label_overlap`, `domain`) follow an **omit-vs-explicit** wire contract: omitting the parameter entirely (the common case, and what every signature default above represents) means "not specified" and the renderer's own default applies as before — byte-identical to today. Passing the parameter **explicitly**, even with the exact value shown above (e.g. `Axis(ticks=True)` or `Axis(label_overlap="greedy")`), now always reaches the wire, which is a real behavior change: an explicit per-channel value beats a conflicting chart-level `configure_axis(...)`/theme value for that field, where chart-level previously won silently regardless of whether the per-channel field was actually named. Previously an explicit value equal to the default was indistinguishable from "not specified" and could be silently overridden by chart-level. `Legend`'s `orient`/`direction` fields (below) carry the identical contract.
+
+> **Dated note (2026-09-03, batch B task 1 — chart-level config refuses unknown keys):** every `configure_*()` domain — `axis`/`axis_x`/`axis_y`/`axis_y2`, `legend`, `title`, `grid`, `padding` (below), `color` — shares one wire-level gate: an unknown key inside any section (a typo, a removed field, a spelling from a different surface) raises `chart config: unknown key '<k>' in <section>; accepted: <sorted list>` before the value ever reaches the Rust deserializer, instead of silently vanishing. Every field the wire schema parses is dispositioned `Honored`/`Rejected` (with a reason) in a completeness-tested manifest, so a field that is accepted syntactically but not yet consumed cannot drift back into silent no-op territory unnoticed.
+
+> **Dated note (2026-09-03, batch B task 8 — axis config plumbing honored end to end):** `domain_min`/`domain_max`/`nice`/`zero` (chart-level `configure_axis(...)` and the per-channel fields above) now feed positional scale resolution at the X axis, the Y axis, and the secondary Y axis alike. An encoding's own `scale=` domain still wins silently over a chart-level `domain_min`/`domain_max` (the documented cascade), an ordinal axis warns rather than applying a numeric domain it cannot use, a user-set domain on a `log` scale refuses with `LogScale`'s own sentence (chart-level and per-scale construction now read identically), and a degenerate `domain_min == domain_max` refuses. Per-axis grid gains a real bool-and-style contract via the new public **`ferrum.GridAxisConfig`** (`enabled`, `color`, `width`, `dash`, `opacity`) — `GridConfig.x`/`GridConfig.y` accept a bare `bool` (enable/disable only, the historical spelling), a `GridAxisConfig`, or its dict form; anything else refuses naming the accepted shapes. Chart-level `tick_count`, `labels`, `ticks`, and the tri-state `title` (omit/`None`/string, matching the per-channel three-way contract above) are honored; `label_overlap` is honored on the **y** axis too (previously x-only). `axis_y2` (`configure(axis_y2=AxisConfig(...))`) is a real consumer end to end — style, axis preparation, and domain resolution all read it for the secondary y axis on a `SecondaryY` chart (previously silently dropped in full: neither color nor `tick_count` reached the rendered SVG). `offset` and `label_flush` are typed `AxisConfig`/`configure_axis()` fields (shift the axis off the plot edge; flush-align the first/last tick label to the axis ends).
+>
+> **Behavior changes:** grid and domain settings compose by **precedence, not AND** — a chart-level and a per-channel setting no longer both have to agree for either to take effect. `axis_x`-scoped configuration no longer leaks onto the y axis (a pre-existing cross-talk bug). `.override(x_axis_tick_size=...)` now correctly beats `configure_axis(tick_size=...)`, matching the documented per-channel-over-chart-level cascade. `.override(axis_label_format=<raw d3 spec>)` now validates the spec at the override boundary (previously an unvalidated raw string reached the wire unchecked); the escape hatch for a raw, unvalidated spec is `axis_label_format_raw=` on the same surface. `.override(axis_x=...)` / `.override(axis_y=...)` — and the four `x_axis_x`/`x_axis_y`/`y_axis_x`/`y_axis_y` spellings — now raise a typed `FerrumOverrideError` naming the replacement (`Chart.axis(x=False)` / `Chart.axis(y=False)`, documented below) instead of silently no-opping; these were the deprecated, do-nothing spellings of the `x`/`y` visibility flags (see `Chart.axis()` below), not a formatting or layout override.
 
 #### `Legend`
 
@@ -1275,6 +1287,8 @@ Set `legend=None` on any channel to suppress the legend for that channel.
 > - `Legend(orient="none")` on a channel suppresses that channel's legend — the per-channel spelling of chart-level `configure_legend(orient="none")`, identical in effect to `legend=None`.
 > - `Legend(values=[...])` on a **categorical** legend filters and orders the entries to the listed values (previously honored only on gradient/colorbar legends, where it replaces the tick labels — unchanged). A value naming no category has no swatch to draw: it is skipped and reported as a `RenderWarning`.
 > - `X(legend=...)` / `Y(legend=...)` are honored. The positional channels have no legend block of their own, so their `legend=` dict addresses the chart's legend, filling any field the `color` channel's own `legend=` left unset. Per-channel precedence is `color` > `x` > `y`.
+> - `orient`/`direction` tokens (both here and on `configure_legend(...)`) validate at construction: an unrecognized value raises `ValueError` naming the accepted set, rather than silently falling back to a default or reaching the wire unrecognized.
+> - `Legend(format=...)` resolves named presets through the same shared resolver `Axis(label_format=...)` uses (`configure_legend()`/`LegendConfig` has no `format` field of its own — colorbar/gradient formatting is per-channel only) — see the format-preset dated note under `Axis` above (batch B tasks 2/4) for the full contract (all five surfaces, malformed-spec refusals, `format=`/`values=` composition).
 > - **Behavior changes (4):**
 >   1. Per-channel `Legend(orient=/columns=/title_font_size=)` now beats chart-level `configure_legend(...)` for those three fields, matching the documented cascade (mark literal > per-channel > chart-level > theme). Previously chart-level silently overwrote the per-channel value.
 >   2. `configure_legend(label_font_size=)` now sizes legend labels only; it used to write a slot shared with the axes and so resized axis tick labels as a side effect. Use `configure_axis(label_font_size=)` for those.
@@ -1306,6 +1320,33 @@ was theme-color-fragile.
 
 Serializes to two optional booleans on `ChartSpec`: `axis_x: bool | None`,
 `axis_y: bool | None`. Both default to `None` (visible).
+
+> **Dated note (2026-09-03, batch B task 1b — deprecated `override(axis_x=)`/`override(axis_y=)` now refuse):** `Chart.override(axis_x=..., ...)` / `Chart.override(axis_y=..., ...)` — and the four `x_axis_x=`/`x_axis_y=`/`y_axis_x=`/`y_axis_y=` spellings on the same low-level `.override()` escape hatch — previously emitted a `DeprecationWarning` and then silently did nothing (they addressed `AxisConfig`'s vestigial, already-deprecated `x`/`y` no-op flags, not this method). They now raise a typed `FerrumOverrideError` naming the offending kwarg and pointing at the real replacement, `Chart.axis(x=False)` / `Chart.axis(y=False)` documented above. This is a **breaking change**: code relying on the old warn-and-ignore behavior now raises instead.
+
+#### Chart-level Padding — `configure_padding()` / `PaddingConfig`
+
+```
+Chart.configure_padding(*, top=None, right=None, bottom=None, left=None, auto=False) -> Chart
+```
+
+Sets the minimum pixel padding on each of the plot's four sides, independent of the theme's flat `padding` default (§3.13). Each side is optional and independent: an unset side falls back to the theme value; a set side always wins there, whether or not `auto=True` is also given.
+
+- `top`, `right`, `bottom`, `left` — pixel values. Each must be a finite, non-negative number (`int` or `float`; `bool` is excluded even though it is an `int` subclass). A negative value, a non-numeric value (including a `NormCoord` or any other non-`Real` type — these are pixel slots, not relative-coordinate slots), or a non-finite value (`NaN`, `±inf`) raises a typed `ValueError` naming the pixel contract. The refusal is enforced identically at three entry points that must never drift apart: `PaddingConfig.__post_init__` (direct construction), `PaddingConfig.to_dict()`, and the low-level `.override(padding_top=..., ...)` escape hatch (scoped to the four numeric side leaves; `padding_auto` is a separate bool leaf and passes through unvalidated here).
+- `auto` (`bool`, default `False`) — opt-in, per-side auto-expand. **Default stays `False`, so every existing chart renders byte-identical**; `auto=True` is a deliberate opt-in, not a retroactive behavior change.
+
+  When `auto=True`, a side that is **not** explicitly set (`top=`/`right=`/`bottom=`/`left=` all still `None` on that side) is expanded — beyond the theme's flat default — to keep two specific things from clipping past the rendered viewport edge:
+  1. **Edge tick-label overhang** on a **continuous** axis — the first/last tick label commonly extends past the plot's nominal edge; `auto` measures the real overhang and reserves enough margin to contain it, respecting any `max_band` cap on that axis's own reserved gutter.
+  2. **A clipped axis title** — solved via a closed-form, asymmetric recentering pass that runs *after* the tick-label pass, against the post-tick-expansion insets (the two passes compose sequentially, not independently).
+
+  A side you *do* set explicitly is never touched by `auto`, on that side, regardless of what the measured overhang would otherwise ask for. `auto` does **not** expand for: annotations; ordinal/nominal axis tick labels (which sit inside fixed band slots and never overhang the plot edge by construction); a hidden axis (`Chart.axis(x=False)`/`(y=False)` — the title pass gates on axis visibility). A y-axis whose gutter is capped tight via `max_band` can still leave its own tick label or title outside the canvas on that axis — `auto`'s tick-label pass respects the cap rather than overriding it, so `max_band` is a hard ceiling `auto` will not breach even at the cost of a clipped label.
+
+  `auto`'s total contribution is capped to whatever the viewport can actually still afford: in an infeasible regime (the fixed/floor padding alone already leaves no usable panel area), `auto` contributes **nothing** on that axis — the render is byte-identical to `auto=False` rather than partially shifting the clip point — and `auto=True` can never itself convert a chart that would otherwise render into a `PaddingExceedsViewport` refusal. When the desired expansion doesn't fully fit but the floor does, `auto` applies the largest expansion that does fit (scaled down proportionally, preserving which side needed more) rather than either refusing or overshooting.
+
+- **`PaddingExceedsViewport`** — raised when a padding value (explicit or the theme default) leaves no usable plot area on an axis. The error reports the **caller's actual value and the specific side that overflowed** (`"padding {side}={padding} exceeds viewport dimension {viewport_dim}"`, `side` one of `"top"`/`"right"`/`"bottom"`/`"left"`) — previously it always reported the theme's default of `16` regardless of what the caller actually set, which misdirected debugging on any large explicit override (e.g. `configure_padding(top=1e9)`).
+
+> **Dated note (2026-09-03, batch B task 6 — padding validates at every entry point):** see the pixel-contract refusal described above (`top`/`right`/`bottom`/`left`); this is the point where `NF-B5`/`NF-B7`'s Python half closed. Previously an invalid value (negative, non-numeric, or non-finite) reached the JSON serializer unchecked and surfaced as an artifact message naming neither the field nor the contract (`ValueError: chart_config: expected value at line 1 column 27`).
+
+> **Dated note (2026-09-03, batch B task 9 — `padding.auto` is implemented):** `auto` did not exist before this task; the field, its opt-in default, the tick-label/title expansion passes, the `max_band` interaction, and the honest `PaddingExceedsViewport` reporting are all new in this batch (closes `F-L07-08`/`NF-B6`). No golden output changes for any chart that does not pass `auto=True`.
 
 ---
 
@@ -1698,6 +1739,9 @@ Theme(
     # Axes
     axis_line=True, axis_line_width=None, axis_line_color=None,
     tick_size=None, tick_width=None, tick_color=None,
+    cull_threshold=None,  # int; minimum pixel gap between adjacent tick
+                           # labels before culling kicks in — see the
+                           # 2026-09-03 dated note below. Default 8 (Rust).
 
     # Marks
     point_size=None, point_opacity=None,
@@ -1761,6 +1805,8 @@ Theme(
 > alias for `background_color`). CSS shorthand hex (`#rgb`/`#rgba`) is expanded
 > by the Rust color parser (`from_hex_str`); the prior redundant Python-side
 > expansion was removed.
+
+> **Dated note (2026-09-03, batch B task 3 — `cull_threshold` is a real pixel-gap minimum, and culling is reachable):** `cull_threshold` is the minimum pixel gap the layout engine keeps between adjacent tick labels; when the natural label set would pack tighter than that, labels are dropped until the survivors clear the gap. `cull_threshold=0` disables culling entirely. Before this task, culling was largely **unreachable**: a floating-point artifact (`cos(±90°)` evaluates to about `6.12e-17` in `f64`, not exactly `0`) made a vertically-rotated (`-90°`) label's computed footprint collapse to near-zero, so the rotation stage always reported "fits" and skipped straight past the cull/elide stages regardless of `cull_threshold`. The footprint calculation now includes the label's own line-height contribution at any rotation angle, so a `-90°` label gets a real fit test and dense categorical/tick axes now visibly cull. `cull_threshold` folds into **every** layout cascade stage as a minimum-gap budget (not just the final stage), so wrapping and packing degrade uniformly under it (shared word-balanced wrapping, never a one-word-per-line collapse) and elision (mid-label truncation with an ellipsis) only fires where truncating the label can actually free enough width to help — an infeasible truncation leaves the label intact rather than truncating for no gain. After culling removes some labels, the survivors re-select their own presentation (flat / rotated / wrapped / elided) at the new, sparser density — a survivor that no longer needs rotation renders flat rather than keeping the rotation the denser pre-cull set required. At `cull_threshold=0` the wrap/pack path is byte-identical to before this task (the verbatim pre-existing accumulator loop).
 
 **Built-in themes** (`ferrum.themes`)
 
@@ -2359,7 +2405,10 @@ RenderConfig(
     raster_behavior="warn",     # "warn" | "silent" | "error" — controls whether
                                 # a warning is emitted when auto-raster
                                 # substitution occurs.
-    raster_aggregate="count",   # default aggregate for auto-raster substitution
+    raster_aggregate="count",   # "count" | "density" | "mean" | "sum" | "any" —
+                                # default aggregate for auto-raster substitution
+    raster_field=None,          # str | None — column to aggregate when
+                                # raster_aggregate is "mean" or "sum"
     raster_cmap="viridis",      # default colormap for auto-raster substitution
 
     # Backend selection (see §3.17)
@@ -2374,6 +2423,8 @@ RenderConfig(
 ```
 
 `raster_threshold=None` and `raster_behavior="silent"` are not equivalent: `None` disables auto-raster entirely (the chart renders all marks through the requested backend, even if performance suffers); `"silent"` keeps auto-raster active but suppresses the substitution warning.
+
+> **Dated note (2026-09-03, batch B task 5 — `raster_aggregate` validates at construction):** `raster_aggregate` is checked at `RenderConfig` construction against its true accepted set — `"count"` | `"density"` | `"mean"` | `"sum"` | `"any"` — matching the underlying Rust `Raster` transform exactly. `"max"`/`"min"`/`"median"` were never valid (despite being reachable at render time before this task, where they surfaced a confusing runtime error well after construction) and now raise `ValueError` immediately. The new `raster_field=` names the column to aggregate when `raster_aggregate` is `"mean"` or `"sum"` (both require it and raise at construction if it's missing); it is genuinely ignored — dropped before the substitution, never resolved as a column name — for `"count"`, `"density"`, and `"any"`, which need no field. The aggregated column must be `Float64`-typed; a non-`Float64` column raises `stat_raster: column '...' must be Float64` at render time (a pre-existing constraint of `Raster`, not new here). `mark_raster` and `desugar_raster`'s docstrings are truth-fixed to match this accepted set — `min`/`max` were never valid and are no longer listed as if they were.
 
 > **2026-05-09 (Phase 7 implementation note):** Phase 7 honors the following
 > `RenderConfig` fields: `scale`, `embed_fonts`, `background`, `width`,
