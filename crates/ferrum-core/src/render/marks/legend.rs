@@ -1,10 +1,15 @@
 //! Internal: build legend scene nodes from a LegendLayout.
 
-use crate::layout::{LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
+use crate::layout::{LegendDirection, LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style};
 use crate::render::scale_resolve::{ColorInput, ColorScale};
 use crate::render::svg::fmt_f;
 use ferrum_scene::{RawAnchor, SceneNode};
+
+/// Length (px) of a colorbar tick mark, drawn off the bar's trailing edge.
+const COLORBAR_TICK_LEN: f64 = 4.0;
+/// Gap (px) between a colorbar tick mark and its label.
+const COLORBAR_LABEL_GAP: f64 = 4.0;
 
 pub fn build_legend(
     legend: &LegendLayout,
@@ -71,6 +76,7 @@ pub fn build_legend(
 
     // Continuous colorbar.
     if let Some(cb) = &legend.colorbar {
+        let horizontal = legend.direction == LegendDirection::Horizontal;
         let grad_id = "ferrum-colorbar-0".to_string();
         let mut stops_xml = String::new();
         for (pos, color) in &cb.stops {
@@ -79,6 +85,14 @@ pub fn build_legend(
                 pos, color,
             ));
         }
+        // Gradient vector: a vertical bar runs bottom→top (Cartesian: high data
+        // at the top), a horizontal one left→right (reading order: high data at
+        // the right). Same stop list, transposed axis.
+        let (gx1, gy1, gx2, gy2) = if horizontal {
+            (0, 0, 1, 0)
+        } else {
+            (0, 1, 0, 0)
+        };
         // Gradient defs + the gradient-filled rect that consumes them, emitted
         // as a SINGLE self-contained Raw fragment. Keeping the `id="{grad_id}"`
         // definition and its only `url(#{grad_id})` consumer co-located in one
@@ -90,7 +104,7 @@ pub fn build_legend(
         // two consecutive Raw nodes, so static SVG output is unchanged.
         nodes.push(SceneNode::Raw {
             svg: format!(
-                "<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">{stops_xml}</linearGradient></defs>\
+                "<defs><linearGradient id=\"{grad_id}\" x1=\"{gx1}\" y1=\"{gy1}\" x2=\"{gx2}\" y2=\"{gy2}\">{stops_xml}</linearGradient></defs>\
                  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{grad_id})\" stroke=\"{}\" stroke-width=\"0.5\"/>",
                 fmt_f(cb.bar_rect.x),
                 fmt_f(cb.bar_rect.y),
@@ -101,16 +115,48 @@ pub fn build_legend(
             anchor: RawAnchor::Chrome,
         });
 
-        // Tick marks + labels on the right edge.
+        // Tick marks + labels: off the bar's right edge (vertical bar), or
+        // beneath its bottom edge with the label centered on the tick
+        // (horizontal bar, D5 — `ColorbarTick.x` carries the along-bar
+        // position and `y` the shared bottom edge).
+        let tick_label_style = if horizontal {
+            to_scene_text_style(
+                label_fill,
+                label_font_size,
+                TextAnchor::Middle,
+                0.0,
+                &theme.typography.label_font_family,
+                label_fw,
+                None,
+                1.0,
+            )
+        } else {
+            label_text_style.clone()
+        };
         let tick_x_start = cb.bar_rect.x + cb.bar_rect.w;
-        let tick_x_end = tick_x_start + 4.0;
-        let label_x = tick_x_end + 4.0;
         for tick in &cb.ticks {
+            let ((x1, y1), (x2, y2), (lx, ly)) = if horizontal {
+                let tx = tick.horizontal_x(&cb.bar_rect);
+                (
+                    (tx, tick.y),
+                    (tx, tick.y + COLORBAR_TICK_LEN),
+                    (tx, tick.y + COLORBAR_TICK_LEN + COLORBAR_LABEL_GAP + label_font_size * 0.7),
+                )
+            } else {
+                (
+                    (tick_x_start, tick.y),
+                    (tick_x_start + COLORBAR_TICK_LEN, tick.y),
+                    (
+                        tick_x_start + COLORBAR_TICK_LEN + COLORBAR_LABEL_GAP,
+                        tick.y + label_font_size * 0.35,
+                    ),
+                )
+            };
             nodes.push(SceneNode::Line {
-                x1: tick_x_start,
-                y1: tick.y,
-                x2: tick_x_end,
-                y2: tick.y,
+                x1,
+                y1,
+                x2,
+                y2,
                 style: to_scene_stroke(
                     theme.colors.axis_line_color,
                     theme.sizes.axis_line_width,
@@ -121,11 +167,11 @@ pub fn build_legend(
                 ),
             });
             nodes.push(SceneNode::Text {
-                x: label_x,
-                y: tick.y + label_font_size * 0.35,
+                x: lx,
+                y: ly,
                 content: tick.label.clone(),
                 slot: None,
-                style: label_text_style.clone(),
+                style: tick_label_style.clone(),
             });
         }
     }

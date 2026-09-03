@@ -6,20 +6,22 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
-from ferrum._title_sentinel import TitleParam, _UNSET, serialize_title
+from ferrum._title_sentinel import TitleParam, _UNSET, _UnsetType, is_unspecified, serialize_title
 
-
-# Default values that should be omitted from serialization (they match
-# the renderer's built-in defaults and would add noise to the spec).
-_AXIS_DEFAULTS: dict[str, Any] = {
-    "ticks": True,
-    "tick_extra": False,
-    "grid": True,
-    "labels": True,
-    "label_flush": False,
-    "label_overlap": "greedy",
-    "domain": True,
-}
+# Fields whose Python default (``True``/``False``/``"greedy"``) matches the
+# renderer's own built-in default.  These are declared with ``_UNSET`` (not
+# their concrete default) so an explicitly-passed value that happens to equal
+# the renderer default is still distinguishable from "not specified" and
+# always reaches the wire (NF-B3, F-L04-04's ``_AXIS_DEFAULTS`` twin): only an
+# omitted field (OR an explicit ``None`` — see
+# ``ferrum._title_sentinel.is_unspecified``, the shared two-way
+# omit-vs-explicit gate this set's fields share with ``Legend.orient``/
+# ``direction``) is dropped from ``to_dict()``, never any other explicit
+# value — see ``to_dict()``'s docstring for why silently dropping an explicit
+# equals-default value breaks the per-channel-wins cascade (D7).
+_UNSET_DEFAULTED_FIELDS: frozenset[str] = frozenset(
+    {"ticks", "tick_extra", "grid", "labels", "label_flush", "label_overlap", "domain"}
+)
 
 # Fields that exist only in the Python layer and must not be forwarded to
 # the Rust renderer (they have no corresponding key in EncodingSpec.axis.extra).
@@ -38,16 +40,22 @@ class Axis:
         the field-name default.
     orient : str, optional
         Axis orientation ("top", "bottom", "left", "right").
-    ticks : bool
-        Show tick marks.
+    ticks : bool, optional
+        Show tick marks.  Omitting ``ticks`` (or passing ``ticks=None``,
+        treated identically — the same "unset" spelling every other optional
+        field here accepts) keeps the renderer's own default (shown); passing
+        any other value explicitly — even ``True`` — always reaches the wire,
+        so an explicit value beats a conflicting chart-level
+        ``configure_axis(ticks=...)`` (per-channel wins).
     tick_count : int, optional
         Suggested number of ticks.
-    tick_extra : bool
-        Include extra tick at domain boundary.
+    tick_extra : bool, optional
+        Include extra tick at domain boundary.  Same omit-vs-explicit contract
+        as ``ticks``.
     tick_min_step : float, optional
         Minimum step between ticks.
-    grid : bool
-        Show grid lines.
+    grid : bool, optional
+        Show grid lines.  Same omit-vs-explicit contract as ``ticks``.
     grid_dash : list[float], optional
         Grid line dash pattern.
     grid_width : float, optional
@@ -56,17 +64,22 @@ class Axis:
         Grid line color.
     grid_opacity : float, optional
         Grid line opacity.
-    labels : bool
-        Show tick labels.
+    labels : bool, optional
+        Show tick labels.  Same omit-vs-explicit contract as ``ticks``.
     label_angle : float, optional
         Tick label rotation angle.
-    label_flush : bool
+    label_flush : bool, optional
         Flush the first and last tick labels against the axis ends so they do
-        not overhang the plot area.  Defaults to ``False`` (no flush), matching
-        the renderer default.
-    label_overlap : str
-        Label overlap strategy ("greedy", "parity", "rotate").  Defaults to
-        ``"greedy"`` (the renderer's graduated collision cascade).
+        not overhang the plot area.  Omitting ``label_flush`` keeps the
+        renderer's own default (``False``, no flush); passing it explicitly —
+        even as ``False`` — always reaches the wire (same omit-vs-explicit
+        contract as ``ticks``).
+    label_overlap : str, optional
+        Label overlap strategy ("greedy", "parity", "rotate").  Omitting
+        ``label_overlap`` keeps the renderer's own default (``"greedy"``, the
+        graduated collision cascade); passing it explicitly — even as
+        ``"greedy"`` — always reaches the wire (same omit-vs-explicit contract
+        as ``ticks``).
     label_format : str, optional
         d3-format string for labels.
     label_format_type : str, optional
@@ -75,8 +88,8 @@ class Axis:
         Label font size.
     label_color : str, optional
         Label color.
-    domain : bool
-        Show axis domain line.
+    domain : bool, optional
+        Show axis domain line.  Same omit-vs-explicit contract as ``ticks``.
     domain_width : float, optional
         Domain line width.
     domain_color : str, optional
@@ -128,24 +141,24 @@ class Axis:
 
     title: TitleParam = _UNSET
     orient: str | None = None
-    ticks: bool = True
+    ticks: "bool | None | _UnsetType" = _UNSET
     tick_count: int | None = None
-    tick_extra: bool = False
+    tick_extra: "bool | None | _UnsetType" = _UNSET
     tick_min_step: float | None = None
-    grid: bool = True
+    grid: "bool | None | _UnsetType" = _UNSET
     grid_dash: list[float] | None = None
     grid_width: float | None = None
     grid_color: str | None = None
     grid_opacity: float | None = None
-    labels: bool = True
+    labels: "bool | None | _UnsetType" = _UNSET
     label_angle: float | None = None
-    label_flush: bool = False
-    label_overlap: str = "greedy"
+    label_flush: "bool | None | _UnsetType" = _UNSET
+    label_overlap: "str | None | _UnsetType" = _UNSET
     label_format: str | None = None
     label_format_type: str | None = None
     label_font_size: float | None = None
     label_color: str | None = None
-    domain: bool = True
+    domain: "bool | None | _UnsetType" = _UNSET
     domain_width: float | None = None
     domain_color: str | None = None
     offset: float | None = None
@@ -171,24 +184,24 @@ class Axis:
         self,
         title: TitleParam = _UNSET,
         orient: str | None = None,
-        ticks: bool = True,
+        ticks: "bool | None | _UnsetType" = _UNSET,
         tick_count: int | None = None,
-        tick_extra: bool = False,
+        tick_extra: "bool | None | _UnsetType" = _UNSET,
         tick_min_step: float | None = None,
-        grid: bool = True,
+        grid: "bool | None | _UnsetType" = _UNSET,
         grid_dash: list[float] | None = None,
         grid_width: float | None = None,
         grid_color: str | None = None,
         grid_opacity: float | None = None,
-        labels: bool = True,
+        labels: "bool | None | _UnsetType" = _UNSET,
         label_angle: float | None = None,
-        label_flush: bool = False,
-        label_overlap: str = "greedy",
+        label_flush: "bool | None | _UnsetType" = _UNSET,
+        label_overlap: "str | None | _UnsetType" = _UNSET,
         label_format: str | None = None,
         label_format_type: str | None = None,
         label_font_size: float | None = None,
         label_color: str | None = None,
-        domain: bool = True,
+        domain: "bool | None | _UnsetType" = _UNSET,
         domain_width: float | None = None,
         domain_color: str | None = None,
         offset: float | None = None,
@@ -260,7 +273,24 @@ class Axis:
         object.__setattr__(self, "label_map", label_map)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for the renderer, omitting None, defaults, and Python-only fields.
+        """Serialize to dict for the renderer, omitting only unset/None/Python-only fields.
+
+        ``ticks``/``tick_extra``/``grid``/``labels``/``label_flush``/
+        ``label_overlap``/``domain`` follow the two-way omit-vs-explicit
+        contract :func:`ferrum._title_sentinel.is_unspecified` implements
+        (distinct from ``title``'s three-way contract below): "not specified"
+        is either omitting the kwarg (``_UNSET``, the field default) or
+        passing the field ``=None`` explicitly — the same "unset" spelling
+        every other optional field on this class already accepts — and either
+        spelling drops the key so the renderer's own default applies. Any
+        OTHER explicitly passed value — including one that happens to equal
+        what the renderer would have picked anyway — always reaches the wire
+        (NF-B3). Skipping an explicit-equals-default value here previously
+        made it indistinguishable from "not specified", which silently lost
+        the per-channel-wins cascade for that field (e.g. an explicit
+        ``Axis(label_overlap="greedy")`` could be overridden by a conflicting
+        ``configure_axis(label_overlap=...)`` even though the per-channel
+        value should always win).
 
         ``label_format`` preset names are resolved to their d3-format/strftime
         strings via :func:`ferrum.format_presets.resolve_format_field` before
@@ -287,6 +317,11 @@ class Axis:
                 if serialized is not None:
                     result["title"] = serialized
                 continue
+            if f.name in _UNSET_DEFAULTED_FIELDS:
+                val = getattr(self, f.name)
+                if not is_unspecified(val):
+                    result[f.name] = val
+                continue
             if f.name == "label_format":
                 if resolved_format is not None:
                     result["label_format"] = resolved_format
@@ -298,9 +333,6 @@ class Axis:
             val = getattr(self, f.name)
             # Skip None values for all other fields
             if val is None:
-                continue
-            # Skip values that match the renderer default
-            if f.name in _AXIS_DEFAULTS and val == _AXIS_DEFAULTS[f.name]:
                 continue
             result[f.name] = val
         return result

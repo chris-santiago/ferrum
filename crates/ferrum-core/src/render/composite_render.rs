@@ -79,8 +79,8 @@ use crate::layout::legend::{
 };
 use crate::layout::text_metrics::TextMetrics;
 use crate::layout::{
-    AuxLegendInput, ColorbarInput, LegendEntry, LegendLayout, LegendOrient, LegendOverrides,
-    Rect as LayoutRect, ThemeInputs, Viewport,
+    AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendLayout, LegendOrient,
+    LegendOverrides, Rect as LayoutRect, ThemeInputs, Viewport,
 };
 use crate::spec::chart::ChartSpec;
 
@@ -1298,6 +1298,7 @@ fn layout_band_legends(
         inner,
         inner_after,
         effective_label_font_size,
+        overrides.style.label_font_size,
         theme.typography.legend_title_font_size,
         metrics,
         theme.padding.column_padding,
@@ -1355,20 +1356,38 @@ fn legend_layouts_extent(
         if let Some(cb) = &l.colorbar {
             let mut max_tick = 0.0_f64;
             for tk in &cb.ticks {
-                max_tick = max_tick.max(metrics.measure_width(&tk.label, label_fs));
-                acc(
-                    cb.bar_rect.x,
-                    tk.y - line_h / 2.0,
-                    cb.bar_rect.x,
-                    tk.y + line_h / 2.0,
-                );
+                let tw = metrics.measure_width(&tk.label, label_fs);
+                max_tick = max_tick.max(tw);
+                match l.direction {
+                    LegendDirection::Vertical => acc(
+                        cb.bar_rect.x,
+                        tk.y - line_h / 2.0,
+                        cb.bar_rect.x,
+                        tk.y + line_h / 2.0,
+                    ),
+                    // Horizontal (D5): the label is centered on the tick's `x`
+                    // and drawn below the bar, so it overhangs the bar's ends by
+                    // half its width on each side.
+                    LegendDirection::Horizontal => {
+                        let tx = tk.horizontal_x(&cb.bar_rect);
+                        acc(tx - tw / 2.0, tk.y, tx + tw / 2.0, tk.y + 4.0 + line_h);
+                    }
+                }
             }
-            acc(
-                cb.bar_rect.x,
-                cb.bar_rect.y,
-                cb.bar_rect.x + cb.bar_rect.w + 4.0 + max_tick,
-                cb.bar_rect.y + cb.bar_rect.h,
-            );
+            match l.direction {
+                LegendDirection::Vertical => acc(
+                    cb.bar_rect.x,
+                    cb.bar_rect.y,
+                    cb.bar_rect.x + cb.bar_rect.w + 4.0 + max_tick,
+                    cb.bar_rect.y + cb.bar_rect.h,
+                ),
+                LegendDirection::Horizontal => acc(
+                    cb.bar_rect.x,
+                    cb.bar_rect.y,
+                    cb.bar_rect.x + cb.bar_rect.w,
+                    cb.bar_rect.y + cb.bar_rect.h + 4.0 + line_h,
+                ),
+            }
         }
     }
     any.then_some((min_x, min_y, max_x, max_y))

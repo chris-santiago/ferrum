@@ -453,6 +453,41 @@ pub struct LegendStyleSpec {
     pub tick_labels: Option<Vec<String>>,
 }
 
+/// The `orient` token that means "draw no legend" rather than naming an edge.
+/// Deliberately absent from [`crate::layout::LegendOrient::parse`]'s placement
+/// vocabulary — it is consumed by [`LegendStyleSpec::suppressed_by`] instead.
+pub(crate) const LEGEND_ORIENT_NONE: &str = "none";
+
+impl LegendStyleSpec {
+    /// Whether the legend addressed by the per-channel precedence chain
+    /// `specs` is suppressed. `specs` is ordered highest-precedence first
+    /// (color > x > y for the color legend); a single-channel asker — a
+    /// size/shape aux block, or chart-level `configure_legend` — passes a
+    /// one-element slice, which is why this is the only expression of the
+    /// rule anywhere.
+    ///
+    /// Two spellings, one meaning: `legend=None` / `legend=False` (which
+    /// Python's `_normalize_legend` turns into `disabled: true`) and
+    /// `orient="none"` — the per-channel mirror of chart-level
+    /// `configure_legend(orient="none")`, which `_resolve_chart_config` also
+    /// resolves to `disabled` before it reaches the wire (spec §4.4:
+    /// "`fm.Legend(orient="none")` disables that channel's legend (parity
+    /// with chart-level)").
+    ///
+    /// Each spelling resolves **field by field** with the same first-`Some`
+    /// rule every other per-channel legend field uses (quality review cycle 1,
+    /// S3). Reading the chain with "any channel suppresses" instead let a
+    /// lower-precedence `Y(legend=Legend(orient="none"))` blank a legend that
+    /// `Color(legend=Legend(orient="right"))` had explicitly placed — the same
+    /// `orient` field answering at two different precedences inside one
+    /// function.
+    pub fn suppressed_by(specs: &[&LegendStyleSpec]) -> bool {
+        let disabled = specs.iter().find_map(|s| s.disabled);
+        let orient = specs.iter().find_map(|s| s.orient.as_deref());
+        disabled.unwrap_or(false) || orient == Some(LEGEND_ORIENT_NONE)
+    }
+}
+
 /// Chart-level legend configuration (`configure_legend`). Legend has no
 /// chart-only-extra fields, so this is `LegendStyleSpec` verbatim (flattened).
 /// `deny_unknown_fields` here works the same way as on `AxisConfigSpec` (see

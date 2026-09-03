@@ -5,15 +5,39 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any
 
-from ferrum._title_sentinel import TitleParam, _UNSET, serialize_title
+from ferrum._title_sentinel import TitleParam, _UNSET, _UnsetType, is_unspecified, serialize_title
+from ferrum._validate import validate_choice
 
 
-# Default values that should be omitted from serialization (they match
-# the renderer's built-in defaults and would add noise to the spec).
-_LEGEND_DEFAULTS: dict[str, Any] = {
-    "orient": "right",
-    "direction": "vertical",
-}
+#: Accepted ``orient`` tokens — the legend edge (or ``"none"`` to suppress).
+_VALID_LEGEND_ORIENTS: frozenset[str] = frozenset({"right", "left", "top", "bottom", "none"})
+
+#: Accepted ``direction`` tokens — how entries arrange within the legend.
+_VALID_LEGEND_DIRECTIONS: frozenset[str] = frozenset({"vertical", "horizontal"})
+
+
+def validate_legend_orient(owner: str, value: str) -> None:
+    """Raise ``ValueError`` when *value* is not a recognized legend ``orient`` token.
+
+    The one shared validator for every Python surface that accepts a legend
+    ``orient`` — the per-channel :class:`Legend` dataclass, chart-level
+    ``LegendConfig``/``configure_legend``, and the raw legend-dict path any
+    channel's ``legend=`` kwarg accepts — so the vocabulary and the
+    ``ValueError`` wording cannot drift between surfaces. Rust's own
+    ``LegendOrient::parse`` stays total over this same vocabulary (an
+    unrecognized token there silently falls back to the theme default,
+    per spec §4.4); this is the loud boundary check the spec places in
+    Python, mirroring ``LegendConfig.orient``'s pre-existing validation.
+    """
+    validate_choice(owner, "orient", value, _VALID_LEGEND_ORIENTS)
+
+
+def validate_legend_direction(owner: str, value: str) -> None:
+    """Raise ``ValueError`` when *value* is not a recognized legend ``direction`` token.
+
+    See :func:`validate_legend_orient` — the same sharing rationale applies.
+    """
+    validate_choice(owner, "direction", value, _VALID_LEGEND_DIRECTIONS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +50,19 @@ class Legend:
         Legend title text.  Pass ``title=None`` to suppress the legend title
         (the field name will not be shown).  Omitting ``title`` entirely keeps
         the field-name default.
-    orient : str
-        Legend position ("right", "left", "top", "bottom", "none").
-    direction : str
-        Layout direction ("vertical", "horizontal").
+    orient : str, optional
+        Legend position ("right", "left", "top", "bottom", "none").  Omitting
+        ``orient`` (or passing ``orient=None``, treated identically — the same
+        "unset" spelling every other optional field here accepts) keeps the
+        renderer's own default ("right" for a side legend); passing any other
+        value explicitly — even as ``"right"`` — always reaches the wire, so
+        an explicit value beats a conflicting chart-level
+        ``configure_legend(orient=...)`` (per-channel wins, D7).
+    direction : str, optional
+        Layout direction ("vertical", "horizontal").  Omitting ``direction``
+        (or passing ``direction=None``) keeps the renderer's per-``orient``
+        default; passing any other value explicitly — even the value that
+        default would have picked — always reaches the wire.
     type : str, optional
         Legend type ("symbol", "gradient").
     tick_count : int, optional
@@ -88,8 +121,8 @@ class Legend:
     """
 
     title: TitleParam = _UNSET
-    orient: str = "right"
-    direction: str = "vertical"
+    orient: "str | None | _UnsetType" = _UNSET
+    direction: "str | None | _UnsetType" = _UNSET
     type: str | None = None
     tick_count: int | None = None
     tick_min_step: float | None = None
@@ -114,8 +147,29 @@ class Legend:
     padding: float | None = None
     zindex: int | None = None
 
+    def __post_init__(self) -> None:
+        if not is_unspecified(self.orient):
+            validate_legend_orient("Legend.orient", self.orient)  # type: ignore[arg-type]
+        if not is_unspecified(self.direction):
+            validate_legend_direction("Legend.direction", self.direction)  # type: ignore[arg-type]
+
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for the renderer, omitting None and default values.
+        """Serialize to dict for the renderer, omitting only unset/None values.
+
+        ``orient`` and ``direction`` follow the two-way omit-vs-explicit
+        contract :func:`ferrum._title_sentinel.is_unspecified` implements
+        (distinct from ``title``'s three-way contract below): "not specified"
+        is either omitting the kwarg (``_UNSET``, the field default) or
+        passing ``orient=None``/``direction=None`` explicitly, and either
+        spelling drops the key so the renderer's own orient/direction
+        defaulting applies. Any OTHER explicitly passed value — including one
+        that happens to equal what the renderer would have picked anyway —
+        always reaches the wire (NF-B3/F-L04-04). Skipping an
+        explicit-equals-default value here previously made it indistinguishable
+        from "not specified", which silently lost the per-channel-wins cascade
+        (D7) for that field. The same gate runs in ``__post_init__`` (token
+        validation) and here (serialization), so a value can never be
+        validated-but-dropped or accepted-but-unvalidated.
 
         ``format`` preset names are resolved to their d3-format/strftime
         strings via :func:`ferrum.format_presets.resolve_format_field` before
@@ -125,9 +179,7 @@ class Legend:
         """
         from ferrum.format_presets import resolve_format_field
 
-        resolved_format, resolved_format_type = resolve_format_field(
-            self.format, self.format_type
-        )
+        resolved_format, resolved_format_type = resolve_format_field(self.format, self.format_type)
         result: dict[str, Any] = {}
         for f in fields(self):
             if f.name == "title":
@@ -138,6 +190,11 @@ class Legend:
                 serialized = serialize_title(getattr(self, f.name))
                 if serialized is not None:
                     result["title"] = serialized
+                continue
+            if f.name in ("orient", "direction"):
+                val = getattr(self, f.name)
+                if not is_unspecified(val):
+                    result[f.name] = val
                 continue
             if f.name == "format":
                 if resolved_format is not None:
@@ -150,9 +207,6 @@ class Legend:
             val = getattr(self, f.name)
             # Skip None values for all other fields
             if val is None:
-                continue
-            # Skip values that match the renderer default
-            if f.name in _LEGEND_DEFAULTS and val == _LEGEND_DEFAULTS[f.name]:
                 continue
             result[f.name] = val
         return result
@@ -192,9 +246,12 @@ def _normalize_legend(value: Any) -> dict[str, Any] | None:
     """Normalize a legend kwarg value to a dict or None.
 
     Accepts:
-    - Legend instance -> .to_dict()
+    - Legend instance -> .to_dict() (already validated by ``Legend.__post_init__``)
     - None or False -> {"disabled": True} (suppress legend)
-    - dict -> pass through (with ``format`` preset resolution)
+    - dict -> pass through (with ``orient``/``direction`` token validation —
+      an explicit ``None`` for either key is "unspecified", not a refusal,
+      see :func:`ferrum._title_sentinel.is_unspecified` — and ``format``
+      preset resolution)
     - Other truthy values -> None (not specified; reserved)
     """
     if value is None or value is False:
@@ -202,6 +259,18 @@ def _normalize_legend(value: Any) -> dict[str, Any] | None:
     if isinstance(value, Legend):
         return value.to_dict()
     if isinstance(value, dict):
+        # A raw dict bypasses Legend.__post_init__, so it gets the same loud
+        # token check here — the dict path must refuse an unrecognized
+        # orient/direction exactly like the Legend()/LegendConfig() paths do.
+        # An explicit None (e.g. {"orient": None}) is "unspecified" under the
+        # same is_unspecified gate those two surfaces use — it is a no-op
+        # here as it always was (dicts pass their keys through unfiltered;
+        # Rust's Option<...> fields treat a JSON null identically to an
+        # absent key), not a refusal.
+        if "orient" in value and not is_unspecified(value["orient"]):
+            validate_legend_orient("legend dict", value["orient"])
+        if "direction" in value and not is_unspecified(value["direction"]):
+            validate_legend_direction("legend dict", value["direction"])
         return _resolve_legend_dict_format(value)
     # Other truthy values are reserved — treat as "not specified".
     return None

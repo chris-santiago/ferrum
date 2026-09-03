@@ -7,10 +7,11 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
+from ferrum._title_sentinel import is_unspecified
 from ferrum._validate import validate_choice, validate_pixel_value
+from ferrum.legend import validate_legend_direction, validate_legend_orient
 
 
-_VALID_LEGEND_ORIENTS = frozenset({"right", "left", "top", "bottom", "none"})
 _VALID_TITLE_ANCHORS = frozenset({"start", "middle", "end"})
 
 _AXIS_XY_DEPRECATION_MSG = (
@@ -390,8 +391,16 @@ class LegendConfig:
     zindex: int | None = None
 
     def __post_init__(self) -> None:
-        if self.orient is not None:
-            validate_choice("LegendConfig.orient", "orient", self.orient, _VALID_LEGEND_ORIENTS)
+        # is_unspecified (not a bare `is not None` check) so this surface
+        # shares its "not specified" gate with Legend's — a bare-None LegendConfig
+        # field has no separate _UNSET state (its default already IS None), so
+        # this reduces to the same check, but sharing the function is what
+        # keeps the three orient/direction surfaces (Legend, LegendConfig, the
+        # raw legend dict) from re-deriving the None policy independently.
+        if not is_unspecified(self.orient):
+            validate_legend_orient("LegendConfig.orient", self.orient)
+        if not is_unspecified(self.direction):
+            validate_legend_direction("LegendConfig.direction", self.direction)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""

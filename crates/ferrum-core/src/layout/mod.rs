@@ -692,7 +692,8 @@ fn reserve_legends(
 ) -> (Option<LegendLayout>, Vec<LegendLayout>, Rect, u32) {
     // D13+: Per-chart overrides from `encoding.color.legend` extra fields:
     //   labelFontSize  → overrides theme.label_font_size for entries/ticks
-    //   direction      → overrides theme.legend_direction for categorical layout
+    //   direction      → overrides theme.legend_direction; sizes + arranges a
+    //                    categorical legend and transposes a colorbar (D5)
     //   type="gradient"→ force colorbar even when categorical entries exist
     //   type="symbol"  → force categorical legend even when colorbar available
     //   tickCount      → subsample colorbar ticks to at most N
@@ -756,6 +757,7 @@ fn reserve_legends(
         inner,
         inner_after_legend,
         effective_label_font_size,
+        legend_overrides.style.label_font_size,
         theme.typography.legend_title_font_size,
         metrics,
         theme.padding.column_padding,

@@ -479,6 +479,15 @@ pub enum RenderWarning {
     /// input (a `&'static str` field forces `Deserialize<'de>` to require
     /// `'de: 'static`, breaking `serde_json::from_str` on a local `String`).
     ConfigSurfaceNotPresent { section: String },
+    /// A per-channel `Legend(values=[...])` on a CATEGORICAL legend named
+    /// entries the legend does not have (D6/F-L04-05, spec §4.4). `values`
+    /// filters and orders the entries; a name matching none of them cannot be
+    /// drawn as a swatch — there is no category, no color, and no scale slot
+    /// behind it — so it is skipped and reported here rather than silently
+    /// ignored or invented as an empty swatch. `values` names the unmatched
+    /// entries in the order the caller wrote them; the matched ones still
+    /// filter and order the legend normally.
+    LegendValuesUnknown { values: Vec<String> },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -574,6 +583,11 @@ impl std::fmt::Display for RenderWarning {
                 "chart config names '{section}' but the chart has no matching surface; \
                  the override was not applied"
             ),
+            RenderWarning::LegendValuesUnknown { values } => write!(
+                f,
+                "legend values [{}] match no legend entry and were skipped",
+                values.join(", ")
+            ),
         }
     }
 }
@@ -633,6 +647,7 @@ mod tests {
                 scale_kind: "log".into(),
             },
             RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() },
+            RenderWarning::LegendValuesUnknown { values: vec!["zzz".into()] },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -688,6 +703,15 @@ mod tests {
         assert!(no_surface_text.contains("axis_y2"), "{no_surface_text}");
         assert!(no_surface_text.contains("no matching surface"), "{no_surface_text}");
         assert!(!no_surface_text.contains("ConfigSurfaceNotPresent"), "{no_surface_text}");
+
+        // D6/F-L04-05 (this task): unknown categorical `Legend(values=)` names.
+        let unknown = RenderWarning::LegendValuesUnknown {
+            values: vec!["zulu".into(), "yankee".into()],
+        };
+        let unknown_text = format!("{unknown}");
+        assert!(unknown_text.contains("zulu, yankee"), "{unknown_text}");
+        assert!(unknown_text.contains("match no legend entry"), "{unknown_text}");
+        assert!(!unknown_text.contains("LegendValuesUnknown"), "{unknown_text}");
     }
 
     /// Spec-review 2026-08-28 (cannot_verify item, resolved this round):
@@ -893,9 +917,15 @@ use chart_config::{AxisConfigSpec, ChartConfig};
 /// Apply [`ChartConfig`] overrides to a [`ThemeInputs`] clone.
 ///
 /// This implements "configure > theme" precedence (level 3 > level 4–5). It is
-/// called in both `render_svg` and `render_scene_json` after the per-encoding
-/// legend overrides have been merged into `effective_theme` but before
-/// `compute_layout` and `build_scene` are invoked.
+/// called in both `render_svg` and `render_scene_json` before `compute_layout`
+/// and `build_scene` are invoked.
+///
+/// It handles only the fields for which the theme slot is a genuine FALLBACK,
+/// consulted by a later `.or(...)`. The three legend fields whose theme slot
+/// also carries the resolved per-channel value are deliberately absent: they
+/// resolve in [`apply_legend_cascade_to_theme`], which runs right after this
+/// and sees both levels at once (D7 — a second unconditional writer here is
+/// what inverted their cascade).
 ///
 /// Per-channel `axis=Axis(...)` overrides live in `AxisInput` and are resolved
 /// by `prepare_render_inputs` — they take effect at layout time (level 2) and
@@ -950,34 +980,22 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
     }
 
     // ── Legend overrides ──────────────────────────────────────────────────────
+    //
+    // Only `direction` lands here. `direction`'s theme slot is genuinely the
+    // chart-level fallback — `layout_color_legend` resolves the per-channel
+    // override against it with `.or(...)`, so writing it unconditionally still
+    // leaves per-channel winning. The other three ThemeInputs-backed legend
+    // fields (`orient`, `columns`, `title_font_size`) cannot: their theme slots
+    // are also where the per-channel values are written, so a write here
+    // OVERWROTE the per-channel value that had already landed — the D7 cascade
+    // inversion. They now resolve in `apply_legend_cascade_to_theme`, which
+    // sees both levels at once. `label_font_size` left too: it wrote the
+    // typography slot SHARED with axis labels, so a legend knob resized axis
+    // labels; it now fills the legend-own `LegendStyleOpts.label_font_size`
+    // slot in `apply_chart_config_to_legend_overrides`.
     if let Some(ref legend_cfg) = config.legend {
-        let legend = &legend_cfg.style;
-        if let Some(ref orient) = legend.orient {
-            theme.legend.legend_orient = match orient.as_str() {
-                "right"  => LegendOrient::Right,
-                "left"   => LegendOrient::Left,
-                "top"    => LegendOrient::Top,
-                "bottom" => LegendOrient::Bottom,
-                _ => theme.legend.legend_orient,
-            };
-        }
-        if let Some(ref dir) = legend.direction {
-            theme.legend.legend_direction = match dir.as_str() {
-                "vertical"   => Some(LegendDirection::Vertical),
-                "horizontal" => Some(LegendDirection::Horizontal),
-                _ => theme.legend.legend_direction,
-            };
-        }
-        if let Some(cols) = legend.columns {
-            theme.legend.legend_columns = Some(cols);
-        }
-        if let Some(fs) = legend.title_font_size {
-            theme.typography.legend_title_font_size = fs;
-        }
-        // legend.label_font_size maps to the shared theme.typography.label_font_size,
-        // which controls both axis and legend label sizing.
-        if let Some(fs) = legend.label_font_size {
-            theme.typography.label_font_size = fs;
+        if let Some(dir) = legend_cfg.style.direction.as_deref().and_then(LegendDirection::parse) {
+            theme.legend.legend_direction = Some(dir);
         }
     }
 
@@ -1104,6 +1122,56 @@ fn apply_axis_y_config_to_theme(theme: &mut ThemeInputs, axis: &AxisConfigSpec) 
     apply_axis_config_to_theme(theme, axis);
 }
 
+/// Resolve the three legend fields whose effective value lives on
+/// [`ThemeInputs`] under the documented cascade: per-channel `Legend(...)` >
+/// chart-level `configure_legend(...)` > theme (D7 cascade repair, spec §4.4).
+///
+/// These three share one hazard: the theme slot is the ONLY carrier for the
+/// resolved value, so per-channel and chart-level both write the same field.
+/// Sequencing two independent writers (per-channel first, then
+/// `apply_chart_config`) therefore inverted the contract — whoever ran last
+/// won, and chart-level ran last. Resolving both levels HERE, with the
+/// `or_else` chain `scene_build`'s `legend_zindex` already uses as the
+/// chart-level-fallback exemplar, makes the precedence a property of one
+/// expression instead of a property of call ordering.
+///
+/// **Disclosed behavior change:** a chart setting BOTH (e.g.
+/// `Color(legend=Legend(orient="bottom"))` plus
+/// `configure_legend(orient="right")`) now honors the per-channel value. That
+/// is the documented contract asserting itself; the previous chart-level-wins
+/// behavior was the bug.
+fn apply_legend_cascade_to_theme(
+    theme: &mut ThemeInputs,
+    per_channel: &prepare::LegendPreparedOverrides,
+    config: &ChartConfig,
+) {
+    let chart_legend = config.legend.as_ref().map(|l| &l.style);
+    // `"none"` is a suppression, not a placement, and is consumed before this
+    // point on both levels (per-channel: `LegendStyleSpec::suppresses` in
+    // `prepare::legend`; chart-level: `chart_config_legend_disabled`, which
+    // reads the same predicate, so a raw-dict `orient="none"` that never went
+    // through Python's `_resolve_chart_config` conversion still suppresses).
+    // An unrecognized token leaves the theme value standing.
+    let chart_orient = chart_legend
+        .and_then(|l| l.orient.as_deref())
+        .and_then(LegendOrient::parse);
+    if let Some(orient) = per_channel.orient.or(chart_orient) {
+        theme.legend.legend_orient = orient;
+    }
+    if let Some(cols) = per_channel
+        .columns
+        .or_else(|| chart_legend.and_then(|l| l.columns))
+    {
+        theme.legend.legend_columns = Some(cols);
+    }
+    if let Some(fs) = per_channel
+        .title_font_size
+        .or_else(|| chart_legend.and_then(|l| l.title_font_size))
+    {
+        theme.typography.legend_title_font_size = fs;
+    }
+}
+
 /// Build a [`LegendOverrides`] from a [`prepare::PreparedInputs`].
 fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides {
     let lo = &prep.legend_overrides;
@@ -1159,14 +1227,21 @@ pub(crate) fn effective_legend_title(prep: &prepare::PreparedInputs) -> Option<S
 }
 
 /// Whether chart-level `configure_legend(...)` fully suppresses the legend
-/// (GH #74). Currently set only via `disabled: true`, which Python's
-/// `_resolve_chart_config` derives from a fully-merged `orient="none"` —
-/// see the call site in `prepare_and_layout`. Reads the SAME `disabled`
-/// field `LegendStyleSpec` already carries for the per-encoding
-/// `Color(legend=None)` path (D13/Schwabish SB3); this is the chart-level
-/// mirror of that one suppression mechanism, not a second one.
+/// (GH #74). Reads [`chart_config::LegendStyleSpec::suppressed_by`] on a
+/// one-element chain — the SAME predicate the per-channel color legend reads
+/// its whole cascade through and the size/shape aux blocks read their own
+/// channel through. So both spellings work here too: `disabled: true` (which
+/// Python's `_resolve_chart_config` derives from a fully-merged
+/// `orient="none"`) and a raw-dict `orient="none"` that never went through
+/// that conversion. Before the cycle-2 fix this asker was left on the bare
+/// `disabled` field, so the second spelling parsed to no placement
+/// (`LegendOrient::parse` rejects `"none"`) and the theme orient stood — a
+/// legend drawn where the caller asked for none.
 fn chart_config_legend_disabled(chart_config: &ChartConfig) -> bool {
-    chart_config.legend.as_ref().and_then(|l| l.style.disabled).unwrap_or(false)
+    chart_config
+        .legend
+        .as_ref()
+        .is_some_and(|l| chart_config::LegendStyleSpec::suppressed_by(&[&l.style]))
 }
 
 /// Apply `ChartConfig.legend` fields to a `LegendOverrides`.
@@ -1225,6 +1300,15 @@ fn apply_chart_config_to_legend_overrides(
     }
     if style.title_padding.is_none() {
         style.title_padding = legend.title_padding;
+    }
+    // D7: `configure_legend(label_font_size=)` fills the LEGEND-OWN slot, the
+    // same one per-channel `Legend(label_font_size=)` writes and
+    // `layout_color_legend` resolves against the theme. It used to write
+    // `theme.typography.label_font_size`, which axis tick labels also read —
+    // so a legend knob silently resized the axes. Axis label size is now
+    // reachable only from `configure_axis(label_font_size=)` and the theme.
+    if style.label_font_size.is_none() {
+        style.label_font_size = legend.label_font_size;
     }
 }
 
@@ -1742,6 +1826,42 @@ fn resync_categorical_legend_entries(
         .collect();
 }
 
+/// Apply a per-channel `Legend(values=[...])` to a CATEGORICAL legend: keep
+/// only the named entries, in the order named (D6/F-L04-05, spec §4.4).
+///
+/// Mirrors the colorbar arm's long-standing `values` semantics (an explicit
+/// list replaces the computed tick labels) for the arm that never had them.
+/// `values` absent → entries untouched, byte-identically. A colorbar chart has
+/// no entries, so this is a no-op there and the colorbar path keeps reading
+/// `values` itself, unchanged.
+///
+/// A name matching no entry cannot be drawn: there is no category behind it,
+/// so no color-scale slot and no swatch. Per the batch's sanctioned-degradation
+/// rule it is skipped and reported via [`RenderWarning::LegendValuesUnknown`],
+/// never silently ignored and never invented as an empty swatch.
+fn apply_legend_values_to_entries(
+    entries: &mut Vec<crate::layout::LegendEntry>,
+    values: Option<&[String]>,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    let Some(values) = values else { return };
+    if entries.is_empty() {
+        return;
+    }
+    let mut kept = Vec::with_capacity(values.len());
+    let mut unknown = Vec::new();
+    for wanted in values {
+        match entries.iter().find(|e| &e.label == wanted) {
+            Some(entry) => kept.push(entry.clone()),
+            None => unknown.push(wanted.clone()),
+        }
+    }
+    if !unknown.is_empty() {
+        warnings.push(RenderWarning::LegendValuesUnknown { values: unknown });
+    }
+    *entries = kept;
+}
+
 /// Output of the shared prepare-and-layout pipeline, consumed by both
 /// `render_svg` and `render_scene_json`.
 struct PipelineOutput {
@@ -2135,6 +2255,18 @@ fn prepare_and_layout(
             prep.provisional_scales.color.as_ref(),
         );
     }
+    // D6/F-L04-05: per-channel `Legend(values=[...])` filters and orders the
+    // CATEGORICAL legend entries, mirroring what the colorbar arm already does
+    // to its tick labels. Applied here, after the color-config resync above
+    // (which rebuilds `legend_entries` wholesale from the resolved domain and
+    // would otherwise undo the filter) and before `compute_layout` — so the
+    // filtered set is what layout sizes, what the overflow accounting counts,
+    // and what a compositor captures for a figure-level legend.
+    apply_legend_values_to_entries(
+        &mut prep.legend_entries,
+        prep.legend_overrides.values.as_deref(),
+        &mut warnings,
+    );
 
     // Build effective_theme: start from the caller-supplied theme, then layer in
     // overrides from lowest to highest priority within the "render" concern:
@@ -2142,18 +2274,11 @@ fn prepare_and_layout(
     //   2. ChartConfig overrides (configure_*() calls, level 3 > theme level 4-5).
     // Per-channel axis overrides (level 2) are in AxisInput and applied at layout time.
     let mut effective_theme = theme.clone();
-    // D13: per-encoding legend overrides.
-    if let Some(orient) = prep.legend_overrides.orient {
-        effective_theme.legend.legend_orient = orient;
-    }
-    if let Some(fs) = prep.legend_overrides.title_font_size {
-        effective_theme.typography.legend_title_font_size = fs;
-    }
-    if let Some(cols) = prep.legend_overrides.columns {
-        effective_theme.legend.legend_columns = Some(cols);
-    }
     // ChartConfig overrides (configure > theme).
     apply_chart_config(&mut effective_theme, chart_config);
+    // The three ThemeInputs-backed legend fields both levels write (orient,
+    // columns, title_font_size) resolve together, per-channel first (D7).
+    apply_legend_cascade_to_theme(&mut effective_theme, &prep.legend_overrides, chart_config);
 
     // D13 + v0.15.1: legend title override (replaces the default field-name title when Some).
     let title_for_layout = effective_legend_title(&prep);
@@ -3215,17 +3340,19 @@ mod orchestration_tests {
         let prep = prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
         let mut warnings = prep.warnings.clone();
 
+        // Mirror `prepare_and_layout`'s effective-theme construction by CALLING
+        // its two steps, not by re-expressing them: this block used to hand-copy
+        // the pre-D7 three-write sequence, which only kept passing because the
+        // test runs with `ChartConfig::default()` (so both expressions
+        // coincide). A second, older statement of a precedence rule stops
+        // tracking the pipeline the moment the rule moves again.
         let mut effective_theme = theme.clone();
-        if let Some(orient) = prep.legend_overrides.orient {
-            effective_theme.legend.legend_orient = orient;
-        }
-        if let Some(fs) = prep.legend_overrides.title_font_size {
-            effective_theme.typography.legend_title_font_size = fs;
-        }
-        if let Some(cols) = prep.legend_overrides.columns {
-            effective_theme.legend.legend_columns = Some(cols);
-        }
         apply_chart_config(&mut effective_theme, &ChartConfig::default());
+        apply_legend_cascade_to_theme(
+            &mut effective_theme,
+            &prep.legend_overrides,
+            &ChartConfig::default(),
+        );
         let theme_ref = &effective_theme;
         // Same three-way resolution as prepare_and_layout (v0.15.1 suppress fix).
         let effective_legend_title = match prep.legend_overrides.title.as_deref() {
@@ -4183,25 +4310,202 @@ mod chart_config_application_tests {
     #[test]
     fn apply_chart_config_legend_orient_and_direction() {
         let mut theme = ThemeInputs::default();
-        let config = ChartConfig {
-            legend: Some(LegendConfigSpec {
-                style: LegendStyleSpec {
-                    orient: Some("bottom".to_string()),
-                    direction: Some("horizontal".to_string()),
-                    columns: Some(4),
-                    title_font_size: Some(16.0),
-                    label_font_size: Some(9.0),
-                    ..Default::default()
-                },
-            }),
+        let config = legend_config(LegendStyleSpec {
+            orient: Some("bottom".to_string()),
+            direction: Some("horizontal".to_string()),
+            columns: Some(4),
+            title_font_size: Some(16.0),
+            label_font_size: Some(9.0),
+            ..Default::default()
+        });
+        // `direction` is the only legend field `apply_chart_config` still
+        // writes; the other three ThemeInputs-backed ones resolve in
+        // `apply_legend_cascade_to_theme` (D7) so per-channel can win.
+        apply_chart_config(&mut theme, &config);
+        assert_eq!(theme.legend.legend_direction, Some(LegendDirection::Horizontal));
+        apply_legend_cascade_to_theme(
+            &mut theme,
+            &prepare::LegendPreparedOverrides::default(),
+            &config,
+        );
+        assert_eq!(theme.legend.legend_orient, LegendOrient::Bottom);
+        assert_eq!(theme.legend.legend_columns, Some(4));
+        assert_eq!(theme.typography.legend_title_font_size, 16.0);
+        // D7: `configure_legend(label_font_size=)` no longer writes the SHARED
+        // typography slot (which axis tick labels also read) — it fills the
+        // legend-own `LegendStyleOpts` slot instead.
+        let theme_default = ThemeInputs::default();
+        assert_eq!(
+            theme.typography.label_font_size, theme_default.typography.label_font_size,
+            "configure_legend(label_font_size=) must not resize axis labels",
+        );
+        let mut overrides = LegendOverrides::default();
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.style.label_font_size, Some(9.0));
+    }
+
+    fn legend_config(style: LegendStyleSpec) -> ChartConfig {
+        ChartConfig { legend: Some(LegendConfigSpec { style }), ..Default::default() }
+    }
+
+    /// D7 cascade repair: for each of the three fields whose effective value
+    /// lives on `ThemeInputs`, a per-channel `Legend(...)` beats chart-level
+    /// `configure_legend(...)`. RED before the fix — `apply_chart_config` ran
+    /// after the per-channel write and clobbered all three.
+    #[test]
+    fn legend_cascade_per_channel_beats_chart_level() {
+        let mut theme = ThemeInputs::default();
+        let config = legend_config(LegendStyleSpec {
+            orient: Some("right".to_string()),
+            columns: Some(4),
+            title_font_size: Some(16.0),
+            ..Default::default()
+        });
+        let per_channel = prepare::LegendPreparedOverrides {
+            orient: Some(LegendOrient::Bottom),
+            columns: Some(2),
+            title_font_size: Some(21.0),
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
+        apply_legend_cascade_to_theme(&mut theme, &per_channel, &config);
         assert_eq!(theme.legend.legend_orient, LegendOrient::Bottom);
-        assert_eq!(theme.legend.legend_direction, Some(LegendDirection::Horizontal));
-        assert_eq!(theme.legend.legend_columns, Some(4));
-        assert_eq!(theme.typography.legend_title_font_size, 16.0);
-        assert_eq!(theme.typography.label_font_size, 9.0);
+        assert_eq!(theme.legend.legend_columns, Some(2));
+        assert_eq!(theme.typography.legend_title_font_size, 21.0);
+    }
+
+    /// The other half of the same cascade: with no per-channel value, the
+    /// chart-level one still lands (it is a fallback, not a no-op).
+    #[test]
+    fn legend_cascade_chart_level_fills_absent_per_channel() {
+        let mut theme = ThemeInputs::default();
+        let config = legend_config(LegendStyleSpec {
+            orient: Some("left".to_string()),
+            columns: Some(3),
+            title_font_size: Some(17.0),
+            ..Default::default()
+        });
+        apply_legend_cascade_to_theme(
+            &mut theme,
+            &prepare::LegendPreparedOverrides::default(),
+            &config,
+        );
+        assert_eq!(theme.legend.legend_orient, LegendOrient::Left);
+        assert_eq!(theme.legend.legend_columns, Some(3));
+        assert_eq!(theme.typography.legend_title_font_size, 17.0);
+    }
+
+    // ── D6/F-L04-05: categorical `values` filter + order ──────────────────
+
+    fn legend_entry(label: &str) -> crate::layout::LegendEntry {
+        crate::layout::LegendEntry {
+            label: label.to_string(),
+            symbol: crate::layout::SymbolKind::Circle,
+        }
+    }
+
+    fn labels_of(entries: &[crate::layout::LegendEntry]) -> Vec<&str> {
+        entries.iter().map(|e| e.label.as_str()).collect()
+    }
+
+    #[test]
+    fn legend_values_filters_and_orders_entries() {
+        let mut entries = vec![legend_entry("a"), legend_entry("b"), legend_entry("c")];
+        let mut warnings = Vec::new();
+        apply_legend_values_to_entries(
+            &mut entries,
+            Some(&["c".to_string(), "a".to_string()]),
+            &mut warnings,
+        );
+        assert_eq!(labels_of(&entries), ["c", "a"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn legend_values_absent_leaves_entries_untouched() {
+        let mut entries = vec![legend_entry("a"), legend_entry("b")];
+        let mut warnings = Vec::new();
+        apply_legend_values_to_entries(&mut entries, None, &mut warnings);
+        assert_eq!(labels_of(&entries), ["a", "b"]);
+        assert!(warnings.is_empty());
+    }
+
+    /// A colorbar chart has no categorical entries; `values` is the colorbar
+    /// arm's own tick-label override there and must not be consumed here.
+    #[test]
+    fn legend_values_on_empty_entries_is_a_no_op_and_never_warns() {
+        let mut entries: Vec<crate::layout::LegendEntry> = Vec::new();
+        let mut warnings = Vec::new();
+        apply_legend_values_to_entries(
+            &mut entries,
+            Some(&["lo".to_string(), "hi".to_string()]),
+            &mut warnings,
+        );
+        assert!(entries.is_empty());
+        assert!(warnings.is_empty(), "a colorbar's values must not warn: {warnings:?}");
+    }
+
+    #[test]
+    fn legend_values_unknown_names_warn_and_are_skipped() {
+        let mut entries = vec![legend_entry("a"), legend_entry("b")];
+        let mut warnings = Vec::new();
+        apply_legend_values_to_entries(
+            &mut entries,
+            Some(&["a".to_string(), "zzz".to_string(), "qqq".to_string()]),
+            &mut warnings,
+        );
+        assert_eq!(labels_of(&entries), ["a"]);
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::LegendValuesUnknown {
+                values: vec!["zzz".to_string(), "qqq".to_string()],
+            }],
+        );
+    }
+
+    /// Cycle-2 S2: `chart_config_legend_disabled` reads the same
+    /// `suppressed_by` predicate as the per-channel and aux askers, so a
+    /// raw-dict chart-level `orient="none"` — one that never passed through
+    /// Python's `_resolve_chart_config` → `disabled` conversion — suppresses
+    /// too. RED before the fix: it read the bare `disabled` field, so
+    /// `orient="none"` fell through `LegendOrient::parse` as no placement and
+    /// the theme orient stood.
+    #[test]
+    fn chart_level_orient_none_suppresses_without_the_python_conversion() {
+        let raw = legend_config(LegendStyleSpec {
+            orient: Some("none".into()),
+            ..Default::default()
+        });
+        assert!(chart_config_legend_disabled(&raw));
+        let converted = legend_config(LegendStyleSpec {
+            disabled: Some(true),
+            ..Default::default()
+        });
+        assert!(chart_config_legend_disabled(&converted));
+        let placed = legend_config(LegendStyleSpec {
+            orient: Some("bottom".into()),
+            ..Default::default()
+        });
+        assert!(!chart_config_legend_disabled(&placed));
+        assert!(!chart_config_legend_disabled(&ChartConfig::default()));
+    }
+
+    /// Neither level set → the theme's own values stand untouched.
+    #[test]
+    fn legend_cascade_no_config_leaves_theme_untouched() {
+        let mut theme = ThemeInputs::default();
+        let before = theme.clone();
+        apply_legend_cascade_to_theme(
+            &mut theme,
+            &prepare::LegendPreparedOverrides::default(),
+            &ChartConfig::default(),
+        );
+        assert_eq!(theme.legend.legend_orient, before.legend.legend_orient);
+        assert_eq!(theme.legend.legend_columns, before.legend.legend_columns);
+        assert_eq!(
+            theme.typography.legend_title_font_size,
+            before.typography.legend_title_font_size
+        );
     }
 
     #[test]

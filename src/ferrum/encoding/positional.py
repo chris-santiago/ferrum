@@ -52,7 +52,11 @@ class X(ChannelBase):
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
     - ``legend`` — a ``Legend(...)`` instance, ``None`` / ``False`` to suppress,
-      or a raw legend dict.
+      or a raw legend dict.  Honored (NF-B13): routed to the same per-channel
+      legend-override path ``Color(legend=...)`` uses, so it takes effect on
+      the chart's legend even though ``x``/``y`` carry no legend of their
+      own.  Per-channel precedence is ``color`` > ``x`` > ``y``; if
+      ``Color(legend=...)`` is also set, its value wins field-by-field.
 
     Examples
     --------
@@ -105,7 +109,11 @@ class Y(ChannelBase):
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
     - ``legend`` — a ``Legend(...)`` instance, ``None`` / ``False`` to suppress,
-      or a raw legend dict.
+      or a raw legend dict.  Honored (NF-B13): routed to the same per-channel
+      legend-override path ``Color(legend=...)`` uses, so it takes effect on
+      the chart's legend even though ``x``/``y`` carry no legend of their
+      own.  Per-channel precedence is ``color`` > ``x`` > ``y``; if
+      ``Color(legend=...)`` is also set, its value wins field-by-field.
 
     Examples
     --------

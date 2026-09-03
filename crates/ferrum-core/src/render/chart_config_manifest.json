@@ -289,15 +289,15 @@
   },
   "LegendStyleSpec.columns": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.legend.legend_columns; chart-level currently OVERWRITES (not fill-only) \u2014 pending Task 7 (D7)"
+    "reason": "per-channel and chart-level both resolve in render/mod.rs::apply_legend_cascade_to_theme -> theme.legend.legend_columns, per-channel wins (D7 cascade repair, Task 7)."
   },
   "LegendStyleSpec.direction": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.legend.legend_direction; not yet threaded into estimate_legend_size \u2014 pending Task 7 (D5)"
+    "reason": "apply_chart_config -> theme.legend.legend_direction, resolved against the per-channel override by layout::legend::resolve_legend_direction and threaded into estimate_legend_size/estimate_legend_size_with_title (sizing) AND layout_colorbar (horizontal gradient bars) \u2014 D5, Task 7."
   },
   "LegendStyleSpec.disabled": {
     "honored": true,
-    "reason": "chart_config_legend_disabled, render/mod.rs \u2014 suppresses legend content"
+    "reason": "LegendStyleSpec::suppressed_by \u2014 one predicate read by all three askers: the per-channel color legend over its color > x > y chain (prepare/legend.rs), each size/shape aux block over its own one-element chain (legend_channel_disabled), and chart-level configure_legend (chart_config_legend_disabled). Both spellings (disabled: true, orient=\"none\") resolve field-by-field with the same first-Some rule every other legend field uses."
   },
   "LegendStyleSpec.format": {
     "honored": true,
@@ -321,7 +321,7 @@
   },
   "LegendStyleSpec.label_font_size": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.typography.label_font_size (SHARED slot \u2014 also resizes axis labels, a known cascade bug); pending Task 7 (D7: a legend-own slot)"
+    "reason": "legend-OWN slot: legend_overrides_from_prep (per-channel) / apply_chart_config_to_legend_overrides (chart-level fill) -> LegendStyleOpts.label_font_size, resolved against the theme in layout_color_legend. No longer writes the shared theme.typography.label_font_size, so a legend knob does not resize axis labels (D7, Task 7)."
   },
   "LegendStyleSpec.label_limit": {
     "honored": true,
@@ -333,7 +333,7 @@
   },
   "LegendStyleSpec.orient": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.legend.legend_orient + legend_overrides path; chart-level `orient` currently OVERWRITES (not fill-only) \u2014 pending Task 7 (D7: cascade repair, per-channel wins)"
+    "reason": "per-channel (color > x > y, prepare/legend.rs::per_channel_legend_specs) and chart-level configure_legend both resolve in render/mod.rs::apply_legend_cascade_to_theme -> theme.legend.legend_orient, per-channel wins (D7 cascade repair, Task 7). orient=\"none\" is a suppression instead, read at the SAME first-Some precedence by LegendStyleSpec::suppressed_by."
   },
   "LegendStyleSpec.padding": {
     "honored": true,
@@ -373,7 +373,7 @@
   },
   "LegendStyleSpec.title_font_size": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.typography.legend_title_font_size; chart-level currently OVERWRITES (not fill-only) \u2014 pending Task 7 (D7)"
+    "reason": "per-channel and chart-level both resolve in render/mod.rs::apply_legend_cascade_to_theme -> theme.typography.legend_title_font_size, per-channel wins (D7 cascade repair, Task 7)."
   },
   "LegendStyleSpec.title_padding": {
     "honored": true,
@@ -385,7 +385,7 @@
   },
   "LegendStyleSpec.values": {
     "honored": true,
-    "reason": "colorbar tick-label arm, layout/legend.rs; categorical-legend filter/order NOT yet wired \u2014 pending Task 7 (D6)"
+    "reason": "colorbar tick-label arm (layout/legend.rs::layout_color_legend) AND the categorical filter+order arm (render/mod.rs::apply_legend_values_to_entries, run after the color-config resync); unknown categorical names warn via RenderWarning::LegendValuesUnknown and are skipped (D6/F-L04-05, Task 7)."
   },
   "LegendStyleSpec.zindex": {
     "honored": true,

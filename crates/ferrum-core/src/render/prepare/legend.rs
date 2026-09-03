@@ -11,6 +11,7 @@ use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendDirection, LegendEntry, LegendOrient, ShapeLegendEntry,
     SizeLegendEntry, StrokeDashLegendEntry, SymbolKind,
 };
+use crate::render::chart_config::LegendStyleSpec;
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::ChannelName;
@@ -26,6 +27,43 @@ pub(crate) struct ColorLegendBundle {
     pub legend_title: Option<String>,
     pub legend_overrides: LegendPreparedOverrides,
     pub aux_legends: Vec<AuxLegendInput>,
+}
+
+/// The per-channel `legend={...}` specs that address the chart's ONE legend
+/// surface, in precedence order.
+///
+/// The color channel owns that surface, so its own `legend=` wins outright.
+/// `X(legend=...)` / `Y(legend=...)` — documented as honored on the positional
+/// channels (`encoding/positional.py`'s Notes, `_honored.py`'s
+/// `PRIMARY_POSITIONAL`) but until now routed nowhere (NF-B13, adjudicated
+/// 2026-09-02: implement) — fill the fields color left unset. A positional
+/// channel has no legend block of its own; the surface its `legend=` can
+/// address is the chart's, which is what this cascade gives it.
+///
+/// Precedence within the per-channel level is color > x > y; the whole level
+/// still beats chart-level `configure_legend` and the theme, per the batch's
+/// one cascade discipline.
+fn per_channel_legend_specs(spec: &ChartSpec) -> Vec<&LegendStyleSpec> {
+    [
+        spec.encoding.color.as_ref(),
+        spec.encoding.x.as_ref(),
+        spec.encoding.y.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|e| e.legend.as_deref())
+    .collect()
+}
+
+/// First `Some` answer for `field` across `specs`, in their precedence order —
+/// the one-line fill-only cascade every per-channel legend override reads
+/// through, so no field can be wired to a different precedence than its
+/// siblings by hand.
+fn pick<'a, T>(
+    specs: &[&'a LegendStyleSpec],
+    field: impl Fn(&'a LegendStyleSpec) -> Option<T>,
+) -> Option<T> {
+    specs.iter().find_map(|s| field(s))
 }
 
 /// Walk `spec.conditionals` for the given `channel` and collect the field names
@@ -130,25 +168,26 @@ pub(crate) fn build_color_legend(
     // the chart-wide extras aux_legends/title). If a new legend-content field
     // is added to ``PreparedInputs`` and wired here, wire it into that clear
     // block too, or a chart-level disable will silently leave it populated.
-    let legend_disabled = spec
-        .encoding
-        .color
-        .as_ref()
-        .and_then(|c| c.legend.as_ref())
-        .and_then(|l| l.disabled)
-        .unwrap_or(false);
+    //
+    // NF-B13 / spec §4.4: the suppression question — like every other
+    // per-channel legend override below — is answered by the color > x > y
+    // cascade, so `X(legend=None)` reaches the same consumer `Color(legend=
+    // None)` does. `orient="none"` is the second spelling of the same intent,
+    // and both resolve field-by-field with the same first-`Some` rule the
+    // `pick`s below use (see `LegendStyleSpec::suppressed_by`).
+    let legend_specs = per_channel_legend_specs(spec);
+    let legend_disabled = LegendStyleSpec::suppressed_by(&legend_specs);
     // Colorbar label overrides, shared by the continuous (gradient) and the
     // discretizing (k-swatch) arms: an explicit `tickLabels` list replaces the
     // computed labels outright, and `format=` applies a Python-style format spec
     // to each computed value.
-    let color_legend = spec.encoding.color.as_ref().and_then(|c| c.legend.as_ref());
-    let custom_tick_labels: Option<Vec<String>> = color_legend.and_then(|l| l.tick_labels.clone());
-    let format_spec: Option<&str> = color_legend.and_then(|l| l.format.as_deref());
+    let custom_tick_labels: Option<Vec<String>> = pick(&legend_specs, |l| l.tick_labels.clone());
+    let format_spec: Option<&str> = pick(&legend_specs, |l| l.format.as_deref());
     // D8 (legend half of format_type threading, Task 4): a colorbar whose
     // domain is temporal (`format_type == "time"`) formats each sampled tick
     // value as an epoch-ms timestamp instead of a d3 numeric spec — mirrors
     // the axis half (`AxisStyleSpec.label_format_type`).
-    let format_type: Option<&str> = color_legend.and_then(|l| l.format_type.as_deref());
+    let format_type: Option<&str> = pick(&legend_specs, |l| l.format_type.as_deref());
     // The two gates below (`format_spec.is_some() || format_type ==
     // Some("time")`) are deliberately narrower than "either field set"
     // (quality-review S2, 2026-09-03): `fm.Legend(format_type=...)` alone,
@@ -308,37 +347,26 @@ pub(crate) fn build_color_legend(
         None
     };
 
-    // D13 (B5-typed): extract legend style overrides from the typed
-    // `encoding.color.legend` spec. Per-channel precedence: these win over
-    // chart-level `configure_legend` (which fills only what is still `None`).
-    let color_legend = spec.encoding.color.as_ref().and_then(|c| c.legend.as_ref());
+    // D13 (B5-typed): extract legend style overrides from the typed per-channel
+    // `legend` specs (color > x > y, see `per_channel_legend_specs`). Per-channel
+    // precedence: these win over chart-level `configure_legend` (which fills only
+    // what is still `None`).
     let legend_overrides = LegendPreparedOverrides {
-        orient: color_legend
-            .and_then(|l| l.orient.as_deref())
-            .and_then(|s| match s {
-                "right" => Some(LegendOrient::Right),
-                "left" => Some(LegendOrient::Left),
-                "top" => Some(LegendOrient::Top),
-                "bottom" => Some(LegendOrient::Bottom),
-                _ => None,
-            }),
-        title: color_legend.and_then(|l| l.title.clone()),
-        title_font_size: color_legend.and_then(|l| l.title_font_size),
-        columns: color_legend.and_then(|l| l.columns),
-        tick_count: color_legend.and_then(|l| l.tick_count).map(|n| n as usize),
-        label_font_size: color_legend.and_then(|l| l.label_font_size),
-        gradient_length: color_legend.and_then(|l| l.gradient_length),
-        gradient_thickness: color_legend.and_then(|l| l.gradient_thickness),
-        direction: color_legend
-            .and_then(|l| l.direction.as_deref())
-            .and_then(|s| match s {
-                "horizontal" => Some(LegendDirection::Horizontal),
-                "vertical" => Some(LegendDirection::Vertical),
-                _ => None,
-            }),
+        // `"none"` is absent here on purpose: it is a suppression, not a
+        // placement, and was already consumed by `legend_disabled` above.
+        orient: pick(&legend_specs, |l| l.orient.as_deref()).and_then(LegendOrient::parse),
+        title: pick(&legend_specs, |l| l.title.clone()),
+        title_font_size: pick(&legend_specs, |l| l.title_font_size),
+        columns: pick(&legend_specs, |l| l.columns),
+        tick_count: pick(&legend_specs, |l| l.tick_count).map(|n| n as usize),
+        label_font_size: pick(&legend_specs, |l| l.label_font_size),
+        gradient_length: pick(&legend_specs, |l| l.gradient_length),
+        gradient_thickness: pick(&legend_specs, |l| l.gradient_thickness),
+        direction: pick(&legend_specs, |l| l.direction.as_deref())
+            .and_then(LegendDirection::parse),
         // `values`: explicit tick/entry labels for the legend. Accepts an array of
         // strings or numbers. Numbers are formatted to a short decimal string.
-        values: color_legend.and_then(|l| l.values.as_ref()).map(|arr| {
+        values: pick(&legend_specs, |l| l.values.as_ref()).map(|arr| {
             arr.iter()
                 .map(|item| {
                     if let Some(s) = item.as_str() {
@@ -359,24 +387,24 @@ pub(crate) fn build_color_legend(
                 .collect()
         }),
         // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
-        legend_type: color_legend.and_then(|l| l.legend_type.clone()),
-        symbol_type: color_legend.and_then(|l| l.symbol_type.clone()),
+        legend_type: pick(&legend_specs, |l| l.legend_type.clone()),
+        symbol_type: pick(&legend_specs, |l| l.symbol_type.clone()),
         // B5 unit 3: orphan legend styling/positioning fields. Per-channel here;
         // chart-level `configure_legend(...)` fills any that stay `None`.
-        symbol_stroke_width: color_legend.and_then(|l| l.symbol_stroke_width),
-        row_padding: color_legend.and_then(|l| l.row_padding),
-        column_padding: color_legend.and_then(|l| l.column_padding),
-        label_limit: color_legend.and_then(|l| l.label_limit),
-        clip_height: color_legend.and_then(|l| l.clip_height),
-        tick_min_step: color_legend.and_then(|l| l.tick_min_step),
-        zindex: color_legend.and_then(|l| l.zindex),
+        symbol_stroke_width: pick(&legend_specs, |l| l.symbol_stroke_width),
+        row_padding: pick(&legend_specs, |l| l.row_padding),
+        column_padding: pick(&legend_specs, |l| l.column_padding),
+        label_limit: pick(&legend_specs, |l| l.label_limit),
+        clip_height: pick(&legend_specs, |l| l.clip_height),
+        tick_min_step: pick(&legend_specs, |l| l.tick_min_step),
+        zindex: pick(&legend_specs, |l| l.zindex),
         // B5 unit 6a orphans. Per-channel here; chart-level `configure_legend`
         // fills any that stay `None`.
-        symbol_size: color_legend.and_then(|l| l.symbol_size),
-        label_color: color_legend.and_then(|l| l.label_color.clone()),
-        offset: color_legend.and_then(|l| l.offset),
-        padding: color_legend.and_then(|l| l.padding),
-        title_padding: color_legend.and_then(|l| l.title_padding),
+        symbol_size: pick(&legend_specs, |l| l.symbol_size),
+        label_color: pick(&legend_specs, |l| l.label_color.clone()),
+        offset: pick(&legend_specs, |l| l.offset),
+        padding: pick(&legend_specs, |l| l.padding),
+        title_padding: pick(&legend_specs, |l| l.title_padding),
     };
 
     // spec §4.0 (2026-08-28) / spec-review 2026-08-28 (cycle-3 finding):
@@ -504,12 +532,15 @@ pub(crate) fn build_color_legend(
     }
 }
 
-/// Read whether a channel's typed `legend` spec carries `disabled: true`
-/// (`legend=None` / `legend=False` from the Python `Size`/`Shape` classes).
+/// Read whether a channel's typed `legend` spec suppresses that channel's aux
+/// legend block — `legend=None` / `legend=False` from the Python `Size`/`Shape`
+/// classes, or `orient="none"`. An aux block answers for ONE channel, so this
+/// is the one-element case of the same [`LegendStyleSpec::suppressed_by`] the
+/// color legend reads its whole cascade through: the two spellings cannot come
+/// to mean different things on different channels.
 fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) -> bool {
-    enc.and_then(|e| e.legend.as_ref())
-        .and_then(|l| l.disabled)
-        .unwrap_or(false)
+    enc.and_then(|e| e.legend.as_deref())
+        .is_some_and(|l| LegendStyleSpec::suppressed_by(&[l]))
 }
 
 /// Optional explicit legend title from a channel's typed `legend.title`,
@@ -937,6 +968,142 @@ mod tests {
 
     fn empty_batch() -> RecordBatch {
         RecordBatch::new_empty(std::sync::Arc::new(arrow::datatypes::Schema::empty()))
+    }
+
+    // ── NF-B13: the per-channel legend cascade (color > x > y) ────────────
+
+    fn enc_with_legend(field: &str, legend: LegendStyleSpec) -> crate::spec::encoding::EncodingSpec {
+        crate::spec::encoding::EncodingSpec {
+            field: field.into(),
+            legend: Some(Box::new(legend)),
+            ..Default::default()
+        }
+    }
+
+    /// `X(legend=...)` / `Y(legend=...)` reach the same override path
+    /// `Color(legend=...)` uses, and color wins where both name a field.
+    #[test]
+    fn per_channel_legend_specs_cascade_color_then_x_then_y() {
+        let mut spec = empty_spec();
+        spec.encoding.color = Some(enc_with_legend(
+            "c",
+            LegendStyleSpec { orient: Some("left".into()), ..Default::default() },
+        ));
+        spec.encoding.x = Some(enc_with_legend(
+            "x",
+            LegendStyleSpec {
+                orient: Some("top".into()),
+                columns: Some(3),
+                ..Default::default()
+            },
+        ));
+        spec.encoding.y = Some(enc_with_legend(
+            "y",
+            LegendStyleSpec {
+                columns: Some(9),
+                title: Some("from y".into()),
+                ..Default::default()
+            },
+        ));
+        let specs = per_channel_legend_specs(&spec);
+        assert_eq!(specs.len(), 3);
+        // Color's orient wins over x's; x's columns wins over y's; y still
+        // supplies the field neither of the others named.
+        assert_eq!(pick(&specs, |l| l.orient.as_deref()), Some("left"));
+        assert_eq!(pick(&specs, |l| l.columns), Some(3));
+        assert_eq!(pick(&specs, |l| l.title.as_deref()), Some("from y"));
+    }
+
+    /// A channel with no `legend=` contributes nothing (it is skipped, not
+    /// treated as an all-`None` spec that could shadow a later channel).
+    #[test]
+    fn per_channel_legend_specs_skips_channels_without_a_legend() {
+        let mut spec = empty_spec();
+        spec.encoding.color = Some(crate::spec::encoding::EncodingSpec {
+            field: "c".into(),
+            ..Default::default()
+        });
+        spec.encoding.y = Some(enc_with_legend(
+            "y",
+            LegendStyleSpec { orient: Some("bottom".into()), ..Default::default() },
+        ));
+        let specs = per_channel_legend_specs(&spec);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(pick(&specs, |l| l.orient.as_deref()), Some("bottom"));
+    }
+
+    /// `orient="none"` on a positional channel suppresses the chart's legend
+    /// the same way `Color(legend=None)` does — one suppression predicate,
+    /// reached through the same cascade.
+    #[test]
+    fn per_channel_orient_none_on_x_suppresses() {
+        let mut spec = empty_spec();
+        spec.encoding.x = Some(enc_with_legend(
+            "x",
+            LegendStyleSpec { orient: Some("none".into()), ..Default::default() },
+        ));
+        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&spec)));
+    }
+
+    /// The cycle-1 S3: suppression is read at the SAME precedence as every
+    /// other field, so a lower-precedence channel cannot blank a legend a
+    /// higher-precedence channel explicitly placed. RED before the fix — the
+    /// old `any(|l| l.suppresses())` let y's `"none"` win over color's
+    /// `"right"`, reading one field at two precedences inside one function.
+    #[test]
+    fn higher_precedence_placement_beats_lower_precedence_orient_none() {
+        let mut spec = empty_spec();
+        spec.encoding.color = Some(enc_with_legend(
+            "c",
+            LegendStyleSpec { orient: Some("right".into()), ..Default::default() },
+        ));
+        spec.encoding.y = Some(enc_with_legend(
+            "y",
+            LegendStyleSpec { orient: Some("none".into()), ..Default::default() },
+        ));
+        let specs = per_channel_legend_specs(&spec);
+        assert!(
+            !LegendStyleSpec::suppressed_by(&specs),
+            "color's explicit placement outranks y's suppression",
+        );
+        // The mirror: with color expressing no opinion on `orient`, y's does win.
+        spec.encoding.color = Some(enc_with_legend(
+            "c",
+            LegendStyleSpec { title: Some("t".into()), ..Default::default() },
+        ));
+        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&spec)));
+    }
+
+    /// `disabled` and `orient` cascade INDEPENDENTLY, field by field — the
+    /// same discipline the `pick`s use. A channel that named only `orient`
+    /// expressed no opinion on `disabled`, so a lower-precedence
+    /// `legend=None` still suppresses.
+    #[test]
+    fn disabled_and_orient_cascade_as_independent_fields() {
+        let mut spec = empty_spec();
+        spec.encoding.color = Some(enc_with_legend(
+            "c",
+            LegendStyleSpec { orient: Some("right".into()), ..Default::default() },
+        ));
+        spec.encoding.y = Some(enc_with_legend(
+            "y",
+            LegendStyleSpec { disabled: Some(true), ..Default::default() },
+        ));
+        assert!(LegendStyleSpec::suppressed_by(&per_channel_legend_specs(&spec)));
+    }
+
+    /// The single-channel askers (aux blocks, chart-level) are the
+    /// one-element case of the same function, not a second rule.
+    #[test]
+    fn suppressed_by_on_one_spec_covers_both_spellings() {
+        let disabled = LegendStyleSpec { disabled: Some(true), ..Default::default() };
+        let orient_none = LegendStyleSpec { orient: Some("none".into()), ..Default::default() };
+        let placed = LegendStyleSpec { orient: Some("bottom".into()), ..Default::default() };
+        assert!(LegendStyleSpec::suppressed_by(&[&disabled]));
+        assert!(LegendStyleSpec::suppressed_by(&[&orient_none]));
+        assert!(!LegendStyleSpec::suppressed_by(&[&placed]));
+        assert!(!LegendStyleSpec::suppressed_by(&[&LegendStyleSpec::default()]));
+        assert!(!LegendStyleSpec::suppressed_by(&[]));
     }
 
     /// A `LayerPrepared` fixture with the given mark and (optionally bound)

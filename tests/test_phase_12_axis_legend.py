@@ -178,15 +178,36 @@ class TestAxisToDict:
         assert result == {"label_angle": 45.0, "label_overlap": "parity"}
 
     def test_label_overlap_default_omitted(self):
-        # The Python default ("greedy") matches the renderer default and is omitted.
-        assert Axis(label_overlap="greedy").to_dict() == {}
+        # Omitting label_overlap entirely omits the key (renderer default applies).
+        # NF-B3: an EXPLICIT "greedy" is no longer indistinguishable from "not
+        # specified" — it always reaches the wire even though it textually
+        # matches the renderer's own default. See
+        # TestAxisRender.test_explicit_label_overlap_beats_chart_level for the
+        # observable divergence this fixes.
+        assert Axis(label_overlap="greedy").to_dict() == {"label_overlap": "greedy"}
         assert Axis().to_dict() == {}
 
     def test_label_flush_explicit_not_omitted(self):
-        # label_flush default is False (the renderer default, omitted); an explicit
-        # True must reach the renderer instead of being silently dropped.
-        assert Axis(label_flush=False).to_dict() == {}
+        # label_flush's renderer default is False; an explicit False now reaches
+        # the wire too (NF-B3), not just an explicit True — only OMITTING the
+        # field drops the key.
+        assert Axis(label_flush=False).to_dict() == {"label_flush": False}
         assert Axis(label_flush=True).to_dict() == {"label_flush": True}
+        assert Axis().to_dict() == {}
+
+    @pytest.mark.parametrize(
+        "field", ["ticks", "tick_extra", "grid", "labels", "label_flush", "label_overlap", "domain"]
+    )
+    def test_explicit_none_is_unspecified_for_every_unset_defaulted_field(self, field):
+        # Quality-review fix (S2, cycle 3): Axis's sentinel-skip block used to
+        # gate on `is not _UNSET` only, so an explicit None on one of these
+        # seven fields bypassed the omission and reached to_dict() as a raw
+        # {"field": None} entry -- inert in Rust (Option<...> fields treat
+        # null like absent) but inconsistent with every other field's None
+        # convention. ferrum._title_sentinel.is_unspecified now gates all
+        # seven the same way _UNSET already did, so explicit None is dropped
+        # exactly like omitting the kwarg.
+        assert Axis(**{field: None}).to_dict() == {}
 
     def test_orient(self):
         result = Axis(orient="top").to_dict()
@@ -249,10 +270,11 @@ class TestLegendFrozen:
 
 
 class TestLegendToDict:
-    """Legend.to_dict() serializes correctly, omitting defaults and None."""
+    """Legend.to_dict() serializes correctly, omitting only unset/None values."""
 
     def test_empty(self):
-        # orient="right" and direction="vertical" are defaults — omitted
+        # orient/direction are omitted only when NOT PASSED at all (the
+        # renderer's own default then applies).
         assert Legend().to_dict() == {}
 
     def test_orient_bottom_columns(self):
@@ -262,6 +284,67 @@ class TestLegendToDict:
     def test_direction_horizontal(self):
         result = Legend(direction="horizontal").to_dict()
         assert result == {"direction": "horizontal"}
+
+    def test_orient_direction_explicit_equals_default_still_serializes(self):
+        # F-L04-04/NF-B3: fm.Legend(direction="vertical") used to strip to {}
+        # because "vertical" textually matched the Python default, making an
+        # explicit value indistinguishable from "not specified" and silently
+        # losing the per-channel-wins cascade for it. Both previously-dead
+        # combinations from the fm.Legend surface now reach the wire.
+        assert Legend(direction="vertical").to_dict() == {"direction": "vertical"}
+        assert Legend(orient="right", direction="vertical").to_dict() == {
+            "orient": "right",
+            "direction": "vertical",
+        }
+
+    def test_orient_none_reaches_wire_verbatim(self):
+        # Per-channel orient="none" is a suppression Rust consumes directly
+        # (LegendStyleSpec::suppresses()) — it must not be normalized away in
+        # Python the way chart-level orient="none" is.
+        assert Legend(orient="none").to_dict() == {"orient": "none"}
+
+    def test_invalid_orient_and_direction_are_refused(self):
+        with pytest.raises(ValueError, match="orient"):
+            Legend(orient="diagonal")
+        with pytest.raises(ValueError, match="direction"):
+            Legend(direction="sideways")
+
+    def test_explicit_none_is_unspecified_not_a_refusal(self):
+        # Quality-review fix (S2, cycle 3): Legend.__post_init__'s validator
+        # gate used to be `is not _UNSET`, so an explicit orient=None/
+        # direction=None (Python's universal "unset" spelling for every
+        # OTHER optional field on this class) fell through to
+        # validate_choice and RAISED ("orient must be one of [...]; got
+        # None") -- a regression from pre-batch behavior, where None was
+        # silently dropped like any other unset field. is_unspecified now
+        # treats None the same as _UNSET on this surface, matching
+        # LegendConfig's pre-existing `orient is not None` convention (see
+        # tests/test_configure.py::TestLegendConfig).
+        assert Legend(orient=None).to_dict() == {}
+        assert Legend(direction=None).to_dict() == {}
+
+    def test_none_semantics_agree_across_all_three_legend_surfaces(self):
+        # RED-proof / divergence pin (S2, cycle 3): before this fix, the same
+        # None token was handled three incompatible ways across the three
+        # Python surfaces the shared orient/direction validator was
+        # introduced to unify:
+        #   - Legend(orient=None)            -> RAISED ValueError
+        #   - LegendConfig(orient=None)       -> accepted as "unset" (no raise)
+        #   - a raw {"orient": None} dict     -> RAISED ValueError (via
+        #     _normalize_legend, same gate as Legend.__post_init__)
+        # All three now agree: None is "not specified", never a refusal.
+        from ferrum.configure import LegendConfig
+        from ferrum.legend import _normalize_legend
+
+        assert Legend(orient=None).to_dict() == {}
+        assert LegendConfig(orient=None).to_dict() == {}
+        normalized = _normalize_legend({"orient": None})
+        # The raw-dict path passes keys through unfiltered (unrelated to this
+        # fix -- dicts never strip None for ANY field), so `orient: None`
+        # survives in the dict; what changed is that building it no longer
+        # raises. A JSON `null` there is indistinguishable from an absent key
+        # to Rust's Option<...> deserializer, so this is not a wire regression.
+        assert normalized is not None and normalized.get("orient") is None
 
     def test_symbol_options(self):
         result = Legend(symbol_size=100.0, symbol_type="square").to_dict()
@@ -707,8 +790,12 @@ class TestAxisRender:
         )
 
     def test_label_overlap_greedy_matches_default(self, scatter_df: pl.DataFrame) -> None:
-        # "greedy" is the renderer default, so it must render identically to the
-        # default (the field is omitted from the spec when set to its default).
+        # "greedy" is the renderer's own default, so an explicit "greedy" (which
+        # NF-B3 now puts on the wire, see TestAxisToDict) still renders
+        # identically to omitting the field — the value Rust resolves to is the
+        # same either way, only its PROVENANCE (explicit vs. defaulted) differs,
+        # which is what test_explicit_label_overlap_beats_chart_level below
+        # exercises.
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
         explicit = (
             fm.Chart(scatter_df)
@@ -717,6 +804,37 @@ class TestAxisRender:
             .to_svg()
         )
         assert explicit == base, "label_overlap='greedy' must render identically to the default"
+
+    def test_explicit_label_overlap_beats_chart_level(self, scatter_df: pl.DataFrame) -> None:
+        # NF-B3's real divergence: an EXPLICIT per-channel label_overlap="greedy"
+        # (textually equal to the Python default) must now beat a conflicting
+        # chart-level configure_axis(label_overlap=...), because per-channel
+        # always wins over chart-level. Before the _AXIS_DEFAULTS fix, the
+        # explicit value was silently stripped on the way to the wire and was
+        # therefore indistinguishable from "not specified", so chart-level
+        # filled in and this pair rendered identically (a real bug: explicit
+        # per-channel intent was lost). Rust's cascade already resolves this
+        # correctly on x (render/mod.rs::chart_config_offset_flush_overlap_do_not_override_per_channel);
+        # this pins that the Python wire-emission half is no longer the blocker.
+        explicit_wins = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(x=fm.X("x", axis=fm.Axis(label_overlap="greedy")), y="y")
+            .configure_axis(label_overlap="parity")
+            .to_svg()
+        )
+        chart_level_only = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(x="x", y="y")
+            .configure_axis(label_overlap="parity")
+            .to_svg()
+        )
+        assert explicit_wins != chart_level_only, (
+            "an explicit per-channel label_overlap='greedy' (even though it equals "
+            "the Python default) must beat a conflicting chart-level "
+            "configure_axis(label_overlap='parity')"
+        )
 
 
 # ---------------------------------------------------------------------------

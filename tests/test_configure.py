@@ -213,6 +213,23 @@ class TestLegendConfig:
         cfg = LegendConfig(orient=None)
         assert cfg.orient is None
 
+    @pytest.mark.parametrize("direction", ["vertical", "horizontal"])
+    def test_valid_directions(self, direction):
+        cfg = LegendConfig(direction=direction)
+        assert cfg.direction == direction
+
+    def test_invalid_direction_raises(self):
+        with pytest.raises(ValueError, match="direction"):
+            LegendConfig(direction="sideways")
+
+    def test_direction_none_is_valid(self):
+        # direction=None means "not set", the same None-is-unspecified gate
+        # orient uses (ferrum._title_sentinel.is_unspecified) — added because
+        # this surface's __post_init__ validates direction too as of batch B
+        # task 7, and the None case needs its own pin same as orient's.
+        cfg = LegendConfig(direction=None)
+        assert cfg.direction is None
+
     def test_styling_fields_default_none(self):
         cfg = LegendConfig()
         assert cfg.label_color is None

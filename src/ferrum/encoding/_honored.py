@@ -67,7 +67,10 @@ PRIMARY_POSITIONAL = frozenset(
         "format",
         "format_type",
         "formatType",
-        # legend dict — honored by prepare.rs legend_orient_override / title.
+        # legend dict — honored by render::prepare::legend::per_channel_legend_specs
+        # (the color > x > y cascade NF-B13 gave X/Y a real consumer for,
+        # 2026-09-02 batch-B task 7; the never-existent legend_orient_override
+        # citation this replaced predates that consumer).
         "legend",
     }
 )

@@ -1221,7 +1221,7 @@ Scales map data domain values to visual range values. Attached to encoding chann
 ```
 Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, tick_min_step=None,
      grid=True, grid_dash=None, grid_width=None, grid_color=None, grid_opacity=None,
-     labels=True, label_angle=None, label_flush=True, label_overlap="parity",
+     labels=True, label_angle=None, label_flush=False, label_overlap="greedy",
      label_format=None, label_format_type=None, label_font_size=None, label_color=None,
      domain=True, domain_width=None, domain_color=None,
      offset=None, translate=None, min_band=None, max_band=None,
@@ -1248,6 +1248,8 @@ Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, 
 > incl. `s % p r g`, plus the `~` trim flag); **time** uses `chrono` strftime
 > (`%b %Y`, `%Y-%m-%d`, `%H:%M`), replacing the prior hand-rolled date math.
 
+> **Dated note (2026-09-03, batch B task 7 — explicit-equals-default now serializes):** the seven fields shown above with a concrete default (`ticks`, `tick_extra`, `grid`, `labels`, `label_flush`, `label_overlap`, `domain`) follow an **omit-vs-explicit** wire contract: omitting the parameter entirely (the common case, and what every signature default above represents) means "not specified" and the renderer's own default applies as before — byte-identical to today. Passing the parameter **explicitly**, even with the exact value shown above (e.g. `Axis(ticks=True)` or `Axis(label_overlap="greedy")`), now always reaches the wire, which is a real behavior change: an explicit per-channel value beats a conflicting chart-level `configure_axis(...)`/theme value for that field, where chart-level previously won silently regardless of whether the per-channel field was actually named. Previously an explicit value equal to the default was indistinguishable from "not specified" and could be silently overridden by chart-level. `Legend`'s `orient`/`direction` fields (below) carry the identical contract.
+
 #### `Legend`
 
 ```
@@ -1263,6 +1265,21 @@ Legend(title=None, *, orient="right", direction="vertical", type=None,
 ```
 
 Set `legend=None` on any channel to suppress the legend for that channel.
+
+> **Dated note (2026-09-03, batch B task 7 — legend contract):** `orient` and `direction` are fully independent. `orient` places the legend block on a chart edge (`"right"`/`"left"`/`"top"`/`"bottom"`); `direction` arranges the entries within it (`"vertical"`/`"horizontal"`) and now also **sizes** the reserved block, so all eight combinations render every entry. Absent `direction`, the edge implies it (side legends stack, top/bottom strips run across). A colorbar honors `direction` too: `"horizontal"` draws a left→right gradient bar with its tick labels centered beneath it.
+>
+> `orient` and `direction` follow the same **omit-vs-explicit** wire contract as the seven `Axis` fields above: omitting either parameter (the signature defaults `orient="right"`/`direction="vertical"` shown above represent this) means "not specified," and the renderer's own orient-implied default applies — byte-identical to today. Passing either explicitly, even as `"right"`/`"vertical"`, now always reaches the wire, so an explicit per-channel value beats a conflicting chart-level `configure_legend(...)` (behavior change 1 below).
+>
+> Further clarifications land with it:
+>
+> - `Legend(orient="none")` on a channel suppresses that channel's legend — the per-channel spelling of chart-level `configure_legend(orient="none")`, identical in effect to `legend=None`.
+> - `Legend(values=[...])` on a **categorical** legend filters and orders the entries to the listed values (previously honored only on gradient/colorbar legends, where it replaces the tick labels — unchanged). A value naming no category has no swatch to draw: it is skipped and reported as a `RenderWarning`.
+> - `X(legend=...)` / `Y(legend=...)` are honored. The positional channels have no legend block of their own, so their `legend=` dict addresses the chart's legend, filling any field the `color` channel's own `legend=` left unset. Per-channel precedence is `color` > `x` > `y`.
+> - **Behavior changes (4):**
+>   1. Per-channel `Legend(orient=/columns=/title_font_size=)` now beats chart-level `configure_legend(...)` for those three fields, matching the documented cascade (mark literal > per-channel > chart-level > theme). Previously chart-level silently overwrote the per-channel value.
+>   2. `configure_legend(label_font_size=)` now sizes legend labels only; it used to write a slot shared with the axes and so resized axis tick labels as a side effect. Use `configure_axis(label_font_size=)` for those.
+>   3. `X(legend=None)` / `Y(legend=False)` now **suppress the chart's legend**, where they previously had no effect (the positional `legend=` kwarg reached the wire but nothing consumed it). This follows from routing every field of the positional override — including `disabled` — through the same per-channel cascade `color`'s `legend=` uses; special-casing `disabled` out would leave the "honored" claim above false for that one field.
+>   4. A `Legend`/`configure_legend` block oriented `"top"`/`"bottom"` with **no explicit `direction`** now defaults to a **horizontal** gradient bar on a continuous (colorbar) legend, matching the orient-implied default the categorical arm already had. It previously always rendered as a tall vertical bar regardless of orient. Pass `direction="vertical"` explicitly to keep the old bar shape.
 
 #### `Chart.axis()` — spec-level axis suppression (added 2026-05-11)
 
