@@ -282,9 +282,20 @@ class TestPaddingByteIdentity:
         expand, so `auto=True` and `auto=False` (the ``configure_padding``
         default) must render byte-identically — the untouched-field
         byte-identity guarantee (claim 3), specialized to padding.auto.
+
+        Uses ``TestPaddingAutoEdgeTickOverhang._clipping_repro_chart()`` (a
+        long-label chart whose ``auto_padding_for_edge_ticks`` contribution
+        is nonzero on the right side), not a plain small-integer chart: on
+        the latter the auto contribution computes to 0.0 on every side, so
+        `auto=True`/`auto=False` are byte-identical no matter whether the
+        explicit-side-wins rule is honored or broken — a vacuous pin. This
+        fixture discriminates: mutating the explicit-side-wins rule in
+        `compute_layout` (letting `auto`'s contribution leak onto an
+        explicitly-set side) makes this fail.
         """
-        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        base = fr.Chart(df).mark_point().encode(x="x", y="y")
+        base = TestPaddingAutoEdgeTickOverhang._clipping_repro_chart().properties(
+            width=400, height=200
+        )
         svg_auto_true = base.configure_padding(
             top=20, right=15, bottom=10, left=5, auto=True
         ).to_svg()

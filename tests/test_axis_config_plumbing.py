@@ -571,6 +571,19 @@ class TestScaleDomainRefusals:
             "construction does, not a different Rust-side backstop sentence"
         )
 
+    def test_degeneracy_produced_by_zero_plus_max_in_combination(self, chart):
+        """`apply_axis_domain_config`'s guard is checked on the COMPUTED
+        domain, not on the individually-supplied fields — so `zero=True`
+        (forces the low end to 0) combined with `domain_max=0.0` produces a
+        zero-width `[0.0, 0.0]` domain that no construction-time check can
+        see: `zero` alone is valid, and `domain_max=0.0` alone is valid.
+        Every other case in this class refuses at Python construction time
+        (`fm.AxisConfig(domain_min=10, domain_max=10)`); this one only
+        surfaces once Rust resolves the computed domain during render.
+        """
+        with pytest.raises(ValueError, match="domain endpoints must differ"):
+            chart.configure_axis(zero=True, domain_max=0.0).to_svg()
+
 
 class TestLogScaleDomainConfig:
     """A config-written domain is a USER-set domain, so it meets the user-set

@@ -531,3 +531,22 @@ def test_wire_gate_refuses_unknown_top_level_section_verbatim_substring():
         chart.to_svg()
     msg = str(exc_info.value)
     assert "chart config: unknown key 'totally_bogus_section' in chart_config; accepted:" in msg
+
+
+def test_wire_gate_refuses_unknown_nested_axis_key_verbatim_substring():
+    """Same pin one level deeper: the nested per-axis ``grid.x`` / ``grid.y``
+    leaf gate (``validate_chart_config_keys``'s third, deepest level).
+
+    The two pins above cover the top level (``chart_config``) and one level
+    in (a section like ``axis``); neither reaches the nested-under-a-section
+    key gate that ``grid.x``/``grid.y`` go through. Without this pin, a
+    disabled third gate level falls back to the untyped serde diagnostic
+    (``chart_config: data did not match any variant of untagged enum
+    Wire...``) instead of this gate's own ``chart config: unknown key
+    'totally_bogus_key' in grid.x; accepted: ...`` — a real regression this
+    module's own existing two pins cannot see."""
+    chart = _chart_with_raw_config_layer({"grid": {"x": {"totally_bogus_key": 1}}})
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    msg = str(exc_info.value)
+    assert "chart config: unknown key 'totally_bogus_key' in grid.x; accepted:" in msg
