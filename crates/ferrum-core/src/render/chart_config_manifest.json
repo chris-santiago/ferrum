@@ -11,6 +11,10 @@
     "honored": false,
     "reason": "same field as AxisStyleSpec.label_format, but scoped to axis_y2: its consumer (apply_label_format_to_axis, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y \u2014 axis_y2's copy reaches AxisStyleOverrides via the same fill-only path axis/axis_x/axis_y use, but has no secondary-axis consumer to read it. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
   },
+  "AxisConfigSpec.axis_y2.label_format_type": {
+    "honored": false,
+    "reason": "same field as AxisStyleSpec.label_format_type, but scoped to axis_y2: its consumer (apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y \u2014 same disposition as the sibling axis_y2.label_format entry above, now that Task 4 (D8) gave the axis/axis_x/axis_y position a real consumer. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+  },
   "AxisConfigSpec.axis_y2.tick_extra": {
     "honored": false,
     "reason": "same field as AxisStyleSpec.tick_extra, but scoped to axis_y2: its consumer (prepare::adjust_axis_ticks, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
@@ -100,8 +104,8 @@
     "reason": "effective_label_format()/axis_style_fill_from -> AxisStyleOverrides.label_format, applied by apply_label_format_to_axis, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format"
   },
   "AxisStyleSpec.label_format_type": {
-    "honored": false,
-    "reason": "chart-level: no consumer \u2014 apply_label_format_to_axis hardcodes format_type=None. Per-channel fm.Axis(label_format_type=) IS honored via resolve_axis_label_format. Pending Task 4 (D8: format_type threads end to end \u2014 this is the axis half; LegendStyleSpec.format_type is the legend half, same task). Task 2's AxisConfig.to_dict() already emits `label_format_type` on the wire (resolved from a `label_format` preset name); it is in AXIS_STYLE_CANONICAL_KEYS so the wire gate accepts it without self-refusal \u2014 Task 4 flips this entry to honored when apply_label_format_to_axis threads it through."
+    "honored": true,
+    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis (render/mod.rs::prepare_and_layout) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
   },
   "AxisStyleSpec.label_overlap": {
     "honored": true,
@@ -300,8 +304,8 @@
     "reason": "prepare/legend.rs's colorbar + size-legend format-spec resolution"
   },
   "LegendStyleSpec.format_type": {
-    "honored": false,
-    "reason": "zero consumers anywhere \u2014 pending Task 4 (D8: the legend half of format_type threading)"
+    "honored": true,
+    "reason": "prepare/legend.rs's build_color_legend (colorbar) and build_aux_legends (size legend) both read color_legend.format_type / size_enc.legend.format_type and format via format::format_value_with_spec (spec + format_type aware), the legend half of D8's format_type threading \u2014 mirrors the axis half at AxisStyleSpec.label_format_type."
   },
   "LegendStyleSpec.gradient_length": {
     "honored": true,

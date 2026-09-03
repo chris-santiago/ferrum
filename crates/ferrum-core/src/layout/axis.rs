@@ -116,6 +116,42 @@ pub(crate) struct AxisStyleOverrides {
     /// d3-format string for tick labels (per-channel `label_format` /
     /// chart-level `label_format_raw`). Applied after `tick_values`.
     pub label_format: Option<String>,
+    /// `label_format`'s format-type tag (`"time"`/`"number"`/`None`),
+    /// CHART-LEVEL ONLY (D8, spec §4.5) — mirrors `label_format`'s own
+    /// chart-level-only ownership (see that field's doc): the per-channel
+    /// path resolves and applies its own format_type immediately during
+    /// `prepare::build_axis_tick_inputs`'s `Thread` mode (a genuinely
+    /// temporal per-channel format is applied there via raw epoch-ms values
+    /// before this bundle is ever consulted, so a per-channel THREADED
+    /// `label_format` — the only kind that reaches this bundle — is always
+    /// numeric by construction and never needs this field). Read by
+    /// `render::apply_label_format_to_axis` to decide whether the deferred
+    /// `label_format` string is a `chrono` strftime pattern or a d3 spec.
+    pub label_format_type: Option<String>,
+    /// Set by the per-channel prepare path (`prepare::build_axis_input`)
+    /// whenever `resolve_axis_label_format` found an explicit per-channel
+    /// format for this axis (`fm.Axis(label_format=)` / the `encoding.format`
+    /// shorthand) — regardless of whether that format ended up THREADED onto
+    /// `label_format` above (the numeric case) or applied EAGERLY to
+    /// `AxisInput.tick_labels` and then discarded (the temporal case: a
+    /// genuinely temporal per-channel format is fully baked into the labels
+    /// before this bundle is built, so `label_format` correctly threads
+    /// `None` — there is nothing left to defer).
+    ///
+    /// `label_format.is_none()` alone CANNOT distinguish "no per-channel
+    /// format claimed this axis" from "a per-channel format already fully
+    /// applied" — cycle 1 of this task (D8) missed exactly this, letting a
+    /// chart-level time preset win the cascade over an explicit per-channel
+    /// one (`configure_axis(label_format="date_iso")` re-deriving RAW
+    /// temporal values and overwriting an already-formatted `fm.Axis(
+    /// label_format="%b %d")` axis — the batch's hard per-channel-wins
+    /// cascade constraint, violated). `render::apply_axis_config_to_axis_input`'s
+    /// chart-level fill-only gate consults THIS flag, not `label_format
+    /// .is_none()` alone, so a per-channel-claimed axis is never touched —
+    /// chart-level's fill (and therefore `apply_label_format_to_axis`'s
+    /// central re-derivation) is skipped entirely, leaving the per-channel
+    /// labels exactly as applied.
+    pub label_format_claimed: bool,
     /// Axis title font size. `None` → `theme.title_font_size`.
     pub title_font_size: Option<f64>,
     /// Axis title color. `None` → `theme.title_color`.
@@ -179,6 +215,38 @@ pub(crate) struct AxisStyleOverrides {
     /// cascade. Only consumed by the x-axis layout; the y-axis applies no overlap
     /// policy.
     pub label_overlap: Option<LabelOverlap>,
+}
+
+impl AxisStyleOverrides {
+    /// The SOLE way a chart-level source may fill
+    /// [`label_format`](Self::label_format) /
+    /// [`label_format_type`](Self::label_format_type): no-ops when the slot
+    /// is already claimed (by a per-channel format — see
+    /// [`label_format_claimed`](Self::label_format_claimed)'s doc — or by an
+    /// earlier chart-level layer that already filled `label_format`).
+    ///
+    /// Quality-review S2 (2026-09-03): the `label_format.is_none() &&
+    /// !label_format_claimed` predicate this method now owns used to be
+    /// hand-copied at its two call sites
+    /// (`render::apply_axis_config_to_axis_input`, `axis_style_fill_from`'s
+    /// own defensive fallback write) — the SAME "is this slot actually
+    /// unclaimed" question, expressed twice, on a `pub(crate)` field with no
+    /// accessor discipline. The cycle-2 fix for the cascade-inversion bug
+    /// this predicate exists to enforce was itself caught missing the second
+    /// writer, proving the hand-copy was already load-bearing and already
+    /// fragile. Mechanizing it here means a THIRD writer of `label_format`
+    /// has exactly one correct way to write it, not a predicate to
+    /// remember and re-derive.
+    pub(crate) fn fill_chart_level_label_format(
+        &mut self,
+        fmt: Option<String>,
+        format_type: Option<String>,
+    ) {
+        if self.label_format.is_none() && !self.label_format_claimed {
+            self.label_format = fmt;
+            self.label_format_type = format_type;
+        }
+    }
 }
 
 /// Caller-supplied per-axis input. Phase 6 takes both x and y always.

@@ -11,11 +11,32 @@
 //!   applied only when the encoding/axis carries a format string.
 //!
 //! The d3-format grammar implemented here (native, no external crate) is:
-//! `[[fill]align][sign][symbol][0][width][,][.precision][~][type]`. See
+//! `[[fill]align][sign][symbol][0][width][,][.precision][~][type]`, where
+//! `type` is one of `e f g s % p r b o d x X c n` (or absent). See
 //! [`parse_format_spec`] for the parser and [`format_with_spec`] for the
 //! application. The `format_num` crate is a useful reference for the SI/rounding
 //! algorithms but is intentionally not a dependency (it lacks `~`/`g`/`r`/`p`
 //! and pulls `regex`).
+//!
+//! **`"__ordinal__"`** is a reserved sentinel (not real d3 grammar) that
+//! [`format_presets::NUMERIC_PRESETS`](../../../../src/ferrum/format_presets.py)'s
+//! `"ordinal"` preset resolves to; [`parse_format_spec`]/[`format_parsed`]
+//! recognize it up front and dispatch to [`format_ordinal_number`] (1st, 2nd,
+//! 3rd, …) instead of the d3 tokenizer (D8, spec §4.5).
+//!
+//! **Malformed-spec refusal** ([`validate_d3_format_spec`], NF-B1 residual,
+//! 2026-09-02): a raw spec that is not a recognized preset passes through
+//! Python's `resolve_format_or_raw` unresolved per spec §4.5's
+//! unknown-name-passes-raw contract (a typo like `"curency"` is honest raw
+//! input, not an error, at that layer) — but the lenient tokenizer below
+//! silently drops any trailing characters it doesn't recognize once it has
+//! consumed an optional leading type char (`"curency"` tokenizes as
+//! `type='c'` — "format as Unicode code point" — with `"urency"` discarded),
+//! which previously emitted raw control characters into rendered SVG text for
+//! small tick values. [`validate_d3_format_spec`] performs the SAME tokenize
+//! pass but requires the whole string to be consumed; callers run it ONCE per
+//! resolved (format, format_type) pair before any per-value formatting
+//! begins (`render::mod::validate_chart_format_specs`), not per tick/label.
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 
@@ -99,19 +120,140 @@ fn month_short(m: u32) -> &'static str {
 }
 
 /// Format an epoch-millisecond timestamp with an explicit `chrono` strftime
-/// pattern (e.g. `"%b %Y"`, `"%Y-%m-%d"`, `"%H:%M"`). Returns the empty string
-/// for out-of-range timestamps. Used when an axis/encoding carries an explicit
-/// time format string (`format_type == "time"`).
+/// pattern (e.g. `"%b %Y"`, `"%Y-%m-%d"`, `"%H:%M"`). Returns the empty
+/// string for an out-of-range TIMESTAMP (a legitimate, un-formattable-data
+/// case — matches every other formatter in this module's NaN/Inf/out-of-
+/// range convention). An invalid PATTERN is a different case entirely: see
+/// below.
+///
+/// **Non-panicking by construction** (quality-review S4, 2026-09-03):
+/// `chrono`'s `DelayedFormat` `Display` impl returns `Err` for an invalid
+/// pattern, and `ToString::to_string()`'s blanket impl `.expect()`s that
+/// `Display::fmt` never errors — calling it on a malformed pattern panics
+/// with `"a Display implementation returned an error unexpectedly"`. Every
+/// caller reaching here goes through `validate_chart_format_specs`'s
+/// `validate_strftime_spec` gate first (which refuses a malformed pattern
+/// with a typed `RenderError` before any formatting is attempted), so this
+/// fallback is defense in depth, not the primary guard.
+///
+/// **The invalid-pattern fallback is deliberately NOT a blank string**
+/// (quality-review cycle-4 correction: an unvalidated call site returning
+/// `""` would render an axis of BLANK tick labels — the exact silent-empty
+/// anti-pattern this batch's malformed-spec-refusal work exists to close,
+/// just relocated one layer down instead of eliminated). Two lines of
+/// defense instead: a `debug_assert!` makes an unvalidated call site loud
+/// in test builds (every current caller is downstream of the validation
+/// chokepoint, confirmed by walking the call graph — this should be
+/// unreachable), and the release fallback returns the PATTERN ITSELF,
+/// unformatted, rather than blank — `"%Y-%m-%d"` appearing verbatim as a
+/// tick label is an obviously-wrong, debuggable signal; a blank label is
+/// indistinguishable from "no label was ever meant to be here".
 pub fn format_time_spec(epoch_ms: i64, pattern: &str) -> String {
-    match DateTime::<Utc>::from_timestamp_millis(epoch_ms) {
-        Some(dt) => dt.format(pattern).to_string(),
-        None => String::new(),
+    let Some(dt) = DateTime::<Utc>::from_timestamp_millis(epoch_ms) else {
+        return String::new();
+    };
+    match try_format_time_spec(dt, pattern) {
+        Some(out) => out,
+        None => {
+            debug_assert!(
+                validate_strftime_spec(pattern).is_ok(),
+                "format_time_spec received a pattern that failed to validate: {pattern:?} \
+                 (every caller must go through validate_chart_format_specs first — this \
+                 is a validation-coverage bug, not a user error)"
+            );
+            pattern.to_string()
+        }
     }
 }
 
+/// The fallible core of [`format_time_spec`]: `None` when `pattern` is
+/// invalid (`chrono`'s `DelayedFormat` `Display` returned an error), never
+/// panicking. Split out so the detection itself (does `chrono` actually
+/// reject this pattern) is directly testable without going through
+/// `format_time_spec`'s `debug_assert!`, which is deliberately loud (panics
+/// in test/debug builds) for the case this fn returns `None`.
+fn try_format_time_spec(dt: DateTime<Utc>, pattern: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    write!(out, "{}", dt.format(pattern)).ok()?;
+    Some(out)
+}
+
+/// Validate a `chrono` strftime pattern against the grammar
+/// `chrono::format::StrftimeItems` implements. Returns `Err` naming the
+/// unrecognized specifier for a malformed pattern (e.g. the typo'd preset
+/// class `"curency%"`, or a genuinely dangling `"%"`/unknown specifier like
+/// `"%J"`) — the strftime-grammar sibling of [`validate_d3_format_spec`],
+/// closing the panic class quality-review found in cycle-2's
+/// `is_time_format_spec`-gated exemption: a `%`-bearing spec with no
+/// explicit `format_type` (every raw-accepting surface's default) was
+/// skipped from d3-grammar validation on the premise `chrono` handles it
+/// "leniently" — it does not; `format_time_spec` panics on exactly this
+/// input. Called once per resolved (format, format_type) pair by
+/// `render::mod::validate_chart_format_specs`, the same chokepoint
+/// `validate_d3_format_spec` uses.
+pub(crate) fn validate_strftime_spec(pattern: &str) -> Result<(), String> {
+    chrono::format::StrftimeItems::new(pattern)
+        .parse()
+        .map(|_| ())
+        .map_err(|e| format!("invalid strftime pattern {pattern:?}: {e}"))
+}
+
 /// Ordinal/threshold passthrough — caller already has a string.
+///
+/// NOT the `"ordinal"` FORMAT PRESET ([`format_ordinal_number`] below) —
+/// this is the categorical `ScaleKind::Ordinal` tick-label passthrough
+/// (`scale_resolve::mod.rs`'s `tick_labels()`), an unrelated feature that
+/// happens to share the "ordinal" name.
 pub fn format_ordinal(value: &str) -> String {
     value.to_string()
+}
+
+/// The `"ordinal"` format preset's sentinel spec string
+/// (`format_presets.NUMERIC_PRESETS["ordinal"]`). [`parse_format_spec`]
+/// recognizes it before running the d3 tokenizer.
+const ORDINAL_SENTINEL: &str = "__ordinal__";
+
+/// Marks a parsed [`D3Spec`] as the ordinal-suffix formatter. `'\u{1}'` (a
+/// C0 control char) can never appear as a real d3 type char — d3 type chars
+/// are always ASCII printable — so it is a safe sentinel value for
+/// [`D3Spec::ty`] that [`format_parsed`] dispatches on before its normal
+/// per-type match.
+const ORDINAL_TYPE_MARKER: char = '\u{1}';
+
+/// Format `v` as an integer with its English ordinal suffix: `1st`, `2nd`,
+/// `3rd`, `4th`, …, `11th`, `12th`, `13th`, `21st`, … (D8, spec §4.5,
+/// F-L07-05). Non-integer values fall back to [`format_numeric`] (the spec's
+/// documented behavior: "non-integers fall back to plain formatting").
+/// NaN/infinite values return the empty string, matching every other
+/// formatter in this module.
+pub fn format_ordinal_number(v: f64) -> String {
+    if v.is_nan() || v.is_infinite() {
+        return String::new();
+    }
+    if v.fract() != 0.0 {
+        return format_numeric(v);
+    }
+    let n = v as i64;
+    format!("{n}{}", ordinal_suffix(n))
+}
+
+/// The English ordinal suffix for an integer: `"th"` for the 11–13 exception
+/// range (11th, 12th, 13th, 111th, 112th, 113th, …), else keyed off the last
+/// digit (`1→st`, `2→nd`, `3→rd`, else `th`). Sign-agnostic (`-1` → `"st"`,
+/// matching `-1st`).
+fn ordinal_suffix(n: i64) -> &'static str {
+    let abs = n.unsigned_abs();
+    let last_two = abs % 100;
+    if (11..=13).contains(&last_two) {
+        return "th";
+    }
+    match abs % 10 {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        _ => "th",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,13 +322,32 @@ impl Default for D3Spec {
     }
 }
 
-/// Parse a d3-format string into a [`D3Spec`].
+/// Parse a d3-format string into a [`D3Spec`], for a caller formatting an
+/// ALREADY-validated spec value-by-value (per-tick, per-legend-entry, …).
+/// Lenient: unrecognized trailing bytes are silently ignored (see
+/// [`parse_format_spec_impl`]'s doc for why leniency here is safe — every
+/// caller of this fn is downstream of [`validate_d3_format_spec`] having
+/// already run once for the same spec string). To validate a spec BEFORE
+/// formatting, use [`validate_d3_format_spec`] instead.
+pub(crate) fn parse_format_spec(spec: &str) -> D3Spec {
+    parse_format_spec_impl(spec).0
+}
+
+/// Tokenize a d3-format string, returning the parsed [`D3Spec`] and the
+/// number of characters consumed. A well-formed spec consumes every
+/// character (the optional trailing type char is the last one);
+/// [`validate_d3_format_spec`] compares `consumed` against the spec's total
+/// length to detect trailing garbage the tokenizer couldn't place — the
+/// malformed-spec guard this module's doc comment describes.
 ///
 /// Grammar: `[[fill]align][sign][symbol][0][width][,][.precision][~][type]`.
-/// Unrecognized leading bytes are tolerated (best-effort): the parser only
-/// consumes tokens it understands and treats the rest as the type/precision
-/// tail, matching d3's permissive behavior.
-pub(crate) fn parse_format_spec(spec: &str) -> D3Spec {
+/// The `"__ordinal__"` sentinel (see [`ORDINAL_SENTINEL`]) is recognized up
+/// front and treated as fully consumed, dispatching [`format_parsed`] to
+/// [`format_ordinal_number`] instead of the type-char match below.
+fn parse_format_spec_impl(spec: &str) -> (D3Spec, usize) {
+    if spec == ORDINAL_SENTINEL {
+        return (D3Spec { ty: ORDINAL_TYPE_MARKER, ..D3Spec::default() }, spec.chars().count());
+    }
     let mut out = D3Spec::default();
     let chars: Vec<char> = spec.chars().collect();
     let mut i = 0;
@@ -274,9 +435,48 @@ pub(crate) fn parse_format_spec(spec: &str) -> D3Spec {
     // [type]
     if i < n {
         out.ty = chars[i];
+        i += 1;
     }
 
-    out
+    (out, i)
+}
+
+/// Validate a raw d3-format spec against the grammar this module implements
+/// (see the module doc's "Malformed-spec refusal" section). Returns `Err`
+/// naming the first unrecognized trailing token when the tokenizer could not
+/// place every character — genuinely malformed input like the typo'd preset
+/// name `"curency"` (tokenizes as `type='c'` with `"urency"` left over).
+/// Every syntactically valid-but-unusual d3 spec (fill/align/sign/symbol/
+/// zero-pad/width/comma/precision/trim combinations, any single trailing
+/// type char whether or not this module's [`format_parsed`] recognizes it)
+/// consumes its whole string and passes. The empty string and the
+/// `"__ordinal__"` sentinel are always valid.
+pub(crate) fn validate_d3_format_spec(spec: &str) -> Result<(), String> {
+    if spec.is_empty() {
+        return Ok(());
+    }
+    let (_, consumed) = parse_format_spec_impl(spec);
+    let total = spec.chars().count();
+    if consumed < total {
+        let tail: String = spec.chars().skip(consumed).collect();
+        return Err(format!(
+            "unrecognized token {tail:?} at position {consumed} in format spec {spec:?} \
+             (grammar: [[fill]align][sign][symbol][0][width][,][.precision][~][type])"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `fmt` should be treated as a `chrono` strftime TIME pattern rather
+/// than a d3 numeric spec: an explicit `format_type == "time"`, or an
+/// unset `format_type` paired with a `%`-bearing spec (the pre-existing
+/// per-channel heuristic — a caller with no format_type at all still gets
+/// `%b %Y`-style raw specs auto-detected as time). An explicit non-`"time"`
+/// `format_type` (e.g. `"number"`, set by every preset resolution) always
+/// wins — this is what keeps a `%`-bearing NUMERIC spec like the `"percent"`
+/// preset's `.1%` from being misclassified as strftime (NF-B2, spec §4.5).
+pub(crate) fn is_time_format_spec(fmt: &str, format_type: Option<&str>) -> bool {
+    fmt.contains('%') && (format_type == Some("time") || format_type.is_none())
 }
 
 fn align_from(c: char) -> Align {
@@ -305,11 +505,42 @@ pub fn format_with_spec(v: f64, spec: Option<&str>) -> String {
     format_parsed(v, &parsed)
 }
 
+/// The value-level (not pre-formatted-string) sibling of
+/// `prepare::apply_tick_format` — used where the caller already holds the
+/// raw domain value `v` directly (colorbar/legend tick labels: D8's
+/// `LegendStyleSpec.format_type` threading) rather than an
+/// already-string-formatted axis label. `format_type == Some("time")` treats
+/// `v` as an epoch-millisecond timestamp: an explicit `spec` is applied as a
+/// `chrono` strftime pattern via [`format_time_spec`]; no spec falls back to
+/// the default spacing-keyed [`format_time`] (day granularity, matching
+/// `apply_tick_format`'s own no-pattern default). Any other `format_type`
+/// (including `None`) formats `v` as a plain number via [`format_with_spec`]
+/// (which also handles the `"__ordinal__"` sentinel).
+pub fn format_value_with_spec(v: f64, spec: Option<&str>, format_type: Option<&str>) -> String {
+    if format_type == Some("time") {
+        let epoch_ms = v as i64;
+        return match spec {
+            Some(pattern) => format_time_spec(epoch_ms, pattern),
+            None => format_time(epoch_ms, 86_400_000),
+        };
+    }
+    format_with_spec(v, spec)
+}
+
 /// Apply an already-parsed [`D3Spec`] to a value. Shared entry point so
 /// `apply_tick_format` can parse once and reuse across a column of labels.
 pub(crate) fn format_parsed(v: f64, spec: &D3Spec) -> String {
     if v.is_nan() || v.is_infinite() {
         return String::new();
+    }
+
+    // The `"__ordinal__"` sentinel (see `ORDINAL_TYPE_MARKER`'s doc):
+    // dispatch to the ordinal-suffix formatter, bypassing the rest of the
+    // d3-grammar match entirely (width/fill/precision/etc. are meaningless
+    // for it, matching how the `c`/type-char formatters below also skip the
+    // general numeric pipeline).
+    if spec.ty == ORDINAL_TYPE_MARKER {
+        return format_ordinal_number(v);
     }
 
     // The `%`/`p` types scale by 100 and append a literal percent sign.
@@ -865,9 +1096,212 @@ mod tests {
         assert_eq!(format_time_spec(epoch, "%H:%M"), "15:30");
     }
 
-    // ---- ordinal ----
+    // ---- ordinal (categorical scale passthrough — unrelated to the format
+    // preset below; see `format_ordinal`'s doc) ----
     #[test]
     fn ordinal_passthrough() {
         assert_eq!(format_ordinal("setosa"), "setosa");
+    }
+
+    // ---- "ordinal" format preset (D8, F-L07-05): real 1st/2nd/3rd suffixes ----
+    #[test]
+    fn ordinal_number_basic_suffixes() {
+        assert_eq!(format_ordinal_number(1.0), "1st");
+        assert_eq!(format_ordinal_number(2.0), "2nd");
+        assert_eq!(format_ordinal_number(3.0), "3rd");
+        assert_eq!(format_ordinal_number(4.0), "4th");
+        assert_eq!(format_ordinal_number(0.0), "0th");
+    }
+    #[test]
+    fn ordinal_number_teens_exception() {
+        // 11/12/13 (and their higher-decade repeats) are always "th", not
+        // the last-digit-keyed st/nd/rd.
+        assert_eq!(format_ordinal_number(11.0), "11th");
+        assert_eq!(format_ordinal_number(12.0), "12th");
+        assert_eq!(format_ordinal_number(13.0), "13th");
+        assert_eq!(format_ordinal_number(111.0), "111th");
+        assert_eq!(format_ordinal_number(112.0), "112th");
+        assert_eq!(format_ordinal_number(113.0), "113th");
+    }
+    #[test]
+    fn ordinal_number_higher_decades() {
+        assert_eq!(format_ordinal_number(21.0), "21st");
+        assert_eq!(format_ordinal_number(22.0), "22nd");
+        assert_eq!(format_ordinal_number(23.0), "23rd");
+        assert_eq!(format_ordinal_number(101.0), "101st");
+    }
+    #[test]
+    fn ordinal_number_non_integer_falls_back_to_plain() {
+        // Spec §4.5: "non-integers fall back to plain formatting".
+        assert_eq!(format_ordinal_number(1.5), format_numeric(1.5));
+    }
+    #[test]
+    fn ordinal_number_nan_inf_empty() {
+        assert_eq!(format_ordinal_number(f64::NAN), "");
+        assert_eq!(format_ordinal_number(f64::INFINITY), "");
+    }
+    #[test]
+    fn ordinal_sentinel_dispatches_via_format_with_spec() {
+        // The sentinel a resolved "ordinal" preset carries end to end.
+        assert_eq!(format_with_spec(2.0, Some("__ordinal__")), "2nd");
+        assert_eq!(format_with_spec(13.0, Some("__ordinal__")), "13th");
+    }
+
+    // ---- malformed-spec refusal (NF-B1 residual, 2026-09-02) ----
+    #[test]
+    fn validate_rejects_typo_preset_name() {
+        // The audit repro: "curency" (typo of "currency") tokenizes as
+        // type='c' with "urency" left over — must be refused, not silently
+        // truncated into the codepoint formatter.
+        let err = validate_d3_format_spec("curency").unwrap_err();
+        assert!(err.contains("curency"), "{err}");
+        assert!(err.contains("urency"), "{err}");
+    }
+    #[test]
+    fn validate_accepts_empty_and_ordinal_sentinel() {
+        assert!(validate_d3_format_spec("").is_ok());
+        assert!(validate_d3_format_spec("__ordinal__").is_ok());
+    }
+    #[test]
+    fn validate_accepts_every_valid_but_unusual_spec_already_pinned_above() {
+        // Every spec string exercised by the `format_with_spec` tests above
+        // must validate clean — the malformed-spec guard must never flag a
+        // genuinely valid d3 spec, however exotic.
+        for spec in [
+            ",.0f", "~s", ".2s", ".3s", ".1%", "$,.2f", "+.1f", " .1f", "~e", ".2e", "~f", ".3r",
+            ".3g", ".1p", ",.0f", ",", "d", ",d", "05d", "<5d", "^5d", "*>5d", "x", "#x", "X",
+            "b", "o", "$~s",
+        ] {
+            assert!(validate_d3_format_spec(spec).is_ok(), "expected {spec:?} to validate clean");
+        }
+    }
+    #[test]
+    fn validate_rejects_trailing_garbage_after_valid_prefix() {
+        // A well-formed prefix followed by unrecognized characters — not
+        // just a bare typo'd word.
+        assert!(validate_d3_format_spec(",.2fxyz").is_err());
+    }
+
+    // ---- is_time_format_spec (NF-B2: %-bearing numeric spec vs strftime) ----
+    #[test]
+    fn is_time_format_spec_explicit_time_wins() {
+        assert!(is_time_format_spec("%Y-%m-%d", Some("time")));
+    }
+    #[test]
+    fn is_time_format_spec_unset_type_with_percent_defaults_time() {
+        assert!(is_time_format_spec("%b %Y", None));
+    }
+    #[test]
+    fn is_time_format_spec_explicit_number_never_misclassified() {
+        // NF-B2's exact motivating case: the "percent" preset (".1%") always
+        // carries an explicit format_type="number" — it must never be
+        // treated as strftime just because it contains '%'.
+        assert!(!is_time_format_spec(".1%", Some("number")));
+    }
+    #[test]
+    fn is_time_format_spec_no_percent_never_time() {
+        assert!(!is_time_format_spec(",.0f", None));
+    }
+
+    // ---- validate_strftime_spec (quality-review S4, 2026-09-03: the
+    // %-bearing-spec panic class) ----
+    #[test]
+    fn validate_strftime_rejects_typo_preset_name_with_percent() {
+        // The exact repro: fm.X("t:T", axis=fm.Axis(label_format="curency%")).
+        assert!(validate_strftime_spec("curency%").is_err());
+    }
+    #[test]
+    fn validate_strftime_rejects_unknown_specifier() {
+        assert!(validate_strftime_spec("%J").is_err());
+    }
+    #[test]
+    fn validate_strftime_rejects_dangling_percent() {
+        assert!(validate_strftime_spec("%").is_err());
+        assert!(validate_strftime_spec(".1%").is_err());
+    }
+    #[test]
+    fn validate_strftime_accepts_every_time_preset() {
+        // format_presets.py's TIME_PRESETS values -- every one must validate
+        // clean, including the GNU no-pad `%-d`/`%-I` modifiers.
+        for spec in [
+            "%b %-d", "%B %-d, %Y", "%Y-%m-%d", "%b", "%b %Y", "%Y", "%H:%M", "%-I:%M %p",
+            "%b %-d, %H:%M",
+        ] {
+            assert!(validate_strftime_spec(spec).is_ok(), "expected {spec:?} to validate clean");
+        }
+    }
+    #[test]
+    fn validate_strftime_accepts_every_pinned_test_spec() {
+        // Every %-bearing spec already exercised by this module's own or
+        // mod.rs's pinned tests must stay valid.
+        for spec in ["%m/%d", "%b %d", "%b %Y", "%Y-%m-%d"] {
+            assert!(validate_strftime_spec(spec).is_ok(), "expected {spec:?} to validate clean");
+        }
+    }
+
+    // ---- format_time_spec: non-panicking core, loud-in-debug wrapper
+    // (quality-review cycle-4 correction: the fallback is no longer a
+    // blank string — see try_format_time_spec/format_time_spec's docs) ----
+    #[test]
+    fn try_format_time_spec_detects_every_malformed_pattern() {
+        // The fallible core: proves chrono actually rejects each pattern,
+        // without going through format_time_spec's debug_assert (which
+        // deliberately panics in test builds for exactly this input).
+        let dt = DateTime::<Utc>::from_timestamp_millis(0).unwrap();
+        assert_eq!(try_format_time_spec(dt, "curency%"), None);
+        assert_eq!(try_format_time_spec(dt, "%J"), None);
+        assert_eq!(try_format_time_spec(dt, "%"), None);
+        assert_eq!(try_format_time_spec(dt, ".1%"), None);
+    }
+    #[test]
+    fn try_format_time_spec_valid_pattern_formats() {
+        let dt = DateTime::<Utc>::from_timestamp_millis(1_577_836_800_000).unwrap();
+        assert_eq!(try_format_time_spec(dt, "%Y-%m-%d").as_deref(), Some("2020-01-01"));
+    }
+    #[test]
+    #[should_panic(expected = "format_time_spec received a pattern that failed to validate")]
+    fn format_time_spec_malformed_pattern_panics_loudly_in_debug() {
+        // The debug_assert is the primary signal a call site skipped
+        // validation — every current caller goes through
+        // validate_chart_format_specs first, so this should be unreachable
+        // in production; test builds must not let it slide by silently.
+        format_time_spec(0, "curency%");
+    }
+    #[test]
+    fn format_time_spec_valid_pattern_unaffected() {
+        assert_eq!(format_time_spec(1_577_836_800_000, "%Y-%m-%d"), "2020-01-01");
+    }
+    #[test]
+    fn format_time_spec_out_of_range_timestamp_returns_empty() {
+        // A legitimate, un-formattable-DATA case (not a pattern problem) —
+        // matches every other formatter's NaN/Inf/out-of-range convention.
+        // A valid pattern is still supplied so this cannot trip the
+        // debug_assert (which only fires for an INVALID pattern).
+        assert_eq!(format_time_spec(i64::MAX, "%Y-%m-%d"), "");
+    }
+
+    // ---- format_value_with_spec (LegendStyleSpec.format_type threading) ----
+    #[test]
+    fn format_value_with_spec_time_uses_pattern() {
+        assert_eq!(
+            format_value_with_spec(1_577_836_800_000.0, Some("%Y-%m-%d"), Some("time")),
+            "2020-01-01"
+        );
+    }
+    #[test]
+    fn format_value_with_spec_time_no_pattern_uses_default() {
+        assert_eq!(
+            format_value_with_spec(1_577_836_800_000.0, None, Some("time")),
+            format_time(1_577_836_800_000, 86_400_000)
+        );
+    }
+    #[test]
+    fn format_value_with_spec_numeric_matches_format_with_spec() {
+        assert_eq!(format_value_with_spec(1234.0, Some(",.0f"), None), "1,234");
+        assert_eq!(format_value_with_spec(1234.0, Some(",.0f"), Some("number")), "1,234");
+    }
+    #[test]
+    fn format_value_with_spec_ordinal() {
+        assert_eq!(format_value_with_spec(2.0, Some("__ordinal__"), Some("number")), "2nd");
     }
 }

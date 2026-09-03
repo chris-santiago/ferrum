@@ -247,6 +247,12 @@ _EXPECTED_PYTHON_ABSENT: dict[str, str] = {
         "preset-names-only at this surface, nothing for a caller to set "
         "explicitly)"
     ),
+    "AxisConfigSpec.axis_y2.label_format_type": (
+        "same wire-only-derived key as AxisStyleSpec.label_format_type above "
+        "(the axis_y2 position resolves through the same AxisConfig "
+        "dataclass, per _STRUCT_TO_PYTHON_CONFIG's 3-part-key mapping) — not "
+        "a constructor parameter on axis_y2's AxisConfig instance either"
+    ),
     # --- No chart-level Rust consumer yet (pending a later batch task);
     # --- Python correctly withholds the parameter rather than accepting a
     # --- value that would silently no-op today.
@@ -266,9 +272,10 @@ _EXPECTED_PYTHON_ABSENT: dict[str, str] = {
         "not expose title either today. Pending Task 8's tri-state model"
     ),
     "LegendStyleSpec.format_type": (
-        "zero Rust consumers yet (pending Task 4, the legend half of "
-        "format_type threading); matches format's chart-level scope "
-        "boundary below"
+        "chart-level configure_legend was never one of NF-B1's five target "
+        "format-resolution surfaces; reachable today via the per-channel "
+        "fm.Legend(format_type=) surface (ferrum/legend.py), not chart-level "
+        "— matches format's chart-level scope boundary below"
     ),
     # --- Separate top-level chart-config sections reached through their
     # --- own dedicated Python APIs, not the Configure/configure() family.

@@ -335,6 +335,27 @@ impl AxisConfigSpec {
             .as_deref()
             .or(self.style.label_format.as_deref())
     }
+
+    /// The format-type tag (`"time"`/`"number"`) accompanying
+    /// [`effective_label_format`](Self::effective_label_format) (D8, spec
+    /// §4.5). `label_format_raw` carries no sibling type field at the Python
+    /// boundary (`AxisConfig` has no `label_format_raw`-paired type
+    /// parameter — a raw spec's time-vs-numeric classification is decided by
+    /// the `%`-containment heuristic at format-application time, matching
+    /// every other raw-accepting surface), so this returns `None` whenever
+    /// `label_format_raw` won the resolution above, even if `style
+    /// .label_format_type` happens to be set (a caller mixing the two keys
+    /// is already refused at the Python boundary as mutually exclusive).
+    /// When `style.label_format` won instead, this is that field's own type
+    /// — set by `AxisConfig.to_dict()`'s preset resolution
+    /// (`resolve_format_field`) whenever the resolved preset carries one.
+    pub fn effective_label_format_type(&self) -> Option<&str> {
+        if self.label_format_raw.is_some() {
+            None
+        } else {
+            self.style.label_format_type.as_deref()
+        }
+    }
 }
 
 /// Shared legend **styling + positioning** fields, mirroring the snake_case keys
@@ -615,11 +636,15 @@ pub(crate) const AXIS_Y2_THEME_SCOPED_CAVEAT_FIELDS: &[&str] = &["grid", "domain
 /// copy of these fields reaches `AxisStyleOverrides` via the same fill-only
 /// path `axis`/`axis_x`/`axis_y` use, but has no secondary-axis consumer to
 /// read it (spec §4.9, extended 2026-09-02: T1's manifest sweep). Task 8
-/// (D12) owns the secondary-axis consumers. `#[cfg(test)]`: pure manifest-
-/// completeness instrumentation, no production reader.
+/// (D12) owns the secondary-axis consumers. `label_format_type` joined this
+/// set in Task 4 (D8): it now has a real `axis`/`axis_x`/`axis_y` consumer
+/// (`render::apply_axis_config_to_axis_input` →
+/// `render::apply_label_format_to_axis`), which — like `label_format`
+/// alongside it — runs on `prep.axes.x`/`prep.axes.y` only. `#[cfg(test)]`:
+/// pure manifest-completeness instrumentation, no production reader.
 #[cfg(test)]
 pub(crate) const AXIS_Y2_PREP_SCOPE_CAVEAT_FIELDS: &[&str] =
-    &["label_format", "tick_extra", "tick_min_step", "values"];
+    &["label_format", "label_format_type", "tick_extra", "tick_min_step", "values"];
 
 /// `LegendStyleSpec`'s canonical (non-alias) field names, using each field's
 /// WIRE spelling (`#[serde(rename = ...)]` where present: `type` for
@@ -1405,6 +1430,7 @@ mod tests {
         "AxisConfigSpec.axis_y2.domain",
         "AxisConfigSpec.axis_y2.grid",
         "AxisConfigSpec.axis_y2.label_format",
+        "AxisConfigSpec.axis_y2.label_format_type",
         "AxisConfigSpec.axis_y2.tick_extra",
         "AxisConfigSpec.axis_y2.tick_min_step",
         "AxisConfigSpec.axis_y2.tick_size",
@@ -1413,12 +1439,10 @@ mod tests {
         "AxisConfigSpec.domain_min",
         "AxisConfigSpec.nice",
         "AxisConfigSpec.zero",
-        "AxisStyleSpec.label_format_type",
         "AxisStyleSpec.labels",
         "AxisStyleSpec.tick_count",
         "AxisStyleSpec.ticks",
         "AxisStyleSpec.title",
-        "LegendStyleSpec.format_type",
         "PaddingConfigSpec.auto",
     ];
 

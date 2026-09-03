@@ -586,6 +586,14 @@ fn build_axis_input(
     // `configure_axis(label_format_raw=...)` is applied later in `render/mod.rs`
     // only when no per-encoding override exists.
     let (tick_format, tick_format_type) = resolve_axis_label_format(rendering_enc);
+    // D8 cascade-inversion fix (spec review cycle 2): capture "did per-channel
+    // claim a format for this axis at all" BEFORE `tick_format` is moved into
+    // `TickFormatMode::Thread` below — this survives even when the eventual
+    // per-channel formatting is applied EAGERLY (temporal case) and threads
+    // `label_format_override = None`, which `label_format.is_none()` alone
+    // cannot distinguish from "no per-channel format". See
+    // `AxisStyleOverrides::label_format_claimed`'s doc.
+    let label_format_claimed = tick_format.is_some();
 
     // Grid item 18: minor tick fractions from the resolved scale, projected
     // through the same `[0,1]`-range scale that places majors. The
@@ -620,6 +628,10 @@ fn build_axis_input(
     // Seed the per-channel `label_format` (resolved via the temporal/numeric
     // threading above) onto the bundle.
     overrides.label_format = label_format_override;
+    // D8 cascade-inversion fix: mark the slot claimed regardless of whether
+    // a format string survived to be threaded (see the capture above and
+    // `AxisStyleOverrides::label_format_claimed`'s doc).
+    overrides.label_format_claimed = label_format_claimed;
 
     // Per-channel `orient` selects the axis side; absent → the dimension default
     // (Bottom for x, Left for y). The `orient` override input stays in the bundle
@@ -1487,6 +1499,36 @@ pub(crate) fn adjust_axis_ticks(
             axis.tick_labels.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
             let mut k = 0;
             proj.major.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+
+            // Quality-review S3 fix (2026-09-03): a chart-level TIME format
+            // (`label_format_type == "time"`) is applied AFTER this fn runs,
+            // by `render::apply_label_format_to_axis`, which re-derives raw
+            // epoch-ms values via `scale.temporal_tick_values(tick_count)` —
+            // an UN-thinned, full-length vec that can no longer line up with
+            // `tick_labels` once thinning just dropped entries above, so its
+            // own length guard silently falls through to a no-op (the
+            // temporal labels are already pretty-printed strings that can't
+            // be re-parsed), discarding the requested format entirely. `raw`
+            // above is the exact correctly-thinned epoch-ms values in
+            // lockstep with the tick_labels just retained — the ONE place
+            // that lockstep invariant actually holds — so finalize the
+            // temporal reformat HERE instead of trying to reconstruct it
+            // later. Gated on `label_format_type` specifically (chart-level-
+            // only-owned, see its doc) so a per-channel temporal format —
+            // already fully applied before thinning ran, see
+            // `apply_axis_format_or_thread` — is untouched (thinning simply
+            // drops its already-correct label strings by index, same as any
+            // other format). `apply_label_format_to_axis`'s own attempt
+            // afterward safely no-ops on these now-thinned labels via its
+            // existing length guard.
+            if is_temporal && axis.overrides.label_format_type.as_deref() == Some("time") {
+                if let Some(fmt) = axis.overrides.label_format.as_deref() {
+                    axis.tick_labels = raw
+                        .iter()
+                        .map(|&ms| crate::render::format::format_time_spec(ms as i64, fmt))
+                        .collect();
+                }
+            }
         }
     }
 
@@ -1559,11 +1601,9 @@ fn apply_axis_format_or_thread(
     tick_count: usize,
     reversed: bool,
 ) -> (Vec<String>, Option<String>) {
-    use crate::render::format::format_time_spec;
+    use crate::render::format::{format_time_spec, is_time_format_spec};
     let Some(fmt) = format else { return (labels, None) };
-    let is_time_pattern =
-        fmt.contains('%') && (format_type == Some("time") || format_type.is_none());
-    if is_time_pattern {
+    if is_time_format_spec(&fmt, format_type) {
         if let Some(mut values) = scale.temporal_tick_values(tick_count) {
             if reversed {
                 values.reverse();
@@ -3730,6 +3770,72 @@ mod tests {
         // Labels and projected fractions stay index-aligned.
         if let Some(proj) = prep.axes.x.tick_projection.as_ref() {
             assert_eq!(proj.major.len(), prep.axes.x.tick_labels.len());
+        }
+    }
+
+    /// Quality-review S3 fix (2026-09-03): a chart-level TIME format must
+    /// survive `tick_min_step` thinning, not silently revert to the DEFAULT
+    /// spacing-keyed granularity. Root cause: `render::apply_label_format_to_axis`
+    /// (which runs AFTER this fn) re-derives raw temporal values via
+    /// `scale.temporal_tick_values(tick_count)` — an UN-thinned, full-length
+    /// vec — so its `values.len() == axis.tick_labels.len()` guard fails once
+    /// thinning has shrunk `tick_labels`, and it silently falls through to a
+    /// no-op. Fixed by finalizing the temporal reformat HERE, using the
+    /// SAME correctly-thinned `raw` this fn already computes in lockstep
+    /// with the just-retained `tick_labels`.
+    #[test]
+    fn tick_min_step_thinning_reformats_temporal_labels_instead_of_dropping_the_format() {
+        use crate::render::scale_resolve::ScaleKind;
+        use crate::scale::time::TimeScale;
+
+        let epoch_lo = 1_514_764_800_000.0; // 2018-01-01
+        let epoch_hi = epoch_lo + 4.0 * 365.0 * 86_400_000.0; // ~2022-01-01
+        let scale = ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        let tick_count = 8;
+        let default_labels = scale.tick_labels(tick_count);
+        let n = default_labels.len();
+        assert!(n > 2, "fixture must produce enough ticks to actually thin");
+
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            default_labels,
+            None,
+        );
+        axis.tick_projection = Some(crate::layout::TickProjection {
+            padding_frac: scale.padding_fraction(),
+            major: scale.tick_fractions(tick_count),
+            minor: Vec::new(),
+        });
+        // A chart-level `configure_axis(label_format="date_iso", tick_min_step=...)`
+        // shape: both fields are chart-level-only-owned (see
+        // `AxisStyleOverrides::label_format_type`'s doc), set here directly to
+        // isolate `adjust_axis_ticks`'s own behavior.
+        // The reviewer's own repro value: 1.5 years, forcing roughly half of
+        // the ~yearly-spaced default ticks to drop.
+        axis.overrides.tick_min_step = Some(1.5 * 365.0 * 86_400_000.0);
+        axis.overrides.label_format = Some("%Y-%m-%d".to_string());
+        axis.overrides.label_format_type = Some("time".to_string());
+
+        adjust_axis_ticks(&mut axis, &scale, tick_count, false);
+
+        assert!(
+            axis.tick_labels.len() < n,
+            "tick_min_step must thin: before={n}, after={}",
+            axis.tick_labels.len()
+        );
+        assert!(!axis.tick_labels.is_empty());
+        for label in &axis.tick_labels {
+            // The DEFAULT (year-granularity) label shape at this span is a
+            // bare "2018"/"2020"-style year — an ISO "YYYY-MM-DD" shape can
+            // only come from the real reformat, never a coincidence.
+            assert_eq!(label.len(), 10, "expected an ISO date after thinning, got {label:?}");
+            assert!(label.starts_with("20") && label.contains('-'), "expected an ISO date, got {label:?}");
         }
     }
 

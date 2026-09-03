@@ -144,6 +144,23 @@ pub(crate) fn build_color_legend(
     let color_legend = spec.encoding.color.as_ref().and_then(|c| c.legend.as_ref());
     let custom_tick_labels: Option<Vec<String>> = color_legend.and_then(|l| l.tick_labels.clone());
     let format_spec: Option<&str> = color_legend.and_then(|l| l.format.as_deref());
+    // D8 (legend half of format_type threading, Task 4): a colorbar whose
+    // domain is temporal (`format_type == "time"`) formats each sampled tick
+    // value as an epoch-ms timestamp instead of a d3 numeric spec — mirrors
+    // the axis half (`AxisStyleSpec.label_format_type`).
+    let format_type: Option<&str> = color_legend.and_then(|l| l.format_type.as_deref());
+    // The two gates below (`format_spec.is_some() || format_type ==
+    // Some("time")`) are deliberately narrower than "either field set"
+    // (quality-review S2, 2026-09-03): `fm.Legend(format_type=...)` alone,
+    // with NO `format=`, is a real public per-channel parameter
+    // (`ferrum/legend.py`'s `format_type`), and any non-`"time"` value
+    // (e.g. `format_type="number"`, which `resolve_format_field` can emit)
+    // must fall through to the EXISTING range-aware `format_colorbar_tick`
+    // default, not divert into `format_value_with_spec(v, None, ...)` =
+    // `format_numeric` — a byte-identity break for that combination the
+    // original `format_type.is_some()` gate introduced undisclosed. Only
+    // `"time"` genuinely needs the new path (a colorbar with no explicit
+    // spec still needs SOME way to know its domain is temporal).
 
     let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) = if legend_disabled {
         (Vec::new(), None)
@@ -187,8 +204,8 @@ pub(crate) fn build_color_legend(
                         .map(|i| {
                             let t = i as f64 / 4.0;
                             let v = lo + t * (hi - lo);
-                            if let Some(spec_str) = format_spec {
-                                crate::render::format::format_with_spec(v, Some(spec_str))
+                            if format_spec.is_some() || format_type == Some("time") {
+                                crate::render::format::format_value_with_spec(v, format_spec, format_type)
                             } else {
                                 format_colorbar_tick(v, lo, hi)
                             }
@@ -229,9 +246,12 @@ pub(crate) fn build_color_legend(
                 let tick_labels = custom_tick_labels.unwrap_or_else(|| {
                     bounds
                         .iter()
-                        .map(|&v| match format_spec {
-                            Some(s) => crate::render::format::format_with_spec(v, Some(s)),
-                            None => format_colorbar_tick(v, lo, hi),
+                        .map(|&v| {
+                            if format_spec.is_some() || format_type == Some("time") {
+                                crate::render::format::format_value_with_spec(v, format_spec, format_type)
+                            } else {
+                                format_colorbar_tick(v, lo, hi)
+                            }
                         })
                         .collect()
                 });
@@ -558,7 +578,7 @@ fn build_aux_legends(
     scales: &ResolvedScales,
     color_is_inert_on_line_or_ribbon: bool,
 ) -> Vec<AuxLegendInput> {
-    use crate::render::format::format_with_spec;
+    use crate::render::format::format_value_with_spec;
     use crate::scale::ticks::nice_ticks;
 
     use super::super::scale_resolve::{ColorInput, ColorScale};
@@ -587,6 +607,9 @@ fn build_aux_legends(
         let suppressed = disabled || (same_field_as_color && !color_is_numeric);
         if !suppressed {
             let format_spec = size_enc.legend.as_ref().and_then(|l| l.format.as_deref());
+            // D8 (legend half of format_type threading, Task 4): mirrors the
+            // color legend's colorbar handling just above.
+            let format_type = size_enc.legend.as_ref().and_then(|l| l.format_type.as_deref());
             if let Some((lo, hi)) = size_scale.inner.data_domain() {
                 let values = nice_ticks(lo, hi, 5);
                 let entries: Vec<SizeLegendEntry> = values
@@ -615,7 +638,7 @@ fn build_aux_legends(
                             None
                         };
                         Some(SizeLegendEntry {
-                            label: format_with_spec(v, format_spec),
+                            label: format_value_with_spec(v, format_spec, format_type),
                             radius,
                             color_hex,
                         })
@@ -996,6 +1019,75 @@ mod tests {
         assert_eq!(cb.tick_labels.len(), 5);
         assert_eq!(cb.domain, Some((0.0, 100.0)));
         assert!(warnings.is_empty(), "a Point-mark consumer must not trigger the line/ribbon suppression");
+    }
+
+    /// Quality-review S2 fix (2026-09-03): `fm.Legend(format_type=...)` alone
+    /// (no explicit `format=`) with a NON-`"time"` value must stay
+    /// byte-identical to the untouched default — the over-broad
+    /// `format_spec.is_some() || format_type.is_some()` gate this finding
+    /// caught diverted a real public parameter
+    /// (`ferrum/legend.py`'s `format_type`) away from the range-aware
+    /// `format_colorbar_tick` default and into plain `format_numeric`, an
+    /// undisclosed behavior change nothing pinned.
+    #[test]
+    fn continuous_color_format_type_number_alone_stays_byte_identical_to_default() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scale = || ColorScale::Continuous {
+            domain: (0.001, 0.0031),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        };
+        let mut spec = spec_with_color_field("v");
+        let layers = vec![LayerPrepared::from_chart_only(&spec)];
+        let mut warnings = Vec::new();
+        let scales_default = scales_with_color(scale());
+        let default_bundle =
+            build_color_legend(&spec, &empty_batch(), &scales_default, &layers, false, &mut warnings);
+        let default_labels = default_bundle.colorbar.expect("must build a colorbar").tick_labels;
+
+        spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
+            crate::render::chart_config::LegendStyleSpec {
+                format_type: Some("number".to_string()),
+                ..Default::default()
+            },
+        ));
+        let scales_typed = scales_with_color(scale());
+        let typed_bundle =
+            build_color_legend(&spec, &empty_batch(), &scales_typed, &layers, false, &mut warnings);
+        let typed_labels = typed_bundle.colorbar.expect("must build a colorbar").tick_labels;
+
+        assert_eq!(
+            default_labels, typed_labels,
+            "format_type=\"number\" alone (no format=) must not change colorbar tick labels"
+        );
+    }
+
+    /// Control for the fix above: `format_type == "time"` alone DOES need
+    /// the new path — it must not fall back to `format_colorbar_tick`'s
+    /// range-aware DECIMAL formatting of a raw epoch-ms domain value.
+    #[test]
+    fn continuous_color_format_type_time_alone_uses_epoch_formatting() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let scales = scales_with_color(ColorScale::Continuous {
+            domain: (1_577_836_800_000.0, 1_580_515_200_000.0), // 2020-01-01 .. 2020-02-01
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let mut spec = spec_with_color_field("v");
+        spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(
+            crate::render::chart_config::LegendStyleSpec {
+                format_type: Some("time".to_string()),
+                ..Default::default()
+            },
+        ));
+        let layers = vec![LayerPrepared::from_chart_only(&spec)];
+        let mut warnings = Vec::new();
+        let bundle = build_color_legend(&spec, &empty_batch(), &scales, &layers, false, &mut warnings);
+        let labels = bundle.colorbar.expect("must build a colorbar").tick_labels;
+        assert!(
+            labels.iter().any(|l| l.starts_with("2020-01") || l.starts_with("2020-02")),
+            "expected date-shaped labels from the epoch-ms domain, got {labels:?}"
+        );
     }
 
     // ── T5b: line/ribbon inert-continuous-color suppression (spec §4.0, 2026-08-28) ──

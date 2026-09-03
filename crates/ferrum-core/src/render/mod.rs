@@ -159,6 +159,23 @@ pub enum RenderError {
     ///   opposite of the config key they typed (mirrors the `SortSpecIgnored`
     ///   exemption in `scale_resolve/domain.rs`).
     InvalidAxisOrient { channel: &'static str, orient: String, coord_flipped: bool },
+    /// A raw d3-format/strftime spec string reachable from `ChartSpec`
+    /// (`EncodingSpec.format`/`.axis.label_format`/`.legend.format`, on any
+    /// layer) or `ChartConfig` (`axis`/`axis_x`/`axis_y`/`axis_y2`'s
+    /// `label_format`/`label_format_raw`, `legend.format`) could not be
+    /// tokenized by the d3-format grammar `format.rs` implements — NF-B1
+    /// residual (2026-09-02): an unrecognized preset name legitimately
+    /// passes through Python's `resolve_format_or_raw` as a raw spec per
+    /// spec §4.5, but a genuine typo (e.g. `"curency"`) previously reached
+    /// the lenient per-value tokenizer, which silently discarded trailing
+    /// characters it couldn't place — corrupting rendered text with raw
+    /// control characters for some inputs (the tokenizer's `c` type char:
+    /// "format as Unicode code point"). Raised once per render by
+    /// [`validate_chart_format_specs`], before any transform/layout work, so
+    /// a malformed spec never reaches per-value formatting. `spec` is the
+    /// offending string; `reason` is [`format::validate_d3_format_spec`]'s
+    /// message (names the unrecognized trailing token and its position).
+    InvalidFormatSpec { spec: String, reason: String },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -213,7 +230,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::EmptyDomain { .. }
         | RenderError::SceneConstruction(_)
         | RenderError::HtmlBundleAssembly(_)
-        | RenderError::UnsupportedChannelCombination { .. }) => other,
+        | RenderError::UnsupportedChannelCombination { .. }
+        | RenderError::InvalidFormatSpec { .. }) => other,
     }
 }
 
@@ -341,6 +359,8 @@ impl std::fmt::Display for RenderError {
                     )
                 }
             }
+            Self::InvalidFormatSpec { spec, reason } =>
+                write!(f, "invalid format spec {spec:?}: {reason}"),
         }
     }
 }
@@ -1231,9 +1251,25 @@ pub(crate) fn apply_axis_config_to_axis_input(
     // raises), so in practice at most one is set; this keeps the Rust side
     // self-consistent regardless. Fill only when nothing higher-precedence (a
     // per-channel spec) already set the override.
-    if axis.overrides.label_format.is_none() {
-        axis.overrides.label_format = cfg.effective_label_format().map(str::to_owned);
-    }
+    //
+    // `label_format.is_none()` ALONE is not a reliable "unclaimed" test (D8
+    // cascade-inversion fix, spec review cycle 2): a per-channel TEMPORAL
+    // format is applied EAGERLY to `AxisInput.tick_labels` in
+    // `prepare::build_axis_tick_inputs` and threads `label_format = None`
+    // back (nothing left to defer) — indistinguishable, by `label_format`
+    // alone, from "no per-channel format was ever set". `label_format_claimed`
+    // (set in `prepare::build_axis_input` from `resolve_axis_label_format`'s
+    // own result) carries that distinction; the mechanized
+    // `fill_chart_level_label_format` (quality-review S2, cycle 3) checks
+    // BOTH, so a per-channel-claimed axis is never touched, even when its
+    // `label_format` slot happens to read `None`. See
+    // `AxisStyleOverrides::label_format_claimed`'s doc for the full account
+    // and `render::apply_label_format_to_axis` for why this alone is
+    // sufficient (that fn no-ops whenever `label_format` stays `None`).
+    axis.overrides.fill_chart_level_label_format(
+        cfg.effective_label_format().map(str::to_owned),
+        cfg.effective_label_format_type().map(str::to_owned),
+    );
     apply_axis_style_to_axis_input(axis, &cfg.style)
 }
 
@@ -1338,8 +1374,21 @@ pub(crate) fn axis_style_fill_from(
     set(&mut o.label_angle, style.label_angle, fill_only_if_none);
     // `label_format` is owned by the chart-level path only. The per-channel path
     // threads it separately after this merge, so it must stay `None` here.
-    if fill_only_if_none && o.label_format.is_none() {
-        o.label_format = style.label_format.clone();
+    //
+    // This fallback write is normally shadowed by `apply_axis_config_to_axis_input`'s
+    // own (more complete — raw-first via `effective_label_format()`) fill
+    // immediately before this fn runs, which makes THIS block a no-op in
+    // the common case (it only re-derives the SAME `style.label_format`
+    // that caller's fill already found — see that caller's doc). But when
+    // the caller's fill is correctly SKIPPED for a per-channel-claimed axis
+    // (`label_format_claimed`, D8 cascade-inversion fix, spec review cycle
+    // 2), `o.label_format` is still `None` reaching here. Routes through
+    // the SAME mechanized `fill_chart_level_label_format` the caller uses
+    // (quality-review S2, cycle 3) rather than hand-re-deriving the
+    // "unclaimed" predicate a second time — this is exactly the two-writer
+    // duplication that finding closed.
+    if fill_only_if_none {
+        o.fill_chart_level_label_format(style.label_format.clone(), style.label_format_type.clone());
     }
     set(&mut o.tick_values, style.values.clone(), fill_only_if_none);
     // Title overrides.
@@ -1394,31 +1443,67 @@ pub(crate) fn apply_axis_style_to_axis_input(
     axis_style_fill_from(&mut axis.overrides, style, channel, true).map_err(|e| e.resolve(false))
 }
 
-/// Re-format tick label strings using a d3-format string override.
+/// Re-format tick label strings using a d3-format/strftime string override.
 ///
 /// When `tick_values_override` is set, tick_labels are replaced entirely
 /// with formatted versions of the explicit tick values. If a
 /// `label_format_override` is also provided the values are formatted using
-/// that d3-format spec; otherwise they are converted to plain decimal strings.
+/// that spec (`format_type`-aware — see [`prepare::apply_tick_format`]);
+/// otherwise they are converted to plain decimal strings.
 ///
-/// When only `label_format_override` is set (no explicit tick values), each
-/// existing tick label is parsed as a float and reformatted via the d3-format
-/// spec. Non-numeric labels (category names, time strings) are passed through
-/// unchanged.
-fn apply_label_format_to_axis(axis: &mut crate::layout::AxisInput) {
+/// When only `label_format_override` is set (no explicit tick values): a
+/// TIME format (`format_type == Some("time")`, D8/F-L07-05 fix) re-derives
+/// the axis's RAW temporal tick values from `scale` and formats those
+/// directly via `chrono` — `axis.tick_labels` at this point already holds
+/// the DEFAULT spacing-keyed date strings ([`format::format_time`]'s output,
+/// via `ScaleKind::tick_labels`), which cannot be re-parsed as epoch-ms, so
+/// re-deriving from the scale is required (mirrors
+/// `prepare::apply_axis_format_or_thread`'s identical per-channel handling
+/// of the same problem). Falls through to the numeric string-reparse path
+/// below when the scale isn't temporal or `values.len()` has drifted from
+/// `tick_labels.len()` (e.g. `tick_extra`/`tick_min_step` ran between the
+/// initial tick build and this call) — same guard
+/// `apply_axis_format_or_thread` uses; `apply_tick_format` leaves labels
+/// that fail to re-parse as a timestamp unchanged, so this fallback is safe
+/// (no corruption), never a silent misformat.
+///
+/// Otherwise (numeric, or no explicit `format_type`), each existing tick
+/// label is parsed as a float and reformatted via the d3-format spec.
+/// Non-numeric labels (category names) are passed through unchanged.
+fn apply_label_format_to_axis(
+    axis: &mut crate::layout::AxisInput,
+    scale: &scale_resolve::ScaleKind,
+    tick_count: usize,
+    reversed: bool,
+) {
+    let format_type = axis.overrides.label_format_type.clone();
     if let Some(tick_vals) = axis.overrides.tick_values.clone() {
         // Replace tick_labels with formatted versions of the explicit tick_values.
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
         let fmt = axis.overrides.label_format.as_deref();
-        axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, None);
-    } else if let Some(ref fmt_str) = axis.overrides.label_format.clone() {
-        // Re-format existing labels using the d3-format spec.
-        axis.tick_labels = prepare::apply_tick_format(
-            std::mem::take(&mut axis.tick_labels),
-            Some(fmt_str),
-            None,
-        );
+        axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
+        return;
     }
+    let Some(fmt_str) = axis.overrides.label_format.clone() else { return };
+    if format_type.as_deref() == Some("time") {
+        if let Some(mut values) = scale.temporal_tick_values(tick_count) {
+            if reversed {
+                values.reverse();
+            }
+            if values.len() == axis.tick_labels.len() {
+                axis.tick_labels = values
+                    .into_iter()
+                    .map(|ms| format::format_time_spec(ms, &fmt_str))
+                    .collect();
+                return;
+            }
+        }
+    }
+    axis.tick_labels = prepare::apply_tick_format(
+        std::mem::take(&mut axis.tick_labels),
+        Some(&fmt_str),
+        format_type.as_deref(),
+    );
 }
 
 /// Continuous-axis scale projection: when `tick_values_override` replaced the
@@ -1677,6 +1762,238 @@ struct PipelineOutput {
 ///   6. Legend-title resolution.
 ///   7. `compute_layout`.
 ///
+/// Validate every raw d3-format/strftime spec string reachable from `spec`
+/// and `chart_config` (NF-B1 residual, spec 2026-09-02 §4.5): a malformed
+/// spec is refused with [`RenderError::InvalidFormatSpec`] before any
+/// transform/layout work begins, rather than reaching `format.rs`'s
+/// per-value tokenizer where trailing garbage from a typo'd preset name
+/// (e.g. `"curency"`) was previously silently discarded, corrupting
+/// rendered text with control characters (the tokenizer's `c` type char).
+///
+/// Every surface that accepts a raw format string funnels through here
+/// exactly once per render — not once per tick/legend-entry:
+/// `chart_config`'s `axis`/`axis_x`/`axis_y`/`axis_y2`
+/// (`AxisConfigSpec::effective_label_format`/`_type`) and `legend.format`/
+/// `format_type`, and every layer's (plus the chart-level shorthand)
+/// `EncodingSpec.format`/`.format_type` for every channel whose `format` has
+/// a real consumer today (x, y — the positional/axis-tick shorthand; text,
+/// tooltip, tooltip_fields — draw.rs/marks/text.rs's label/tooltip
+/// formatting; color, size, shape, opacity, x2, y2 are ALSO swept, even
+/// though their own `.format` field has no consumer yet, since validating
+/// an unused field is free and a future consumer then inherits validation
+/// for free too), plus its nested `.axis.label_format`/`_type` (x/y only —
+/// `AxisStyleSpec` has no consumer on any other channel) and
+/// `.legend.format`/`format_type` (every channel's legend, chart-level and
+/// per-channel). A spec classified as a TIME pattern is validated against
+/// the `chrono` strftime grammar instead of the d3 one
+/// ([`format::validate_strftime_spec`]) — NOT exempted from validation.
+/// (Quality-review cycle-2 correction: an earlier revision of this
+/// doc/code claimed `chrono` is "separately lenient" and skipped validating
+/// time patterns entirely. That premise was false — `format::format_time_spec`
+/// panics on a malformed pattern (`chrono`'s `DelayedFormat` `Display`
+/// returns `Err`, and the blanket `ToString` impl `.expect()`s it never
+/// does), so every raw-accepting surface's default `format_type: None` case
+/// — which `is_time_format_spec` treats as time whenever the spec contains
+/// `%` — was one typo away from a `PanicException` crossing the PyO3
+/// boundary instead of the typed refusal this fn exists to give.)
+///
+/// **Two time-classification rules, matched to the two real runtime rules**
+/// (quality-review cycle-3 correction — a single shared LOOSE rule here
+/// falsely refused a valid raw d3 percent spec on the chart-level axis
+/// surface): `check_loose` uses [`format::is_time_format_spec`] (the `%`
+/// -containment heuristic) for the ONE surface that actually auto-detects
+/// time that way at runtime — per-channel `x`/`y`'s `.format`/`.axis
+/// .label_format`, consumed by `prepare::apply_axis_format_or_thread`,
+/// which uses the identical heuristic. Every other surface's real consumer
+/// (`render::apply_label_format_to_axis` for chart-level `AxisConfigSpec`;
+/// `prepare::legend`'s `format_value_with_spec` for every `.legend.format`;
+/// `draw.rs`/`marks/text.rs` for `text`/`tooltip`/`tooltip_fields`) checks
+/// `format_type == Some("time")` STRICTLY, with no `%`-based auto-detection
+/// — `check_strict` matches that, so this pre-pass never refuses a spec its
+/// own real consumer would have accepted as numeric.
+///
+/// `check_loose`'s auto-detected case (no explicit `format_type`, spec
+/// contains `%`) is genuinely ambiguous at validation time on its own: at
+/// runtime, `apply_axis_format_or_thread` only actually commits to the
+/// `chrono` strftime grammar when the RESOLVED scale turns out temporal
+/// (`scale.temporal_tick_values` returns `Some`); on a non-temporal scale it
+/// falls through to `apply_tick_format`'s own STRICT check, which sees
+/// `format_type: None` and formats as NUMERIC d3 instead — so a spec valid
+/// as d3 but not as strftime (e.g. `"*>8.1%"`, a real percent format) must
+/// not be refused on a channel that will never resolve temporal. This fn
+/// runs before scale resolution, but each channel's *declared* type
+/// (`EncodingSpec.type_`, e.g. the `:T`/`:Q` shorthand suffix) is known
+/// early and is exactly the signal `SpecDataType::Temporal` (`scale_resolve
+/// /positional.rs`) uses to choose `ScaleKind::Time` in the first place —
+/// so `check_loose` uses `type_` to resolve the ambiguity precisely for the
+/// declared-type case, falling back to a tolerant "valid under either
+/// grammar" check only when `type_` is unset (fully auto-inferred from data,
+/// the one case this fn truly cannot know early).
+fn validate_chart_format_specs(spec: &ChartSpec, chart_config: &ChartConfig) -> Result<(), RenderError> {
+    use crate::spec::encoding::DataType;
+
+    fn check_with(f: &str, is_time: bool) -> Result<(), RenderError> {
+        let result =
+            if is_time { format::validate_strftime_spec(f) } else { format::validate_d3_format_spec(f) };
+        result.map_err(|reason| RenderError::InvalidFormatSpec { spec: f.to_string(), reason })
+    }
+
+    /// Matches `prepare::apply_axis_format_or_thread`'s real per-channel
+    /// axis time-detection rule (the `%`-containment heuristic), disambiguated
+    /// by the channel's declared `encoding_type` where the auto-detected case
+    /// would otherwise be ambiguous — see this fn's doc.
+    fn check_loose(
+        fmt: Option<&str>,
+        format_type: Option<&str>,
+        encoding_type: Option<DataType>,
+    ) -> Result<(), RenderError> {
+        let Some(f) = fmt else { return Ok(()) };
+        if format_type == Some("time") {
+            return check_with(f, true);
+        }
+        if !format::is_time_format_spec(f, format_type) {
+            return check_with(f, false);
+        }
+        // Auto-detected via '%'-containment with no explicit format_type.
+        match encoding_type {
+            Some(DataType::Temporal) => check_with(f, true),
+            Some(DataType::Quantitative | DataType::Nominal | DataType::Ordinal) => check_with(f, false),
+            None => {
+                // Fully auto-inferred type: genuinely ambiguous early.
+                // Tolerate whichever grammar the spec actually validates
+                // under, matching whichever one its eventually-resolved
+                // scale will really use.
+                if format::validate_strftime_spec(f).is_ok() || format::validate_d3_format_spec(f).is_ok()
+                {
+                    Ok(())
+                } else {
+                    check_with(f, true)
+                }
+            }
+        }
+    }
+
+    /// Matches every OTHER real consumer's rule: `format_type == Some("time")`
+    /// exactly, never auto-detected from the spec's own content.
+    fn check_strict(fmt: Option<&str>, format_type: Option<&str>) -> Result<(), RenderError> {
+        let Some(f) = fmt else { return Ok(()) };
+        check_with(f, format_type == Some("time"))
+    }
+
+    fn check_axis_cfg(cfg: Option<&AxisConfigSpec>) -> Result<(), RenderError> {
+        let Some(cfg) = cfg else { return Ok(()) };
+        let fmt = cfg.effective_label_format();
+        let format_type = cfg.effective_label_format_type();
+        let Some(f) = fmt else { return Ok(()) };
+        check_with(f, format_type == Some("time")).map_err(|err| {
+            // Quality-review cycle-4 fix: when the STRICT check above failed
+            // as d3 (format_type wasn't explicitly "time") but the SAME
+            // string IS a valid strftime pattern, the true problem is NOT
+            // "your d3 spec is malformed" — chart-level axis config
+            // (`configure_axis` / `AxisConfig.label_format_raw`) has NO time
+            // spelling at all; only a time preset name (`label_format=
+            // "date_iso"`, resolved by Python before this fn ever runs) or
+            // the per-channel `fm.Axis(label_format=...)` surface accept a
+            // custom date/time pattern. Re-diagnose the message so it names
+            // the real cause instead of restating the (also technically
+            // true, but misleading) d3-grammar complaint.
+            //
+            // Cycle-5 correction (quality-review cycle-3 finding, recurring
+            // at this exact site): `validate_strftime_spec` alone is NOT a
+            // "looks like a date pattern" test — `chrono`'s `StrftimeItems`
+            // parses ANY `%`-free literal text successfully (there is
+            // nothing to parse), so the bare `.is_ok()` check re-diagnosed
+            // EVERY %-free typo (the batch's own headline repro, `"curency"`)
+            // as "a valid date/time pattern". A string only counts as a
+            // strftime CANDIDATE when it actually contains a `%` escape —
+            // the one character every real specifier requires and no
+            // literal-only string ever has — so `"curency"` (no `%`) now
+            // keeps the d3-grammar message unconditionally, while `"%b %d"`
+            // (has a `%`, and parses) still gets the re-diagnosis.
+            if format_type != Some("time") && f.contains('%') && format::validate_strftime_spec(f).is_ok() {
+                RenderError::InvalidFormatSpec {
+                    spec: f.to_string(),
+                    reason: format!(
+                        "{f:?} is a valid date/time pattern, but this chart-level axis \
+                         surface (configure_axis / AxisConfig.label_format_raw) only \
+                         accepts numeric d3-format specs — use a time preset name \
+                         (e.g. label_format=\"date_iso\") or the per-channel \
+                         fm.Axis(label_format=...) surface for a custom date/time pattern"
+                    ),
+                }
+            } else {
+                err
+            }
+        })
+    }
+
+    fn check_legend_style(style: &chart_config::LegendStyleSpec) -> Result<(), RenderError> {
+        check_strict(style.format.as_deref(), style.format_type.as_deref())
+    }
+
+    /// `format_is_strict`: whether THIS channel's own `.format`/`.format_type`
+    /// (not the nested `.axis`/`.legend`, which always use their own fixed
+    /// rule) is consumed by a strict-only reader (`text`/`tooltip`/
+    /// `tooltip_fields` — `draw.rs`/`marks/text.rs`) versus the loose,
+    /// auto-detecting `x`/`y` axis-shorthand reader. Channels with no
+    /// consumer for their own `.format` today (color/size/shape/opacity/
+    /// x2/y2) are swept with the loose rule — harmless either way since
+    /// nothing reads it yet, and loose is the more permissive default.
+    fn check_encoding(
+        e: Option<&crate::spec::encoding::EncodingSpec>,
+        format_is_strict: bool,
+    ) -> Result<(), RenderError> {
+        let Some(e) = e else { return Ok(()) };
+        if format_is_strict {
+            check_strict(e.format.as_deref(), e.format_type.as_deref())?;
+        } else {
+            check_loose(e.format.as_deref(), e.format_type.as_deref(), e.type_)?;
+        }
+        if let Some(axis) = e.axis.as_deref() {
+            check_loose(axis.label_format.as_deref(), axis.label_format_type.as_deref(), e.type_)?;
+        }
+        if let Some(legend) = e.legend.as_deref() {
+            check_legend_style(legend)?;
+        }
+        Ok(())
+    }
+
+    fn check_encoding_set(enc: &crate::spec::encoding::Encoding) -> Result<(), RenderError> {
+        check_encoding(enc.x.as_ref(), false)?;
+        check_encoding(enc.y.as_ref(), false)?;
+        check_encoding(enc.color.as_ref(), false)?;
+        check_encoding(enc.size.as_ref(), false)?;
+        check_encoding(enc.shape.as_ref(), false)?;
+        check_encoding(enc.opacity.as_ref(), false)?;
+        check_encoding(enc.x2.as_ref(), false)?;
+        check_encoding(enc.y2.as_ref(), false)?;
+        check_encoding(enc.text.as_ref(), true)?;
+        check_encoding(enc.tooltip.as_ref(), true)?;
+        if let Some(fields) = enc.tooltip_fields.as_ref() {
+            for f in fields {
+                check_encoding(Some(f), true)?;
+            }
+        }
+        Ok(())
+    }
+
+    check_axis_cfg(chart_config.axis.as_ref())?;
+    check_axis_cfg(chart_config.axis_x.as_ref())?;
+    check_axis_cfg(chart_config.axis_y.as_ref())?;
+    check_axis_cfg(chart_config.axis_y2.as_ref())?;
+    if let Some(legend) = chart_config.legend.as_ref() {
+        check_legend_style(&legend.style)?;
+    }
+
+    check_encoding_set(&spec.encoding)?;
+    if let Some(layers) = spec.layers.as_ref() {
+        for layer in layers {
+            check_encoding_set(&layer.encoding)?;
+        }
+    }
+    Ok(())
+}
+
 /// The viewport must already have been validated (both dimensions > 0) and
 /// overridden with `RenderConfig.width` / `RenderConfig.height` by the caller.
 fn prepare_and_layout(
@@ -1690,6 +2007,10 @@ fn prepare_and_layout(
     // (flat/facet) render → byte-identical output.
     leaf_scales: Option<&scale_resolve::LeafScaleContext>,
 ) -> Result<PipelineOutput, RenderError> {
+    // NF-B1 residual malformed-spec guard (Task 4, D8) — runs before any
+    // transform/layout work so a bad spec refuses fast, once per render, not
+    // once per tick/label. See `validate_chart_format_specs`'s doc.
+    validate_chart_format_specs(spec, chart_config)?;
     let mut prep = prepare::prepare_render_inputs(spec, batch, theme, leaf_scales)?;
     let mut warnings = prep.warnings.clone();
 
@@ -1791,8 +2112,8 @@ fn prepare_and_layout(
     prepare::adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, x_tc, false);
     prepare::adjust_axis_ticks(&mut prep.axes.y, &prep.provisional_scales.y, y_tc, y_reversed);
     // Apply label_format_override to tick labels (requires axis config to be set first).
-    apply_label_format_to_axis(&mut prep.axes.x);
-    apply_label_format_to_axis(&mut prep.axes.y);
+    apply_label_format_to_axis(&mut prep.axes.x, &prep.provisional_scales.x, x_tc, false);
+    apply_label_format_to_axis(&mut prep.axes.y, &prep.provisional_scales.y, y_tc, y_reversed);
     // Continuous-axis scale projection: when explicit `tick_values` replaced the
     // auto tick labels, recompute the projected fractions from those same values
     // so the carrier stays index-aligned with the new labels. The explicit
@@ -2013,6 +2334,7 @@ mod orchestration_tests {
     use crate::spec::mark::Mark;
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use chart_config::{AxisStyleSpec, LegendStyleSpec};
     use std::sync::Arc;
 
     fn scatter_3() -> (ChartSpec, RecordBatch) {
@@ -2079,6 +2401,284 @@ mod orchestration_tests {
             &ChartConfig::default(),
         );
         assert!(matches!(result.unwrap_err(), RenderError::InvalidViewport { .. }));
+    }
+
+    // ── NF-B1 residual: malformed-spec refusal, per surface (Task 4, D8) ────
+    // The audit repro: a typo'd preset name (`fm.Axis(label_format="curency")`
+    // / `fm.X("x", format="curency")`) passes through Python's
+    // `resolve_format_or_raw` as an honest raw spec (spec §4.5's
+    // unknown-name-passes-raw contract), then previously reached the lenient
+    // per-value d3 tokenizer, which parsed it as `type='c'` (the Unicode
+    // code-point formatter) and emitted control characters into rendered SVG
+    // text. These pin the FULL `render_svg` pipeline refusing before any
+    // control characters are ever emitted, on each raw-accepting surface.
+
+    #[test]
+    fn render_svg_refuses_malformed_encoding_format() {
+        // Surface: encoding `format=` (`fm.X("x", format=...)`).
+        let (mut spec, batch) = scatter_3();
+        spec.encoding.x.as_mut().unwrap().format = Some("curency".to_string());
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("curency"), "{msg}");
+        assert!(!msg.contains('\u{c}'), "message must not embed control chars: {msg:?}");
+    }
+
+    #[test]
+    fn render_svg_refuses_malformed_per_channel_axis_label_format() {
+        // Surface: per-channel `fm.Axis(label_format=...)`.
+        let (mut spec, batch) = scatter_3();
+        spec.encoding.x.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            label_format: Some("curency".to_string()),
+            ..Default::default()
+        }));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        assert!(err.to_string().contains("curency"));
+    }
+
+    #[test]
+    fn render_svg_refuses_malformed_chart_level_axis_label_format() {
+        // Surface: chart-level `configure_axis(label_format_raw=...)` (the
+        // `AxisConfig.label_format` preset-name surface always resolves to a
+        // real spec at the Python boundary — a genuinely malformed STRING
+        // only reaches Rust via the raw spelling, or a raw-dict caller).
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let chart_config = ChartConfig {
+            axis: Some(AxisConfigSpec {
+                label_format_raw: Some("curency".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err =
+            render_svg(&spec, &batch, &theme, viewport, &config, &chart_config).unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        assert!(err.to_string().contains("curency"));
+    }
+
+    #[test]
+    fn render_svg_refuses_chart_level_raw_strftime_with_diagnosing_message() {
+        // Quality-review cycle-4 fix: a raw strftime-shaped spec on the
+        // chart-level axis surface must be refused with a message naming
+        // the REAL cause (this surface is numeric-only) rather than
+        // restating the misleading "your d3 spec is malformed" complaint —
+        // "%b %d" IS a valid d3-format grammar failure (trailing garbage)
+        // but that framing hides the actual fix (a time preset name or the
+        // per-channel fm.Axis surface).
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let chart_config = ChartConfig {
+            axis: Some(AxisConfigSpec {
+                label_format_raw: Some("%b %d".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err =
+            render_svg(&spec, &batch, &theme, viewport, &config, &chart_config).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        assert!(msg.contains("valid date/time pattern"), "{msg}");
+        assert!(msg.contains("only accepts numeric d3-format specs"), "{msg}");
+        assert!(msg.contains("fm.Axis(label_format=...)"), "{msg}");
+        assert!(
+            !msg.contains("unrecognized token"),
+            "must not restate the misleading d3-grammar complaint: {msg}"
+        );
+    }
+
+    #[test]
+    fn render_svg_percent_free_typo_on_chart_level_raw_keeps_d3_grammar_message() {
+        // Quality-review cycle-5 fix (recurring at this exact site, cycle-3
+        // finding): the negative control the reviewer required alongside the
+        // cycle-4 re-diagnosis fix. `"curency"` — the batch's own headline
+        // NF-B1 repro — has NO `%` at all, so `chrono`'s `StrftimeItems`
+        // trivially parses it as pure literal text (`validate_strftime_spec`
+        // returns `Ok`) even though it is NOT a date/time pattern by any
+        // sensible reading. Requiring an actual `%` before treating a spec
+        // as a strftime candidate (not just successful parsing) is what
+        // keeps this on the d3-grammar message, which names the real defect
+        // (an unrecognized trailing token) — the date/time re-diagnosis must
+        // never fire for a %-free string.
+        let (spec, batch) = scatter_3();
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let chart_config = ChartConfig {
+            axis: Some(AxisConfigSpec {
+                label_format_raw: Some("curency".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err =
+            render_svg(&spec, &batch, &theme, viewport, &config, &chart_config).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        assert!(msg.contains("unrecognized token"), "expected the d3-grammar message: {msg}");
+        assert!(
+            !msg.contains("valid date/time pattern"),
+            "a %-free typo must never be misdiagnosed as a date/time pattern: {msg}"
+        );
+    }
+
+    #[test]
+    fn render_svg_refuses_malformed_legend_format() {
+        // Surface: per-channel `fm.Legend(format=...)` (color legend).
+        let (mut spec, batch) = scatter_3();
+        spec.encoding.color =
+            Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
+        spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(LegendStyleSpec {
+            format: Some("curency".to_string()),
+            ..Default::default()
+        }));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        assert!(err.to_string().contains("curency"));
+    }
+
+    #[test]
+    fn render_svg_accepts_valid_but_unusual_specs_on_every_surface() {
+        // The refusal must never false-positive on genuinely valid d3 specs.
+        // `y` here is NON-temporal (`scatter_3`'s plain `EncodingSpec`, no
+        // `type_` set) — quality-review cycle-3 pin: "*>8.1%" auto-detects as
+        // a TIME candidate by the `%`-containment heuristic (no explicit
+        // format_type), but `y`'s declared type is not Temporal, so it must
+        // validate as the (valid) d3 percent spec it actually is, matching
+        // what `apply_axis_format_or_thread` really does at runtime on a
+        // non-temporal scale (falls through to the numeric path regardless
+        // of the heuristic's own guess).
+        let (mut spec, batch) = scatter_3();
+        spec.encoding.x.as_mut().unwrap().format = Some(",.2f".to_string());
+        spec.encoding.y.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            label_format: Some("*>8.1%".to_string()),
+            ..Default::default()
+        }));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let chart_config = ChartConfig {
+            axis_y: Some(AxisConfigSpec {
+                label_format_raw: Some("~s".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        render_svg(&spec, &batch, &theme, viewport, &config, &chart_config)
+            .expect("valid-but-unusual specs must not be refused");
+    }
+
+    // ── Quality-review S4 (2026-09-03): malformed %-bearing specs on a
+    // TEMPORAL channel must be a typed refusal, never a panic. Root cause:
+    // `validate_chart_format_specs` exempted every `%`-bearing spec from
+    // validation entirely (on the false premise that `chrono` handles a bad
+    // pattern "leniently" — it panics instead, via `format::format_time_spec`'s
+    // old `.to_string()` on a `DelayedFormat` whose `Display` can error). The
+    // fixed `validate_chart_format_specs` validates the `chrono` strftime
+    // grammar for a channel whose declared `type_` is `Temporal`, refusing
+    // with `RenderError::InvalidFormatSpec` — a typed Rust `Result`, which
+    // can NEVER become an unhandled Python panic (PyO3's `render_err_to_py`
+    // always converts it to a `ValueError` first). These four reproduce the
+    // exact snippets quality review verified crash on the pre-fix build.
+
+    #[test]
+    fn render_svg_refuses_curency_percent_typo_on_temporal_axis() {
+        // fm.X('t:T', axis=fm.Axis(label_format='curency%')).
+        let (mut spec, batch) = scatter_3();
+        let x = spec.encoding.x.as_mut().unwrap();
+        x.type_ = Some(crate::spec::encoding::DataType::Temporal);
+        x.axis = Some(Box::new(AxisStyleSpec {
+            label_format: Some("curency%".to_string()),
+            ..Default::default()
+        }));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+        assert!(err.to_string().contains("curency%"));
+    }
+
+    #[test]
+    fn render_svg_refuses_unknown_strftime_specifier_on_temporal_axis() {
+        // label_format='%J' -- not a real strftime specifier.
+        let (mut spec, batch) = scatter_3();
+        let x = spec.encoding.x.as_mut().unwrap();
+        x.type_ = Some(crate::spec::encoding::DataType::Temporal);
+        x.axis =
+            Some(Box::new(AxisStyleSpec { label_format: Some("%J".to_string()), ..Default::default() }));
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn render_svg_refuses_ordinary_percent_spec_on_temporal_encoding_format() {
+        // fm.X('t:T', format='.1%') -- a perfectly ordinary raw d3 percent
+        // spec that is valid on a numeric scale but is not a valid strftime
+        // pattern, and `x` here IS declared temporal.
+        let (mut spec, batch) = scatter_3();
+        let x = spec.encoding.x.as_mut().unwrap();
+        x.type_ = Some(crate::spec::encoding::DataType::Temporal);
+        x.format = Some(".1%".to_string());
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn render_svg_refuses_bare_percent_on_temporal_encoding_format() {
+        // format='%' -- a dangling strftime escape with nothing after it.
+        let (mut spec, batch) = scatter_3();
+        let x = spec.encoding.x.as_mut().unwrap();
+        x.type_ = Some(crate::spec::encoding::DataType::Temporal);
+        x.format = Some("%".to_string());
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let err = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap_err();
+        assert!(matches!(err, RenderError::InvalidFormatSpec { .. }), "got: {err:?}");
+    }
+
+    #[test]
+    fn render_svg_accepts_the_same_ordinary_percent_spec_on_a_non_temporal_axis() {
+        // The exact mirror-image control: '.1%' on a NON-temporal x (no
+        // `type_` set, matching `scatter_3`'s default) must render fine --
+        // the fix must not become the opposite over-eager refusal.
+        let (mut spec, batch) = scatter_3();
+        spec.encoding.x.as_mut().unwrap().format = Some(".1%".to_string());
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .expect("'.1%' on a non-temporal axis must render, not refuse");
     }
 
     // ── T12: stroke_dash consumption end-to-end (spec §4.3) ─────────────────
@@ -3437,6 +4037,18 @@ mod chart_config_application_tests {
         LegendConfigSpec, LegendStyleSpec, PaddingConfigSpec, TitleConfigSpec,
     };
 
+    /// A minimal `Linear` scale for tests that only need `apply_label_format_to_axis`'s
+    /// `scale`/`tick_count` parameters to satisfy the signature (its numeric,
+    /// non-temporal formatting paths never consult the scale directly).
+    fn linear_scale(lo: f64, hi: f64) -> scale_resolve::ScaleKind {
+        scale_resolve::ScaleKind::Linear(crate::scale::linear::LinearScale::new_internal(
+            vec![lo, hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ))
+    }
+
     #[test]
     fn apply_chart_config_noop_on_empty_config() {
         let default_theme = ThemeInputs::default();
@@ -4005,7 +4617,8 @@ mod chart_config_application_tests {
         );
         let cfg = AxisConfigSpec { label_format_raw: Some(",.0f".to_string()), ..Default::default() };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        apply_label_format_to_axis(&mut axis);
+        let scale = linear_scale(0.0, 3000.0);
+        apply_label_format_to_axis(&mut axis, &scale, 3, false);
         // ",.0f" formats with thousands separator and 0 decimal places.
         assert_eq!(axis.tick_labels, vec!["1,000", "2,000", "3,000"]);
     }
@@ -4024,8 +4637,189 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        apply_label_format_to_axis(&mut axis);
+        let scale = linear_scale(0.0, 1.0);
+        apply_label_format_to_axis(&mut axis, &scale, 3, false);
+        // Raw `label_format_raw` carries no sibling type field (D8:
+        // `effective_label_format_type()` returns `None` for it) — NF-B2's
+        // exact regression guard: a raw `%`-bearing NUMERIC spec must still
+        // resolve as percent, not get swept into the time branch.
         assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
+    }
+
+    /// D8/F-L07-05 (the batch's motivating repro): a chart-level TIME preset
+    /// (`configure_axis(label_format="date_iso")`, resolved by Python into
+    /// `label_format="%Y-%m-%d"` + `label_format_type="time"`) must render
+    /// real dates, not misparse the strftime pattern as a d3 numeric spec
+    /// (the pre-fix bug: `%` tokenized as the d3 percent TYPE char, yielding
+    /// output like `"300.000000%"`).
+    #[test]
+    fn axis_config_time_preset_reformats_default_date_labels_as_real_dates() {
+        use crate::scale::time::TimeScale;
+        // 2020-01-01T00:00:00Z .. 2020-01-04T00:00:00Z, 4 daily ticks.
+        let epoch_lo = 1_577_836_800_000.0;
+        let epoch_hi = epoch_lo + 3.0 * 86_400_000.0;
+        let scale = scale_resolve::ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        // The default (no explicit format) labels the axis already carries —
+        // spacing-keyed date strings from `format::format_time`, NOT
+        // reparseable epoch-ms integers (this is exactly why the fix must
+        // re-derive raw values from `scale`, not reparse these strings).
+        let default_labels = scale.tick_labels(4);
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            default_labels,
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some("%Y-%m-%d".to_string()),
+                label_format_type: Some("time".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.overrides.label_format_type.as_deref(), Some("time"));
+        apply_label_format_to_axis(&mut axis, &scale, 4, false);
+        for label in &axis.tick_labels {
+            assert!(
+                !label.contains('%'),
+                "date-formatted label must not carry a literal '%': {label}"
+            );
+            // ISO date shape: YYYY-MM-DD.
+            assert_eq!(label.len(), 10, "expected an ISO date, got {label:?}");
+            assert!(label.starts_with("2020-01-0"), "expected a Jan 2020 date, got {label:?}");
+        }
+    }
+
+    /// NF-B2, chart level: `label_format` + explicit `values=` compose in
+    /// BOTH directions — a numeric percent spec applies correctly to
+    /// explicit tick values even though `label_format_type` is now real
+    /// (not hardcoded `None`).
+    #[test]
+    fn axis_config_label_format_percent_composes_with_explicit_values() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["ignored".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some(".1%".to_string()),
+                label_format_type: Some("number".to_string()),
+                values: Some(vec![0.0, 0.5, 1.0]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.overrides.label_format_type.as_deref(), Some("number"));
+        let scale = linear_scale(0.0, 1.0);
+        apply_label_format_to_axis(&mut axis, &scale, 3, false);
+        assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
+    }
+
+    /// D8: the `"ordinal"` preset's sentinel threads through the chart-level
+    /// path end to end.
+    #[test]
+    fn axis_config_ordinal_preset_renders_suffixes() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["1".to_string(), "2".to_string(), "3".to_string(), "11".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some("__ordinal__".to_string()),
+                label_format_type: Some("number".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        let scale = linear_scale(1.0, 11.0);
+        apply_label_format_to_axis(&mut axis, &scale, 4, false);
+        assert_eq!(axis.tick_labels, vec!["1st", "2nd", "3rd", "11th"]);
+    }
+
+    /// D8 cascade-inversion fix (spec review cycle 2): `label_format_claimed`
+    /// must block the chart-level fill EVEN THOUGH `label_format` itself
+    /// reads `None` — the exact shape `prepare::build_axis_input` produces
+    /// for a per-channel TEMPORAL format (applied eagerly, threads `None`
+    /// back). Simulates that shape directly (bypassing the full
+    /// prepare/scale-resolve pipeline, which the end-to-end
+    /// `render_svg`-level test below also covers) to pin the mechanism in
+    /// isolation.
+    #[test]
+    fn axis_config_chart_level_fill_skipped_when_per_channel_claimed_via_flag() {
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["Feb 06".to_string(), "Mar 06".to_string()],
+            None,
+        );
+        // Simulates prepare::build_axis_input's post-eager-temporal-apply
+        // state: label_format threaded None, but the axis IS claimed.
+        axis.overrides.label_format_claimed = true;
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some("%Y-%m-%d".to_string()),
+                label_format_type: Some("time".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        // Chart-level must not have filled the slot at all.
+        assert_eq!(axis.overrides.label_format, None);
+        assert_eq!(axis.overrides.label_format_type, None);
+        // And apply_label_format_to_axis (which no-ops on a None label_format)
+        // must leave the already-applied per-channel labels untouched.
+        let scale = linear_scale(0.0, 1.0);
+        apply_label_format_to_axis(&mut axis, &scale, 2, false);
+        assert_eq!(axis.tick_labels, vec!["Feb 06".to_string(), "Mar 06".to_string()]);
+    }
+
+    /// The unclaimed case (control): with `label_format_claimed = false` (the
+    /// default), the chart-level time preset DOES fill and re-derive — this
+    /// is the correct, desired "chart-level alone" behavior the claimed-flag
+    /// fix must not regress.
+    #[test]
+    fn axis_config_chart_level_fill_proceeds_when_unclaimed() {
+        use crate::scale::time::TimeScale;
+        let epoch_lo = 1_577_836_800_000.0; // 2020-01-01
+        let epoch_hi = epoch_lo + 86_400_000.0; // 2020-01-02
+        let scale = scale_resolve::ScaleKind::Time(TimeScale::new_internal(
+            vec![epoch_lo, epoch_hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ));
+        let default_labels = scale.tick_labels(2);
+        let mut axis =
+            crate::layout::AxisInput::new(crate::layout::AxisOrient::Bottom, None, default_labels, None);
+        assert!(!axis.overrides.label_format_claimed, "default must be unclaimed");
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some("%Y-%m-%d".to_string()),
+                label_format_type: Some("time".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.overrides.label_format.as_deref(), Some("%Y-%m-%d"));
+        apply_label_format_to_axis(&mut axis, &scale, 2, false);
+        for label in &axis.tick_labels {
+            assert!(label.starts_with("2020-01-0"), "expected an ISO date, got {label:?}");
+        }
     }
 
     #[test]
