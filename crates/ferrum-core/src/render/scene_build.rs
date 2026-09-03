@@ -693,7 +693,7 @@ fn resolve_panel_scales(
         // Warnings are emitted once, by the chart-level application in
         // `prepare_and_layout`; this is the same config against the same scale,
         // so reporting here would duplicate one warning per panel.
-        let _ = super::apply_color_config_to_color_scale(&mut scales.color, cfg);
+        let _ = super::config_apply::apply_color_config_to_color_scale(&mut scales.color, cfg);
     }
 
     // Per-layer independent y-scale slots (secondary-y-axis, GH #52). Byte-stable
@@ -1668,7 +1668,7 @@ pub(crate) fn resolve_legend_color_scale(
     if let Some(ref cfg) = chart_config.color {
         // See the per-panel site above: the chart-level application already
         // reported any refusal, so this legend-only re-application is silent.
-        let _ = super::apply_color_config_to_color_scale(&mut color_scale, cfg);
+        let _ = super::config_apply::apply_color_config_to_color_scale(&mut color_scale, cfg);
     }
     Ok(color_scale)
 }
@@ -3192,7 +3192,7 @@ mod tests {
 
     /// `configure_title(subtitle_font_size=…, subtitle_color=…)` flows through the
     /// chart-config → theme path and reaches the rendered subtitle. The chart-level
-    /// subtitle styling lives on the theme (populated by `apply_chart_config`); the
+    /// subtitle styling lives on the theme (populated by `apply_chart_config_to_theme`); the
     /// per-chart `spec.title` is `None` here, exactly the `configure_title` case.
     #[test]
     fn build_title_applies_chart_config_subtitle_styling() {
@@ -3640,8 +3640,9 @@ mod tests {
             None,
         )
         .unwrap();
-        // Mirror the real orchestration (`render::mod`'s `render_svg`/interactive
-        // entry points): `apply_show_defaults` is the bottom of the grid/domain
+        // Mirror the real orchestration (`config_apply`'s
+        // `build_effective_theme_config_over_theme`, pass 15): `apply_show_defaults`
+        // is the bottom of the grid/domain
         // precedence chain, run once here right before layout so `AxisLayout
         // .show_grid`/`show_domain` carry the final per-axis answer.
         prep.axes.apply_show_defaults(&theme);

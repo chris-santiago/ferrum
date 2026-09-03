@@ -40,6 +40,26 @@ impl AxisDimension {
             AxisDimension::Y => AxisOrient::Left,
         }
     }
+
+    /// This dimension's encoding-channel token, `"x"` or `"y"`.
+    ///
+    /// The one home for the token the axis-orient validators
+    /// (`prepare::parse_axis_orient` / `parse_title_orient`) take, so a
+    /// chart-level `orient`/`title_orient` can be checked against the axis's
+    /// own dimension. #143 remediation: this replaces `config_apply`'s private
+    /// `axis_channel`, which re-derived x-vs-y with the same open-coded
+    /// `matches!(.. Top | Bottom)` that [`AxisOrient::dimension`] exists to
+    /// own. Reached as `orient.dimension().channel_token()`.
+    ///
+    /// Note this is the axis's PHYSICAL dimension, never a user-written
+    /// encoding channel that may have traveled through `CoordFlip`'s x/y swap
+    /// — see the R3 exemption on `prepare::axis_style_fill_from`.
+    pub(crate) fn channel_token(self) -> &'static str {
+        match self {
+            AxisDimension::X => "x",
+            AxisDimension::Y => "y",
+        }
+    }
 }
 
 impl AxisOrient {
@@ -269,7 +289,7 @@ impl AxisStyleOverrides {
     ///
     /// The `label_format.is_none() && !label_format_claimed` predicate this
     /// method now owns used to be hand-copied at its two call sites
-    /// (`render::config_apply::apply_axis_config_to_axis_input`, `axis_style_fill_from`'s
+    /// (`render::config_apply::apply_axis_config_to_axis_input`, `prepare::axis_style_fill_from`'s
     /// own defensive fallback write) — the SAME "is this slot actually
     /// unclaimed" question, expressed twice, on a `pub(crate)` field with no
     /// accessor discipline. A fix for the cascade-inversion bug this

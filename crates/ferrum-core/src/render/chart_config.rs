@@ -199,7 +199,7 @@ fn default_connect_style() -> String { "lines".to_string() }
 /// `tick_min_step`, `grid_opacity`, `title_orient`, `zindex` are orphans (a
 /// prior version of this doc claimed otherwise — stale as of the 2026-09-02
 /// batch-b-config-plumbing disposition audit): every one of them is merged
-/// into `AxisStyleOverrides` by `axis_style_fill_from` and consumed by
+/// into `AxisStyleOverrides` by `prepare::axis_style_fill_from` and consumed by
 /// `layout/axis.rs` (`resolve_orient`, the collision cascade, `clamp_axis_band`,
 /// `build_grid`) or `render/marks/axis.rs`. See `chart_config_manifest.json` at the
 /// bottom of this file for the per-field consumer citations.
@@ -229,7 +229,7 @@ pub struct AxisStyleSpec {
     /// Whether to show tick labels (`false` suppresses them). Honored at
     /// BOTH the per-channel (`EncodingSpec.axis`) and chart-level
     /// (`axis`/`axis_x`/`axis_y`/`axis_y2`) positions as of D12 (spec §4.9):
-    /// it merges through `axis_style_fill_from` into
+    /// it merges through `prepare::axis_style_fill_from` into
     /// `AxisStyleOverrides::show_labels`, an `Option<bool>` whose fill-only
     /// chart-level discipline is what lets both levels write it without the
     /// chart-level one clobbering the per-channel answer. (Before that
@@ -802,8 +802,8 @@ pub(crate) const AXIS_CONFIG_EXTRA_KEYS: &[&str] =
 /// wiring gap — the same disposition shape `orient` has at this position. `label_format`/
 /// `label_format_type`/`tick_extra`/`tick_min_step`/`values` reached
 /// `AxisStyleOverrides` already, but their consumers ran on `prep.axes.x`/
-/// `.y` only; `prepare_and_layout` now runs the same trio over
-/// `prep.axes.secondary_y` against `prep.secondary_y_scales`.
+/// `.y` only; `config_apply::resync_ticks_after_axis_merge` now runs the same
+/// trio over `axes.secondary_y` against `prep.secondary_y_scales`.
 ///
 /// The namespace is kept even though every entry is now honored: the y2
 /// position is a genuinely separate disposition question (a future change

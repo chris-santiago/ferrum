@@ -339,7 +339,8 @@ pub struct PreparedInputs {
     /// The resolved y scale behind each entry of `axes.secondary_y`, in the
     /// same order (spec §4.9, extended 2026-09-02). Carried for exactly the
     /// reason `x_tick_count`/`y_tick_count` are: the post-config tick
-    /// adjustments run in `render::prepare_and_layout`, after `axis_y2`'s
+    /// adjustments run in `render::config_apply::resync_ticks_after_axis_merge`,
+    /// after `axis_y2`'s
     /// values have merged onto the axis input, and each needs the scale its
     /// axis was derived from. Empty for every chart with no independent-y
     /// layer.
@@ -349,7 +350,7 @@ pub struct PreparedInputs {
     /// position, the exact analogue of `x_tick_count`/`y_tick_count`.
     ///
     /// Carried out for the same reason the scales are: the post-config trio in
-    /// `render::prepare_and_layout` needs it, and `adjust_axis_ticks`
+    /// `render::config_apply::resync_ticks_after_axis_merge` needs it, and `adjust_axis_ticks`
     /// re-derives `scale.tick_values_raw(tick_count)` and bails when the length
     /// does not match `tick_labels`. Deriving the count from `tick_labels.len()`
     /// instead is only accidentally equal — whenever a scale returns a different
@@ -369,8 +370,9 @@ pub struct PreparedInputs {
 ///
 /// All fields are `Option` so `Default` (all `None`) represents "use theme defaults".
 /// Populated by `prepare_render_inputs` from the `color_legend_extra` JSON map and
-/// consumed by `legend_overrides_from_prep` (layout) and `prepare_and_layout`
-/// (effective-theme construction).
+/// consumed by `config_apply`'s legend projection (passes 17–18, into the
+/// `layout::LegendOverrides` bundle) and its effective-theme construction
+/// (pass 14's per-channel > chart-level cascade).
 #[derive(Debug, Clone, Default)]
 pub struct LegendPreparedOverrides {
     /// D13: orient override from `encoding.color.legend.orient`.
@@ -1020,7 +1022,7 @@ fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
 /// resolution used.
 ///
 /// A struct rather than a bare tuple because the correspondence is the whole
-/// point — `render::prepare_and_layout`'s post-config trio zips all three, and
+/// point — `render::config_apply::resync_ticks_after_axis_merge` zips all three, and
 /// a mismatch would silently pair an axis with another layer's scale.
 pub(crate) struct SecondaryYAxes {
     pub(crate) inputs: Vec<AxisInput>,
@@ -1515,7 +1517,7 @@ pub(in crate::render) fn layer_effective_y<'a>(
 /// Parse an axis `orient` string into an [`AxisOrient`], validating it against
 /// the channel dimension: x accepts top/bottom, y accepts left/right. A
 /// cross-dimension value fails loud per the B5 contract. Shared by the
-/// per-channel (here) and chart-level (`render::mod`) apply paths so the two
+/// per-channel (here) and chart-level (`render::config_apply`) apply paths so the two
 /// cannot drift on the accepted token set or the dimension check.
 ///
 /// R3: the `InvalidAxisOrient` constructions below always build
@@ -1629,9 +1631,161 @@ pub(crate) fn parse_title_orient(
     }
 }
 
+// ── The canonical AxisStyleSpec → AxisStyleOverrides merge ────────────────
+//
+// #143 remediation (design review rec 6): this merge lived in `config_apply`,
+// which made `prepare` — the EARLIER stage — depend on a later one for a
+// primitive that is neutral between them. It is not chart-config application:
+// it is the one field mapping both the per-channel (this module) and the
+// chart-level (`config_apply`) disciplines share, selected by
+// `fill_only_if_none`. Filed here, beside the three `parse_*` validators it
+// calls and beside its own per-channel caller below, the dependency points
+// one way again: `config_apply` → `prepare`, never back.
+
+/// One canonical [`AxisStyleSpec`](crate::render::chart_config::AxisStyleSpec) →
+/// [`AxisStyleOverrides`](crate::layout::AxisStyleOverrides) merge, replacing the
+/// two parallel ~28-field mappers that previously turned the SAME source struct
+/// into the bundle in two shapes (the per-channel fresh-builder in
+/// `prepare::encoding_axis_style_overrides` and the chart-level fill-only-if-`None`
+/// `apply_axis_style_to_axis_input`). Both call sites now route through here so a
+/// new `AxisStyleSpec` field is wired once, not in two drifting bodies.
+///
+/// `fill_only_if_none` selects the merge discipline:
+/// - `false` (per-channel path): write every field unconditionally — the caller
+///   starts from `Default`, so this is the fresh-build the encoding path needs.
+/// - `true` (chart-level path): write each field only when the slot is still
+///   `None`, so a higher-precedence source (a per-channel spec, or an earlier
+///   config layer) always wins.
+///
+/// Field-ownership exceptions preserved bit-for-bit from the old two-mapper world:
+/// - **`label_format`** is written ONLY on the chart-level (`fill_only_if_none`)
+///   path. The per-channel/prepare path deliberately leaves it `None` here and
+///   seeds it separately from the temporal/numeric format threading
+///   (`apply_axis_format_or_thread`) after this merge runs.
+/// - **`show_*`** toggles (`grid`/`domain`/`labels`/`ticks`) live on `AxisInput`,
+///   not on this bundle, and are owned solely by the prepare path. This merge
+///   cannot touch them (they are not `AxisStyleOverrides` fields); the chart-level
+///   caller documents that single-owner contract at its call site.
+///
+/// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
+/// [`RenderError::InvalidAxisOrient`]; an unparseable color hex string leaves the
+/// slot `None` (theme fallback) on both paths.
+///
+/// Returns [`UnflippedRenderError`] (R3), not `RenderError` directly: neither
+/// this fn nor `parse_axis_orient`/`parse_title_orient` beneath it has access
+/// to `coord_flipped` (this fn is shared by both the flip-patched per-channel
+/// path and the flip-exempt chart-level path — see the field doc on
+/// [`RenderError::InvalidAxisOrient`]), so the decision is deferred to each
+/// caller's own boundary via `.resolve(coord_flipped)`.
+pub(crate) fn axis_style_fill_from(
+    o: &mut crate::layout::AxisStyleOverrides,
+    style: &crate::render::chart_config::AxisStyleSpec,
+    channel: &'static str,
+    fill_only_if_none: bool,
+) -> Result<(), crate::render::UnflippedRenderError> {
+    // One merge predicate for every field: on the fresh-build (per-channel) path
+    // (`fill_only_if_none == false`) the value is written unconditionally; on the
+    // chart-level path it is written only when the slot is still `None` so a
+    // higher-precedence source wins. Collapsing it here means each field below
+    // appears exactly once regardless of which discipline applies. A generic `fn`
+    // (not a closure) because the slot type varies across fields.
+    fn set<T>(slot: &mut Option<T>, value: Option<T>, fill_only_if_none: bool) {
+        if !fill_only_if_none || slot.is_none() {
+            *slot = value;
+        }
+    }
+    // Full CSS vocabulary (names, `rgb()`, hex) — `None` for absent or
+    // unparseable values, matching the pre-existing "keep the theme default"
+    // behavior of every axis-style color override.
+    let opt_color = |c: &Option<String>| c.as_deref().and_then(|s| crate::render::color::parse_color(s).ok());
+    // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
+    // `orient` is the override INPUT (validated against the dimension); the
+    // concrete `AxisInput.orient` is re-synced from it by `resolve_orient` after
+    // all override layers merge. Validation can fail, so it is resolved eagerly
+    // (before `set`) and only assigned under the same fill predicate.
+    if !fill_only_if_none || o.orient.is_none() {
+        o.orient = style
+            .orient
+            .as_deref()
+            .map(|s| parse_axis_orient(s, channel))
+            .transpose()?;
+    }
+    if !fill_only_if_none || o.title_orient.is_none() {
+        o.title_orient = style
+            .title_orient
+            .as_deref()
+            .map(|s| parse_title_orient(s, channel))
+            .transpose()?;
+    }
+    set(&mut o.translate, style.translate, fill_only_if_none);
+    set(&mut o.min_band, style.min_band, fill_only_if_none);
+    set(&mut o.max_band, style.max_band, fill_only_if_none);
+    set(&mut o.grid_opacity, style.grid_opacity, fill_only_if_none);
+    set(&mut o.zindex, style.zindex, fill_only_if_none);
+    set(&mut o.tick_size, style.tick_size, fill_only_if_none);
+    set(&mut o.tick_extra, style.tick_extra, fill_only_if_none);
+    set(&mut o.tick_min_step, style.tick_min_step, fill_only_if_none);
+    // ── Show toggles (D12, spec §4.9) ────────────────────────────────────────
+    // These four used to live as bare `bool`s on `AxisInput`, written ONLY by
+    // the per-channel prepare path, because a `bool` cannot say "unset" and a
+    // chart-level write would therefore have clobbered the per-channel answer.
+    // As `Option<bool>` on this bundle they obey the same one merge predicate
+    // as every sibling field, which is what makes chart-level `labels`/`ticks`/
+    // `domain`/`grid` honored (they had no consumer at all before) WITHOUT
+    // inverting the cascade. `grid`/`domain` additionally carry a theme
+    // fallback, folded in by `AxesInput::apply_show_defaults` after every
+    // config layer has had its turn.
+    set(&mut o.show_labels, style.labels, fill_only_if_none);
+    set(&mut o.show_ticks, style.ticks, fill_only_if_none);
+    set(&mut o.show_domain, style.domain, fill_only_if_none);
+    set(&mut o.show_grid, style.grid, fill_only_if_none);
+    // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
+    set(&mut o.offset, style.offset, fill_only_if_none);
+    set(&mut o.label_flush, style.label_flush, fill_only_if_none);
+    set(
+        &mut o.label_overlap,
+        style.label_overlap.as_deref().and_then(parse_label_overlap),
+        fill_only_if_none,
+    );
+    set(&mut o.label_angle, style.label_angle, fill_only_if_none);
+    // `label_format` is owned by the chart-level path only. The per-channel path
+    // threads it separately after this merge, so it must stay `None` here.
+    //
+    // This fallback write is normally shadowed by `apply_axis_config_to_axis_input`'s
+    // own (more complete — raw-first via `effective_label_format()`) fill
+    // immediately before this fn runs, which makes THIS block a no-op in
+    // the common case (it only re-derives the SAME `style.label_format`
+    // that caller's fill already found — see that caller's doc). But when
+    // the caller's fill is correctly SKIPPED for a per-channel-claimed axis
+    // (`label_format_claimed`, D8 cascade-inversion fix),
+    // `o.label_format` is still `None` reaching here. Routes through
+    // the SAME mechanized `fill_chart_level_label_format` the caller uses
+    // rather than hand-re-deriving the
+    // "unclaimed" predicate a second time — this is exactly the two-writer
+    // duplication that fix closed.
+    if fill_only_if_none {
+        o.fill_chart_level_label_format(style.label_format.clone(), style.label_format_type.clone());
+    }
+    set(&mut o.tick_values, style.values.clone(), fill_only_if_none);
+    // Title overrides.
+    set(&mut o.title_font_size, style.title_font_size, fill_only_if_none);
+    set(&mut o.title_color, opt_color(&style.title_color), fill_only_if_none);
+    set(&mut o.title_padding, style.title_padding, fill_only_if_none);
+    set(&mut o.label_padding, style.label_padding, fill_only_if_none);
+    // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
+    set(&mut o.label_color, opt_color(&style.label_color), fill_only_if_none);
+    set(&mut o.label_font_size, style.label_font_size, fill_only_if_none);
+    set(&mut o.grid_color, opt_color(&style.grid_color), fill_only_if_none);
+    set(&mut o.grid_dash, style.grid_dash.clone(), fill_only_if_none);
+    set(&mut o.grid_width, style.grid_width, fill_only_if_none);
+    set(&mut o.domain_color, opt_color(&style.domain_color), fill_only_if_none);
+    set(&mut o.domain_width, style.domain_width, fill_only_if_none);
+    Ok(())
+}
+
 /// Parse a per-channel typed [`AxisStyleSpec`] into the bundled
 /// [`AxisStyleOverrides`] ready to drop into an `AxisInput` (B5). A fresh-build
-/// over a `Default` bundle via the canonical [`crate::render::axis_style_fill_from`]
+/// over a `Default` bundle via the canonical [`axis_style_fill_from`]
 /// merge (`fill_only_if_none = false`), the same merge the chart-level
 /// `configure_axis` path uses (`fill_only_if_none = true`) — so the two cannot
 /// drift on the field set, color parsing, or orient/title_orient validation.
@@ -1652,7 +1806,7 @@ fn encoding_axis_style_overrides(
 ) -> Result<crate::layout::AxisStyleOverrides, crate::render::UnflippedRenderError> {
     let mut overrides = crate::layout::AxisStyleOverrides::default();
     if let Some(a) = axis {
-        crate::render::axis_style_fill_from(&mut overrides, a, channel, false)?;
+        axis_style_fill_from(&mut overrides, a, channel, false)?;
     }
     Ok(overrides)
 }
@@ -1985,6 +2139,200 @@ pub(crate) fn apply_tick_format(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod axis_style_fill_from_tests {
+    //! Characterization tests for `axis_style_fill_from` (T2.6 / SPINE-01): the
+    //! one merge that replaced the two parallel `AxisStyleSpec → AxisStyleOverrides`
+    //! mappers. These pin the exact field ownership both old mappers had so the
+    //! collapse stays behavior-preserving.
+    use super::*;
+    use crate::layout::{AxisStyleOverrides, LabelOverlap};
+    use crate::render::chart_config::AxisStyleSpec;
+    use crate::render::color;
+
+    /// An `AxisStyleSpec` with every merge-relevant field populated, plus a couple
+    /// of fields that exercise color parsing and token validation.
+    fn fully_populated_spec() -> AxisStyleSpec {
+        AxisStyleSpec {
+            label_angle: Some(45.0),
+            label_font_size: Some(11.0),
+            label_color: Some("#112233".into()),
+            label_format: Some(".2f".into()),
+            label_format_type: None,
+            label_overlap: Some("parity".into()),
+            label_flush: Some(true),
+            labels: Some(false), // show toggle — NOT an overrides field; must be ignored
+            ticks: Some(false),  // show toggle — ignored
+            tick_count: Some(7), // not an overrides field — ignored
+            tick_size: Some(4.0),
+            tick_extra: Some(true),
+            tick_min_step: Some(0.5),
+            values: Some(vec![0.0, 1.0, 2.0]),
+            grid: Some(false), // show toggle — ignored
+            grid_color: Some("#445566".into()),
+            grid_dash: Some(vec![6.0, 3.0]),
+            grid_width: Some(1.5),
+            grid_opacity: Some(0.4),
+            domain: Some(false), // show toggle — ignored
+            domain_color: Some("#778899".into()),
+            domain_width: Some(2.0),
+            title: Some("ignored-here".into()), // title text — not an overrides field
+            title_font_size: Some(13.0),
+            title_color: Some("#aabbcc".into()),
+            title_padding: Some(8.0),
+            title_orient: Some("right".into()),
+            label_padding: Some(3.0),
+            orient: Some("bottom".into()),
+            translate: Some(5.0),
+            min_band: Some(10.0),
+            max_band: Some(40.0),
+            offset: Some(2.0),
+            zindex: Some(1),
+        }
+    }
+
+    /// Per-channel fresh-build (`fill_only_if_none = false`) writes every
+    /// overrides field from the spec — EXCEPT `label_format`, which the
+    /// per-channel/prepare path deliberately leaves `None` (it is threaded
+    /// separately afterward). show_* toggles and non-overrides fields (title text,
+    /// tick_count, tick_size) are never written (they are not bundle fields).
+    #[test]
+    fn fresh_build_writes_all_fields_except_label_format() {
+        let spec = fully_populated_spec();
+        let mut o = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
+
+        assert_eq!(o.label_angle, Some(45.0));
+        assert_eq!(o.label_font_size, Some(11.0));
+        assert_eq!(o.label_color, color::parse_color("#112233").ok());
+        // label_format MUST stay None on the per-channel/fresh-build path.
+        assert_eq!(o.label_format, None);
+        assert_eq!(o.label_overlap, Some(LabelOverlap::Parity));
+        assert_eq!(o.label_flush, Some(true));
+        assert_eq!(o.tick_extra, Some(true));
+        assert_eq!(o.tick_min_step, Some(0.5));
+        assert_eq!(o.tick_values, Some(vec![0.0, 1.0, 2.0]));
+        assert_eq!(o.grid_color, color::parse_color("#445566").ok());
+        assert_eq!(o.grid_dash, Some(vec![6.0, 3.0]));
+        assert_eq!(o.grid_width, Some(1.5));
+        assert_eq!(o.grid_opacity, Some(0.4));
+        assert_eq!(o.domain_color, color::parse_color("#778899").ok());
+        assert_eq!(o.domain_width, Some(2.0));
+        assert_eq!(o.title_font_size, Some(13.0));
+        assert_eq!(o.title_color, color::parse_color("#aabbcc").ok());
+        assert_eq!(o.title_padding, Some(8.0));
+        assert_eq!(o.title_orient, Some(crate::layout::AxisOrient::Right));
+        assert_eq!(o.label_padding, Some(3.0));
+        assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
+        assert_eq!(o.translate, Some(5.0));
+        assert_eq!(o.min_band, Some(10.0));
+        assert_eq!(o.max_band, Some(40.0));
+        assert_eq!(o.offset, Some(2.0));
+        assert_eq!(o.zindex, Some(1));
+    }
+
+    /// Chart-level fill (`fill_only_if_none = true`) fills only `None` slots
+    /// (higher-precedence values survive) AND owns `label_format` (the one field
+    /// the per-channel path leaves `None`).
+    #[test]
+    fn chart_level_fills_only_none_and_owns_label_format() {
+        let spec = fully_populated_spec();
+        // EVERY slot the `set(...)` helper routes is pre-claimed, with a value
+        // distinct from `fully_populated_spec()`'s. Pre-setting only two of them
+        // (as this test did before the #143 remediation) left ~24 fields free to
+        // silently switch to unconditional-overwrite: mutation review M8 flipped
+        // `tick_values` and the suite stayed green, while the same flip on
+        // `grid_width` — one of the two that WERE pre-set — was caught. The
+        // asymmetry was an oversight, not a decision, so the field set is now
+        // exhaustive and a discipline flip on any single field fails here.
+        let mut o = AxisStyleOverrides {
+            label_angle: Some(90.0),
+            grid_width: Some(99.0),
+            tick_values: Some(vec![7.0]),
+            title_font_size: Some(91.0),
+            title_color: crate::render::color::parse_color("#010203").ok(),
+            title_padding: Some(92.0),
+            label_padding: Some(93.0),
+            label_color: crate::render::color::parse_color("#040506").ok(),
+            label_font_size: Some(94.0),
+            grid_color: crate::render::color::parse_color("#070809").ok(),
+            grid_dash: Some(vec![9.0, 9.0]),
+            domain_color: crate::render::color::parse_color("#0a0b0c").ok(),
+            domain_width: Some(95.0),
+            orient: Some(AxisOrient::Top),
+            translate: Some(96.0),
+            min_band: Some(97.0),
+            max_band: Some(98.0),
+            grid_opacity: Some(0.99),
+            title_orient: Some(AxisOrient::Left),
+            zindex: Some(42),
+            tick_extra: Some(false),
+            tick_min_step: Some(0.25),
+            offset: Some(89.0),
+            label_flush: Some(false),
+            label_overlap: Some(LabelOverlap::Greedy),
+            tick_size: Some(88.0),
+            show_labels: Some(true),
+            show_ticks: Some(true),
+            show_domain: Some(true),
+            show_grid: Some(true),
+            ..AxisStyleOverrides::default()
+        };
+        let pre_set = o.clone();
+        axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
+
+        // Every pre-set slot survives (fill-only-if-None) — the whole field set,
+        // asserted as one comparison so a newly added field cannot slip through
+        // by being absent from a hand-listed assertion block.
+        assert_eq!(
+            AxisStyleOverrides { label_format: None, label_format_type: None,
+                label_format_claimed: false, ..o.clone() },
+            AxisStyleOverrides { label_format: None, label_format_type: None,
+                label_format_claimed: false, ..pre_set },
+            "a chart-level fill must not overwrite ANY slot a higher-precedence \
+             per-channel value already claimed"
+        );
+        // `label_format` is the one field the chart-level path OWNS: the
+        // per-channel path leaves it `None`, so it is excluded above and
+        // asserted as written here.
+        assert_eq!(o.label_format, Some(".2f".into()));
+    }
+
+    /// Chart-level fill does NOT clobber a `label_format` that a per-channel value
+    /// already set (the threaded override wins).
+    #[test]
+    fn chart_level_label_format_defers_to_existing() {
+        let spec = fully_populated_spec(); // label_format = ".2f"
+        let mut o = AxisStyleOverrides {
+            label_format: Some("~s".into()), // per-channel already won
+            ..AxisStyleOverrides::default()
+        };
+        axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
+        assert_eq!(o.label_format, Some("~s".into()));
+    }
+
+    /// A cross-dimension `orient` (left/right on an x axis) fails loud on both
+    /// paths, exactly as both old mappers did via `parse_axis_orient`.
+    #[test]
+    fn cross_dimension_orient_errors() {
+        let spec = AxisStyleSpec { orient: Some("left".into()), ..Default::default() };
+        let mut o = AxisStyleOverrides::default();
+        assert!(axis_style_fill_from(&mut o, &spec, "x", false).is_err());
+        let mut o = AxisStyleOverrides::default();
+        assert!(axis_style_fill_from(&mut o, &spec, "x", true).is_err());
+    }
+
+    /// An unparseable color hex leaves the slot `None` (theme fallback) rather
+    /// than failing — preserved from both old mappers.
+    #[test]
+    fn bad_color_hex_falls_back_to_none() {
+        let spec = AxisStyleSpec { label_color: Some("not-a-color".into()), ..Default::default() };
+        let mut o = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
+        assert_eq!(o.label_color, None);
+    }
 }
 
 #[cfg(test)]

@@ -13,27 +13,40 @@
 //!    8. `label_format` re-formatting of the tick labels.
 //!    9. Projected-fraction re-sync for explicit `tick_values`.
 //!   10. Passes 7–9 again, for every secondary y axis.
-//!   11. Color `domain`/`range` overrides, then the categorical legend-entry rebuild.
+//!   11. Color `domain`/`range` overrides on the resolved color scale (11a),
+//!       then the categorical legend-entry rebuild from that new domain (11b).
+//!       The halves are numbered because they are separately re-executed:
+//!       `scene_build` re-runs 11a alone.
 //!   12. Per-channel `Legend(values=[…])` legend-entry filter.
 //!   13. Effective theme: `ChartConfig` over the caller's theme.
 //!   14. The three theme-backed legend fields' per-channel > chart-level cascade.
 //!   15. `grid`/`domain` show-defaults from the effective theme.
-//!   16. Effective legend title.
 //!   17. `LegendOverrides` projection from the prepared inputs.
 //!   18. `configure_legend` fill of the override slots still unset.
+//!   16. Effective legend title.
+//!
+//! The last tier really does run 17 → 18 → 16: the numbers name the precedence
+//! LAYERS (16 is the title layer, 17–18 the overrides layer), and the title
+//! resolution reads only `prep`, which 17 and 18 do not mutate. The list is
+//! written in CALL order rather than label order so that the one place the
+//! order is stated agrees with the code — see [`resolve_leaf_legend_overrides`].
 //!
 //! That order is stated HERE and nowhere else. Each tier fn's name carries the
 //! precedence rule its passes implement, so a reorder has to argue with a
 //! function name rather than with a comment; three merge disciplines are in
 //! play and the names distinguish them — fill-if-unset (2, 3, 4, 6, 15, 18),
-//! unconditional overwrite (1, 8, 11, 12, 13), and a single-expression `.or()`
-//! cascade (14).
+//! unconditional overwrite (1, 8, 11a, 11b, 12, 13), and a single-expression
+//! `.or()` cascade (14).
 //!
 //! Every partial re-execution outside this module goes through a named entry
-//! rather than restating a slice of the order: `composite_render`'s
-//! figure-legend seam calls [`resolve_leaf_legend_overrides`] (passes 16–18),
-//! and `scene_build` re-applies pass 11 after its own per-panel /
-//! per-legend scale resolution via [`apply_color_config_to_color_scale`].
+//! rather than restating a slice of the order. In production there are exactly
+//! two: `composite_render`'s figure-legend seam reads passes 16–18's result off
+//! `PipelineOutput` (one value, computed once — it no longer recomputes them),
+//! and `scene_build` re-applies the SCALE-EDIT HALF of pass 11 (11a alone, not
+//! the legend-entry rebuild) after its own per-panel / per-legend scale
+//! resolution, via [`apply_color_config_to_color_scale`]. Test code in
+//! `scene_build` still hand-assembles a layout around `apply_show_defaults`
+//! (pass 15); that is test plumbing, not a production re-execution.
 //!
 //! [`validate_chart_format_specs`] lives here too — it is a gate over the same
 //! `ChartConfig` surface — but it is NOT part of the pipeline: `prepare_and_layout`
@@ -49,7 +62,7 @@ use crate::layout::{
 use crate::spec::chart::ChartSpec;
 
 use super::chart_config::{self, AxisConfigSpec, ChartConfig};
-use super::{color, format, prepare, scale_resolve, RenderError, RenderWarning, UnflippedRenderError};
+use super::{color, format, prepare, scale_resolve, RenderError, RenderWarning};
 
 /// What [`apply_chart_config_pipeline`] produces beyond its in-place edits to
 /// `prep`: the three values `compute_layout` needs that do not live on the
@@ -82,8 +95,21 @@ pub(in crate::render) fn apply_chart_config_pipeline(
 ) -> Result<AppliedChartConfig, RenderError> {
     suppress_legend_if_chart_level_disabled(prep, chart_config);
     fill_axis_slots_specific_before_shared(&mut prep.axes, chart_config, warnings)?;
-    resync_ticks_after_axis_merge(prep);
-    apply_color_config_then_filter_legend_entries(prep, chart_config, warnings);
+    resync_ticks_after_axis_merge(
+        &mut prep.axes,
+        &prep.provisional_scales,
+        prep.x_tick_count,
+        prep.y_tick_count,
+        &prep.secondary_y_scales,
+        &prep.secondary_y_tick_counts,
+    );
+    apply_color_config_then_filter_legend_entries(
+        &mut prep.provisional_scales.color,
+        &mut prep.legend_entries,
+        prep.legend_overrides.values.as_deref(),
+        chart_config,
+        warnings,
+    );
     let effective_theme = build_effective_theme_config_over_theme(prep, theme, chart_config);
     let (legend_overrides, legend_title) = resolve_leaf_legend_overrides(prep, chart_config);
     Ok(AppliedChartConfig { effective_theme, legend_overrides, legend_title })
@@ -133,7 +159,7 @@ fn suppress_legend_if_chart_level_disabled(
 ///
 /// These styling fields use fill-only-if-`None` — FIRST writer claims the slot
 /// — so the more-specific source must run FIRST. That is the OPPOSITE order
-/// from the overwrite-semantics theme path in [`apply_chart_config`], where
+/// from the overwrite-semantics theme path in [`apply_chart_config_to_theme`], where
 /// last-writer-wins makes the shared `axis` key run first and `axis_x` second.
 /// The inversion is the whole reason the two orders cannot be read off each
 /// other, and is why this function's name states which one it implements.
@@ -142,7 +168,8 @@ fn suppress_legend_if_chart_level_disabled(
 /// `with_coord_flipped` — this is the mirror image of the `SortSpecIgnored`
 /// exemption (`scale_resolve/domain.rs`'s `apply_channel_shorthand_sort`).
 /// [`apply_axis_config_to_axis_input`] → [`apply_axis_style_to_axis_input`]
-/// derives `channel` from the axis's PHYSICAL orientation ([`axis_channel`]:
+/// derives `channel` from the axis's PHYSICAL dimension
+/// ([`AxisDimension::channel_token`](crate::layout::AxisOrient::dimension):
 /// `Top|Bottom → "x"`, else `"y"`), never from a user-written encoding channel.
 /// And the config KEY the user actually typed here — `axis_x`/`axis_y` (or the
 /// shared `axis`) — is itself resolved-slot vocabulary: nothing on the Python
@@ -220,15 +247,22 @@ fn fill_axis_slots_specific_before_shared(
 /// The non-ordinal y labels/fractions were reversed in prepare, so the raw
 /// values are reversed in lockstep. The EXPLICIT labels are not reversed
 /// (unlike auto labels), so the value-order fractions align directly.
-fn resync_ticks_after_axis_merge(prep: &mut prepare::PreparedInputs) {
-    let y_reversed = !matches!(prep.provisional_scales.y, scale_resolve::ScaleKind::Ordinal(_));
-    let (x_tc, y_tc) = (prep.x_tick_count, prep.y_tick_count);
-    prepare::adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, x_tc, false);
-    prepare::adjust_axis_ticks(&mut prep.axes.y, &prep.provisional_scales.y, y_tc, y_reversed);
-    apply_label_format_to_axis(&mut prep.axes.x, &prep.provisional_scales.x, x_tc, false);
-    apply_label_format_to_axis(&mut prep.axes.y, &prep.provisional_scales.y, y_tc, y_reversed);
-    sync_projected_fractions_to_tick_values(&mut prep.axes.x, &prep.provisional_scales.x);
-    sync_projected_fractions_to_tick_values(&mut prep.axes.y, &prep.provisional_scales.y);
+fn resync_ticks_after_axis_merge(
+    axes: &mut crate::layout::AxesInput,
+    scales: &scale_resolve::ResolvedScales,
+    x_tick_count: usize,
+    y_tick_count: usize,
+    secondary_scales: &[scale_resolve::ScaleKind],
+    secondary_tick_counts: &[usize],
+) {
+    let y_reversed = !matches!(scales.y, scale_resolve::ScaleKind::Ordinal(_));
+    let (x_tc, y_tc) = (x_tick_count, y_tick_count);
+    prepare::adjust_axis_ticks(&mut axes.x, &scales.x, x_tc, false);
+    prepare::adjust_axis_ticks(&mut axes.y, &scales.y, y_tc, y_reversed);
+    apply_label_format_to_axis(&mut axes.x, &scales.x, x_tc, false);
+    apply_label_format_to_axis(&mut axes.y, &scales.y, y_tc, y_reversed);
+    sync_projected_fractions_to_tick_values(&mut axes.x, &scales.x);
+    sync_projected_fractions_to_tick_values(&mut axes.y, &scales.y);
     // The SAME three post-config tick adjustments for every secondary y axis
     // (spec §4.9, extended 2026-09-02). `axis_y2`'s `label_format`,
     // `label_format_type`, `tick_extra`, `tick_min_step` and `values` reached
@@ -248,12 +282,11 @@ fn resync_ticks_after_axis_merge(prep: &mut prepare::PreparedInputs) {
     // re-derives `tick_values_raw(tick_count)` and bails on a length
     // mismatch, so any data shape where the two differ would silently drop
     // `axis_y2`'s tick_extra/tick_min_step/values.
-    for ((secondary, scale), &tc) in prep
-        .axes
+    for ((secondary, scale), &tc) in axes
         .secondary_y
         .iter_mut()
-        .zip(prep.secondary_y_scales.iter())
-        .zip(prep.secondary_y_tick_counts.iter())
+        .zip(secondary_scales.iter())
+        .zip(secondary_tick_counts.iter())
     {
         let reversed = !matches!(scale, scale_resolve::ScaleKind::Ordinal(_));
         prepare::adjust_axis_ticks(secondary, scale, tc, reversed);
@@ -262,7 +295,7 @@ fn resync_ticks_after_axis_merge(prep: &mut prepare::PreparedInputs) {
     }
 }
 
-// ── Tier 4 (passes 11–12): color config, THEN the legend-entry filter ───────
+// ── Tier 4 (passes 11a, 11b, 12): color config, THEN the legend-entry filter ─
 
 /// Apply `configure_color(domain=/range=)` to the resolved color scale and
 /// rebuild the categorical legend entries from it — and only THEN apply the
@@ -285,22 +318,17 @@ fn resync_ticks_after_axis_merge(prep: &mut prepare::PreparedInputs) {
 /// same scale, so they discard their (identical) warnings rather than emit one
 /// per panel.
 fn apply_color_config_then_filter_legend_entries(
-    prep: &mut prepare::PreparedInputs,
+    color_scale: &mut Option<scale_resolve::ColorScale>,
+    legend_entries: &mut Vec<crate::layout::LegendEntry>,
+    legend_values: Option<&[String]>,
     chart_config: &ChartConfig,
     warnings: &mut Vec<RenderWarning>,
 ) {
     if let Some(ref cfg) = chart_config.color {
-        warnings.extend(apply_color_config_to_color_scale(&mut prep.provisional_scales.color, cfg));
-        resync_categorical_legend_entries(
-            &mut prep.legend_entries,
-            prep.provisional_scales.color.as_ref(),
-        );
+        warnings.extend(apply_color_config_to_color_scale(color_scale, cfg));
+        resync_categorical_legend_entries(legend_entries, color_scale.as_ref());
     }
-    apply_legend_values_to_entries(
-        &mut prep.legend_entries,
-        prep.legend_overrides.values.as_deref(),
-        warnings,
-    );
+    apply_legend_values_to_entries(legend_entries, legend_values, warnings);
 }
 
 // ── Tier 5 (passes 13–15): effective theme, config over theme ──────────────
@@ -310,17 +338,25 @@ fn apply_color_config_then_filter_legend_entries(
 /// concern. Per-channel axis overrides (level 2) are NOT here — they live in
 /// `AxisInput` and take effect at layout time.
 ///
-/// The two theme writers run in this order for one reason: [`apply_chart_config`]
-/// is unconditional-overwrite, so it must not run after the cascade resolution
-/// that already accounts for both levels. The three `ThemeInputs`-backed legend
-/// fields both levels write (`orient`, `columns`, `title_font_size`) therefore
-/// resolve together in [`apply_legend_cascade_to_theme`], per-channel first —
-/// a second unconditional writer for them here is exactly what inverted their
-/// cascade before D7.
+/// The D7 cascade repair is expressed as a SPLIT OF OWNERSHIP, not as an
+/// ordering: the three `ThemeInputs`-backed legend fields both levels write
+/// (`orient`, `columns`, `title_font_size`) resolve together, per-channel
+/// first, inside [`apply_legend_cascade_to_theme`], and
+/// [`apply_chart_config_to_theme`] deliberately does not touch them — a second
+/// unconditional writer for them is exactly what inverted their cascade before
+/// D7.
+///
+/// Accuracy note (mutation review M7): BECAUSE that split holds, the two
+/// writers' field sets are disjoint today, so swapping these two calls is
+/// currently behavior-preserving and no test would catch it. The order is
+/// therefore a statement of intent, not a live constraint — do not read it as
+/// protection. What protects the cascade is the ownership split above: if a
+/// field is ever added to BOTH writers, the order becomes load-bearing again
+/// and nothing here will say so. Add it to one writer only.
 ///
 /// Finally `apply_show_defaults` closes the grid/domain precedence chain (D4,
 /// spec §4.3): every axis that expressed no opinion of its own now takes the
-/// effective theme's. It runs AFTER [`apply_chart_config`] so
+/// effective theme's. It runs AFTER [`apply_chart_config_to_theme`] so
 /// `configure_grid(color=…)`'s both-axes shorthand is already in the theme, and
 /// before `compute_layout` so `AxisLayout.show_grid`/`show_domain` carry the
 /// FINAL per-axis answer — which is why `build_grid`/`build_axis` no longer
@@ -331,22 +367,27 @@ fn build_effective_theme_config_over_theme(
     chart_config: &ChartConfig,
 ) -> ThemeInputs {
     let mut effective_theme = theme.clone();
-    apply_chart_config(&mut effective_theme, chart_config);
+    apply_chart_config_to_theme(&mut effective_theme, chart_config);
     apply_legend_cascade_to_theme(&mut effective_theme, &prep.legend_overrides, chart_config);
     prep.axes.apply_show_defaults(&effective_theme);
     effective_theme
 }
 
-// ── Tier 6 (passes 16–18): the legend-overrides projection ─────────────────
+// ── Tier 6 (passes 17, 18, 16): the legend-overrides projection ────────────
 
 /// Project one leaf's prepared legend state into the pair `compute_layout` (and
 /// a compositor's figure-legend seam) consumes: the `LegendOverrides` bundle
 /// with `configure_legend(...)` (level 3) filling whatever the per-channel
 /// `Legend(...)` (level 2) left unset, plus the three-way-resolved title.
 ///
-/// Named, and `pub(in crate::render)`, because it has a second caller:
-/// `composite_render::capture_leaf_bundle` needs exactly these passes for the
-/// figure-level legend and used to restate them as a verbatim three-line copy.
+/// Runs 17 → 18 → 16 (see the module doc's note): the numbers label precedence
+/// layers, the call order is what the code does, and the title resolution reads
+/// only `prep`, which the other two do not mutate.
+///
+/// Its result is carried on `PipelineOutput` rather than recomputed, because
+/// `composite_render::capture_leaf_bundle` needs exactly these values for the
+/// same leaf. That was a verbatim three-line copy before #143, then a second
+/// call to this fn; it is now one value with one producer.
 pub(in crate::render) fn resolve_leaf_legend_overrides(
     prep: &prepare::PreparedInputs,
     chart_config: &ChartConfig,
@@ -377,7 +418,7 @@ pub(in crate::render) fn resolve_leaf_legend_overrides(
 /// Per-channel `axis=Axis(...)` overrides live in `AxisInput` and are resolved
 /// by `prepare_render_inputs` — they take effect at layout time (level 2) and
 /// are never touched here.
-fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
+fn apply_chart_config_to_theme(theme: &mut ThemeInputs, config: &ChartConfig) {
     // ── Grid overrides (both-axes shorthand only) ─────────────────────────────
     // `configure_grid(x=…, y=…)` no longer lands here at all (D4/F-L07-01,
     // spec §4.3): those are per-axis and are applied to each `AxisInput`'s own
@@ -568,7 +609,7 @@ fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec
 /// These three share one hazard: the theme slot is the ONLY carrier for the
 /// resolved value, so per-channel and chart-level both write the same field.
 /// Sequencing two independent writers (per-channel first, then
-/// `apply_chart_config`) therefore inverted the contract — whoever ran last
+/// `apply_chart_config_to_theme`) therefore inverted the contract — whoever ran last
 /// won, and chart-level ran last. Resolving both levels HERE, with the
 /// `or_else` chain `scene_build`'s `legend_zindex` already uses as the
 /// chart-level-fallback exemplar, makes the precedence a property of one
@@ -840,155 +881,6 @@ fn apply_grid_config_to_axis_inputs(
     }
 }
 
-/// The channel an axis belongs to, inferred from its current orient. x carries a
-/// horizontal axis (Top/Bottom); y a vertical one (Left/Right). Used to validate
-/// a chart-level `orient`/`title_orient` against the axis's dimension.
-fn axis_channel(orient: crate::layout::AxisOrient) -> &'static str {
-    use crate::layout::AxisOrient::{Bottom, Top};
-    if matches!(orient, Top | Bottom) { "x" } else { "y" }
-}
-
-/// One canonical [`AxisStyleSpec`](chart_config::AxisStyleSpec) →
-/// [`AxisStyleOverrides`](crate::layout::AxisStyleOverrides) merge, replacing the
-/// two parallel ~28-field mappers that previously turned the SAME source struct
-/// into the bundle in two shapes (the per-channel fresh-builder in
-/// `prepare::encoding_axis_style_overrides` and the chart-level fill-only-if-`None`
-/// `apply_axis_style_to_axis_input`). Both call sites now route through here so a
-/// new `AxisStyleSpec` field is wired once, not in two drifting bodies.
-///
-/// `fill_only_if_none` selects the merge discipline:
-/// - `false` (per-channel path): write every field unconditionally — the caller
-///   starts from `Default`, so this is the fresh-build the encoding path needs.
-/// - `true` (chart-level path): write each field only when the slot is still
-///   `None`, so a higher-precedence source (a per-channel spec, or an earlier
-///   config layer) always wins.
-///
-/// Field-ownership exceptions preserved bit-for-bit from the old two-mapper world:
-/// - **`label_format`** is written ONLY on the chart-level (`fill_only_if_none`)
-///   path. The per-channel/prepare path deliberately leaves it `None` here and
-///   seeds it separately from the temporal/numeric format threading
-///   (`apply_axis_format_or_thread`) after this merge runs.
-/// - **`show_*`** toggles (`grid`/`domain`/`labels`/`ticks`) live on `AxisInput`,
-///   not on this bundle, and are owned solely by the prepare path. This merge
-///   cannot touch them (they are not `AxisStyleOverrides` fields); the chart-level
-///   caller documents that single-owner contract at its call site.
-///
-/// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
-/// [`RenderError::InvalidAxisOrient`]; an unparseable color hex string leaves the
-/// slot `None` (theme fallback) on both paths.
-///
-/// Returns [`UnflippedRenderError`] (R3), not `RenderError` directly: neither
-/// this fn nor `parse_axis_orient`/`parse_title_orient` beneath it has access
-/// to `coord_flipped` (this fn is shared by both the flip-patched per-channel
-/// path and the flip-exempt chart-level path — see the field doc on
-/// [`RenderError::InvalidAxisOrient`]), so the decision is deferred to each
-/// caller's own boundary via `.resolve(coord_flipped)`.
-pub(in crate::render) fn axis_style_fill_from(
-    o: &mut crate::layout::AxisStyleOverrides,
-    style: &chart_config::AxisStyleSpec,
-    channel: &'static str,
-    fill_only_if_none: bool,
-) -> Result<(), UnflippedRenderError> {
-    // One merge predicate for every field: on the fresh-build (per-channel) path
-    // (`fill_only_if_none == false`) the value is written unconditionally; on the
-    // chart-level path it is written only when the slot is still `None` so a
-    // higher-precedence source wins. Collapsing it here means each field below
-    // appears exactly once regardless of which discipline applies. A generic `fn`
-    // (not a closure) because the slot type varies across fields.
-    fn set<T>(slot: &mut Option<T>, value: Option<T>, fill_only_if_none: bool) {
-        if !fill_only_if_none || slot.is_none() {
-            *slot = value;
-        }
-    }
-    // Full CSS vocabulary (names, `rgb()`, hex) — `None` for absent or
-    // unparseable values, matching the pre-existing "keep the theme default"
-    // behavior of every axis-style color override.
-    let opt_color = |c: &Option<String>| c.as_deref().and_then(|s| color::parse_color(s).ok());
-    // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
-    // `orient` is the override INPUT (validated against the dimension); the
-    // concrete `AxisInput.orient` is re-synced from it by `resolve_orient` after
-    // all override layers merge. Validation can fail, so it is resolved eagerly
-    // (before `set`) and only assigned under the same fill predicate.
-    if !fill_only_if_none || o.orient.is_none() {
-        o.orient = style
-            .orient
-            .as_deref()
-            .map(|s| prepare::parse_axis_orient(s, channel))
-            .transpose()?;
-    }
-    if !fill_only_if_none || o.title_orient.is_none() {
-        o.title_orient = style
-            .title_orient
-            .as_deref()
-            .map(|s| prepare::parse_title_orient(s, channel))
-            .transpose()?;
-    }
-    set(&mut o.translate, style.translate, fill_only_if_none);
-    set(&mut o.min_band, style.min_band, fill_only_if_none);
-    set(&mut o.max_band, style.max_band, fill_only_if_none);
-    set(&mut o.grid_opacity, style.grid_opacity, fill_only_if_none);
-    set(&mut o.zindex, style.zindex, fill_only_if_none);
-    set(&mut o.tick_size, style.tick_size, fill_only_if_none);
-    set(&mut o.tick_extra, style.tick_extra, fill_only_if_none);
-    set(&mut o.tick_min_step, style.tick_min_step, fill_only_if_none);
-    // ── Show toggles (D12, spec §4.9) ────────────────────────────────────────
-    // These four used to live as bare `bool`s on `AxisInput`, written ONLY by
-    // the per-channel prepare path, because a `bool` cannot say "unset" and a
-    // chart-level write would therefore have clobbered the per-channel answer.
-    // As `Option<bool>` on this bundle they obey the same one merge predicate
-    // as every sibling field, which is what makes chart-level `labels`/`ticks`/
-    // `domain`/`grid` honored (they had no consumer at all before) WITHOUT
-    // inverting the cascade. `grid`/`domain` additionally carry a theme
-    // fallback, folded in by `AxesInput::apply_show_defaults` after every
-    // config layer has had its turn.
-    set(&mut o.show_labels, style.labels, fill_only_if_none);
-    set(&mut o.show_ticks, style.ticks, fill_only_if_none);
-    set(&mut o.show_domain, style.domain, fill_only_if_none);
-    set(&mut o.show_grid, style.grid, fill_only_if_none);
-    // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
-    set(&mut o.offset, style.offset, fill_only_if_none);
-    set(&mut o.label_flush, style.label_flush, fill_only_if_none);
-    set(
-        &mut o.label_overlap,
-        style.label_overlap.as_deref().and_then(prepare::parse_label_overlap),
-        fill_only_if_none,
-    );
-    set(&mut o.label_angle, style.label_angle, fill_only_if_none);
-    // `label_format` is owned by the chart-level path only. The per-channel path
-    // threads it separately after this merge, so it must stay `None` here.
-    //
-    // This fallback write is normally shadowed by `apply_axis_config_to_axis_input`'s
-    // own (more complete — raw-first via `effective_label_format()`) fill
-    // immediately before this fn runs, which makes THIS block a no-op in
-    // the common case (it only re-derives the SAME `style.label_format`
-    // that caller's fill already found — see that caller's doc). But when
-    // the caller's fill is correctly SKIPPED for a per-channel-claimed axis
-    // (`label_format_claimed`, D8 cascade-inversion fix),
-    // `o.label_format` is still `None` reaching here. Routes through
-    // the SAME mechanized `fill_chart_level_label_format` the caller uses
-    // rather than hand-re-deriving the
-    // "unclaimed" predicate a second time — this is exactly the two-writer
-    // duplication that fix closed.
-    if fill_only_if_none {
-        o.fill_chart_level_label_format(style.label_format.clone(), style.label_format_type.clone());
-    }
-    set(&mut o.tick_values, style.values.clone(), fill_only_if_none);
-    // Title overrides.
-    set(&mut o.title_font_size, style.title_font_size, fill_only_if_none);
-    set(&mut o.title_color, opt_color(&style.title_color), fill_only_if_none);
-    set(&mut o.title_padding, style.title_padding, fill_only_if_none);
-    set(&mut o.label_padding, style.label_padding, fill_only_if_none);
-    // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
-    set(&mut o.label_color, opt_color(&style.label_color), fill_only_if_none);
-    set(&mut o.label_font_size, style.label_font_size, fill_only_if_none);
-    set(&mut o.grid_color, opt_color(&style.grid_color), fill_only_if_none);
-    set(&mut o.grid_dash, style.grid_dash.clone(), fill_only_if_none);
-    set(&mut o.grid_width, style.grid_width, fill_only_if_none);
-    set(&mut o.domain_color, opt_color(&style.domain_color), fill_only_if_none);
-    set(&mut o.domain_width, style.domain_width, fill_only_if_none);
-    Ok(())
-}
-
 /// Apply an [`AxisStyleSpec`](chart_config::AxisStyleSpec) to one `AxisInput`,
 /// filling only fields the input has not already set (so a higher-precedence
 /// source — a per-channel spec, or an earlier config layer — always wins).
@@ -998,7 +890,7 @@ pub(in crate::render) fn axis_style_fill_from(
 /// label color/font-size, domain color/width) flow into per-axis override fields
 /// on `AxisInput` that `build_axis`/`build_grid` consult with a theme fallback, so
 /// they render per-axis instead of mutating the shared theme. The actual field
-/// merge is the canonical [`axis_style_fill_from`] (chart-level discipline:
+/// merge is the canonical [`prepare::axis_style_fill_from`] (chart-level discipline:
 /// `fill_only_if_none = true`).
 ///
 /// Show toggles (`grid`/`domain`/`labels`/`ticks`) route through the SAME merge
@@ -1017,13 +909,14 @@ pub(in crate::render) fn apply_axis_style_to_axis_input(
     style: &chart_config::AxisStyleSpec,
 ) -> Result<(), RenderError> {
     axis.fill_chart_level_title(style.title.as_deref());
-    let channel = axis_channel(axis.orient);
-    // R3 EXEMPT chain: `channel` here is the axis's PHYSICAL orientation
-    // (`axis_channel`), not a channel that traveled through `build_layers`'
-    // swap — resolve with `false` explicitly. See the three-chain account on
-    // `RenderError::InvalidAxisOrient` and the `chart_level_orient_error_names_resolved_axis_under_flip`
-    // test pinning this.
-    axis_style_fill_from(&mut axis.overrides, style, channel, true).map_err(|e| e.resolve(false))
+    let channel = axis.orient.dimension().channel_token();
+    // R3 EXEMPT chain: `channel` here is the axis's PHYSICAL dimension
+    // (`AxisDimension::channel_token`), not a channel that traveled through
+    // `build_layers`' swap — resolve with `false` explicitly. See the
+    // three-chain account on `RenderError::InvalidAxisOrient` and the
+    // `chart_level_orient_error_names_resolved_axis_under_flip` test pinning this.
+    prepare::axis_style_fill_from(&mut axis.overrides, style, channel, true)
+        .map_err(|e| e.resolve(false))
 }
 
 /// Re-format tick label strings using a d3-format/strftime string override.

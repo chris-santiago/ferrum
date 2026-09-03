@@ -29,29 +29,6 @@ pub(crate) mod svg_walk;
 pub(crate) mod break_axis;
 pub(crate) mod inset;
 
-// ── Re-exports: `config_apply` entries with a consumer outside that module ──
-//
-// The chart-config application pipeline states its pass order once, inside
-// `config_apply` (this module reaches it through the `config_apply::` path).
-// These three are the partial re-executions other render stages legitimately
-// need in production; re-exported into this module's namespace so the
-// established `render::…` / `super::…` paths keep resolving from those
-// consumers:
-//
-//   - `resolve_leaf_legend_overrides` — `composite_render::capture_leaf_bundle`,
-//     which needs passes 16–18 for the figure-level legend seam.
-//   - `apply_color_config_to_color_scale` — `scene_build`, which re-applies
-//     pass 11 after its own per-panel / per-legend scale re-resolution.
-//   - `axis_style_fill_from` — `prepare::encoding_axis_style_overrides`, which
-//     runs the SAME merge under the fresh-build (per-channel) discipline.
-//
-// Test-only reachers (`prepare`'s inline tests, for the chart-level axis fill)
-// spell `crate::render::config_apply::…` instead: a `use` here would be unused
-// in a non-test build.
-pub(in crate::render) use config_apply::{
-    apply_color_config_to_color_scale, axis_style_fill_from, resolve_leaf_legend_overrides,
-};
-
 // Constants (spec §6.1).
 pub const FLOAT_PRECISION: usize = 3;
 pub const CLIP_ID_PREFIX: &str = "ferrum-clip-";
@@ -174,9 +151,10 @@ pub enum RenderError {
     /// - `prepare::build_secondary_y_axis_inputs` (independent-y layer's own
     ///   `fm.Axis(orient=...)`) — PATCHES, same reasoning as above.
     /// - the chart-level `configure_axis` apply block
-    ///   (`apply_axis_config_to_axis_input`, in `prepare_and_layout`) — EXEMPT.
-    ///   `channel` there is derived from the axis's PHYSICAL orientation
-    ///   (`axis_channel`), never from an `EncodingSpec`, and the config key
+    ///   (`config_apply::apply_axis_config_to_axis_input`, called by
+    ///   `config_apply::fill_axis_slots_specific_before_shared`) — EXEMPT.
+    ///   `channel` there is derived from the axis's PHYSICAL dimension
+    ///   (`AxisDimension::channel_token`), never from an `EncodingSpec`, and the config key
     ///   the user actually typed (`axis_x`/`axis_y`) is itself RESOLVED-slot
     ///   vocabulary that Python never remaps under flip — so the resolved
     ///   token already IS what the user wrote; un-flipping it would say the
@@ -832,7 +810,9 @@ mod tests {
 // Task 20 — render_svg full pipeline orchestration (spec §6).
 // ---------------------------------------------------------------------------
 
-use crate::layout::{compute_layout, CompositeLayoutSeam, LegendSuppression, ThemeInputs, Viewport};
+use crate::layout::{
+    compute_layout, CompositeLayoutSeam, LegendOverrides, LegendSuppression, ThemeInputs, Viewport,
+};
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use chart_config::ChartConfig;
@@ -844,6 +824,15 @@ struct PipelineOutput {
     layout: crate::layout::LayoutResult,
     effective_theme: ThemeInputs,
     warnings: Vec<RenderWarning>,
+    /// Passes 17–18 and 16 of the config pipeline
+    /// (`config_apply::resolve_leaf_legend_overrides`), carried out rather than
+    /// recomputed. `compute_layout` consumes them below; `composite_render`'s
+    /// figure-legend seam (`capture_leaf_bundle`) needs the SAME two values for
+    /// the same leaf and used to call the projection a second time on this very
+    /// `prep`. Carrying them makes the two uses one value, so they cannot
+    /// diverge (#143 remediation, design review rec 4).
+    legend_overrides: LegendOverrides,
+    legend_title: Option<String>,
 }
 
 /// Shared pipeline executed by both `render_svg` and `render_scene_json` (and,
@@ -918,7 +907,7 @@ fn prepare_and_layout(
         &prep.axes,
         &prep.facet_groups,
         &prep.legend_entries,
-        legend_title,
+        legend_title.clone(),
         prep.colorbar.as_ref(),
         &metrics,
         &legend_overrides,
@@ -930,7 +919,7 @@ fn prepare_and_layout(
         warnings.push(RenderWarning::Layout(w.clone()));
     }
 
-    Ok(PipelineOutput { prep, layout, effective_theme, warnings })
+    Ok(PipelineOutput { prep, layout, effective_theme, warnings, legend_overrides, legend_title })
 }
 
 pub fn render_svg(
@@ -953,7 +942,7 @@ pub fn render_svg(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let PipelineOutput { prep, layout, effective_theme, mut warnings } =
+    let PipelineOutput { prep, layout, effective_theme, mut warnings, .. } =
         prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let scene = scene_build::build_scene(
@@ -1009,7 +998,7 @@ pub fn render_scene_json(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let PipelineOutput { prep, layout, effective_theme, mut warnings } =
+    let PipelineOutput { prep, layout, effective_theme, mut warnings, .. } =
         prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let mut scene = scene_build::build_scene(

@@ -1,177 +1,37 @@
 //! Chart-config application test coverage.
 //!
-//! This module carries the two `#[cfg(test)]` mods that were relocated out of
+//! This module carries `chart_config_application_tests`, relocated out of
 //! `render/mod.rs` alongside the `config_apply` extraction (#143), together
-//! with their subjects: `axis_style_fill_from_tests` (the canonical
-//! `AxisStyleSpec → AxisStyleOverrides` merge under both disciplines) and
-//! `chart_config_application_tests` (every `configure_*()` surface, the
-//! precedence orderings between them, and the tier fns that own those
-//! orderings).
+//! with its subject: every `configure_*()` surface, the precedence orderings
+//! between them, and the tier fns that own those orderings.
 //!
-//! It could not stay inline: the relocated body is ~1,920 lines against
-//! ~1,595 lines of source, so keeping it in `mod.rs` would make the pipeline
-//! itself the minority of the file it lives in — the promotion trigger in
-//! CLAUDE.md's Rust test-module convention. The split is mechanical only.
-//! Both mods keep their original names and their own inner `//!` docstrings,
-//! every test body is byte-identical to what `render/mod.rs` carried, and
-//! nothing was dropped, merged, or renamed in either move. The only edit
-//! is the removal of each mod's own `#[cfg(test)]` attribute, now
-//! redundant under this file's single `#[cfg(test)] mod tests;` gate.
-
+//! It could not stay inline: the relocated body is the larger half of the
+//! module, so keeping it in `mod.rs` would make the pipeline itself the
+//! minority of the file it lives in — the promotion trigger in CLAUDE.md's
+//! Rust test-module convention.
+//!
+//! What the relocation changed, precisely: every test kept its name and its
+//! assertions, and the mod kept its own inner `//!` docstring. Four bodies are
+//! not byte-identical to what `render/mod.rs` carried, all deliberately:
+//! `axis_x_wins_on_x_without_disturbing_the_shared_theme_fallback`,
+//! `axis_x_tick_size_lands_on_x_only` and
+//! `axis_x_styling_field_wins_over_axis_via_fill_none_ordering` were rewired to
+//! assert THROUGH `fill_axis_slots_specific_before_shared` instead of
+//! hand-sequencing the four `apply_axis_config_to_axis_input` calls (so a
+//! production reorder now fails them), and
+//! `chart_level_orient_none_suppresses_without_the_python_conversion` was
+//! extended past the `chart_config_legend_disabled` predicate to the clear it
+//! gates. Nothing was dropped or merged. The `#[cfg(test)]` attribute on the
+//! mod itself is gone, redundant under this file's `#[cfg(test)] mod tests;`
+//! gate.
+//!
+//! `axis_style_fill_from_tests` is NOT here: the #143 remediation moved its
+//! subject to `prepare` (breaking the `prepare` → `config_apply` back-edge),
+//! and the characterization tests followed it there.
 use super::*;
 
-mod axis_style_fill_from_tests {
-    //! Characterization tests for `axis_style_fill_from` (T2.6 / SPINE-01): the
-    //! one merge that replaced the two parallel `AxisStyleSpec → AxisStyleOverrides`
-    //! mappers. These pin the exact field ownership both old mappers had so the
-    //! collapse stays behavior-preserving.
-    use super::*;
-    use crate::layout::{AxisStyleOverrides, LabelOverlap};
-    use chart_config::AxisStyleSpec;
-
-    /// An `AxisStyleSpec` with every merge-relevant field populated, plus a couple
-    /// of fields that exercise color parsing and token validation.
-    fn fully_populated_spec() -> AxisStyleSpec {
-        AxisStyleSpec {
-            label_angle: Some(45.0),
-            label_font_size: Some(11.0),
-            label_color: Some("#112233".into()),
-            label_format: Some(".2f".into()),
-            label_format_type: None,
-            label_overlap: Some("parity".into()),
-            label_flush: Some(true),
-            labels: Some(false), // show toggle — NOT an overrides field; must be ignored
-            ticks: Some(false),  // show toggle — ignored
-            tick_count: Some(7), // not an overrides field — ignored
-            tick_size: Some(4.0),
-            tick_extra: Some(true),
-            tick_min_step: Some(0.5),
-            values: Some(vec![0.0, 1.0, 2.0]),
-            grid: Some(false), // show toggle — ignored
-            grid_color: Some("#445566".into()),
-            grid_dash: Some(vec![6.0, 3.0]),
-            grid_width: Some(1.5),
-            grid_opacity: Some(0.4),
-            domain: Some(false), // show toggle — ignored
-            domain_color: Some("#778899".into()),
-            domain_width: Some(2.0),
-            title: Some("ignored-here".into()), // title text — not an overrides field
-            title_font_size: Some(13.0),
-            title_color: Some("#aabbcc".into()),
-            title_padding: Some(8.0),
-            title_orient: Some("right".into()),
-            label_padding: Some(3.0),
-            orient: Some("bottom".into()),
-            translate: Some(5.0),
-            min_band: Some(10.0),
-            max_band: Some(40.0),
-            offset: Some(2.0),
-            zindex: Some(1),
-        }
-    }
-
-    /// Per-channel fresh-build (`fill_only_if_none = false`) writes every
-    /// overrides field from the spec — EXCEPT `label_format`, which the
-    /// per-channel/prepare path deliberately leaves `None` (it is threaded
-    /// separately afterward). show_* toggles and non-overrides fields (title text,
-    /// tick_count, tick_size) are never written (they are not bundle fields).
-    #[test]
-    fn fresh_build_writes_all_fields_except_label_format() {
-        let spec = fully_populated_spec();
-        let mut o = AxisStyleOverrides::default();
-        axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
-
-        assert_eq!(o.label_angle, Some(45.0));
-        assert_eq!(o.label_font_size, Some(11.0));
-        assert_eq!(o.label_color, color::parse_color("#112233").ok());
-        // label_format MUST stay None on the per-channel/fresh-build path.
-        assert_eq!(o.label_format, None);
-        assert_eq!(o.label_overlap, Some(LabelOverlap::Parity));
-        assert_eq!(o.label_flush, Some(true));
-        assert_eq!(o.tick_extra, Some(true));
-        assert_eq!(o.tick_min_step, Some(0.5));
-        assert_eq!(o.tick_values, Some(vec![0.0, 1.0, 2.0]));
-        assert_eq!(o.grid_color, color::parse_color("#445566").ok());
-        assert_eq!(o.grid_dash, Some(vec![6.0, 3.0]));
-        assert_eq!(o.grid_width, Some(1.5));
-        assert_eq!(o.grid_opacity, Some(0.4));
-        assert_eq!(o.domain_color, color::parse_color("#778899").ok());
-        assert_eq!(o.domain_width, Some(2.0));
-        assert_eq!(o.title_font_size, Some(13.0));
-        assert_eq!(o.title_color, color::parse_color("#aabbcc").ok());
-        assert_eq!(o.title_padding, Some(8.0));
-        assert_eq!(o.title_orient, Some(crate::layout::AxisOrient::Right));
-        assert_eq!(o.label_padding, Some(3.0));
-        assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
-        assert_eq!(o.translate, Some(5.0));
-        assert_eq!(o.min_band, Some(10.0));
-        assert_eq!(o.max_band, Some(40.0));
-        assert_eq!(o.offset, Some(2.0));
-        assert_eq!(o.zindex, Some(1));
-    }
-
-    /// Chart-level fill (`fill_only_if_none = true`) fills only `None` slots
-    /// (higher-precedence values survive) AND owns `label_format` (the one field
-    /// the per-channel path leaves `None`).
-    #[test]
-    fn chart_level_fills_only_none_and_owns_label_format() {
-        let spec = fully_populated_spec();
-        let mut o = AxisStyleOverrides {
-            // A higher-precedence per-channel value already claimed these slots.
-            label_angle: Some(90.0),
-            grid_width: Some(99.0),
-            ..AxisStyleOverrides::default()
-        };
-        axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
-
-        // Pre-set slots survive (fill-only-if-None).
-        assert_eq!(o.label_angle, Some(90.0));
-        assert_eq!(o.grid_width, Some(99.0));
-        // Empty slots filled from the spec.
-        assert_eq!(o.label_font_size, Some(11.0));
-        assert_eq!(o.tick_min_step, Some(0.5));
-        assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
-        // label_format IS written on the chart-level path.
-        assert_eq!(o.label_format, Some(".2f".into()));
-    }
-
-    /// Chart-level fill does NOT clobber a `label_format` that a per-channel value
-    /// already set (the threaded override wins).
-    #[test]
-    fn chart_level_label_format_defers_to_existing() {
-        let spec = fully_populated_spec(); // label_format = ".2f"
-        let mut o = AxisStyleOverrides {
-            label_format: Some("~s".into()), // per-channel already won
-            ..AxisStyleOverrides::default()
-        };
-        axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
-        assert_eq!(o.label_format, Some("~s".into()));
-    }
-
-    /// A cross-dimension `orient` (left/right on an x axis) fails loud on both
-    /// paths, exactly as both old mappers did via `parse_axis_orient`.
-    #[test]
-    fn cross_dimension_orient_errors() {
-        let spec = AxisStyleSpec { orient: Some("left".into()), ..Default::default() };
-        let mut o = AxisStyleOverrides::default();
-        assert!(axis_style_fill_from(&mut o, &spec, "x", false).is_err());
-        let mut o = AxisStyleOverrides::default();
-        assert!(axis_style_fill_from(&mut o, &spec, "x", true).is_err());
-    }
-
-    /// An unparseable color hex leaves the slot `None` (theme fallback) rather
-    /// than failing — preserved from both old mappers.
-    #[test]
-    fn bad_color_hex_falls_back_to_none() {
-        let spec = AxisStyleSpec { label_color: Some("not-a-color".into()), ..Default::default() };
-        let mut o = AxisStyleOverrides::default();
-        axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
-        assert_eq!(o.label_color, None);
-    }
-}
-
 mod chart_config_application_tests {
-    //! Unit tests for `apply_chart_config` — verify that ChartConfig overrides
+    //! Unit tests for `apply_chart_config_to_theme` — verify that ChartConfig overrides
     //! are correctly applied to ThemeInputs.
 
     use super::*;
@@ -199,7 +59,7 @@ mod chart_config_application_tests {
     fn apply_chart_config_noop_on_empty_config() {
         let default_theme = ThemeInputs::default();
         let mut theme = default_theme.clone();
-        apply_chart_config(&mut theme, &ChartConfig::default());
+        apply_chart_config_to_theme(&mut theme, &ChartConfig::default());
         // Empty config must not change anything.
         assert_eq!(theme.grid.grid, default_theme.grid.grid);
         assert_eq!(theme.sizes.grid_width, default_theme.sizes.grid_width);
@@ -223,7 +83,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.colors.grid_color, color::parse_color("#ff0000").unwrap());
         assert_eq!(theme.sizes.grid_width, 2.0);
         assert_eq!(theme.grid.grid_opacity, 0.5);
@@ -244,7 +104,7 @@ mod chart_config_application_tests {
                 }),
                 ..Default::default()
             };
-            apply_chart_config(&mut theme, &config);
+            apply_chart_config_to_theme(&mut theme, &config);
             theme.colors.grid_color
         };
         let expected = color::parse_color("#4682b4").unwrap();
@@ -258,7 +118,7 @@ mod chart_config_application_tests {
     /// A bare `AxesInput` for the per-axis grid/toggle unit tests below: two
     /// axes with no overrides at all, i.e. "no opinion" on every toggle.
     #[cfg(test)]
-    fn blank_axes() -> crate::layout::AxesInput {
+    pub(super) fn blank_axes() -> crate::layout::AxesInput {
         use crate::layout::{AxisInput, AxisOrient};
         crate::layout::AxesInput {
             x: AxisInput::new(AxisOrient::Bottom, None, vec!["a".into()], None),
@@ -291,7 +151,7 @@ mod chart_config_application_tests {
         assert!(!axes.y.show_grid());
     }
 
-    /// The case the old `apply_chart_config` block dropped ENTIRELY: x and y
+    /// The case the old `apply_chart_config_to_theme` block dropped ENTIRELY: x and y
     /// disagreeing. Its equality guard (`grid_cfg.y.unwrap_or(enabled) ==
     /// enabled`) failed, so neither branch wrote anything and the caller's
     /// whole request vanished. RED before this task on any assertion at all.
@@ -386,7 +246,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         // Each side is set independently.
         assert_eq!(theme.padding.padding_top, Some(10.0));
         assert_eq!(theme.padding.padding_right, Some(20.0));
@@ -409,7 +269,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         // The explicit top value must be applied even when auto=true.
         assert_eq!(theme.padding.padding_top, Some(5.0));
         // Sides not specified remain None.
@@ -434,10 +294,10 @@ mod chart_config_application_tests {
             label_font_size: Some(9.0),
             ..Default::default()
         });
-        // `direction` is the only legend field `apply_chart_config` still
+        // `direction` is the only legend field `apply_chart_config_to_theme` still
         // writes; the other three ThemeInputs-backed ones resolve in
         // `apply_legend_cascade_to_theme` (D7) so per-channel can win.
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.legend.legend_direction, Some(LegendDirection::Horizontal));
         apply_legend_cascade_to_theme(
             &mut theme,
@@ -466,7 +326,7 @@ mod chart_config_application_tests {
 
     /// D7 cascade repair: for each of the three fields whose effective value
     /// lives on `ThemeInputs`, a per-channel `Legend(...)` beats chart-level
-    /// `configure_legend(...)`. RED before the fix — `apply_chart_config` ran
+    /// `configure_legend(...)`. RED before the fix — `apply_chart_config_to_theme` ran
     /// after the per-channel write and clobbered all three.
     #[test]
     fn legend_cascade_per_channel_beats_chart_level() {
@@ -483,7 +343,7 @@ mod chart_config_application_tests {
             title_font_size: Some(21.0),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         apply_legend_cascade_to_theme(&mut theme, &per_channel, &config);
         assert_eq!(theme.legend.legend_orient, LegendOrient::Bottom);
         assert_eq!(theme.legend.legend_columns, Some(2));
@@ -636,7 +496,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.palette.color_scheme, "tableau10");
         assert_eq!(theme.palette.sequential_scheme, "viridis");
         assert_eq!(theme.palette.diverging_scheme, "rdbu");
@@ -652,7 +512,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.typography.label_font_size, 14.0);
     }
 
@@ -672,7 +532,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.sizes.tick_size, 6.0);
         assert_eq!(theme.sizes.axis_line_width, 2.0);
         // `domain` is no longer a theme write (D12, spec §4.9): it is a
@@ -702,7 +562,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.typography.title_font_size, 22.0);
         assert_eq!(theme.typography.title_font_weight, "700");
         assert_eq!(theme.typography.title_anchor, TextAnchor::End);
@@ -720,7 +580,7 @@ mod chart_config_application_tests {
         // No `title` config → subtitle theme fields stay `None`, preserving the
         // pre-config default subtitle styling (font_color + title*0.85).
         let mut theme = ThemeInputs::default();
-        apply_chart_config(&mut theme, &ChartConfig::default());
+        apply_chart_config_to_theme(&mut theme, &ChartConfig::default());
         assert_eq!(theme.typography.subtitle_font_size, None);
         assert_eq!(theme.colors.subtitle_color, None);
     }
@@ -736,7 +596,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         // Bad color must not change the existing value.
         assert_eq!(theme.colors.grid_color, original_grid_color);
     }
@@ -761,7 +621,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(
             theme.typography.label_font_size, 10.0,
             "only the SHARED `axis` key writes the theme; `axis_x` must not"
@@ -796,7 +656,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         let mut axes = blank_axes();
         fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
         assert_eq!(axes.x.tick_size(&theme), 2.0, "axis_x's tick_size reaches x");
@@ -844,7 +704,7 @@ mod chart_config_application_tests {
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
+        apply_chart_config_to_theme(&mut theme, &config);
         assert_eq!(theme.grid.grid_dash, Some(vec![4.0, 4.0]));
     }
 
@@ -1935,6 +1795,348 @@ mod chart_config_application_tests {
             Some(blue),
             "b must NOT inherit the third entry's color — that is the shift this \
              test exists to catch"
+        );
+    }
+}
+
+/// Pipeline-level ordering tests (#143 remediation, mutation review M2–M6).
+///
+/// Every test here asserts THROUGH the production entry — `apply_chart_config_pipeline`
+/// or the tier fn that owns the order under test — and never hand-sequences the
+/// helpers in its own body. That distinction is the whole point: the pre-existing
+/// unit tests baked the correct call order into the test, which made them
+/// precedence tests of the HELPERS and left the PIPELINE's order unobserved. Each
+/// test below was RED-proven against the specific reorder named in its doc.
+mod pipeline_order_tests {
+    use super::*;
+    use crate::layout::ThemeInputs;
+    use crate::render::chart_config::{
+        AxisConfigSpec, AxisStyleSpec, ChartConfig, ColorConfigSpec, GridAxisSpec, GridConfigSpec,
+        LegendConfigSpec, LegendStyleSpec,
+    };
+    use crate::render::prepare;
+    // The bare two-axis `AxesInput` the sibling mod's per-axis tests use.
+    use super::chart_config_application_tests::blank_axes;
+    use crate::spec::chart::ChartSpec;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    /// How the `color` channel is typed, which decides whether `prepare` builds a
+    /// categorical entry list or a continuous colorbar.
+    enum ColorKind {
+        /// A `Utf8` category column — yields `legend_entries`.
+        Categorical,
+        /// A `Float64` column — yields a `colorbar`, the arm M6 showed uncovered.
+        Continuous,
+        None,
+    }
+
+    /// x/y plus an optional color channel and an optional `size` channel (a
+    /// distinct field, so `prepare` builds a real aux legend rather than folding
+    /// size into the color legend). `color_legend` wires a per-channel
+    /// `Legend(...)` onto the color encoding — the LEVEL-2 side of every cascade
+    /// asserted here.
+    fn chart(
+        color: ColorKind,
+        color_legend: Option<LegendStyleSpec>,
+        with_size: bool,
+    ) -> (ChartSpec, RecordBatch) {
+        let mut fields = vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ];
+        let mut columns: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+        ];
+        match color {
+            ColorKind::Categorical => {
+                fields.push(Field::new("kind", DataType::Utf8, false));
+                columns.push(Arc::new(StringArray::from(vec!["a", "b", "c"])));
+            }
+            ColorKind::Continuous => {
+                fields.push(Field::new("kind", DataType::Float64, false));
+                columns.push(Arc::new(Float64Array::from(vec![1.0, 5.0, 9.0])));
+            }
+            ColorKind::None => {}
+        }
+        if with_size {
+            fields.push(Field::new("mass", DataType::Float64, false));
+            columns.push(Arc::new(Float64Array::from(vec![2.0, 4.0, 6.0])));
+        }
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let color_enc = match color {
+            ColorKind::None => None,
+            _ => Some(EncodingSpec {
+                field: "kind".into(),
+                type_: None,
+                legend: color_legend.map(Box::new),
+                ..Default::default()
+            }),
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: color_enc,
+                size: with_size.then(|| EncodingSpec {
+                    field: "mass".into(),
+                    type_: None,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        (spec, batch)
+    }
+
+    /// Run the real pipeline over a real `PreparedInputs`, returning both halves
+    /// so a test can assert on the mutated `prep` and on the returned bundle.
+    fn run_pipeline(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+        chart_config: &ChartConfig,
+    ) -> (prepare::PreparedInputs, AppliedChartConfig, Vec<RenderWarning>) {
+        let theme = ThemeInputs::default();
+        let mut prep =
+            prepare::prepare_render_inputs(spec, batch, &theme, chart_config, None).unwrap();
+        let mut warnings = prep.warnings.clone();
+        let applied =
+            apply_chart_config_pipeline(&mut prep, &theme, chart_config, &mut warnings).unwrap();
+        (prep, applied, warnings)
+    }
+
+    /// **M2.** The `configure_grid(x=…)` layer sits BETWEEN `axis_x`/`axis_y` and
+    /// the shared `axis`, so the documented middle of the cascade is
+    /// `axis_x > grid.x > axis`. The pre-existing ordering tests pinned only the
+    /// OUTER boundary (`axis_x` vs `axis`) because none of them set
+    /// `chart_config.grid`, and the grid tests that would discriminate call
+    /// `apply_grid_config_to_axis_inputs` directly — bypassing the tier fn that
+    /// owns the order. Asserted here through `fill_axis_slots_specific_before_shared`.
+    ///
+    /// RED against: hoisting `apply_grid_config_to_axis_inputs` above the
+    /// `axis_x`/`axis_y` fills.
+    #[test]
+    fn grid_layer_sits_between_per_axis_and_shared_axis() {
+        let config = ChartConfig {
+            // Least specific: loses on both axes.
+            axis: Some(AxisConfigSpec {
+                style: AxisStyleSpec { grid_color: Some("#00ff00".into()), ..Default::default() },
+                ..Default::default()
+            }),
+            // Most specific: wins on x.
+            axis_x: Some(AxisConfigSpec {
+                style: AxisStyleSpec { grid_color: Some("#0000ff".into()), ..Default::default() },
+                ..Default::default()
+            }),
+            grid: Some(GridConfigSpec {
+                // Middle layer: loses to `axis_x` on x …
+                x: Some(GridAxisSpec { color: Some("#ff0000".into()), ..Default::default() }),
+                // … and wins over the shared `axis` on y, where no `axis_y` exists.
+                y: Some(GridAxisSpec { color: Some("#ff0000".into()), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut axes = blank_axes();
+        fill_axis_slots_specific_before_shared(&mut axes, &config, &mut Vec::new()).unwrap();
+        let rgb = |a: &crate::layout::AxisInput| a.overrides.grid_color.map(|c| [c.red, c.green, c.blue]);
+        assert_eq!(
+            rgb(&axes.x),
+            Some([0, 0, 255]),
+            "axis_x (blue) must beat grid.x (red): the per-axis AXIS section is more \
+             specific than the per-axis GRID section"
+        );
+        assert_eq!(
+            rgb(&axes.y),
+            Some([255, 0, 0]),
+            "grid.y (red) must beat the shared axis (green): the grid layer is more \
+             specific than the axis-unspecified shorthand"
+        );
+    }
+
+    /// **M3.** The tick products (`label_format` re-formatting, `tick_extra`,
+    /// `tick_min_step`, projected fractions) must be re-derived AFTER the axis
+    /// merge, or a chart-level `configure_axis(label_format=…)` is silently
+    /// dropped — it would not yet be on `AxisInput.overrides` when the re-sync
+    /// reads it. The pre-existing label-format tests hand-sequence
+    /// `apply_axis_config_to_axis_input` then `apply_label_format_to_axis`, so
+    /// they bake the correct order into the test body and cannot observe a
+    /// production reorder. Asserted here through `apply_chart_config_pipeline`.
+    ///
+    /// RED against: hoisting `resync_ticks_after_axis_merge` above
+    /// `fill_axis_slots_specific_before_shared`.
+    #[test]
+    fn chart_level_label_format_survives_because_ticks_resync_after_the_axis_merge() {
+        let (spec, batch) = chart(ColorKind::None, None, false);
+        let config = ChartConfig {
+            axis_y: Some(AxisConfigSpec {
+                label_format_raw: Some(".2f".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (prep, _applied, _warnings) = run_pipeline(&spec, &batch, &config);
+        assert!(
+            prep.axes.y.tick_labels.iter().all(|l| l.contains('.')
+                && l.split('.').nth(1).is_some_and(|frac| frac.len() == 2)),
+            "every y tick label must carry the chart-level `.2f` format; got {:?} — \
+             the re-sync ran before the axis merge, so `label_format` was not yet \
+             on the axis when the labels were rebuilt",
+            prep.axes.y.tick_labels
+        );
+    }
+
+    /// **M4.** The `Legend(values=[…])` filter must run AFTER the categorical
+    /// entry rebuild, because the rebuild reconstructs `legend_entries` wholesale
+    /// from the overridden domain and would otherwise undo the filter — the A-B-A
+    /// the tier fn's own doc calls load-bearing. The pre-existing tests exercise
+    /// each pass in isolation; nothing exercised the PAIR. Asserted here through
+    /// `apply_chart_config_pipeline` with both layers set at once.
+    ///
+    /// RED against: moving `apply_legend_values_to_entries` above
+    /// `resync_categorical_legend_entries`.
+    #[test]
+    fn legend_values_filter_survives_the_color_domain_rebuild() {
+        let (spec, batch) = chart(
+            ColorKind::Categorical,
+            Some(LegendStyleSpec {
+                values: Some(vec!["c".into(), "a".into()]),
+                ..Default::default()
+            }),
+            false,
+        );
+        let config = ChartConfig {
+            // Reorders/refreshes the domain, which rebuilds every entry.
+            color: Some(ColorConfigSpec {
+                domain: Some(vec!["c".into(), "b".into(), "a".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (prep, _applied, _warnings) = run_pipeline(&spec, &batch, &config);
+        let labels: Vec<&str> = prep.legend_entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["c", "a"],
+            "the `Legend(values=)` filter must be the LAST word on the entry set; \
+             the full rebuilt domain here means the rebuild ran after the filter \
+             and undid it"
+        );
+    }
+
+    /// **M5.** `resolve_leaf_legend_overrides` projects the per-channel (level 2)
+    /// `Legend(...)` bundle before `configure_legend` (level 3) fills what is
+    /// still unset. The pre-existing cascade tests build their level-2 side as a
+    /// hand-written `LegendOverrides` literal and call
+    /// `apply_chart_config_to_legend_overrides` directly, so the projection itself
+    /// — the sub-entry #143 extracted to de-duplicate `composite_render` — was
+    /// never asserted. Asserted here through `apply_chart_config_pipeline` on a
+    /// real `prep`, on both a field the chart level also sets (per-channel must
+    /// win) and one only the per-channel level sets (must survive at all).
+    ///
+    /// RED against: `legend_overrides_from_prep(prep)` → `LegendOverrides::default()`.
+    #[test]
+    fn per_channel_legend_fields_reach_the_bundle_through_the_projection() {
+        let (spec, batch) = chart(
+            ColorKind::Categorical,
+            Some(LegendStyleSpec {
+                symbol_type: Some("square".into()),
+                symbol_size: Some(77.0),
+                ..Default::default()
+            }),
+            false,
+        );
+        let config = ChartConfig {
+            legend: Some(LegendConfigSpec {
+                style: LegendStyleSpec {
+                    // Level 3 must LOSE to the per-channel value above …
+                    symbol_type: Some("triangle".into()),
+                    // … and fill this one, which level 2 leaves unset.
+                    row_padding: Some(9.0),
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        let (_prep, applied, _warnings) = run_pipeline(&spec, &batch, &config);
+        assert_eq!(
+            applied.legend_overrides.symbol_type.as_deref(),
+            Some("square"),
+            "per-channel `Legend(symbol_type=)` must survive the projection and beat \
+             `configure_legend`"
+        );
+        assert_eq!(
+            applied.legend_overrides.style.symbol_size,
+            Some(77.0),
+            "a per-channel field the chart level never mentions must still reach the \
+             bundle — a dropped projection is invisible to any test that only checks \
+             contested fields"
+        );
+        assert_eq!(
+            applied.legend_overrides.style.row_padding,
+            Some(9.0),
+            "`configure_legend` must still fill what level 2 left unset"
+        );
+    }
+
+    /// **M6.** Chart-level `configure_legend(orient="none")` clears the whole
+    /// legend bundle, not just the categorical entries. No Rust test reached that
+    /// body at all — the existing test asserts on the
+    /// `chart_config_legend_disabled` PREDICATE and stops there — and no Python
+    /// test covers the continuous arm either, so a mutant deleting
+    /// `colorbar = None` / `aux_legends.clear()` left a suppressed chart still
+    /// drawing its colorbar. `prepare::legend`'s coupling comment ("if a new
+    /// legend-content field is added, wire it into that clear too") demands a
+    /// test on the far side; this is it.
+    ///
+    /// RED against: deleting `prep.colorbar = None` and `prep.aux_legends.clear()`
+    /// from `suppress_legend_if_chart_level_disabled`.
+    #[test]
+    fn chart_level_suppression_clears_colorbar_and_aux_legends_not_just_entries() {
+        // Continuous color → a colorbar; a distinct size field → an aux legend.
+        let (spec, batch) = chart(ColorKind::Continuous, None, true);
+
+        // Guard: without suppression this chart really does carry both, so the
+        // assertions below cannot pass vacuously.
+        let (baseline, _, _) = run_pipeline(&spec, &batch, &ChartConfig::default());
+        assert!(baseline.colorbar.is_some(), "fixture must build a colorbar to suppress");
+        assert!(!baseline.aux_legends.is_empty(), "fixture must build an aux legend to suppress");
+
+        let config = ChartConfig {
+            legend: Some(LegendConfigSpec {
+                style: LegendStyleSpec { orient: Some("none".into()), ..Default::default() },
+            }),
+            ..Default::default()
+        };
+        let (prep, applied, _warnings) = run_pipeline(&spec, &batch, &config);
+        assert!(prep.colorbar.is_none(), "the colorbar must be cleared, not just the entries");
+        assert!(prep.aux_legends.is_empty(), "the size/shape aux legends must be cleared too");
+        assert!(prep.legend_entries.is_empty(), "categorical entries must be cleared");
+        assert!(prep.legend_title.is_none(), "the legend title must be cleared");
+        assert!(
+            applied.legend_title.is_none(),
+            "and the cleared title must reach the layout bundle, not just `prep`"
         );
     }
 }

@@ -491,15 +491,17 @@ fn capture_leaf_bundle(
         &po.effective_theme,
         leaf.chart_config,
     )?;
-    // The SAME projection `apply_chart_config_pipeline` runs for this leaf's own
-    // layout (passes 16–18), called rather than restated — this used to be a
-    // verbatim three-line copy of that slice of the pass order.
-    let (overrides, title) = super::resolve_leaf_legend_overrides(&po.prep, leaf.chart_config);
+    // The legend projection (config passes 17–18 and 16) is READ off the
+    // pipeline output, not recomputed: `prepare_and_layout` already ran it for
+    // this same `po.prep`, which nothing mutates between there and here. It was
+    // a verbatim three-line copy before #143, then a second call to the shared
+    // `resolve_leaf_legend_overrides`; carrying the value makes "one statement"
+    // into "one value" (design review rec 4).
     Ok(LeafLegendBundle {
         entries: po.prep.legend_entries.clone(),
         colorbar: po.prep.colorbar.clone(),
-        title,
-        overrides,
+        title: po.legend_title.clone(),
+        overrides: po.legend_overrides.clone(),
         aux: po.prep.aux_legends.clone(),
         color_scale,
         theme: po.effective_theme.clone(),

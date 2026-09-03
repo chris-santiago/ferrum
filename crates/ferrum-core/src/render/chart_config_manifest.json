@@ -17,11 +17,11 @@
   },
   "AxisConfigSpec.axis_y2.label_format": {
     "honored": true,
-    "reason": "same field as AxisStyleSpec.label_format, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+    "reason": "same field as AxisStyleSpec.label_format, scoped to axis_y2: config_apply::resync_ticks_after_axis_merge now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.label_format_type": {
     "honored": true,
-    "reason": "same field as AxisStyleSpec.label_format_type, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+    "reason": "same field as AxisStyleSpec.label_format_type, scoped to axis_y2: config_apply::resync_ticks_after_axis_merge now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.nice": {
     "honored": true,
@@ -29,11 +29,11 @@
   },
   "AxisConfigSpec.axis_y2.tick_extra": {
     "honored": true,
-    "reason": "same field as AxisStyleSpec.tick_extra, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+    "reason": "same field as AxisStyleSpec.tick_extra, scoped to axis_y2: config_apply::resync_ticks_after_axis_merge now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.tick_min_step": {
     "honored": true,
-    "reason": "same field as AxisStyleSpec.tick_min_step, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+    "reason": "same field as AxisStyleSpec.tick_min_step, scoped to axis_y2: config_apply::resync_ticks_after_axis_merge now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.tick_size": {
     "honored": true,
@@ -41,7 +41,7 @@
   },
   "AxisConfigSpec.axis_y2.values": {
     "honored": true,
-    "reason": "same field as AxisStyleSpec.values, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+    "reason": "same field as AxisStyleSpec.values, scoped to axis_y2: config_apply::resync_ticks_after_axis_merge now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.zero": {
     "honored": true,
@@ -61,7 +61,7 @@
   },
   "AxisConfigSpec.nice": {
     "honored": true,
-    "reason": "rounds the resolved bounds outward via each scale kind's OWN nice() (ScaleKind::niced_domain dispatches by kind, mirroring the set_data_domain/validate_user_domain pattern already in apply_axis_domain_config) — nice_step count-10 rounding for Linear/Pow/Symlog, power-of-base rounding for Log, calendar-aware rounding for Time — so a chart-level nice always lands on the same bounds an encoding-level Scale(nice=True) would, on every continuous kind including Log and Time (fixed 2026-09-03: a log axis under configure_axis(nice=True) used to refuse with InvalidScaleDomainConfig, since the pre-fix inline nice_step rounding could drive its bound to 0). prepare::axis_domain_config -> scale_resolve::apply_axis_domain_config, applied to the provisional x/y scales in prepare_render_inputs (before the axes derive their ticks) and re-applied per panel in scene_build::resolve_panel_scales (which re-resolves scales from scratch), so ticks and marks describe one domain. An encoding-level scale= domain on the channel wins entirely and SILENTLY (documented cascade); an ordinal axis is refused loudly via RenderWarning::ScaleDomainConfigOnOrdinalAxis. Task 8, D3, spec \u00a74.2. ONE-DIRECTIONAL, and honored only in the `true` direction: this field names an opt-in WIDENING of an already-resolved domain, and nothing in the auto path forces the behavior for `false` to switch off (build_axis_scale constructs every auto positional scale with nice: false, and no mark or theme injects a zero baseline \u2014 a bar chart's y domain reaches 0 because the post-Stack values do). So the `false` spelling requests the default and is a deliberate no-op, pinned byte-identical in tests/test_axis_config_plumbing.py. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
+    "reason": "rounds the resolved bounds outward via each scale kind's OWN nice() (ScaleKind::niced_domain dispatches by kind, mirroring the set_data_domain/validate_user_domain pattern already in apply_axis_domain_config) \u2014 nice_step count-10 rounding for Linear/Pow/Symlog, power-of-base rounding for Log, calendar-aware rounding for Time \u2014 so a chart-level nice always lands on the same bounds an encoding-level Scale(nice=True) would, on every continuous kind including Log and Time (fixed 2026-09-03: a log axis under configure_axis(nice=True) used to refuse with InvalidScaleDomainConfig, since the pre-fix inline nice_step rounding could drive its bound to 0). prepare::axis_domain_config -> scale_resolve::apply_axis_domain_config, applied to the provisional x/y scales in prepare_render_inputs (before the axes derive their ticks) and re-applied per panel in scene_build::resolve_panel_scales (which re-resolves scales from scratch), so ticks and marks describe one domain. An encoding-level scale= domain on the channel wins entirely and SILENTLY (documented cascade); an ordinal axis is refused loudly via RenderWarning::ScaleDomainConfigOnOrdinalAxis. Task 8, D3, spec \u00a74.2. ONE-DIRECTIONAL, and honored only in the `true` direction: this field names an opt-in WIDENING of an already-resolved domain, and nothing in the auto path forces the behavior for `false` to switch off (build_axis_scale constructs every auto positional scale with nice: false, and no mark or theme injects a zero baseline \u2014 a bar chart's y domain reaches 0 because the post-Stack values do). So the `false` spelling requests the default and is a deliberate no-op, pinned byte-identical in tests/test_axis_config_plumbing.py. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.zero": {
     "honored": true,
@@ -121,7 +121,7 @@
   },
   "AxisStyleSpec.label_format_type": {
     "honored": true,
-    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis (render/mod.rs::prepare_and_layout) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
+    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis (render/config_apply/mod.rs, in the resync_ticks_after_axis_merge tier) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
   },
   "AxisStyleSpec.label_overlap": {
     "honored": true,
@@ -209,83 +209,83 @@
   },
   "ChartConfig.axis": {
     "honored": true,
-    "reason": "apply_axis_config_to_theme + apply_axis_config_to_axis_input(prep.axes.{x,y}), render/mod.rs"
+    "reason": "apply_axis_config_to_theme + apply_axis_config_to_axis_input(prep.axes.{x,y}), render/config_apply/mod.rs"
   },
   "ChartConfig.axis_x": {
     "honored": true,
-    "reason": "apply_axis_x_config_to_theme + apply_axis_config_to_axis_input(prep.axes.x), render/mod.rs"
+    "reason": "apply_axis_config_to_axis_input(axes.x) from config_apply::fill_axis_slots_specific_before_shared, render/config_apply/mod.rs \u2014 the per-axis slot ONLY. The axis_x section deliberately does not write the shared theme (D12, spec \u00a74.9): ThemeInputs has no x/y split, so a per-axis section writing it would write BOTH axes and, being last-wins, axis_y would then silently overwrite axis_x on every shared field. Only the shared `axis` key reaches the theme, via apply_axis_config_to_theme. Runs BEFORE the shared `axis` key, which is what makes axis_x > axis hold under the fill-only-if-None merge (first writer claims the slot)."
   },
   "ChartConfig.axis_y": {
     "honored": true,
-    "reason": "apply_axis_y_config_to_theme + apply_axis_config_to_axis_input(prep.axes.y), render/mod.rs"
+    "reason": "apply_axis_config_to_axis_input(axes.y) from config_apply::fill_axis_slots_specific_before_shared, render/config_apply/mod.rs \u2014 the per-axis slot ONLY. The axis_y section deliberately does not write the shared theme (D12, spec \u00a74.9): ThemeInputs has no x/y split, so a per-axis section writing it would write BOTH axes. Only the shared `axis` key reaches the theme, via apply_axis_config_to_theme. Runs BEFORE the shared `axis` key, which is what makes axis_y > axis hold under the fill-only-if-None merge (first writer claims the slot)."
   },
   "ChartConfig.axis_y2": {
     "honored": true,
-    "reason": "apply_axis_config_to_axis_input(prep.axes.secondary_y), render/mod.rs \u2014 D2/F-L07-06, this task"
+    "reason": "apply_axis_config_to_axis_input(prep.axes.secondary_y), render/config_apply/mod.rs \u2014 D2/F-L07-06, this task"
   },
   "ChartConfig.color": {
     "honored": true,
-    "reason": "apply_chart_config color-scheme block + apply_color_config_to_color_scale, render/mod.rs"
+    "reason": "apply_chart_config_to_theme color-scheme block + apply_color_config_to_color_scale, render/config_apply/mod.rs"
   },
   "ChartConfig.grid": {
     "honored": true,
-    "reason": "apply_chart_config grid block, render/mod.rs; band_colors via scene_build.rs -> render/marks/axis.rs"
+    "reason": "apply_chart_config_to_theme grid block, render/config_apply/mod.rs; band_colors via scene_build.rs -> render/marks/axis.rs"
   },
   "ChartConfig.legend": {
     "honored": true,
-    "reason": "apply_chart_config legend block (theme fields) + apply_chart_config_to_legend_overrides, render/mod.rs"
+    "reason": "apply_chart_config_to_theme legend block (theme fields) + apply_chart_config_to_legend_overrides, render/config_apply/mod.rs"
   },
   "ChartConfig.padding": {
     "honored": true,
-    "reason": "apply_chart_config padding block, render/mod.rs (top/right/bottom/left only \u2014 see the `auto` field entry)"
+    "reason": "apply_chart_config_to_theme padding block, render/config_apply/mod.rs (top/right/bottom/left only \u2014 see the `auto` field entry)"
   },
   "ChartConfig.structural": {
     "honored": true,
-    "reason": "StructuralSpec (break_axis/inset) consumed by render/mod.rs's structural-feature pass"
+    "reason": "StructuralSpec (break_axis/inset) consumed by scene_build::build_structural_nodes (render/scene_build.rs), called from build_scene for the FIRST panel only (non-faceted charts). Emits break indicators / inset nodes as extra annotations and returns the per-axis BreakResult pairs that remap primary mark pixel coordinates through the broken scale."
   },
   "ChartConfig.title": {
     "honored": true,
-    "reason": "apply_chart_config title block, render/mod.rs (pinned by apply_chart_config_title_overrides)"
+    "reason": "apply_chart_config_to_theme title block, render/config_apply/mod.rs (pinned by apply_chart_config_title_overrides)"
   },
   "ColorConfigSpec.diverging_scheme": {
     "honored": true,
-    "reason": "apply_chart_config color-scheme block -> theme.palette.diverging_scheme, render/mod.rs"
+    "reason": "apply_chart_config_to_theme color-scheme block -> theme.palette.diverging_scheme, render/config_apply/mod.rs"
   },
   "ColorConfigSpec.domain": {
     "honored": true,
-    "reason": "apply_color_config_to_color_scale, render/mod.rs"
+    "reason": "apply_color_config_to_color_scale, render/config_apply/mod.rs"
   },
   "ColorConfigSpec.range": {
     "honored": true,
-    "reason": "apply_color_config_to_color_scale, render/mod.rs"
+    "reason": "apply_color_config_to_color_scale, render/config_apply/mod.rs"
   },
   "ColorConfigSpec.scheme": {
     "honored": true,
-    "reason": "apply_chart_config color-scheme block -> theme.palette.color_scheme, render/mod.rs"
+    "reason": "apply_chart_config_to_theme color-scheme block -> theme.palette.color_scheme, render/config_apply/mod.rs"
   },
   "ColorConfigSpec.sequential_scheme": {
     "honored": true,
-    "reason": "apply_chart_config color-scheme block -> theme.palette.sequential_scheme, render/mod.rs"
+    "reason": "apply_chart_config_to_theme color-scheme block -> theme.palette.sequential_scheme, render/config_apply/mod.rs"
   },
   "GridAxisSpec.color": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_color, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.color key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_color, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.color key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridAxisSpec.dash": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_dash, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.dash key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_dash, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.dash key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridAxisSpec.enabled": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> AxisStyleOverrides.show_grid, resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). This is the per-axis grid enable F-L07-01/D4 (spec \u00a74.3) exists for: configure_grid(x=True, y=False) now takes effect instead of being dropped whole by the old agreeing-values guard."
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> AxisStyleOverrides.show_grid, resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). This is the per-axis grid enable F-L07-01/D4 (spec \u00a74.3) exists for: configure_grid(x=True, y=False) now takes effect instead of being dropped whole by the old agreeing-values guard."
   },
   "GridAxisSpec.opacity": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_opacity, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.opacity key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_opacity, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.opacity key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridAxisSpec.width": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_width, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.width key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> the target axis's own AxisStyleOverrides.grid_width, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.width key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
   },
   "GridConfigSpec.band_colors": {
     "honored": true,
@@ -293,27 +293,27 @@
   },
   "GridConfigSpec.color": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.colors.grid_color, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.color wins for that axis (D4, spec \u00a74.3)."
+    "reason": "apply_chart_config_to_theme grid block -> theme.colors.grid_color, render/config_apply/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.color wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.dash": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.grid.grid_dash, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.dash wins for that axis (D4, spec \u00a74.3)."
+    "reason": "apply_chart_config_to_theme grid block -> theme.grid.grid_dash, render/config_apply/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.dash wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.opacity": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.grid.grid_opacity, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.opacity wins for that axis (D4, spec \u00a74.3)."
+    "reason": "apply_chart_config_to_theme grid block -> theme.grid.grid_opacity, render/config_apply/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.opacity wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.width": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.sizes.grid_width, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.width wins for that axis (D4, spec \u00a74.3)."
+    "reason": "apply_chart_config_to_theme grid block -> theme.sizes.grid_width, render/config_apply/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.width wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.x": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> prep.axes.x's own AxisStyleOverrides (D4, spec \u00a74.3). Accepts both wire spellings: the historical bare bool (enable-only) and a GridAxisSpec object carrying enable + this axis's gridline style \u2014 see the GridAxisSpec.* entries."
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> prep.axes.x's own AxisStyleOverrides (D4, spec \u00a74.3). Accepts both wire spellings: the historical bare bool (enable-only) and a GridAxisSpec object carrying enable + this axis's gridline style \u2014 see the GridAxisSpec.* entries."
   },
   "GridConfigSpec.y": {
     "honored": true,
-    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> prep.axes.y's own AxisStyleOverrides (D4, spec \u00a74.3). Same two wire spellings as GridConfigSpec.x."
+    "reason": "apply_grid_config_to_axis_inputs (render/config_apply/mod.rs) -> prep.axes.y's own AxisStyleOverrides (D4, spec \u00a74.3). Same two wire spellings as GridConfigSpec.x."
   },
   "LegendStyleSpec.clip_height": {
     "honored": true,
@@ -325,11 +325,11 @@
   },
   "LegendStyleSpec.columns": {
     "honored": true,
-    "reason": "per-channel and chart-level both resolve in render/mod.rs::apply_legend_cascade_to_theme -> theme.legend.legend_columns, per-channel wins (D7 cascade repair, Task 7)."
+    "reason": "per-channel and chart-level both resolve in render/config_apply/mod.rs::apply_legend_cascade_to_theme -> theme.legend.legend_columns, per-channel wins (D7 cascade repair, Task 7)."
   },
   "LegendStyleSpec.direction": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.legend.legend_direction, resolved against the per-channel override by layout::legend::resolve_legend_direction and threaded into estimate_legend_size/estimate_legend_size_with_title (sizing) AND layout_colorbar (horizontal gradient bars) \u2014 D5, Task 7."
+    "reason": "apply_chart_config_to_theme -> theme.legend.legend_direction, resolved against the per-channel override by layout::legend::resolve_legend_direction and threaded into estimate_legend_size/estimate_legend_size_with_title (sizing) AND layout_colorbar (horizontal gradient bars) \u2014 D5, Task 7."
   },
   "LegendStyleSpec.disabled": {
     "honored": true,
@@ -369,7 +369,7 @@
   },
   "LegendStyleSpec.orient": {
     "honored": true,
-    "reason": "per-channel (color > x > y, prepare/legend.rs::per_channel_legend_specs) and chart-level configure_legend both resolve in render/mod.rs::apply_legend_cascade_to_theme -> theme.legend.legend_orient, per-channel wins (D7 cascade repair, Task 7). orient=\"none\" is a suppression instead, read at the SAME first-Some precedence by LegendStyleSpec::suppressed_by."
+    "reason": "per-channel (color > x > y, prepare/legend.rs::per_channel_legend_specs) and chart-level configure_legend both resolve in render/config_apply/mod.rs::apply_legend_cascade_to_theme -> theme.legend.legend_orient, per-channel wins (D7 cascade repair, Task 7). orient=\"none\" is a suppression instead, read at the SAME first-Some precedence by LegendStyleSpec::suppressed_by."
   },
   "LegendStyleSpec.padding": {
     "honored": true,
@@ -405,11 +405,11 @@
   },
   "LegendStyleSpec.title": {
     "honored": true,
-    "reason": "legend title 3-way resolution, render/mod.rs"
+    "reason": "legend title 3-way resolution, render/config_apply/mod.rs::effective_legend_title"
   },
   "LegendStyleSpec.title_font_size": {
     "honored": true,
-    "reason": "per-channel and chart-level both resolve in render/mod.rs::apply_legend_cascade_to_theme -> theme.typography.legend_title_font_size, per-channel wins (D7 cascade repair, Task 7)."
+    "reason": "per-channel and chart-level both resolve in render/config_apply/mod.rs::apply_legend_cascade_to_theme -> theme.typography.legend_title_font_size, per-channel wins (D7 cascade repair, Task 7)."
   },
   "LegendStyleSpec.title_padding": {
     "honored": true,
@@ -421,7 +421,7 @@
   },
   "LegendStyleSpec.values": {
     "honored": true,
-    "reason": "colorbar tick-label arm (layout/legend.rs::layout_color_legend) AND the categorical filter+order arm (render/mod.rs::apply_legend_values_to_entries, run after the color-config resync); unknown categorical names warn via RenderWarning::LegendValuesUnknown and are skipped (D6/F-L04-05, Task 7)."
+    "reason": "colorbar tick-label arm (layout/legend.rs::layout_color_legend) AND the categorical filter+order arm (render/config_apply/mod.rs::apply_legend_values_to_entries, run after the color-config resync); unknown categorical names warn via RenderWarning::LegendValuesUnknown and are skipped (D6/F-L04-05, Task 7)."
   },
   "LegendStyleSpec.zindex": {
     "honored": true,
@@ -429,50 +429,50 @@
   },
   "PaddingConfigSpec.auto": {
     "honored": true,
-    "reason": "apply_chart_config -> theme.padding.padding_auto -> layout::compute_layout's auto_padding_for_edge_ticks then auto_padding_for_axis_titles, composed sequentially and summed, then capped against the viewport via cap_auto_contribution (Task 9, D10, spec-review cycles 2 and 6): expands a side with no explicit override to contain a continuous axis's edge-tick-label overhang and/or recenter an overflowing axis title, render/mod.rs + layout/mod.rs. Opt-in (default false) end to end."
+    "reason": "apply_chart_config_to_theme -> theme.padding.padding_auto -> layout::compute_layout's auto_padding_for_edge_ticks then auto_padding_for_axis_titles, composed sequentially and summed, then capped against the viewport via cap_auto_contribution (Task 9, D10, spec-review cycles 2 and 6): expands a side with no explicit override to contain a continuous axis's edge-tick-label overhang and/or recenter an overflowing axis title, render/config_apply/mod.rs + layout/mod.rs. Opt-in (default false) end to end."
   },
   "PaddingConfigSpec.bottom": {
     "honored": true,
-    "reason": "apply_chart_config padding block -> theme.padding.padding_bottom, render/mod.rs"
+    "reason": "apply_chart_config_to_theme padding block -> theme.padding.padding_bottom, render/config_apply/mod.rs"
   },
   "PaddingConfigSpec.left": {
     "honored": true,
-    "reason": "apply_chart_config padding block -> theme.padding.padding_left, render/mod.rs"
+    "reason": "apply_chart_config_to_theme padding block -> theme.padding.padding_left, render/config_apply/mod.rs"
   },
   "PaddingConfigSpec.right": {
     "honored": true,
-    "reason": "apply_chart_config padding block -> theme.padding.padding_right, render/mod.rs"
+    "reason": "apply_chart_config_to_theme padding block -> theme.padding.padding_right, render/config_apply/mod.rs"
   },
   "PaddingConfigSpec.top": {
     "honored": true,
-    "reason": "apply_chart_config padding block -> theme.padding.padding_top, render/mod.rs"
+    "reason": "apply_chart_config_to_theme padding block -> theme.padding.padding_top, render/config_apply/mod.rs"
   },
   "TitleConfigSpec.anchor": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.typography.title_anchor"
+    "reason": "apply_chart_config_to_theme title block -> theme.typography.title_anchor"
   },
   "TitleConfigSpec.color": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.colors.title_color"
+    "reason": "apply_chart_config_to_theme title block -> theme.colors.title_color"
   },
   "TitleConfigSpec.font_size": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.typography.title_font_size"
+    "reason": "apply_chart_config_to_theme title block -> theme.typography.title_font_size"
   },
   "TitleConfigSpec.font_weight": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.typography.title_font_weight"
+    "reason": "apply_chart_config_to_theme title block -> theme.typography.title_font_weight"
   },
   "TitleConfigSpec.offset": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.typography.title_offset"
+    "reason": "apply_chart_config_to_theme title block -> theme.typography.title_offset"
   },
   "TitleConfigSpec.subtitle_color": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.colors.subtitle_color"
+    "reason": "apply_chart_config_to_theme title block -> theme.colors.subtitle_color"
   },
   "TitleConfigSpec.subtitle_font_size": {
     "honored": true,
-    "reason": "apply_chart_config title block -> theme.typography.subtitle_font_size"
+    "reason": "apply_chart_config_to_theme title block -> theme.typography.subtitle_font_size"
   }
 }
