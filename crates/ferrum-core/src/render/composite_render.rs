@@ -463,7 +463,7 @@ fn render_leaf(
         leaf.spec,
         &po.prep,
         &po.layout,
-        &po.effective_theme,
+        &po.applied.effective_theme,
         leaf.config,
         &mut po.warnings,
         leaf.chart_config,
@@ -488,23 +488,23 @@ fn capture_leaf_bundle(
     let color_scale = scene_build::resolve_legend_color_scale(
         leaf.spec,
         &po.prep,
-        &po.effective_theme,
+        &po.applied.effective_theme,
         leaf.chart_config,
     )?;
     // The legend projection (config passes 17–18 and 16) is READ off the
     // pipeline output, not recomputed: `prepare_and_layout` already ran it for
     // this same `po.prep`, which nothing mutates between there and here. It was
     // a verbatim three-line copy before #143, then a second call to the shared
-    // `resolve_leaf_legend_overrides`; carrying the value makes "one statement"
+    // `resolve_legend_overrides_and_title`; carrying the value makes "one statement"
     // into "one value" (design review rec 4).
     Ok(LeafLegendBundle {
         entries: po.prep.legend_entries.clone(),
         colorbar: po.prep.colorbar.clone(),
-        title: po.legend_title.clone(),
-        overrides: po.legend_overrides.clone(),
+        title: po.applied.legend_title.clone(),
+        overrides: po.applied.legend_overrides.clone(),
         aux: po.prep.aux_legends.clone(),
         color_scale,
-        theme: po.effective_theme.clone(),
+        theme: po.applied.effective_theme.clone(),
         merged_color_size: leaf_merges_color_size(leaf.spec),
     })
 }
@@ -5766,6 +5766,99 @@ mod tests {
             resolve.legend.color = legend_color;
         }
         node
+    }
+
+    /// **N1a + N1b.** The figure-legend band must carry the LEAF'S OWN resolved
+    /// legend title and style overrides — the values `apply_chart_config_pipeline`
+    /// produced (passes 16–18) and `PipelineOutput` carries — not the raw
+    /// pre-projection state on `prep` and not a default bundle.
+    ///
+    /// 14 tests reach `capture_leaf_bundle`, but before this one none asserted the
+    /// bundle's `title` or `overrides`, so two mutations survived: reading
+    /// `po.prep.legend_title` (the field-name default, which also breaks the
+    /// explicit `title=""` suppress) and `overrides: Default::default()` (which
+    /// silently drops every per-channel and `configure_legend` override from the
+    /// band). Both values are live downstream — `layout_band_legends` binds
+    /// `bundle.overrides`, and `draw_legend_band` reads
+    /// `bundle.overrides.style.label_font_size` — so this asserts through the
+    /// rendered scene rather than through the bundle struct.
+    #[test]
+    fn figure_legend_band_carries_the_leafs_resolved_title_and_style_overrides() {
+        use crate::render::chart_config::LegendStyleSpec;
+
+        // Per-channel `fm.Legend(title=…, label_font_size=…)` on the color channel.
+        // The title differs from the field name ("g") so N1a is observable, and the
+        // font size differs from the theme default so N1b is.
+        let mut spec = cat_color_spec();
+        spec.encoding.color.as_mut().unwrap().legend = Some(Box::new(LegendStyleSpec {
+            title: Some("Cultivar".into()),
+            label_font_size: Some(19.0),
+            ..Default::default()
+        }));
+        let theme = ThemeInputs::default();
+        assert_ne!(
+            theme.typography.label_font_size, 19.0,
+            "the override must differ from the theme default or N1b is unobservable"
+        );
+
+        let h0 = color_hold_with(spec.clone(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), theme.clone());
+        let h1 = color_hold_with(spec.clone(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), theme.clone());
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        // Same shared-color hconcat the sibling tests use, but with the leaf spec
+        // carrying the per-channel legend so the composite node agrees with the
+        // leaf inputs.
+        let mut node = composite(
+            CompositeLayout::Hconcat,
+            (0..2)
+                .map(|data| CompositeNode::Leaf { spec: Box::new(spec.clone()), data, label: None })
+                .collect(),
+        );
+        if let CompositeNode::Composite { resolve, .. } = &mut node {
+            resolve.color = Some(RM::Shared);
+        }
+        let (scene, _) = render_composite_scene(&node, &leaves, &theme).unwrap();
+
+        let texts: Vec<&SceneNode> = scene
+            .legend
+            .iter()
+            .filter(|n| matches!(n, SceneNode::Text { .. }))
+            .collect();
+        assert!(!texts.is_empty(), "the shared-color band must draw legend text");
+
+        // N1a: the band's title is the per-channel one, not the field name.
+        assert!(
+            texts.iter().any(|n| matches!(n, SceneNode::Text { content, .. } if content == "Cultivar")),
+            "figure band must render the leaf's RESOLVED legend title; nodes: {:?}",
+            texts.iter().filter_map(|n| match n {
+                SceneNode::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            }).collect::<Vec<_>>()
+        );
+        assert!(
+            !texts.iter().any(|n| matches!(n, SceneNode::Text { content, .. } if content == "g")),
+            "the raw field-name title must not reach the band once a per-channel \
+             title is set — that is the stale pre-projection value"
+        );
+
+        // N1b: the entry labels are sized by the per-channel override, which only
+        // reaches `draw_legend_band` through `bundle.overrides`.
+        let entry_fs: Vec<f64> = texts
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Text { content, style, .. } if content == "a" || content == "b" => {
+                    Some(style.font_size)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!entry_fs.is_empty(), "band must draw the categorical entry labels");
+        assert!(
+            entry_fs.iter().all(|fs| (fs - 19.0).abs() < 1e-6),
+            "every band entry label must take the per-channel label_font_size (19); \
+             got {entry_fs:?} — a default overrides bundle falls back to the theme's {}",
+            theme.typography.label_font_size
+        );
     }
 
     #[test]

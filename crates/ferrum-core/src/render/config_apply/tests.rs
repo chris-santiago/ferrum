@@ -2045,7 +2045,7 @@ mod pipeline_order_tests {
         );
     }
 
-    /// **M5.** `resolve_leaf_legend_overrides` projects the per-channel (level 2)
+    /// **M5.** `resolve_legend_overrides_and_title` projects the per-channel (level 2)
     /// `Legend(...)` bundle before `configure_legend` (level 3) fills what is
     /// still unset. The pre-existing cascade tests build their level-2 side as a
     /// hand-written `LegendOverrides` literal and call
@@ -2097,6 +2097,76 @@ mod pipeline_order_tests {
             applied.legend_overrides.style.row_padding,
             Some(9.0),
             "`configure_legend` must still fill what level 2 left unset"
+        );
+    }
+
+    /// **N2.** The tick re-sync pairs each axis with the tick count it was built
+    /// with. Those counts arrive as two adjacent `usize`, so nothing but ordering
+    /// tied each to its axis — swapping them at the call site survived the whole
+    /// suite. It is behavior-changing whenever the counts differ and a
+    /// resync-triggering field is set: `adjust_axis_ticks` re-derives
+    /// `tick_values_raw(tick_count)` and BAILS on a length mismatch against
+    /// `tick_labels`, so the mis-paired count silently drops `tick_extra` /
+    /// `tick_min_step` rather than failing.
+    ///
+    /// Written against the post-`TickResyncCtx` shape; RED against mis-pairing the
+    /// struct's `x_tick_count` / `y_tick_count` field initialisers.
+    #[test]
+    fn tick_resync_pairs_each_axis_with_its_own_tick_count() {
+        let (spec, _) = chart(ColorKind::None, None, false);
+        // OFF-GRID x data: `tick_extra` appends the DATA-DOMAIN boundaries only
+        // when they are not already tick values, so [1.0, 2.0, 3.0] would make it
+        // a silent no-op and the test vacuous.
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.3, 2.0, 2.7])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+        let axis_x = AxisConfigSpec {
+            style: AxisStyleSpec {
+                // Deliberately different from y's, so a swap is observable at all.
+                tick_count: Some(4),
+                tick_extra: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let axis_y = AxisConfigSpec {
+            style: AxisStyleSpec { tick_count: Some(9), ..Default::default() },
+            ..Default::default()
+        };
+        // Baseline: the same axes with tick_extra OFF, so the assertion below
+        // compares against this chart's real tick set rather than a guess.
+        let plain = ChartConfig {
+            axis_x: Some(AxisConfigSpec {
+                style: AxisStyleSpec { tick_count: Some(4), ..Default::default() },
+                ..Default::default()
+            }),
+            axis_y: Some(axis_y.clone()),
+            ..Default::default()
+        };
+        let (base, _, _) = run_pipeline(&spec, &batch, &plain);
+        let base_x = base.axes.x.tick_labels.len();
+
+        let config = ChartConfig {
+            axis_x: Some(axis_x),
+            axis_y: Some(axis_y),
+            ..Default::default()
+        };
+        let (prep, _applied, _warnings) = run_pipeline(&spec, &batch, &config);
+        assert!(
+            prep.axes.x.tick_labels.len() > base_x,
+            "axis_x's tick_extra must reach the x axis, which only happens if the \
+             x axis is re-synced against the x tick count (4), not the y one (9); \
+             got {} labels vs the tick_extra-off baseline {}",
+            prep.axes.x.tick_labels.len(),
+            base_x
         );
     }
 

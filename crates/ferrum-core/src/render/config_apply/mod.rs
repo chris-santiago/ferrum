@@ -21,15 +21,19 @@
 //!   13. Effective theme: `ChartConfig` over the caller's theme.
 //!   14. The three theme-backed legend fields' per-channel > chart-level cascade.
 //!   15. `grid`/`domain` show-defaults from the effective theme.
-//!   17. `LegendOverrides` projection from the prepared inputs.
-//!   18. `configure_legend` fill of the override slots still unset.
-//!   16. Effective legend title.
 //!
-//! The last tier really does run 17 → 18 → 16: the numbers name the precedence
-//! LAYERS (16 is the title layer, 17–18 the overrides layer), and the title
-//! resolution reads only `prep`, which 17 and 18 do not mutate. The list is
-//! written in CALL order rather than label order so that the one place the
-//! order is stated agrees with the code — see [`resolve_leaf_legend_overrides`].
+//! Tier 6 then executes its three passes in the order **17, 18, 16** — not
+//! 16, 17, 18. Written as a plain list because an ordered one would be
+//! renumbered by the renderer, which would silently undo the statement:
+//!
+//! - **Pass 17** — `LegendOverrides` projection from the prepared inputs.
+//! - **Pass 18** — `configure_legend` fill of the override slots still unset.
+//! - **Pass 16** — effective legend title.
+//!
+//! The numbers label the precedence LAYERS (16 is the title layer, 17–18 the
+//! overrides layer); the execution order is what this list shows. Resolving the
+//! title last is safe because it only reads `prep`, which 17 and 18 do not
+//! mutate — see [`resolve_legend_overrides_and_title`].
 //!
 //! That order is stated HERE and nowhere else. Each tier fn's name carries the
 //! precedence rule its passes implement, so a reorder has to argue with a
@@ -97,11 +101,13 @@ pub(in crate::render) fn apply_chart_config_pipeline(
     fill_axis_slots_specific_before_shared(&mut prep.axes, chart_config, warnings)?;
     resync_ticks_after_axis_merge(
         &mut prep.axes,
-        &prep.provisional_scales,
-        prep.x_tick_count,
-        prep.y_tick_count,
-        &prep.secondary_y_scales,
-        &prep.secondary_y_tick_counts,
+        TickResyncCtx {
+            scales: &prep.provisional_scales,
+            x_tick_count: prep.x_tick_count,
+            y_tick_count: prep.y_tick_count,
+            secondary_scales: &prep.secondary_y_scales,
+            secondary_tick_counts: &prep.secondary_y_tick_counts,
+        },
     );
     apply_color_config_then_filter_legend_entries(
         &mut prep.provisional_scales.color,
@@ -111,7 +117,7 @@ pub(in crate::render) fn apply_chart_config_pipeline(
         warnings,
     );
     let effective_theme = build_effective_theme_config_over_theme(prep, theme, chart_config);
-    let (legend_overrides, legend_title) = resolve_leaf_legend_overrides(prep, chart_config);
+    let (legend_overrides, legend_title) = resolve_legend_overrides_and_title(prep, chart_config);
     Ok(AppliedChartConfig { effective_theme, legend_overrides, legend_title })
 }
 
@@ -169,8 +175,8 @@ fn suppress_legend_if_chart_level_disabled(
 /// exemption (`scale_resolve/domain.rs`'s `apply_channel_shorthand_sort`).
 /// [`apply_axis_config_to_axis_input`] → [`apply_axis_style_to_axis_input`]
 /// derives `channel` from the axis's PHYSICAL dimension
-/// ([`AxisDimension::channel_token`](crate::layout::AxisOrient::dimension):
-/// `Top|Bottom → "x"`, else `"y"`), never from a user-written encoding channel.
+/// (`orient.dimension().channel_token()`: `Top|Bottom → "x"`, else `"y"`),
+/// never from a user-written encoding channel.
 /// And the config KEY the user actually typed here — `axis_x`/`axis_y` (or the
 /// shared `axis`) — is itself resolved-slot vocabulary: nothing on the Python
 /// side remaps `configure_axis(axis_x=…)` to `axis_y=` under `CoordFlip`
@@ -247,14 +253,39 @@ fn fill_axis_slots_specific_before_shared(
 /// The non-ordinal y labels/fractions were reversed in prepare, so the raw
 /// values are reversed in lockstep. The EXPLICIT labels are not reversed
 /// (unlike auto labels), so the value-order fractions align directly.
-fn resync_ticks_after_axis_merge(
-    axes: &mut crate::layout::AxesInput,
-    scales: &scale_resolve::ResolvedScales,
+/// Everything the tick re-sync READS, as one bundle: the resolved scales and
+/// the tick counts each axis was built with. Every field is a by-axis
+/// correspondence — `scales.x`/`x_tick_count` describe one axis,
+/// `scales.y`/`y_tick_count` the other, and `secondary_scales[i]` /
+/// `secondary_tick_counts[i]` the i-th secondary axis — which is exactly what
+/// six positional parameters could not say: the two bare `usize` were
+/// distinguishable only by argument order, and nothing but ordering tied each
+/// count to its scale. Grouped because they travel together and must stay
+/// index-aligned (`prepare` carries the secondary pair out of `build_axes` for
+/// this one consumer), not because they are merely adjacent. `axes` stays a
+/// separate `&mut` parameter: this bundle is the read-only half.
+#[derive(Clone, Copy)]
+struct TickResyncCtx<'a> {
+    /// The provisional scales the primary tick labels were derived from.
+    scales: &'a scale_resolve::ResolvedScales,
+    /// `resolve_axis_tick_count`'s output for the primary x axis.
     x_tick_count: usize,
+    /// `resolve_axis_tick_count`'s output for the primary y axis.
     y_tick_count: usize,
-    secondary_scales: &[scale_resolve::ScaleKind],
-    secondary_tick_counts: &[usize],
-) {
+    /// One scale per `axes.secondary_y` entry, same order.
+    secondary_scales: &'a [scale_resolve::ScaleKind],
+    /// One tick count per `axes.secondary_y` entry, same order.
+    secondary_tick_counts: &'a [usize],
+}
+
+fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickResyncCtx<'_>) {
+    let TickResyncCtx {
+        scales,
+        x_tick_count,
+        y_tick_count,
+        secondary_scales,
+        secondary_tick_counts,
+    } = ctx;
     let y_reversed = !matches!(scales.y, scale_resolve::ScaleKind::Ordinal(_));
     let (x_tc, y_tc) = (x_tick_count, y_tick_count);
     prepare::adjust_axis_ticks(&mut axes.x, &scales.x, x_tc, false);
@@ -384,11 +415,12 @@ fn build_effective_theme_config_over_theme(
 /// layers, the call order is what the code does, and the title resolution reads
 /// only `prep`, which the other two do not mutate.
 ///
-/// Its result is carried on `PipelineOutput` rather than recomputed, because
-/// `composite_render::capture_leaf_bundle` needs exactly these values for the
-/// same leaf. That was a verbatim three-line copy before #143, then a second
-/// call to this fn; it is now one value with one producer.
-pub(in crate::render) fn resolve_leaf_legend_overrides(
+/// Private, and no longer `_leaf_`-named: `composite_render::capture_leaf_bundle`
+/// used to call this directly (and, before #143, hand-copied its three lines),
+/// but it now reads the result off `PipelineOutput`. The only caller left is
+/// [`apply_chart_config_pipeline`], so there is no leaf-specific caller for the
+/// name to describe — one value, one producer, one caller.
+fn resolve_legend_overrides_and_title(
     prep: &prepare::PreparedInputs,
     chart_config: &ChartConfig,
 ) -> (LegendOverrides, Option<String>) {
@@ -690,7 +722,7 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
 ///
 /// Three-way resolution (D13 + v0.15.1), reached by both the single-chart path
 /// and `composite_render::capture_leaf_bundle`'s figure-legend seam (design §6)
-/// through [`resolve_leaf_legend_overrides`]: mirrors the axis-title contract in
+/// through [`resolve_legend_overrides_and_title`]: mirrors the axis-title contract in
 /// `prepare.rs`.
 ///   - `legend_overrides.title` absent (`None`)   → fall through to field-name default
 ///   - `legend_overrides.title = Some("")`        → explicit suppress; no text node, no margin

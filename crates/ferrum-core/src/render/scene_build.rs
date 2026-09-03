@@ -688,11 +688,12 @@ fn resolve_panel_scales(
     // Must run after scale resolution because `resolve_scales_with_outputs`
     // independently re-resolves the color scale for each panel, discarding the
     // provisional override applied to `prep.provisional_scales` in
-    // `prepare_and_layout`.
+    // `config_apply::apply_color_config_then_filter_legend_entries`.
     if let Some(ref cfg) = chart_config.color {
         // Warnings are emitted once, by the chart-level application in
-        // `prepare_and_layout`; this is the same config against the same scale,
-        // so reporting here would duplicate one warning per panel.
+        // `config_apply::apply_color_config_then_filter_legend_entries`; this is
+        // the same config against the same scale, so reporting here would
+        // duplicate one warning per panel.
         let _ = super::config_apply::apply_color_config_to_color_scale(&mut scales.color, cfg);
     }
 

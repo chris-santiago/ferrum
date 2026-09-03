@@ -2237,7 +2237,7 @@ mod axis_style_fill_from_tests {
     /// (higher-precedence values survive) AND owns `label_format` (the one field
     /// the per-channel path leaves `None`).
     #[test]
-    fn chart_level_fills_only_none_and_owns_label_format() {
+    fn chart_level_overwrites_no_claimed_slot_and_owns_label_format() {
         let spec = fully_populated_spec();
         // EVERY slot the `set(...)` helper routes is pre-claimed, with a value
         // distinct from `fully_populated_spec()`'s. Pre-setting only two of them
@@ -4379,7 +4379,8 @@ mod tests {
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
-        // The adjustment runs in prepare_and_layout; invoke it directly here.
+        // The adjustment runs in `config_apply::resync_ticks_after_axis_merge`;
+        // invoke it directly here.
         let tc = prep.x_tick_count;
         adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
         assert!(
@@ -4554,7 +4555,8 @@ mod tests {
         assert!(prep.axes.y.overrides.show_domain.unwrap_or(true), "y domain default true");
 
         // Chart-level configure_axis(grid=True, domain=True) applies to BOTH axes
-        // via the shared `axis` key, the same wire step `prepare_and_layout` runs.
+        // via the shared `axis` key, the same wire step
+        // `config_apply::fill_axis_slots_specific_before_shared` runs.
         let cfg = crate::render::chart_config::AxisConfigSpec {
             style: crate::render::chart_config::AxisStyleSpec {
                 grid: Some(true),

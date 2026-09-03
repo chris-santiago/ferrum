@@ -810,9 +810,7 @@ mod tests {
 // Task 20 — render_svg full pipeline orchestration (spec §6).
 // ---------------------------------------------------------------------------
 
-use crate::layout::{
-    compute_layout, CompositeLayoutSeam, LegendOverrides, LegendSuppression, ThemeInputs, Viewport,
-};
+use crate::layout::{compute_layout, CompositeLayoutSeam, LegendSuppression, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use chart_config::ChartConfig;
@@ -822,17 +820,17 @@ use chart_config::ChartConfig;
 struct PipelineOutput {
     prep: prepare::PreparedInputs,
     layout: crate::layout::LayoutResult,
-    effective_theme: ThemeInputs,
     warnings: Vec<RenderWarning>,
-    /// Passes 17–18 and 16 of the config pipeline
-    /// (`config_apply::resolve_leaf_legend_overrides`), carried out rather than
-    /// recomputed. `compute_layout` consumes them below; `composite_render`'s
-    /// figure-legend seam (`capture_leaf_bundle`) needs the SAME two values for
-    /// the same leaf and used to call the projection a second time on this very
-    /// `prep`. Carrying them makes the two uses one value, so they cannot
-    /// diverge (#143 remediation, design review rec 4).
-    legend_overrides: LegendOverrides,
-    legend_title: Option<String>,
+    /// The config pipeline's own product, carried WHOLE rather than unpacked
+    /// into three sibling fields here: `effective_theme` (passes 13–15) plus the
+    /// legend overrides and title (passes 17, 18, 16). `compute_layout` consumes
+    /// all three below, and `composite_render`'s figure-legend seam
+    /// (`capture_leaf_bundle`) needs the same values for the same leaf — it used
+    /// to recompute the legend pair from this very `prep`. Keeping the bundle
+    /// intact means `config_apply` owns its shape in one place: adding a field
+    /// there does not require a matching field and a copy line here
+    /// (#143 remediation, design review recs 4 and 5).
+    applied: config_apply::AppliedChartConfig,
 }
 
 /// Shared pipeline executed by both `render_svg` and `render_scene_json` (and,
@@ -871,7 +869,7 @@ fn prepare_and_layout(
     // `config_apply`'s module doc states — legend suppression, axis-slot fill
     // (most specific first), tick re-derivation, color config + legend-entry
     // rebuild, effective theme, legend-overrides projection.
-    let config_apply::AppliedChartConfig { effective_theme, legend_overrides, legend_title } =
+    let applied =
         config_apply::apply_chart_config_pipeline(&mut prep, theme, chart_config, &mut warnings)?;
 
     let metrics = font::FontdueMetrics::new();
@@ -902,15 +900,15 @@ fn prepare_and_layout(
         .unwrap_or_default();
     let layout = compute_layout(
         spec,
-        &effective_theme,
+        &applied.effective_theme,
         viewport,
         &prep.axes,
         &prep.facet_groups,
         &prep.legend_entries,
-        legend_title.clone(),
+        applied.legend_title.clone(),
         prep.colorbar.as_ref(),
         &metrics,
-        &legend_overrides,
+        &applied.legend_overrides,
         &prep.aux_legends,
         seam,
     )
@@ -919,7 +917,7 @@ fn prepare_and_layout(
         warnings.push(RenderWarning::Layout(w.clone()));
     }
 
-    Ok(PipelineOutput { prep, layout, effective_theme, warnings, legend_overrides, legend_title })
+    Ok(PipelineOutput { prep, layout, warnings, applied })
 }
 
 pub fn render_svg(
@@ -942,11 +940,11 @@ pub fn render_svg(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let PipelineOutput { prep, layout, effective_theme, mut warnings, .. } =
+    let PipelineOutput { prep, layout, applied, mut warnings } =
         prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let scene = scene_build::build_scene(
-        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config, None,
+        spec, &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
     )?;
     let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts);
 
@@ -998,11 +996,11 @@ pub fn render_scene_json(
         height: config.height.unwrap_or(viewport.height),
     };
 
-    let PipelineOutput { prep, layout, effective_theme, mut warnings, .. } =
+    let PipelineOutput { prep, layout, applied, mut warnings } =
         prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let mut scene = scene_build::build_scene(
-        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config, None,
+        spec, &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
     )?;
 
     // Extract large homogeneous mark batches as raw packed bytes, clearing
