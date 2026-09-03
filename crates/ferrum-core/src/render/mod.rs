@@ -1008,9 +1008,13 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
 
     // ── Padding overrides ─────────────────────────────────────────────────────
     // Per-side padding: map each supplied side directly to ThemeInputs.padding.*.
-    // `auto=true` (the Python default) is no longer a guard — it was previously
-    // blocking all padding overrides. The `auto` field is reserved for a future
-    // "auto-expand to fit labels" semantic; it does not disable explicit values.
+    // `auto=true` is not a guard — it does not block or disable explicit side
+    // values (an explicit side always wins, spec §4.7). It flips
+    // `theme.padding.padding_auto`, consumed at layout time by
+    // `layout::compute_layout` (D10, spec §4.7, F-L07-08) to expand an UNSET
+    // side enough to contain a continuous axis's edge-tick-label overhang
+    // and/or recenter an overflowing axis title — see
+    // `ThemePadding::padding_auto`'s own doc for the reader list.
     if let Some(ref pad) = config.padding {
         if let Some(top) = pad.top {
             theme.padding.padding_top = Some(top);
@@ -1023,6 +1027,9 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
         }
         if let Some(left) = pad.left {
             theme.padding.padding_left = Some(left);
+        }
+        if let Some(auto) = pad.auto {
+            theme.padding.padding_auto = auto;
         }
     }
 
@@ -4510,7 +4517,8 @@ mod chart_config_application_tests {
 
     #[test]
     fn apply_chart_config_padding_auto_does_not_block_explicit_sides() {
-        // auto=true (the Python default) must NOT block explicit side values.
+        // auto=true (opt-in; `False` is the Python default since spec-review
+        // cycle 2) must NOT block explicit side values.
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             padding: Some(PaddingConfigSpec {
@@ -4527,6 +4535,12 @@ mod chart_config_application_tests {
         assert!(theme.padding.padding_right.is_none());
         assert!(theme.padding.padding_bottom.is_none());
         assert!(theme.padding.padding_left.is_none());
+        // The one line this function actually adds to this block
+        // (render/mod.rs's `if let Some(auto) = pad.auto { theme.padding
+        // .padding_auto = auto; }`) — the plumbing this test exists for was
+        // previously covered only end to end from Python (spec-review
+        // cycle 6, S1).
+        assert!(theme.padding.padding_auto);
     }
 
     #[test]

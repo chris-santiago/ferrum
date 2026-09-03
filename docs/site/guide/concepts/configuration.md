@@ -346,9 +346,13 @@ chart.configure_grid(x=False, y=True, dash=[4, 4], color="#ddd")
 
 ## PaddingConfig
 
-Controls plot-area margins. Ferrum's auto-padding (enabled by default) expands margins
-when axis labels or annotations would otherwise be clipped. Use `PaddingConfig` to set
-minimum padding or to supply exact margins.
+Controls plot-area margins. `auto` is opt-in (default `False`). When `auto=True`, a
+side left unset (`None`) expands to keep a continuous axis's edge-tick label or axis
+title from clipping past the rendered viewport edge — it does not cover annotations
+or ordinal/nominal axis labels (which never overhang the plot edge), and a y-axis
+capped tight enough via `max_band` can still leave its own label or title outside the
+canvas on that axis. Use `PaddingConfig` to supply exact margins, optionally combined
+with `auto=True` for the sides you don't set.
 
 ```python
 from ferrum import PaddingConfig
@@ -358,7 +362,7 @@ PaddingConfig(
     right=40.0,
     bottom=60.0,
     left=80.0,
-    auto=True,    # still expand beyond these minimums if labels require it
+    auto=True,    # all four sides are set here, so auto has nothing left to expand
 )
 ```
 
@@ -370,12 +374,15 @@ PaddingConfig(
 | `right` | `float | None` | `None` | Right margin in pixels |
 | `bottom` | `float | None` | `None` | Bottom margin in pixels |
 | `left` | `float | None` | `None` | Left margin in pixels |
-| `auto` | `bool` | `True` | Auto-expand margins to fit labels and annotations |
+| `auto` | `bool` | `False` | Opt-in: expand an unset side to fit continuous-axis tick labels/titles |
 
 ### Notes
 
-- When `auto=True` and individual sides are set, the provided values act as minimums.
-- When `auto=False`, the provided values are used exactly; labels may clip.
+- A side you set explicitly is never touched by `auto` — explicit values are always
+  used exactly, on every side, regardless of `auto`. `auto` only ever expands a side
+  left at its default (`None`).
+- When `auto=False` (the default), unset sides fall back to the flat theme padding;
+  labels or titles may clip.
 
 ### Example: minimal axes with tight padding
 

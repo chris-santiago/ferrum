@@ -800,13 +800,14 @@ class TestOverrideMatchesItsTypedEquivalent:
         instance carries keys the caller never named.
 
         `PaddingConfig` is the one config class with such a default
-        (`auto: bool = True`), so `PaddingConfig(left=70).to_dict()` is
-        `{"auto": True, "left": 70.0}`. Merging that whole fragment injected an
-        unsolicited `auto` AND let it overwrite an explicit sibling leaf in
+        (`auto: bool = False`), so `PaddingConfig(left=70).to_dict()` is
+        `{"auto": False, "left": 70.0}`. Merging that whole fragment injected
+        an unsolicited `auto` AND let it overwrite an explicit sibling leaf in
         kwarg order — the two spellings below disagreed with each other and
         with the typed equivalent. Latent only because `PaddingConfigSpec.auto`
-        has no Rust consumer yet (Task 9 gives it one), which is exactly when a
-        payload-level divergence becomes a rendering one.
+        had no Rust consumer at the time this test was written (Task 9 gave
+        it one), which is exactly when a payload-level divergence becomes a
+        rendering one.
         """
         from ferrum._override_apply import build_payload
 

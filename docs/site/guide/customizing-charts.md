@@ -241,10 +241,16 @@ chart.configure_grid(
 
 ### `.configure_padding()`
 
-Controls plot-area margins. With `auto=True` (the default), ferrum expands margins
-automatically when labels or annotations would be clipped.
+Controls plot-area margins. `auto` is opt-in (default `False`); pass
+`auto=True` to expand a side left unset here when a continuous axis's
+edge-tick label or axis title would otherwise clip past the rendered
+viewport edge. A side you set explicitly is never touched by `auto`. It
+does not cover ordinal/nominal axis labels (which never overhang the plot
+edge) or annotations, and a y-axis capped tight enough via `max_band` can
+still leave its own label or title outside the canvas on that axis.
 
 ```python
+# All four sides are set here, so auto has nothing left to expand.
 chart.configure_padding(top=20, right=40, bottom=60, left=60, auto=True)
 ```
 

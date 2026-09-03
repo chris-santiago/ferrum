@@ -533,7 +533,7 @@ class ConfigureMixin:
         right: "float | None" = None,
         bottom: "float | None" = None,
         left: "float | None" = None,
-        auto: bool = True,
+        auto: bool = False,
     ):
         """Apply padding configuration.
 
@@ -541,8 +541,16 @@ class ConfigureMixin:
         ----------
         top, right, bottom, left : float, optional
             Minimum padding in pixels per side.
-        auto : bool, default True
-            Auto-expand margins to fit labels.
+        auto : bool, default False
+            Opt-in, per-side auto-expand (D10, spec §4.7): a side left
+            unset here is expanded to keep a continuous axis's edge-tick
+            label or axis title from clipping past the rendered viewport
+            edge. A side you *do* set is never touched by `auto` — an
+            explicit value always wins on its own side. Does not affect
+            ordinal/nominal axis labels (which never overhang the plot
+            edge) or annotations; a y-axis capped tight enough via
+            `max_band` can still leave its own label or title outside the
+            canvas on that axis.
 
         Returns
         -------

@@ -400,6 +400,10 @@ chart_unemp   = fm.Chart(unemp_df).mark_area().encode(...) + RECESSION_BAND
 
 ## How annotations interact with margins
 
-When `PaddingConfig.auto=True` (the default), ferrum expands plot margins automatically
-when a near-edge annotation would otherwise be clipped. To disable this behavior, set
-`auto=False` in `configure_padding`.
+`configure_padding(auto=True)` (opt-in; default `False`) expands a plot margin left
+unset to keep a continuous axis's edge-tick label or axis title from clipping past the
+rendered viewport edge — it does **not** account for annotations, and a y-axis capped
+tight enough via `max_band` can still leave its own label or title outside the canvas
+on that axis. A near-edge annotation (e.g. `ann.text` placed close to a plot boundary)
+can still be clipped; reserve room for it explicitly with `configure_padding(top=...,
+right=..., bottom=..., left=...)` instead.

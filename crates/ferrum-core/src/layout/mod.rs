@@ -244,7 +244,16 @@ impl std::fmt::Display for LayoutWarning {
 pub enum LayoutError {
     InvalidViewport { width: f64, height: f64 },
     InvalidFacetSpec(String),
-    PaddingExceedsViewport { padding: f64, viewport_dim: f64 },
+    /// `padding` and `side` are the CALLER'S actual value and the specific
+    /// side that overflowed (D10, spec §4.7, T6 quality-review repro:
+    /// `configure_padding(top=1e9)` previously reported the theme's default
+    /// 16 instead of the caller's 1e9). `side` names one of
+    /// `"top"|"right"|"bottom"|"left"` — the one whose resolved inset is
+    /// largest on the violated axis (width for left/right, height for
+    /// top/bottom), so a caller who only overrode one side always sees that
+    /// side named even when the other side of the same axis still carries
+    /// the theme default.
+    PaddingExceedsViewport { padding: f64, side: &'static str, viewport_dim: f64 },
     EmptyFacetGroups,
 }
 
@@ -255,8 +264,10 @@ impl std::fmt::Display for LayoutError {
                 write!(f, "invalid viewport: width={width}, height={height} (both must be > 0)"),
             LayoutError::InvalidFacetSpec(s) =>
                 write!(f, "invalid facet spec: {s}"),
-            LayoutError::PaddingExceedsViewport { padding, viewport_dim } =>
-                write!(f, "padding {padding} exceeds viewport dimension {viewport_dim}"),
+            LayoutError::PaddingExceedsViewport { padding, side, viewport_dim } => write!(
+                f,
+                "padding {side}={padding} exceeds viewport dimension {viewport_dim}"
+            ),
             LayoutError::EmptyFacetGroups =>
                 write!(f, "facet specified but facet_groups input is empty"),
         }
@@ -283,6 +294,20 @@ pub struct ThemePadding {
     pub padding_right: Option<f64>,
     pub padding_bottom: Option<f64>,
     pub padding_left: Option<f64>,
+    /// `padding.auto` (D10, spec §4.7, F-L07-08): when `true`, a side left
+    /// unset above (`padding_top`/etc. all `None`) is expanded — instead of
+    /// falling back to the flat [`padding`](Self::padding) default — to
+    /// contain a continuous axis's edge-tick-label overhang and/or recenter
+    /// an axis title that would otherwise render past the viewport edge.
+    /// Read by [`compute_layout`](super::compute_layout), which composes
+    /// every reader's correction SEQUENTIALLY and sums the result per side,
+    /// then caps it against the viewport (spec-review cycle 6 — an earlier
+    /// elementwise-max merge was unsound; see the composition note on
+    /// `compute_layout`'s own padding step and each reader's own doc for
+    /// why); a side the caller DID set is never touched (explicit always
+    /// wins — spec §4.7). Default `false`, so default output is
+    /// byte-identical.
+    pub padding_auto: bool,
     pub column_padding: f64,
     pub row_padding: f64,
     pub axis_title_padding: f64,
@@ -297,6 +322,7 @@ impl Default for ThemePadding {
             padding_right: None,
             padding_bottom: None,
             padding_left: None,
+            padding_auto: false,
             column_padding: 12.0,
             row_padding: 12.0,
             axis_title_padding: 8.0,
@@ -606,6 +632,41 @@ fn strip_band_size(theme: &ThemeInputs, metrics: &dyn TextMetrics) -> f64 {
 /// threaded between `split_panels` and `layout_panel_axes`.
 type PanelRect = (u32, u32, Rect, Option<FacetKey>, Option<FacetKey>);
 
+/// The chart-level title band's height: title line height, plus a subtitle
+/// line height when present, plus the resolved offset. Shared by every
+/// consumer that needs this quantity — `reserve_chart_title` (the actual
+/// reservation), and `auto_padding_for_edge_ticks`'s and
+/// `auto_padding_for_axis_titles`'s top-cushion estimates (padding.auto,
+/// D10, spec §4.7) — so hand-copying it at each call site can never let an
+/// estimate silently drift from what `reserve_chart_title` actually
+/// reserves. Returns `0.0` when the chart has no title.
+fn chart_title_band_height(
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+) -> f64 {
+    let Some(title_spec) = spec.title.as_ref() else {
+        return 0.0;
+    };
+    let resolved_font_size = title_spec
+        .font_size
+        .unwrap_or(theme.typography.title_font_size);
+    let resolved_offset = title_spec
+        .offset
+        .unwrap_or(theme.typography.title_offset);
+    let title_line_h = metrics.line_height(resolved_font_size);
+    let subtitle_font_size = title_spec
+        .subtitle_font_size
+        .or(theme.typography.subtitle_font_size)
+        .unwrap_or(resolved_font_size * 0.85);
+    let subtitle_line_h = if title_spec.subtitle.is_some() {
+        metrics.line_height(subtitle_font_size)
+    } else {
+        0.0
+    };
+    title_line_h + subtitle_line_h + resolved_offset
+}
+
 /// 400 stage 1 — reserve the chart-level (top-of-SVG) title band off the top of
 /// `inner` (Themes-T2.5a; Schwabish SB1 adds the subtitle line). Returns the
 /// placed title (or `None`) and the remaining rect. Pure extraction of the
@@ -623,9 +684,6 @@ fn reserve_chart_title(
     let resolved_font_size = title_spec
         .font_size
         .unwrap_or(theme.typography.title_font_size);
-    let resolved_offset = title_spec
-        .offset
-        .unwrap_or(theme.typography.title_offset);
     let resolved_anchor = match title_spec.anchor.as_deref() {
         Some("middle") => TextAnchor::Middle,
         Some("end")    => TextAnchor::End,
@@ -642,7 +700,7 @@ fn reserve_chart_title(
     } else {
         0.0
     };
-    let band_h = title_line_h + subtitle_line_h + resolved_offset;
+    let band_h = chart_title_band_height(spec, theme, metrics);
     let (band, rest) = inner.split_top(band_h);
     let x = match resolved_anchor {
         TextAnchor::Start => band.x,
@@ -928,6 +986,438 @@ fn reserve_axis_bands(
     });
 
     (plot_region, x_label_band, secondary_y_bands)
+}
+
+/// The four sides' non-auto fallback padding — an explicit side if the
+/// caller set one, else the theme's flat default. This is the "floor"
+/// `padding.auto` (D10) never lowers and never needs to reduce: every
+/// auto-padding reader starts from it, and `compute_layout`'s own feasibility
+/// cap (spec-review cycle 6, finding 2) treats it as the space auto must
+/// never encroach on, so all three read the identical quantity instead of
+/// each re-deriving `padding_<side>.unwrap_or(padding)` by hand.
+fn base_padding_insets(theme: &ThemeInputs) -> Inset {
+    Inset {
+        top: theme.padding.padding_top.unwrap_or(theme.padding.padding),
+        right: theme.padding.padding_right.unwrap_or(theme.padding.padding),
+        bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
+        left: theme.padding.padding_left.unwrap_or(theme.padding.padding),
+    }
+}
+
+/// Scales `extra_low`/`extra_high` — an already-computed TOTAL `padding.auto`
+/// contribution for one axis (left/right or top/bottom, after every
+/// auto-padding reader has been combined) — down so applying it can never
+/// convert a chart that renders at `auto=false` into a
+/// `LayoutError::PaddingExceedsViewport` refusal (spec-review cycle 6,
+/// finding 2: `recentering_padding`'s feasible branch is intentionally
+/// unbounded in isolation — it solves for whatever shift the title needs,
+/// with no notion of a shared budget — so nothing capped the MERGED total
+/// against the viewport it was being added to; a large enough `extra`
+/// could collapse the inner rect, and the resulting error would then name
+/// a padding value the caller never set, undercutting
+/// [`LayoutError::PaddingExceedsViewport`]'s own "report the caller's
+/// actual value" contract).
+///
+/// `fixed_low`/`fixed_high` are the axis's [`base_padding_insets`] — what
+/// this axis's inset would be at `auto=false`, which auto never touches.
+/// If the floor ALONE already fails to leave [`MIN_PANEL_DIM`] of `span`,
+/// that is a pre-existing failure auto did not cause and cannot fix:
+/// returns `(0.0, 0.0)` so auto contributes nothing and the render fails —
+/// or doesn't — exactly as it would without auto, with the same message.
+/// Otherwise scales `extra_low`/`extra_high` down PROPORTIONALLY
+/// (preserving which side needed more, just less of it) so their sum
+/// leaves at least `MIN_PANEL_DIM` of `span` free; when they already fit,
+/// returns them unchanged. This is "best-effort": when the full correction
+/// doesn't fit, auto applies the largest one that does rather than either
+/// refusing or overshooting into a refusal.
+fn cap_auto_contribution(
+    fixed_low: f64,
+    fixed_high: f64,
+    extra_low: f64,
+    extra_high: f64,
+    span: f64,
+) -> (f64, f64) {
+    let budget = span - fixed_low - fixed_high - MIN_PANEL_DIM;
+    if budget <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let desired = extra_low + extra_high;
+    if desired <= budget {
+        return (extra_low, extra_high);
+    }
+    let scale = budget / desired;
+    (extra_low * scale, extra_high * scale)
+}
+
+/// The y-axis gutter width `padding.auto` (D10) treats as the "cushion"
+/// already available on whichever side the y-axis sits: label band + title
+/// gutter, clamped through `clamp_axis_band` exactly like
+/// `reserve_axis_bands` clamps its own `y_band` (spec-review cycle 2 fix —
+/// the cushion estimate previously used the UNCLAMPED sum, so
+/// `fm.Axis(max_band=...)` capping the real gutter smaller than this
+/// estimate made the cushion look bigger than it really is, silently
+/// under-reserving `extra_left`/`extra_right` below). Shared by
+/// `auto_padding_for_edge_ticks` and `auto_padding_for_axis_titles` so the
+/// two auto-padding passes can never compute two different notions of "how
+/// much of the left/right margin is already spoken for by the y-axis."
+fn clamped_y_gutter(theme: &ThemeInputs, axes: &AxesInput, metrics: &dyn TextMetrics) -> f64 {
+    let y_label_font_size = axes
+        .y
+        .overrides
+        .label_font_size
+        .unwrap_or(theme.typography.label_font_size);
+    let raw = axis::compute_y_label_band_width(
+        &axes.y, y_label_font_size, metrics, axes.y.tick_size(theme), axes.show_y,
+    ) + axis::compute_y_title_width(
+        &axes.y, theme.typography.title_font_size, theme.padding.axis_title_padding, metrics,
+    );
+    clamp_axis_band(raw, axes.y.overrides.min_band, axes.y.overrides.max_band)
+}
+
+/// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
+/// per side, to contain a CONTINUOUS axis's first/last tick-label OVERHANG
+/// past the plot's own edge. (Axis TITLE overflow is a separate, sibling
+/// correction — see [`auto_padding_for_axis_titles`]. `compute_layout`
+/// solves THIS pass first, against the untouched base, then solves the
+/// title pass against the base this pass leaves behind and sums the two —
+/// see the composition note on `compute_layout`'s own padding step for why
+/// an earlier elementwise-max merge was unsound.)
+///
+/// A continuous scale places its ticks uniformly across the plot rect's own
+/// extent (`AxisInput::tick_projection`), so the last x-tick sits at
+/// (approximately) the plot's own right edge; its label, centered on that
+/// pixel (`text-anchor="middle"`, flat/unrotated), has HALF its rendered
+/// width extending PAST that edge. Nothing reserves that space today — the
+/// theme's flat default (16px) is not necessarily enough for a long numeric
+/// label (`"1,000,000"`), so the label clips past the canvas edge. The same
+/// happens in the perpendicular direction for a continuous y-axis's
+/// topmost tick (using half a line-height as a conservative, font-agnostic
+/// proxy for a label's vertical half-extent, since text baselines aren't
+/// exactly centered).
+///
+/// Padding is the right lever here specifically because the overhang is
+/// anchored relative to the PLOT's own edge, which padding controls
+/// directly (shrinking the plot moves its edge — and therefore the tick's
+/// pixel position — away from the canvas edge, opening exactly the room
+/// the overhang needs).
+///
+/// Scoped to continuous axes only (`tick_projection.is_some()`): an
+/// ordinal/nominal axis places ticks at BAND-SLOT centers, inset from the
+/// plot edges by construction, with no equivalent overhang. Scoped to flat
+/// (unrotated) labels: an explicit nonzero `label_angle` override skips
+/// this correction — a rotated label's "end"-anchored geometry does not
+/// overhang symmetrically the way a "middle"-anchored flat label does, and
+/// already has the cascade's own (unrelated) protections; a
+/// CASCADE-chosen (not override-declared) rotation is not visible here
+/// (the cascade runs downstream, inside `reserve_axis_bands`/
+/// `layout_x_axis`), so this may occasionally over-pad a chart the cascade
+/// ends up rotating anyway — safe-direction, never under-pads. Right-side
+/// x overhang ignores `secondary_y` bands and the y-vertical corrections
+/// ignore an `x`-axis drawn `orient="top"` — both documented, safe-
+/// direction gaps (may occasionally over-pad in those combinations, never
+/// under-pads) rather than attempts at pixel-exact reservation, matching
+/// this module's established "over-reservation is acceptable, under-
+/// reservation is the bug" tradeoff (see `reserve_axis_bands`'s own doc).
+fn auto_padding_for_edge_ticks(
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    axes: &AxesInput,
+    metrics: &dyn TextMetrics,
+) -> Inset {
+    // The non-auto fallback for each side — mirrors `compute_layout`'s own
+    // `inset` computation exactly (an explicit side stays exactly this;
+    // auto only ever adds on top of it below).
+    let base = base_padding_insets(theme);
+    let (base_left, base_right, base_top) = (base.left, base.right, base.top);
+
+    let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
+    let y_label_font_size = axes
+        .y
+        .overrides
+        .label_font_size
+        .unwrap_or(theme.typography.label_font_size);
+    let y_gutter = clamped_y_gutter(theme, axes, metrics);
+
+    let x_label_font_size = axes
+        .x
+        .overrides
+        .label_font_size
+        .unwrap_or(theme.typography.label_font_size);
+    let x_flat = axes.x.overrides.label_angle.is_none_or(|a| a == 0.0);
+    let x_continuous = axes.x.tick_projection.is_some();
+    let (extra_left, extra_right) =
+        if axes.show_x && axes.x.show_labels() && x_continuous && x_flat {
+            match (axes.x.tick_labels.first(), axes.x.tick_labels.last()) {
+                (Some(first), Some(last)) => {
+                    let half_first = metrics.measure_width(first, x_label_font_size) / 2.0;
+                    let half_last = metrics.measure_width(last, x_label_font_size) / 2.0;
+                    let left_cushion = base_left + if y_on_right { 0.0 } else { y_gutter };
+                    let right_cushion = base_right + if y_on_right { y_gutter } else { 0.0 };
+                    ((half_first - left_cushion).max(0.0), (half_last - right_cushion).max(0.0))
+                }
+                _ => (0.0, 0.0),
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+    // Top only: the bottom cushion is `base_bottom + x_label_band +
+    // x_title_gutter`, and a shown, labeled x-axis's OWN band reservation
+    // (`estimate_x_label_band`'s flat branch: at minimum `tick_size +
+    // line_h`) already exceeds a y-label's half-line-height in every
+    // realistic combination, so a bottom correction would never fire —
+    // computing it would need this function to duplicate
+    // `estimate_x_label_band`'s slot-width estimate for no practical
+    // benefit. The top cushion (`base_top + the chart title band`, if any)
+    // has no such guaranteed floor when there's no chart title, so it can
+    // genuinely need a correction.
+    let y_flat = axes.y.overrides.label_angle.is_none_or(|a| a == 0.0);
+    let y_continuous = axes.y.tick_projection.is_some();
+    let extra_top = if axes.show_y && axes.y.show_labels() && y_continuous && y_flat
+        && !axes.y.tick_labels.is_empty()
+    {
+        let half_line = metrics.line_height(y_label_font_size) / 2.0;
+        let top_cushion = base_top + chart_title_band_height(spec, theme, metrics);
+        (half_line - top_cushion).max(0.0)
+    } else {
+        0.0
+    };
+
+    Inset { top: extra_top, right: extra_right, bottom: 0.0, left: extra_left }
+}
+
+/// The minimal `(extra_low, extra_high)` pair of ADDITIONAL padding needed
+/// on the low-coordinate side (left/top) and high-coordinate side
+/// (right/bottom) of one axis so a CENTER-anchored element of half-extent
+/// `half_extent`, whose baseline center sits at `baseline_center` along a
+/// `span`-long viewport axis, no longer overflows either edge.
+///
+/// Derivation (spec-review cycle 2, F-L07-08 finding 1 — the symmetric-only
+/// derivation this replaces incorrectly concluded a centered element could
+/// NEVER be rescued by padding; that holds only when both sides expand by
+/// the SAME amount): expanding the low side's padding by `x` shifts the
+/// element's center by `+x/2`; expanding the high side's by `y` shifts it
+/// by `-y/2` (`layout_x_axis`/`layout_y_axis` anchor a title at
+/// `panel_area.{x,y} + panel_area.{w,h}/2`, and each unit of low-side
+/// padding both pushes the panel's low edge out by 1 and leaves its high
+/// edge fixed, so the center moves half as much). Requiring both edges to
+/// land within `[0, span]` after a shift `s = (extra_low - extra_high)/2`
+/// gives:
+///
+/// - low edge:  `baseline_center + s - half_extent >= 0`  →  `s >= half_extent - baseline_center`
+/// - high edge: `baseline_center + s + half_extent <= span` → `s <= span - baseline_center - half_extent`
+///
+/// This pair is satisfiable (some shift fixes BOTH edges at once) exactly
+/// when the lower bound does not exceed the upper bound, which simplifies
+/// to `2*half_extent <= span` — the element is no wider than the viewport
+/// axis itself. When satisfiable, the MINIMAL sufficient shift (added to
+/// only one side, leaving the other side's `extra` at `0`) is used, so an
+/// already-fitting element gets `(0.0, 0.0)`. When not satisfiable — the
+/// element is wider than the viewport itself — no padding arrangement can
+/// eliminate all clipping (this is the genuine, narrow residual: NOT "any
+/// centered element," only one wider than the canvas), and this returns
+/// `(0.0, 0.0)` rather than adding unbounded padding that cannot help and
+/// would risk turning a "renders with a clipped element" chart into a
+/// `PaddingExceedsViewport` refusal.
+/// Whether [`recentering_padding`] can eliminate ALL clipping for a
+/// center-anchored element of half-extent `half_extent` somewhere within a
+/// `span`-long viewport axis — independent of `baseline_center` (the
+/// `2*half_extent <= span` bound below the derivation cancels it out; see
+/// `recentering_padding`'s own doc for the full derivation). Split out
+/// (spec-review cycle 7, finding 1) because `recentering_padding`'s own
+/// `(extra_low, extra_high)` output is `(0.0, 0.0)` in TWO different
+/// situations a caller composing it with another auto-padding pass must
+/// tell apart: "already centered, nothing to do" and "genuinely too wide
+/// to ever fully fit" (the documented residual). Only the second is a
+/// signal that a same-axis pass's own contribution must be suppressed too
+/// — see `compute_layout`'s use of this via
+/// [`auto_padding_for_axis_titles`]'s `x_infeasible`/`y_infeasible` flags.
+fn recentering_is_feasible(half_extent: f64, span: f64) -> bool {
+    2.0 * half_extent <= span
+}
+
+fn recentering_padding(baseline_center: f64, half_extent: f64, span: f64) -> (f64, f64) {
+    if !recentering_is_feasible(half_extent, span) {
+        return (0.0, 0.0);
+    }
+    let low_bound = half_extent - baseline_center;
+    let high_bound = span - baseline_center - half_extent;
+    let shift = if low_bound > 0.0 {
+        low_bound
+    } else if high_bound < 0.0 {
+        high_bound
+    } else {
+        0.0
+    };
+    if shift > 0.0 {
+        (2.0 * shift, 0.0)
+    } else {
+        (0.0, -2.0 * shift)
+    }
+}
+
+/// `padding.auto` (D10, spec §4.7, F-L07-08): the extra outer margin needed,
+/// per side, to RECENTER an axis title that would otherwise clip past the
+/// viewport edge — the sibling correction to
+/// [`auto_padding_for_edge_ticks`] (tick-label overhang). Both axis titles
+/// are center-anchored on the plot rect (`layout_x_axis`/`layout_y_axis`'s
+/// `anchor_x`/`anchor_y`), which is why a naive SYMMETRIC padding expansion
+/// cannot help (it shrinks the plot without moving a centered title's
+/// on-screen position — see [`recentering_padding`]'s doc for the full
+/// derivation) — but an ASYMMETRIC one can, and does, by shifting the
+/// plot's (and therefore the title's) center away from the edge it would
+/// otherwise overflow. Only a title wider than the viewport itself is a
+/// genuine residual (see [`recentering_padding`]).
+///
+/// `base` is the outer padding to solve against — NOT re-derived from
+/// `theme.padding` here (spec-review cycle 6, finding 1): `compute_layout`
+/// passes the padding AFTER `auto_padding_for_edge_ticks`'s own correction
+/// is folded in, so this function's solve — the last word on outer
+/// padding, since nothing after it adds more — sees the geometry the tick
+/// pass actually leaves behind, instead of the tick-naive base. Merging
+/// two independently-against-the-untouched-base solutions by elementwise
+/// max was unsound here specifically because [`recentering_padding`]
+/// solves for a DIFFERENCE between two sides, not an independent minimum
+/// per side like the tick pass: a tick-only expansion on one side silently
+/// shifts the center this function would otherwise have recentered
+/// correctly, re-introducing the exact clip this function exists to
+/// remove. Sequential composition (ticks, then titles against the
+/// tick-adjusted base) is sound because the tick pass's own guarantee is
+/// monotone under later additions on either side — solving titles last,
+/// against the settled result, is the only order nothing downstream can
+/// invalidate.
+///
+/// Gated on `axes.show_x`/`axes.show_y` — mirrors
+/// `auto_padding_for_edge_ticks`'s own gate (spec-review cycle 6, finding
+/// 3): `AxisInput.title` is populated independently of the chart-level
+/// show flag, so without this gate a `.axis(x=False)` chart with a title
+/// set would still pay for recentering a title `layout_panel_axes` never
+/// draws.
+///
+/// Reuses [`clamped_y_gutter`] (spec-review cycle 2 fix, same `max_band`
+/// gap as `auto_padding_for_edge_ticks`) for the x-title's left/right
+/// baseline-center estimate, and the x-axis's own clamped band (its label
+/// band plus title gutter, via the same `clamp_axis_band` `reserve_axis_bands`
+/// applies) for the y-title's top/bottom baseline-center estimate. Both
+/// estimates ignore the legend gutter and secondary-y bands (documented,
+/// disclosed gap, sign corrected spec-review cycle 6: ignoring a real
+/// right-side legend or secondary-y band makes `baseline_center` LARGER
+/// than the true plot center, which asks the solver for MORE right
+/// padding than actually needed and can push the title further past its
+/// LEFT edge than intended — an over-correction risk on the title's
+/// opposite side, not the under-correction this doc previously claimed).
+/// `auto_padding_for_edge_ticks`'s own `orient="top"` gap does NOT apply
+/// here: this function's y-title estimate computes `x_on_top` and folds
+/// the x-band into `plot_y`/`plot_h` on both orientations (see the
+/// `x_on_top` branch below), so it is correct for `orient="top"` as
+/// written.
+///
+/// Also reports, per axis, whether that axis's title is in the genuine
+/// residual regime (title wider than the viewport itself,
+/// `!recentering_is_feasible`) via `AxisTitleAutoPadding::x_infeasible`/
+/// `y_infeasible` — `compute_layout` needs this (spec-review cycle 7,
+/// finding 1): this function's own `(extra_low, extra_high)` for that axis
+/// is `(0.0, 0.0)` either way in that regime, but a same-axis tick-pass
+/// contribution folded into `base` is NOT zero and, being asymmetric,
+/// still shifts the title's center with nothing here able to counteract
+/// it — see `compute_layout`'s composition step for how the flag is used.
+fn auto_padding_for_axis_titles(
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    axes: &AxesInput,
+    metrics: &dyn TextMetrics,
+    base: Inset,
+) -> AxisTitleAutoPadding {
+    let (base_left, base_right, base_top, base_bottom) = (base.left, base.right, base.top, base.bottom);
+
+    let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
+    let y_gutter = clamped_y_gutter(theme, axes, metrics);
+    let plot_w = (viewport.width - base_left - base_right - y_gutter).max(0.0);
+
+    let (extra_left, extra_right, x_infeasible) = match (axes.show_x, axes.x.title.as_deref()) {
+        (true, Some(text)) => {
+            let plot_x = base_left + if y_on_right { 0.0 } else { y_gutter };
+            let baseline_center = plot_x + plot_w / 2.0;
+            let font_size = axes
+                .x
+                .overrides
+                .title_font_size
+                .unwrap_or(theme.typography.title_font_size);
+            let half_w = metrics.measure_width(text, font_size) / 2.0;
+            let (l, r) = recentering_padding(baseline_center, half_w, viewport.width);
+            (l, r, !recentering_is_feasible(half_w, viewport.width))
+        }
+        _ => (0.0, 0.0, false),
+    };
+
+    let (extra_top, extra_bottom, y_infeasible) = match (axes.show_y, axes.y.title.as_deref()) {
+        (true, Some(text)) => {
+            let x_label_font_size = axes
+                .x
+                .overrides
+                .label_font_size
+                .unwrap_or(theme.typography.label_font_size);
+            let n_labels = axes.x.tick_labels.len().max(1);
+            let x_label_band = if axes.show_x {
+                axis::estimate_x_label_band(
+                    &axes.x.tick_labels,
+                    x_label_font_size,
+                    axes.x.overrides.label_angle,
+                    metrics,
+                    plot_w / n_labels as f64,
+                    theme.cull_threshold,
+                    axes.x.overrides.label_padding,
+                    axes.x.tick_size(theme),
+                    axes.x.show_labels(),
+                )
+            } else {
+                0.0
+            };
+            let x_title_gutter = axis::compute_x_title_width(
+                &axes.x, theme.typography.title_font_size, theme.padding.axis_title_padding, metrics,
+            );
+            let x_band = clamp_axis_band(
+                x_label_band + x_title_gutter,
+                axes.x.overrides.min_band,
+                axes.x.overrides.max_band,
+            );
+            let chart_title_h = chart_title_band_height(spec, theme, metrics);
+            let x_on_top = matches!(axes.x.orient, AxisOrient::Top);
+            let plot_y = base_top + chart_title_h + if x_on_top { x_band } else { 0.0 };
+            let plot_h =
+                (viewport.height - base_top - base_bottom - chart_title_h - x_band).max(0.0);
+            let baseline_center = plot_y + plot_h / 2.0;
+            let font_size = axes
+                .y
+                .overrides
+                .title_font_size
+                .unwrap_or(theme.typography.title_font_size);
+            // The y-axis title renders rotated -90°, so its measured WIDTH
+            // (unrotated) is the VERTICAL extent it actually occupies.
+            let half_h = metrics.measure_width(text, font_size) / 2.0;
+            let (t, b) = recentering_padding(baseline_center, half_h, viewport.height);
+            (t, b, !recentering_is_feasible(half_h, viewport.height))
+        }
+        _ => (0.0, 0.0, false),
+    };
+
+    AxisTitleAutoPadding {
+        inset: Inset { top: extra_top, right: extra_right, bottom: extra_bottom, left: extra_left },
+        x_infeasible,
+        y_infeasible,
+    }
+}
+
+/// [`auto_padding_for_axis_titles`]'s return shape: the extra `Inset` it
+/// computed, plus (spec-review cycle 7, finding 1) per-axis feasibility
+/// flags `compute_layout` uses to suppress a same-axis
+/// [`auto_padding_for_edge_ticks`] contribution when this pass's own
+/// correction is in the genuine residual regime — see both functions' docs.
+struct AxisTitleAutoPadding {
+    inset: Inset,
+    x_infeasible: bool,
+    y_infeasible: bool,
 }
 
 /// 400 stage 4 — split `plot_region` into facet cells (or a single panel),
@@ -1393,19 +1883,112 @@ pub fn compute_layout(
         }
     }
 
-    // 2. Apply outer padding.
+    // 2. Apply outer padding. `padding.auto` (D10, spec §4.7, F-L07-08)
+    // expands a side with no explicit override to also contain (a) a
+    // continuous axis's edge-tick-label overhang, and (b) an axis title
+    // that would otherwise clip past the viewport edge — composed
+    // SEQUENTIALLY, not merged by elementwise max (spec-review cycle 6,
+    // finding 1): the tick pass is solved first, against the untouched
+    // base, and its own guarantee is monotone under later additions on
+    // either side; the title pass is solved LAST, against the
+    // tick-adjusted base (`auto_padding_for_axis_titles`'s `base`
+    // parameter), so its recentering solve sees the geometry the tick pass
+    // actually leaves behind and is the final word nothing downstream
+    // perturbs. Merging two independently-against-the-untouched-base
+    // solutions by max was unsound specifically because the title solver
+    // is a function of the DIFFERENCE between its two sides
+    // (`recentering_padding`), not an independent per-side minimum like
+    // the tick pass — a tick-only expansion on one side silently moved the
+    // center the title pass had solved for, re-clipping a title auto
+    // claims to protect. The combined per-side total is then capped
+    // against the viewport (finding 2, `cap_auto_contribution`): auto is
+    // best-effort and must never convert a chart that renders at
+    // `auto=false` into a `PaddingExceedsViewport` refusal, or report a
+    // padding value the caller never set. Computed once, only when
+    // requested, so a non-auto chart's inset is unchanged.
+    //
+    // Spec-review cycle 7, finding 1: when a title's own recentering is
+    // INFEASIBLE (`AxisTitleAutoPadding::x_infeasible`/`y_infeasible` —
+    // the title is wider than the viewport itself, the documented genuine
+    // residual), its own contribution is already `(0.0, 0.0)`, but the
+    // tick pass's contribution on that SAME axis is not: being asymmetric
+    // by construction, it still shifts the plot's (and title's) center,
+    // and the title pass has no way to counteract a shift it declined to
+    // solve for. Measured live: a same-axis tick correction alone turned a
+    // 9.51px title clip into a 26.53px one — auto=true strictly worse than
+    // auto=false, the exact regression `cap_auto_contribution`'s
+    // best-effort contract forbids. Suppressing that axis's tick
+    // contribution too (not just the title's) restores auto=false's exact
+    // geometry on that axis — byte-identical, and therefore never worse —
+    // instead of applying half of a composition that cannot be completed.
     let viewport_rect = viewport.into_rect();
+    let base = base_padding_insets(theme);
+    let extra = if theme.padding.padding_auto {
+        let ticks = auto_padding_for_edge_ticks(spec, theme, axes, metrics);
+        let base_after_ticks = Inset {
+            top: base.top + ticks.top,
+            right: base.right + ticks.right,
+            bottom: base.bottom + ticks.bottom,
+            left: base.left + ticks.left,
+        };
+        let titles = auto_padding_for_axis_titles(spec, theme, viewport, axes, metrics, base_after_ticks);
+        let ticks = Inset {
+            top: if titles.y_infeasible { 0.0 } else { ticks.top },
+            right: if titles.x_infeasible { 0.0 } else { ticks.right },
+            bottom: if titles.y_infeasible { 0.0 } else { ticks.bottom },
+            left: if titles.x_infeasible { 0.0 } else { ticks.left },
+        };
+        let combined = Inset {
+            top: ticks.top + titles.inset.top,
+            right: ticks.right + titles.inset.right,
+            bottom: ticks.bottom + titles.inset.bottom,
+            left: ticks.left + titles.inset.left,
+        };
+        let (left, right) = cap_auto_contribution(
+            base.left, base.right, combined.left, combined.right, viewport.width,
+        );
+        let (top, bottom) = cap_auto_contribution(
+            base.top, base.bottom, combined.top, combined.bottom, viewport.height,
+        );
+        Inset { top, right, bottom, left }
+    } else {
+        Inset::default()
+    };
     let inset = Inset {
-        top:    theme.padding.padding_top.unwrap_or(theme.padding.padding),
-        right:  theme.padding.padding_right.unwrap_or(theme.padding.padding),
-        bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
-        left:   theme.padding.padding_left.unwrap_or(theme.padding.padding),
+        top:    theme.padding.padding_top.unwrap_or(base.top + extra.top),
+        right:  theme.padding.padding_right.unwrap_or(base.right + extra.right),
+        bottom: theme.padding.padding_bottom.unwrap_or(base.bottom + extra.bottom),
+        left:   theme.padding.padding_left.unwrap_or(base.left + extra.left),
     };
     let inner = viewport_rect.shrink(inset);
     if inner.w <= 0.0 || inner.h <= 0.0 {
-        let dim = viewport.width.min(viewport.height);
+        // Report the CALLER's actual value and the specific side responsible
+        // (D10, spec §4.7 — the T6 quality-review repro:
+        // `configure_padding(top=1e9)` previously reported the theme
+        // DEFAULT 16, not the caller's 1e9). `Rect::shrink` collapses both
+        // `inner.w` and `inner.h` to 0 together once either axis fails, so
+        // the violated axis is re-derived here from the raw (pre-shrink)
+        // extents rather than read back off `inner`.
+        let raw_w = viewport.width - inset.left - inset.right;
+        let raw_h = viewport.height - inset.top - inset.bottom;
+        debug_assert!(
+            raw_w <= 0.0 || raw_h <= 0.0,
+            "inner collapsed to ZERO but neither raw extent is <= 0"
+        );
+        let (side, value, dim) = if raw_w <= 0.0 {
+            if inset.left >= inset.right {
+                ("left", inset.left, viewport.width)
+            } else {
+                ("right", inset.right, viewport.width)
+            }
+        } else if inset.top >= inset.bottom {
+            ("top", inset.top, viewport.height)
+        } else {
+            ("bottom", inset.bottom, viewport.height)
+        };
         return Err(LayoutError::PaddingExceedsViewport {
-            padding: theme.padding.padding,
+            padding: value,
+            side,
             viewport_dim: dim,
         });
     }
@@ -2345,9 +2928,699 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            LayoutError::PaddingExceedsViewport { .. } => {}
+            LayoutError::PaddingExceedsViewport { padding, side, viewport_dim } => {
+                assert_eq!(padding, 100.0);
+                assert_eq!(side, "left");
+                assert_eq!(viewport_dim, 50.0);
+            }
             other => panic!("expected PaddingExceedsViewport, got {:?}", other),
         }
+    }
+
+    /// D10, spec §4.7 — the T6 quality-review repro: `configure_padding(top=
+    /// 1e9)` previously reported the theme DEFAULT (16), not the caller's
+    /// 1e9, and never named which side. `padding_top` is the only side set
+    /// (mirroring `configure_padding(top=1e9)` — the other three sides stay
+    /// theme-default), so `side` must name `"top"` and `padding` must be the
+    /// caller's own 1e9, not the untouched default.
+    #[test]
+    fn compute_layout_padding_exceeds_viewport_names_the_callers_side_and_value() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = ThemeInputs {
+            padding: ThemePadding { padding_top: Some(1e9), ..ThemePadding::default() },
+            ..ThemeInputs::default()
+        };
+        let err = compute_layout(
+            &spec,
+            &theme,
+            Viewport { width: 480.0, height: 360.0 },
+            &axes,
+            &[],
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .unwrap_err();
+        match err {
+            LayoutError::PaddingExceedsViewport { padding, side, viewport_dim } => {
+                assert_eq!(padding, 1e9, "must report the CALLER's value, not the theme default");
+                assert_eq!(side, "top");
+                assert_eq!(viewport_dim, 360.0);
+            }
+            other => panic!("expected PaddingExceedsViewport, got {:?}", other),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("top=1000000000"), "message must name the side and caller value: {msg}");
+    }
+
+    // ── padding.auto (D10, spec §4.7, F-L07-08) ─────────────────────────────
+
+    /// A continuous x-axis (`tick_projection: Some`) whose last tick's label
+    /// is a long number, at a narrow viewport with default (16px) padding.
+    fn continuous_x_axes_with_long_last_label() -> AxesInput {
+        let mut x = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["0".into(), "999999".into()],
+            None,
+        );
+        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major: vec![0.0, 1.0], minor: vec![] });
+        let y = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "5".into(), "10".into()],
+            None,
+        );
+        AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
+    }
+
+    /// Unit-level pin of `auto_padding_for_edge_ticks`'s concrete numbers
+    /// (hand-derived in the task's own working notes, reproduced here):
+    /// last label `"999999"` measures 60px (6 chars * 10px), so its half-
+    /// width (30) exceeds the flat 16px right padding by 14 — that shortfall
+    /// is exactly what `extra.right` must be. The first label `"0"`
+    /// (half-width 5) never exceeds its cushion (16px padding + the 26px
+    /// y-gutter), so `extra.left` stays 0 and `extra.top`/`extra.bottom`
+    /// are untouched by an x-only correction.
+    #[test]
+    fn auto_padding_for_edge_ticks_reserves_exactly_the_overhang() {
+        let axes = continuous_x_axes_with_long_last_label();
+        let spec = minimal_chart_spec();
+        let theme = default_theme_inputs();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let extra = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        assert!((extra.right - 14.0).abs() < 1e-9, "extra.right = {}", extra.right);
+        assert_eq!(extra.left, 0.0);
+        assert_eq!(extra.bottom, 0.0);
+    }
+
+    /// A continuous x-axis whose FIRST tick's label is a long negative
+    /// number, paired with a y-axis whose `max_band` caps its reserved
+    /// gutter well below its natural (unclamped) width.
+    fn continuous_x_axes_with_long_first_label_and_capped_y_band() -> AxesInput {
+        let mut x = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["-999999999999999".into(), "0".into()],
+            None,
+        );
+        x.tick_projection = Some(TickProjection { padding_frac: 0.0, major: vec![0.0, 1.0], minor: vec![] });
+        let mut y = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["0".into(), "5".into(), "10".into()],
+            None,
+        );
+        y.overrides.max_band = Some(10.0);
+        AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
+    }
+
+    /// Spec-review cycle 2, finding 2: the cushion estimate previously used
+    /// the UNCLAMPED y label band, so `fm.Axis(max_band=...)` capping the
+    /// REAL reserved gutter smaller made the cushion look bigger than it
+    /// really is and silently under-reserved `extra.left`. Hand-derived
+    /// numbers: raw y label band is 26 (`tick_size 4 + label_pad 2 +
+    /// max_label_w 20` for `"10"`), `max_band=10` caps it to 10, so the
+    /// left cushion is `16 (default padding) + 10 (clamped y band) = 26` —
+    /// NOT `16 + 26 = 42` (the pre-fix, unclamped figure). The first
+    /// label (`"-999999999999999"`, 16 chars) has half-width 80, so
+    /// `extra.left` must be `80 - 26 = 54`, not the under-reserved
+    /// `80 - 42 = 38` the unclamped cushion would have produced.
+    #[test]
+    fn auto_padding_for_edge_ticks_honors_max_band_when_computing_the_cushion() {
+        let axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
+        let spec = minimal_chart_spec();
+        let theme = default_theme_inputs();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let extra = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        assert!(
+            (extra.left - 54.0).abs() < 1e-9,
+            "extra.left = {} (expected 54.0 = 80 - 26; the pre-fix unclamped \
+             cushion would have wrongly produced 38 = 80 - 42)",
+            extra.left,
+        );
+    }
+
+    /// Integration-level sibling of
+    /// `padding_auto_prevents_last_x_tick_label_from_overhanging_the_viewport`,
+    /// through the real `compute_layout` path, pinning the reviewer's live
+    /// repro (spec-review cycle 2, finding 2): a long first x tick label
+    /// clips past the LEFT canvas edge, identically under auto=True and
+    /// auto=False, when the cushion estimate ignores `max_band`. After the
+    /// fix, `auto=True` keeps it within bounds.
+    #[test]
+    fn padding_auto_honors_max_band_and_prevents_left_tick_overhang() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
+        let viewport = Viewport { width: 400.0, height: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("baseline layout should succeed");
+        let x_axis = baseline.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let first_tick = x_axis.ticks.first().expect("x axis has ticks");
+        let half_w = m.measure_width(&first_tick.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            first_tick.position - half_w < 0.0,
+            "fixture assumption broken: the capped y max_band should already clip the \
+             first x tick label past the left edge (position {} - half-width {} should be < 0)",
+            first_tick.position, half_w,
+        );
+
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme.clone()
+        };
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should succeed");
+        let x_axis2 = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let first_tick2 = x_axis2.ticks.first().expect("x axis has ticks");
+        let half_w2 = m.measure_width(&first_tick2.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            first_tick2.position - half_w2 >= -1e-9,
+            "padding.auto=true should keep the first x tick label within the viewport \
+             even with max_band capping the y gutter (position {} - half-width {} should be >= 0)",
+            first_tick2.position, half_w2,
+        );
+    }
+
+    /// The pin the brief asks for: "a chart whose labels would clip at
+    /// default padding renders unclipped under auto" — proven on CONCRETE
+    /// geometry (the real tick's pixel position plus its measured half-
+    /// width against the real viewport width), through the actual
+    /// `compute_layout` production path, not a hand-built shape.
+    #[test]
+    fn padding_auto_prevents_last_x_tick_label_from_overhanging_the_viewport() {
+        let spec = minimal_chart_spec();
+        let axes = continuous_x_axes_with_long_last_label();
+        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        // Baseline (auto=false, the flat 16px default): the fixture must
+        // actually clip, or this test proves nothing about the fix.
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("baseline layout should succeed");
+        let x_axis = baseline.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let last_tick = x_axis.ticks.last().expect("x axis has ticks");
+        let half_w = m.measure_width(&last_tick.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            last_tick.position + half_w > baseline.viewport.w,
+            "fixture assumption broken: default padding should already clip the last x \
+             tick label (position {} + half-width {} should exceed viewport width {})",
+            last_tick.position, half_w, baseline.viewport.w,
+        );
+
+        // Same chart, `padding.auto = true`: the SAME last tick's label no
+        // longer overhangs past the viewport edge.
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme.clone()
+        };
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should succeed");
+        let x_axis2 = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let last_tick2 = x_axis2.ticks.last().expect("x axis has ticks");
+        let half_w2 = m.measure_width(&last_tick2.label, theme.typography.label_font_size) / 2.0;
+        assert!(
+            last_tick2.position + half_w2 <= with_auto.viewport.w + 1e-9,
+            "padding.auto=true should keep the last x tick label within the viewport \
+             (position {} + half-width {} should not exceed viewport width {})",
+            last_tick2.position, half_w2, with_auto.viewport.w,
+        );
+    }
+
+    /// An ordinal/nominal axis (`tick_projection: None`) has no edge overhang
+    /// to correct — `dummy_axes()` is ordinal-shaped — so `padding.auto`
+    /// must leave its layout byte-identical to the non-auto render (claim 3:
+    /// byte-identity for charts that don't exercise the touched field).
+    #[test]
+    fn padding_auto_is_byte_identical_for_a_chart_with_no_continuous_axis_or_title() {
+        let spec = minimal_chart_spec();
+        let axes = dummy_axes();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        let without_auto = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .unwrap();
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme
+        };
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .unwrap();
+        assert_eq!(without_auto, with_auto);
+    }
+
+    // ── padding.auto: axis-title recentering (spec-review cycle 2, finding 1) ──
+
+    #[test]
+    fn recentering_padding_no_correction_when_already_fits() {
+        // Center 100, half-extent 20 -> edges [80, 120], well inside [0, 200].
+        assert_eq!(recentering_padding(100.0, 20.0, 200.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn recentering_padding_shifts_right_edge_back_when_only_the_right_overflows() {
+        // Center 150, half-extent 60 -> edges [90, 210]; only the right (210)
+        // overflows a 200-wide span, by 10. The minimal fix adds ONLY to the
+        // right side (shifting the center left by 10) — extra_left stays 0.
+        assert_eq!(recentering_padding(150.0, 60.0, 200.0), (0.0, 20.0));
+    }
+
+    #[test]
+    fn recentering_padding_shifts_left_edge_back_when_only_the_left_overflows() {
+        // Center 50, half-extent 60 -> edges [-10, 110]; only the left (-10)
+        // overflows, by 10. The minimal fix adds ONLY to the left side.
+        assert_eq!(recentering_padding(50.0, 60.0, 200.0), (20.0, 0.0));
+    }
+
+    #[test]
+    fn recentering_padding_is_zero_when_the_element_is_wider_than_the_span() {
+        // half-extent 150 -> full width 300 > span 200: no shift can satisfy
+        // both edges regardless of baseline_center (the genuine, narrow
+        // residual: an element wider than the viewport itself). Returns
+        // (0.0, 0.0) rather than adding unbounded, unhelpful padding.
+        assert_eq!(recentering_padding(100.0, 150.0, 200.0), (0.0, 0.0));
+        // Off-center baseline: still infeasible (2*half_extent > span is the
+        // exact feasibility test, independent of where the center starts).
+        assert_eq!(recentering_padding(30.0, 150.0, 200.0), (0.0, 0.0));
+    }
+
+    /// `recentering_is_feasible` is the SAME `2*half_extent <= span` test
+    /// `recentering_padding` uses internally, exposed so `compute_layout`
+    /// can tell "no correction needed" apart from "genuinely infeasible" —
+    /// both of which `recentering_padding` collapses to `(0.0, 0.0)` (spec-
+    /// review cycle 7, finding 1).
+    #[test]
+    fn recentering_is_feasible_matches_recentering_padding_own_bound() {
+        assert!(recentering_is_feasible(20.0, 200.0), "well within span");
+        assert!(recentering_is_feasible(100.0, 200.0), "exactly the boundary (2*100 == 200)");
+        assert!(!recentering_is_feasible(150.0, 200.0), "wider than the span");
+        // Independent of baseline_center, per recentering_padding's own derivation.
+        assert!(recentering_is_feasible(60.0, 200.0));
+    }
+
+    /// A short-tick-label chart (so `auto_padding_for_edge_ticks` contributes
+    /// nothing, isolating the title-only effect) with a long x-axis title.
+    fn axes_with_wide_x_title() -> AxesInput {
+        let x = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("A Wide X Axis Title".into()), // 19 chars
+            vec!["0".into(), "1".into()],
+            None,
+        );
+        let y = AxisInput::new(AxisOrient::Left, None, vec!["0".into(), "1".into()], None);
+        AxesInput { x, y, show_x: true, show_y: true, secondary_y: Vec::new() }
+    }
+
+    /// Unit-level pin of `auto_padding_for_axis_titles`'s concrete numbers
+    /// (hand-derived): y gutter is 16 (`tick_size 4 + label_pad 2 +
+    /// max_label_w 10` for the single-digit y labels), so at
+    /// `viewport.width = 200` the baseline plot spans `[32, 184]`
+    /// (`x = 16 + 16`, `w = 200 - 16 - 16 - 16 = 152`), centered at 108. The
+    /// title (`"A Wide X Axis Title"`, 19 chars * 10px = 190px, half-width
+    /// 95) would span `[13, 203]` around that center — only the right edge
+    /// (203) overflows the 200-wide viewport, by 3, so `extra.right` must be
+    /// exactly `6` (`2 * 3`) and `extra.left` must stay `0`.
+    #[test]
+    fn auto_padding_for_axis_titles_recenters_a_right_overflowing_x_title() {
+        let axes = axes_with_wide_x_title();
+        let spec = minimal_chart_spec();
+        let theme = default_theme_inputs();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let base = base_padding_insets(&theme);
+        let extra = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes, &m, base);
+        assert!((extra.inset.right - 6.0).abs() < 1e-9, "extra.right = {}", extra.inset.right);
+        assert_eq!(extra.inset.left, 0.0);
+        assert_eq!(extra.inset.top, 0.0);
+        assert_eq!(extra.inset.bottom, 0.0);
+        assert!(!extra.x_infeasible, "this title fits within the viewport once recentered");
+        assert!(!extra.y_infeasible, "no y title in this fixture");
+    }
+
+    /// Finding 1's own repro, proven through the real `compute_layout` path:
+    /// a chart whose x-axis title would clip past the viewport's right edge
+    /// at default (symmetric) padding renders fully within bounds under
+    /// `padding.auto = true` — the ASYMMETRIC recentering case the
+    /// symmetric-only derivation this replaces incorrectly ruled out.
+    #[test]
+    fn padding_auto_recenters_an_overflowing_x_title_within_the_viewport() {
+        let spec = minimal_chart_spec();
+        let axes = axes_with_wide_x_title();
+        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("baseline layout should succeed");
+        let x_axis = baseline.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let title = x_axis.title.as_ref().expect("x axis has a title");
+        let half_w = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
+        assert!(
+            title.anchor_x + half_w > baseline.viewport.w,
+            "fixture assumption broken: default padding should already clip the x \
+             title (anchor_x {} + half-width {} should exceed viewport width {})",
+            title.anchor_x, half_w, baseline.viewport.w,
+        );
+
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme.clone()
+        };
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should succeed");
+        let x_axis2 = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let title2 = x_axis2.title.as_ref().expect("x axis has a title");
+        let half_w2 = m.measure_width(&title2.text, theme.typography.title_font_size) / 2.0;
+        assert!(
+            title2.anchor_x + half_w2 <= with_auto.viewport.w + 1e-9,
+            "padding.auto=true should keep the x title within the viewport \
+             (anchor_x {} + half-width {} should not exceed viewport width {})",
+            title2.anchor_x, half_w2, with_auto.viewport.w,
+        );
+        assert!(
+            title2.anchor_x - half_w2 >= -1e-9,
+            "padding.auto=true's recentering must not push the title past the LEFT \
+             edge while fixing the right (anchor_x {} - half-width {} should be >= 0)",
+            title2.anchor_x, half_w2,
+        );
+    }
+
+    /// The genuine residual (spec-review cycle 2, finding 1's narrowed
+    /// claim): a title wider than the viewport ITSELF cannot be fully
+    /// rescued by any padding arrangement. `padding.auto=true` must not
+    /// turn this into a hard failure (no `PaddingExceedsViewport`), and —
+    /// in this ISOLATED fixture, where no other auto-padding pass fires on
+    /// the same axis (a short 2-tick label, no `max_band`, no overhang) —
+    /// it renders BYTE-IDENTICAL to `auto=false`: the title pass's own
+    /// contribution is `(0.0, 0.0)` and there is nothing else to compose it
+    /// with. (Spec-review cycle 7, finding 1: this is NOT the general
+    /// guarantee — see
+    /// `padding_auto_never_worsens_an_infeasible_title_when_a_tick_correction_also_fires`
+    /// below for the composed case, where a same-axis tick correction used
+    /// to make an infeasible title's clip strictly WORSE than `auto=false`
+    /// before this fix, contradicting a since-corrected version of this
+    /// docstring that claimed byte-identity applied universally.)
+    #[test]
+    fn padding_auto_does_not_blow_up_on_a_title_wider_than_the_viewport() {
+        let spec = minimal_chart_spec();
+        let mut axes = axes_with_wide_x_title();
+        // A title far wider than any reasonable viewport.
+        axes.x.title = Some("A".repeat(100));
+        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme.clone()
+        };
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("baseline (auto=false) must render");
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        );
+        assert!(with_auto.is_ok(), "an unfixably-wide title must still render, not refuse: {with_auto:?}");
+        assert_eq!(
+            with_auto.unwrap(), baseline,
+            "with no competing auto-padding pass on this axis, an infeasible \
+             title's auto=true render must be byte-identical to auto=false",
+        );
+    }
+
+    /// The composed sibling of the test above (spec-review cycle 7, finding
+    /// 1): cycle 6's `padding_auto_keeps_title_on_canvas_when_a_tick_correction_also_fires`
+    /// proved the FEASIBLE case, where the title pass's solve, evaluated
+    /// against the tick-adjusted base, fully recenters the title. This is
+    /// the INFEASIBLE case — same tick-overhang fixture
+    /// (`axes_with_left_tick_overhang_and_a_title_the_shift_would_clip`),
+    /// narrowed so the 66-char (660px-wide, half-width 330) title no longer
+    /// fits the viewport at all (`2*330 = 660 > 300`). Pre-fix,
+    /// `auto_padding_for_axis_titles` still reported `(0.0, 0.0)` for x (it
+    /// cannot help), but the tick pass's real, asymmetric left expansion
+    /// applied anyway — shifting the plot's (and title's) center and
+    /// turning a real but bounded clip into a WORSE one. Reconstructed at
+    /// the Rust unit-test level from the quality reviewer's live (real-font)
+    /// Python repro (`W=280`: `9.51px -> 26.53px` clip, `auto=True` strictly
+    /// worse than `auto=False`) using this file's `MockMetrics`-based
+    /// fixture family, since the reviewer's fixture depended on real font
+    /// metrics unavailable to a Rust-only unit test.
+    #[test]
+    fn padding_auto_never_worsens_an_infeasible_title_when_a_tick_correction_also_fires() {
+        let spec = minimal_chart_spec();
+        let axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
+        let viewport = Viewport { width: 300.0, height: 300.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        // Fixture assumption: the title really is infeasible at this width
+        // (unlike the 700px sibling fixture, where it is feasible).
+        let title_half_w =
+            m.measure_width(&"a".repeat(66), theme.typography.title_font_size) / 2.0;
+        assert!(
+            !recentering_is_feasible(title_half_w, viewport.width),
+            "fixture assumption broken: title half-width {title_half_w} should \
+             exceed half the {}-wide viewport", viewport.width,
+        );
+        // And the tick pass genuinely wants left padding here — this test
+        // would be vacuous if the fixture stopped exercising the tick pass.
+        let ticks_alone = auto_padding_for_edge_ticks(&spec, &theme, &axes, &m);
+        assert!(ticks_alone.left > 0.0, "fixture assumption broken: the tick pass should still fire");
+
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("baseline (auto=false) layout should succeed");
+
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme.clone()
+        };
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should still render, not refuse");
+
+        // The genuine guarantee (cycle 7): never worse than auto=false.
+        // Since this axis's combined auto contribution is suppressed to
+        // exactly zero in the infeasible regime, the two renders are
+        // byte-identical -- not merely "no worse".
+        assert_eq!(
+            with_auto, baseline,
+            "an infeasible title's auto=true render must be byte-identical to \
+             auto=false when a same-axis tick correction cannot be applied \
+             without decentering an already-unfixable title",
+        );
+    }
+
+    // ── padding.auto: composition (spec-review cycle 6, findings 1/2/3) ─────
+
+    #[test]
+    fn cap_auto_contribution_passes_through_when_it_already_fits() {
+        // fixed 16+16=32, extra 10+10=20, span 200: 32+20=52 << 200, no cap.
+        assert_eq!(cap_auto_contribution(16.0, 16.0, 10.0, 10.0, 200.0), (10.0, 10.0));
+    }
+
+    #[test]
+    fn cap_auto_contribution_scales_proportionally_when_over_budget() {
+        // fixed 16+16=32, span 100, MIN_PANEL_DIM 1 -> budget = 100-32-1 = 67.
+        // desired 60+30=90 > 67, scale = 67/90; preserves the 2:1 ratio.
+        let (low, high) = cap_auto_contribution(16.0, 16.0, 60.0, 30.0, 100.0);
+        let scale = 67.0 / 90.0;
+        assert!((low - 60.0 * scale).abs() < 1e-9, "low = {low}");
+        assert!((high - 30.0 * scale).abs() < 1e-9, "high = {high}");
+        assert!((low + high - 67.0).abs() < 1e-9, "sum should exactly consume the budget");
+    }
+
+    #[test]
+    fn cap_auto_contribution_is_zero_when_the_fixed_floor_alone_overflows() {
+        // fixed 100+100=200 already >= span 150: pre-existing failure, auto
+        // must contribute nothing (not attempt a negative-budget scale).
+        assert_eq!(cap_auto_contribution(100.0, 100.0, 5.0, 5.0, 150.0), (0.0, 0.0));
+    }
+
+    /// The composed fixture behind findings 1 and 2: the LEFT-tick-overhang
+    /// fixture (`continuous_x_axes_with_long_first_label_and_capped_y_band`)
+    /// PLUS an x-axis title (66 characters, half-width 330 at 10px/char)
+    /// wide enough to fit against the UNTOUCHED base but to clip past the
+    /// RIGHT edge once the tick pass's own left expansion shifts the plot
+    /// rightward — exactly the interference the elementwise-max composition
+    /// missed (each pass alone reported "no correction needed" against a
+    /// base the OTHER pass was about to change). The viewport (`700x300` in
+    /// the test below) is wide enough that the x-axis's own 2-tick label
+    /// band stays flat (no rotation cascade) both before and after both
+    /// auto-padding corrections apply, isolating the outer-padding
+    /// composition question from the unrelated tick-rotation cascade.
+    fn axes_with_left_tick_overhang_and_a_title_the_shift_would_clip() -> AxesInput {
+        let mut axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
+        axes.x.title = Some("a".repeat(66));
+        axes
+    }
+
+    /// Finding 1's own repro, proven through the real `compute_layout` path
+    /// (the same fixture family as the reviewer's live Python repro, scaled
+    /// to a viewport wide enough to keep the x-axis's own tick-rotation
+    /// cascade out of the picture): the tick pass alone wants real left
+    /// padding (the long negative first label, capped y `max_band`); the
+    /// title alone (against the untouched base) would have reported "fits,
+    /// no correction" — the exact shape that let elementwise-max ship a
+    /// title-clipping bug for five cycles. Sequential composition must
+    /// still keep the title fully on-canvas.
+    #[test]
+    fn padding_auto_keeps_title_on_canvas_when_a_tick_correction_also_fires() {
+        let spec = minimal_chart_spec();
+        let axes = axes_with_left_tick_overhang_and_a_title_the_shift_would_clip();
+        let viewport = Viewport { width: 700.0, height: 300.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme.clone()
+        };
+
+        let with_auto = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("auto-padded layout should succeed");
+        let x_axis = with_auto.axes.iter().find(|a| a.orient == AxisOrient::Bottom)
+            .expect("x axis present");
+        let title = x_axis.title.as_ref().expect("x axis has a title");
+        let half_w = m.measure_width(&title.text, theme.typography.title_font_size) / 2.0;
+        assert!(
+            title.anchor_x + half_w <= with_auto.viewport.w + 1e-9,
+            "the title must not overhang the right edge once the tick pass has \
+             also shifted the plot (anchor_x {} + half-width {} vs viewport width {})",
+            title.anchor_x, half_w, with_auto.viewport.w,
+        );
+        assert!(
+            title.anchor_x - half_w >= -1e-9,
+            "the title must not overhang the left edge either (anchor_x {} - half-width {})",
+            title.anchor_x, half_w,
+        );
+
+        // Also pin that the tick pass's own correction is genuinely still
+        // in effect (this test would be vacuous if the fixture stopped
+        // exercising the tick pass at all).
+        let last_x_tick = x_axis.ticks.last().expect("x axis has ticks");
+        assert!(
+            with_auto.viewport.w - last_x_tick.position > 20.0,
+            "fixture assumption broken: the tick pass should still be reserving \
+             real left padding in this fixture",
+        );
+    }
+
+    /// Finding 2's own repro, proven through the real `compute_layout` path:
+    /// a viewport too narrow for the FULL auto correction a huge first-tick
+    /// label + capped `max_band` would otherwise compute must still RENDER
+    /// under `auto=True` (best-effort, degraded correction) rather than
+    /// raise `PaddingExceedsViewport` — auto is never allowed to convert a
+    /// chart that renders at `auto=False` into a refusal, let alone one
+    /// citing a padding value the caller never set.
+    #[test]
+    fn padding_auto_never_converts_a_rendering_chart_into_a_padding_exceeds_viewport_refusal() {
+        let spec = minimal_chart_spec();
+        let mut axes = continuous_x_axes_with_long_first_label_and_capped_y_band();
+        // Far longer than the sibling fixture's label, to force a much
+        // larger desired tick-overhang correction than a narrow viewport
+        // can possibly absorb.
+        axes.x.tick_labels[0] = format!("-{}", "9".repeat(200));
+        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+
+        compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        )
+        .expect("baseline (auto=false) must render — the fixture must not be pathological on its own");
+
+        let auto_theme = ThemeInputs {
+            padding: ThemePadding { padding_auto: true, ..theme.padding.clone() },
+            ..theme
+        };
+        let result = compute_layout(
+            &spec, &auto_theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], CompositeLayoutSeam::default(),
+        );
+        assert!(
+            result.is_ok(),
+            "padding.auto=true must never convert a rendering chart into \
+             PaddingExceedsViewport: {result:?}",
+        );
+    }
+
+    /// Finding 3: `AxisInput.title` is populated independently of the
+    /// chart-level show flag (`.axis(x=False)`), so without a matching gate
+    /// `auto_padding_for_axis_titles` would expand margins to recenter a
+    /// title `layout_panel_axes` never draws — mirrors
+    /// `auto_padding_for_edge_ticks`'s own `show_x`/`show_y` gate.
+    #[test]
+    fn auto_padding_for_axis_titles_is_inert_when_the_axis_is_hidden() {
+        let spec = minimal_chart_spec();
+        let theme = default_theme_inputs();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let viewport = Viewport { width: 200.0, height: 200.0 };
+        let base = base_padding_insets(&theme);
+
+        let mut axes_x_hidden = axes_with_wide_x_title();
+        axes_x_hidden.show_x = false;
+        let extra_x = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_x_hidden, &m, base);
+        assert_eq!(extra_x.inset, Inset::default(), "a hidden x-axis's title must not be recentered");
+        assert!(!extra_x.x_infeasible, "a hidden axis's title is not even considered");
+
+        let mut axes_y_hidden = axes_with_wide_x_title();
+        axes_y_hidden.y.title = Some("A Wide Y Axis Title".into());
+        axes_y_hidden.x.title = None;
+        axes_y_hidden.show_y = false;
+        let extra_y = auto_padding_for_axis_titles(&spec, &theme, viewport, &axes_y_hidden, &m, base);
+        assert_eq!(extra_y.inset, Inset::default(), "a hidden y-axis's title must not be recentered");
+        assert!(!extra_y.y_infeasible, "a hidden axis's title is not even considered");
     }
 
     #[test]

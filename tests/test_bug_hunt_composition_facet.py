@@ -2515,16 +2515,20 @@ def test_configure_grid_band_colors_serialization():
 # ---------------------------------------------------------------------------
 
 
-def test_padding_auto_default_true():
-    """PaddingConfig defaults to auto=True.
+def test_padding_auto_default_false():
+    """PaddingConfig defaults to auto=False (opt-in, spec §4.7, D10).
 
-    Targets configure.py PaddingConfig default: auto=True.
+    Targets configure.py PaddingConfig default: auto=False. auto never had
+    a polarity decision recorded before it became a real (non-no-op)
+    consumer; defaulting it True would have silently expanded margins for
+    every existing PaddingConfig()/configure_padding() caller.
     """
     cfg = PaddingConfig()
-    assert cfg.auto is True
+    assert cfg.auto is False
     d = cfg.to_dict()
-    # auto=True should be in the dict since it's not None
-    assert d["auto"] is True
+    # auto=False should be in the dict since it's not None (bool is never
+    # omitted by _to_dict_omit_none).
+    assert d["auto"] is False
 
 
 def test_padding_explicit_sides_renders():

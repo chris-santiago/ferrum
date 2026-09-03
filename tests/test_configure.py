@@ -366,7 +366,10 @@ class TestPaddingConfig:
 
     def test_default_construction(self):
         cfg = PaddingConfig()
-        assert cfg.auto is True
+        # auto is opt-in (spec §4.7, D10): defaulting it True meant every
+        # existing PaddingConfig()/configure_padding() caller silently
+        # gained margin expansion on sides they never touched.
+        assert cfg.auto is False
         assert cfg.top is None
 
     def test_frozen(self):

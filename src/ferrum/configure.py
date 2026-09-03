@@ -735,16 +735,23 @@ class PaddingConfig:
         Bottom padding in pixels.
     left : float, optional
         Left padding in pixels.
-    auto : bool
-        When True and all four sides are None, let the renderer choose
-        padding automatically.
+    auto : bool, default False
+        Opt-in, per-side auto-expand (D10, spec §4.7): a side still at its
+        own default here (`None`) is expanded, when `auto=True`, to keep a
+        continuous axis's edge-tick label or axis title from clipping past
+        the rendered viewport edge. A side you *do* set is never touched by
+        `auto` — an explicit value always wins on its own side. Does not
+        affect ordinal/nominal axis labels (which never overhang the plot
+        edge) or annotations; a y-axis capped tight enough via `max_band`
+        can still leave its own label or title outside the canvas on that
+        axis.
     """
 
     top: float | None = None
     right: float | None = None
     bottom: float | None = None
     left: float | None = None
-    auto: bool = True
+    auto: bool = False
 
     def __post_init__(self) -> None:
         # Validate at construction time (NF-B5/B6/B7): each side must be a

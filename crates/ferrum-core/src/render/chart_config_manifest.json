@@ -428,8 +428,8 @@
     "reason": "LegendOverrides zindex, coarse draw order relative to marks"
   },
   "PaddingConfigSpec.auto": {
-    "honored": false,
-    "reason": "reserved sentinel \u2014 apply_chart_config's own comment records it 'does not disable explicit values' but implements no auto-expand-to-fit-labels behavior either. Pending Task 9 (D10)"
+    "honored": true,
+    "reason": "apply_chart_config -> theme.padding.padding_auto -> layout::compute_layout's auto_padding_for_edge_ticks then auto_padding_for_axis_titles, composed sequentially and summed, then capped against the viewport via cap_auto_contribution (Task 9, D10, spec-review cycles 2 and 6): expands a side with no explicit override to contain a continuous axis's edge-tick-label overhang and/or recenter an overflowing axis title, render/mod.rs + layout/mod.rs. Opt-in (default false) end to end."
   },
   "PaddingConfigSpec.bottom": {
     "honored": true,

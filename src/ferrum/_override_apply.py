@@ -598,12 +598,12 @@ def _leaf_wire_fragment(config_cls: type | None, leaf: str, value: Any) -> dict[
     The empty-construction baseline is subtracted for the mirror-image
     reason. ``to_dict()`` emits every non-``None`` field, including the
     class's own DEFAULTS, so a one-leaf instance carries keys the caller never
-    named: ``PaddingConfig`` declares ``auto: bool = True``, so
-    ``PaddingConfig(left=70).to_dict()`` is ``{"auto": True, "left": 70.0}``.
+    named: ``PaddingConfig`` declares ``auto: bool = False``, so
+    ``PaddingConfig(left=70).to_dict()`` is ``{"auto": False, "left": 70.0}``.
     Merging that fragment would inject an unsolicited ``auto`` onto the wire
     AND overwrite an explicit sibling leaf in kwarg order — ``override(
-    padding_auto=False, padding_left=70)`` would resolve to ``auto: True``
-    while the reversed spelling resolved to ``auto: False``, the exact parity
+    padding_auto=True, padding_left=70)`` would resolve to ``auto: False``
+    while the reversed spelling resolved to ``auto: True``, the exact parity
     this seam exists to guarantee. Dropping any key the leaf did not name that
     a default-constructed instance also emits keeps derived companions (absent
     from the baseline) and drops injected defaults (present in it), so a

@@ -651,10 +651,13 @@ pub struct PaddingConfigSpec {
     pub right: Option<f64>,
     pub bottom: Option<f64>,
     pub left: Option<f64>,
-    /// Reserved: intended to auto-expand margins to fit measured labels when
-    /// no explicit side is set. Currently unread — `apply_chart_config`'s own
-    /// comment records that it "does not disable explicit values" but does
-    /// nothing else either. See `chart_config_manifest.json`.
+    /// Auto-expand a side with no explicit value to contain a continuous
+    /// axis's edge-tick-label overhang and/or recenter an overflowing axis
+    /// title, either of which would otherwise clip past the viewport edge
+    /// (D10, spec §4.7, F-L07-08). Consumed by `theme.padding.padding_auto`
+    /// → `layout::compute_layout` — see `ThemePadding::padding_auto`'s own
+    /// doc for the reader list. An explicit side always wins over auto on
+    /// that side. See `chart_config_manifest.json`.
     pub auto: Option<bool>,
 }
 
@@ -1694,8 +1697,7 @@ mod tests {
     /// ever reads `entry.reason`, so `honored` needs its own consumer, not a
     /// wider net cast over `reason`.
     #[cfg(test)]
-    const KNOWN_UNHONORED_FIELDS: &[&str] =
-        &["AxisConfigSpec.axis_y2.grid", "PaddingConfigSpec.auto"];
+    const KNOWN_UNHONORED_FIELDS: &[&str] = &["AxisConfigSpec.axis_y2.grid"];
 
     /// Gives `ManifestEntry::honored` teeth (spec review, T1 cycle 2): reads
     /// the flag out of every manifest entry and asserts the `honored: false`
