@@ -355,17 +355,23 @@ def test_chart_level_percent_format_composes_with_explicit_tick_values():
 
 
 def test_color_legend_time_preset_renders_dates():
-    svg = fm.Chart(_time_df()).mark_point().encode(
-        x="x", y="y", color=fm.Color("t", legend=fm.Legend(format="date_iso"))
-    ).to_svg()
+    svg = (
+        fm.Chart(_time_df())
+        .mark_point()
+        .encode(x="x", y="y", color=fm.Color("t", legend=fm.Legend(format="date_iso")))
+        .to_svg()
+    )
     labels = _extract_text_labels(svg)
     assert any(re.match(r"^\d{4}-\d{2}-\d{2}$", l) for l in labels), labels
 
 
 def test_size_legend_time_preset_renders_dates():
-    svg = fm.Chart(_time_df()).mark_point().encode(
-        x="x", y="y", size=fm.Size("t", legend=fm.Legend(format="date_iso"))
-    ).to_svg()
+    svg = (
+        fm.Chart(_time_df())
+        .mark_point()
+        .encode(x="x", y="y", size=fm.Size("t", legend=fm.Legend(format="date_iso")))
+        .to_svg()
+    )
     labels = _extract_text_labels(svg)
     assert any(re.match(r"^\d{4}-\d{2}-\d{2}$", l) for l in labels), labels
 
@@ -384,9 +390,7 @@ def test_color_legend_no_format_type_default_unaffected():
     domain instead: 5 evenly-spaced values (10, 15, 20, 25, 30) formatted
     by the pre-existing range-aware `format_colorbar_tick`, unchanged from
     before this task."""
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "c": [10.0, 20.0, 30.0]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "c": [10.0, 20.0, 30.0]})
     svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="c").to_svg()
     assert not _control_chars(svg)
     labels = _extract_text_labels(svg)
@@ -466,9 +470,7 @@ def test_curency_refusal_is_typed_valueerror_not_silent_corruption():
     """Direct proof the refusal replaces the historical control-character
     corruption class, not just that SOME error fires."""
     with pytest.raises(ValueError) as exc_info:
-        fm.Chart(_xy_df()).mark_point().encode(
-            x=fm.X("x", format="curency"), y="y"
-        ).to_svg()
+        fm.Chart(_xy_df()).mark_point().encode(x=fm.X("x", format="curency"), y="y").to_svg()
     msg = str(exc_info.value)
     assert "curency" in msg
     assert not _control_chars(msg)
@@ -477,12 +479,7 @@ def test_curency_refusal_is_typed_valueerror_not_silent_corruption():
 def test_valid_but_unusual_spec_still_renders():
     """The refusal must never false-positive on a genuinely valid, if
     exotic, d3 spec."""
-    svg = (
-        fm.Chart(_xy_df())
-        .mark_point()
-        .encode(x=fm.X("x", format="*>8.1%"), y="y")
-        .to_svg()
-    )
+    svg = fm.Chart(_xy_df()).mark_point().encode(x=fm.X("x", format="*>8.1%"), y="y").to_svg()
     assert "<svg " in svg
     assert not _control_chars(svg)
 

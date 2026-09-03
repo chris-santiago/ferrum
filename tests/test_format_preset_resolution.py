@@ -134,10 +134,7 @@ def test_color_legend_currency_preset_renders_clean():
 
 def test_encoding_format_currency_preset_renders_clean():
     svg = (
-        fm.Chart(_currency_df())
-        .mark_point()
-        .encode(x=fm.X("x", format="currency"), y="y")
-        .to_svg()
+        fm.Chart(_currency_df()).mark_point().encode(x=fm.X("x", format="currency"), y="y").to_svg()
     )
     bad = _control_chars(svg)
     assert not bad, f"control chars in SVG: {[hex(ord(c)) for c in bad]}"
