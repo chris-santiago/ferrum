@@ -381,6 +381,16 @@ class TestOverrideRegistryParity:
             rule.valid_leaves
         )
 
+    def test_padding_numeric_leaves_are_all_padding_leaves_minus_auto(self):
+        # oa._PADDING_NUMERIC_LEAVES (the spec §4.7 pixel-contract guard's
+        # leaf set) is derived from PaddingConfig's own fields, not
+        # hand-enumerated, so a future PaddingConfig field is validated
+        # automatically instead of silently passing through the override
+        # boundary unchecked. Pin both halves of that derivation directly.
+        all_padding_leaves = frozenset(f.name for f in fields(PaddingConfig))
+        assert oa._PADDING_NUMERIC_LEAVES == all_padding_leaves - {"auto"}
+        assert "auto" not in oa._PADDING_NUMERIC_LEAVES
+
 
 class TestOverrideResolve:
     def test_x_axis_longest_prefix_wins(self):
@@ -529,6 +539,13 @@ class TestOverrideValidate:
         with pytest.raises(FerrumOverrideError, match=rf"{deprecated_path}.*Chart\.axis"):
             oa.validate({deprecated_path: True})
 
+    @pytest.mark.parametrize("value", [False, True])
+    def test_padding_auto_bool_leaf_is_not_routed_through_pixel_validator(self, value):
+        # ``padding_auto`` is a registered, valid PaddingConfig leaf (bool),
+        # not a pixel value. The spec §4.7 numeric/non-negative validator
+        # must not fire on it in either direction.
+        oa.validate({"padding_auto": value})
+
 
 class TestOverrideBuildPayload:
     def test_routes_each_target_into_its_piece(self):
@@ -646,6 +663,14 @@ class TestOverrideRenderChartConfig:
     def test_baseline_has_no_rotation(self, bar_chart):
         root = _svg_root(bar_chart)
         assert not any("rotate(-45" in (t.get("transform") or "") for t in _text_elements(root))
+
+    def test_padding_auto_override_renders(self, base_chart):
+        # Regression pin: ``.override(padding_auto=False)`` is a registered,
+        # valid PaddingConfig leaf (tests/test_override.py::TestOverrideRegistryParity)
+        # and must reach render, not be refused by the pixel-value validator
+        # that only applies to top/right/bottom/left.
+        root = _svg_root(base_chart.override(padding_auto=False))
+        assert root.tag.endswith("svg")
 
 
 class TestOverrideRenderProperties:

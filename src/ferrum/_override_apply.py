@@ -50,6 +50,7 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, NamedTuple
 
+from ferrum._validate import validate_pixel_value
 from ferrum.configure import (
     AxisConfig,
     ColorConfig,
@@ -168,10 +169,22 @@ class OverridePayload:
 # Shared by both the registry exclusion and the deprecated-path-map builder to prevent drift.
 _DEPRECATED_AXIS_LEAVES = frozenset({"x", "y"})
 
+# Non-pixel PaddingConfig leaves: excluded from the numeric pixel-contract
+# guard below. ``auto`` is a bool, not a pixel value, and must pass through
+# ``.override(padding_auto=...)`` untouched.
+_PADDING_NON_NUMERIC_LEAVES = frozenset({"auto"})
+
 
 def _config_leaves(config_cls: type) -> frozenset[str]:
     """Return the valid override leaves for a :mod:`ferrum.configure` dataclass."""
     return frozenset(f.name for f in fields(config_cls))
+
+
+# The numeric-pixel PaddingConfig leaves that carry the spec §4.7 pixel
+# contract, derived from PaddingConfig's own fields (minus the non-pixel
+# leaves above) so a future pixel-valued field is validated automatically
+# instead of silently passing through unchecked.
+_PADDING_NUMERIC_LEAVES = _config_leaves(PaddingConfig) - _PADDING_NON_NUMERIC_LEAVES
 
 
 def _coord_leaves() -> frozenset[str]:
@@ -497,6 +510,13 @@ def validate(overrides: dict[str, Any]) -> None:
     Keys are checked in iteration order and the error is raised on the first
     failure (fail-fast).
 
+    Also validates the numeric PaddingConfig leaves (``top``/``right``/
+    ``bottom``/``left``): they must be finite, non-negative pixel values per
+    spec §4.7's pixel contract (:func:`ferrum._validate.validate_pixel_value`,
+    the same predicate ``PaddingConfig.__post_init__`` runs). ``padding_auto``
+    (a bool leaf) is not part of the pixel contract and passes through
+    unvalidated here.
+
     Parameters
     ----------
     overrides:
@@ -506,9 +526,12 @@ def validate(overrides: dict[str, Any]) -> None:
     ------
     FerrumOverrideError
         When any path does not resolve.
+    ValueError
+        When a padding side value violates the pixel contract.
     """
-    for path in overrides:
-        if resolve(path) is None:
+    for path, value in overrides.items():
+        resolved = resolve(path)
+        if resolved is None:
             # Check if this is a known deprecated path with a documented replacement.
             if path in _DEPRECATED_PATHS:
                 replacement = _DEPRECATED_PATHS[path]
@@ -516,6 +539,16 @@ def validate(overrides: dict[str, Any]) -> None:
                     f"Unknown override path {path!r} (deprecated). Use {replacement} instead."
                 )
             raise FerrumOverrideError(f"Unknown override path {path!r}.{_suggestion(path)}")
+
+        # Validate padding-side values (NF-B5/B6/B7): numeric, finite,
+        # non-negative. Narrowed to exactly the numeric sides; "padding_auto"
+        # (bool) is a valid, registered leaf and must not be routed through
+        # the pixel-value validator.
+        if (
+            resolved.location.target_key == "padding"
+            and resolved.location.leaf in _PADDING_NUMERIC_LEAVES
+        ):
+            validate_pixel_value(f"override {path!r}", value)
 
 
 def build_payload(overrides: dict[str, Any]) -> OverridePayload:

@@ -337,6 +337,16 @@ class TestGridConfig:
 
 
 class TestPaddingConfig:
+    """Class-shape tests only.
+
+    Construction-time validation (negative/non-numeric/non-finite padding)
+    is feature coverage for this task (NF-B5/B6/B7) and lives in
+    ``tests/test_padding_validation.py`` per this project's test-file
+    convention (findings-scoped/feature files own their feature's
+    coverage); duplicating it here drifted the two files out of sync
+    across review cycles.
+    """
+
     def test_default_construction(self):
         cfg = PaddingConfig()
         assert cfg.auto is True

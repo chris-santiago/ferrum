@@ -7,7 +7,7 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
-from ferrum._validate import validate_choice
+from ferrum._validate import validate_choice, validate_pixel_value
 
 
 _VALID_LEGEND_ORIENTS = frozenset({"right", "left", "top", "bottom", "none"})
@@ -496,6 +496,14 @@ class PaddingConfig:
     bottom: float | None = None
     left: float | None = None
     auto: bool = True
+
+    def __post_init__(self) -> None:
+        # Validate at construction time (NF-B5/B6/B7): each side must be a
+        # finite, non-negative pixel value (spec §4.7's pixel contract).
+        validate_pixel_value("padding.top", self.top)
+        validate_pixel_value("padding.right", self.right)
+        validate_pixel_value("padding.bottom", self.bottom)
+        validate_pixel_value("padding.left", self.left)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""

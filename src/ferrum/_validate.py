@@ -1,6 +1,6 @@
 """Shared zero-import leaf-validation predicates for the rest of ``ferrum``.
 
-Two independent predicates live here today:
+Three independent predicates live here today:
 
 - ``validate_choice`` is the canonical way to reject a value that is not a
   member of a documented closed vocabulary (a ``kind=``/``method=``/``order=``
@@ -22,7 +22,15 @@ Two independent predicates live here today:
   ``resolve_paint_color`` (``crates/ferrum-core/src/render/draw.rs``); see
   the function docstring below.
 
-Both are small, self-contained predicates with no shared machinery between
+- ``validate_pixel_value`` is the single definition of the "pixel contract"
+  (spec §4.7): a value must be numeric (``bool`` excluded), finite, and
+  non-negative. It is shared by ``configure.PaddingConfig.__post_init__``
+  (construction-time validation) and ``_override_apply.validate``'s padding
+  guard (the ``Chart.override`` entry point), so both boundaries refuse the
+  same values with the same reasoning instead of maintaining two hand-copied
+  isinstance/range checks that can drift.
+
+Each is a small, self-contained predicate with no shared machinery between
 them — this module is a landing spot for that shape of helper, not a
 general utility dump; a new addition should be a comparably minimal,
 zero-import validation predicate, not accreted business logic.
@@ -34,6 +42,7 @@ on it without inverting the dependency graph.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -84,3 +93,35 @@ def validate_choice(
         raise ValueError(
             f"{func_name}: {param} must be one of {sorted(str(c) for c in choices)}; got {value!r}"
         )
+
+
+def validate_pixel_value(label: str, value: Any) -> None:
+    """Raise ``ValueError`` when *value* violates the pixel contract (spec §4.7).
+
+    A valid pixel value is numeric (``int``/``float``, ``bool`` excluded since
+    ``bool`` is a ``int`` subclass), finite (not NaN/±inf), and non-negative.
+    ``None`` is the caller's "unset" sentinel and always passes.
+
+    *label* is a pre-composed description of the field being checked (e.g.
+    ``"padding.top"`` or ``"override 'padding_top'"``) so each call site keeps
+    its own message convention; this function owns only the check itself,
+    which two independent entry points — ``PaddingConfig.__post_init__`` and
+    the ``Chart.override`` padding guard — otherwise had to keep in sync by
+    hand.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not numeric, is NaN/±inf, or is negative.
+    """
+    if value is None:
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(
+            f"{label} must be a numeric pixel value (int or float), "
+            f"not {type(value).__name__}; received {value!r}"
+        )
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be a finite numeric pixel value; received {value}")
+    if value < 0:
+        raise ValueError(f"{label} must be non-negative; received {value}")
