@@ -45,6 +45,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._snapshots import legend_texts as texts
 
 
 # ---------------------------------------------------------------------------
@@ -79,11 +80,6 @@ def num_df() -> pl.DataFrame:
             "val": [0.0, 25.0, 50.0, 75.0, 100.0],
         }
     )
-
-
-def texts(svg: str) -> list[str]:
-    """All ``<text>`` node contents in document order."""
-    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
 
 def render(chart) -> tuple[str, list[str]]:

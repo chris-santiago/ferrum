@@ -69,14 +69,8 @@ import pytest
 
 import ferrum as fm
 from ferrum.configure import AxisConfig
-
-
-def _extract_text_labels(svg: str) -> list[str]:
-    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
-
-
-def _control_chars(text: str) -> set[str]:
-    return {c for c in text if ord(c) < 0x20 and c not in "\t\n\r"}
+from tests._snapshots import control_chars as _control_chars
+from tests._snapshots import legend_texts as _extract_text_labels
 
 
 def _xy_df() -> pl.DataFrame:

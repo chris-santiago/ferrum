@@ -24,6 +24,18 @@ def legend_texts(svg: str) -> list[str]:
     return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
 
+def control_chars(text: str) -> set[str]:
+    """Return the set of C0 control characters (excluding tab/newline/CR) in *text*.
+
+    Shared probe for the "an unresolved format preset reached the SVG as a
+    literal control byte" regression class (NF-B1): a d3-format parser that
+    misreads a preset name as a type character can emit ``\\x18``/``\\x1a``/
+    ``\\x1c`` straight into rendered text, which this catches without
+    depending on any particular preset's output shape.
+    """
+    return {c for c in text if ord(c) < 0x20 and c not in "\t\n\r"}
+
+
 def assert_svg_eq(actual: str, expected: str, *, name: str, regen_hint: str) -> None:
     """Assert two SVG strings are byte-equal with a fast, compact failure message.
 

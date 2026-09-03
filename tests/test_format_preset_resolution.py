@@ -22,8 +22,6 @@ rendered output — see the design spec §4.5 and this task's brief.
 
 from __future__ import annotations
 
-import re
-
 import polars as pl
 import pytest
 
@@ -31,16 +29,8 @@ import ferrum as fm
 from ferrum.axis import Axis, _normalize_axis
 from ferrum.configure import AxisConfig
 from ferrum.legend import Legend, _normalize_legend
-
-
-def _control_chars(text: str) -> set[str]:
-    """Return the set of C0 control characters (excluding tab/newline/CR) in *text*."""
-    return {c for c in text if ord(c) < 0x20 and c not in "\t\n\r"}
-
-
-def _extract_text_labels(svg: str) -> list[str]:
-    """Extract visible text label content from SVG <text> elements."""
-    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+from tests._snapshots import control_chars as _control_chars
+from tests._snapshots import legend_texts as _extract_text_labels
 
 
 def _percent_df() -> pl.DataFrame:

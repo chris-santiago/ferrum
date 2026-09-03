@@ -117,11 +117,11 @@
   },
   "AxisStyleSpec.label_format": {
     "honored": true,
-    "reason": "effective_label_format()/axis_style_fill_from -> AxisStyleOverrides.label_format, applied by apply_label_format_to_axis, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format"
+    "reason": "effective_label_format()/axis_style_fill_from -> AxisStyleOverrides.label_format, applied by apply_label_format_to_axis, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format"
   },
   "AxisStyleSpec.label_format_type": {
     "honored": true,
-    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis (render/mod.rs::prepare_and_layout) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
+    "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis (render/mod.rs::prepare_and_layout) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
   },
   "AxisStyleSpec.label_overlap": {
     "honored": true,
@@ -157,11 +157,11 @@
   },
   "AxisStyleSpec.tick_extra": {
     "honored": true,
-    "reason": "prepare::adjust_axis_ticks, render/prepare/mod.rs, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_extra"
+    "reason": "prepare::adjust_axis_ticks, render/prepare/mod.rs, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_extra"
   },
   "AxisStyleSpec.tick_min_step": {
     "honored": true,
-    "reason": "prepare::adjust_axis_ticks, render/prepare/mod.rs, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_min_step"
+    "reason": "prepare::adjust_axis_ticks, render/prepare/mod.rs, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_min_step"
   },
   "AxisStyleSpec.tick_size": {
     "honored": true,
@@ -197,7 +197,7 @@
   },
   "AxisStyleSpec.values": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.tick_values, consumed by apply_label_format_to_axis / sync_projected_fractions_to_tick_values, for axis/axis_x/axis_y; NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.values"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.tick_values, consumed by apply_label_format_to_axis / sync_projected_fractions_to_tick_values, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.values"
   },
   "AxisStyleSpec.zindex": {
     "honored": true,

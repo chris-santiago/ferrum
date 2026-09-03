@@ -30,6 +30,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from tests._snapshots import legend_texts as _texts
 
 
 @pytest.fixture
@@ -47,10 +48,6 @@ def df() -> pl.DataFrame:
 @pytest.fixture
 def chart(df: pl.DataFrame):
     return fm.Chart(df).mark_point().encode(x="a", y="b")
-
-
-def _texts(svg: str) -> list[str]:
-    return re.findall(r">([^<>]+)</text>", svg)
 
 
 def _grid_line_count(svg: str) -> int:

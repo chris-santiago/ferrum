@@ -695,6 +695,10 @@ mod tests {
             },
             RenderWarning::ConfigSurfaceNotPresent { section: "axis_y2".to_string() },
             RenderWarning::LegendValuesUnknown { values: vec!["zzz".into()] },
+            RenderWarning::ScaleDomainConfigOnOrdinalAxis {
+                channel: "x".into(),
+                fields: vec!["domain_min".into(), "nice".into()],
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
