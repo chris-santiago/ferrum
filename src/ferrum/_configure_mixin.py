@@ -14,6 +14,8 @@ from __future__ import annotations
 import warnings
 from abc import abstractmethod
 
+from ferrum._title_sentinel import _UNSET, TitleParam
+
 # Sentinel for "caller did not pass this kwarg" — used by the deprecated-alias
 # resolver so that an explicit alias=None is still detected as "supplied".
 _MISSING = object()
@@ -139,6 +141,11 @@ class ConfigureMixin:
         tick_min_step: "float | None" = None,
         title_orient: "str | None" = None,
         zindex: "int | None" = None,
+        labels: "bool | None" = None,
+        ticks: "bool | None" = None,
+        title: "TitleParam" = _UNSET,
+        offset: "float | None" = None,
+        label_flush: "bool | None" = None,
         # Deprecated aliases — accepted with a DeprecationWarning.
         min_extent: object = _MISSING,
         max_extent: object = _MISSING,
@@ -216,6 +223,25 @@ class ConfigureMixin:
             Side/orientation of the axis title.
         zindex : int, optional
             Coarse draw order of the axis relative to marks.
+        labels : bool, optional
+            Show or hide the tick labels. A per-channel
+            ``fm.Axis(labels=...)`` wins over this.
+        ticks : bool, optional
+            Show or hide the tick marks. Same precedence as ``labels``.
+        title : str or None, optional
+            Axis title text, on the same three-way contract as the
+            per-channel :class:`~ferrum.axis.Axis` surface: omit it to keep
+            the field-name default, pass ``None`` to suppress the title, or
+            pass a string to use it verbatim. A per-channel
+            ``X(title=...)`` / ``fm.Axis(title=...)`` wins over this,
+            *including* when the per-channel value is the suppression — a
+            chart-level title never resurrects a title the channel
+            deliberately removed.
+        offset : float, optional
+            Shift the axis away from the plot edge by N pixels.
+        label_flush : bool, optional
+            Align the first and last tick labels flush with the axis ends
+            instead of letting them overhang the plot bounds.
 
         Returns
         -------
@@ -275,6 +301,11 @@ class ConfigureMixin:
             tick_min_step=tick_min_step,
             title_orient=title_orient,
             zindex=zindex,
+            labels=labels,
+            ticks=ticks,
+            title=title,
+            offset=offset,
+            label_flush=label_flush,
         )
         return self._append_configure(Configure(axis=cfg))
 
@@ -440,8 +471,8 @@ class ConfigureMixin:
     def configure_grid(
         self,
         *,
-        x: "bool | None" = None,
-        y: "bool | None" = None,
+        x: "bool | GridAxisConfig | None" = None,
+        y: "bool | GridAxisConfig | None" = None,
         color: "str | None" = None,
         width: "float | None" = None,
         dash: "list[float] | None" = None,
@@ -450,10 +481,19 @@ class ConfigureMixin:
     ):
         """Apply grid configuration.
 
+        ``x`` and ``y`` are independent: ``configure_grid(x=True, y=False)``
+        draws vertical gridlines only. (Before the per-axis grid work this
+        combination was silently dropped in full — only agreeing x/y values,
+        or a y-only setting, had any effect.)
+
         Parameters
         ----------
-        x, y : bool, optional
-            Enable/disable grid on each axis.
+        x, y : bool or GridAxisConfig, optional
+            Enable/disable grid on each axis, or pass a
+            :class:`~ferrum.configure.GridAxisConfig` to give that axis its
+            own gridline color/width/dash/opacity as well. An axis left unset
+            falls back to the flat ``color``/``width``/``dash``/``opacity``
+            shorthand below, and then to the theme.
         color : str, optional
             Grid line color.
         width : float, optional

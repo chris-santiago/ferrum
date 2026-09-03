@@ -9,6 +9,7 @@ Chart-level configuration dataclasses — Configure, AxisConfig, ColorConfig, Gr
         - ColorConfig
         - Configure
         - FerrumOverrideError
+        - GridAxisConfig
         - GridConfig
         - LegendConfig
         - PaddingConfig

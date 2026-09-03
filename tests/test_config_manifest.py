@@ -43,6 +43,7 @@ from ferrum.configure import (
     AxisConfig,
     ColorConfig,
     Configure,
+    GridAxisConfig,
     GridConfig,
     LegendConfig,
     PaddingConfig,
@@ -192,6 +193,10 @@ _STRUCT_TO_PYTHON_CONFIG: dict[str, tuple[type, dict[str, str]]] = {
     "AxisStyleSpec": (AxisConfig, {"values": "tick_values"}),
     "ColorConfigSpec": (ColorConfig, {}),
     "GridConfigSpec": (GridConfig, {}),
+    # The per-axis grid sub-struct (`grid.x` / `grid.y`'s object spelling).
+    # Python's `GridAxisConfig` is its mirror; a bare bool on the same slot is
+    # the enable-only shorthand both sides still accept.
+    "GridAxisSpec": (GridAxisConfig, {}),
     "LegendStyleSpec": (LegendConfig, {}),
     "PaddingConfigSpec": (PaddingConfig, {}),
     "TitleConfigSpec": (TitleConfig, {}),
@@ -253,24 +258,6 @@ _EXPECTED_PYTHON_ABSENT: dict[str, str] = {
         "dataclass, per _STRUCT_TO_PYTHON_CONFIG's 3-part-key mapping) — not "
         "a constructor parameter on axis_y2's AxisConfig instance either"
     ),
-    # --- No chart-level Rust consumer yet (pending a later batch task);
-    # --- Python correctly withholds the parameter rather than accepting a
-    # --- value that would silently no-op today.
-    "AxisStyleSpec.labels": (
-        "no chart-level Rust consumer (AxisInput.show_labels is a plain "
-        "bool, per-channel-only); adding a Python kwarg today would "
-        "silently no-op. Pending Task 8 per chart_config_manifest.json"
-    ),
-    "AxisStyleSpec.ticks": (
-        "same disposition as labels — no chart-level Rust consumer; "
-        "pending Task 8 per chart_config_manifest.json"
-    ),
-    "AxisStyleSpec.title": (
-        "no chart-level Rust consumer (AxisInput.title's unset/suppressed "
-        "tri-state conflation makes a naive chart-level fill unsafe); "
-        "chart_config_manifest.json's own reason confirms AxisConfig does "
-        "not expose title either today. Pending Task 8's tri-state model"
-    ),
     "LegendStyleSpec.format_type": (
         "chart-level configure_legend was never one of NF-B1's five target "
         "format-resolution surfaces; reachable today via the per-channel "
@@ -315,24 +302,6 @@ _EXPECTED_PYTHON_ABSENT: dict[str, str] = {
         "per-channel-only by design: explicit legend values are inherently "
         "per-encoding, not a sensible chart-wide default; fm.Legend(values=) "
         "exists"
-    ),
-    # --- Rust already honors these at the chart-level axis position;
-    # --- AxisConfig has simply never exposed a matching Python kwarg. Not a
-    # --- silent-loss bug (there is no Python field to lose data from), but
-    # --- called out distinctly from the "no Rust consumer" entries above —
-    # --- this is an unbuilt feature, flagged for the orchestrator rather
-    # --- than added here (public-API addition; out of this fix round's
-    # --- two-item scope).
-    "AxisStyleSpec.offset": (
-        "Rust honors this at chart-level (axis_style_fill_from -> "
-        "AxisStyleOverrides.offset) but AxisConfig has never exposed a "
-        "matching kwarg — an unbuilt feature, not a silent-loss bug. "
-        "Flagged for the orchestrator, not fixed in this round."
-    ),
-    "AxisStyleSpec.label_flush": (
-        "same situation as offset above: Rust honors this at chart-level "
-        "(axis_style_fill_from -> AxisStyleOverrides.label_flush) but "
-        "AxisConfig has never exposed a matching kwarg."
     ),
 }
 
@@ -379,8 +348,7 @@ def test_expected_python_absent_allowlist_has_no_stale_entries():
         assert reason, f"{key!r} has an empty allowlist reason"
         assert key in manifest, f"{key!r} no longer in the Rust manifest; remove from allowlist"
         assert not _is_reachable_from_python(key), (
-            f"{key!r} is now reachable from Python; remove from allowlist "
-            "(it's no longer a gap)"
+            f"{key!r} is now reachable from Python; remove from allowlist (it's no longer a gap)"
         )
 
 

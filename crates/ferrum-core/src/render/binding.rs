@@ -1324,10 +1324,30 @@ fn validate_chart_config_keys(d: &Bound<'_, PyDict>) -> PyResult<()> {
             // error; this gate only walks dict-shaped sections.
             continue;
         };
-        for (inner_key_obj, _) in section.iter() {
+        for (inner_key_obj, inner_value) in section.iter() {
             let inner_key: String = inner_key_obj.extract()?;
             if !accepted.contains(&inner_key.as_str()) {
                 return Err(chart_config_unknown_key_err(&inner_key, &key, &accepted));
+            }
+            // One level deeper for the nested per-axis objects (`grid.x` /
+            // `grid.y`, D4/spec §4.3). Without this the sub-struct's own keys
+            // would be gated only by serde's untagged bool-or-object arm,
+            // whose failure text names no accepted set — the exact gap the
+            // pinned refusal exists to close. `None` (every non-nesting key,
+            // and the bool spelling of a nesting one) walks no further.
+            let Some(nested) = super::chart_config::accepted_keys_for_nested(&key, &inner_key)
+            else {
+                continue;
+            };
+            let Ok(nested_dict) = inner_value.cast::<PyDict>() else {
+                continue;
+            };
+            for (leaf_obj, _) in nested_dict.iter() {
+                let leaf: String = leaf_obj.extract()?;
+                if !nested.contains(&leaf.as_str()) {
+                    let section_path = format!("{key}.{inner_key}");
+                    return Err(chart_config_unknown_key_err(&leaf, &section_path, nested));
+                }
             }
         }
     }

@@ -212,9 +212,51 @@ pub(crate) struct AxisStyleOverrides {
     /// `None`/`false` → default anchors (byte-identical).
     pub label_flush: Option<bool>,
     /// Tick-label overlap strategy override. `None` → the unmodified collision
-    /// cascade. Only consumed by the x-axis layout; the y-axis applies no overlap
-    /// policy.
+    /// cascade on x, and no overlap policy at all on y (see
+    /// [`resolve_y_overlap`](crate::layout::axis::resolve_y_overlap) for y's
+    /// transpose of the four primitives).
     pub label_overlap: Option<LabelOverlap>,
+    /// Tick-mark length (px) for this axis. `None` → `theme.sizes.tick_size`.
+    /// Per-axis rather than theme-global as of D12 (spec §4.9): it was the
+    /// LAST `AxisStyleSpec` field whose only carrier was the shared theme, so
+    /// `configure(axis_x=AxisConfig(tick_size=…))` had nowhere to land but a
+    /// global slot the y axis reads too — the gap Python's
+    /// `_redistribute_general_axis` was papering over.
+    pub tick_size: Option<f64>,
+    /// Whether tick labels render. `None` → `true`. Per-channel
+    /// `fm.Axis(labels=)` writes it unconditionally; chart-level
+    /// `configure_axis(labels=)` fills it only when still `None`, so
+    /// per-channel wins (D12, spec §4.9).
+    pub show_labels: Option<bool>,
+    /// Whether tick marks render. Same cascade as
+    /// [`show_labels`](Self::show_labels). `None` → `true`.
+    pub show_ticks: Option<bool>,
+    /// Whether the axis domain line renders. `None` means "no per-axis
+    /// opinion" and is resolved against `theme.axis.axis_line` by
+    /// [`AxesInput::apply_show_defaults`], so by layout time this is always
+    /// `Some`. Precedence (not AND): a per-channel `Axis(domain=True)` wins
+    /// over a theme that disables domain lines.
+    pub show_domain: Option<bool>,
+    /// Whether gridlines from this axis render. `None` means "no per-axis
+    /// opinion" and is resolved against `theme.grid.grid` by
+    /// [`AxesInput::apply_show_defaults`] — the per-axis half of D4/F-L07-01
+    /// (spec §4.3). Precedence, not AND: a per-channel `Axis(grid=True)` on a
+    /// grid-less theme draws gridlines for that axis only.
+    pub show_grid: Option<bool>,
+    /// Set once the axis title slot has been claimed by a source the
+    /// chart-level config must not overwrite: a per-channel `X(title=)` /
+    /// `fm.Axis(title=)` (including the `title=""` explicit-suppress
+    /// spelling), or an earlier, more specific chart-level layer.
+    ///
+    /// [`AxisInput::title`] alone cannot carry that distinction — `None`
+    /// there means BOTH "never set" and "explicitly suppressed", so a naive
+    /// fill-only-if-`None` chart-level write would resurrect a title the
+    /// caller deliberately removed, inverting the per-channel-wins cascade.
+    /// This is the title twin of [`label_format_claimed`](Self::label_format_claimed),
+    /// which exists for the identical reason on the format slot; both are
+    /// written once at their source and read only through the one
+    /// `fill_chart_level_*` method that owns the predicate (D12, spec §4.9).
+    pub title_claimed: bool,
 }
 
 impl AxisStyleOverrides {
@@ -249,6 +291,23 @@ impl AxisStyleOverrides {
     }
 }
 
+/// The axis-title 3-way resolution shared by the per-channel builder
+/// (`prepare::resolve_axis_title`) and the chart-level fill
+/// ([`AxisInput::fill_chart_level_title`]):
+///   - absent (`None`)             → keep `fallback`;
+///   - present + empty/whitespace  → explicit suppress, yields `None`;
+///   - present + non-empty         → use it verbatim.
+///
+/// The empty-string suppression sentinel comes from Python forwarding
+/// `title = ""` only when `title=None` was explicitly passed.
+pub(crate) fn resolve_axis_title(value: Option<&str>, fallback: Option<String>) -> Option<String> {
+    match value {
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s.to_owned()),
+        None => fallback,
+    }
+}
+
 /// Caller-supplied per-axis input. Phase 6 takes both x and y always.
 ///
 /// The render-input data (orient, title, labels, show toggles, formats, tick
@@ -261,20 +320,13 @@ pub struct AxisInput {
     /// `overrides.orient` (default Bottom for x, Left for y) via
     /// [`resolve_orient`](Self::resolve_orient) after all override layers merge.
     pub orient: AxisOrient,
+    /// Resolved axis title, or `None` for "no title" (either never set, or
+    /// explicitly suppressed via the `title=""` sentinel). Which of the two it
+    /// is matters for the chart-level cascade and is carried separately by
+    /// [`AxisStyleOverrides::title_claimed`] — see
+    /// [`AxisInput::fill_chart_level_title`].
     pub title: Option<String>,
     pub tick_labels: Vec<String>,
-    /// When `false`, tick labels are suppressed (D7: `axis.labels`).
-    /// Default `true` — preserves byte-identity for all existing goldens.
-    pub show_labels: bool,
-    /// When `false`, tick marks are suppressed (D7: `axis.ticks`).
-    /// Default `true`.
-    pub show_ticks: bool,
-    /// When `false`, the axis domain line is suppressed (D7: `axis.domain`).
-    /// Default `true`.
-    pub show_domain: bool,
-    /// When `false`, gridlines for this axis are suppressed even when the theme
-    /// enables them globally (D7: `axis.grid`). Default `true`.
-    pub show_grid: bool,
     /// Optional d3-format string applied to each tick label before layout
     /// (D12: `encoding.format` on x/y axes). `None` → use the scale's own
     /// default formatter (existing behavior).
@@ -332,9 +384,10 @@ pub struct TickProjection {
 }
 
 impl AxisInput {
-    /// Construct an `AxisInput` with all overrides empty and all show_* = true
-    /// (the backward-compatible defaults). `label_angle` seeds
-    /// `overrides.label_angle`.
+    /// Construct an `AxisInput` with all overrides empty (so every show toggle
+    /// reads its default: `true` for labels/ticks, the theme's value for
+    /// domain/grid once [`AxesInput::apply_show_defaults`] has run).
+    /// `label_angle` seeds `overrides.label_angle`.
     pub fn new(
         orient: AxisOrient,
         title: Option<String>,
@@ -345,10 +398,6 @@ impl AxisInput {
             orient,
             title,
             tick_labels,
-            show_labels: true,
-            show_ticks: true,
-            show_domain: true,
-            show_grid: true,
             tick_format: None,
             tick_format_type: None,
             tick_projection: None,
@@ -358,6 +407,60 @@ impl AxisInput {
                 ..AxisStyleOverrides::default()
             },
         }
+    }
+
+    /// This axis's tick-mark length: its own override, else the theme's.
+    /// One accessor rather than an `unwrap_or` repeated at each of the six
+    /// consumers (band reservation, the two `layout_*_axis` calls, the
+    /// secondary-y call, and `build_axis`).
+    pub fn tick_size(&self, theme: &super::ThemeInputs) -> f64 {
+        self.overrides.tick_size.unwrap_or(theme.sizes.tick_size)
+    }
+
+    /// Whether tick labels render (`overrides.show_labels`, default `true`).
+    pub fn show_labels(&self) -> bool {
+        self.overrides.show_labels.unwrap_or(true)
+    }
+
+    /// Whether tick marks render (`overrides.show_ticks`, default `true`).
+    pub fn show_ticks(&self) -> bool {
+        self.overrides.show_ticks.unwrap_or(true)
+    }
+
+    /// Whether the axis domain line renders. `None` here means the theme
+    /// default has not been folded in yet ([`AxesInput::apply_show_defaults`]);
+    /// `true` is that theme field's own default, so an un-resolved axis reads
+    /// the same as an unconfigured one.
+    pub fn show_domain(&self) -> bool {
+        self.overrides.show_domain.unwrap_or(true)
+    }
+
+    /// Whether gridlines from this axis render. Same "resolved by
+    /// [`AxesInput::apply_show_defaults`], defaults to the theme field's own
+    /// default" contract as [`show_domain`](Self::show_domain).
+    pub fn show_grid(&self) -> bool {
+        self.overrides.show_grid.unwrap_or(true)
+    }
+
+    /// The SOLE way a chart-level source may fill [`title`](Self::title):
+    /// no-ops once the slot is claimed (by a per-channel title — including an
+    /// explicit `title=""` suppression — or by an earlier, more specific
+    /// chart-level layer), and claims it on the way out so the next, less
+    /// specific layer cannot overwrite it.
+    ///
+    /// `spec_title` carries the raw wire value, so the same empty-string
+    /// suppress sentinel the per-channel path honors works at chart level too:
+    /// `configure_axis(title="")` removes the field-name default rather than
+    /// rendering an empty title. Mirrors
+    /// [`AxisStyleOverrides::fill_chart_level_label_format`] field for field —
+    /// same hazard (a slot whose `None` is ambiguous), same one-owner fix.
+    pub(crate) fn fill_chart_level_title(&mut self, spec_title: Option<&str>) {
+        if self.overrides.title_claimed {
+            return;
+        }
+        let Some(raw) = spec_title else { return };
+        self.title = resolve_axis_title(Some(raw), self.title.take());
+        self.overrides.title_claimed = true;
     }
 
     /// Re-resolve the concrete [`orient`](Self::orient) from the
@@ -396,6 +499,36 @@ pub struct AxesInput {
     pub secondary_y: Vec<AxisInput>,
 }
 
+impl AxesInput {
+    /// Fold the two theme-defaulted show toggles (`grid`, `domain`) into every
+    /// axis's own override slot, so from here on the per-axis value is the
+    /// FINAL answer and no consumer needs a second, theme-level gate.
+    ///
+    /// This is what makes the grid/domain cascade a PRECEDENCE chain rather
+    /// than the AND it used to be (D4/F-L07-01, spec §4.3): `build_grid` and
+    /// `build_axis` previously each re-consulted `theme.grid.grid` /
+    /// `theme.axis.axis_line` alongside the per-axis flag, so a per-channel
+    /// `Axis(grid=True)` could never light up an axis on a grid-less theme,
+    /// and a per-axis `configure(axis_x=AxisConfig(grid=False))` had to be
+    /// expressed as a GLOBAL theme write that took the y gridlines down with
+    /// it. Resolving once, here, removes both the second gate and the global
+    /// write; the same-answer conditional is gone from every consumer.
+    ///
+    /// Idempotent: a slot that is already `Some` is left alone, so running it
+    /// twice (or after a per-channel/chart-level fill) changes nothing.
+    /// Applies to the secondary y axes too — the `axis_y2` position's own
+    /// `grid`/`domain` values reach the same slots via the shared fill path.
+    pub(crate) fn apply_show_defaults(&mut self, theme: &super::ThemeInputs) {
+        for axis in [&mut self.x, &mut self.y]
+            .into_iter()
+            .chain(self.secondary_y.iter_mut())
+        {
+            axis.overrides.show_grid.get_or_insert(theme.grid.grid);
+            axis.overrides.show_domain.get_or_insert(theme.axis.axis_line);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AxisLayout {
     pub orient: AxisOrient,
@@ -423,6 +556,10 @@ pub struct AxisLayout {
     /// D7: whether to render gridlines from this axis. Default `true`.
     #[serde(default = "default_true")]
     pub show_grid: bool,
+    /// Per-axis tick-mark length override (`configure_axis(tick_size=...)` /
+    /// `fm.Axis(tick_size=...)`). `None` means use the theme default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_size: Option<f64>,
     /// Per-axis title font size override from `configure_axis(title_font_size=...)`.
     /// `None` means use the theme default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -517,10 +654,11 @@ impl AxisLayout {
             ticks,
             minor_ticks,
             title,
-            show_labels: input.show_labels,
-            show_ticks: input.show_ticks,
-            show_domain: input.show_domain,
-            show_grid: input.show_grid,
+            tick_size: input.overrides.tick_size,
+            show_labels: input.show_labels(),
+            show_ticks: input.show_ticks(),
+            show_domain: input.show_domain(),
+            show_grid: input.show_grid(),
             title_font_size: input.overrides.title_font_size,
             title_color_rgba: input.overrides.title_color.map(rgba_array),
             label_padding: input.overrides.label_padding,
@@ -1083,7 +1221,7 @@ pub(crate) fn compute_y_label_band_width(
         .map(|s| metrics.measure_width(s, label_font_size))
         .fold(0.0_f64, f64::max);
     let angle = input.overrides.label_angle.unwrap_or(0.0);
-    let labels_drawn = visible && input.show_labels;
+    let labels_drawn = visible && input.show_labels();
     if !labels_drawn && angle == 0.0 {
         // #94 phantom-margin family (deliberately unchanged here): the
         // pre-#97 flat reservation for an axis whose labels never draw
@@ -1189,7 +1327,34 @@ pub fn layout_y_axis(
         (None, None) => slot_h,
     };
 
-    let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
+    // `label_overlap` on y (D12, spec §4.9): the y-dimension transpose of the
+    // policy `cascade_collision_recovery` applies on x, reading the SAME
+    // `LabelOverlap` object off the same override slot — so
+    // `configure_axis(label_overlap=…)` and `fm.Axis(label_overlap=…)` mean
+    // one thing on both axes instead of silently applying to x only.
+    //
+    // `None` stays byte-identical: y has never run a collision cascade, so
+    // "no policy" must keep meaning "draw every label". That is why `None`
+    // and `Greedy` differ HERE and not on x — on y, `Greedy` is an explicit
+    // request for the fit-based culling y otherwise never does.
+    let overlap_visible = resolve_y_overlap(
+        input.overrides.label_overlap,
+        &input.tick_labels,
+        cascade_slot_h,
+        label_font_size,
+        metrics,
+    );
+    // `label_overlap = "rotate"` supplies the angle when the caller set none,
+    // so the two knobs compose instead of one silently shadowing the other:
+    // an explicit `label_angle` still wins (it is the more specific request).
+    let effective_angle = input
+        .overrides
+        .label_angle
+        .or_else(|| match input.overrides.label_overlap {
+            Some(LabelOverlap::Rotate) => Some(*ANGLE_CASCADE.last().unwrap()),
+            _ => None,
+        });
+    let (mut ticks, warning) = if let Some(override_angle) = effective_angle {
         // R2: label_angle_override always applies (there is no cascade to
         // bypass on y). Shared body (quality-review fix 4): see
         // `stamp_override_angle_with_elide`'s doc for the x/y transpose
@@ -1221,6 +1386,11 @@ pub fn layout_y_axis(
             .collect();
         (ticks, None)
     };
+    if let Some(visible) = overlap_visible {
+        for (tick, keep) in ticks.iter_mut().zip(visible) {
+            tick.culled = !keep;
+        }
+    }
     // Minors use the SAME inverted base range + padding inset as the major
     // projection above, so a minor at domain `v` coincides with the major
     // projection of `v`.
@@ -1284,6 +1454,52 @@ pub fn layout_y_axis(
     // layout_x_axis via `AxisLayout::from_input`).
     let layout = AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title);
     (layout, warning)
+}
+
+/// The y-axis transpose of `cascade_collision_recovery`'s `label_overlap`
+/// block (D12, spec §4.9): which tick labels survive, given the policy.
+///
+/// `None` (the return) means "no policy applied — leave every label as the
+/// caller built it", which is what keeps a y axis with no `label_overlap`
+/// byte-identical. Per policy:
+/// - [`LabelOverlap::ShowAll`] — every label kept, explicitly (the same
+///   observable as no policy today, but a promise rather than an accident:
+///   a future y-side cascade must not cull under `ShowAll`).
+/// - [`LabelOverlap::Parity`] — stride-2 decimation, no measurement, exactly
+///   as on x.
+/// - [`LabelOverlap::Greedy`] — keep a label only if its line box clears the
+///   last kept one's; on x this is the default cascade's behavior, on y it is
+///   an explicit request, since y has never culled on its own.
+/// - [`LabelOverlap::Rotate`] — no culling here; the caller turns this into
+///   the steepest cascade angle, mirroring x's rotate stage.
+///
+/// `slot_h` is the per-tick vertical budget `layout_y_axis` already computes
+/// (the tightest adjacent gap on a projected axis, `slot_h` on a uniform one).
+fn resolve_y_overlap(
+    policy: Option<LabelOverlap>,
+    labels: &[String],
+    slot_h: f64,
+    label_font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> Option<Vec<bool>> {
+    match policy? {
+        LabelOverlap::ShowAll | LabelOverlap::Rotate => Some(vec![true; labels.len()]),
+        LabelOverlap::Parity => Some((0..labels.len()).map(|i| i % 2 == 0).collect()),
+        LabelOverlap::Greedy => {
+            let line_h = metrics.line_height(label_font_size);
+            let mut visible = Vec::with_capacity(labels.len());
+            // Positions are evenly spaced by `slot_h`, so "does this label
+            // clear the last kept one" reduces to counting slots since the
+            // last keep — the vertical analogue of x's stride.
+            let mut slots_since_kept = f64::INFINITY;
+            for _ in labels {
+                let keep = slots_since_kept * slot_h >= line_h;
+                visible.push(keep);
+                slots_since_kept = if keep { 1.0 } else { slots_since_kept + 1.0 };
+            }
+            Some(visible)
+        }
+    }
 }
 
 use crate::layout::{LABEL_OVERLAP_TOLERANCE, ANGLE_CASCADE, FONT_SHRINK_FACTOR};
@@ -2381,7 +2597,7 @@ pub fn layout_x_axis(
         // labels is unaffected — pre-#97 rotated title placement already
         // included the full standoff regardless of label visibility, the
         // same reasoning that limits every other #97 gate to θ=0. See #94.
-        let label_extent = if resolved_angle == 0.0 && !input.show_labels {
+        let label_extent = if resolved_angle == 0.0 && !input.show_labels() {
             line_h
         } else {
             rotated_x_label_extent(
@@ -2445,11 +2661,11 @@ mod tests {
             vec!["a".into()],
             None,
         );
-        input.show_labels = false;
-        input.show_ticks = false;
-        input.show_domain = false;
-        input.show_grid = false;
         input.overrides = AxisStyleOverrides {
+            show_labels: Some(false),
+            show_ticks: Some(false),
+            show_domain: Some(false),
+            show_grid: Some(false),
             title_font_size: Some(14.0),
             title_color: Some(red),
             label_padding: Some(3.0),
@@ -2546,6 +2762,7 @@ mod tests {
                 anchor_y: 380.0,
                 angle: 0.0,
             }),
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -2580,6 +2797,7 @@ mod tests {
             ticks: vec![],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -2770,7 +2988,7 @@ mod tests {
             vec!["0".into(), "100".into(), "10000".into()],
             None,
         );
-        input.show_labels = false;
+        input.overrides.show_labels = Some(false);
         let m = mock(10.0);
 
         // `visible: true` — the axis itself is shown; only its labels are off.
@@ -2794,7 +3012,7 @@ mod tests {
         // label_padding — proving the gate keys on `show_labels`, not some
         // unrelated code path that always returns the bare value.
         let mut labels_on_padded = padded.clone();
-        labels_on_padded.show_labels = true;
+        labels_on_padded.overrides.show_labels = Some(true);
         let labels_on_padded_band = compute_y_label_band_width(&labels_on_padded, 11.0, &m, 4.0, true);
         assert!(
             labels_on_padded_band > labels_off_padded,
@@ -3183,6 +3401,7 @@ mod tests {
             ticks: vec![],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -4989,7 +5208,7 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
             None,
         );
-        input.show_labels = false;
+        input.overrides.show_labels = Some(false);
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 20.0, line_h_factor: 1.2 };
         let label_font_size = 11.0;
@@ -5024,7 +5243,7 @@ mod tests {
         // Contrast: the SAME input with labels drawn gets the #97 standoff
         // and sits strictly further from the axis line.
         let mut labels_on = input.clone();
-        labels_on.show_labels = true;
+        labels_on.overrides.show_labels = Some(true);
         let (axis_on, _) = layout_x_axis(
             &labels_on, panel_area, 0, label_font_size, title_font_size, title_padding,
             8, tick_size, &m,

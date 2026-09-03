@@ -665,6 +665,25 @@ fn resolve_panel_scales(
     scales.x.translate_explicit_ordinal_range(panel_offset.0);
     scales.y.translate_explicit_ordinal_range(panel_offset.1);
 
+    // Chart-level scale-domain config (D3, spec §4.2) — the positional twin of
+    // the color-config re-application just below, and for the same reason:
+    // `resolve_scales_with_leaf_context` re-resolves each panel's x/y scales
+    // from scratch, discarding the domain `prepare_render_inputs` shaped on
+    // the provisional pair. Without this the axis ticks (built from the
+    // provisional, config-shaped scale) and the marks (placed by this panel's
+    // scale) would describe different domains. Warnings go to a throwaway sink:
+    // this is the same config against an equivalent scale, already reported
+    // once by the chart-level application, so keeping them would emit one
+    // duplicate per panel.
+    let mut discarded = Vec::new();
+    super::prepare::apply_axis_domain_configs(
+        &mut scales.x,
+        &mut scales.y,
+        &rendering_spec_for_panel.encoding,
+        chart_config,
+        &mut discarded,
+    )?;
+
     // Apply chart_config color overrides (level 3) to the per-panel color scale.
     // Must run after scale resolution because `resolve_scales_with_outputs`
     // independently re-resolves the color scale for each panel, discarding the
@@ -763,6 +782,22 @@ fn resolve_layer_y_scale(
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
     )?;
     warnings.extend(layer_warnings);
+    // D3 (spec §4.2) at the `axis_y2` position — the secondary-axis twin of
+    // `resolve_panel_scales`' own re-application, and for the same reason:
+    // this pass resolves the layer's y scale from scratch over the panel-real
+    // pixel range, so without it the marks would sit on the un-shaped domain
+    // while the axis ticks (shaped in `prepare::build_secondary_y_axis_inputs`)
+    // describe the configured one. Warnings go to a throwaway sink: prepare
+    // already reported this chart's once, and this call runs per panel.
+    let mut discarded = Vec::new();
+    super::prepare::apply_axis_domain_config_for(
+        &mut y,
+        super::prepare::layer_effective_y(&layer.encoding, &spec.encoding),
+        "y2",
+        super::chart_config::ConfigAxis::Y2,
+        ctx.chart_config,
+        &mut discarded,
+    )?;
     y.translate_explicit_ordinal_range(y_offset);
     Ok(y)
 }
@@ -868,7 +903,7 @@ fn resolve_panel_axes(
             theme.typography.title_font_size,
             theme.padding.axis_title_padding,
             crate::layout::DEFAULT_CULL_THRESHOLD,
-            theme.sizes.tick_size,
+            x_input.tick_size(theme),
             facet_metrics,
         );
         Some(new_x_layout)
@@ -910,7 +945,7 @@ fn resolve_panel_axes(
             y_label_fs,
             theme.typography.title_font_size,
             theme.padding.axis_title_padding,
-            theme.sizes.tick_size,
+            y_input.tick_size(theme),
             facet_metrics,
         );
         Some(new_y_layout)
@@ -3317,8 +3352,14 @@ mod tests {
         .unwrap();
 
         let theme = ThemeInputs::default();
-        let prep =
-            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
         // Two panels with deliberately different plot_area widths.
@@ -3591,7 +3632,14 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep = super::super::prepare::prepare_render_inputs(spec, batch, &theme, None).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(
+            spec,
+            batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
@@ -5047,7 +5095,14 @@ mod tests {
 
     fn resolve_dual_y(spec: &ChartSpec, batch: &RecordBatch) -> scale_resolve::ResolvedScales {
         let theme = ThemeInputs::default();
-        let prep = super::super::prepare::prepare_render_inputs(spec, batch, &theme, None).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(
+            spec,
+            batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         let chart_config = super::super::chart_config::ChartConfig::default();
         let panel = crate::layout::PanelLayout {
             plot_area: crate::layout::Rect {
@@ -5313,7 +5368,7 @@ mod tests {
             ],
             None,
         );
-        secondary_input.show_grid = true; // deliberately try to leak into the grid
+        secondary_input.overrides.show_grid = Some(true); // deliberately try to leak into the grid
         let (secondary_y, _warn2) = crate::layout::axis::layout_y_axis(
             &secondary_input,
             panel.plot_area,
@@ -5459,8 +5514,14 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep =
-            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
@@ -5689,8 +5750,14 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep =
-            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
 
         // The plan itself: two secondary layers (indices 1, 2) on slots 1, 2.
         assert!(prep.y_slot_plan.has_independent());
@@ -5818,8 +5885,14 @@ mod tests {
         let config = super::super::config::RenderConfig::default();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
-        let prep =
-            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
         let layout = crate::layout::compute_layout(
@@ -5974,6 +6047,7 @@ mod tests {
             &spec,
             &batch,
             &ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
             None,
         )
         .unwrap();
@@ -6007,6 +6081,7 @@ mod tests {
             &spec,
             &batch,
             &ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
             None,
         )
         .unwrap();
@@ -6103,9 +6178,14 @@ mod tests {
         let theme = ThemeInputs::default();
 
         let flipped_spec = bar_spec_with_x2_y2(true);
-        let flipped_prep =
-            crate::render::prepare::prepare_render_inputs(&flipped_spec, &batch, &theme, None)
-                .unwrap();
+        let flipped_prep = crate::render::prepare::prepare_render_inputs(
+            &flipped_spec,
+            &batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         assert!(flipped_prep.coord_flipped);
         let flipped_err = validate_mark_encoding(
             &Mark::Bar,
@@ -6115,9 +6195,14 @@ mod tests {
         .expect_err("both x2 and y2 bound must be rejected for mark_bar, flipped");
 
         let unflipped_spec = bar_spec_with_x2_y2(false);
-        let unflipped_prep =
-            crate::render::prepare::prepare_render_inputs(&unflipped_spec, &batch, &theme, None)
-                .unwrap();
+        let unflipped_prep = crate::render::prepare::prepare_render_inputs(
+            &unflipped_spec,
+            &batch,
+            &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
         assert!(!unflipped_prep.coord_flipped);
         let unflipped_err = validate_mark_encoding(
             &Mark::Bar,

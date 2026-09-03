@@ -15,7 +15,8 @@
 //! module (`CHART_CONFIG_SECTIONS`, `AXIS_STYLE_CANONICAL_KEYS` +
 //! `AXIS_STYLE_ALIAS_KEYS` + `AXIS_CONFIG_EXTRA_KEYS`,
 //! `LEGEND_STYLE_CANONICAL_KEYS` + `LEGEND_STYLE_ALIAS_KEYS`,
-//! `GRID_CONFIG_KEYS`, `PADDING_CONFIG_KEYS`, `COLOR_CONFIG_KEYS`,
+//! `GRID_CONFIG_KEYS` + `GRID_AXIS_KEYS` for the nested per-axis grid
+//! objects, `PADDING_CONFIG_KEYS`, `COLOR_CONFIG_KEYS`,
 //! `TITLE_CONFIG_KEYS`) BEFORE deserializing, refusing with `chart config:
 //! unknown key '<k>' in <section>; accepted: <sorted list>` (spec
 //! 2026-09-02 batch-b-config-plumbing §4.1/§6, D1). Every struct in this
@@ -77,6 +78,44 @@ pub struct ChartConfig {
     /// Structural features: axis breaks, inset charts.
     #[serde(default)]
     pub structural: Vec<StructuralSpec>,
+}
+
+/// Which axis a chart-level config lookup addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigAxis {
+    X,
+    Y,
+    /// The secondary y axis (`axis_y2`). Deliberately does NOT fall back to
+    /// the shared `axis` key: `axis`'s per-axis application visits
+    /// `prep.axes.x`/`.y` only, so letting a lookup here see it would report a
+    /// value the render path never applies.
+    Y2,
+}
+
+impl ChartConfig {
+    /// The chart-level [`AxisConfigSpec`] sources for one axis, highest
+    /// precedence first: the per-axis section, then the shared `axis` section.
+    ///
+    /// One expression of "chart-level per-axis beats chart-level shared", so
+    /// every field that needs the chain (`tick_count`, the scale-domain
+    /// quartet) reads it at the same precedence instead of re-deriving the
+    /// ordering per call site.
+    pub(crate) fn axis_sections(&self, axis: ConfigAxis) -> [Option<&AxisConfigSpec>; 2] {
+        match axis {
+            ConfigAxis::X => [self.axis_x.as_ref(), self.axis.as_ref()],
+            ConfigAxis::Y => [self.axis_y.as_ref(), self.axis.as_ref()],
+            ConfigAxis::Y2 => [self.axis_y2.as_ref(), None],
+        }
+    }
+
+    /// The first `Some` value `pick` yields across [`axis_sections`](Self::axis_sections).
+    pub(crate) fn axis_field<T>(
+        &self,
+        axis: ConfigAxis,
+        pick: impl Fn(&AxisConfigSpec) -> Option<T>,
+    ) -> Option<T> {
+        self.axis_sections(axis).into_iter().flatten().find_map(pick)
+    }
 }
 
 // ── Structural feature specs ────────────────────────────────────────────────
@@ -187,21 +226,34 @@ pub struct AxisStyleSpec {
     /// Consumed by `render/marks/axis.rs`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_flush: Option<bool>,
-    /// Whether to show tick labels (`false` suppresses them). Per-channel
-    /// only (`EncodingSpec.axis`, `prepare::build_axes`) — the chart-level
-    /// `axis`/`axis_x`/`axis_y`/`axis_y2` position has NO consumer today:
-    /// `AxisInput.show_labels` is a plain `bool` (not `Option<bool>`),
-    /// exclusively owned by the per-channel prepare path (see the doc note
-    /// on `apply_axis_style_to_axis_input`). See `chart_config_manifest.json`.
+    /// Whether to show tick labels (`false` suppresses them). Honored at
+    /// BOTH the per-channel (`EncodingSpec.axis`) and chart-level
+    /// (`axis`/`axis_x`/`axis_y`/`axis_y2`) positions as of D12 (spec §4.9):
+    /// it merges through `axis_style_fill_from` into
+    /// `AxisStyleOverrides::show_labels`, an `Option<bool>` whose fill-only
+    /// chart-level discipline is what lets both levels write it without the
+    /// chart-level one clobbering the per-channel answer. (Before that
+    /// widening `AxisInput.show_labels` was a plain `bool` with no way to say
+    /// "unset", so the chart-level position had no consumer at all.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<bool>,
     // ── Ticks ────────────────────────────────────────────────────────────────
-    /// Whether to show tick marks. Same per-channel-only disposition as
-    /// `labels` above.
+    /// Whether to show tick marks. Same two-level disposition as `labels`
+    /// above (`AxisStyleOverrides::show_ticks`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ticks: Option<bool>,
+    /// Target number of major ticks. Resolved — per-channel first, then the
+    /// per-axis config section, then the shared one, then the default of 10 —
+    /// by `prepare::resolve_axis_tick_count`, the single place a tick count
+    /// is decided (D12, spec §4.9). Resolved in `prepare` rather than merged
+    /// onto `AxisStyleOverrides` because the count decides how many ticks the
+    /// scale GENERATES, not how existing ones are drawn.
     #[serde(alias = "tickCount", skip_serializing_if = "Option::is_none")]
     pub tick_count: Option<u32>,
+    /// Tick-mark length in px. Per-axis via `AxisStyleOverrides::tick_size`
+    /// (`AxisInput::tick_size`) as of D12; the SHARED `axis` key additionally
+    /// writes `theme.sizes.tick_size` as the global fallback for axes the
+    /// per-axis fill does not visit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_size: Option<f64>,
     /// Append a tick at each domain boundary. Consumed by
@@ -217,7 +269,15 @@ pub struct AxisStyleSpec {
     #[serde(alias = "tick_values", skip_serializing_if = "Option::is_none")]
     pub values: Option<Vec<f64>>,
     // ── Grid ─────────────────────────────────────────────────────────────────
-    /// Whether to show gridlines for this axis.
+    /// Whether to show gridlines for this axis. Per-axis at BOTH positions as
+    /// of D4/D12 (spec §4.3): merges into `AxisStyleOverrides::show_grid`
+    /// (`Option<bool>`), resolved against `theme.grid.grid` by
+    /// `AxesInput::apply_show_defaults` and read by `build_grid`'s per-axis
+    /// filter. It no longer writes the single global `theme.grid.grid`, which
+    /// is what made `configure(axis_x=AxisConfig(grid=False))` take the y
+    /// gridlines down with it. See `chart_config_manifest.json` for the one
+    /// position that is still inert (`axis_y2`: a secondary y axis never
+    /// contributes gridlines, by design).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,7 +290,9 @@ pub struct AxisStyleSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grid_opacity: Option<f64>,
     // ── Domain line ──────────────────────────────────────────────────────────
-    /// Whether to show the axis domain line.
+    /// Whether to show the axis domain line. Same per-axis treatment as
+    /// `grid` above (`AxisStyleOverrides::show_domain`, resolved against
+    /// `theme.axis.axis_line`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,17 +301,19 @@ pub struct AxisStyleSpec {
     pub domain_width: Option<f64>,
     // ── Title ────────────────────────────────────────────────────────────────
     /// Axis title text. `Some("")` suppresses the title (the `title=None`
-    /// contract); absent means use the field-name default. Consumed at the
-    /// PER-CHANNEL position only (`prepare::resolve_axis_title`, reading
-    /// `EncodingSpec.axis.title`); the chart-level `axis`/`axis_x`/`axis_y`/
-    /// `axis_y2` position has NO consumer. Not a naive gap: `AxisInput.title`
+    /// contract); absent means use the field-name default. Honored at both
+    /// positions: per-channel via `prepare::resolve_axis_title`, chart-level
+    /// via `AxisInput::fill_chart_level_title` (D12, spec §4.9).
+    ///
+    /// The chart-level half needed a tri-state first, and that is what
+    /// `AxisStyleOverrides::title_claimed` is: `AxisInput.title` alone
     /// conflates "unset" with "per-channel explicitly suppressed" (the
     /// `title=""` -> `None` contract above), so a fill-only-if-`None`
-    /// chart-level fill would resurrect an explicitly suppressed per-channel
-    /// title — inverting the per-channel-wins cascade. Wiring it safely needs
-    /// a tri-state model first; see `chart_config_manifest.json`. Python's
-    /// `AxisConfig` dataclass does not expose a `title` parameter today
-    /// either (chart-level `title` is reachable only via raw-dict callers).
+    /// chart-level fill would have resurrected a title the channel
+    /// deliberately removed. The claim flag records which of the two a `None`
+    /// title means, so the fill can decline. Both levels share ONE
+    /// suppression rule (`layout::axis::resolve_axis_title`), so `""` means
+    /// the same thing wherever it is written.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(alias = "titleFontSize", skip_serializing_if = "Option::is_none")]
@@ -294,9 +358,10 @@ pub struct AxisStyleSpec {
 /// / `axis_y2`). Embeds [`AxisStyleSpec`] (the styling/positioning fields
 /// shared with the per-channel path) and adds the **chart-only** fields that
 /// are meaningless per-channel: the scale-domain controls
-/// (`domain_min`/`domain_max`/`nice`/`zero` — currently unread; scale-domain
-/// resolution lands in a later batch task, see `chart_config_manifest.json`) and the
-/// d3-format alias `label_format_raw`.
+/// (`domain_min`/`domain_max`/`nice`/`zero` — lifted into the neutral
+/// `scale_resolve::AxisDomainConfig` by `prepare::axis_domain_config` and
+/// applied to the resolved positional scale, D3/spec §4.2) and the d3-format
+/// alias `label_format_raw`.
 ///
 /// Applied after per-channel values but before theme.
 ///
@@ -317,7 +382,15 @@ pub struct AxisConfigSpec {
     // ── Chart-only scale-domain fields (never per-channel) ───────────────────
     pub domain_min: Option<f64>,
     pub domain_max: Option<f64>,
+    /// Round the resolved domain outward to nice bounds. ONE-DIRECTIONAL:
+    /// `false` is the default (auto positional scales are constructed with
+    /// `nice: false`), so it requests the default and is a deliberate no-op
+    /// rather than an un-nicing. See `positional::apply_axis_domain_config`.
     pub nice: Option<bool>,
+    /// Extend the resolved domain to include 0. ONE-DIRECTIONAL, same as
+    /// `nice`: nothing forces a zero baseline into a domain, so `false`
+    /// requests the default and is a deliberate no-op. It does NOT erase a 0
+    /// that the DATA reaches (a stacked bar chart's values start at 0).
     pub zero: Option<bool>,
     /// d3-format string applied to tick labels. Chart-level callers historically
     /// used this name; the per-channel path uses `label_format`. Both are honored
@@ -499,16 +572,71 @@ pub struct LegendConfigSpec {
     pub style: LegendStyleSpec,
 }
 
+/// One axis's own grid settings inside [`GridConfigSpec`] (D4, spec §4.3/§6).
+///
+/// Two wire spellings, one meaning — see [`deserialize_grid_axis`]:
+/// `{"grid": {"x": false}}` (the historical enable-only bool, unchanged) and
+/// `{"grid": {"x": {"enabled": false, "color": "#eee"}}}` (enable plus this
+/// axis's own gridline style). The flat `color`/`width`/`dash`/`opacity` keys
+/// on `GridConfigSpec` remain the both-axes shorthand; anything set here wins
+/// for its axis.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GridAxisSpec {
+    /// Whether this axis draws gridlines. `None` → inherit the theme
+    /// (`theme.grid.grid`), per the §4.3 precedence chain.
+    pub enabled: Option<bool>,
+    pub color: Option<String>,
+    pub width: Option<f64>,
+    pub dash: Option<Vec<f64>>,
+    pub opacity: Option<f64>,
+}
+
+/// Accept either the bare bool (`"x": true`) or the full object
+/// (`"x": {"enabled": true, …}`) for a [`GridConfigSpec`] per-axis slot.
+///
+/// The bool arm is the pre-D4 wire contract every existing Python caller
+/// emits (`GridConfig(x=True)`), so it must keep meaning exactly what it did:
+/// enable-only, no style. Implemented as a field-level `deserialize_with`
+/// rather than a custom `impl Deserialize for GridAxisSpec` so the struct
+/// keeps its plain derive — which is what lets `grid_axis_keys_match_serde`
+/// mine its real accepted-field set out of `deny_unknown_fields`, the same
+/// reflective drift check every other key const in this module gets.
+fn deserialize_grid_axis<'de, D>(d: D) -> Result<Option<GridAxisSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Enabled(bool),
+        Full(GridAxisSpec),
+    }
+    Ok(Option::<Wire>::deserialize(d)?.map(|w| match w {
+        Wire::Enabled(enabled) => GridAxisSpec { enabled: Some(enabled), ..Default::default() },
+        Wire::Full(spec) => spec,
+    }))
+}
+
 /// Grid configuration. No `#[serde(flatten)]` field, so `deny_unknown_fields`
 /// gives a real accepted-field-list error (mined by `grid_config_keys_match_serde`).
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GridConfigSpec {
-    pub x: Option<bool>,
-    pub y: Option<bool>,
+    /// x-axis grid: `true`/`false`, or an object carrying this axis's own
+    /// enable + gridline style. See [`GridAxisSpec`].
+    #[serde(deserialize_with = "deserialize_grid_axis")]
+    pub x: Option<GridAxisSpec>,
+    /// y-axis grid; same two spellings as [`x`](Self::x).
+    #[serde(deserialize_with = "deserialize_grid_axis")]
+    pub y: Option<GridAxisSpec>,
+    /// Both-axes gridline color shorthand; an axis's own `color` wins.
     pub color: Option<String>,
+    /// Both-axes gridline width shorthand; an axis's own `width` wins.
     pub width: Option<f64>,
+    /// Both-axes gridline dash shorthand; an axis's own `dash` wins.
     pub dash: Option<Vec<f64>>,
+    /// Both-axes gridline opacity shorthand; an axis's own `opacity` wins.
     pub opacity: Option<f64>,
     /// Alternating band fill colors for categorical axes (e.g. `["#f0f0f0", "transparent"]`).
     pub band_colors: Option<Vec<String>>,
@@ -650,36 +778,57 @@ pub(crate) const AXIS_STYLE_ALIAS_KEYS: &[&str] = &[
 pub(crate) const AXIS_CONFIG_EXTRA_KEYS: &[&str] =
     &["domain_min", "domain_max", "nice", "zero", "label_format_raw"];
 
-/// `AxisStyleSpec` fields whose only real consumer today is the GLOBAL theme
-/// path (`apply_axis_config_to_theme`): `axis`/`axis_x`/`axis_y` route
-/// through it (so these ARE `honored: true` at the `AxisStyleSpec.*`
-/// manifest entry), but `axis_y2` deliberately does NOT — that path writes
-/// genuinely shared `ThemeInputs` fields, and routing `axis_y2` through it
-/// would leak the "secondary y only" override onto the primary x/y axes'
-/// theme fallback (see the doc on `ChartConfig::axis_y2`). Used only to
-/// namespace this scope-specific gap as its own manifest entries
-/// (`AxisConfigSpec.axis_y2.*`, spec §4.9 extended 2026-09-02) — Task 8
-/// (D12) owns giving `axis_y2` its own theme-scoped consumer. `#[cfg(test)]`:
-/// pure manifest-completeness instrumentation, no production reader.
+/// Fields whose `axis_y2` position is a separate disposition question from
+/// their `axis`/`axis_x`/`axis_y` one, and which therefore carry their own
+/// manifest entries under the `AxisConfigSpec.axis_y2.*` namespace (spec §4.9,
+/// extended 2026-09-02).
+///
+/// Drawn from BOTH `AXIS_STYLE_CANONICAL_KEYS` and `AxisConfigSpec`'s own
+/// chart-only extras (the scale-domain quartet): what puts a name here is not
+/// which struct declares it but whether the secondary axis reaches it by a
+/// different route than the primary pair does.
+///
+/// Two mechanisms, one namespace. `domain`/`tick_size` used to be theme-only,
+/// so `axis_y2` — which deliberately does not write the shared theme (that
+/// would leak a secondary-only override onto the primary axes) — could not
+/// express them; they are now per-axis `AxisStyleOverrides` slots the
+/// `axis_y2` fill reaches like any other field. `grid` reaches the same kind
+/// of slot but stays `honored: false` here: a secondary y axis never
+/// contributes gridlines (`build_grid` takes only the panel's primary x/y
+/// pair), which is a design decision about gridline ownership rather than a
+/// wiring gap — the same disposition shape `orient` has at this position. `label_format`/
+/// `label_format_type`/`tick_extra`/`tick_min_step`/`values` reached
+/// `AxisStyleOverrides` already, but their consumers ran on `prep.axes.x`/
+/// `.y` only; `prepare_and_layout` now runs the same trio over
+/// `prep.axes.secondary_y` against `prep.secondary_y_scales`.
+///
+/// The namespace is kept even though every entry is now honored: the y2
+/// position is a genuinely separate disposition question (a future change
+/// can break it there while x/y keeps working), and the completeness gate
+/// only sees positions that are enumerated here.
+///
+/// `#[cfg(test)]`: pure manifest-completeness instrumentation, no production
+/// reader.
 #[cfg(test)]
-pub(crate) const AXIS_Y2_THEME_SCOPED_CAVEAT_FIELDS: &[&str] = &["grid", "domain", "tick_size"];
-
-/// `AxisStyleSpec` fields whose consumer (`apply_label_format_to_axis` /
-/// `prepare::adjust_axis_ticks` / `sync_projected_fractions_to_tick_values`,
-/// all in `render/mod.rs::prepare_and_layout`) runs on `prep.axes.x` /
-/// `prep.axes.y` only — never `prep.axes.secondary_y` — so `axis_y2`'s own
-/// copy of these fields reaches `AxisStyleOverrides` via the same fill-only
-/// path `axis`/`axis_x`/`axis_y` use, but has no secondary-axis consumer to
-/// read it (spec §4.9, extended 2026-09-02: T1's manifest sweep). Task 8
-/// (D12) owns the secondary-axis consumers. `label_format_type` joined this
-/// set in Task 4 (D8): it now has a real `axis`/`axis_x`/`axis_y` consumer
-/// (`render::apply_axis_config_to_axis_input` →
-/// `render::apply_label_format_to_axis`), which — like `label_format`
-/// alongside it — runs on `prep.axes.x`/`prep.axes.y` only. `#[cfg(test)]`:
-/// pure manifest-completeness instrumentation, no production reader.
-#[cfg(test)]
-pub(crate) const AXIS_Y2_PREP_SCOPE_CAVEAT_FIELDS: &[&str] =
-    &["label_format", "label_format_type", "tick_extra", "tick_min_step", "values"];
+pub(crate) const AXIS_Y2_SCOPED_FIELDS: &[&str] = &[
+    "grid",
+    "domain",
+    "tick_size",
+    "label_format",
+    "label_format_type",
+    "tick_extra",
+    "tick_min_step",
+    "values",
+    // The `AxisConfigSpec` chart-only extras (D3, spec §4.2). Separate at this
+    // position because the primary pair is reshaped by
+    // `prepare::apply_axis_domain_configs` over `provisional_scales.x/.y`,
+    // while the secondary axis is reshaped per independent-y layer against its
+    // OWN resolved slot scale, at both stages that resolve one.
+    "domain_min",
+    "domain_max",
+    "nice",
+    "zero",
+];
 
 /// `LegendStyleSpec`'s canonical (non-alias) field names, using each field's
 /// WIRE spelling (`#[serde(rename = ...)]` where present: `type` for
@@ -726,6 +875,28 @@ pub(crate) const LEGEND_STYLE_ALIAS_KEYS: &[&str] =
 /// `GridConfigSpec` (`grid_config_keys_match_serde`).
 pub(crate) const GRID_CONFIG_KEYS: &[&str] =
     &["x", "y", "color", "width", "dash", "opacity", "band_colors"];
+
+/// [`GridAxisSpec`]'s field names — the accepted keys INSIDE a
+/// `grid.x` / `grid.y` object (D4, spec §4.3). Drift-tested against the real
+/// struct (`grid_axis_keys_match_serde`) and namespaced into the disposition
+/// manifest as `GridAxisSpec.*`, which is what closes the sub-struct carve-out
+/// the wire-key gate's own doc records: a nested config struct that is NOT
+/// enumerated here contributes zero expected manifest keys, so its fields
+/// would be parsed-but-never-dispositioned — exactly the NF-B11/B12 class.
+pub(crate) const GRID_AXIS_KEYS: &[&str] = &["enabled", "color", "width", "dash", "opacity"];
+
+/// The accepted-key set for a nested object inside a gated section, or `None`
+/// when `(section, key)` names no nested object. Today the only such nesting
+/// is `grid.x` / `grid.y` ([`GridAxisSpec`]); `binding.rs::validate_chart_config_keys`
+/// consults this to walk one level deeper, so a typo inside a per-axis grid
+/// object refuses with the same pinned text as a typo at any other level
+/// rather than falling into serde's untagged "data did not match any variant".
+pub(crate) fn accepted_keys_for_nested(section: &str, key: &str) -> Option<&'static [&'static str]> {
+    match (section, key) {
+        ("grid", "x") | ("grid", "y") => Some(GRID_AXIS_KEYS),
+        _ => None,
+    }
+}
 
 /// `PaddingConfigSpec`'s field names (no aliases). Drift-tested against
 /// `PaddingConfigSpec` (`padding_config_keys_match_serde`).
@@ -1009,8 +1180,8 @@ mod tests {
         assert_eq!(cfg.axis_y.as_ref().unwrap().zero, Some(true));
         assert_eq!(cfg.legend.as_ref().unwrap().style.orient.as_deref(), Some("bottom"));
         assert_eq!(cfg.legend.as_ref().unwrap().style.columns, Some(3));
-        assert_eq!(cfg.grid.as_ref().unwrap().x, Some(true));
-        assert_eq!(cfg.grid.as_ref().unwrap().y, Some(false));
+        assert_eq!(cfg.grid.as_ref().unwrap().x.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(cfg.grid.as_ref().unwrap().y.as_ref().unwrap().enabled, Some(false));
         assert_eq!(cfg.grid.as_ref().unwrap().color.as_deref(), Some("#eee"));
         assert_eq!(cfg.padding.as_ref().unwrap().top, Some(20.0));
         assert_eq!(cfg.color.as_ref().unwrap().scheme.as_deref(), Some("tableau10"));
@@ -1311,6 +1482,62 @@ mod tests {
         assert_eq!(mined, manifest, "GRID_CONFIG_KEYS drifted from GridConfigSpec");
     }
 
+    /// The nested per-axis grid sub-struct gets the same reflective drift
+    /// check as every top-level section (D4, spec §4.3/§6) — this is what
+    /// makes `GRID_AXIS_KEYS` a schema-derived const rather than a hand list,
+    /// and therefore what makes the `GridAxisSpec.*` manifest entries
+    /// complete. Mining works because `GridAxisSpec` keeps a plain
+    /// `#[derive(Deserialize)]`; the bool-or-object acceptance lives on
+    /// `GridConfigSpec`'s FIELDS (`deserialize_grid_axis`), not on the struct.
+    #[test]
+    fn grid_axis_keys_match_serde() {
+        let mined = mined_fields_of::<GridAxisSpec>();
+        let manifest: std::collections::BTreeSet<String> =
+            GRID_AXIS_KEYS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(mined, manifest, "GRID_AXIS_KEYS drifted from GridAxisSpec");
+    }
+
+    /// Both wire spellings of a per-axis grid slot land on the same struct
+    /// (D4, spec §4.3): the historical bare bool means enable-only, the
+    /// object carries enable plus this axis's own style. Back-compat pin —
+    /// every `GridConfig(x=True)` Python emits today takes the bool arm.
+    #[test]
+    fn grid_axis_accepts_bool_and_object_spellings() {
+        let flat: ChartConfig =
+            serde_json::from_str(r#"{"grid": {"x": true, "y": false}}"#).unwrap();
+        let grid = flat.grid.unwrap();
+        assert_eq!(grid.x.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(grid.y.as_ref().unwrap().enabled, Some(false));
+        assert!(grid.x.as_ref().unwrap().color.is_none());
+
+        let nested: ChartConfig = serde_json::from_str(
+            r##"{"grid": {"x": {"enabled": true, "color": "#eee", "width": 2.0}}}"##,
+        )
+        .unwrap();
+        let x = nested.grid.unwrap().x.unwrap();
+        assert_eq!(x.enabled, Some(true));
+        assert_eq!(x.color.as_deref(), Some("#eee"));
+        assert_eq!(x.width, Some(2.0));
+    }
+
+    /// `accepted_keys_for_nested` names the per-axis grid objects and nothing
+    /// else — derived from `GRID_CONFIG_KEYS` so a future nesting added to
+    /// `GridConfigSpec` without an arm here fails this test rather than
+    /// silently escaping the wire gate's deeper walk.
+    #[test]
+    fn accepted_keys_for_nested_covers_the_per_axis_grid_objects() {
+        for &key in GRID_CONFIG_KEYS {
+            let expected_nested = matches!(key, "x" | "y");
+            assert_eq!(
+                accepted_keys_for_nested("grid", key).is_some(),
+                expected_nested,
+                "grid.{key}: accepted_keys_for_nested must return {}",
+                if expected_nested { "Some(...)" } else { "None" }
+            );
+        }
+        assert!(accepted_keys_for_nested("axis", "x").is_none());
+    }
+
     #[test]
     fn padding_config_keys_match_serde() {
         let mined = mined_fields_of::<PaddingConfigSpec>();
@@ -1425,6 +1652,13 @@ mod tests {
         expected.extend(namespaced("AxisConfigSpec", AXIS_CONFIG_EXTRA_KEYS));
         expected.extend(namespaced("LegendStyleSpec", LEGEND_STYLE_CANONICAL_KEYS));
         expected.extend(namespaced("GridConfigSpec", GRID_CONFIG_KEYS));
+        // The per-axis grid sub-structs (D4, spec §4.3), honoring the CONTRACT
+        // above: `GRID_AXIS_KEYS` is drift-tested against `GridAxisSpec`
+        // (`grid_axis_keys_match_serde`) AND namespaced here. Omitting this
+        // line is exactly the failure mode that contract warns about — the
+        // const would exist, the struct would parse, and its five fields
+        // would carry no disposition and no failing test.
+        expected.extend(namespaced("GridAxisSpec", GRID_AXIS_KEYS));
         expected.extend(namespaced("PaddingConfigSpec", PADDING_CONFIG_KEYS));
         expected.extend(namespaced("ColorConfigSpec", COLOR_CONFIG_KEYS));
         expected.extend(namespaced("TitleConfigSpec", TITLE_CONFIG_KEYS));
@@ -1434,8 +1668,7 @@ mod tests {
         // gap is real even where `axis`/`axis_x`/`axis_y`'s is not (see the
         // two consts' docs). Distinct namespace (`AxisConfigSpec.axis_y2.*`)
         // so these don't collide with the shared `AxisStyleSpec.*` entries.
-        expected.extend(namespaced("AxisConfigSpec.axis_y2", AXIS_Y2_THEME_SCOPED_CAVEAT_FIELDS));
-        expected.extend(namespaced("AxisConfigSpec.axis_y2", AXIS_Y2_PREP_SCOPE_CAVEAT_FIELDS));
+        expected.extend(namespaced("AxisConfigSpec.axis_y2", AXIS_Y2_SCOPED_FIELDS));
 
         let missing: Vec<&String> = expected.difference(&dispositioned).collect();
         assert!(
@@ -1461,25 +1694,8 @@ mod tests {
     /// ever reads `entry.reason`, so `honored` needs its own consumer, not a
     /// wider net cast over `reason`.
     #[cfg(test)]
-    const KNOWN_UNHONORED_FIELDS: &[&str] = &[
-        "AxisConfigSpec.axis_y2.domain",
-        "AxisConfigSpec.axis_y2.grid",
-        "AxisConfigSpec.axis_y2.label_format",
-        "AxisConfigSpec.axis_y2.label_format_type",
-        "AxisConfigSpec.axis_y2.tick_extra",
-        "AxisConfigSpec.axis_y2.tick_min_step",
-        "AxisConfigSpec.axis_y2.tick_size",
-        "AxisConfigSpec.axis_y2.values",
-        "AxisConfigSpec.domain_max",
-        "AxisConfigSpec.domain_min",
-        "AxisConfigSpec.nice",
-        "AxisConfigSpec.zero",
-        "AxisStyleSpec.labels",
-        "AxisStyleSpec.tick_count",
-        "AxisStyleSpec.ticks",
-        "AxisStyleSpec.title",
-        "PaddingConfigSpec.auto",
-    ];
+    const KNOWN_UNHONORED_FIELDS: &[&str] =
+        &["AxisConfigSpec.axis_y2.grid", "PaddingConfigSpec.auto"];
 
     /// Gives `ManifestEntry::honored` teeth (spec review, T1 cycle 2): reads
     /// the flag out of every manifest entry and asserts the `honored: false`

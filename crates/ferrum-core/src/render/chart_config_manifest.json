@@ -1,59 +1,75 @@
 {
   "AxisConfigSpec.axis_y2.domain": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.domain, but scoped to axis_y2: the only consumer (apply_axis_config_to_theme -> theme.axis.axis_line, render/mod.rs) is GLOBAL ThemeInputs and axis/axis_x/axis_y route through it \u2014 routing axis_y2 through it would leak the override onto the primary x/y axes' theme fallback, so it deliberately does not. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02): a secondary-axis-scoped ThemeInputs split."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.domain, scoped to axis_y2: reaches the secondary axis's own AxisStyleOverrides slot via the same fill-only apply_axis_config_to_axis_input path axis/axis_x/axis_y use; the field stopped being theme-only in Task 8, so axis_y2 can now express it without writing the shared theme (which would leak a secondary-only override onto the primary axes). D12, spec \u00a74.9. Resolved against theme.axis.axis_line by AxesInput::apply_show_defaults, then read by build_axis."
+  },
+  "AxisConfigSpec.axis_y2.domain_max": {
+    "honored": true,
+    "reason": "same field as AxisConfigSpec.domain_max, scoped to axis_y2: clamps the resolved upper bound. prepare::apply_axis_domain_config_for at the ConfigAxis::Y2 position, applied to the independent-y layer's OWN resolved slot scale at both stages that resolve one: prepare::build_secondary_y_axis_inputs (before build_axis_input derives that axis's ticks) and scene_build::resolve_layer_y_scale (panel-real, so marks land on the same domain the ticks describe). Separate from the AxisConfigSpec.{field} entry because the primary pair is reshaped over provisional_scales.x/.y, which the secondary axis is not part of. Reached ONLY via configure(axis_y2=...) \u2014 ChartConfig::axis_sections(Y2) deliberately does not fall back to the shared `axis` key, matching every other field at this position. An ordinal secondary axis warns with channel=\"y2\"; a layer-level y scale= wins silently. Task 8, D3, spec \u00a74.2. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
+  },
+  "AxisConfigSpec.axis_y2.domain_min": {
+    "honored": true,
+    "reason": "same field as AxisConfigSpec.domain_min, scoped to axis_y2: clamps the resolved lower bound. prepare::apply_axis_domain_config_for at the ConfigAxis::Y2 position, applied to the independent-y layer's OWN resolved slot scale at both stages that resolve one: prepare::build_secondary_y_axis_inputs (before build_axis_input derives that axis's ticks) and scene_build::resolve_layer_y_scale (panel-real, so marks land on the same domain the ticks describe). Separate from the AxisConfigSpec.{field} entry because the primary pair is reshaped over provisional_scales.x/.y, which the secondary axis is not part of. Reached ONLY via configure(axis_y2=...) \u2014 ChartConfig::axis_sections(Y2) deliberately does not fall back to the shared `axis` key, matching every other field at this position. An ordinal secondary axis warns with channel=\"y2\"; a layer-level y scale= wins silently. Task 8, D3, spec \u00a74.2. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.axis_y2.grid": {
     "honored": false,
-    "reason": "same field as AxisStyleSpec.grid, but scoped to axis_y2: the only consumer (apply_axis_config_to_theme -> theme.grid.grid, render/mod.rs) is GLOBAL ThemeInputs and axis/axis_x/axis_y route through it \u2014 routing axis_y2 through it would leak the override onto the primary x/y axes' theme fallback, so it deliberately does not. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02): a secondary-axis-scoped ThemeInputs split."
+    "reason": "same field as AxisStyleSpec.grid, scoped to axis_y2: the value DOES reach the secondary axis's own AxisStyleOverrides.show_grid slot (and through AxesInput::apply_show_defaults to AxisLayout.show_grid), but nothing reads it \u2014 build_grid takes only the panel's primary x/y axis pair, so a secondary y axis never contributes gridlines. That is a deliberate design decision, not a wiring gap (scene_build's `a secondary y-axis must not add or alter gridlines, even with show_grid=true` test pins it) \u2014 the same disposition shape as AxisStyleSpec.orient at this position, where layout_panel_axes forces every secondary axis to Right. Verified end to end during Task 8: axis_y2 grid=True and grid=False render byte-identically. Giving it a consumer means deciding that a secondary axis may own the panel's horizontal gridlines, which is a gridline-ownership design question, not this task's plumbing."
   },
   "AxisConfigSpec.axis_y2.label_format": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.label_format, but scoped to axis_y2: its consumer (apply_label_format_to_axis, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y \u2014 axis_y2's copy reaches AxisStyleOverrides via the same fill-only path axis/axis_x/axis_y use, but has no secondary-axis consumer to read it. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.label_format, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.label_format_type": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.label_format_type, but scoped to axis_y2: its consumer (apply_axis_config_to_axis_input -> AxisStyleOverrides.label_format_type, read by apply_label_format_to_axis, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y \u2014 same disposition as the sibling axis_y2.label_format entry above, now that Task 4 (D8) gave the axis/axis_x/axis_y position a real consumer. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.label_format_type, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+  },
+  "AxisConfigSpec.axis_y2.nice": {
+    "honored": true,
+    "reason": "same field as AxisConfigSpec.nice, scoped to axis_y2: rounds the resolved bounds outward. prepare::apply_axis_domain_config_for at the ConfigAxis::Y2 position, applied to the independent-y layer's OWN resolved slot scale at both stages that resolve one: prepare::build_secondary_y_axis_inputs (before build_axis_input derives that axis's ticks) and scene_build::resolve_layer_y_scale (panel-real, so marks land on the same domain the ticks describe). Separate from the AxisConfigSpec.{field} entry because the primary pair is reshaped over provisional_scales.x/.y, which the secondary axis is not part of. Reached ONLY via configure(axis_y2=...) \u2014 ChartConfig::axis_sections(Y2) deliberately does not fall back to the shared `axis` key, matching every other field at this position. An ordinal secondary axis warns with channel=\"y2\"; a layer-level y scale= wins silently. Task 8, D3, spec \u00a74.2. ONE-DIRECTIONAL, and honored only in the `true` direction: this field names an opt-in WIDENING of an already-resolved domain, and nothing in the auto path forces the behavior for `false` to switch off (build_axis_scale constructs every auto positional scale with nice: false, and no mark or theme injects a zero baseline \u2014 a bar chart's y domain reaches 0 because the post-Stack values do). So the `false` spelling requests the default and is a deliberate no-op, pinned byte-identical in tests/test_axis_config_plumbing.py. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.axis_y2.tick_extra": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.tick_extra, but scoped to axis_y2: its consumer (prepare::adjust_axis_ticks, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.tick_extra, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.tick_min_step": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.tick_min_step, but scoped to axis_y2: its consumer (prepare::adjust_axis_ticks, render/mod.rs::prepare_and_layout) runs on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.tick_min_step, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
   },
   "AxisConfigSpec.axis_y2.tick_size": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.tick_size, but scoped to axis_y2: the only consumer (apply_axis_config_to_theme -> theme.sizes.tick_size, render/mod.rs) is GLOBAL ThemeInputs and axis/axis_x/axis_y route through it \u2014 axis_y2 does NOT route through the theme path (would leak scope to the primary axes). Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02): a secondary-axis-scoped tick_size toggle."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.tick_size, scoped to axis_y2: reaches the secondary axis's own AxisStyleOverrides slot via the same fill-only apply_axis_config_to_axis_input path axis/axis_x/axis_y use; the field stopped being theme-only in Task 8, so axis_y2 can now express it without writing the shared theme (which would leak a secondary-only override onto the primary axes). D12, spec \u00a74.9. Read via AxisInput::tick_size at the secondary axis's own layout_y_axis call and by build_axis."
   },
   "AxisConfigSpec.axis_y2.values": {
-    "honored": false,
-    "reason": "same field as AxisStyleSpec.values, but scoped to axis_y2: its consumers (apply_label_format_to_axis / sync_projected_fractions_to_tick_values, render/mod.rs::prepare_and_layout) run on prep.axes.x/prep.axes.y only, never prep.axes.secondary_y. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02)."
+    "honored": true,
+    "reason": "same field as AxisStyleSpec.values, scoped to axis_y2: prepare_and_layout now runs the SAME post-config trio (prepare::adjust_axis_ticks / apply_label_format_to_axis / sync_projected_fractions_to_tick_values) over prep.axes.secondary_y against prep.secondary_y_scales that it has always run over prep.axes.x/.y \u2014 the pairing prepare carries out of build_axes for exactly this purpose (Task 8, D12, spec \u00a74.9)."
+  },
+  "AxisConfigSpec.axis_y2.zero": {
+    "honored": true,
+    "reason": "same field as AxisConfigSpec.zero, scoped to axis_y2: extends the resolved extent to include 0. prepare::apply_axis_domain_config_for at the ConfigAxis::Y2 position, applied to the independent-y layer's OWN resolved slot scale at both stages that resolve one: prepare::build_secondary_y_axis_inputs (before build_axis_input derives that axis's ticks) and scene_build::resolve_layer_y_scale (panel-real, so marks land on the same domain the ticks describe). Separate from the AxisConfigSpec.{field} entry because the primary pair is reshaped over provisional_scales.x/.y, which the secondary axis is not part of. Reached ONLY via configure(axis_y2=...) \u2014 ChartConfig::axis_sections(Y2) deliberately does not fall back to the shared `axis` key, matching every other field at this position. An ordinal secondary axis warns with channel=\"y2\"; a layer-level y scale= wins silently. Task 8, D3, spec \u00a74.2. ONE-DIRECTIONAL, and honored only in the `true` direction: this field names an opt-in WIDENING of an already-resolved domain, and nothing in the auto path forces the behavior for `false` to switch off (build_axis_scale constructs every auto positional scale with nice: false, and no mark or theme injects a zero baseline \u2014 a bar chart's y domain reaches 0 because the post-Stack values do). So the `false` spelling requests the default and is a deliberate no-op, pinned byte-identical in tests/test_axis_config_plumbing.py. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.domain_max": {
-    "honored": false,
-    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+    "honored": true,
+    "reason": "clamps the resolved upper bound. prepare::axis_domain_config -> scale_resolve::apply_axis_domain_config, applied to the provisional x/y scales in prepare_render_inputs (before the axes derive their ticks) and re-applied per panel in scene_build::resolve_panel_scales (which re-resolves scales from scratch), so ticks and marks describe one domain. An encoding-level scale= domain on the channel wins entirely and SILENTLY (documented cascade); an ordinal axis is refused loudly via RenderWarning::ScaleDomainConfigOnOrdinalAxis. Task 8, D3, spec \u00a74.2. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.domain_min": {
-    "honored": false,
-    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+    "honored": true,
+    "reason": "clamps the resolved lower bound. prepare::axis_domain_config -> scale_resolve::apply_axis_domain_config, applied to the provisional x/y scales in prepare_render_inputs (before the axes derive their ticks) and re-applied per panel in scene_build::resolve_panel_scales (which re-resolves scales from scratch), so ticks and marks describe one domain. An encoding-level scale= domain on the channel wins entirely and SILENTLY (documented cascade); an ordinal axis is refused loudly via RenderWarning::ScaleDomainConfigOnOrdinalAxis. Task 8, D3, spec \u00a74.2. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.label_format_raw": {
     "honored": true,
     "reason": "AxisConfigSpec::effective_label_format() -> apply_axis_config_to_axis_input"
   },
   "AxisConfigSpec.nice": {
-    "honored": false,
-    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+    "honored": true,
+    "reason": "rounds the resolved bounds outward to nice_step multiples (the same count-10 rounding the scales' own nice() uses). prepare::axis_domain_config -> scale_resolve::apply_axis_domain_config, applied to the provisional x/y scales in prepare_render_inputs (before the axes derive their ticks) and re-applied per panel in scene_build::resolve_panel_scales (which re-resolves scales from scratch), so ticks and marks describe one domain. An encoding-level scale= domain on the channel wins entirely and SILENTLY (documented cascade); an ordinal axis is refused loudly via RenderWarning::ScaleDomainConfigOnOrdinalAxis. Task 8, D3, spec \u00a74.2. ONE-DIRECTIONAL, and honored only in the `true` direction: this field names an opt-in WIDENING of an already-resolved domain, and nothing in the auto path forces the behavior for `false` to switch off (build_axis_scale constructs every auto positional scale with nice: false, and no mark or theme injects a zero baseline \u2014 a bar chart's y domain reaches 0 because the post-Stack values do). So the `false` spelling requests the default and is a deliberate no-op, pinned byte-identical in tests/test_axis_config_plumbing.py. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisConfigSpec.zero": {
-    "honored": false,
-    "reason": "no consumer anywhere in scale_resolve \u2014 pending Task 8 (D3: scale-domain config fields)"
+    "honored": true,
+    "reason": "extends the resolved extent to include 0. Applied before nice and before the explicit min/max clamps. prepare::axis_domain_config -> scale_resolve::apply_axis_domain_config, applied to the provisional x/y scales in prepare_render_inputs (before the axes derive their ticks) and re-applied per panel in scene_build::resolve_panel_scales (which re-resolves scales from scratch), so ticks and marks describe one domain. An encoding-level scale= domain on the channel wins entirely and SILENTLY (documented cascade); an ordinal axis is refused loudly via RenderWarning::ScaleDomainConfigOnOrdinalAxis. Task 8, D3, spec \u00a74.2. ONE-DIRECTIONAL, and honored only in the `true` direction: this field names an opt-in WIDENING of an already-resolved domain, and nothing in the auto path forces the behavior for `false` to switch off (build_axis_scale constructs every auto positional scale with nice: false, and no mark or theme injects a zero baseline \u2014 a bar chart's y domain reaches 0 because the post-Stack values do). So the `false` spelling requests the default and is a deliberate no-op, pinned byte-identical in tests/test_axis_config_plumbing.py. The cascade gate tests the encoding scale's DOMAIN (scale_resolve::encoding_explicit_extent -> ScaleSpec::positional_extent), not the mere presence of a scale= object: a LinearScale(clamp=True) or a Quantile scale pins no extent, so it has no domain for this field to lose to and the config still applies."
   },
   "AxisStyleSpec.domain": {
     "honored": true,
-    "reason": "apply_axis_config_to_theme -> theme.axis.axis_line, for axis/axis_x/axis_y (global theme fallback); NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.domain"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_domain (Option<bool>, fill-only at chart level), resolved against theme.axis.axis_line by AxesInput::apply_show_defaults and consumed by build_axis. Per-axis for all four positions as of Task 8 (D12) \u2014 previously a global theme write."
   },
   "AxisStyleSpec.domain_color": {
     "honored": true,
@@ -65,7 +81,7 @@
   },
   "AxisStyleSpec.grid": {
     "honored": true,
-    "reason": "apply_axis_config_to_theme -> theme.grid.grid, for axis/axis_x/axis_y (global theme fallback); NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.grid"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_grid (Option<bool>, fill-only at chart level so per-channel wins), resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). Per-axis for all four positions as of Task 8 (D4/D12): it no longer writes the single global theme.grid.grid, which is what made configure(axis_x=AxisConfig(grid=False)) take the y gridlines down with it."
   },
   "AxisStyleSpec.grid_color": {
     "honored": true,
@@ -109,15 +125,15 @@
   },
   "AxisStyleSpec.label_overlap": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_overlap, consumed by layout_x_axis's collision cascade (layout/axis.rs). NOT consumed by layout_y_axis (no cull recovery on y). Pending Task 8 (D12: label_overlap honored on y, same policy object as x)"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.label_overlap, consumed by layout_x_axis's collision cascade AND, as of Task 8 (D12, spec \u00a74.9), by layout_y_axis via layout::axis::resolve_y_overlap \u2014 the y transpose of the same four LabelOverlap primitives, reading the same policy object. `None` still means 'no policy' on y (byte-identical), which is why Greedy and None differ there and not on x."
   },
   "AxisStyleSpec.label_padding": {
     "honored": true,
     "reason": "axis_style_fill_from -> AxisStyleOverrides.label_padding, consumed by layout/axis.rs's standoff calc"
   },
   "AxisStyleSpec.labels": {
-    "honored": false,
-    "reason": "chart-level configure_axis(labels=) has no consumer \u2014 AxisInput.show_labels is a plain bool (not Option<bool>), exclusively owned by the per-channel prepare path (prepare/mod.rs, EncodingSpec.axis). Wiring chart-level control needs it widened to Option<bool> \u2014 out of this task's scope. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02: T1's manifest sweep surfaced this)."
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_labels (Option<bool>), read via AxisInput::show_labels by the label-band reservation and threaded to AxisLayout.show_labels for render/marks/axis.rs's tick loop. The Option<bool> widening (Task 8, D12, spec \u00a74.9) is what gives the chart-level position a consumer without letting it clobber a per-channel fm.Axis(labels=)."
   },
   "AxisStyleSpec.max_band": {
     "honored": true,
@@ -133,11 +149,11 @@
   },
   "AxisStyleSpec.orient": {
     "honored": true,
-    "reason": "axis_style_fill_from -> AxisStyleOverrides.orient, consumed by AxisInput::resolve_orient, for axis/axis_x/axis_y. For axis_y2 the override reaches AxisStyleOverrides.orient (fill-only, same as every other field) but has no concrete side to resolve onto: layout::layout_panel_axes unconditionally forces every secondary axis's orient to Right regardless of any override, per-channel or chart-level — deliberate design (secondary axes always stack outward on the right), not a wiring gap, so this is NOT a Task 8 item."
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.orient, consumed by AxisInput::resolve_orient, for axis/axis_x/axis_y. For axis_y2 the override reaches AxisStyleOverrides.orient (fill-only, same as every other field) but has no concrete side to resolve onto: layout::layout_panel_axes unconditionally forces every secondary axis's orient to Right regardless of any override, per-channel or chart-level \u2014 deliberate design (secondary axes always stack outward on the right), not a wiring gap, so this is NOT a Task 8 item."
   },
   "AxisStyleSpec.tick_count": {
-    "honored": false,
-    "reason": "chart-level: no consumer anywhere \u2014 AxisStyleOverrides has no tick_count field at all. Per-channel fm.Axis(tick_count=) IS honored via encoding_axis_tick_count. Pending Task 8 (D12: chart-level tick_count, fill-only, same consumer as encoding-level)"
+    "honored": true,
+    "reason": "prepare::resolve_axis_tick_count \u2014 the single place a tick count is decided, resolving per-channel fm.Axis(tick_count=) > chart-level configure_axis(tick_count=) (per-axis section before shared, via ChartConfig::axis_field) > DEFAULT_TICK_COUNT. Resolved in prepare rather than filled onto the overrides bundle afterwards because the count decides how many ticks the scale GENERATES (Task 8, D12, spec \u00a74.9)."
   },
   "AxisStyleSpec.tick_extra": {
     "honored": true,
@@ -149,15 +165,15 @@
   },
   "AxisStyleSpec.tick_size": {
     "honored": true,
-    "reason": "apply_axis_config_to_theme -> theme.sizes.tick_size, for axis/axis_x/axis_y (global theme fallback); NOT honored for axis_y2 \u2014 see AxisConfigSpec.axis_y2.tick_size"
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.tick_size, read via AxisInput::tick_size by the layout band reservation, both layout_*_axis calls, and build_axis. Per-axis as of Task 8 (D12); the shared `axis` key ALSO writes theme.sizes.tick_size as the global fallback for axes the per-axis fill does not visit."
   },
   "AxisStyleSpec.ticks": {
-    "honored": false,
-    "reason": "same disposition as `labels` \u2014 chart-level has no consumer (AxisInput.show_ticks is a plain bool); per-channel fm.Axis(ticks=) IS honored. Pending Task 8 (D12, same Option<bool> widening as `labels`, spec \u00a74.9 extended 2026-09-02)."
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.show_ticks (Option<bool>), threaded to AxisLayout.show_ticks and read by render/marks/axis.rs's tick loop. Same Option<bool> widening as `labels` (Task 8, D12)."
   },
   "AxisStyleSpec.title": {
-    "honored": false,
-    "reason": "chart-level: no consumer \u2014 AxisInput.title conflates 'unset' with 'per-channel explicitly suppressed' (title=\"\" -> None), so a naive fill-only-if-None chart-level fill would resurrect an explicitly suppressed per-channel title, inverting the per-channel-wins cascade; needs a tri-state model before it's safe to wire. Per-channel fm.Axis(title=) IS honored via prepare::resolve_axis_title. Python's AxisConfig dataclass doesn't expose a `title` param either today. Pending Task 8 (D12, spec \u00a74.9 extended 2026-09-02: needs the tri-state model before it's safe to wire)."
+    "honored": true,
+    "reason": "AxisInput::fill_chart_level_title (render::apply_axis_style_to_axis_input) \u2014 the tri-state model spec \u00a74.9 called for: AxisStyleOverrides.title_claimed records whether a per-channel title (INCLUDING the title=\"\" explicit-suppress spelling) or an earlier, more specific chart-level layer already owns the slot, so the chart-level fill can never resurrect a suppressed title nor lose to a less specific layer. The empty-string suppress sentinel works at chart level too, via the shared layout::axis::resolve_axis_title."
   },
   "AxisStyleSpec.title_color": {
     "honored": true,
@@ -251,33 +267,53 @@
     "honored": true,
     "reason": "apply_chart_config color-scheme block -> theme.palette.sequential_scheme, render/mod.rs"
   },
+  "GridAxisSpec.color": {
+    "honored": true,
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_color, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.color key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+  },
+  "GridAxisSpec.dash": {
+    "honored": true,
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_dash, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.dash key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+  },
+  "GridAxisSpec.enabled": {
+    "honored": true,
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> AxisStyleOverrides.show_grid, resolved against theme.grid.grid by AxesInput::apply_show_defaults and consumed by build_grid's per-axis filter (render/marks/axis.rs). This is the per-axis grid enable F-L07-01/D4 (spec \u00a74.3) exists for: configure_grid(x=True, y=False) now takes effect instead of being dropped whole by the old agreeing-values guard."
+  },
+  "GridAxisSpec.opacity": {
+    "honored": true,
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_opacity, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.opacity key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+  },
+  "GridAxisSpec.width": {
+    "honored": true,
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> the target axis's own AxisStyleOverrides.grid_width, consumed by build_grid (render/marks/axis.rs) via AxisLayout; the flat GridConfigSpec.width key remains the both-axes shorthand on the theme, which this axis's slot falls back to when unset (D4, spec \u00a74.3)"
+  },
   "GridConfigSpec.band_colors": {
     "honored": true,
     "reason": "scene_build.rs -> render/marks/axis.rs's alternating grid-band rects"
   },
   "GridConfigSpec.color": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.colors.grid_color, render/mod.rs"
+    "reason": "apply_chart_config grid block -> theme.colors.grid_color, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.color wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.dash": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.grid.grid_dash, render/mod.rs"
+    "reason": "apply_chart_config grid block -> theme.grid.grid_dash, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.dash wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.opacity": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.grid.grid_opacity, render/mod.rs"
+    "reason": "apply_chart_config grid block -> theme.grid.grid_opacity, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.opacity wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.width": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.sizes.grid_width, render/mod.rs"
+    "reason": "apply_chart_config grid block -> theme.sizes.grid_width, render/mod.rs \u2014 the axis-unspecified BOTH-AXES shorthand; an axis's own GridAxisSpec.width wins for that axis (D4, spec \u00a74.3)."
   },
   "GridConfigSpec.x": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.grid.grid, render/mod.rs"
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> prep.axes.x's own AxisStyleOverrides (D4, spec \u00a74.3). Accepts both wire spellings: the historical bare bool (enable-only) and a GridAxisSpec object carrying enable + this axis's gridline style \u2014 see the GridAxisSpec.* entries."
   },
   "GridConfigSpec.y": {
     "honored": true,
-    "reason": "apply_chart_config grid block -> theme.grid.grid, render/mod.rs"
+    "reason": "apply_grid_config_to_axis_inputs (render/mod.rs) -> prep.axes.y's own AxisStyleOverrides (D4, spec \u00a74.3). Same two wire spellings as GridConfigSpec.x."
   },
   "LegendStyleSpec.clip_height": {
     "honored": true,

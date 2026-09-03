@@ -336,6 +336,26 @@ pub struct PreparedInputs {
     /// raw tick values that produced the current labels.
     pub x_tick_count: usize,
     pub y_tick_count: usize,
+    /// The resolved y scale behind each entry of `axes.secondary_y`, in the
+    /// same order (spec §4.9, extended 2026-09-02). Carried for exactly the
+    /// reason `x_tick_count`/`y_tick_count` are: the post-config tick
+    /// adjustments run in `render::prepare_and_layout`, after `axis_y2`'s
+    /// values have merged onto the axis input, and each needs the scale its
+    /// axis was derived from. Empty for every chart with no independent-y
+    /// layer.
+    pub secondary_y_scales: Vec<crate::render::scale_resolve::ScaleKind>,
+    /// The RESOLVED tick count behind each entry of `axes.secondary_y`, in the
+    /// same order — `resolve_axis_tick_count`'s output at the `ConfigAxis::Y2`
+    /// position, the exact analogue of `x_tick_count`/`y_tick_count`.
+    ///
+    /// Carried out for the same reason the scales are: the post-config trio in
+    /// `render::prepare_and_layout` needs it, and `adjust_axis_ticks`
+    /// re-derives `scale.tick_values_raw(tick_count)` and bails when the length
+    /// does not match `tick_labels`. Deriving the count from `tick_labels.len()`
+    /// instead is only accidentally equal — whenever a scale returns a different
+    /// number of raw values than labels, `axis_y2`'s `tick_extra`/
+    /// `tick_min_step`/`values` would go silently inert for that data shape.
+    pub secondary_y_tick_counts: Vec<usize>,
     /// The structural layer→y-slot plan (secondary-y-axis, GH #52 / #72),
     /// derived once from the layers' `independent_y` flags. The single source
     /// for the layer→slot mapping: the prepare axis-input builder, per-panel
@@ -500,22 +520,13 @@ pub(crate) fn user_facing_channel(channel: &str, coord_flipped: bool) -> &str {
     }
 }
 
-/// Resolve a positional axis title via the 3-way idiom shared by the spec-level
-/// encoding title and the per-channel `Axis(title=...)` override (SPINE-08):
-///   - **absent** (`None`)            → fall through to `fallback`;
-///   - **present + empty/whitespace** → explicit suppress, returns `None`;
-///   - **present + non-empty**        → use it.
-///
-/// The empty-string suppression contract comes from Python forwarding
-/// `title = ""` only when `title=None` was explicitly passed; an absent key
-/// means "use the default".
-fn resolve_axis_title(value: Option<&str>, fallback: Option<String>) -> Option<String> {
-    match value {
-        Some(s) if s.trim().is_empty() => None, // explicit suppress: don't fall back
-        Some(s) => Some(s.to_owned()),          // explicit non-empty title
-        None => fallback,                       // absent: use the default
-    }
-}
+// The 3-way axis-title idiom (absent → fallback, empty → suppress, non-empty →
+// verbatim) lives in `layout::axis` alongside `AxisInput::fill_chart_level_title`,
+// the chart-level writer that must apply the identical rule (D12, spec §4.9).
+// Hoisted there rather than re-expressed here: two copies of a suppression
+// sentinel is exactly how a chart-level fill starts resurrecting per-channel
+// suppressions.
+use crate::layout::axis::resolve_axis_title;
 
 /// Build one positional axis's [`AxisInput`] from its resolved scale and
 /// encoding (SPINE-08).
@@ -568,17 +579,24 @@ fn build_axis_input(
     });
 
     // D7 + D12 (B5-typed): per-axis style fields from the typed `encoding.axis`
-    // style spec. The show toggles default to `true` (and title falls through to
-    // the field name) so SVG output is byte-identical when the encoding carries
-    // no axis overrides.
+    // style spec. The show toggles ride the SAME `AxisStyleOverrides` bundle as
+    // every other per-axis field (D12, spec §4.9) — `encoding_axis_style_overrides`
+    // below writes them unconditionally (fresh build), and the chart-level path
+    // fills them only when still `None`, so per-channel wins without this fn
+    // needing a hand-written `unwrap_or(true)` per toggle.
     let enc_axis = rendering_enc.and_then(|e| e.axis.as_ref());
-    let show_labels = enc_axis.and_then(|a| a.labels).unwrap_or(true);
-    let show_ticks = enc_axis.and_then(|a| a.ticks).unwrap_or(true);
-    let show_domain = enc_axis.and_then(|a| a.domain).unwrap_or(true);
-    let show_grid = enc_axis.and_then(|a| a.grid).unwrap_or(true);
     // Axis(title=...): the outer Option distinguishes "key absent" (fall through
     // to the field-name default) from "key present but empty" (explicit suppress).
-    let title = resolve_axis_title(enc_axis.and_then(|a| a.title.as_deref()), field_title);
+    let per_channel_title = enc_axis.and_then(|a| a.title.as_deref());
+    // The chart-level `configure_axis(title=)` fill must not overwrite a
+    // per-channel title — including the empty-string SUPPRESS spelling, whose
+    // resolved value is indistinguishable from "never set" once it lands in
+    // `AxisInput.title`. Capture the claim here, where the raw wire value is
+    // still visible. `spec_enc.title` (the highest-priority source, resolved
+    // into `field_title` above) claims the slot for the same reason.
+    let title_claimed =
+        per_channel_title.is_some() || spec_enc.and_then(|p| p.title.as_deref()).is_some();
+    let title = resolve_axis_title(per_channel_title, field_title);
 
     // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
     // label_format_type=)` takes precedence over the shorthand
@@ -632,6 +650,9 @@ fn build_axis_input(
     // a format string survived to be threaded (see the capture above and
     // `AxisStyleOverrides::label_format_claimed`'s doc).
     overrides.label_format_claimed = label_format_claimed;
+    // Same shape for the title slot (D12): see `title_claimed`'s capture above
+    // and `AxisInput::fill_chart_level_title`.
+    overrides.title_claimed = title_claimed;
 
     // Per-channel `orient` selects the axis side; absent → the dimension default
     // (Bottom for x, Left for y). The `orient` override input stays in the bundle
@@ -643,10 +664,6 @@ fn build_axis_input(
         orient,
         title,
         tick_labels,
-        show_labels,
-        show_ticks,
-        show_domain,
-        show_grid,
         tick_format: None, // already applied above
         tick_format_type: None,
         tick_projection,
@@ -672,6 +689,7 @@ pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
     theme: &crate::layout::ThemeInputs,
+    chart_config: &crate::render::chart_config::ChartConfig,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<PreparedInputs, RenderError> {
     if batch.num_rows() == 0 {
@@ -754,7 +772,26 @@ pub fn prepare_render_inputs(
     // #52) from `layers`/`transformed`/`transform_outputs`, pushing any scale
     // warnings into `scale_warnings` alongside the primary's.
     let mut scale_warnings = scale_warnings;
-    let (axes, x_tick_count, y_tick_count) = build_axes(
+    let mut provisional_scales = provisional_scales;
+    // D3 (spec §4.2): chart-level `domain_min`/`domain_max`/`nice`/`zero`
+    // reshape the resolved positional domains BEFORE the axes derive their
+    // ticks from them, so the axis labels and the mark placement describe the
+    // same domain.
+    apply_axis_domain_configs(
+        &mut provisional_scales.x,
+        &mut provisional_scales.y,
+        &rendering_encoding,
+        chart_config,
+        &mut scale_warnings,
+    )?;
+    let provisional_scales = provisional_scales;
+    let PreparedAxes {
+        axes,
+        x_tick_count,
+        y_tick_count,
+        secondary_y_scales,
+        secondary_y_tick_counts,
+    } = build_axes(
         spec,
         &rendering_encoding,
         &provisional_scales,
@@ -763,6 +800,7 @@ pub fn prepare_render_inputs(
         &y_slot_plan,
         &transformed,
         &transform_outputs,
+        chart_config,
         &mut scale_warnings,
     )?;
 
@@ -834,6 +872,8 @@ pub fn prepare_render_inputs(
         aux_legends,
         x_tick_count,
         y_tick_count,
+        secondary_y_scales,
+        secondary_y_tick_counts,
         y_slot_plan,
     })
 }
@@ -975,6 +1015,38 @@ fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
 /// resolution. The per-channel derivation runs once each through
 /// [`build_axis_input`], with [`Channel`] carrying the orient default and the
 /// non-ordinal-y reversal. Returns `(axes, x_tick_count, y_tick_count)`.
+/// One independent-y layer's secondary axis, in three index-correlated vectors:
+/// the axis input, the y scale it was resolved from, and the tick count that
+/// resolution used.
+///
+/// A struct rather than a bare tuple because the correspondence is the whole
+/// point — `render::prepare_and_layout`'s post-config trio zips all three, and
+/// a mismatch would silently pair an axis with another layer's scale.
+pub(crate) struct SecondaryYAxes {
+    pub(crate) inputs: Vec<AxisInput>,
+    pub(crate) scales: Vec<crate::render::scale_resolve::ScaleKind>,
+    pub(crate) tick_counts: Vec<usize>,
+}
+
+/// What [`build_axes`] produces: the axis inputs, the two resolved primary tick
+/// counts, and the secondary y axes' own resolved scales.
+///
+/// The scales are carried out because the secondary axes' post-config tick
+/// adjustments (`adjust_axis_ticks` / `apply_label_format_to_axis` /
+/// `sync_projected_fractions_to_tick_values`) run in
+/// `render::prepare_and_layout`, AFTER `axis_y2`'s config has been merged onto
+/// the axis inputs — and each of those needs the scale the axis was derived
+/// from. Without this the secondary axes had no scale to re-derive against,
+/// which is exactly why `axis_y2`'s `label_format`/`tick_extra`/`tick_min_step`/
+/// `values` had no consumer (spec §4.9, extended 2026-09-02).
+pub(crate) struct PreparedAxes {
+    pub(crate) axes: AxesInput,
+    pub(crate) x_tick_count: usize,
+    pub(crate) y_tick_count: usize,
+    pub(crate) secondary_y_scales: Vec<crate::render::scale_resolve::ScaleKind>,
+    pub(crate) secondary_y_tick_counts: Vec<usize>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_axes(
     spec: &ChartSpec,
@@ -985,15 +1057,19 @@ fn build_axes(
     y_slot_plan: &crate::render::scale_resolve::YSlotPlan,
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
+    chart_config: &crate::render::chart_config::ChartConfig,
     warnings: &mut Vec<RenderWarning>,
-) -> Result<(AxesInput, usize, usize), RenderError> {
+) -> Result<PreparedAxes, RenderError> {
     // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
     // target tick count for continuous + temporal axes (default 10). Limiting it
     // is what de-clutters dense temporal axes (e.g. a 72-row series no longer
     // renders 72 overlapping ticks). Read before tick generation so the count
     // feeds every downstream tick call (labels, fractions, minors).
-    let x_tick_count = encoding_axis_tick_count(rendering_encoding.x.as_ref()).unwrap_or(10);
-    let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
+    use crate::render::chart_config::ConfigAxis;
+    let x_tick_count =
+        resolve_axis_tick_count(rendering_encoding.x.as_ref(), chart_config, ConfigAxis::X);
+    let y_tick_count =
+        resolve_axis_tick_count(rendering_encoding.y.as_ref(), chart_config, ConfigAxis::Y);
 
     // R3: `build_axis_input`'s per-channel `Axis(orient=...)` validation has no
     // flip context of its own (it returns `UnflippedRenderError`); resolve it
@@ -1001,6 +1077,20 @@ fn build_axes(
     // axis the user actually wrote instead of the resolved (post-flip) one.
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
 
+    let SecondaryYAxes {
+        inputs: secondary_y,
+        scales: secondary_y_scales,
+        tick_counts: secondary_y_tick_counts,
+    } = build_secondary_y_axis_inputs(
+        spec,
+        layers,
+        y_slot_plan,
+        transformed,
+        transform_outputs,
+        theme,
+        chart_config,
+        warnings,
+    )?;
     let axes = AxesInput {
         x: build_axis_input(
             Channel::X,
@@ -1022,17 +1112,9 @@ fn build_axes(
         .map_err(|e| e.resolve(coord_flipped))?,
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
-        secondary_y: build_secondary_y_axis_inputs(
-            spec,
-            layers,
-            y_slot_plan,
-            transformed,
-            transform_outputs,
-            theme,
-            warnings,
-        )?,
+        secondary_y,
     };
-    Ok((axes, x_tick_count, y_tick_count))
+    Ok(PreparedAxes { axes, x_tick_count, y_tick_count, secondary_y_scales, secondary_y_tick_counts })
 }
 
 /// Provisional secondary y-axis inputs, one per `independent_y` layer in layer
@@ -1055,6 +1137,12 @@ fn build_axes(
 /// slot 1..n) so the axis-band order matches the per-panel [`YScaleSlots`] slot
 /// order and the axis router's slot ids by construction, not by parallel
 /// re-derivation (GH #72).
+// 8 params after Task 8 threaded `chart_config` in (for `axis_y2`'s tick
+// count). Mirrors the `#[allow]` its own caller `build_axes` already carries:
+// these are the same six resolution inputs `build_axes` holds, forwarded, and
+// bundling them into a struct used at exactly one call site would trade a lint
+// for an indirection.
+#[allow(clippy::too_many_arguments)]
 fn build_secondary_y_axis_inputs(
     spec: &ChartSpec,
     layers: &[LayerPrepared],
@@ -1062,9 +1150,12 @@ fn build_secondary_y_axis_inputs(
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &crate::layout::ThemeInputs,
+    chart_config: &crate::render::chart_config::ChartConfig,
     warnings: &mut Vec<RenderWarning>,
-) -> Result<Vec<AxisInput>, RenderError> {
-    let mut out = Vec::new();
+) -> Result<SecondaryYAxes, RenderError> {
+    let mut inputs = Vec::new();
+    let mut scales = Vec::new();
+    let mut tick_counts = Vec::new();
     for &layer_idx in y_slot_plan.secondary_layers() {
         let layer = &layers[layer_idx];
         let layer_batch: &RecordBatch = match &layer.data_source {
@@ -1100,7 +1191,28 @@ fn build_secondary_y_axis_inputs(
                 (0.0, 1.0),
             )?;
         warnings.extend(layer_warnings);
-        let y_tick_count = encoding_axis_tick_count(layer_encoding.y.as_ref()).unwrap_or(10);
+        // D3 (spec §4.2) at the `axis_y2` position: reshape THIS layer's own y
+        // domain before `build_axis_input` below derives its ticks from the
+        // scale, exactly as the primary pair is reshaped before `build_axes`.
+        // Reported here (the one chart-level application);
+        // `scene_build::resolve_layer_y_scale` re-applies it silently against
+        // the panel-real scale so marks land on the same domain these ticks
+        // describe.
+        let mut y_scale = y_scale;
+        apply_axis_domain_config_for(
+            &mut y_scale,
+            layer_effective_y(&layer.encoding, &spec.encoding),
+            "y2",
+            crate::render::chart_config::ConfigAxis::Y2,
+            chart_config,
+            warnings,
+        )?;
+        let y_scale = y_scale;
+        let y_tick_count = resolve_axis_tick_count(
+            layer_encoding.y.as_ref(),
+            chart_config,
+            crate::render::chart_config::ConfigAxis::Y2,
+        );
         // R3: one of the two chains that RESOLVE `coord_flipped` (the other is
         // `build_axes`, just above; the third production chain to
         // `InvalidAxisOrient` — the chart-level `configure_axis` apply block in
@@ -1126,9 +1238,11 @@ fn build_secondary_y_axis_inputs(
             theme,
         )
         .map_err(|e| e.resolve(coord_flipped))?;
-        out.push(axis_input);
+        inputs.push(axis_input);
+        scales.push(y_scale);
+        tick_counts.push(y_tick_count);
     }
-    Ok(out)
+    Ok(SecondaryYAxes { inputs, scales, tick_counts })
 }
 
 /// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
@@ -1275,12 +1389,126 @@ fn apply_impute(
 // module only re-parses pre-computed label strings back to numbers (or epoch-ms
 // for temporal axes) and re-applies the requested format.
 
-/// D3 (flexibility campaign): per-channel `Axis(tick_count=N)`. Read from the
-/// encoding's typed `axis` style spec. `None` → use the caller's default (10).
-fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -> Option<usize> {
+/// The default major-tick count when neither level asks for one.
+pub(crate) const DEFAULT_TICK_COUNT: usize = 10;
+
+/// The effective major-tick count for one axis, resolved at the documented
+/// cascade in ONE place (D3 flexibility campaign + D12, spec §4.9):
+/// per-channel `fm.Axis(tick_count=)` > chart-level `configure_axis(
+/// tick_count=)` (per-axis section before the shared one, via
+/// `ChartConfig::axis_field`) > [`DEFAULT_TICK_COUNT`].
+///
+/// Resolved HERE, before the axes are built, rather than as a fill onto
+/// `AxisStyleOverrides` after the fact: the count decides how many ticks the
+/// scale generates, so it has to be known at generation time. That is also why
+/// `prepare_render_inputs` takes the chart config at all — a chart-level count
+/// applied later could only thin an already-built tick vector, not choose it.
+fn resolve_axis_tick_count(
+    enc: Option<&crate::spec::encoding::EncodingSpec>,
+    chart_config: &crate::render::chart_config::ChartConfig,
+    axis: crate::render::chart_config::ConfigAxis,
+) -> usize {
     enc.and_then(|e| e.axis.as_ref())
         .and_then(|a| a.tick_count)
+        .or_else(|| chart_config.axis_field(axis, |cfg| cfg.style.tick_count))
         .map(|n| n as usize)
+        .unwrap_or(DEFAULT_TICK_COUNT)
+}
+
+/// One axis's chart-level scale-domain config (D3, spec §4.2), lifted out of
+/// `ChartConfig` into the neutral shape `scale_resolve` accepts.
+fn axis_domain_config(
+    chart_config: &crate::render::chart_config::ChartConfig,
+    axis: crate::render::chart_config::ConfigAxis,
+) -> crate::render::scale_resolve::AxisDomainConfig {
+    crate::render::scale_resolve::AxisDomainConfig {
+        min: chart_config.axis_field(axis, |c| c.domain_min),
+        max: chart_config.axis_field(axis, |c| c.domain_max),
+        nice: chart_config.axis_field(axis, |c| c.nice),
+        zero: chart_config.axis_field(axis, |c| c.zero),
+    }
+}
+
+/// Apply the chart-level scale-domain config to ONE axis position (D3, spec
+/// §4.2). The primitive every position routes through, so the
+/// section→encoding→gate correspondence is expressed once.
+///
+/// `enc` is the RESOLVED (post-`CoordFlip`) encoding for this axis: an
+/// encoding-level `scale=` **domain** on it wins entirely and silently,
+/// because it is the more specific surface and the documented cascade has
+/// already answered.
+///
+/// The gate is `encoding_explicit_extent`, not `scale.is_some()`. A `scale=`
+/// that declares no domain — `LinearScale(clamp=True)`, a `Quantile` whose
+/// domain is a binning artifact, any ordinal family — pins nothing, so it has
+/// no domain for the config to lose to and the config must still apply.
+/// Testing mere presence made all four fields silently inert for those
+/// encodings, which is the parsed-but-dropped class this task exists to
+/// remove.
+pub(in crate::render) fn apply_axis_domain_config_for(
+    scale: &mut crate::render::scale_resolve::ScaleKind,
+    enc: Option<&crate::spec::encoding::EncodingSpec>,
+    channel: &'static str,
+    axis: crate::render::chart_config::ConfigAxis,
+    chart_config: &crate::render::chart_config::ChartConfig,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), RenderError> {
+    crate::render::scale_resolve::apply_axis_domain_config(
+        scale,
+        &axis_domain_config(chart_config, axis),
+        channel,
+        enc.is_some_and(|e| {
+            crate::render::scale_resolve::encoding_explicit_extent(e).is_some()
+        }),
+        warnings,
+    )
+}
+
+/// Apply the chart-level scale-domain config to BOTH primary positional scales
+/// of one resolution pass (D3, spec §4.2).
+///
+/// Two passes need this and must agree: this module's provisional resolution
+/// (before the axes derive their ticks from the domain) and
+/// `scene_build::resolve_panel_scales` (which re-resolves each panel's scales
+/// from scratch and would otherwise place marks against the un-shaped
+/// domain). One body rather than the same per-channel pairing written twice —
+/// the axis→section→encoding correspondence is exactly the kind of mapping
+/// that drifts when hand-copied.
+///
+/// `warnings` is the caller's sink: `scene_build` passes a throwaway, because
+/// its per-panel re-application would otherwise repeat this chart's one
+/// ordinal-axis warning once per panel.
+pub(in crate::render) fn apply_axis_domain_configs(
+    x: &mut crate::render::scale_resolve::ScaleKind,
+    y: &mut crate::render::scale_resolve::ScaleKind,
+    encoding: &crate::spec::encoding::Encoding,
+    chart_config: &crate::render::chart_config::ChartConfig,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), RenderError> {
+    use crate::render::chart_config::ConfigAxis;
+    for (channel, axis, scale, enc) in [
+        ("x", ConfigAxis::X, x, encoding.x.as_ref()),
+        ("y", ConfigAxis::Y, y, encoding.y.as_ref()),
+    ] {
+        apply_axis_domain_config_for(scale, enc, channel, axis, chart_config, warnings)?;
+    }
+    Ok(())
+}
+
+/// The y encoding an `independent_y` layer actually resolves against: its own
+/// when the layer binds y, else the chart-level one.
+///
+/// This is `Encoding::overlay_from`'s rule for a single channel, which is what
+/// `scale_resolve::resolve_layer_y_slot_scale` applies internally to build the
+/// scale — so the `scale=` gate above is asked of the SAME encoding the scale
+/// came from. Both stages that resolve a secondary y scale (this module's
+/// axis-input builder and `scene_build::resolve_layer_y_scale`) call this
+/// rather than each spelling the merge out.
+pub(in crate::render) fn layer_effective_y<'a>(
+    layer_encoding: &'a crate::spec::encoding::Encoding,
+    chart_encoding: &'a crate::spec::encoding::Encoding,
+) -> Option<&'a crate::spec::encoding::EncodingSpec> {
+    layer_encoding.y.as_ref().or(chart_encoding.y.as_ref())
 }
 
 /// Parse an axis `orient` string into an [`AxisOrient`], validating it against
@@ -2228,8 +2456,8 @@ mod tests {
         assert_eq!(x.title.as_deref(), Some("v"));
         assert_eq!(y.title.as_deref(), Some("v"));
         // Show toggles default true on both.
-        assert!(x.show_labels && x.show_ticks && x.show_domain && x.show_grid);
-        assert!(y.show_labels && y.show_ticks && y.show_domain && y.show_grid);
+        assert!(x.show_labels() && x.show_ticks() && x.show_domain() && x.show_grid());
+        assert!(y.show_labels() && y.show_ticks() && y.show_domain() && y.show_grid());
 
         // The y tick labels are the x tick labels reversed (non-ordinal-y rule).
         assert!(!x.tick_labels.is_empty(), "continuous axis must have labels");
@@ -3121,7 +3349,9 @@ mod tests {
     fn prepare_returns_axes_and_groups_and_legend() {
         let spec = spec_color_facet();
         let batch = batch3();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prep.axes.x.title.as_deref(), Some("x"));
         assert_eq!(prep.axes.y.title.as_deref(), Some("y"));
         assert!(!prep.axes.x.tick_labels.is_empty());
@@ -3181,7 +3411,9 @@ mod tests {
     }
 
     fn prep(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
-        prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default(), None).unwrap()
+        prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap()
     }
 
     #[test]
@@ -3319,7 +3551,9 @@ mod tests {
         let mut spec = spec_color_facet();
         spec.encoding.color = None;
         spec.facet = None;
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap_err();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap_err();
         assert!(matches!(err, RenderError::EmptyBatch));
     }
 
@@ -3370,7 +3604,9 @@ mod tests {
     fn prepare_single_layer_produces_one_layer_prepared() {
         let spec = single_layer_spec();
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prepared.layers.len(), 1);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert!(!prepared.coord_flipped);
@@ -3410,7 +3646,9 @@ mod tests {
             },
         ]);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prepared.layers.len(), 2);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert_eq!(prepared.layers[1].mark, Mark::Line);
@@ -3471,7 +3709,9 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(None);
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         // __final__ is always present.
         assert!(
             prep.transform_outputs.contains_key("__final__"),
@@ -3500,7 +3740,9 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(Some("box".into()));
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert!(prep.transform_outputs.contains_key("box"));
         assert!(prep.transform_outputs.contains_key("__final__"));
         // Under fan-out semantics, named transforms run on the ORIGINAL input
@@ -3552,7 +3794,9 @@ mod tests {
             position: None, blend: None, name: None, independent_y: false,
         }]);
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap_err();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing"), "error must name the bogus key: {msg}");
         // Available keys list must mention either the named transform or the sentinel.
@@ -3568,7 +3812,9 @@ mod tests {
         let mut spec = single_layer_spec(); // x="price", y="weight"
         spec.coord = Some(CoordKind::Flip);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert!(prepared.coord_flipped);
         // After flip: x should have "weight", y should have "price"
         assert_eq!(
@@ -3612,7 +3858,9 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prep.axes.x.overrides.label_format.as_deref(), Some(",.0f"));
     }
 
@@ -3628,7 +3876,9 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         let gx = prep.axes.x.overrides.grid_color.expect("per-channel grid_color must reach x AxisInput");
         assert_eq!([gx.red, gx.green, gx.blue], [0xcc, 0xcc, 0xcc]);
         let lx = prep.axes.x.overrides.label_color.expect("per-channel label_color must reach x AxisInput");
@@ -3648,7 +3898,9 @@ mod tests {
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "top" })));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prep.axes.x.orient, AxisOrient::Top);
         // y untouched (default Left).
         assert_eq!(prep.axes.y.orient, AxisOrient::Left);
@@ -3661,7 +3913,9 @@ mod tests {
         let mut spec = single_layer_spec();
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "left" })));
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
             .expect_err("x orient='left' must fail loud");
         match err {
             crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
@@ -3687,7 +3941,9 @@ mod tests {
         spec.coord = Some(CoordKind::Flip);
         spec.encoding.y = Some(enc_with_axis("weight", serde_json::json!({ "orient": "left" })));
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
             .expect_err("y orient='left', swapped onto x, must fail loud");
         match err {
             crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
@@ -3700,7 +3956,9 @@ mod tests {
         }
         let text = format!(
             "{}",
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
                 .unwrap_err()
         );
         assert_eq!(
@@ -3734,7 +3992,9 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
         assert_eq!(prep.axes.x.overrides.min_band, Some(70.0));
         assert_eq!(prep.axes.x.overrides.max_band, Some(120.0));
@@ -3750,13 +4010,17 @@ mod tests {
         let mut spec = single_layer_spec();
         let batch = price_weight_batch();
         let baseline =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         let base_count = baseline.axes.x.tick_labels.len();
 
         // Pick a min_step larger than the natural tick spacing to force thinning.
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_min_step": 1e9 })));
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         // The adjustment runs in prepare_and_layout; invoke it directly here.
         let tc = prep.x_tick_count;
         adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
@@ -3859,7 +4123,9 @@ mod tests {
         let mut spec = single_layer_spec();
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_extra": true })));
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         let before = prep.axes.x.tick_labels.len();
         let tc = prep.x_tick_count;
         adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
@@ -3885,7 +4151,9 @@ mod tests {
             Some(enc_with_axis("price", serde_json::json!({ "grid_width": 4.0 })));
         let batch = price_weight_batch();
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel value set in prep");
         // Chart-level configure_axis(grid_width=1.0) must NOT overwrite per-channel.
         let cfg = crate::render::chart_config::AxisConfigSpec {
@@ -3913,12 +4181,14 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         // Per-channel suppression is set in prep; y is untouched (defaults true).
-        assert!(!prep.axes.x.show_grid, "per-channel grid=False set in prep");
-        assert!(!prep.axes.x.show_domain, "per-channel domain=False set in prep");
-        assert!(prep.axes.y.show_grid, "y grid default true");
-        assert!(prep.axes.y.show_domain, "y domain default true");
+        assert!(!prep.axes.x.show_grid(), "per-channel grid=False set in prep");
+        assert!(!prep.axes.x.show_domain(), "per-channel domain=False set in prep");
+        assert!(prep.axes.y.show_grid(), "y grid default true");
+        assert!(prep.axes.y.show_domain(), "y domain default true");
 
         // Chart-level configure_axis(grid=True, domain=True) applies to BOTH axes
         // via the shared `axis` key, the same wire step `prepare_and_layout` runs.
@@ -3935,16 +4205,16 @@ mod tests {
 
         // Per-channel x suppression survives the conflicting chart-level toggle.
         assert!(
-            !prep.axes.x.show_grid,
+            !prep.axes.x.show_grid(),
             "per-channel grid=False must survive configure_axis(grid=True)"
         );
         assert!(
-            !prep.axes.x.show_domain,
+            !prep.axes.x.show_domain(),
             "per-channel domain=False must survive configure_axis(domain=True)"
         );
         // The other axis (no per-channel override) is unaffected: still shown.
-        assert!(prep.axes.y.show_grid, "y axis show_grid unaffected");
-        assert!(prep.axes.y.show_domain, "y axis show_domain unaffected");
+        assert!(prep.axes.y.show_grid(), "y axis show_grid unaffected");
+        assert!(prep.axes.y.show_domain(), "y axis show_domain unaffected");
     }
 
     #[test]
@@ -3959,7 +4229,9 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         // Apply the threaded override exactly as render/mod.rs does.
         prep.axes.x.tick_labels = apply_tick_format(
             std::mem::take(&mut prep.axes.x.tick_labels),
@@ -3984,14 +4256,18 @@ mod tests {
         default_spec.encoding.x =
             Some(EncodingSpec { field: "price".into(), ..Default::default() });
         let default_prep =
-            prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default(), None)
+            prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
                 .unwrap();
 
         let mut limited_spec = single_layer_spec();
         limited_spec.encoding.x =
             Some(enc_with_axis("price", serde_json::json!({ "tick_count": 2 })));
         let limited_prep =
-            prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default(), None)
+            prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
                 .unwrap();
 
         assert!(
@@ -4237,7 +4513,9 @@ mod tests {
 
         let batch = cat_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
 
         assert!(
             !prep.legend_entries.is_empty(),
@@ -4589,7 +4867,9 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let prep = prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
 
         assert_eq!(prep.axes.secondary_y.len(), 1, "one independent_y layer → one secondary axis input");
         let secondary_axis = &prep.axes.secondary_y[0];
@@ -4688,7 +4968,9 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let err = prepare_render_inputs(&spec, &batch, &theme, None)
+        let err = prepare_render_inputs(&spec, &batch, &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
             .expect_err("orient='top' on the secondary y axis must fail loud");
         match &err {
             crate::render::RenderError::InvalidAxisOrient { channel, orient, coord_flipped } => {
@@ -4781,7 +5063,9 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let err = prepare_render_inputs(&spec, &batch, &theme, None)
+        let err = prepare_render_inputs(&spec, &batch, &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None)
             .expect_err("orient='top' on the secondary y axis must fail loud");
         assert_eq!(
             format!("{err}"),
@@ -4829,7 +5113,9 @@ mod tests {
         .unwrap();
 
         let theme = crate::layout::ThemeInputs::default();
-        let prep = prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &theme,
+            &crate::render::chart_config::ChartConfig::default(),
+            None).unwrap();
         assert!(prep.axes.secondary_y.is_empty());
     }
 }

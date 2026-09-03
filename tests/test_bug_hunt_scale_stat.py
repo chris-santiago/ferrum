@@ -208,20 +208,32 @@ def test_configure_on_empty_data():
 
 
 def test_configure_axis_domain_min_equals_domain_max():
-    """configure_axis where domain_min == domain_max should not crash.
+    """configure_axis with domain_min == domain_max is a typed refusal.
 
-    This creates a degenerate domain [5, 5]. The renderer must expand it.
+    Rewritten for batch B task 8 (spec 2026-09-02 4.2). This test previously
+    asserted only "does not crash", and passed **vacuously**: the four
+    scale-domain config fields were parsed and never read, so a degenerate
+    pair reached no scale and could not have crashed. Now that the fields are
+    honored, the degenerate pair has a real meaning and it is the one every
+    scale constructor already rejects -- ``LinearScale(domain=[5, 5])`` raises
+    ``domain endpoints must differ (lo != hi)``, so this surface raises the
+    same sentence rather than silently clipping every mark away.
+
+    The sibling below (``min > max``) still renders: that is an accepted
+    reversed axis on both surfaces, not a degenerate one.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    svg = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_axis(domain_min=5.0, domain_max=5.0)
-        .to_svg()
-    )
-    assert "<svg" in svg
-    assert "NaN" not in svg
+    with pytest.raises(ValueError, match=r"domain endpoints must differ \(lo != hi\)"):
+        (
+            fr.Chart(df)
+            .mark_point()
+            .encode(x="x", y="y")
+            .configure_axis(domain_min=5.0, domain_max=5.0)
+            .to_svg()
+        )
+    # Same words from the sibling surface the contract comes from.
+    with pytest.raises(ValueError, match=r"domain endpoints must differ \(lo != hi\)"):
+        fr.LinearScale(domain=[5.0, 5.0])
 
 
 def test_configure_axis_domain_min_greater_than_max():

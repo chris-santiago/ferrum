@@ -158,6 +158,25 @@ impl PowScale {
         self.data.domain
     }
 
+    /// Replace this scale's data-space domain in place, keeping its range and
+    /// every kind-specific parameter.
+    ///
+    /// The sibling of [`domain_pair`](Self::domain_pair), added for the
+    /// chart-level scale-domain config (D3, spec §4.2), which adjusts a
+    /// RESOLVED domain rather than building a new scale — reconstructing via
+    /// `new_internal` would have to re-supply parameters the caller cannot
+    /// see. Because it is a second way into the domain field, it must apply
+    /// whatever validation this kind's own constructor applies, or a config
+    /// domain could store a value construction would have refused. `PowScaleData` has no sanitizer — `new_internal` writes the pair straight through — so a raw write here matches construction exactly.
+    ///
+    /// `domain_user_set` flips to `true`: the domain now IS explicitly set (by
+    /// the chart config), so `repr_string`/the `domain` getter must stop
+    /// reporting it as data-derived.
+    pub(crate) fn set_domain_pair(&mut self, domain: [f64; 2]) {
+        self.data.domain = domain;
+        self.domain_user_set = true;
+    }
+
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
     /// The `Pow` variant carries no `nice` field (nice is baked into the domain
     /// at construction), matching what the legacy `_scale_to_dict` emitted.

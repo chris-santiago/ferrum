@@ -253,7 +253,7 @@ pub(crate) fn render_composite_scene(
     // resolution, never the transformed data), then union shared domains.
     let mut prepared: Vec<prepare::PreparedInputs> = Vec::with_capacity(n);
     for (i, leaf) in leaves.iter().enumerate() {
-        let prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, None)
+        let prep = prepare::prepare_render_inputs(leaf.spec, leaf.batch, leaf.theme, leaf.chart_config, None)
             .map_err(|source| CompositeRenderError::LeafRender {
                 kind: "leaf",
                 index: i,

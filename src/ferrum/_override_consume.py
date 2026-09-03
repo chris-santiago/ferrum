@@ -23,13 +23,6 @@ from ferrum._override_apply import OverridePayload
 from ferrum.exceptions import FerrumOverrideError
 
 
-# The two per-axis config keys and the general (both-axes) key. A per-axis
-# override must beat a general-``axis`` configure on its own axis (override wins
-# the cascade), regardless of the Rust per-field merge direction (some axis fields
-# are first-wins with ``axis`` applied first, so a naive ``axis_x`` merge loses).
-_AXIS_SPECIFIC = {"axis_x": "axis_y", "axis_y": "axis_x"}
-
-
 def merge_chart_config(chart_config: dict[str, Any], payload: OverridePayload) -> dict[str, Any]:
     """Return *chart_config* deep-merged with ``payload.chart_config`` (override wins).
 
@@ -38,13 +31,16 @@ def merge_chart_config(chart_config: dict[str, Any], payload: OverridePayload) -
     matching key of *chart_config*, with override leaves replacing configure-layer
     leaves on conflict.  *chart_config* is not mutated; a new dict is returned.
 
-    A per-axis override (``axis_x``/``axis_y``) must win over a general
-    ``configure_axis`` (which lands in the both-axes ``axis`` key).  The Rust
-    chart-config merge applies ``axis`` before ``axis_x``/``axis_y`` and some axis
-    fields are first-wins, so a per-axis override leaf is **redistributed**: removed
-    from the general ``axis`` key and re-pinned onto the opposite axis (when that
-    axis does not already specify it) so the override is the sole source for that
-    leaf on its axis while the other axis keeps the configured value.
+    Section keys stay where the caller put them.  A ``_redistribute_general_axis``
+    helper used to rewrite them here — moving a leaf off the general ``axis`` key
+    and re-pinning it onto the *opposite* axis — on the premise that Rust applied
+    ``axis`` before ``axis_x``/``axis_y`` under first-wins semantics, so a per-axis
+    override would otherwise lose.  That premise was false, and the rewrite was
+    the thing causing the loss: for the axis fields whose only carrier was the
+    shared theme, the synthesized opposite-axis entry ran *last* into that one
+    global slot and so the general value won.  Rust now applies the per-axis
+    sections first (fill-only) and gives every such field its own per-axis slot,
+    so precedence is settled there and nothing is left for this layer to fix.
     """
     if not payload.chart_config:
         return chart_config
@@ -55,34 +51,7 @@ def merge_chart_config(chart_config: dict[str, Any], payload: OverridePayload) -
             merged[target_key] = {**existing, **leaves}
         else:
             merged[target_key] = dict(leaves)
-        if target_key in _AXIS_SPECIFIC:
-            _redistribute_general_axis(merged, target_key, leaves)
     return merged
-
-
-def _redistribute_general_axis(
-    merged: dict[str, Any], axis_key: str, override_leaves: dict[str, Any]
-) -> None:
-    """Move conflicting general-``axis`` leaves off the axis the override targets.
-
-    For each override leaf also present in the general ``axis`` key, drop it from
-    ``axis`` (so it no longer pre-empts the per-axis override on the targeted axis)
-    and re-pin it onto the opposite axis key unless that axis already sets it.  The
-    general ``axis`` key is left in place for every non-conflicting leaf.
-    """
-    general = merged.get("axis")
-    if not isinstance(general, dict):
-        return
-    other_key = _AXIS_SPECIFIC[axis_key]
-    for leaf in override_leaves:
-        if leaf not in general:
-            continue
-        carried = general.pop(leaf)
-        other = merged.get(other_key)
-        if isinstance(other, dict):
-            other.setdefault(leaf, carried)
-        else:
-            merged[other_key] = {leaf: carried}
 
 
 def apply_mark_style(

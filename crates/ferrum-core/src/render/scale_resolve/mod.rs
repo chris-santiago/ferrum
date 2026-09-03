@@ -53,9 +53,15 @@ pub(in crate::render) use self::domain::{
 pub(in crate::render) use self::seam::{Channel, LeafScaleContext, SharedDomain};
 
 // Internal re-exports used by the orchestrator in this module.
-use self::positional::{
-    apply_coord_domain_overrides, build_axis_scale, PositionalFields,
-};
+use self::positional::{apply_coord_domain_overrides, build_axis_scale, PositionalFields};
+
+// D3 (spec §4.2): the chart-level scale-domain seam. `prepare` extracts the
+// neutral `AxisDomainConfig` from `ChartConfig` and calls this; the engine
+// never sees `ChartConfig` itself (see `seam.rs`'s one-way-dependency note).
+pub(in crate::render) use self::positional::{apply_axis_domain_config, AxisDomainConfig};
+// The one "does this encoding pin its own extent" predicate, shared by the
+// color resolver and the chart-level scale-domain cascade gate.
+pub(in crate::render) use self::domain::encoding_explicit_extent;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -234,6 +240,52 @@ impl ScaleKind {
                 Some((lo, hi))
             }
         }
+    }
+
+    /// What this scale kind would have REFUSED at construction for a
+    /// USER-SUPPLIED domain — the question the chart-level scale-domain config
+    /// must ask before writing one (D3, spec §4.2).
+    ///
+    /// Asking the SCALE, rather than re-deriving each kind's rules at the
+    /// config surface, is what makes a new scale kind's own domain constraint
+    /// impossible to miss here: the match is exhaustive with no wildcard arm,
+    /// so adding a variant forces a decision. It is also what keeps the two
+    /// surfaces' vocabularies identical — the `Log` arm delegates to the same
+    /// `LogScaleData::validate_user_domain` that `LogScale::new` calls, so
+    /// `fm.LogScale(domain=[0, 5])` and `configure_axis(domain_min=0)` on a
+    /// log axis refuse in the same words.
+    ///
+    /// Per-kind audit (2026-09-03), against each constructor:
+    /// - `Log` — two kind-specific constraints (no zero endpoint, no
+    ///   sign crossing), delegated.
+    /// - `Linear`/`Time`/`Pow`/`Symlog` — their constructors apply only
+    ///   `core::validate_continuous_domain` (length 2, finite, non-degenerate).
+    ///   Length is structural here, finiteness is refused at the Python
+    ///   boundary, and degeneracy is refused kind-independently by the caller,
+    ///   so there is nothing kind-specific left to ask: `Ok(())`.
+    /// - `Ordinal` — no numeric domain at all; the caller reports that as a
+    ///   wrong-surface `RenderWarning` and never reaches here.
+    pub(in crate::render) fn validate_user_domain(&self, lo: f64, hi: f64) -> Result<(), &'static str> {
+        match self {
+            ScaleKind::Log(_) => crate::scale::log::LogScaleData::validate_user_domain([lo, hi]),
+            ScaleKind::Linear(_)
+            | ScaleKind::Time(_)
+            | ScaleKind::Pow(_)
+            | ScaleKind::Symlog(_)
+            | ScaleKind::Ordinal(_) => Ok(()),
+        }
+    }
+
+    /// Replace this scale's data-space domain, keeping its pixel range and
+    /// kind. `None`-returning for the same reason [`data_domain`](Self::data_domain)
+    /// does: an ordinal scale has no numeric domain to set, and the one caller
+    /// (`positional::apply_axis_domain_config`) refuses that case loudly
+    /// before reaching here rather than silently no-op-ing.
+    pub(in crate::render) fn set_data_domain(&mut self, lo: f64, hi: f64) {
+        if matches!(self, ScaleKind::Ordinal(_)) {
+            return;
+        }
+        dispatch_continuous!(self, set_domain_pair, [lo, hi]);
     }
 
     /// Pixel-range used when constructing this scale (lo, hi).

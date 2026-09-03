@@ -780,8 +780,7 @@ fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str
 /// Returns `None` when the spec declares no extent, allowing the caller to fall
 /// back to the auto-inferred data extent.
 fn scale_explicit_domain(enc: &crate::spec::encoding::EncodingSpec) -> Option<(f64, f64)> {
-    let extent = enc.scale.as_ref()?.positional_extent()?;
-    (extent.len() >= 2).then(|| (extent[0], extent[extent.len() - 1]))
+    super::domain::encoding_explicit_extent(enc)
 }
 
 /// Extract the diverging midpoint from a `Diverging` scale spec.

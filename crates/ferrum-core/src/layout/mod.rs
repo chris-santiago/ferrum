@@ -798,12 +798,12 @@ fn reserve_axis_bands(
     // does NOT empty `axes.y.tick_labels` — only `layout_y_axis`'s emission
     // is skipped, not this reservation — so a hidden axis must keep its bare
     // pre-#97 `max_label_w` reservation. `compute_y_label_band_width` also
-    // reads `axes.y.show_labels` directly off the passed `AxisInput`
+    // reads `axes.y.show_labels()` directly off the passed `AxisInput`
     // (`fm.Axis(labels=False)` on an otherwise-shown axis draws no label
     // text either), so only an axis that both is shown AND draws its labels
     // gets #97's new standoff.
     let y_label_band = axis::compute_y_label_band_width(
-        &axes.y, y_label_font_size, metrics, theme.sizes.tick_size, axes.show_y,
+        &axes.y, y_label_font_size, metrics, axes.y.tick_size(theme), axes.show_y,
     );
 
     // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
@@ -822,7 +822,7 @@ fn reserve_axis_bands(
         // Standoff gate (#97, spec §4.1 amended 2026-08-27, x-side extension;
         // #94 phantom-margin family): `axes.show_x` already gates this whole
         // branch to `0.0` above (`.axis(x=False)`), so the only remaining
-        // knob is `axes.x.show_labels` (`fm.Axis(labels=False)` on an
+        // knob is `axes.x.show_labels()` (`fm.Axis(labels=False)` on an
         // otherwise-shown axis draws no label text either) — mirrors the
         // primary y band's gate exactly, see `estimate_x_label_band`'s doc.
         axis::estimate_x_label_band(
@@ -833,8 +833,8 @@ fn reserve_axis_bands(
             estimated_slot_w,
             theme.cull_threshold,
             axes.x.overrides.label_padding,
-            theme.sizes.tick_size,
-            axes.x.show_labels,
+            axes.x.tick_size(theme),
+            axes.x.show_labels(),
         )
     } else {
         0.0
@@ -900,7 +900,7 @@ fn reserve_axis_bands(
             // secondary axis IS already honored — `compute_y_label_band_width`
             // reads `a.show_labels` directly off this `AxisInput`.
             let label_band = axis::compute_y_label_band_width(
-                a, label_font_size, metrics, theme.sizes.tick_size, true,
+                a, label_font_size, metrics, a.tick_size(theme), true,
             );
             let title_gutter = axis::compute_y_title_width(
                 a,
@@ -1233,7 +1233,7 @@ fn layout_panel_axes(
                     y_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
-                    theme.sizes.tick_size,
+                    y_input.tick_size(theme),
                     metrics,
                 );
                 if let Some(axis::AxisLabelWarning::LabelsElided { count }) = ywarn {
@@ -1276,7 +1276,7 @@ fn layout_panel_axes(
                     sec_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
-                    theme.sizes.tick_size,
+                    sec_input.tick_size(theme),
                     metrics,
                 );
                 if let Some(axis::AxisLabelWarning::LabelsElided { count }) = sec_warn {
@@ -1325,7 +1325,7 @@ fn layout_panel_axes(
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
                     theme.cull_threshold,
-                    theme.sizes.tick_size,
+                    x_input.tick_size(theme),
                     metrics,
                 );
                 if let Some(axis::AxisLabelWarning::LabelsElided { count }) = xwarn {

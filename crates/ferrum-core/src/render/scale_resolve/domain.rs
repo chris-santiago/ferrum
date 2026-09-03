@@ -53,6 +53,32 @@ pub(in crate::render) fn locate_field<'a>(
 
 /// Aggregate operation used by data-aware sort forms (channel shorthand and
 /// sort-field object). Vega-Lite's default `op` is `"sum"`.
+/// The explicit continuous extent an encoding's own `scale=` declares, or
+/// `None` when it declares none.
+///
+/// The single answer to "did the user pin this channel's domain at the
+/// encoding level" — the question the documented cascade turns on. Asked by
+/// the color resolver (`color.rs::scale_explicit_domain`, which seeds a
+/// colorbar's extent) and by the chart-level scale-domain config
+/// (`prepare::apply_axis_domain_config_for`, whose four fields lose to it
+/// silently, D3/spec §4.2).
+///
+/// Delegates to [`ScaleSpec::positional_extent`](crate::spec::encoding::ScaleSpec::positional_extent),
+/// which is compiler-enforced exhaustive over the scale variants and already
+/// encodes the distinctions that matter here: `Quantile`/`Threshold`/
+/// `BinOrdinal` domains are binning artifacts rather than extents, ordinal
+/// families have no continuous extent at all, and a continuous scale carrying
+/// no `domain` (e.g. `LinearScale(clamp=True)`) declares nothing — so it must
+/// NOT out-rank a chart-level `domain_max`. Testing `scale.is_some()` instead
+/// gets that last case wrong, which is exactly how the config fields went
+/// silently inert for a common encoding shape.
+pub(in crate::render) fn encoding_explicit_extent(
+    enc: &crate::spec::encoding::EncodingSpec,
+) -> Option<(f64, f64)> {
+    let extent = enc.scale.as_ref()?.positional_extent()?;
+    (extent.len() >= 2).then(|| (extent[0], extent[extent.len() - 1]))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SortOp {
     Sum,

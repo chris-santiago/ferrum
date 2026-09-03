@@ -13,6 +13,17 @@ contracts — do not conflate them:
    ``title: ""``; Rust treats an empty string as "suppress" (no title, no
    margin). ``"Foo"`` → emit ``title: "Foo"`` verbatim.
 
+   Three surfaces share it, at two levels of one cascade: per-channel
+   ``Axis.to_dict`` and ``Legend.to_dict``, and — since batch B task 8 gave
+   the chart-level axis title a consumer — ``AxisConfig.to_dict``
+   (``configure_axis(title=...)`` / ``configure(axis_x=AxisConfig(title=...))``).
+   That third surface routes through this same function deliberately:
+   ``AxisConfig(title=None)`` must mean what ``Axis(title=None)`` means, or
+   the same kwarg name would carry opposite meanings at two levels of one
+   cascade. Rust honors it through the matching single rule
+   (``layout::axis::resolve_axis_title``), with per-channel winning over
+   chart-level *including* when the per-channel value is the suppression.
+
 2. **The two-way omit-vs-explicit contract** (``is_unspecified``), used by
    nine fields across the two classes whose Python default is a *concrete*
    value that matches the renderer's own default (``Axis``'s ``ticks``,
@@ -79,9 +90,10 @@ def serialize_title(title: TitleParam) -> str | None:
     Returns the string verbatim otherwise.
 
     This is the single implementation of the three-way title contract shared
-    between ``Axis.to_dict`` and ``Legend.to_dict``. Do not reuse this for any
-    other field: :func:`is_unspecified` is the two-way contract every other
-    ``_UNSET``-defaulted field on these classes follows.
+    between ``Axis.to_dict``, ``Legend.to_dict`` and ``AxisConfig.to_dict``
+    (the chart-level axis title — see contract 1 in the module docstring). Do
+    not reuse this for any other field: :func:`is_unspecified` is the two-way
+    contract every other ``_UNSET``-defaulted field on these classes follows.
     """
     if title is _UNSET:
         return None  # omit key — Rust will use the field name

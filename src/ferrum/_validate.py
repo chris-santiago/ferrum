@@ -1,6 +1,6 @@
 """Shared zero-import leaf-validation predicates for the rest of ``ferrum``.
 
-Three independent predicates live here today:
+Four independent predicates live here today:
 
 - ``validate_choice`` is the canonical way to reject a value that is not a
   member of a documented closed vocabulary (a ``kind=``/``method=``/``order=``
@@ -125,3 +125,36 @@ def validate_pixel_value(label: str, value: Any) -> None:
         raise ValueError(f"{label} must be a finite numeric pixel value; received {value}")
     if value < 0:
         raise ValueError(f"{label} must be non-negative; received {value}")
+
+
+def validate_fraction_value(label: str, value: Any) -> None:
+    """Raise ``ValueError`` when *value* is not a fraction in ``[0, 1]``.
+
+    The bounded-fraction sibling of :func:`validate_pixel_value`, and it lives
+    here for the same reason that one does: the numeric-and-finite half of the
+    two contracts is identical, so expressing it twice is how the two drift.
+    (It was briefly expressed twice — ``configure._validate_grid_style``
+    called ``validate_pixel_value`` for ``width`` and hand-rolled the same
+    numeric/finite check for ``opacity`` one line below.)
+
+    A valid fraction is numeric (``bool`` excluded, as it is an ``int``
+    subclass), finite, and within ``[0, 1]`` inclusive. ``None`` is the
+    caller's "unset" sentinel and always passes.
+
+    *label* is a pre-composed field description, matching
+    :func:`validate_pixel_value`'s convention.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not numeric, is NaN/±inf, or falls outside ``[0, 1]``.
+    """
+    if value is None:
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(
+            f"{label} must be a number between 0 and 1, "
+            f"not {type(value).__name__}; received {value!r}"
+        )
+    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        raise ValueError(f"{label} must be between 0 and 1; received {value!r}")

@@ -468,6 +468,156 @@ pub(in crate::render) fn apply_coord_domain_overrides(
     }
 }
 
+/// One axis's chart-level scale-domain configuration (`configure_axis(
+/// domain_min=, domain_max=, nice=, zero=)` and its `axis_x`/`axis_y`/
+/// `axis_y2` spellings), in the neutral value vocabulary this module speaks.
+///
+/// `ChartConfig` itself stays out of `scale_resolve` per the layering the
+/// seam doc records (`seam.rs`: `render::mod` and `scene_build` call DOWN into
+/// the scale engine, never the reverse), so the caller extracts this and the
+/// engine never learns the config's shape.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(in crate::render) struct AxisDomainConfig {
+    pub(in crate::render) min: Option<f64>,
+    pub(in crate::render) max: Option<f64>,
+    pub(in crate::render) nice: Option<bool>,
+    pub(in crate::render) zero: Option<bool>,
+}
+
+impl AxisDomainConfig {
+    /// Whether the caller asked for anything at all. `false` → applying this
+    /// config is a guaranteed no-op, which is what keeps every chart that
+    /// doesn't use these fields byte-identical.
+    pub(in crate::render) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The field names the caller set, for the wrong-surface warning.
+    fn named_fields(&self) -> Vec<String> {
+        [
+            ("domain_min", self.min.is_some()),
+            ("domain_max", self.max.is_some()),
+            ("nice", self.nice.is_some()),
+            ("zero", self.zero.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| name.to_string())
+        .collect()
+    }
+}
+
+/// Apply one axis's chart-level scale-domain config to its resolved scale
+/// (D3, spec §4.2).
+///
+/// Precedence, per the decision doc: an encoding-level `scale=` domain wins
+/// ENTIRELY and silently — it is the more specific surface, so the documented
+/// cascade already answers the question and a warning would be noise. That is
+/// why `encoding_scale_explicit` is a parameter rather than something this fn
+/// infers: only the caller can see the encoding.
+///
+/// On an ordinal/band axis the four fields describe nothing that exists (there
+/// are no numeric bounds to clamp, round, or extend to zero), so they are
+/// refused loudly instead: [`RenderWarning::ScaleDomainConfigOnOrdinalAxis`],
+/// naming the axis and the fields. Wrong surface, not a cascade loss.
+///
+/// Order of operations on a continuous axis: `zero` first (extend the extent
+/// to include 0), then `nice` (round outward to human bounds), then the
+/// explicit `min`/`max` clamps — so an explicit bound is never re-rounded away
+/// by `nice`, and `zero` cannot re-widen past an explicit bound.
+///
+/// `zero` and `nice` are ONE-DIRECTIONAL by design, and the `false` spelling
+/// is a deliberate no-op rather than an oversight: both name an opt-in
+/// widening of an already-resolved domain, and there is nothing on the other
+/// side for `false` to switch off. Nothing in the auto path forces either —
+/// `build_axis_scale` constructs every auto positional scale with
+/// `nice: false`, and no mark or theme injects a zero baseline into the
+/// domain (a bar chart's y domain reaches 0 because the post-Stack VALUES
+/// start at 0, which `zero=false` must not and does not erase). So
+/// `zero=false`/`nice=false` request the default and get it. Pinned as
+/// byte-identical no-ops in `tests/test_axis_config_plumbing.py`; stated in
+/// the manifest reasons and on the Python `AxisConfig` fields.
+pub(in crate::render) fn apply_axis_domain_config(
+    scale: &mut ScaleKind,
+    cfg: &AxisDomainConfig,
+    channel: &'static str,
+    encoding_scale_explicit: bool,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), RenderError> {
+    if cfg.is_empty() || encoding_scale_explicit {
+        return Ok(());
+    }
+    let Some((lo, hi)) = scale.data_domain() else {
+        warnings.push(RenderWarning::ScaleDomainConfigOnOrdinalAxis {
+            channel: channel.to_string(),
+            fields: cfg.named_fields(),
+        });
+        return Ok(());
+    };
+    // A y axis carries its domain in display order (`[hi, lo]` for the
+    // inverted pixel range is the RANGE, not the domain — the domain stays
+    // ascending), but a reversed scale can still present `lo > hi`. Work in
+    // ascending order and restore the caller's orientation at the end so a
+    // reversed axis stays reversed.
+    let reversed = lo > hi;
+    let (mut d_lo, mut d_hi) = if reversed { (hi, lo) } else { (lo, hi) };
+    if cfg.zero == Some(true) {
+        d_lo = d_lo.min(0.0);
+        d_hi = d_hi.max(0.0);
+    }
+    if cfg.nice == Some(true) {
+        let step = crate::scale::ticks::nice_step(d_lo, d_hi, DEFAULT_NICE_TICK_COUNT);
+        if step.is_finite() && step != 0.0 {
+            d_lo = (d_lo / step).floor() * step;
+            d_hi = (d_hi / step).ceil() * step;
+        }
+    }
+    if let Some(min) = cfg.min {
+        d_lo = min;
+    }
+    if let Some(max) = cfg.max {
+        d_hi = max;
+    }
+    // The computed domain must survive everything its own scale kind would
+    // have refused at construction — a config-written domain is a USER-set
+    // domain, so it meets the user-set contract, not the auto-inferred
+    // fallback (spec §4.2, quality review cycle 2). Two layers, both quoting
+    // the constructors' own sentences so the words never drift:
+    //
+    //   1. KIND-INDEPENDENT: a degenerate pair, which every continuous
+    //      constructor rejects via `core::validate_continuous_domain`.
+    //      Checked on the COMPUTED result, so a zero-width domain produced by
+    //      `zero`/`nice`/`min`/`max` in combination is caught too. Reversed
+    //      (`lo > hi`) is NOT degenerate — an accepted reversed axis on the
+    //      sibling surface too.
+    //   2. KIND-SPECIFIC: whatever this scale kind constrains further, asked
+    //      of the SCALE (`ScaleKind::validate_user_domain`) rather than
+    //      re-derived here. That is what stops this site from growing a third
+    //      hand-written check per kind, and what makes a future scale kind's
+    //      own rule impossible to omit.
+    if d_lo == d_hi {
+        return Err(RenderError::InvalidScaleDomainConfig {
+            channel: channel.to_string(),
+            reason: crate::scale::core::DEGENERATE_DOMAIN_MESSAGE.to_string(),
+        });
+    }
+    let (new_lo, new_hi) = if reversed { (d_hi, d_lo) } else { (d_lo, d_hi) };
+    scale
+        .validate_user_domain(new_lo, new_hi)
+        .map_err(|reason| RenderError::InvalidScaleDomainConfig {
+            channel: channel.to_string(),
+            reason: reason.to_string(),
+        })?;
+    scale.set_data_domain(new_lo, new_hi);
+    Ok(())
+}
+
+/// The tick count `nice=true` rounds against — the same 10 the continuous
+/// scales' own `nice()` implementations use (`LinearScale::nice`,
+/// `LogScale::nice`), so a chart-level `nice` lands on the same bounds an
+/// encoding-level `Scale(nice=True)` would.
+const DEFAULT_NICE_TICK_COUNT: usize = 10;
+
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};

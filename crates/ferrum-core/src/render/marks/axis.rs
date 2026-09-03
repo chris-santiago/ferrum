@@ -28,9 +28,17 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         axis.domain_color_rgba.map(rgba).unwrap_or(theme.colors.axis_line_color);
     let axis_line_width = axis.domain_width.unwrap_or(theme.sizes.axis_line_width);
     let axis_label_font_size = axis.label_font_size.unwrap_or(theme.typography.label_font_size);
+    // Per-axis tick length (D12, spec §4.9); theme is the fallback, as for
+    // every other per-axis style override above.
+    let tick_len = axis.tick_size.unwrap_or(theme.sizes.tick_size);
 
-    // Domain line.
-    if theme.axis.axis_line && axis.show_domain {
+    // Domain line. `axis.show_domain` is the FINAL answer — the theme's
+    // `axis_line` default was folded into this axis's own slot by
+    // `AxesInput::apply_show_defaults` (D12, spec §4.9), so there is no
+    // second theme gate to AND against here. That AND is what used to make a
+    // per-channel `Axis(domain=True)` unable to draw a domain line on a theme
+    // that disabled them.
+    if axis.show_domain {
         nodes.push(SceneNode::Line {
             x1: r.x,
             y1: r.y,
@@ -80,13 +88,13 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
 
         let (tx1, ty1, tx2, ty2, label_x, mut label_y, mut anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
-                tick.position, r.y, tick.position, r.y + theme.sizes.tick_size,
-                tick.position, r.y + theme.sizes.tick_size + effective_font_size + label_pad,
+                tick.position, r.y, tick.position, r.y + tick_len,
+                tick.position, r.y + tick_len + effective_font_size + label_pad,
                 TextAnchor::Middle, tick.label_angle,
             ),
             AxisOrient::Top => (
-                tick.position, r.y, tick.position, r.y - theme.sizes.tick_size,
-                tick.position, r.y - theme.sizes.tick_size - label_pad - 2.0,
+                tick.position, r.y, tick.position, r.y - tick_len,
+                tick.position, r.y - tick_len - label_pad - 2.0,
                 TextAnchor::Middle, tick.label_angle,
             ),
             // R2: forward `tick.label_angle` instead of a literal `0.0`. Unlike
@@ -96,13 +104,13 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             // pivot swings the label away from the plot with no anchor change —
             // see `layout::axis::rotated_y_label_extent`'s doc for the geometry.
             AxisOrient::Left => (
-                r.x, tick.position, r.x - theme.sizes.tick_size, tick.position,
-                r.x - theme.sizes.tick_size - label_pad, tick.position + effective_font_size / 3.0,
+                r.x, tick.position, r.x - tick_len, tick.position,
+                r.x - tick_len - label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::End, tick.label_angle,
             ),
             AxisOrient::Right => (
-                r.x, tick.position, r.x + theme.sizes.tick_size, tick.position,
-                r.x + theme.sizes.tick_size + label_pad, tick.position + effective_font_size / 3.0,
+                r.x, tick.position, r.x + tick_len, tick.position,
+                r.x + tick_len + label_pad, tick.position + effective_font_size / 3.0,
                 TextAnchor::Start, tick.label_angle,
             ),
         };
@@ -346,9 +354,12 @@ pub fn build_grid(
     theme: &ThemeInputs,
     band_colors: &[String],
 ) -> Vec<SceneNode> {
-    if !theme.grid.grid {
-        return Vec::new();
-    }
+    // No global `theme.grid.grid` gate here any more (D4, spec §4.3): each
+    // axis's `show_grid` already carries the resolved answer for that axis
+    // (per-channel > chart-level per-axis > chart-level shared > theme,
+    // folded by `AxesInput::apply_show_defaults`). The old early return was
+    // the reason a per-axis grid request could not be expressed at all — it
+    // took BOTH axes and the band fills down together.
     let mut nodes = Vec::new();
     // Major level — legacy single-level theme fields are the major level.
     let major_color = theme.colors.grid_color;
@@ -536,6 +547,7 @@ mod tests {
             ticks: vec![major_tick(60.0, "a"), major_tick(160.0, "b"), major_tick(260.0, "c")],
             minor_ticks: vec![minor_tick(110.0), minor_tick(210.0)],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -719,6 +731,7 @@ mod tests {
                 anchor_y: 95.0,
                 angle: 0.0,
             }),
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -767,6 +780,7 @@ mod tests {
                 anchor_y: 160.0,
                 angle: -90.0,
             }),
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -819,6 +833,7 @@ mod tests {
             ],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: false,
@@ -872,6 +887,7 @@ mod tests {
             ],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: false,
@@ -935,6 +951,7 @@ mod tests {
             ],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: false,
@@ -993,6 +1010,7 @@ mod tests {
             ],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
@@ -1072,6 +1090,7 @@ mod tests {
             ticks: vec![major_tick(60.0, "a")],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true, show_ticks: true, show_domain: true, show_grid: true,
             title_font_size: None, title_color_rgba: None, label_padding: None,
             label_color_rgba: None, label_font_size: None,
@@ -1106,6 +1125,7 @@ mod tests {
             ],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: false,
@@ -1395,6 +1415,7 @@ mod tests {
                 anchor_y: 100.0,
                 angle: 0.0,
             }),
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: false,
@@ -1682,6 +1703,7 @@ mod tests {
             ticks: vec![major_tick(50.0, "0")],
             minor_ticks: vec![],
             title: None,
+            tick_size: None,
             show_labels: true,
             show_ticks: true,
             show_domain: true,

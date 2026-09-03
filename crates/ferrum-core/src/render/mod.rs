@@ -176,6 +176,27 @@ pub enum RenderError {
     /// offending string; `reason` is [`format::validate_d3_format_spec`]'s
     /// message (names the unrecognized trailing token and its position).
     InvalidFormatSpec { spec: String, reason: String },
+    /// A chart-level scale-domain config (`configure_axis(domain_min=,
+    /// domain_max=, ...)` and its per-axis spellings) resolved to a domain the
+    /// scale family refuses (D3, spec §4.2). Today the one such shape is a
+    /// DEGENERATE pair — `lo == hi` — which every scale constructor already
+    /// rejects with [`crate::scale::core::DEGENERATE_DOMAIN_MESSAGE`]; the
+    /// config surface quotes that same sentence so a user who reaches the
+    /// contract from `LinearScale(domain=[10, 10])` and from
+    /// `configure_axis(domain_min=10, domain_max=10)` reads identical words.
+    ///
+    /// Refused rather than warned because it is a user error, not a sanctioned
+    /// degradation: a zero-width domain clips every mark away and produces a
+    /// blank plot that is indistinguishable from a rendering bug. `min > max`
+    /// is deliberately NOT refused — `LinearScale(domain=[50, 0])` is an
+    /// accepted reversed axis and this surface matches it.
+    ///
+    /// The primary refusal is at the Python boundary (`AxisConfig
+    /// .__post_init__`), matching where the scale constructors refuse; this is
+    /// the render-side backstop for a raw-dict `chart_config` that never went
+    /// through it, mirroring how `scale_resolve::color` quotes the same
+    /// sentence for a raw-dict discretizing scale.
+    InvalidScaleDomainConfig { channel: String, reason: String },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -231,7 +252,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::SceneConstruction(_)
         | RenderError::HtmlBundleAssembly(_)
         | RenderError::UnsupportedChannelCombination { .. }
-        | RenderError::InvalidFormatSpec { .. }) => other,
+        | RenderError::InvalidFormatSpec { .. }
+        | RenderError::InvalidScaleDomainConfig { .. }) => other,
     }
 }
 
@@ -359,6 +381,10 @@ impl std::fmt::Display for RenderError {
                     )
                 }
             }
+            Self::InvalidScaleDomainConfig { channel, reason } => write!(
+                f,
+                "{channel} axis scale-domain config: {reason}"
+            ),
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
         }
@@ -488,6 +514,20 @@ pub enum RenderWarning {
     /// entries in the order the caller wrote them; the matched ones still
     /// filter and order the legend normally.
     LegendValuesUnknown { values: Vec<String> },
+    /// A chart-level scale-domain config field (`domain_min`/`domain_max`/
+    /// `nice`/`zero`, from `configure_axis(...)` or from a per-axis
+    /// `configure(axis_x=/axis_y=/axis_y2=...)` section — note the shared
+    /// `axis` key reaches x and y only, never the secondary axis, so `axis_y2`
+    /// is the sole way to address that one) was set on an axis whose resolved
+    /// scale is ordinal/band
+    /// (D3, spec §4.2). Categorical axes have no numeric bounds to clamp,
+    /// round, or extend to zero, so the fields describe nothing that exists
+    /// — a WRONG SURFACE, not a cascade loss, and therefore reported rather
+    /// than silently dropped. (The cascade loss — an encoding-level `scale=`
+    /// domain out-ranking these — IS silent by design: the documented
+    /// precedence already answers it.) `channel` is `"x"`/`"y"`/`"y2"`;
+    /// `fields` names the subset the caller actually set, in schema order.
+    ScaleDomainConfigOnOrdinalAxis { channel: String, fields: Vec<String> },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -587,6 +627,13 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "legend values [{}] match no legend entry and were skipped",
                 values.join(", ")
+            ),
+            RenderWarning::ScaleDomainConfigOnOrdinalAxis { channel, fields } => write!(
+                f,
+                "{} appl{} to continuous scales; the {channel} axis is ordinal, so {} not applied",
+                fields.join(", "),
+                if fields.len() == 1 { "ies" } else { "y" },
+                if fields.len() == 1 { "it was" } else { "they were" },
             ),
         }
     }
@@ -931,18 +978,18 @@ use chart_config::{AxisConfigSpec, ChartConfig};
 /// by `prepare_render_inputs` — they take effect at layout time (level 2) and
 /// are never touched here.
 fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
-    // ── Grid overrides ────────────────────────────────────────────────────────
+    // ── Grid overrides (both-axes shorthand only) ─────────────────────────────
+    // `configure_grid(x=…, y=…)` no longer lands here at all (D4/F-L07-01,
+    // spec §4.3): those are per-axis and are applied to each `AxisInput`'s own
+    // override slots by `apply_grid_config_to_axis_inputs`. What remains is the
+    // axis-unspecified shorthand — `color`/`width`/`dash`/`opacity` with no
+    // axis named, which by definition means both axes, i.e. the theme.
+    //
+    // The deleted block could not express disagreement: it flipped the single
+    // global `theme.grid.grid` only when x and y AGREED, so
+    // `configure_grid(x=True, y=False)` was silently dropped in full — the
+    // caller's whole request, gone, with no warning.
     if let Some(ref grid_cfg) = config.grid {
-        if let Some(enabled) = grid_cfg.x {
-            // x-grid is controlled globally via theme.grid.grid; a dedicated x-only
-            // flag does not exist in ThemeInputs. When both x and y are present
-            // we only flip the global flag when they agree.
-            if grid_cfg.y.unwrap_or(enabled) == enabled {
-                theme.grid.grid = enabled;
-            }
-        } else if let Some(enabled) = grid_cfg.y {
-            theme.grid.grid = enabled;
-        }
         if let Some(ref color_str) = grid_cfg.color {
             if let Ok(c) = color::parse_color(color_str) {
                 theme.colors.grid_color = c;
@@ -1012,17 +1059,26 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
         }
     }
 
-    // ── Axis overrides (applied to both axes simultaneously) ──────────────────
+    // ── Axis overrides: the SHARED `axis` key only ────────────────────────────
+    // `axis_x`/`axis_y` deliberately do not reach the theme any more (D12,
+    // spec §4.9). `ThemeInputs` has no x/y split, so a per-axis section
+    // writing it was writing BOTH axes — and, because the writes are
+    // last-wins, `axis_y` then silently overwrote `axis_x` on every field
+    // they shared. Every field `apply_axis_config_to_theme` still writes now
+    // has a per-axis `AxisStyleOverrides` slot as well, which the per-axis
+    // sections fill directly (`apply_axis_config_to_axis_input`), so nothing
+    // is lost by not writing the theme from them — and the per-axis contract
+    // becomes true rather than approximately true.
+    //
+    // This is the Rust half of retiring Python's `_redistribute_general_axis`:
+    // that helper existed to stop a general `configure_axis(...)` from
+    // pre-empting a per-axis `.override(x_axis_…)`, but it worked by re-pinning
+    // the general value onto the OPPOSITE axis key — which, on a theme-global
+    // field, made the general value the LAST writer and therefore the winner.
+    // With no global write left for a per-axis section to lose to, the
+    // ordering is settled in Rust and the redistribution has nothing to do.
     if let Some(ref axis_cfg) = config.axis {
         apply_axis_config_to_theme(theme, axis_cfg);
-    }
-    // Per-axis overrides run after the combined override so axis_x / axis_y
-    // wins over axis when both are specified.
-    if let Some(ref axis_x) = config.axis_x {
-        apply_axis_x_config_to_theme(theme, axis_x);
-    }
-    if let Some(ref axis_y) = config.axis_y {
-        apply_axis_y_config_to_theme(theme, axis_y);
     }
 
     // ── Title overrides ───────────────────────────────────────────────────────
@@ -1059,11 +1115,22 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
     }
 }
 
-/// Apply axis config fields that affect shared theme state (both axes).
+/// Apply the SHARED `configure_axis(...)` key's styling to the theme.
 ///
-/// Fields like `label_font_size`, `tick_size`, and grid color are global in
-/// `ThemeInputs` and are applied here regardless of x/y axis distinction.
-/// Per-axis-specific overrides (x vs y) are handled in the sibling functions.
+/// Called for `config.axis` only. "Shared" is the whole justification: this
+/// key means "every axis", which is exactly what a `ThemeInputs` write says,
+/// and it is the only way the settings reach axes the per-axis application
+/// never visits — the secondary y axes, which `apply_axis_config_to_axis_input`
+/// fills from `axis_y2` alone.
+///
+/// The fields listed here all ALSO have a per-axis `AxisStyleOverrides` slot
+/// that the same shared key fills (via `apply_axis_config_to_axis_input` on
+/// both x and y). That is not a double application: the per-axis slot wins for
+/// x/y and the theme write is the fallback everything else reads, so the two
+/// agree by construction. The grid family and the two show toggles left this
+/// function entirely (D4/D12, spec §4.3/§4.9) — for those the theme is the
+/// bottom of a precedence chain, not a parallel writer, and it is reached
+/// through `AxesInput::apply_show_defaults` instead.
 fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec) {
     let style = &axis_cfg.style;
     if let Some(fs) = style.label_font_size {
@@ -1077,9 +1144,6 @@ fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec
     if let Some(ts) = style.tick_size {
         theme.sizes.tick_size = ts;
     }
-    if let Some(enabled) = style.domain {
-        theme.axis.axis_line = enabled;
-    }
     if let Some(ref c) = style.domain_color {
         if let Ok(parsed) = color::parse_color(c) {
             theme.colors.axis_line_color = parsed;
@@ -1088,38 +1152,6 @@ fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec
     if let Some(w) = style.domain_width {
         theme.sizes.axis_line_width = w;
     }
-    if let Some(enabled) = style.grid {
-        theme.grid.grid = enabled;
-    }
-    if let Some(ref c) = style.grid_color {
-        if let Ok(parsed) = color::parse_color(c) {
-            theme.colors.grid_color = parsed;
-        }
-    }
-    if let Some(ref d) = style.grid_dash {
-        theme.grid.grid_dash = Some(d.clone());
-    }
-    if let Some(w) = style.grid_width {
-        theme.sizes.grid_width = w;
-    }
-}
-
-/// Apply `axis_x`-specific config fields that have per-axis theme equivalents.
-///
-/// Currently `ThemeInputs` has no separate x/y axis theme fields, so x-specific
-/// overrides that conflict with y settings cannot be expressed at this level.
-/// When axis_x and axis_y specify the same field with different values, the last
-/// one applied wins (axis_y runs after axis_x in the caller).
-fn apply_axis_x_config_to_theme(theme: &mut ThemeInputs, axis: &AxisConfigSpec) {
-    // x-axis-specific overrides reuse the same shared theme fields.
-    // Per-channel `axis=Axis(...)` on the x encoding remains the highest-priority
-    // override and is handled separately in `prepare_render_inputs`.
-    apply_axis_config_to_theme(theme, axis);
-}
-
-/// Apply `axis_y`-specific config fields that have per-axis theme equivalents.
-fn apply_axis_y_config_to_theme(theme: &mut ThemeInputs, axis: &AxisConfigSpec) {
-    apply_axis_config_to_theme(theme, axis);
 }
 
 /// Resolve the three legend fields whose effective value lives on
@@ -1357,6 +1389,46 @@ pub(crate) fn apply_axis_config_to_axis_input(
     apply_axis_style_to_axis_input(axis, &cfg.style)
 }
 
+/// Apply `configure_grid(x=…, y=…)`'s per-axis grid settings to the matching
+/// `AxisInput` (D4/F-L07-01, spec §4.3).
+///
+/// Fill-only, like every other chart-level axis write, so a per-channel
+/// `fm.Axis(grid=…)` still wins. Runs BETWEEN the per-axis `axis_x`/`axis_y`
+/// section and the shared `axis` section, which is what gives the documented
+/// precedence its full ordering: per-channel > `axis_x`/`axis_y` > `grid.x`/
+/// `grid.y` > `axis` > `grid`'s flat both-axes shorthand (the theme) — most
+/// specific first, and within one specificity level the axis section (which
+/// carries the whole axis vocabulary) ahead of the grid section.
+///
+/// The flat `color`/`width`/`dash`/`opacity` keys are NOT applied here: they
+/// are the axis-unspecified shorthand and stay on the theme, which is exactly
+/// the fallback `build_grid` consults when an axis sets nothing of its own.
+fn apply_grid_config_to_axis_inputs(
+    axes: &mut crate::layout::AxesInput,
+    config: &ChartConfig,
+) {
+    let Some(ref grid) = config.grid else { return };
+    for (axis, spec) in [(&mut axes.x, grid.x.as_ref()), (&mut axes.y, grid.y.as_ref())] {
+        let Some(spec) = spec else { continue };
+        let o = &mut axis.overrides;
+        if o.show_grid.is_none() {
+            o.show_grid = spec.enabled;
+        }
+        if o.grid_color.is_none() {
+            o.grid_color = spec.color.as_deref().and_then(|s| color::parse_color(s).ok());
+        }
+        if o.grid_width.is_none() {
+            o.grid_width = spec.width;
+        }
+        if o.grid_dash.is_none() {
+            o.grid_dash = spec.dash.clone();
+        }
+        if o.grid_opacity.is_none() {
+            o.grid_opacity = spec.opacity;
+        }
+    }
+}
+
 /// The channel an axis belongs to, inferred from its current orient. x carries a
 /// horizontal axis (Top/Bottom); y a vertical one (Left/Right). Used to validate
 /// a chart-level `orient`/`title_orient` against the axis's dimension.
@@ -1445,8 +1517,23 @@ pub(crate) fn axis_style_fill_from(
     set(&mut o.max_band, style.max_band, fill_only_if_none);
     set(&mut o.grid_opacity, style.grid_opacity, fill_only_if_none);
     set(&mut o.zindex, style.zindex, fill_only_if_none);
+    set(&mut o.tick_size, style.tick_size, fill_only_if_none);
     set(&mut o.tick_extra, style.tick_extra, fill_only_if_none);
     set(&mut o.tick_min_step, style.tick_min_step, fill_only_if_none);
+    // ── Show toggles (D12, spec §4.9) ────────────────────────────────────────
+    // These four used to live as bare `bool`s on `AxisInput`, written ONLY by
+    // the per-channel prepare path, because a `bool` cannot say "unset" and a
+    // chart-level write would therefore have clobbered the per-channel answer.
+    // As `Option<bool>` on this bundle they obey the same one merge predicate
+    // as every sibling field, which is what makes chart-level `labels`/`ticks`/
+    // `domain`/`grid` honored (they had no consumer at all before) WITHOUT
+    // inverting the cascade. `grid`/`domain` additionally carry a theme
+    // fallback, folded in by `AxesInput::apply_show_defaults` after every
+    // config layer has had its turn.
+    set(&mut o.show_labels, style.labels, fill_only_if_none);
+    set(&mut o.show_ticks, style.ticks, fill_only_if_none);
+    set(&mut o.show_domain, style.domain, fill_only_if_none);
+    set(&mut o.show_grid, style.grid, fill_only_if_none);
     // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
     set(&mut o.offset, style.offset, fill_only_if_none);
     set(&mut o.label_flush, style.label_flush, fill_only_if_none);
@@ -1503,21 +1590,22 @@ pub(crate) fn axis_style_fill_from(
 /// merge is the canonical [`axis_style_fill_from`] (chart-level discipline:
 /// `fill_only_if_none = true`).
 ///
-/// Show toggles (`grid`/`domain`/`labels`/`ticks`) are deliberately NOT written
-/// from the chart-level path. The per-channel prepare path
-/// (`prepare_render_inputs`) is the sole owner of `AxisInput.show_*`, so a
-/// per-channel `Axis(grid=False)` wins over a conflicting chart-level
-/// `configure_axis(grid=True)`. The chart-level toggle still takes effect through
-/// its global theme/gate path: `configure_axis` maps `grid`→`theme.grid.grid` and
-/// `domain`→`theme.axis.axis_line` in `apply_axis_config_to_theme`, and
-/// `build_grid`/`build_axis` AND that global gate with the per-axis `show_*` gate.
-/// Writing `show_*` here would clobber the per-channel value and invert the
-/// precedence — which is why `axis_style_fill_from` (operating on
-/// `AxisStyleOverrides`, which has no `show_*` fields) structurally cannot.
+/// Show toggles (`grid`/`domain`/`labels`/`ticks`) route through the SAME merge
+/// as of D12 (spec §4.9): they are `Option<bool>` slots on `AxisStyleOverrides`,
+/// so the chart-level fill can no longer clobber a per-channel value and the
+/// old carve-out (chart-level `grid`/`domain` reaching only the GLOBAL theme,
+/// `labels`/`ticks` reaching nothing at all) is gone. The theme remains the
+/// bottom of the `grid`/`domain` chain via `AxesInput::apply_show_defaults`.
+///
+/// The axis TITLE is filled here too, through `AxisInput::fill_chart_level_title`
+/// — not via the style merge, because `AxisInput.title` is a resolved string
+/// whose `None` is ambiguous between "unset" and "per-channel suppressed"
+/// (see that method and `AxisStyleOverrides::title_claimed`).
 pub(crate) fn apply_axis_style_to_axis_input(
     axis: &mut crate::layout::AxisInput,
     style: &chart_config::AxisStyleSpec,
 ) -> Result<(), RenderError> {
+    axis.fill_chart_level_title(style.title.as_deref());
     let channel = axis_channel(axis.orient);
     // R3 EXEMPT chain: `channel` here is the axis's PHYSICAL orientation
     // (`axis_channel`), not a channel that traveled through `build_layers`'
@@ -2131,7 +2219,7 @@ fn prepare_and_layout(
     // transform/layout work so a bad spec refuses fast, once per render, not
     // once per tick/label. See `validate_chart_format_specs`'s doc.
     validate_chart_format_specs(spec, chart_config)?;
-    let mut prep = prepare::prepare_render_inputs(spec, batch, theme, leaf_scales)?;
+    let mut prep = prepare::prepare_render_inputs(spec, batch, theme, chart_config, leaf_scales)?;
     let mut warnings = prep.warnings.clone();
 
     // Chart-level `configure_legend(orient="none")` suppression (GH #74).
@@ -2184,6 +2272,10 @@ fn prepare_and_layout(
     // `chart_level_orient_error_names_resolved_axis_under_flip` below.
     apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref())?;
+    // `configure_grid(x=…, y=…)` sits between the two axis layers: more
+    // specific than the shared `axis` key, less specific than `axis_x`/`axis_y`
+    // (D4, spec §4.3 — see `apply_grid_config_to_axis_inputs`).
+    apply_grid_config_to_axis_inputs(&mut prep.axes, chart_config);
     apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref())?;
     // Re-sync the concrete axis side from the merged `overrides.orient`: a
@@ -2241,6 +2333,37 @@ fn prepare_and_layout(
     // fractions align directly.
     sync_projected_fractions_to_tick_values(&mut prep.axes.x, &prep.provisional_scales.x);
     sync_projected_fractions_to_tick_values(&mut prep.axes.y, &prep.provisional_scales.y);
+    // The SAME three post-config tick adjustments for every secondary y axis
+    // (spec §4.9, extended 2026-09-02). `axis_y2`'s `label_format`,
+    // `label_format_type`, `tick_extra`, `tick_min_step` and `values` reached
+    // `AxisStyleOverrides` before this task but had no consumer: this trio ran
+    // on `prep.axes.x`/`.y` only, so a secondary axis carried the settings and
+    // ignored them. Each secondary axis is paired with the scale it was built
+    // from (`prep.secondary_y_scales`, same order) — the piece prepare now
+    // carries out specifically so this loop can exist.
+    //
+    // `reversed`/`tick_count` follow the primary y's own rules, because
+    // `build_secondary_y_axis_inputs` builds these through the identical
+    // `build_axis_input(Channel::Y, …)` path — `tick_count` is that builder's
+    // OWN `resolve_axis_tick_count` output, carried out beside the scales
+    // (`prep.secondary_y_tick_counts`), exactly as the primary pair passes
+    // `prep.x_tick_count`/`prep.y_tick_count`. Deriving it from
+    // `tick_labels.len()` would only accidentally agree: `adjust_axis_ticks`
+    // re-derives `tick_values_raw(tick_count)` and bails on a length
+    // mismatch, so any data shape where the two differ would silently drop
+    // `axis_y2`'s tick_extra/tick_min_step/values.
+    for ((secondary, scale), &tc) in prep
+        .axes
+        .secondary_y
+        .iter_mut()
+        .zip(prep.secondary_y_scales.iter())
+        .zip(prep.secondary_y_tick_counts.iter())
+    {
+        let reversed = !matches!(scale, scale_resolve::ScaleKind::Ordinal(_));
+        prepare::adjust_axis_ticks(secondary, scale, tc, reversed);
+        apply_label_format_to_axis(secondary, scale, tc, reversed);
+        sync_projected_fractions_to_tick_values(secondary, scale);
+    }
     // Apply color domain/range overrides (level 3) to resolved color scale.
     // This is the ONE reporting application: `scene_build`'s per-panel and
     // per-legend re-applications run the same config against the same scale, so
@@ -2279,6 +2402,14 @@ fn prepare_and_layout(
     // The three ThemeInputs-backed legend fields both levels write (orient,
     // columns, title_font_size) resolve together, per-channel first (D7).
     apply_legend_cascade_to_theme(&mut effective_theme, &prep.legend_overrides, chart_config);
+    // Bottom of the grid/domain precedence chain (D4, spec §4.3): every axis
+    // that expressed no opinion of its own now takes the effective theme's.
+    // Runs after `apply_chart_config` so `configure_grid(color=…)`'s
+    // both-axes shorthand is already in `effective_theme`, and before
+    // `compute_layout` so `AxisLayout.show_grid`/`show_domain` carry the FINAL
+    // per-axis answer — which is why `build_grid`/`build_axis` no longer
+    // re-consult the theme themselves.
+    prep.axes.apply_show_defaults(&effective_theme);
 
     // D13 + v0.15.1: legend title override (replaces the default field-name title when Some).
     let title_for_layout = effective_legend_title(&prep);
@@ -3337,7 +3468,7 @@ mod orchestration_tests {
         let cfg = config::RenderConfig::default();
         let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg, &ChartConfig::default()).unwrap().bytes;
 
-        let prep = prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let prep = prepare::prepare_render_inputs(&spec, &batch, &theme, &ChartConfig::default(), None).unwrap();
         let mut warnings = prep.warnings.clone();
 
         // Mirror `prepare_and_layout`'s effective-theme construction by CALLING
@@ -4236,31 +4367,122 @@ mod chart_config_application_tests {
         assert_eq!(grid_color("not-a-color"), ThemeInputs::default().colors.grid_color);
     }
 
-    #[test]
-    fn apply_chart_config_grid_disabled_via_grid_config() {
-        let mut theme = ThemeInputs::default();
-        assert!(theme.grid.grid); // default is on
-        let config = ChartConfig {
-            grid: Some(GridConfigSpec { x: Some(false), y: Some(false), ..Default::default() }),
-            ..Default::default()
-        };
-        apply_chart_config(&mut theme, &config);
-        assert!(!theme.grid.grid);
+    /// A bare `AxesInput` for the per-axis grid/toggle unit tests below: two
+    /// axes with no overrides at all, i.e. "no opinion" on every toggle.
+    #[cfg(test)]
+    fn blank_axes() -> crate::layout::AxesInput {
+        use crate::layout::{AxisInput, AxisOrient};
+        crate::layout::AxesInput {
+            x: AxisInput::new(AxisOrient::Bottom, None, vec!["a".into()], None),
+            y: AxisInput::new(AxisOrient::Left, None, vec!["0".into()], None),
+            show_x: true,
+            show_y: true,
+            secondary_y: Vec::new(),
+        }
     }
 
+    /// D4/F-L07-01 (spec §4.3): `configure_grid(x=False, y=False)` reaches
+    /// each axis's OWN slot, not the single global theme flag. Was previously
+    /// a `theme.grid.grid = false` assertion — the global write this task
+    /// removed, because it is the thing that made a per-axis grid request
+    /// inexpressible.
     #[test]
-    fn apply_chart_config_grid_enabled_via_axis_config() {
-        let mut theme = ThemeInputs::default();
-        theme.grid.grid = false;
+    fn grid_config_disables_grid_per_axis() {
+        use crate::render::chart_config::GridAxisSpec;
+        let mut axes = blank_axes();
         let config = ChartConfig {
-            axis: Some(AxisConfigSpec {
-                style: AxisStyleSpec { grid: Some(true), ..Default::default() },
+            grid: Some(GridConfigSpec {
+                x: Some(GridAxisSpec { enabled: Some(false), ..Default::default() }),
+                y: Some(GridAxisSpec { enabled: Some(false), ..Default::default() }),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        apply_chart_config(&mut theme, &config);
-        assert!(theme.grid.grid);
+        apply_grid_config_to_axis_inputs(&mut axes, &config);
+        assert!(!axes.x.show_grid());
+        assert!(!axes.y.show_grid());
+    }
+
+    /// The case the old `apply_chart_config` block dropped ENTIRELY: x and y
+    /// disagreeing. Its equality guard (`grid_cfg.y.unwrap_or(enabled) ==
+    /// enabled`) failed, so neither branch wrote anything and the caller's
+    /// whole request vanished. RED before this task on any assertion at all.
+    #[test]
+    fn grid_config_honors_disagreeing_x_and_y() {
+        use crate::render::chart_config::GridAxisSpec;
+        let mut axes = blank_axes();
+        let config = ChartConfig {
+            grid: Some(GridConfigSpec {
+                x: Some(GridAxisSpec { enabled: Some(true), ..Default::default() }),
+                y: Some(GridAxisSpec { enabled: Some(false), ..Default::default() }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_grid_config_to_axis_inputs(&mut axes, &config);
+        assert!(axes.x.show_grid(), "x grid explicitly enabled");
+        assert!(!axes.y.show_grid(), "y grid explicitly disabled");
+    }
+
+    /// The per-axis grid STYLE half of §4.3: an axis's own `grid.x` object
+    /// styles only that axis; the other axis keeps the theme fallback (a
+    /// `None` override slot).
+    #[test]
+    fn grid_config_per_axis_style_does_not_leak_to_the_other_axis() {
+        use crate::render::chart_config::GridAxisSpec;
+        let mut axes = blank_axes();
+        let config = ChartConfig {
+            grid: Some(GridConfigSpec {
+                x: Some(GridAxisSpec {
+                    color: Some("#ff0000".into()),
+                    width: Some(3.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_grid_config_to_axis_inputs(&mut axes, &config);
+        assert_eq!(axes.x.overrides.grid_color, color::parse_color("#ff0000").ok());
+        assert_eq!(axes.x.overrides.grid_width, Some(3.0));
+        assert!(axes.y.overrides.grid_color.is_none(), "y keeps the theme fallback");
+        assert!(axes.y.overrides.grid_width.is_none());
+    }
+
+    /// `configure_axis(grid=True)` now lands on both axes' own slots
+    /// (previously: the global `theme.grid.grid`), and — because the toggle is
+    /// a precedence chain rather than an AND — it lights the grid up on a
+    /// theme that disables gridlines globally.
+    #[test]
+    fn axis_config_grid_enables_per_axis_over_a_grid_less_theme() {
+        let mut axes = blank_axes();
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { grid: Some(true), ..Default::default() },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axes.x, Some(&cfg)).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.y, Some(&cfg)).unwrap();
+        let mut theme = ThemeInputs::default();
+        theme.grid.grid = false;
+        axes.apply_show_defaults(&theme);
+        assert!(axes.x.show_grid());
+        assert!(axes.y.show_grid());
+    }
+
+    /// The theme is the BOTTOM of the chain, not a veto: an axis with no
+    /// opinion takes the theme's answer, an axis with one keeps its own.
+    #[test]
+    fn apply_show_defaults_fills_only_unopinionated_axes() {
+        let mut axes = blank_axes();
+        axes.x.overrides.show_grid = Some(true);
+        let mut theme = ThemeInputs::default();
+        theme.grid.grid = false;
+        theme.axis.axis_line = false;
+        axes.apply_show_defaults(&theme);
+        assert!(axes.x.show_grid(), "explicit per-axis value survives");
+        assert!(!axes.y.show_grid(), "unopinionated axis takes the theme's");
+        assert!(!axes.x.show_domain(), "domain rides the same fold");
+        assert!(!axes.y.show_domain());
     }
 
     #[test]
@@ -4558,8 +4780,17 @@ mod chart_config_application_tests {
         };
         apply_chart_config(&mut theme, &config);
         assert_eq!(theme.sizes.tick_size, 6.0);
-        assert!(!theme.axis.axis_line);
         assert_eq!(theme.sizes.axis_line_width, 2.0);
+        // `domain` is no longer a theme write (D12, spec §4.9): it is a
+        // per-axis toggle, so the shared `axis` key reaches each axis's own
+        // slot instead of the one global flag that could not tell x from y.
+        assert!(theme.axis.axis_line, "domain no longer mutates the global theme flag");
+        let mut axes = blank_axes();
+        apply_axis_config_to_axis_input(&mut axes.x, config.axis.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.y, config.axis.as_ref()).unwrap();
+        axes.apply_show_defaults(&theme);
+        assert!(!axes.x.show_domain());
+        assert!(!axes.y.show_domain());
     }
 
     #[test]
@@ -4616,10 +4847,14 @@ mod chart_config_application_tests {
         assert_eq!(theme.colors.grid_color, original_grid_color);
     }
 
+    /// The precedence this test used to assert on the THEME is now asserted
+    /// where it belongs: on each axis. `axis_x` no longer writes the shared
+    /// theme at all (D12, spec §4.9), so the shared `axis` value stays the
+    /// fallback for every axis the per-axis sections don't address, while the
+    /// x axis itself takes `axis_x`'s value — one answer per axis instead of
+    /// one global slot two sections fight over.
     #[test]
-    fn apply_chart_config_axis_x_wins_over_axis_for_same_field() {
-        // When both `axis` and `axis_x` set label_font_size, axis_x wins
-        // (applied last). This is the documented behavior for per-axis overrides.
+    fn axis_x_wins_on_x_without_disturbing_the_shared_theme_fallback() {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
@@ -4633,7 +4868,51 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
-        assert_eq!(theme.typography.label_font_size, 14.0);
+        assert_eq!(
+            theme.typography.label_font_size, 10.0,
+            "only the SHARED `axis` key writes the theme; `axis_x` must not"
+        );
+
+        let mut axes = blank_axes();
+        apply_axis_config_to_axis_input(&mut axes.x, config.axis_x.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.y, config.axis_y.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.x, config.axis.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.y, config.axis.as_ref()).unwrap();
+        assert_eq!(axes.x.overrides.label_font_size, Some(14.0), "axis_x wins on x");
+        assert_eq!(axes.y.overrides.label_font_size, Some(10.0), "y takes the shared value");
+    }
+
+    /// The Rust half of retiring Python's `_redistribute_general_axis` (spec
+    /// §7 cascade constraint). `tick_size` was the last `AxisStyleSpec` field
+    /// whose ONLY carrier was the global theme, so a per-axis section could
+    /// not express it and the Python helper tried to compensate by re-pinning
+    /// the general value onto the opposite axis key — which, on a global
+    /// last-writer-wins slot, made the general value win instead.
+    ///
+    /// RED before this task twice over: `AxisStyleOverrides` had no
+    /// `tick_size` field at all, and `axis_x` wrote `theme.sizes.tick_size`.
+    #[test]
+    fn axis_x_tick_size_lands_on_x_only() {
+        let mut theme = ThemeInputs::default();
+        let config = ChartConfig {
+            axis: Some(AxisConfigSpec {
+                style: AxisStyleSpec { tick_size: Some(12.0), ..Default::default() },
+                ..Default::default()
+            }),
+            axis_x: Some(AxisConfigSpec {
+                style: AxisStyleSpec { tick_size: Some(2.0), ..Default::default() },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_chart_config(&mut theme, &config);
+        let mut axes = blank_axes();
+        apply_axis_config_to_axis_input(&mut axes.x, config.axis_x.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.y, config.axis_y.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.x, config.axis.as_ref()).unwrap();
+        apply_axis_config_to_axis_input(&mut axes.y, config.axis.as_ref()).unwrap();
+        assert_eq!(axes.x.tick_size(&theme), 2.0, "axis_x's tick_size reaches x");
+        assert_eq!(axes.y.tick_size(&theme), 12.0, "y keeps the shared value");
     }
 
     #[test]

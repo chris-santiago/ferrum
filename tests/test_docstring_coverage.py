@@ -246,6 +246,7 @@ _DOC_ALLOWLIST: set[str] = {
     "AxisConfig",
     "LegendConfig",
     "TitleConfig",
+    "GridAxisConfig",
     "GridConfig",
     "PaddingConfig",
     "ColorConfig",

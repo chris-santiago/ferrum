@@ -6,12 +6,24 @@ use super::ticks::{minor_ticks_log, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
-struct LogScaleData {
+pub(crate) struct LogScaleData {
     domain: [f64; 2],
     range: [f64; 2],
     base: f64,
     clamp: bool,
 }
+
+/// The two constraints `LogScale::new` enforces on a USER-SUPPLIED domain.
+///
+/// Consts, not inline literals, for the same reason
+/// [`DEGENERATE_DOMAIN_MESSAGE`](crate::scale::core::DEGENERATE_DOMAIN_MESSAGE)
+/// is: two surfaces refuse these domains — the `fm.LogScale(domain=...)`
+/// constructor and the chart-level scale-domain config
+/// (`configure_axis(domain_min=...)` on a log axis) — and a user who meets the
+/// contract from either must read identical words.
+pub(crate) const LOG_DOMAIN_CONTAINS_ZERO: &str = "log scale domain must not contain 0";
+pub(crate) const LOG_DOMAIN_SIGN_MISMATCH: &str =
+    "log scale domain endpoints must have the same sign";
 
 impl LogScaleData {
     /// Number of decades below the reference endpoint used as a floor when
@@ -26,6 +38,31 @@ impl LogScaleData {
     /// [`sanitize_domain`](Self::sanitize_domain)).
     fn new(domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool) -> Self {
         Self { domain: Self::sanitize_domain(domain), range, base, clamp }
+    }
+
+    /// Whether a USER-SUPPLIED domain is one this scale kind can represent.
+    ///
+    /// The counterpart of [`sanitize_domain`](Self::sanitize_domain), and the
+    /// distinction between them is the whole point: sanitize is the *fallback*
+    /// for an AUTO-INFERRED domain, which arrives with no user input to reject
+    /// (a `nice`-extended bin edge can legitimately land on 0, GH #49). A
+    /// domain the caller actually wrote gets REJECTED instead — silently
+    /// flooring someone's explicit `0` to `hi / 1e6` answers a different
+    /// question than the one they asked.
+    ///
+    /// One body, two callers: [`LogScale::new`] (the `domain_user_set` arm)
+    /// and `ScaleKind::validate_user_domain`, which is how the chart-level
+    /// config surface asks the SCALE what it would have refused at
+    /// construction rather than re-deriving log's rules a third time.
+    pub(crate) fn validate_user_domain(domain: [f64; 2]) -> Result<(), &'static str> {
+        let [d0, d1] = domain;
+        if d0 == 0.0 || d1 == 0.0 {
+            return Err(LOG_DOMAIN_CONTAINS_ZERO);
+        }
+        if d0.signum() != d1.signum() {
+            return Err(LOG_DOMAIN_SIGN_MISMATCH);
+        }
+        Ok(())
     }
 
     /// Whether `x` can stand as a log-domain endpoint: nonzero and finite.
@@ -270,6 +307,41 @@ impl LogScale {
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] { self.data.domain }
 
+    /// Replace this scale's data-space domain in place, keeping its range and
+    /// every kind-specific parameter.
+    ///
+    /// The sibling of [`domain_pair`](Self::domain_pair), added for the
+    /// chart-level scale-domain config (D3, spec §4.2), which adjusts a
+    /// RESOLVED domain rather than building a new scale — reconstructing via
+    /// `new_internal` would have to re-supply parameters the caller cannot
+    /// see. Because it is a second way into the domain field, the domain it
+    /// stores must have met whatever validation this kind's own constructor
+    /// applies — and for `Log` that validation is REJECTION, not repair.
+    ///
+    /// So the write here is deliberately raw, and the validation lives
+    /// upstream at the caller: `render::scale_resolve::positional::
+    /// apply_axis_domain_config` runs `ScaleKind::validate_user_domain`,
+    /// which delegates to the same `LogScaleData::validate_user_domain`
+    /// that `LogScale::new`'s `domain_user_set` arm calls, and refuses a
+    /// zero-containing or sign-crossing pair before this is ever reached.
+    /// That mirrors the constructor exactly: there too, `LogScaleData::new`'s
+    /// `sanitize_domain` is a no-op pass-through for a user-set domain
+    /// because the rejection already happened.
+    ///
+    /// Routing a USER-set domain through `sanitize_domain` here instead — as
+    /// an earlier pass did — would apply the AUTO-domain fallback to caller
+    /// input, silently flooring an explicit `0` to `hi / 1e6`. See
+    /// `LogScaleData::sanitize_domain`'s doc for why the two are not
+    /// interchangeable.
+    ///
+    /// `domain_user_set` flips to `true`: the domain now IS explicitly set (by
+    /// the chart config), so `repr_string`/the `domain` getter must stop
+    /// reporting it as data-derived.
+    pub(crate) fn set_domain_pair(&mut self, domain: [f64; 2]) {
+        self.data.domain = domain;
+        self.domain_user_set = true;
+    }
+
     pub(crate) fn repr_string(&self) -> String {
         let LogScaleData { domain, range, base, clamp } = &self.data;
         let domain_s = if self.domain_user_set {
@@ -328,17 +400,8 @@ impl LogScale {
         // replaces it before any scale computation occurs.
         let resolved = resolve_continuous(domain, range, [1.0, 10.0])?;
         if resolved.domain_user_set {
-            let [d0, d1] = resolved.domain;
-            if d0 == 0.0 || d1 == 0.0 {
-                return Err(PyValueError::new_err(
-                    "log scale domain must not contain 0",
-                ));
-            }
-            if d0.signum() != d1.signum() {
-                return Err(PyValueError::new_err(
-                    "log scale domain endpoints must have the same sign",
-                ));
-            }
+            LogScaleData::validate_user_domain(resolved.domain)
+                .map_err(PyValueError::new_err)?;
         }
         // `LogScaleData::new` re-runs `sanitize_domain` unconditionally, but a
         // user-set domain was already rejected above if it touched zero or
