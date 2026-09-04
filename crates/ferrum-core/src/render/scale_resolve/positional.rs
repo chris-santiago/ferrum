@@ -287,7 +287,12 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Utc { common, nice } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
             let d = apply_domain_reverse(d, common.reverse);
-            ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
+            // F-L04-06: `utc=true` survives resolution — the wire tag no
+            // longer collapses into an indistinguishable `TimeScale` once
+            // resolved (`new_internal` used to default it away here).
+            ScaleKind::Time(
+                TimeScale::new_internal(d, r, common.clamp, *nice).with_utc(true),
+            )
         }
         ScaleSpec::Band { domain, padding, padding_inner, padding_outer, align, range } => {
             let mut d = match domain {
@@ -1358,6 +1363,31 @@ mod tests {
         let spec = ScaleSpec::Utc { common: reverse_common(None, None, true), nice: false };
         let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
         assert_eq!(scale.data_domain(), Some((86_400_000.0, 0.0)));
+    }
+
+    /// F-L04-06 (batch-C task 3): the `Utc` wire tag survives resolution.
+    /// `new_internal` used to hardcode `utc: false` regardless of which
+    /// `ScaleSpec` variant resolved it, so a wire round-trip through
+    /// `ScaleSpec::Utc` silently lost the tag on the resolved `TimeScale`.
+    /// `ScaleSpec::Time` and `ScaleSpec::Utc` must now resolve to
+    /// distinguishable `utc()` values through the SAME resolver arm every
+    /// encoding's explicit `scale=` goes through.
+    #[test]
+    fn utc_and_time_scale_spec_resolve_to_distinct_utc_tag() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 86_400_000.0]);
+
+        let utc_spec = ScaleSpec::Utc { common: reverse_common(None, None, false), nice: false };
+        let ScaleKind::Time(utc_scale) = resolve_scale(&utc_spec, "v", &batch, (0.0, 500.0)) else {
+            panic!("expected ScaleKind::Time");
+        };
+        assert!(utc_scale.utc_flag(), "ScaleSpec::Utc must resolve with utc=true");
+
+        let time_spec = ScaleSpec::Time { common: reverse_common(None, None, false), nice: false };
+        let ScaleKind::Time(time_scale) = resolve_scale(&time_spec, "v", &batch, (0.0, 500.0)) else {
+            panic!("expected ScaleKind::Time");
+        };
+        assert!(!time_scale.utc_flag(), "ScaleSpec::Time must resolve with utc=false");
     }
 
     /// `reverse=false` (the wire default) leaves every kind's domain in

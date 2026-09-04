@@ -278,10 +278,8 @@ pub(crate) fn validate_quantile(domain: &[f64], range: &[f64]) -> PyResult<()> {
 
 /// Validate a continuous-scale domain pair: exactly 2 entries, both finite,
 /// and endpoints that differ (a degenerate `[c, c]` domain divides by zero
-/// downstream). Shared by [`validate_continuous_pair`] and
-/// [`resolve_continuous`] so the two never drift on what counts as a valid
-/// domain (GH #69 cohesion fix — `resolve_continuous` used to hand-duplicate
-/// this exact check inline).
+/// downstream). Called from [`resolve_continuous`] (GH #69 cohesion fix —
+/// `resolve_continuous` used to hand-duplicate this exact check inline).
 pub(crate) fn validate_continuous_domain(domain: &[f64]) -> PyResult<()> {
     if domain.len() != 2 {
         return Err(PyValueError::new_err(format!(
@@ -297,8 +295,8 @@ pub(crate) fn validate_continuous_domain(domain: &[f64]) -> PyResult<()> {
 }
 
 /// Validate a continuous-scale range pair: exactly 2 entries, both finite.
-/// Shared by [`validate_continuous_pair`] and [`resolve_continuous`] (see
-/// [`validate_continuous_domain`]'s doc for why this was extracted).
+/// Called from [`resolve_continuous`] (see [`validate_continuous_domain`]'s
+/// doc for why this was extracted).
 pub(crate) fn validate_continuous_range(range: &[f64]) -> PyResult<()> {
     if range.len() != 2 {
         return Err(PyValueError::new_err(format!(
@@ -307,12 +305,6 @@ pub(crate) fn validate_continuous_range(range: &[f64]) -> PyResult<()> {
         )));
     }
     validate_finite("range", range)?;
-    Ok(())
-}
-
-pub(crate) fn validate_continuous_pair(domain: &[f64], range: &[f64]) -> PyResult<()> {
-    validate_continuous_domain(domain)?;
-    validate_continuous_range(range)?;
     Ok(())
 }
 
@@ -342,15 +334,17 @@ pub(crate) struct ResolvedContinuous {
 /// `domain` and `range` are each validated independently via
 /// [`validate_continuous_domain`] / [`validate_continuous_range`], whenever
 /// the user actually supplied that argument (GH #69 sibling fix): the
-/// previous `if domain_user_set { validate_continuous_pair(...) }` gate
-/// skipped ALL range validation whenever `domain` was left unset, so e.g.
+/// previous `if domain_user_set { validate_continuous_pair(...) }` gate (a
+/// combined domain+range validator, since removed — `TimeScale::new` was its
+/// last production caller before switching to this helper, F-L04-10) skipped
+/// ALL range validation whenever `domain` was left unset, so e.g.
 /// `LinearScale(range=[5.0])` indexed past the end of a 1-element `Vec` at
 /// `range: [r[0], r[1]]` below and **panicked** (`index out of bounds`)
 /// instead of raising a typed `ValueError`; a non-finite `range` with no
 /// `domain` slipped through silently for the same reason. This helper calls
-/// the same per-field validators that [`validate_continuous_pair`] composes
-/// from (rather than hand-duplicating their checks inline), which keeps the
-/// two call paths from drifting on error messages or thresholds.
+/// the same per-field validators the old combined validator composed from
+/// (rather than hand-duplicating their checks inline), which keeps every
+/// call path from drifting on error messages or thresholds.
 pub(crate) fn resolve_continuous(
     domain: Option<Vec<f64>>,
     range: Option<Vec<f64>>,
@@ -380,22 +374,14 @@ pub(crate) fn resolve_continuous(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_validate_continuous_pair_rejects_wrong_length() {
-        assert!(validate_continuous_pair(&[0.0], &[0.0, 1.0]).is_err());
-        assert!(validate_continuous_pair(&[0.0, 1.0], &[]).is_err());
-    }
-
-    #[test]
-    fn test_validate_continuous_pair_rejects_degenerate_domain() {
-        assert!(validate_continuous_pair(&[5.0, 5.0], &[0.0, 1.0]).is_err());
-    }
-
-    #[test]
-    fn test_validate_continuous_pair_rejects_non_finite() {
-        assert!(validate_continuous_pair(&[0.0, f64::NAN], &[0.0, 1.0]).is_err());
-        assert!(validate_continuous_pair(&[0.0, 10.0], &[f64::INFINITY, 1.0]).is_err());
-    }
+    // `validate_continuous_pair` (the combined domain+range validator these
+    // tests used to pin) was deleted as dead production code (F-L04-10
+    // remediation): `TimeScale::new` was its last caller before switching to
+    // `resolve_continuous`. Its coverage is not lost — `validate_continuous_domain`/
+    // `validate_continuous_range` (the two validators it composed, unchanged)
+    // are still exercised, wrong-length/degenerate/non-finite included, via
+    // `resolve_continuous`'s own test suite immediately below and via every
+    // continuous-scale pyclass constructor test that resolves through it.
 
     // ── resolve_continuous: range validated even when domain is unset (GH #69) ──
 

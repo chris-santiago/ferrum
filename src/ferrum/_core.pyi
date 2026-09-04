@@ -1,3 +1,4 @@
+import datetime
 from typing import Any, List, Literal, Optional, Sequence, Tuple, TypedDict, Union
 
 DataTypeStr = Literal[
@@ -183,7 +184,7 @@ class LogScale:
     def __eq__(self, other: object) -> bool: ...
 
 class TimeScale:
-    domain: list[float]
+    domain: list[float] | None
     range: list[float] | None
     clamp: bool
     padding: float | None
@@ -192,7 +193,7 @@ class TimeScale:
     def __init__(
         self,
         *,
-        domain: Sequence[float],
+        domain: Sequence[float | datetime.date | datetime.datetime | str] | None = None,
         range: Sequence[float] | None = None,
         clamp: bool = False,
         nice: bool = False,

@@ -1099,6 +1099,49 @@ mod orchestration_tests {
         assert!(svg.contains("@font-face"));
     }
 
+    /// F-L04-06 (batch-C task 3): `utc=True` and `utc=False` render
+    /// byte-identical SVG through the FULL `render_svg` pipeline — not just
+    /// the resolved scale in isolation — pinning the "UTC by contract"
+    /// promise in `TimeScale`'s struct doc and `format_time`'s doc. Both
+    /// renders use an explicit domain so the x column's dtype (plain
+    /// `Float64` from `scatter_3`) never needs to matter — only the
+    /// `ScaleSpec::Time` vs `ScaleSpec::Utc` tag differs between the two
+    /// resolves.
+    #[test]
+    fn time_scale_utc_true_and_false_render_byte_identical_svg() {
+        use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+
+        let (mut spec, batch) = scatter_3();
+        let common = ContinuousScaleCommon {
+            domain: Some(vec![0.0, 3.0]),
+            range: None,
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse: false,
+        };
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+
+        spec.encoding.x.as_mut().unwrap().scale =
+            Some(ScaleSpec::Time { common: common.clone(), nice: false });
+        let time_svg = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap()
+            .bytes;
+
+        spec.encoding.x.as_mut().unwrap().scale = Some(ScaleSpec::Utc { common, nice: false });
+        let utc_svg = render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap()
+            .bytes;
+
+        assert_eq!(
+            time_svg, utc_svg,
+            "utc=True/False must render byte-identical SVG by contract (F-L04-06)"
+        );
+    }
+
     #[test]
     fn render_svg_invalid_viewport_errors() {
         let (spec, batch) = scatter_3();

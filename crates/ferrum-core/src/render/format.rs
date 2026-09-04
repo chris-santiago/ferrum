@@ -93,6 +93,15 @@ fn trim_scientific(s: &str) -> String {
 /// - >= 1 day: "2026-03-15"
 /// - >= 1 hour: "15:00"
 /// - else: "15:30:45"
+///
+/// **UTC by contract (F-L04-06):** `epoch_ms` is always formatted as UTC —
+/// `DateTime::<Utc>::from_timestamp_millis` below, never a local-timezone
+/// conversion. This holds for every temporal rendering path in the crate
+/// ([`format_time_spec`]'s explicit-pattern formatter included), regardless
+/// of a `TimeScale`'s `utc` flag, which is a wire-tag distinction only (see
+/// [`crate::scale::time::TimeScale`]'s struct doc) — there is no
+/// local-time rendering anywhere, ever (barred by the byte-determinism hard
+/// constraint).
 pub fn format_time(epoch_ms: i64, spacing_ms: i64) -> String {
     let Some(dt) = DateTime::<Utc>::from_timestamp_millis(epoch_ms) else {
         return String::new();

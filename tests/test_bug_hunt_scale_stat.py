@@ -374,7 +374,11 @@ def test_quantile_scale_two_element_domain():
 def test_time_scale_zero_span_domain():
     """TimeScale with domain [t, t] (zero span) should reject with ValueError.
 
-    Targets core.rs:validate_continuous_pair — domain endpoints must differ.
+    Targets core.rs:validate_continuous_domain, invoked from resolve_continuous
+    — domain endpoints must differ. (validate_continuous_pair, the combined
+    domain+range validator this test used to target, was deleted in batch-C
+    task 3: TimeScale::new now goes through resolve_continuous like its five
+    continuous siblings, which validates domain and range independently.)
     """
     t = 1_767_225_600_000.0  # 2026-01-01 00:00:00 UTC
     with pytest.raises(ValueError, match="domain endpoints must differ"):
