@@ -1142,6 +1142,592 @@ mod orchestration_tests {
         );
     }
 
+    // ── F-L04-03 / GH #67: one centers path for categorical axes ────────────
+
+    /// Four categories with a quantitative companion, for the band-axis rows.
+    fn four_categories() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A bar chart of [`four_categories`] whose x scale is `band`.
+    fn band_bar_spec(band: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "cat".into(),
+                    type_: Some(crate::spec::encoding::DataType::Nominal),
+                    scale: band,
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "val".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    /// Every `Text` node under `nodes`, flattened through `Group`s.
+    fn text_nodes(nodes: &[ferrum_scene::SceneNode]) -> Vec<(f64, String)> {
+        let mut out = Vec::new();
+        for n in nodes {
+            match n {
+                ferrum_scene::SceneNode::Text { x, content, .. } => {
+                    out.push((*x, content.clone()))
+                }
+                ferrum_scene::SceneNode::Group { children, .. } => {
+                    out.extend(text_nodes(children))
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Run the production orchestration for `spec` over `batch` —
+    /// `prepare_and_layout` then `build_scene`, so anything that aborts the
+    /// pipeline surfaces here rather than only at a user's `to_svg()`.
+    fn scene_and_layout_over(
+        spec: &ChartSpec,
+        chart_config: &ChartConfig,
+        batch: &RecordBatch,
+    ) -> (ferrum_scene::SceneGraph, crate::layout::LayoutResult) {
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        let PipelineOutput { prep, layout, applied, mut warnings } =
+            prepare_and_layout(spec, batch, &theme, viewport, chart_config, None)
+                .expect("fixture must prepare");
+        let scene = scene_build::build_scene(
+            spec,
+            &prep,
+            &layout,
+            &applied.effective_theme,
+            &config,
+            &mut warnings,
+            chart_config,
+            None,
+        )
+        .expect("fixture must build a scene");
+        (scene, layout)
+    }
+
+    /// [`scene_and_layout_over`] over [`four_categories`] — the fixture every
+    /// row in this section but the equal-length explicit-`range=` pins uses.
+    fn scene_and_layout(
+        spec: &ChartSpec,
+        chart_config: &ChartConfig,
+    ) -> (ferrum_scene::SceneGraph, crate::layout::LayoutResult) {
+        scene_and_layout_over(spec, chart_config, &four_categories())
+    }
+
+    /// Panel 0's rendered ticks on `orient`, as `(position, label)` in tick
+    /// order — the placement `build_scene` draws its labels and grid lines at.
+    fn panel_ticks(
+        layout: &crate::layout::LayoutResult,
+        orient: crate::layout::AxisOrient,
+    ) -> Vec<(f64, String)> {
+        let axis = layout
+            .axes
+            .iter()
+            .find(|a| a.panel_index == 0 && a.orient == orient)
+            .expect("panel 0 must carry this axis");
+        axis.ticks.iter().map(|t| (t.position, t.label.clone())).collect()
+    }
+
+    /// Build the scene for `spec` over `four_categories`, and return
+    /// `(bar centers, x-axis tick-label pixels)` — both in category order.
+    fn bar_centers_and_tick_pixels(spec: &ChartSpec) -> (Vec<f64>, Vec<f64>) {
+        let (scene, _) = scene_and_layout(spec, &ChartConfig::default());
+        let panel = &scene.panels[0];
+        let mut centers: Vec<f64> = panel
+            .marks
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter_map(|n| match n {
+                ferrum_scene::SceneNode::Rect { x, w, .. } => Some(x + w / 2.0),
+                _ => None,
+            })
+            .collect();
+        centers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let labels: Vec<f64> = text_nodes(&panel.axes)
+            .into_iter()
+            .filter(|(_, content)| ["a", "b", "c", "d"].contains(&content.as_str()))
+            .map(|(x, _)| x)
+            .collect();
+
+        assert_eq!(centers.len(), 4, "expected four bars");
+        assert_eq!(labels.len(), 4, "expected four x tick labels");
+        (centers, labels)
+    }
+
+    /// THE observable F-L04-03 owed: a **padded, no-`range=`** `BandScale`'s
+    /// axis tick labels land exactly on its bar centers.
+    ///
+    /// This is the case the old centers gate could not serve. The marks came
+    /// from the d3 band model resolved over the real panel; the labels came
+    /// from layout's own `(i + 0.5)·slot`, because the scale's centers were
+    /// offered to the axis only when the user had supplied an explicit `range=`
+    /// — and the panel-extent scale reaching the axis pass carries a `[0, 1]`
+    /// placeholder range, so absolute pixels were not available to offer. The
+    /// two models disagreed by ~1.6–4.8px per label at these parameters
+    /// (`tests/test_bug_hunt_band_point_range.py` pins the same repro from the
+    /// Python side).
+    ///
+    /// The tick labels are asserted against the **hand-computed d3 model** with
+    /// `assert_eq!` (the axis resolves that model over the same
+    /// `(plot_area.x, plot_area.x + plot_area.w)` interval
+    /// `resolve_panel_scales` gives the mark scale, so it is bit-exact or the
+    /// paths have forked); the bars are compared with a 1e-9 tolerance, because
+    /// a bar stores `center − w/2` and `w`, so recovering its center costs two
+    /// roundings. The divergence this row exists to catch is ~1.6–4.8px.
+    #[test]
+    fn padded_no_range_band_axis_labels_land_on_bar_centers() {
+        let spec = band_bar_spec(Some(padded_band()));
+        let (centers, labels) = bar_centers_and_tick_pixels(&spec);
+
+        // d3, by hand: `padding = 0.1` sets both inner and outer, so
+        // denom = 4 − 0.1 + 0.2 = 4.1, step = w/4.1, start = x + 0.1·step, and
+        // each center is the middle of its 0.9-of-a-step drawn band.
+        let (x, w) = scene_plot_area(&spec);
+        let step = w / 4.1;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| x + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        assert_eq!(labels, expected, "tick labels must be the d3 band centers");
+        for (bar, label) in centers.iter().zip(&labels) {
+            assert!(
+                (bar - label).abs() < 1e-9,
+                "bar center {bar} does not sit under its tick label {label}"
+            );
+        }
+
+        // Discriminating: the padded centers are NOT the uniform slots the old
+        // fallback produced, so the row cannot pass by both paths agreeing on
+        // the unpadded model.
+        let uniform: Vec<f64> = (0..4).map(|i| x + (i as f64 + 0.5) * (w / 4.0)).collect();
+        assert_ne!(labels, uniform, "padding must move the centers off the uniform slots");
+    }
+
+    /// The unpadded (auto-inferred) categorical axis takes the same one path
+    /// and still lands on the uniform slots — the local half of the
+    /// byte-identity gate for tick placement, and why no golden moved when the
+    /// gate collapsed.
+    #[test]
+    fn unpadded_categorical_axis_labels_still_land_on_the_uniform_slots() {
+        let spec = band_bar_spec(None);
+        let (centers, labels) = bar_centers_and_tick_pixels(&spec);
+        for (bar, label) in centers.iter().zip(&labels) {
+            assert!(
+                (bar - label).abs() < 1e-9,
+                "bar center {bar} does not sit under its tick label {label}"
+            );
+        }
+
+        let (x, w) = scene_plot_area(&spec);
+        let uniform: Vec<f64> = (0..4).map(|i| x + (i as f64 + 0.5) * (w / 4.0)).collect();
+        assert_eq!(labels, uniform, "the unpadded model must reduce to the uniform slots");
+    }
+
+    /// This spec's panel-0 plot area as `(x, w)`, for the rows above to compute
+    /// the uniform-slot comparison against the layout's real rect rather than a
+    /// hardcoded guess.
+    fn scene_plot_area(spec: &ChartSpec) -> (f64, f64) {
+        let (_, layout) = scene_and_layout(spec, &ChartConfig::default());
+        let plot = layout.panels[0].plot_area;
+        (plot.x, plot.w)
+    }
+
+    /// A horizontal bar chart of [`four_categories`]: the transpose of
+    /// [`band_bar_spec`], with the band on **y** and the quantitative field
+    /// on x.
+    fn band_bar_spec_y(band: Option<crate::spec::encoding::ScaleSpec>) -> ChartSpec {
+        let mut spec = band_bar_spec(None);
+        spec.encoding.x = Some(EncodingSpec { field: "val".into(), ..Default::default() });
+        spec.encoding.y = Some(EncodingSpec {
+            field: "cat".into(),
+            type_: Some(crate::spec::encoding::DataType::Nominal),
+            scale: band,
+            ..Default::default()
+        });
+        spec
+    }
+
+    /// A `BandScale(padding=0.1)` with the four categories as its domain and no
+    /// `range=` — the panel-extent case F-L04-03 exists for.
+    fn padded_band() -> crate::spec::encoding::ScaleSpec {
+        crate::spec::encoding::ScaleSpec::Band {
+            domain: Some(vec!["a".into(), "b".into(), "c".into(), "d".into()]),
+            padding: 0.1,
+            padding_inner: None,
+            padding_outer: None,
+            align: 0.5,
+            range: None,
+        }
+    }
+
+    /// The **y transpose** of [`padded_no_range_band_axis_labels_land_on_bar_centers`].
+    ///
+    /// The x row alone cannot catch a lo/hi swap in the y placement: an
+    /// unpadded model is symmetric about the panel's midpoint, so an inverted
+    /// resolution reproduces the same positions. Padded, it does not — the
+    /// outer padding sits at one end, and the whole ladder of centers would
+    /// mirror. `layout::axis::tests::y_axis_resolves_panel_extent_placement_against_this_panel`
+    /// pins `layout_y_axis` in isolation; this row pins the resolver → layout →
+    /// scene agreement, which is where an interval handed over backwards would
+    /// show up.
+    #[test]
+    fn padded_no_range_band_y_axis_labels_land_on_bar_centers() {
+        let spec = band_bar_spec_y(Some(padded_band()));
+        let (scene, layout) = scene_and_layout(&spec, &ChartConfig::default());
+        let plot = layout.panels[0].plot_area;
+
+        // The same d3 model as the x row, over the panel's vertical interval:
+        // denom = 4 − 0.1 + 0.2 = 4.1, top → bottom in category order.
+        let step = plot.h / 4.1;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| plot.y + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Left);
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+        assert_eq!(labels, ["a", "b", "c", "d"], "ordinal y is not reversed");
+        assert_eq!(positions, expected, "y tick labels must be the d3 band centers");
+
+        let mut centers: Vec<f64> = scene.panels[0]
+            .marks
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter_map(|n| match n {
+                ferrum_scene::SceneNode::Rect { y, h, .. } => Some(y + h / 2.0),
+                _ => None,
+            })
+            .collect();
+        centers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(centers.len(), 4, "expected four bars");
+        for (bar, label) in centers.iter().zip(&positions) {
+            assert!(
+                (bar - label).abs() < 1e-9,
+                "bar center {bar} does not sit beside its tick label {label}"
+            );
+        }
+
+        // Discriminating, exactly as on x: padded centers are NOT the uniform
+        // slots, so a mirrored or slot-based resolution cannot pass this row.
+        let uniform: Vec<f64> = (0..4).map(|i| plot.y + (i as f64 + 0.5) * (plot.h / 4.0)).collect();
+        assert_ne!(positions, uniform, "padding must move the centers off the uniform slots");
+    }
+
+    // ── tick_values over a categorical axis (batch-C T7 review, finding 1) ───
+    // An explicit tick-value list replaces `tick_labels` wholesale, at any
+    // length, while the categorical placement carrier is sized by the scale's
+    // DOMAIN. Layout indexes that carrier by tick position, so before
+    // `config_apply::sync_tick_placement_to_tick_values` cleared it these three
+    // spellings aborted the render with an index-out-of-bounds panic — raised
+    // across the PyO3 boundary as a `PanicException`, not a typed
+    // `RenderError`. Each row asserts the *placement* that survives (the
+    // uniform slots, i.e. the pre-F-L04-03 outcome for an overridden
+    // categorical axis), not merely that nothing panicked, and each carries the
+    // override's own labels so a row cannot pass by the override being dropped.
+
+    /// The uniform-slot center of tick `i` of `n` over `[lo, lo + extent]`.
+    fn uniform_slots(lo: f64, extent: f64, n: usize) -> Vec<f64> {
+        (0..n).map(|i| lo + (i as f64 + 0.5) * (extent / n as f64)).collect()
+    }
+
+    /// `configure_axis(tick_values=[…])` with MORE values than the domain has
+    /// categories — the spelling and shape from the review's repro.
+    #[test]
+    fn categorical_x_axis_under_a_longer_tick_values_override_keeps_uniform_slots() {
+        let spec = band_bar_spec(Some(padded_band()));
+        let chart_config = ChartConfig {
+            axis: Some(AxisConfigSpec {
+                style: AxisStyleSpec {
+                    values: Some(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (_, layout) = scene_and_layout(&spec, &chart_config);
+        let plot = layout.panels[0].plot_area;
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Bottom);
+
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(labels, ["0", "1", "2", "3", "4", "5"], "the override must reach the axis");
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            positions,
+            uniform_slots(plot.x, plot.w, 6),
+            "six overridden labels take the six uniform slots — there are only four band centers"
+        );
+    }
+
+    /// Per-channel `fm.Axis(values=[…])` with FEWER values than the domain has
+    /// categories. The other half of the length mismatch: a short carrier
+    /// cannot be caught by an index guard alone, so the pin is the placement.
+    #[test]
+    fn categorical_x_axis_under_a_shorter_tick_values_override_keeps_uniform_slots() {
+        let mut spec = band_bar_spec(Some(padded_band()));
+        spec.encoding.x.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            values: Some(vec![10.0, 20.0]),
+            ..Default::default()
+        }));
+        let (_, layout) = scene_and_layout(&spec, &ChartConfig::default());
+        let plot = layout.panels[0].plot_area;
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Bottom);
+
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(labels, ["10", "20"], "the override must reach the axis");
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            positions,
+            uniform_slots(plot.x, plot.w, 2),
+            "two overridden labels take the two uniform slots, not the first two band centers"
+        );
+    }
+
+    /// The y transpose of both rows above, on a categorical y axis (the second
+    /// live repro the review reported, at `layout/axis.rs`'s y-side index).
+    #[test]
+    fn categorical_y_axis_under_a_tick_values_override_keeps_uniform_slots() {
+        let ticks_for = |values: Vec<f64>| {
+            let mut spec = band_bar_spec_y(Some(padded_band()));
+            spec.encoding.y.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+                values: Some(values),
+                ..Default::default()
+            }));
+            let (_, layout) = scene_and_layout(&spec, &ChartConfig::default());
+            let plot = layout.panels[0].plot_area;
+            (plot, panel_ticks(&layout, crate::layout::AxisOrient::Left))
+        };
+
+        let (plot, longer) = ticks_for(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(
+            longer.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>(),
+            ["0", "1", "2", "3", "4", "5"]
+        );
+        assert_eq!(
+            longer.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            uniform_slots(plot.y, plot.h, 6),
+            "six overridden y labels take the six uniform slots"
+        );
+
+        let (plot, shorter) = ticks_for(vec![10.0, 20.0]);
+        assert_eq!(
+            shorter.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>(),
+            ["10", "20"]
+        );
+        assert_eq!(
+            shorter.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            uniform_slots(plot.y, plot.h, 2),
+            "two overridden y labels take the two uniform slots"
+        );
+    }
+
+    // ── equal-length tick_values on a categorical axis (batch-C T7 review,
+    //    round 3 — the equal-length finding) ──────────────────────────────
+    // When the override supplies exactly one label per category, the pairing
+    // between tick position and category still holds, so
+    // `sync_tick_placement_to_tick_values` keeps the placement carrier instead
+    // of clearing it: the relabeled ticks land on the aligned centers, not the
+    // uniform slots. Mismatched-length overrides (above) are unaffected.
+
+    /// Three categories with a quantitative companion — the spec reviewer's
+    /// exact repro shape (`BandScale(range=[50, 400])`, 3 categories).
+    fn three_categories() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// An explicit-`range=` `BandScale` over `domain`, at the library's
+    /// default padding/align — the shape the spec reviewer measured.
+    fn explicit_range_band(
+        domain: Vec<&str>,
+        range: [f64; 2],
+    ) -> crate::spec::encoding::ScaleSpec {
+        crate::spec::encoding::ScaleSpec::Band {
+            domain: Some(domain.into_iter().map(String::from).collect()),
+            padding: 0.1,
+            padding_inner: None,
+            padding_outer: None,
+            align: 0.5,
+            range: Some(vec![range[0], range[1]]),
+        }
+    }
+
+    /// Equal-length `tick_values` on an explicit-`range=` band restores the
+    /// pre-F-L04-03 outcome exactly, byte-for-byte with the spec reviewer's own
+    /// measurement: `BandScale(range=[50, 400])` over three categories centers
+    /// each band at 112.097 / 225 / 337.903. Round 2's unconditional clear
+    /// moved these to uniform slots (156.453 / 343.472 / 530.491), the last of
+    /// which sits OUTSIDE the declared `[50, 400]` range — this pin is what
+    /// catches a regression back to that behavior.
+    #[test]
+    fn categorical_x_axis_under_an_equal_length_tick_values_override_lands_on_explicit_range_band_centers()
+    {
+        let mut spec = band_bar_spec(Some(explicit_range_band(vec!["a", "b", "c"], [50.0, 400.0])));
+        spec.encoding.x.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            values: Some(vec![1.0, 2.0, 3.0]),
+            ..Default::default()
+        }));
+        let (_, layout) = scene_and_layout_over(&spec, &ChartConfig::default(), &three_categories());
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Bottom);
+
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(labels, ["1", "2", "3"], "the override's own labels must reach the axis");
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+
+        // d3, by hand: denom = 3 − 0.1 + 0.2 = 3.1, step = 350/3.1, over
+        // [50, 400] directly (an explicit range is used verbatim, not
+        // re-derived from the panel — GH #39).
+        let step = 350.0_f64 / 3.1;
+        let expected: Vec<f64> =
+            (0..3).map(|i| 50.0 + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step).collect();
+        assert_eq!(positions, expected, "an equal-length relabel must land on the explicit-range band centers");
+        for (got, want) in positions.iter().zip([112.097, 225.0, 337.903]) {
+            assert!((got - want).abs() < 1e-2, "expected band center {want}, got {got}");
+        }
+        assert!(
+            positions.iter().all(|p| (50.0..=400.0).contains(p)),
+            "band centers must stay inside the declared range: {positions:?}"
+        );
+    }
+
+    /// The y transpose of the row above.
+    #[test]
+    fn categorical_y_axis_under_an_equal_length_tick_values_override_lands_on_explicit_range_band_centers()
+    {
+        let mut spec = band_bar_spec_y(Some(explicit_range_band(vec!["a", "b", "c"], [50.0, 400.0])));
+        spec.encoding.y.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            values: Some(vec![1.0, 2.0, 3.0]),
+            ..Default::default()
+        }));
+        let (_, layout) = scene_and_layout_over(&spec, &ChartConfig::default(), &three_categories());
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Left);
+
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(labels, ["1", "2", "3"], "the override's own labels must reach the axis");
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+
+        let step = 350.0_f64 / 3.1;
+        let expected: Vec<f64> =
+            (0..3).map(|i| 50.0 + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step).collect();
+        assert_eq!(positions, expected, "an equal-length relabel must land on the explicit-range band centers");
+        assert!(
+            positions.iter().all(|p| (50.0..=400.0).contains(p)),
+            "band centers must stay inside the declared range: {positions:?}"
+        );
+    }
+
+    /// Equal-length `tick_values` on a PADDED no-`range=` band lands on the
+    /// same d3 centers [`padded_no_range_band_axis_labels_land_on_bar_centers`]
+    /// pins for the unoverridden case — in range, and off the uniform slots.
+    #[test]
+    fn categorical_x_axis_under_an_equal_length_tick_values_override_lands_on_padded_band_centers() {
+        let mut spec = band_bar_spec(Some(padded_band()));
+        spec.encoding.x.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            values: Some(vec![10.0, 20.0, 30.0, 40.0]),
+            ..Default::default()
+        }));
+        let (_, layout) = scene_and_layout(&spec, &ChartConfig::default());
+        let plot = layout.panels[0].plot_area;
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Bottom);
+
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(labels, ["10", "20", "30", "40"], "the override's own labels must reach the axis");
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+
+        let step = plot.w / 4.1;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| plot.x + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        assert_eq!(
+            positions, expected,
+            "an equal-length relabel must land on the padded band centers, not uniform slots"
+        );
+        assert_ne!(
+            positions,
+            uniform_slots(plot.x, plot.w, 4),
+            "must not fall back to uniform slots when the override pairs one-to-one with the categories"
+        );
+        assert!(
+            positions.iter().all(|p| (plot.x..=plot.x + plot.w).contains(p)),
+            "band centers must stay inside the plot area: {positions:?}"
+        );
+    }
+
+    /// The y transpose of the row above.
+    #[test]
+    fn categorical_y_axis_under_an_equal_length_tick_values_override_lands_on_padded_band_centers() {
+        let mut spec = band_bar_spec_y(Some(padded_band()));
+        spec.encoding.y.as_mut().unwrap().axis = Some(Box::new(AxisStyleSpec {
+            values: Some(vec![10.0, 20.0, 30.0, 40.0]),
+            ..Default::default()
+        }));
+        let (_, layout) = scene_and_layout(&spec, &ChartConfig::default());
+        let plot = layout.panels[0].plot_area;
+        let ticks = panel_ticks(&layout, crate::layout::AxisOrient::Left);
+
+        let labels: Vec<String> = ticks.iter().map(|(_, l)| l.clone()).collect();
+        assert_eq!(labels, ["10", "20", "30", "40"], "the override's own labels must reach the axis");
+        let positions: Vec<f64> = ticks.iter().map(|(p, _)| *p).collect();
+
+        let step = plot.h / 4.1;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| plot.y + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        assert_eq!(
+            positions, expected,
+            "an equal-length relabel must land on the padded band centers, not uniform slots"
+        );
+        assert_ne!(
+            positions,
+            uniform_slots(plot.y, plot.h, 4),
+            "must not fall back to uniform slots when the override pairs one-to-one with the categories"
+        );
+        assert!(
+            positions.iter().all(|p| (plot.y..=plot.y + plot.h).contains(p)),
+            "band centers must stay inside the plot area: {positions:?}"
+        );
+    }
+
     #[test]
     fn render_svg_invalid_viewport_errors() {
         let (spec, batch) = scatter_3();

@@ -506,6 +506,65 @@ fn ordinal_only_crossbars_scale_the_cross_axis_extent_by_the_band_fraction() {
     }
 }
 
+// ── align (spec §4A, §9's n=1 acceptance row) ───────────────────────────────
+
+/// `align` moves rendered geometry — but only where the d3 denominator clamp
+/// leaves it something to distribute, which for the band model means a single
+/// category padded past the clamp.
+///
+/// One category at `padding_inner = 0.5` over `[0, 400]` gives
+/// `denom_raw = 0.5`, so `step` clamps to the full 400px extent and the drawn
+/// band is 200px, leaving 200px of leftover. `align = 0` pins that band against
+/// `range_lo` (center 100), `align = 1` against `range_hi` (center 300), and
+/// the default `align = 0.5` centers it (center 200). The bar is
+/// `200 × 0.8 = 160`px wide at every alignment — `align` translates the band, it
+/// does not resize it.
+///
+/// This is the acceptance row §9 names ("`align` 0.0 vs 1.0, n=1 domain for
+/// align, produce different geometry"), pinned on *rendered* nodes rather than
+/// on `DiscreteGeometry`: `scale::discrete::tests::align_moves_only_the_clamped_leftover`
+/// already proves the model, and what F-L04-03 owed was that the parameter
+/// reaches pixels. It is RED against every pre-F-L04-03 revision, where `align`
+/// was parsed, validated, serialized — and dropped before the render-side
+/// ordinal scale, which had no alignment term at all.
+#[test]
+fn align_translates_the_clamped_band_in_rendered_geometry() {
+    let bar_x_w = |align: f64| {
+        let nodes = render_nodes(
+            Mark::Bar,
+            Encoding {
+                x: enc(
+                    "cat",
+                    SpecType::Nominal,
+                    Some(ScaleSpec::Band {
+                        domain: Some(vec!["a".into()]),
+                        padding: 0.0,
+                        padding_inner: Some(0.5),
+                        padding_outer: Some(0.0),
+                        align,
+                        range: Some(vec![0.0, 400.0]),
+                    }),
+                ),
+                y: enc("val", SpecType::Quantitative, None),
+                ..Default::default()
+            },
+            &band_batch(&["a"], &["g1"]),
+            None,
+            Rect { x: 0.0, y: 0.0, w: 400.0, h: 350.0 },
+        );
+        counted(rect_x_w(&nodes), 1, "single-category bar")[0]
+    };
+
+    for (align, center) in [(0.0, 100.0), (0.5, 200.0), (1.0, 300.0)] {
+        let (x, w) = bar_x_w(align);
+        assert_close(w, 160.0, "align must not resize the 200px band's 0.8 bar");
+        assert_close(x, center - 80.0, "bar left edge = band center − width/2");
+    }
+
+    // The discriminating pair, stated as a difference: a full leftover apart.
+    assert_close(bar_x_w(1.0).0 - bar_x_w(0.0).0, 200.0, "align spans the whole leftover");
+}
+
 // ── Domain count, not batch count (spec §4A) ────────────────────────────────
 
 /// A layer whose batch is missing categories sizes by the scale's DOMAIN.

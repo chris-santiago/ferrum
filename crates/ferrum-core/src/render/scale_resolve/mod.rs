@@ -19,6 +19,7 @@ use arrow::datatypes::DataType as ArrowDataType;
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::ThemeInputs;
+use crate::scale::discrete::CategoricalPlacement;
 use crate::scale::linear::LinearScale;
 use crate::scale::log::LogScale;
 use crate::scale::ordinal::OrdinalScale;
@@ -379,19 +380,24 @@ impl ScaleKind {
         }
     }
 
-    /// Absolute band-center pixels, one per category in `tick_labels` (domain)
-    /// order, for an ordinal positional scale whose pixel range was **explicitly
-    /// supplied** by the user (`BandScale`/`PointScale`/positional `OrdinalScale`
-    /// `range=`); `None` for every other scale kind and for the panel-extent
-    /// fallback (band-geometry unification design §6). These are the same pixels
+    /// Where a categorical axis places this scale's categories — `Some` for
+    /// **every** ordinal positional scale (F-L04-03, GH #67), `None` for the
+    /// continuous kinds, which place their ticks through
+    /// [`tick_fractions`](Self::tick_fractions) instead.
+    ///
+    /// The returned [`CategoricalPlacement`] resolves to the same pixels
     /// [`to_pixel_str`](Self::to_pixel_str) yields for marks, so a categorical
-    /// axis that places its tick labels/grid lines here agrees with the marks
-    /// (spec §7). Consumed by [`crate::layout::axis`] as `categorical_positions`
-    /// on the [`AxisInput`](crate::layout::AxisInput), in place of the
-    /// `uniform_center` fallback; the `None` case leaves that path byte-identical.
-    pub(in crate::render) fn explicit_band_centers(&self) -> Option<Vec<f64>> {
+    /// axis placing its tick labels and grid lines here agrees with its marks
+    /// (spec §7). Consumed by [`crate::layout::axis`] as
+    /// `categorical_placement` on the [`AxisInput`](crate::layout::AxisInput).
+    ///
+    /// Before #67 closed, this answered `Some` only for a user-supplied
+    /// `range=`; an ordinal scale on the panel-extent fallback answered `None`
+    /// and layout placed its labels on a padding-blind `(i + 0.5)·slot` model
+    /// of its own. That second model is gone — see [`CategoricalPlacement`].
+    pub(in crate::render) fn categorical_placement(&self) -> Option<CategoricalPlacement> {
         match self {
-            ScaleKind::Ordinal(s) => s.explicit_band_centers(),
+            ScaleKind::Ordinal(s) => Some(s.categorical_placement()),
             _ => None,
         }
     }

@@ -3,7 +3,7 @@ use pyo3::types::PyList;
 use serde::{Deserialize, Serialize};
 
 use super::core::{scale_spec_to_py_dict, validate_ordinal, validate_ordinal_domain};
-use super::discrete::{DiscreteGeometry, DiscreteLayout, DEFAULT_ALIGN};
+use super::discrete::{CategoricalPlacement, DiscreteGeometry, DiscreteLayout, DEFAULT_ALIGN};
 use crate::spec::encoding::ScaleSpec;
 
 /// A single element of an `OrdinalScale` range: either a pixel coordinate
@@ -123,14 +123,17 @@ impl OrdinalRangeValue {
 ///   fallback). The `.range` getter is declared unread on render-internal
 ///   instances — render code never calls it — but its `Some`-returning
 ///   behavior is preserved byte-for-byte in case a future/test caller
-///   invokes it. The explicit-range accessors return `None`/no-op for this
-///   variant either way.
+///   invokes it. [`translate_explicit_range`](OrdinalScale::translate_explicit_range)
+///   is a no-op for this variant, and
+///   [`categorical_placement`](OrdinalScale::categorical_placement) yields the
+///   panel-extent (model-carrying) form.
 /// - [`ExplicitPixel`](Self::ExplicitPixel) — old `(true, true)`. Set only
 ///   via `with_explicit_range(true)` at the render-internal resolver call
 ///   sites (`render::scale_resolve::positional`) that resolved a
 ///   user-supplied `BandScale`/`PointScale`/positional-`OrdinalScale` pixel
-///   range (GH #39 phase 2), as opposed to the panel-extent fallback. Feeds
-///   `explicit_band_centers()` and `translate_explicit_range()`.
+///   range (GH #39 phase 2), as opposed to the panel-extent fallback. Selects
+///   `categorical_placement()`'s absolute-pixel form and enables
+///   `translate_explicit_range()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RangeProvenance {
     Default,
@@ -285,20 +288,30 @@ impl OrdinalScale {
         self
     }
 
-    /// Absolute band-center pixels, one per domain category in order, but only
-    /// when [`with_explicit_range`](Self::with_explicit_range) recorded this
-    /// scale's range as user-supplied (GH #39 phase 2, band-geometry
-    /// unification). These are the same pixels [`scale_internal`](Self::scale_internal)
-    /// yields for each category — i.e. the pixels marks are placed at — so a
-    /// categorical axis that consumes them agrees with its marks. `None` for the
-    /// panel-extent fallback, keeping the layout `uniform_center` path (and thus
-    /// every no-range golden) byte-identical. Explicitness is recorded at
-    /// construction, never inferred by comparing floats.
-    pub(crate) fn explicit_band_centers(&self) -> Option<Vec<f64>> {
-        if !self.range_provenance.is_explicit_pixel() {
-            return None;
+    /// Where a categorical axis should place this scale's categories — the one
+    /// centers path (F-L04-03, GH #67), branching only on range *provenance*.
+    ///
+    /// An explicitly user-supplied pixel range (GH #39 phase 2) is
+    /// chart-absolute and already resolved, so it yields the same pixels
+    /// [`scale_internal`](Self::scale_internal) gives each category — i.e. the
+    /// pixels marks are placed at. The panel-extent fallback cannot be resolved
+    /// here at all: the axis-input pass runs before layout, against a `[0, 1]`
+    /// placeholder range, so it yields this scale's d3 model for the axis to
+    /// resolve against the panel rect instead. Either way the axis and the
+    /// marks evaluate the *same* [`DiscreteGeometry`], which is what closes
+    /// #67. Explicitness is recorded at construction, never inferred by
+    /// comparing floats.
+    pub(crate) fn categorical_placement(&self) -> CategoricalPlacement {
+        if self.range_provenance.is_explicit_pixel() {
+            CategoricalPlacement::Absolute(
+                self.data.domain.iter().map(|c| self.data.scale_str(c)).collect(),
+            )
+        } else {
+            CategoricalPlacement::PanelExtent {
+                layout: self.data.layout,
+                categories: self.data.domain.len(),
+            }
         }
-        Some(self.data.domain.iter().map(|c| self.data.scale_str(c)).collect())
     }
 
     /// Crate-internal lookup. Returns `None` if `value` is not in the domain.
@@ -360,7 +373,10 @@ impl OrdinalScale {
     /// The render-side caller (`scene_build::resolve_panel_scales`) translates
     /// every panel but the reference (panel 0, where `offset == 0.0`) by that
     /// panel's own displacement from panel 0's plot-area origin, so the same
-    /// user-specified extent re-anchors inside each panel's own window.
+    /// user-specified extent re-anchors inside each panel's own window. The
+    /// panel-extent fallback needs no such correction: its
+    /// [`categorical_placement`](Self::categorical_placement) carries the model
+    /// rather than pixels, and layout resolves it against each panel's own rect.
     ///
     /// No-op when this scale's range was never recorded as explicit
     /// (`range_provenance` is not [`RangeProvenance::ExplicitPixel`]) — the
@@ -368,7 +384,7 @@ impl OrdinalScale {
     /// shifted again.
     ///
     /// Only `data.range` is load-bearing at render time (mark placement,
-    /// `bandwidth()`, `explicit_band_centers()`); this deliberately
+    /// `bandwidth()`, `categorical_placement()`); this deliberately
     /// leaves the wire/getter-facing `range_orig` untouched. A render-internal
     /// `OrdinalScale` (built via `new_internal` + `with_explicit_range`) never
     /// flows back through the `.range` Python getter or `to_scale_spec()` — those
@@ -577,21 +593,34 @@ mod tests {
         assert!(s.scale_str("z").is_nan());
     }
 
-    // ── explicit_band_centers (GH #39 phase 2) ───────────────────────────────
+    // ── categorical_placement (GH #39 phase 2, GH #67) ───────────────────────
+
+    /// The absolute centers a placement resolves to over `[lo, hi]` — what a
+    /// categorical axis actually places its ticks at. `lo`/`hi` are inert for
+    /// the absolute form, so the explicit-range rows pass a deliberately
+    /// unrelated interval to prove they are ignored.
+    fn centers_over(scale: &OrdinalScale, lo: f64, hi: f64) -> Vec<f64> {
+        scale.categorical_placement().centers(lo, hi).into_owned()
+    }
 
     /// An explicit range reports absolute band centers, one per category in
     /// domain order — the same pixels `scale_internal` yields for marks. The
     /// canonical oracle: domain [a,b,c,d] over [40, 260] → step 55 → centers
     /// 67.5 / 122.5 / 177.5 / 232.5.
     #[test]
-    fn explicit_band_centers_match_scale_internal_oracle() {
+    fn explicit_range_placement_matches_scale_internal_oracle() {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
             vec![40.0, 260.0],
             DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
-        let centers = scale.explicit_band_centers().expect("explicit → Some");
+        assert!(matches!(
+            scale.categorical_placement(),
+            CategoricalPlacement::Absolute(_)
+        ));
+        // The panel interval is ignored: an explicit range is chart-absolute.
+        let centers = centers_over(&scale, 999.0, 1999.0);
         assert_eq!(centers, vec![67.5, 122.5, 177.5, 232.5]);
         // Each center equals the mark pixel for that category.
         for (cat, c) in ["a", "b", "c", "d"].iter().zip(&centers) {
@@ -599,29 +628,63 @@ mod tests {
         }
     }
 
-    /// The panel-extent fallback (never marked explicit) reports `None`, so the
-    /// layout `uniform_center` path stays byte-identical.
+    /// The panel-extent fallback (never marked explicit) carries its d3 model
+    /// instead of pixels — this scale's own range is the `[0, 1]`-ish
+    /// placeholder the pre-layout axis pass resolves against, so pixels here
+    /// would be meaningless. Resolved over a panel interval it yields that
+    /// panel's mark centers (GH #67): four categories over [0, 220] → step 55.
     #[test]
-    fn explicit_band_centers_none_without_explicit_flag() {
+    fn panel_extent_placement_carries_the_model_not_pixels() {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            vec![0.0, 220.0],
+            vec![0.0, 1.0],
             DiscreteLayout::UNPADDED,
         );
-        assert_eq!(scale.explicit_band_centers(), None);
+        assert_eq!(
+            scale.categorical_placement(),
+            CategoricalPlacement::PanelExtent {
+                layout: DiscreteLayout::UNPADDED,
+                categories: 4
+            }
+        );
+        assert_eq!(centers_over(&scale, 0.0, 220.0), vec![27.5, 82.5, 137.5, 192.5]);
+    }
+
+    /// The panel-extent form carries **padding** through to the axis, which is
+    /// the whole of GH #67: a padded no-range `BandScale` resolved over a panel
+    /// gives the same centers its marks get, where the layout's former
+    /// `(i + 0.5)·slot` fallback gave padding-blind ones. Four categories at
+    /// `padding_inner = padding_outer = 0.1` over [0, 400]: denom = 4.1,
+    /// step = 97.560975…, bandwidth = 87.804878…, start = 9.756097…, so the
+    /// first center sits at 53.658…, not the uniform model's 50.
+    #[test]
+    fn panel_extent_placement_honors_padding() {
+        let scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![0.0, 1.0],
+            DiscreteLayout::band(0.1, 0.1, DEFAULT_ALIGN),
+        );
+        let centers = centers_over(&scale, 0.0, 400.0);
+        let step = 400.0 / 4.1;
+        let expected: Vec<f64> = (0..4)
+            .map(|i| 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        assert_eq!(centers, expected);
+        let uniform: Vec<f64> = (0..4).map(|i| (i as f64 + 0.5) * 100.0).collect();
+        assert_ne!(centers, uniform, "padding must move the centers off the uniform slots");
     }
 
     /// A reversed explicit range `[hi, lo]` is passed through as-is: band centers
     /// descend, matching the mark placement (`scale_internal`).
     #[test]
-    fn explicit_band_centers_honor_reversed_range() {
+    fn explicit_range_placement_honors_reversed_range() {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
             vec![260.0, 40.0],
             DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
-        let centers = scale.explicit_band_centers().expect("explicit → Some");
+        let centers = centers_over(&scale, 0.0, 1.0);
         assert_eq!(centers, vec![232.5, 177.5, 122.5, 67.5]);
         for (cat, c) in ["a", "b", "c", "d"].iter().zip(&centers) {
             assert_eq!(scale.scale_internal(cat), Some(*c));
@@ -644,7 +707,7 @@ mod tests {
         assert_eq!(scale.range_pair(), [140.0, 360.0]);
         // The 220px extent survives the shift, so both centers move by exactly
         // `offset` and the bandwidth is unchanged: 110px step over [140, 360].
-        assert_eq!(scale.explicit_band_centers(), Some(vec![195.0, 305.0]));
+        assert_eq!(centers_over(&scale, 0.0, 1.0), vec![195.0, 305.0]);
         assert_eq!(scale.bandwidth(), 110.0);
     }
 
@@ -811,7 +874,10 @@ mod tests {
         );
         assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
-        assert_eq!(scale.explicit_band_centers(), None);
+        assert!(
+            matches!(scale.categorical_placement(), CategoricalPlacement::PanelExtent { .. }),
+            "a non-explicit range must carry the model, not absolute pixels"
+        );
     }
 
     /// `OrdinalScale::new` (the PyO3 constructor) with a `range=` kwarg
@@ -829,7 +895,10 @@ mod tests {
         .unwrap();
         assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
-        assert_eq!(scale.explicit_band_centers(), None);
+        assert!(
+            matches!(scale.categorical_placement(), CategoricalPlacement::PanelExtent { .. }),
+            "a non-explicit range must carry the model, not absolute pixels"
+        );
     }
 
     /// `OrdinalScale::new` without a `range=` kwarg matches old
@@ -840,7 +909,10 @@ mod tests {
         let scale = OrdinalScale::new(vec!["a".into(), "b".into()], None, 0.0).unwrap();
         assert!(!scale.range_provenance.range_is_user_set(), "old range_user_set was false");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
-        assert_eq!(scale.explicit_band_centers(), None);
+        assert!(
+            matches!(scale.categorical_placement(), CategoricalPlacement::PanelExtent { .. }),
+            "a non-explicit range must carry the model, not absolute pixels"
+        );
     }
 
     /// `with_explicit_range(true)` flips only the explicit-side answer: the
@@ -857,8 +929,11 @@ mod tests {
         .with_explicit_range(true);
         assert!(scale.range_provenance.range_is_user_set(), "range_is_user_set unaffected");
         assert!(scale.range_provenance.is_explicit_pixel());
-        // The explicit-side accessor is live: two bands over [0, 100].
-        assert_eq!(scale.explicit_band_centers(), Some(vec![25.0, 75.0]));
+        // The absolute-pixel placement is live: two bands over [0, 100].
+        assert_eq!(
+            scale.categorical_placement(),
+            CategoricalPlacement::Absolute(vec![25.0, 75.0])
+        );
     }
 
     /// `with_explicit_range(false)` is the default state `new_internal`

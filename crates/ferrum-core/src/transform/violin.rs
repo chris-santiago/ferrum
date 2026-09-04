@@ -380,6 +380,34 @@ pub(crate) fn apply_with_context(
     // which matches the standard violin convention.
     // Without panel context (e.g. tests calling `apply` directly) we fall back
     // to a sensible per-band default so the column is still populated.
+    //
+    // DIVERGENCE (2026-09-04, F-L04-03 / spec §4A, adjudicated in batch-C task 7):
+    // `panel_dim / n_groups` is the UNPADDED band. Every other ordinal mark width
+    // moved onto the resolved scale's padding-aware `ScaleKind::bandwidth()`, but
+    // this one cannot: transforms run *before* scale resolution
+    // (`prepare::prepare_render_inputs` transforms first, then resolves scales
+    // against a `[0, 1]` placeholder range, and only `scene_build` knows the real
+    // panel), and `TransformContext` carries `panel_pixel_size` + `named_outputs`
+    // — no scale, by construction of that ordering. So the divergence is stated
+    // rather than silent, and it is wider than padding alone: this formula is
+    // PANEL pixels over the BATCH's group count, while `ScaleKind::bandwidth()`
+    // is the SCALE's range over the SCALE's domain count (the "domain count, not
+    // batch count" invariant `render::marks::band_width` pins). All three axes
+    // of that difference are observable:
+    //   - padding — under `BandScale(padding_inner=p)`, violin polygons keep
+    //     their full-slot width while sibling bars/boxes narrow to `(1 − p)`;
+    //   - domain vs. batch — an explicit `domain=` carrying a category absent
+    //     from the data makes the siblings' band narrower than `panel/groups`,
+    //     diverging even at `p = 0`;
+    //   - range vs. panel — an explicit `range=` narrower (or wider) than the
+    //     plot area moves the siblings' band off `panel_dim` entirely, also at
+    //     `p = 0`.
+    // Default (auto-scale) output is unaffected: with no explicit scale the
+    // domain is the batch's groups, the range is the panel, and `p = 0`, so the
+    // two agree exactly. Closing it means giving the transform stage the
+    // *declared* scale (padding, domain and range are all spec-level values,
+    // unlike a resolved bandwidth), which is a TransformContext contract change,
+    // not a formula change here.
     let n_groups = groups.len().max(1);
     let band_pixels: f64 = if spec.horizontal {
         match ctx.panel_pixel_size {

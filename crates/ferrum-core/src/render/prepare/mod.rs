@@ -669,11 +669,13 @@ fn build_axis_input(
         tick_format: None, // already applied above
         tick_format_type: None,
         tick_projection,
-        // Explicit-range ordinal axes (GH #39 phase 2): carry the scale's absolute
-        // band centers so layout places tick labels/grid lines at the same pixels
-        // the marks get. `None` for continuous axes and for ordinal axes without an
-        // explicit range — the latter keeps `uniform_center`, byte-identical.
-        categorical_positions: scale.explicit_band_centers(),
+        // Categorical axes (F-L04-03, GH #67): carry the scale's own band
+        // placement so layout puts tick labels and grid lines on the same pixels
+        // the marks get. An explicit `range=` resolves to absolute pixels here; a
+        // panel-extent scale carries its d3 model instead, because this pass runs
+        // before layout against a `[0, 1]` placeholder range. `None` for
+        // continuous axes, which project through `tick_projection`.
+        categorical_placement: scale.categorical_placement(),
         overrides,
     })
 }
@@ -1035,7 +1037,7 @@ pub(crate) struct SecondaryYAxes {
 ///
 /// The scales are carried out because the secondary axes' post-config tick
 /// adjustments (`adjust_axis_ticks` / `apply_label_format_to_axis` /
-/// `sync_projected_fractions_to_tick_values`) run in
+/// `sync_tick_placement_to_tick_values`) run in
 /// `render::config_apply`'s pipeline, AFTER `axis_y2`'s config has been merged onto
 /// the axis inputs — and each of those needs the scale the axis was derived
 /// from. Without this the secondary axes had no scale to re-derive against,

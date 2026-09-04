@@ -692,7 +692,7 @@ pub(in crate::render) fn apply_axis_domain_config(
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};
-    use crate::scale::discrete::DiscreteLayout;
+    use crate::scale::discrete::{CategoricalPlacement, DiscreteLayout};
     use arrow::record_batch::RecordBatch;
     use crate::render::scale_resolve::ScaleKind;
     use crate::scale::linear::LinearScale;
@@ -850,7 +850,10 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
-        assert_eq!(scale.explicit_band_centers(), Some(vec![95.0, 205.0]));
+        assert_eq!(
+            scale.categorical_placement(),
+            Some(CategoricalPlacement::Absolute(vec![95.0, 205.0]))
+        );
         assert_eq!(scale.bandwidth(), Some(110.0));
     }
 
@@ -868,16 +871,20 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
-        assert_eq!(scale.explicit_band_centers(), Some(vec![205.0, 95.0]));
+        assert_eq!(
+            scale.categorical_placement(),
+            Some(CategoricalPlacement::Absolute(vec![205.0, 95.0]))
+        );
         assert_eq!(scale.bandwidth(), Some(110.0));
     }
 
-    /// A Band scale falling back to the panel extent reports `None` from the
-    /// explicit-range accessor even though its range is numerically identical
-    /// to what an explicit range spanning the same pixels would be —
-    /// explicitness is recorded at construction, not inferred from the numbers.
+    /// A Band scale falling back to the panel extent carries the MODEL rather
+    /// than absolute pixels, even though its range is numerically identical to
+    /// what an explicit range spanning the same pixels would be — explicitness
+    /// is recorded at construction, not inferred from the numbers, and the
+    /// fallback's pixels are a pre-layout placeholder that must not be trusted.
     #[test]
-    fn band_scale_fallback_range_reports_no_explicit_centers() {
+    fn band_scale_fallback_range_carries_the_model_not_pixels() {
         let (range, explicit) = band_point_pixel_range(None, (0.0, 500.0));
         assert!(!explicit);
         let scale = ScaleKind::Ordinal(
@@ -888,9 +895,15 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
-        assert_eq!(scale.explicit_band_centers(), None);
-        // The band geometry itself is unaffected by provenance: only the
-        // explicit-range ACCESSOR is gated.
+        assert_eq!(
+            scale.categorical_placement(),
+            Some(CategoricalPlacement::PanelExtent {
+                layout: DiscreteLayout::UNPADDED,
+                categories: 2
+            })
+        );
+        // The band geometry itself is unaffected by provenance: only which
+        // FORM the placement takes is.
         assert_eq!(scale.bandwidth(), Some(250.0));
     }
 
@@ -912,12 +925,16 @@ mod tests {
             )
             .with_explicit_range(explicit),
         );
-        assert_eq!(scale.explicit_band_centers(), Some(vec![60.0, 160.0]));
+        assert_eq!(
+            scale.categorical_placement(),
+            Some(CategoricalPlacement::Absolute(vec![60.0, 160.0]))
+        );
         assert_eq!(scale.bandwidth(), Some(100.0));
     }
 
-    /// A non-ordinal (Linear) scale always reports `None` from both band
-    /// accessors — they are gated to ordinal positional scales only.
+    /// A non-ordinal (Linear) scale reports `None` from both band accessors —
+    /// they are gated to ordinal positional scales only, continuous axes
+    /// placing their ticks through `tick_fractions` instead.
     #[test]
     fn linear_scale_never_reports_band_geometry() {
         let scale = ScaleKind::Linear(crate::scale::linear::LinearScale::new_internal(
@@ -926,7 +943,7 @@ mod tests {
             false,
             false,
         ));
-        assert_eq!(scale.explicit_band_centers(), None);
+        assert_eq!(scale.categorical_placement(), None);
         assert_eq!(scale.bandwidth(), None);
     }
 

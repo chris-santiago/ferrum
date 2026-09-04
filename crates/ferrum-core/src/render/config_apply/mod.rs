@@ -11,7 +11,10 @@
 //!    6. `axis_y2` slot fill, for every secondary y axis.
 //!    7. `tick_extra` / `tick_min_step` tick adjustment against the provisional scales.
 //!    8. `label_format` re-formatting of the tick labels.
-//!    9. Projected-fraction re-sync for explicit `tick_values`.
+//!    9. Tick-placement re-sync for explicit `tick_values`: repairs whichever
+//!       carrier the axis holds (the continuous projected-fraction carrier, or
+//!       the categorical band-center placement when its length no longer
+//!       matches the override) so layout never indexes a stale vec.
 //!   10. Passes 7–9 again, for every secondary y axis.
 //!   11. Color `domain`/`range` overrides on the resolved color scale (11a),
 //!       then the categorical legend-entry rebuild from that new domain (11b).
@@ -245,10 +248,10 @@ fn fill_axis_slots_specific_before_shared(
 /// `tick_extra` / `tick_min_step` (B5 unit 2) adjust the generated ticks
 /// against the provisional scale; `apply_label_format_to_axis` re-formats the
 /// labels (it requires the axis config to be set first);
-/// `sync_projected_fractions_to_tick_values` recomputes the projected
-/// fractions from explicit `tick_values` so the carrier stays index-aligned
-/// with the new labels. No-ops when none of those fields is set, so default
-/// output is byte-identical.
+/// `sync_tick_placement_to_tick_values` re-pairs the axis's placement carrier
+/// (continuous projection or categorical placement) with those new labels, so
+/// neither is left index-addressed against a stale length. No-ops when none of
+/// those fields is set, so default output is byte-identical.
 ///
 /// The non-ordinal y labels/fractions were reversed in prepare, so the raw
 /// values are reversed in lockstep. The EXPLICIT labels are not reversed
@@ -292,8 +295,8 @@ fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickR
     prepare::adjust_axis_ticks(&mut axes.y, &scales.y, y_tc, y_reversed);
     apply_label_format_to_axis(&mut axes.x, &scales.x, x_tc, false);
     apply_label_format_to_axis(&mut axes.y, &scales.y, y_tc, y_reversed);
-    sync_projected_fractions_to_tick_values(&mut axes.x, &scales.x);
-    sync_projected_fractions_to_tick_values(&mut axes.y, &scales.y);
+    sync_tick_placement_to_tick_values(&mut axes.x, &scales.x);
+    sync_tick_placement_to_tick_values(&mut axes.y, &scales.y);
     // The SAME three post-config tick adjustments for every secondary y axis
     // (spec §4.9, extended 2026-09-02). `axis_y2`'s `label_format`,
     // `label_format_type`, `tick_extra`, `tick_min_step` and `values` reached
@@ -322,7 +325,7 @@ fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickR
         let reversed = !matches!(scale, scale_resolve::ScaleKind::Ordinal(_));
         prepare::adjust_axis_ticks(secondary, scale, tc, reversed);
         apply_label_format_to_axis(secondary, scale, tc, reversed);
-        sync_projected_fractions_to_tick_values(secondary, scale);
+        sync_tick_placement_to_tick_values(secondary, scale);
     }
 }
 
@@ -1014,30 +1017,66 @@ fn apply_label_format_to_axis(
     );
 }
 
-/// Continuous-axis scale projection: when `tick_values_override` replaced the
-/// axis labels with explicit data values, recompute the `tick_projection`'s
-/// `major` fractions from those values via the scale so the carrier matches the
-/// new labels. Only acts on continuous axes that already carry a projection
-/// (categorical axes have `None` and keep uniform-slot placement). When the
-/// scale yields no fractions (e.g. ordinal), the carrier is cleared so layout
-/// falls back to uniform slots rather than indexing a stale vec.
-fn sync_projected_fractions_to_tick_values(
+/// Re-pair the axis's tick-placement carrier with its labels after a
+/// `tick_values` override replaced them wholesale (`apply_label_format_to_axis`,
+/// above).
+///
+/// An [`AxisInput`](crate::layout::AxisInput) carries at most one
+/// index-addressed placement carrier beside `tick_labels` — a continuous
+/// `tick_projection` or a categorical `categorical_placement` — and
+/// `layout_*_axis` reads it as `carrier[i]` for `i` over `tick_labels`. An
+/// explicit `tick_values` list replaces `tick_labels` at an arbitrary length,
+/// so BOTH carriers go stale the same way. They are repaired in one function
+/// rather than two siblings on purpose: F-L04-03 (GH #67) added the categorical
+/// carrier with the identical hazard, and the fact that only the continuous one
+/// had a sync is what let a stale-index panic ship (batch-C T7 review).
+///
+/// - **Continuous**: recompute `major` from the explicit values via the scale.
+///   When the scale yields no fractions (degenerate domain), clear the carrier.
+///   The minor carrier is dropped in lockstep — empty `value_fractions` implies
+///   an axis with no continuum, so its minors are already empty.
+/// - **Categorical**: whether there is anything to re-pair depends on whether
+///   the override supplied one label per category. `apply_label_format_to_axis`
+///   has already replaced `tick_labels` with the override's values, so at this
+///   point `tick_labels.len()` IS the override's length.
+///   - **Equal count** (`categorical_placement.len() == tick_labels.len()`):
+///     the caller supplied exactly one relabel per category, so the pairing
+///     between position `i` and category `i` still holds — keep the carrier
+///     and let the (relabeled) tick land on its aligned center. For an
+///     explicit `range=` scale this restores the pre-F-L04-03 (GH #67) band
+///     centers exactly; for a padded no-`range=` scale it is a deliberate
+///     improvement in this batch's own direction (relabeled ticks land on the
+///     aligned centers rather than uniform slots).
+///   - **Mismatched count**: the values have no correspondence to the scale's
+///     category order (there is no category `i` for a label the caller never
+///     paired one-to-one) — clear the carrier and let layout fall back to
+///     uniform slots. That is the pre-F-L04-03 outcome for a mismatched-length
+///     override on a categorical axis.
+///
+/// Either way the rule is this function's original one: never leave layout
+/// indexing a stale vec. `AxisInput`'s debug canary
+/// (`debug_assert_placement_invariants`) and layout's release-side
+/// `paired_band_centers` guard both invariants regardless of which branch
+/// this function takes.
+fn sync_tick_placement_to_tick_values(
     axis: &mut crate::layout::AxisInput,
     scale: &scale_resolve::ScaleKind,
 ) {
-    if axis.tick_projection.is_none() {
-        return;
-    }
     let Some(values) = axis.overrides.tick_values.clone() else {
         return;
     };
+    if axis
+        .categorical_placement
+        .as_ref()
+        .is_some_and(|placement| placement.len() != axis.tick_labels.len())
+    {
+        axis.categorical_placement = None;
+    }
+    if axis.tick_projection.is_none() {
+        return;
+    }
     let fractions = scale.value_fractions(&values);
     if fractions.is_empty() {
-        // Scale yields no fractions (e.g. ordinal / degenerate domain): clear the
-        // carrier so layout falls back to uniform slots rather than indexing a
-        // stale vec. The minor carrier is dropped in lockstep — empty
-        // `value_fractions` implies an axis with no continuum, so its minors are
-        // already empty.
         axis.tick_projection = None;
     } else if let Some(proj) = axis.tick_projection.as_mut() {
         proj.major = fractions;

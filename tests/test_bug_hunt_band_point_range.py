@@ -23,17 +23,15 @@ Known divergences and their pins:
   ``bandwidth()``, not the unpadded ``extent / n``. (``bar::build_polar``'s
   angular band is a deliberate, documented exception -- it stays
   batch-counted, a spec §3 non-goal with no pixel range or resolved
-  ordinal scale behind it, out of scope for this file entirely.) What
-  remains genuinely open until batch-C T7 is narrower: a
-  padded band/point scale rendered with NO explicit ``range=`` places marks
-  at the d3 centers but the categorical axis still resolves tick placement
-  via ``uniform_center`` (gated on range-explicitness), so labels and marks
-  can diverge by several pixels for that one case.
+  ordinal scale behind it, out of scope for this file entirely.) As of
+  batch-C T7, the last piece has landed too: a padded band/point scale
+  rendered with NO explicit ``range=`` now resolves tick placement through
+  the same provenance-aware ``CategoricalPlacement`` carrier the marks use
+  (``crates/ferrum-core/src/scale/discrete.rs``), so axis labels and bar
+  centers agree for that case as well.
   ``test_padded_no_range_band_scale_axis_labels_align_with_bar_centers``
-  below is an ``xfail(strict=True)`` forward pin for exactly that transient:
-  it will XPASS -- and strict mode will turn the XPASS into a failure --
-  the moment T7 collapses the gate, forcing that task to flip the marker
-  rather than ship the fix silently.
+  below, formerly an ``xfail(strict=True)`` forward pin for that transient,
+  is now a plain regression pin for the fixed alignment.
 """
 
 from __future__ import annotations
@@ -1017,37 +1015,27 @@ def test_point_scale_getters_round_trip_all_fields():
 
 
 # ---------------------------------------------------------------------------
-# GH #67 centers-gate transient (forward pin for batch-C T7)
+# GH #67 centers-gate collapse (batch-C T7 regression pin)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GH #67 centers-gate transient: a padded BandScale rendered with no "
-        "explicit range= places marks at the d3 band centers (batch-C T5) "
-        "but the categorical axis still resolves tick placement via "
-        "uniform_center, gated on range-explicitness. Batch-C T7 collapses "
-        "that gate so axis and marks share one center formula; this xfail "
-        "must flip to a real assertion (not be silently deleted) the "
-        "moment T7 lands, since strict=True turns the resulting XPASS "
-        "into a failure."
-    ),
-)
 def test_padded_no_range_band_scale_axis_labels_align_with_bar_centers():
-    """Axis tick labels should align with bar centers for a padded BandScale
-    with no explicit range=, the same coherence contract already pinned
-    (under an explicit range=) by
-    ``test_x_axis_tick_labels_align_with_band_centers`` in
-    ``tests/test_regression_band_point_range.py``.
+    """Axis tick labels align with bar centers for a padded BandScale with no
+    explicit range=, the same coherence contract already pinned (under an
+    explicit range=) by ``test_x_axis_tick_labels_align_with_band_centers``
+    in ``tests/test_regression_band_point_range.py``.
 
-    Reproduced today (post T5's S3 placement repair): a 4-category
-    ``BandScale(padding=0.1)`` with no range=, at width=600, renders bar
+    Regression pin (batch-C T7, F-L04-03): before T7, a 4-category
+    ``BandScale(padding=0.1)`` with no range=, at width=600, rendered bar
     centers [130.0975, 257.9575, 385.8175, 513.6775] against axis tick
-    centers [125.303, 256.359, 387.416, 518.472] -- the S3 repair narrowed
-    the divergence from ~11px to ~1.6-4.8px per label, but it's still well
-    outside this test's 0.5px tolerance, so this xfails for the intended
-    reason (centers diverge) rather than a parse failure.
+    centers [125.303, 256.359, 387.416, 518.472] -- categorical tick
+    placement fell back to ``uniform_center`` (gated on range-explicitness)
+    while marks placed at the d3 band centers, diverging by ~1.6-4.8px per
+    label. T7 collapsed that gate so both the axis and the marks resolve
+    centers through the same provenance-aware ``CategoricalPlacement``
+    carrier (``crates/ferrum-core/src/scale/discrete.rs``), so this now
+    asserts real alignment within the same 0.5px tolerance the explicit-range
+    sibling test uses, instead of xfailing on the pre-fix divergence.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
     chart = (

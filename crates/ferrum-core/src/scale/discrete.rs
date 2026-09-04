@@ -97,6 +97,8 @@
 //! The batch's docs task carries the dated reconciliation note in
 //! `ferrum-spec.md`.
 
+use std::borrow::Cow;
+
 /// d3's default `align` for band and point scales: leftover pixels (when the
 /// denominator clamp creates any) are split evenly before and after.
 pub(crate) const DEFAULT_ALIGN: f64 = 0.5;
@@ -215,6 +217,70 @@ impl DiscreteLayout {
                     first: start,
                 }
             }
+        }
+    }
+}
+
+/// How a categorical axis learns the pixels its categories are drawn at
+/// (F-L04-03, GH #67).
+///
+/// A discrete scale's centers are always [`DiscreteGeometry::position`] — one
+/// model, shared with the marks. What differs is *which pixel interval* that
+/// geometry resolves over, and that is decided by where the scale's range came
+/// from:
+///
+/// - **[`Absolute`](Self::Absolute)** — the user supplied `range=`. That range
+///   is chart-absolute by design (#39 phase 2), so the centers are already
+///   resolved when the scale is built and travel to layout as pixels.
+/// - **[`PanelExtent`](Self::PanelExtent)** — the range is the plot area, which
+///   is not known when the axis input is built: the provisional scale pass
+///   resolves against `[0, 1]` (`prepare::prepare_render_inputs`) precisely
+///   because layout has not run yet. So the *model* travels instead, and the
+///   axis resolves it against the panel rect. That rect is bit-for-bit the
+///   interval `scene_build::resolve_panel_scales` hands the final mark scale
+///   (`(plot_area.x, plot_area.x + plot_area.w)`), so labels land on mark
+///   centers exactly, not approximately.
+///
+/// This enum *is* the collapse of #67's centers gate. Before it, only the first
+/// case had a carrier; the second fell back to layout's `(i + 0.5)·slot`, a
+/// symmetric model blind to `padding_inner`/`padding_outer`/`align` — so a
+/// padded no-range `BandScale` drew its bars from this module and its tick
+/// labels from a different model, and the two disagreed by pixels (~4.8px at
+/// `padding = 0.1` over four categories on a 600px canvas).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CategoricalPlacement {
+    /// Chart-absolute band centers, one per domain category in order.
+    Absolute(Vec<f64>),
+    /// The scale's d3 model plus its domain size, to be resolved against the
+    /// panel's pixel interval at layout time.
+    PanelExtent { layout: DiscreteLayout, categories: usize },
+}
+
+impl CategoricalPlacement {
+    /// The absolute center pixel of every category, in domain order, over the
+    /// axis's pixel interval `[lo, hi]`.
+    ///
+    /// `lo`/`hi` are ignored by [`Absolute`](Self::Absolute), whose pixels are
+    /// already chart-absolute — borrowed rather than rebuilt, so an
+    /// explicit-range axis allocates nothing here.
+    pub(crate) fn centers(&self, lo: f64, hi: f64) -> Cow<'_, [f64]> {
+        match self {
+            CategoricalPlacement::Absolute(centers) => Cow::Borrowed(centers),
+            CategoricalPlacement::PanelExtent { layout, categories } => {
+                let g = layout.geometry(*categories, lo, hi);
+                Cow::Owned((0..*categories).map(|i| g.position(i)).collect())
+            }
+        }
+    }
+
+    /// How many centers [`centers`](Self::centers) yields — the scale's domain
+    /// size, known without a pixel interval. Lets the placement/label pairing
+    /// invariant be checked before any geometry is resolved
+    /// (`AxisInput::debug_assert_placement_invariants`).
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            CategoricalPlacement::Absolute(centers) => centers.len(),
+            CategoricalPlacement::PanelExtent { categories, .. } => *categories,
         }
     }
 }

@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::geometry::{Axis1D, Rect};
+use crate::scale::discrete::CategoricalPlacement;
 use palette::Srgba;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -361,19 +362,29 @@ pub struct AxisInput {
     /// uniform-slot placement byte-identically. Presence of this field — not the
     /// scale type — drives the placement branch. See [`TickProjection`].
     pub tick_projection: Option<TickProjection>,
-    /// Absolute band-center pixels for a **categorical** axis whose ordinal scale
-    /// carries an explicit pixel range (GH #39 phase 2, band-geometry
-    /// unification). One entry per category in [`tick_labels`](Self::tick_labels)
-    /// order; each is the same pixel the mark for that category is placed at, so
-    /// tick labels and grid lines agree with the marks (spec §7). `Some` only for
-    /// an explicit-range ordinal axis; `None` for continuous axes (which use
-    /// [`tick_projection`](Self::tick_projection)) and for ordinal axes without an
-    /// explicit range (which keep the `uniform_center` slot placement,
-    /// byte-identically). Mutually exclusive with `tick_projection` — an ordinal
-    /// scale yields no projection. Unlike projected fractions, these are absolute
-    /// pixels used **directly** by `layout_*_axis`, not mapped through the
-    /// panel-extent padding inset.
-    pub categorical_positions: Option<Vec<f64>>,
+    /// How a **categorical** axis places its categories: the resolved ordinal
+    /// scale's own band geometry, so tick labels and grid lines land on the
+    /// pixels the marks land on (spec §7, F-L04-03/GH #67). `Some` for every
+    /// ordinal positional scale — carrying either chart-absolute centers (a
+    /// user-supplied `range=`) or the d3 model to resolve against this panel's
+    /// rect (the panel-extent fallback); see [`CategoricalPlacement`].
+    ///
+    /// `None` for continuous axes, which place through
+    /// [`tick_projection`](Self::tick_projection), and for the scale-less
+    /// [`compute_layout`](crate::layout::binding::compute_layout) binding, which
+    /// is handed bare tick-label strings and has no scale to ask — the one
+    /// remaining consumer of the uniform-slot fallback. Mutually exclusive with
+    /// `tick_projection`: an ordinal scale yields no projection. Unlike
+    /// projected fractions, the resolved centers are absolute pixels used
+    /// **directly** by `layout_*_axis`, not mapped through the panel-extent
+    /// padding inset.
+    ///
+    /// The mutual exclusivity with `tick_projection`, and this vec's 1:1
+    /// pairing with `tick_labels`, are enforced by
+    /// [`debug_assert_placement_invariants`](Self::debug_assert_placement_invariants)
+    /// at both `layout_*_axis` entry points (archaeology BR-3 asked for exactly
+    /// this hardening).
+    pub(crate) categorical_placement: Option<CategoricalPlacement>,
     /// Per-axis style/positioning overrides (B5). See [`AxisStyleOverrides`].
     pub overrides: AxisStyleOverrides,
 }
@@ -420,12 +431,50 @@ impl AxisInput {
             tick_format: None,
             tick_format_type: None,
             tick_projection: None,
-            categorical_positions: None,
+            categorical_placement: None,
             overrides: AxisStyleOverrides {
                 label_angle,
                 ..AxisStyleOverrides::default()
             },
         }
+    }
+
+    /// Assert the two tick-placement invariants `layout_*_axis` relies on.
+    ///
+    /// **One carrier.** An axis carries a continuous projection or a
+    /// categorical placement, never both. The two describe the same thing
+    /// (where tick `i` goes) in incompatible terms, and `layout_*_axis`
+    /// resolves the conflict by silently preferring the projection — so a
+    /// producer that set both would get a plausible layout with the wrong
+    /// ticks. The exclusivity is structural (a resolved scale is continuous or
+    /// ordinal, and `tick_fractions` is empty for the ordinal kinds).
+    ///
+    /// **Paired lengths.** The categorical carrier is indexed by tick position,
+    /// so it must hold exactly one center per entry in `tick_labels`. It is
+    /// sized by the scale's DOMAIN, while `tick_labels` can be replaced
+    /// wholesale by an explicit `tick_values` override of any length — the
+    /// staleness `config_apply::sync_tick_placement_to_tick_values` clears the
+    /// carrier for. Asserting it here is the canary for a future producer that
+    /// forgets to (a stale carrier used to index out of bounds and abort the
+    /// render across the PyO3 boundary; `paired_band_centers` is the release-
+    /// build half of the same guard).
+    ///
+    /// Both are bug canaries, not runtime branches: debug builds trip, release
+    /// builds pay nothing.
+    fn debug_assert_placement_invariants(&self) {
+        debug_assert!(
+            !(self.tick_projection.is_some() && self.categorical_placement.is_some()),
+            "an axis cannot carry both a continuous tick projection and a categorical placement"
+        );
+        debug_assert!(
+            self.categorical_placement
+                .as_ref()
+                .is_none_or(|p| p.len() == self.tick_labels.len()),
+            "categorical placement holds {:?} centers for {} tick labels — layout indexes the \
+             centers by tick position, so they must be paired",
+            self.categorical_placement.as_ref().map(|p| p.len()),
+            self.tick_labels.len()
+        );
     }
 
     /// This axis's tick-mark length: its own override, else the theme's.
@@ -809,6 +858,23 @@ fn project_tick_positions(input: &AxisInput, base_range: (f64, f64)) -> Option<V
         proj.padding_frac,
         NonFinitePolicy::DropAll,
     )
+}
+
+/// Categorical band centers accepted for index-addressed placement: `Some` only
+/// when the carrier holds exactly one center per tick label.
+///
+/// `layout_*_axis` reads `centers[i]` for every `i` over `tick_labels`, and the
+/// carrier is sized by the scale's DOMAIN, so a producer that replaced the
+/// labels without re-pairing the carrier (an explicit `tick_values` override is
+/// the reachable spelling — see
+/// `config_apply::sync_tick_placement_to_tick_values`) would index out of
+/// bounds and abort the render across the PyO3 boundary. Debug builds trip
+/// [`AxisInput::debug_assert_placement_invariants`] first; this is the release
+/// half, and it degrades to the uniform-slot placement — the same outcome
+/// clearing the carrier produces — rather than placing labels on centers that
+/// are not theirs.
+fn paired_band_centers(centers: Option<&[f64]>, tick_count: usize) -> Option<&[f64]> {
+    centers.filter(|c| c.len() == tick_count)
 }
 
 /// Smallest absolute gap between consecutive positions, or `None` when there are
@@ -1332,6 +1398,7 @@ pub fn layout_y_axis(
     tick_size: f64,
     metrics: &dyn TextMetrics,
 ) -> (AxisLayout, Option<AxisLabelWarning>) {
+    input.debug_assert_placement_invariants();
     let n = input.tick_labels.len();
     let slot_h = if n > 0 { panel_area.h / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (top → bottom, in pixel order): slot `i`'s center
@@ -1344,11 +1411,20 @@ pub fn layout_y_axis(
         input,
         (panel_area.y + panel_area.h, panel_area.y),
     );
-    // Explicit-range ordinal axes (GH #39 phase 2): place each tick at the
-    // scale's absolute band center — the same pixel its mark gets — so labels and
-    // grid lines agree with the marks. Absent (`None`) → the uniform-slot formula,
-    // byte-identical to before.
-    let band_centers = input.categorical_positions.as_deref();
+    // Categorical axes (F-L04-03, GH #67): place each tick at the scale's own
+    // band center — the same pixel its mark gets — so labels and grid lines agree
+    // with the marks. `slot_axis` is bit-for-bit the pixel interval
+    // `scene_build::resolve_panel_scales` gives this panel's mark scales (ordinal
+    // y is NOT inverted — see `scale_resolve::axis_pixel_range`), so a
+    // panel-extent placement resolves to those same centers exactly. Absent
+    // (`None`) → the uniform-slot formula, for the scale-less `compute_layout`
+    // binding — and so does a carrier that is not paired 1:1 with the labels
+    // (see `paired_band_centers`).
+    let resolved_centers = input
+        .categorical_placement
+        .as_ref()
+        .map(|p| p.centers(slot_axis.lo, slot_axis.hi));
+    let band_centers = paired_band_centers(resolved_centers.as_deref(), n);
     let tick_position = |i: usize| -> f64 {
         match (&projected, band_centers) {
             (Some(px), _) => px[i],
@@ -1358,9 +1434,9 @@ pub fn layout_y_axis(
     };
     // Per-tick vertical budget used to judge whether a rotated label still
     // collides with its neighbor — the y-dimension transpose of
-    // `layout_x_axis`'s `cascade_slot_w`. Continuous/explicit-range axes use
+    // `layout_x_axis`'s `cascade_slot_w`. Continuous and categorical axes use
     // the minimum adjacent gap between projected/band-center positions (the
-    // tightest pair, worst case); uniform categorical axes use `slot_h`.
+    // tightest pair, worst case); the scale-less binding uses `slot_h`.
     let cascade_slot_h = match (&projected, band_centers) {
         (Some(px), _) => min_adjacent_gap(px).unwrap_or(slot_h),
         (None, Some(centers)) => min_adjacent_gap(centers).unwrap_or(slot_h),
@@ -2468,6 +2544,7 @@ pub fn layout_x_axis(
     tick_size: f64,
     metrics: &dyn TextMetrics,
 ) -> (AxisLayout, Option<AxisLabelWarning>) {
+    input.debug_assert_placement_invariants();
     let n = input.tick_labels.len();
     let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (left → right, in pixel order): slot `i`'s center
@@ -2478,11 +2555,19 @@ pub fn layout_x_axis(
     // axes (no projected fractions) keep the uniform-slot center. The closure
     // resolves a tick's position by index against whichever placement applies.
     let projected = project_tick_positions(input, (panel_area.x, panel_area.x + panel_area.w));
-    // Explicit-range ordinal axes (GH #39 phase 2): place each tick at the scale's
-    // absolute band center — the same pixel its mark gets — so labels and grid
-    // lines agree with the marks. Absent (`None`) → the uniform-slot formula,
-    // byte-identical to before.
-    let band_centers = input.categorical_positions.as_deref();
+    // Categorical axes (F-L04-03, GH #67): place each tick at the scale's own
+    // band center — the same pixel its mark gets — so labels and grid lines
+    // agree with the marks. `slot_axis` is bit-for-bit the pixel interval
+    // `scene_build::resolve_panel_scales` gives this panel's mark scales, so a
+    // panel-extent placement resolves to those same centers exactly. Absent
+    // (`None`) → the uniform-slot formula, for the scale-less `compute_layout`
+    // binding — and so does a carrier that is not paired 1:1 with the labels
+    // (see `paired_band_centers`).
+    let resolved_centers = input
+        .categorical_placement
+        .as_ref()
+        .map(|p| p.centers(slot_axis.lo, slot_axis.hi));
+    let band_centers = paired_band_centers(resolved_centers.as_deref(), n);
     let tick_position = |i: usize| -> f64 {
         match (&projected, band_centers) {
             (Some(px), _) => px[i],
@@ -2491,12 +2576,13 @@ pub fn layout_x_axis(
         }
     };
     // The collision cascade judges label fit against the available horizontal
-    // budget per tick. For uniform (categorical) axes that is `slot_w`. For
-    // continuous axes the spacing is non-uniform (log/pow/symlog), so use the
+    // budget per tick. Without a scale to ask (`compute_layout`) that is `slot_w`.
+    // For continuous axes the spacing is non-uniform (log/pow/symlog), so use the
     // *minimum* adjacent gap between projected positions — the worst case — to
     // avoid under-counting collisions where ticks bunch toward one end.
-    // An explicit-range ordinal axis packs its bands into `[a, b]`, so the per-tick
-    // budget is the band step, not the full-panel `slot_w` — use the min adjacent
+    // A categorical axis's bands may pack into a sub-interval (an explicit
+    // `range=`) or spread by padding, so the per-tick budget is the band step,
+    // not the full-panel `slot_w` — use the min adjacent
     // gap between band centers so label collisions are judged against the true
     // (tighter) spacing.
     let cascade_slot_w = match (&projected, band_centers) {
@@ -2686,6 +2772,7 @@ pub fn layout_x_axis(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scale::discrete::DiscreteLayout;
 
     /// Test helper: `AxisInput::new` plus the theme-default fold
     /// `AxesInput::apply_show_defaults` performs in production, so per-axis
@@ -3402,78 +3489,180 @@ mod tests {
         assert!((title.angle - (-90.0)).abs() < 1e-9);
     }
 
-    // ── explicit-range ordinal band centers (GH #39 phase 2) ────────────────
+    // ── categorical band placement (GH #39 phase 2, GH #67) ─────────────────
 
-    /// When `categorical_positions` is set (an explicit-range ordinal axis), the
-    /// x-axis places each tick at the absolute band center — NOT the panel-uniform
-    /// slot center. Discriminating: over panel_area `x=100, w=300` the uniform
-    /// slots would be 137.5 / 212.5 / 287.5 / 362.5, far from the band centers.
+    /// The four categories every placement row below lays out.
+    fn four_cat_labels() -> Vec<String> {
+        vec!["a".into(), "b".into(), "c".into(), "d".into()]
+    }
+
+    /// The panel every placement row lays out against: `x = 100, w = 300`
+    /// (uniform slots 137.5 / 212.5 / 287.5 / 362.5) and `y = 50, h = 200`
+    /// (uniform slots 75 / 125 / 175 / 225). Both dimensions are deliberately
+    /// unlike the absolute centers below, so an axis that ignored its placement
+    /// could not accidentally agree.
+    const PLACEMENT_PANEL: Rect = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+
+    /// An `Absolute` placement (an explicit-range ordinal axis) puts each tick
+    /// on the scale's own band center, NOT on the panel-uniform slot center.
     #[test]
-    fn x_axis_uses_categorical_positions_when_present() {
-        let mut input = axis_input(
-            AxisOrient::Bottom,
-            None,
-            vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            None,
-        );
-        input.categorical_positions = Some(vec![67.5, 122.5, 177.5, 232.5]);
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+    fn x_axis_uses_absolute_placement_when_present() {
+        let mut input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
+        input.categorical_placement =
+            Some(CategoricalPlacement::Absolute(vec![67.5, 122.5, 177.5, 232.5]));
         let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
     }
 
-    /// Without `categorical_positions` (the default `None`), the x-axis keeps the
-    /// uniform-slot formula, byte-identical to before this seam.
+    /// A `PanelExtent` placement resolves its d3 model against THIS panel — the
+    /// half of GH #67 the axis owns. Padded, the ticks land off the uniform
+    /// slots (`padding_inner = padding_outer = 0.1` over 300px: denom 4.1,
+    /// step 73.17…, first center 140.24… vs the uniform 137.5); unpadded, the
+    /// same code path must reproduce the uniform slots, which is what keeps
+    /// every default categorical golden byte-identical.
     #[test]
-    fn x_axis_falls_back_to_uniform_center_without_categorical_positions() {
-        let input = axis_input(
-            AxisOrient::Bottom,
-            None,
-            vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            None,
-        );
-        assert!(input.categorical_positions.is_none());
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+    fn x_axis_resolves_panel_extent_placement_against_this_panel() {
         let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let positions = |layout| {
+            let mut input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
+            input.categorical_placement =
+                Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
+            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+            axis.ticks.iter().map(|t| t.position).collect::<Vec<f64>>()
+        };
+
+        let step = 300.0 / 4.1;
+        let padded_expected: Vec<f64> = (0..4)
+            .map(|i| 100.0 + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        assert_eq!(positions(DiscreteLayout::band(0.1, 0.1, 0.5)), padded_expected);
+
+        assert_eq!(
+            positions(DiscreteLayout::UNPADDED),
+            vec![137.5, 212.5, 287.5, 362.5],
+            "the unpadded model must still reduce to the uniform slots"
+        );
+    }
+
+    /// Without a placement (the scale-less `compute_layout` binding, which is
+    /// handed bare label strings), the x-axis keeps the uniform-slot formula.
+    #[test]
+    fn x_axis_falls_back_to_uniform_center_without_a_placement() {
+        let input = axis_input(AxisOrient::Bottom, None, four_cat_labels(), None);
+        assert!(input.categorical_placement.is_none());
+        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![137.5, 212.5, 287.5, 362.5]);
     }
 
-    /// The y-axis honors `categorical_positions` too — ordinal y is NOT reversed,
-    /// so band centers map to labels in domain order (top → bottom). Discriminating
-    /// against the panel-uniform slots (75 / 125 / 175 / 225 over `y=50, h=200`).
+    /// The y-axis honors an `Absolute` placement too — ordinal y is NOT
+    /// reversed, so band centers map to labels in domain order (top → bottom).
     #[test]
-    fn y_axis_uses_categorical_positions_when_present() {
-        let mut input = axis_input(
-            AxisOrient::Left,
-            None,
-            vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            None,
-        );
-        input.categorical_positions = Some(vec![67.5, 122.5, 177.5, 232.5]);
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+    fn y_axis_uses_absolute_placement_when_present() {
+        let mut input = axis_input(AxisOrient::Left, None, four_cat_labels(), None);
+        input.categorical_placement =
+            Some(CategoricalPlacement::Absolute(vec![67.5, 122.5, 177.5, 232.5]));
         let m = mock(10.0);
-        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (axis, _) = layout_y_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
     }
 
-    /// Without `categorical_positions`, the y-axis keeps uniform-slot placement.
+    /// The y transpose of the panel-extent row: the model resolves against the
+    /// panel's vertical interval, top → bottom, and reduces to the uniform
+    /// slots when unpadded.
     #[test]
-    fn y_axis_falls_back_to_uniform_center_without_categorical_positions() {
-        let input = axis_input(
-            AxisOrient::Left,
-            None,
-            vec!["a".into(), "b".into(), "c".into(), "d".into()],
-            None,
-        );
-        assert!(input.categorical_positions.is_none());
-        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+    fn y_axis_resolves_panel_extent_placement_against_this_panel() {
         let m = mock(10.0);
-        let (axis, _) = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let positions = |layout| {
+            let mut input = axis_input(AxisOrient::Left, None, four_cat_labels(), None);
+            input.categorical_placement =
+                Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
+            let (axis, _) = layout_y_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 4.0, &m);
+            axis.ticks.iter().map(|t| t.position).collect::<Vec<f64>>()
+        };
+
+        let step = 200.0 / 4.1;
+        let padded_expected: Vec<f64> = (0..4)
+            .map(|i| 50.0 + 0.1 * step + step * 0.9 / 2.0 + i as f64 * step)
+            .collect();
+        assert_eq!(positions(DiscreteLayout::band(0.1, 0.1, 0.5)), padded_expected);
+
+        assert_eq!(
+            positions(DiscreteLayout::UNPADDED),
+            vec![75.0, 125.0, 175.0, 225.0],
+            "the unpadded model must still reduce to the uniform slots"
+        );
+    }
+
+    /// The collision cascade judges label fit against the PLACEMENT's band
+    /// step, not the panel's uniform slot — so a scale whose categories are
+    /// spaced wider than `panel/n` gets a looser budget, and one spaced tighter
+    /// gets a tighter one.
+    ///
+    /// This is the behavior change F-L04-03 carried beyond tick placement, and
+    /// it is percent-scale on a non-default scale (batch-C T7 review): over four
+    /// categories on this 300px panel the budget is 75px with no placement,
+    /// 73.17px under `padding = 0.1` (denom 4.1) and 100px under a
+    /// `PointScale(padding = 0)` (denom 3) — `w/4` → `w/4.1` → `w/3`. Seventeen
+    /// characters at 4px each measure 68px, which sits between the point
+    /// scale's threshold (`100·0.9 − 8 = 82`) and the other two (`67.5 − 8 =
+    /// 59.5` and `65.85 − 8 = 57.85`), so the same labels on the same panel stay
+    /// flat under one placement and rotate under the others. The labels carry no
+    /// spaces or hyphens, so the wrap stage cannot absorb the difference.
+    #[test]
+    fn the_cascade_budget_follows_the_placement_step_not_the_panel_slot() {
+        let labels: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|c| c.repeat(17))
+            .collect();
+        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
+        let angle = |placement: Option<CategoricalPlacement>| {
+            let mut input = axis_input(AxisOrient::Bottom, None, labels.clone(), None);
+            input.categorical_placement = placement;
+            let (axis, _) = layout_x_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+            axis.ticks[0].label_angle
+        };
+        let panel_extent = |layout| Some(CategoricalPlacement::PanelExtent { layout, categories: 4 });
+
+        assert_eq!(
+            angle(panel_extent(DiscreteLayout::point(0.0, 0.5))),
+            0.0,
+            "a point scale spaces categories 100px apart, so 68px labels fit flat"
+        );
+        assert_ne!(
+            angle(None),
+            0.0,
+            "the 75px uniform slot cannot fit the same labels — the budget, not the labels, is what changed"
+        );
+        assert_ne!(
+            angle(panel_extent(DiscreteLayout::band(0.1, 0.1, 0.5))),
+            0.0,
+            "padding tightens the step to 73.17px, tighter still than the uniform slot"
+        );
+    }
+
+    /// `paired_band_centers` is the release-side half of the length-pairing
+    /// invariant `debug_assert_placement_invariants` asserts in debug builds;
+    /// nothing in `layout_*_axis` can reach its rejecting branch (the debug
+    /// assertion fires first), so this pins it directly (batch-C T7 review,
+    /// Bug Risk 3).
+    #[test]
+    fn paired_band_centers_accepts_matched_length_and_rejects_mismatched() {
+        assert_eq!(paired_band_centers(Some(&[1.0, 2.0]), 2), Some(&[1.0, 2.0][..]));
+        assert_eq!(paired_band_centers(Some(&[1.0, 2.0]), 3), None);
+    }
+
+    /// Without a placement, the y-axis keeps uniform-slot placement.
+    #[test]
+    fn y_axis_falls_back_to_uniform_center_without_a_placement() {
+        let input = axis_input(AxisOrient::Left, None, four_cat_labels(), None);
+        assert!(input.categorical_placement.is_none());
+        let m = mock(10.0);
+        let (axis, _) = layout_y_axis(&input, PLACEMENT_PANEL, 0, 11.0, 13.0, 4.0, 4.0, &m);
         let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
         assert_eq!(got, vec![75.0, 125.0, 175.0, 225.0]);
     }
