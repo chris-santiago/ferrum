@@ -1435,12 +1435,11 @@ mod tests {
     /// correct `(80.0, 0.0)`. Reversing FIRST would hand `zero`'s
     /// ascending-pair assumption the already-swapped `[80, 20]` pair
     /// instead: `d[0]=80 > 0.0` zeros it, `d[1]=20 < 0.0` is false, so the
-    /// wrong-order run corrupts the result to `(0.0, 20.0)` — a RED value I
-    /// confirmed by hoisting `apply_domain_reverse` above the `zero` block
-    /// in-place, running this test (it failed with exactly `Some((0.0,
-    /// 20.0))` vs. the expected `Some((80.0, 0.0))`), and reverting the
-    /// hoist back to its original position (see the task report's cycle-3
-    /// section for the exact command/output).
+    /// wrong-order run corrupts the result to `(0.0, 20.0)` — a RED value
+    /// confirmed by temporarily hoisting `apply_domain_reverse` above the
+    /// `zero` block and running this test in place (it failed with exactly
+    /// `Some((0.0, 20.0))` vs. the expected `Some((80.0, 0.0))`), then
+    /// reverting the hoist back to its original position.
     #[test]
     fn linear_zero_true_reverse_true_yields_non_degenerate_descending_domain() {
         use crate::spec::encoding::ScaleSpec;

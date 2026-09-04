@@ -164,14 +164,17 @@ pub struct ContinuousScaleCommon {
 /// | `Sequential`, `Diverging`, `Quantize` | `ScaleKind::Linear` (positional fallback) |
 /// | `BinOrdinal` | `ScaleKind::Linear` |
 ///
-/// **Dual-representation hazard.** The user-facing PyO3 `*Scale` classes in
-/// `crate::scale` (BandScale, PointScale, QuantileScale, etc.) are a **separate,
-/// parallel construction surface** with independent field sets, defaults, and
-/// validation. There is no `From`, `TryFrom`, or `to_scale_spec` link between them
-/// and this enum, so the two can drift independently. When adding or changing a scale
-/// type, both representations must be updated in lockstep. The full reconciliation
-/// (a single canonical representation, or a `to_scale_spec` bridge so Python emits
-/// `ScaleSpec` JSON directly) is a tracked follow-up.
+/// **Dual-representation link, now single-sourced (SPEC-04).** The user-facing
+/// PyO3 `*Scale` classes in `crate::scale` (BandScale, PointScale, QuantileScale,
+/// etc.) remain a **separate construction surface** — thin builders with their
+/// own field sets, defaults, and validation, used for direct Python compute
+/// (`.bandwidth()`, `.scale()`, `.ticks()`) rather than for rendering. But each
+/// pyclass now exposes an inherent `to_scale_spec(&self) -> ScaleSpec`, so the
+/// wire form of a `*Scale` instance is emitted from one place next to this enum
+/// instead of being hand-copied in Python. Extending a `ScaleSpec` variant breaks
+/// its `to_scale_spec` builder until updated (a compile-time drift guard), and a
+/// parity test enumerates every pyclass → variant mapping (a test-time guard).
+/// See `crate::scale` module docs for the full picture.
 ///
 /// Uses `tag = "type"` (NOT the spec-module convention `tag = "kind"`) for Vega-Lite
 /// wire-format alignment — see design spec §11 row 16 ("Vega-Lite interop stays open
@@ -500,7 +503,7 @@ fn accepted_keys_for_scale_type(scale_type: &str) -> Option<Vec<&'static str>> {
 /// `render/color/palette.rs`) which return `Option<T>` — `None` in Python —
 /// for an unknown name. `scale_type` here is not an internal lookup key;
 /// it arrives from user input via `Chart.override(<channel>_scale_type=...)`,
-/// and the sole caller (`_spec_build.py`) wants exactly one thing on an
+/// and its Python consumer (`_spec_build.py`) wants exactly one thing on an
 /// unknown tag: let it fall through, unfiltered, to `ScaleSpec`'s own
 /// deserialize gate, whose "unknown variant" message names the accepted
 /// tag set — a strictly richer answer than this function could construct.

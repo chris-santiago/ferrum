@@ -142,7 +142,7 @@ impl PointScale {
 
     /// Map a category label to its point pixel coordinate.
     ///
-    /// Returns ``f64::NAN`` for labels not in the domain.
+    /// Returns ``NaN`` for labels not in the domain.
     fn scale(&self, value: &str) -> f64 {
         let [r0, r1] = self.range.unwrap_or([0.0, 1.0]);
         self.data.scale_str(value, r0, r1)

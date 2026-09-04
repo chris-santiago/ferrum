@@ -199,7 +199,7 @@ impl BandScale {
     /// and the pixel a mark for ``v`` is drawn at is
     /// ``scale(v) + bandwidth() / 2``. For a descending ``range=[hi, lo]`` the
     /// band runs back from this edge instead, so the mark sits at
-    /// ``scale(v) - bandwidth() / 2``. Returns ``f64::NAN`` for labels not in
+    /// ``scale(v) - bandwidth() / 2``. Returns ``NaN`` for labels not in
     /// the domain.
     fn scale(&self, value: &str) -> f64 {
         let [r0, r1] = self.range.unwrap_or([0.0, 1.0]);

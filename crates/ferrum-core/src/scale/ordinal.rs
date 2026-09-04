@@ -486,7 +486,7 @@ impl OrdinalScale {
 
     /// Map a category label to its band-center pixel coordinate.
     ///
-    /// Returns ``f64::NAN`` for labels not in the domain.
+    /// Returns ``NaN`` for labels not in the domain.
     fn scale(&self, value: &str) -> f64 {
         self.data.scale_str(value)
     }
