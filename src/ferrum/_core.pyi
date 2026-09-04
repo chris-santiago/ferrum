@@ -923,6 +923,12 @@ def render_png(
 def theme_known_keys() -> list[str]: ...
 def theme_color_keys() -> list[str]: ...
 
+# Batch C task 4 round 4 (#95): the raw-dict scale key gate's own per-type
+# accepted-key table, published for Python to filter against instead of
+# hand-mirroring a subset of it. Raises ValueError naming the type on an
+# unknown ``scale_type`` tag.
+def scale_accepted_keys(scale_type: str) -> list[str]: ...
+
 # ---------- Palette registry accessors ----------
 #
 # Read-only views over the Rust palette registry (categorical + continuous).

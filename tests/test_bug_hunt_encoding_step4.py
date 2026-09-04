@@ -6,7 +6,11 @@ campaign changed:
 1. ``scheme=`` declaration-time validation on Color/Fill/Stroke
    (``ChannelBase._validate`` -> ``ferrum.color._validate_scheme``).
 2. ``color.to_hex`` range-based default heuristic (``color.to_hex``).
-3. ``deny_unknown_fields`` on transform/encoding/scale wire dicts
+3. ``deny_unknown_fields`` on transform/encoding wire dicts, plus the
+   schema-derived wire-key gate on ``scale`` dicts that closes the one
+   shape serde's own ``deny_unknown_fields`` cannot reach through a
+   flattened/internally-tagged enum (batch-C task 4, F-L04-07 — see
+   ``tests/test_scale_dict_gate.py`` for that gate's full coverage)
    (``ChartSpec.from_json`` round-trip).
 4. ``min_band``/``max_band`` deprecated-alias resolution
    (``_configure_mixin._resolve_band_alias``).
@@ -343,27 +347,35 @@ def test_encoding_channel_typo_key_is_rejected() -> None:
         ChartSpec.from_json(json.dumps(j))
 
 
-def test_scale_dict_typo_key_is_tolerated_documented_exception() -> None:
-    """A misspelled scale key (``clammp``) is TOLERATED (documented exception).
+def test_scale_dict_typo_key_is_rejected() -> None:
+    """A misspelled scale key (``clammp``) now raises, not silently dropped.
 
     Path: ``ScaleSpec`` deserialise.  Unlike ``EncodingSpec``/``ChartSpec``,
     ``ScaleSpec`` is an internally-tagged enum whose every continuous variant
-    embeds ``ContinuousScaleCommon`` via ``#[serde(flatten)]``.  serde cannot
-    enforce ``deny_unknown_fields`` through a flattened / internally-tagged shape,
-    so a ``clammp`` typo (of ``clamp``) inside a ``scale`` sub-dict is accepted
-    and silently dropped.  This is a structural serde constraint, documented on
-    the ``ScaleSpec`` doc comment — NOT a fail-loud surface.  This test pins that
-    tolerated-drop so a future "fix" that breaks the round-trip is caught.
+    embeds ``ContinuousScaleCommon`` via ``#[serde(flatten)]``, so serde
+    itself cannot enforce ``deny_unknown_fields`` through a flattened /
+    internally-tagged shape — this WAS the last documented silent-drop
+    carve-out (a ``clammp`` typo of ``clamp`` used to round-trip with the
+    typo'd key silently dropped, no error).
+
+    Batch-C task 4 (F-L04-07) closed that carve-out with a schema-derived
+    wire-key gate at ``ScaleSpec``'s own ``Deserialize`` boundary (see
+    ``crates/ferrum-core/src/spec/encoding.rs::validate_scale_spec_keys``),
+    the single chokepoint every JSON- and PyO3-dict-sourced ``ScaleSpec``
+    passes through. This test now pins the flipped, fail-loud contract —
+    the retired tolerant version this replaces is preserved in git history
+    for reference. See ``tests/test_scale_dict_gate.py`` for this gate's
+    full feature coverage (every scale type, the accepted-key sweep, the
+    raw-dict temporal-domain conversion, etc.) — this module keeps only the
+    single spec-§9 repro that lives alongside this file's other
+    ``deny_unknown_fields`` siblings above.
     """
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
     base = fm.Chart(df).mark_point().encode(x=fm.X("a", scale=fm.LinearScale()), y="b")
     j = json.loads(base.to_spec().to_json())
     j["encoding"]["x"]["scale"]["clammp"] = True  # typo of clamp
-    # Tolerated: the flattened ScaleSpec cannot deny, so this round-trips and the
-    # typo'd key is dropped (no error).
-    spec = ChartSpec.from_json(json.dumps(j))
-    round_tripped = json.loads(spec.to_json())
-    assert "clammp" not in round_tripped["encoding"]["x"]["scale"]
+    with pytest.raises(ValueError, match="unknown key 'clammp'"):
+        ChartSpec.from_json(json.dumps(j))
 
 
 def test_top_level_chartspec_typo_key_is_rejected() -> None:

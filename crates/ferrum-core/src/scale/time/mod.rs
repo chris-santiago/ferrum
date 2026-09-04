@@ -376,7 +376,17 @@ impl FromPyObject<'_, '_> for TemporalDomainValue {
 /// containing `int`s), so `TimeScale` keeps that sibling-parity behavior
 /// rather than narrowing to float-only to chase parity with a function that
 /// was never in the numeric-acceptance business to begin with.
-fn temporal_value_to_epoch_ms(ob: &Bound<'_, PyAny>) -> PyResult<f64> {
+///
+/// `pub(crate)` (batch-C task 4, F-L04-10): reused verbatim by
+/// `spec::encoding`'s raw-dict scale gate to convert a
+/// `{"type": "time"/"utc", "domain": [...]}` raw-dict element BEFORE the
+/// dict is JSON-stringified for serde (a Python `datetime` object cannot
+/// survive `json.dumps`, so this conversion has to happen at the PyO3
+/// boundary, not downstream in serde) — see
+/// `spec::encoding::convert_raw_dict_temporal_domain`. Not duplicated there;
+/// that function calls this one directly rather than re-implementing any
+/// part of the accepted-forms taxonomy.
+pub(crate) fn temporal_value_to_epoch_ms(ob: &Bound<'_, PyAny>) -> PyResult<f64> {
     if let Ok(dt) = ob.cast::<PyDateTime>() {
         return datetime_epoch_ms(dt);
     }

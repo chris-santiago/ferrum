@@ -15,6 +15,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transport::process_batch, m)?)?;
     m.add_class::<spec::chart::ChartSpec>()?;
     m.add_class::<spec::encoding::EncodingSpec>()?;
+    // Batch-C task 4 (round 4): the scale wire-key gate's own accepted-key
+    // table, published to Python so `_spec_build.py`'s override-scale merge
+    // filters against the SAME source of truth the gate enforces instead of
+    // a hand-mirrored copy.
+    m.add_function(wrap_pyfunction!(spec::encoding::scale_accepted_keys, m)?)?;
     m.add_class::<scale::linear::LinearScale>()?;
     m.add_class::<scale::log::LogScale>()?;
     m.add_class::<scale::symlog::SymlogScale>()?;
