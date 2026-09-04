@@ -40,6 +40,11 @@ pub(crate) fn continuous_common(
         padding,
         scheme: None,
         domain_param: None,
+        // The six continuous pyclasses gain a `reverse` kwarg in a
+        // downstream batch-C task; until that lands, every pyclass
+        // construction path stays `false` here so this helper's output is
+        // unchanged.
+        reverse: false,
     }
 }
 

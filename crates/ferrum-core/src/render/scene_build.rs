@@ -2878,6 +2878,7 @@ mod tests {
                 padding: None,
                 scheme: None,
                 domain_param: Some(name.to_string()),
+                reverse: false,
             },
             nice: false,
             zero: false,

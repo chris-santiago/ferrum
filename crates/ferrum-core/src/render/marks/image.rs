@@ -331,6 +331,7 @@ mod tests {
                 domain: Some(vec![x_domain.0, x_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
                 domain_param: None,
+                reverse: false,
             },
             nice: false, zero: false,
         };
@@ -339,6 +340,7 @@ mod tests {
                 domain: Some(vec![y_domain.0, y_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
                 domain_param: None,
+                reverse: false,
             },
             nice: false, zero: false,
         };
@@ -378,6 +380,7 @@ mod tests {
                 domain: Some(vec![x_domain.0, x_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
                 domain_param: None,
+                reverse: false,
             },
             nice: false, zero: false,
         };
@@ -386,6 +389,7 @@ mod tests {
                 domain: Some(vec![y_domain.0, y_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
                 domain_param: None,
+                reverse: false,
             },
             nice: false, zero: false,
         };
@@ -715,14 +719,14 @@ mod tests {
         let x_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![x_domain.0, x_domain.1]),
-                range: None, clamp: false, padding: None, scheme: None, domain_param: None,
+                range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
             },
             nice: false, zero: false,
         };
         let y_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![y_domain.0, y_domain.1]),
-                range: None, clamp: false, padding: None, scheme: None, domain_param: None,
+                range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false,
             },
             nice: false, zero: false,
         };

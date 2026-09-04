@@ -259,6 +259,7 @@ fn explicit_log_scale_overrides_auto_detection() {
             padding: None,
             scheme: None,
             domain_param: None,
+            reverse: false,
         },
         nice: false,
     });
@@ -882,6 +883,7 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
                     common: crate::spec::encoding::ContinuousScaleCommon {
                         domain: None, range: None, clamp: false, padding: None, scheme: None,
                         domain_param: None,
+                        reverse: false,
                     },
                     nice: false,
                 }),
@@ -1049,6 +1051,7 @@ fn pow_scale_exponent_2_compresses_low_values() {
                         padding: None,
                         scheme: None,
                         domain_param: None,
+                        reverse: false,
                     },
                 }),
                 ..Default::default()
@@ -1118,6 +1121,7 @@ fn sqrt_scale_expands_low_values() {
                         padding: None,
                         scheme: None,
                         domain_param: None,
+                        reverse: false,
                     },
                 }),
                 ..Default::default()
@@ -1726,6 +1730,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
                             padding: None,
                             scheme: Some(scheme.to_string()),
                             domain_param: None,
+                            reverse: false,
                         },
                         nice: false,
                         zero: false,
@@ -4365,6 +4370,7 @@ fn d4b_user_scale_wins_over_shared() {
                 padding: None,
                 scheme: None,
                 domain_param: None,
+                reverse: false,
             },
             nice: false,
             zero: false,
@@ -4821,6 +4827,7 @@ mod positional_extent_classification {
             padding: None,
             scheme: None,
             domain_param: None,
+            reverse: false,
         }
     }
 

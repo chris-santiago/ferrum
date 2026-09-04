@@ -234,18 +234,22 @@ pub(in crate::render) fn build_from_scale_spec(
                 if d[0] > 0.0 { d[0] = 0.0; }
                 if d[1] < 0.0 { d[1] = 0.0; }
             }
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, *nice))
         }
         ScaleSpec::Time { common, nice } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Symlog { constant, common, nice } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, common.clamp, *nice))
         }
         ScaleSpec::Ordinal { domain, range, padding } => {
@@ -265,14 +269,17 @@ pub(in crate::render) fn build_from_scale_spec(
         }
         ScaleSpec::Pow { exponent, common } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, common.clamp))
         }
         ScaleSpec::Sqrt { common } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, common.clamp))
         }
         ScaleSpec::Utc { common, nice } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
+            let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Band { domain, padding, padding_inner, range, .. } => {
@@ -409,6 +416,51 @@ fn resolve_continuous_domain_and_range(
         vec![inset.0, inset.1]
     };
     Ok((d, r))
+}
+
+/// Domain-swap sugar for `ContinuousScaleCommon::reverse` (F-L04-07, spec
+/// §4C): swaps the resolved domain pair. For an explicit `domain=[a, b]`
+/// with `zero=false` (the only case where no other step reorders the pair),
+/// this is exactly equivalent to writing `domain=[b, a]` by hand — see
+/// `ContinuousScaleCommon::reverse`'s doc for the two cases where it is not
+/// (auto-inferred domain's padding inset; `zero=true`'s degenerate-collapse
+/// hazard covered next).
+///
+/// Called once per continuous variant arm in `build_from_scale_spec`, as the
+/// LAST step of that arm's domain resolution — after
+/// `resolve_continuous_domain_and_range` and after any per-variant domain
+/// shaping (Linear's `zero` extension, immediately above in the `Linear`
+/// arm). This ordering is load-bearing, and the reason is NOT that it
+/// matches a hand-written descending domain — it does not: `domain=[100,
+/// 0]` with `zero=true` collapses to `[0.0, 0.0]` today (pre-existing,
+/// independent of `reverse`), through this exact same `Linear` arm, because
+/// the `zero` block treats `d[0]` as the minimum (`if d[0] > 0.0 { d[0] =
+/// 0.0; }`, `if d[1] < 0.0 { d[1] = 0.0; }`), an assumption only an
+/// ASCENDING pair satisfies. The real reason to reverse LAST is that
+/// reversing FIRST would hand that same ascending-pair assumption a
+/// descending pair instead, silently corrupting the result — NOT
+/// necessarily to `[0.0, 0.0]` (the exact wrong value depends on the
+/// domain: an auto-inferred `[20, 80]` reversed-then-zeroed comes out
+/// `[0.0, 20.0]`, not `[0.0, 0.0]`, and not the correct `[80.0, 0.0]`
+/// either) — see
+/// `linear_zero_true_reverse_true_yields_non_degenerate_descending_domain`
+/// below, which pins the CORRECT ordering by failing (on the concrete
+/// `[0.0, 20.0]` wrong value above) if the swap is hoisted above the `zero`
+/// block.
+///
+/// Range orientation, the structural y-inversion predicate
+/// (`axis_pixel_range`), and tick label/fraction pairing are untouched —
+/// this only flips which value lands at each end of the domain pair.
+/// Downstream (`apply_axis_domain_config`'s lo>hi normalize/restore, tick
+/// generation, mark positioning) already tolerates a descending domain
+/// (batch-B's domain-config cascade proved this), so no other call site
+/// needs to change. A no-op on anything but a 2-element domain, mirroring
+/// the `zero` guard in the Linear arm above.
+fn apply_domain_reverse(mut d: Vec<f64>, reverse: bool) -> Vec<f64> {
+    if reverse && d.len() == 2 {
+        d.swap(0, 1);
+    }
+    d
 }
 
 /// Apply coord-level domain and padding overrides to the x/y scales.
@@ -623,6 +675,7 @@ pub(in crate::render) fn apply_axis_domain_config(
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};
+    use arrow::record_batch::RecordBatch;
     use crate::render::scale_resolve::ScaleKind;
     use crate::scale::linear::LinearScale;
     use crate::scale::log::LogScale;
@@ -1015,5 +1068,398 @@ mod tests {
     fn ordinal_gate_empty_range_falls_back_no_panic() {
         let empty_vals: Vec<crate::scale::ordinal::OrdinalRangeValue> = Vec::new();
         assert_eq!(ordinal_pixel_range(Some(&empty_vals), (5.0, 95.0)), (vec![5.0, 95.0], false));
+    }
+
+    // ── Continuous `reverse` domain-swap (F-L04-07, batch-C task 1) ──
+    //
+    // `reverse` on `ContinuousScaleCommon` is domain-swap sugar (spec §4C):
+    // after domain resolution, `reverse=true` swaps the resolved domain
+    // pair, exactly equivalent to writing `domain=[hi, lo]` by hand. Every
+    // test below resolves through the real `build_from_scale_spec` arm —
+    // the same seam `build_axis_scale` calls for an encoding's explicit
+    // `scale` — mirroring the `PointScale(reverse=True)` tests above rather
+    // than hand-sequencing the swap.
+
+    fn numeric_batch(field: &str, values: Vec<f64>) -> RecordBatch {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(field, ArrowDataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    fn resolve_scale(
+        spec: &crate::spec::encoding::ScaleSpec,
+        field: &str,
+        batch: &RecordBatch,
+        pr: (f64, f64),
+    ) -> ScaleKind {
+        let enc = crate::spec::encoding::EncodingSpec {
+            field: field.into(),
+            type_: None,
+            scale: Some(spec.clone()),
+            ..Default::default()
+        };
+        let sort_ctx = super::SortContext {
+            category_field: field,
+            batch,
+            x_field: None,
+            y_field: None,
+        };
+        let mut warnings = Vec::new();
+        super::build_from_scale_spec(spec, &enc, batch, pr, &sort_ctx, &mut warnings).unwrap()
+    }
+
+    /// A `ContinuousScaleCommon` with everything but `domain`/`range`/`reverse`
+    /// at its wire default — the shape every one of these tests varies along
+    /// exactly one axis at a time.
+    fn reverse_common(
+        domain: Option<Vec<f64>>,
+        range: Option<Vec<f64>>,
+        reverse: bool,
+    ) -> crate::spec::encoding::ContinuousScaleCommon {
+        crate::spec::encoding::ContinuousScaleCommon {
+            domain,
+            range,
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+            reverse,
+        }
+    }
+
+    /// F-L04-07: `reverse=true` on an auto-inferred domain swaps the
+    /// resolved `[min, max]` pair to `[max, min]` — one test per continuous
+    /// kind, so a future kind that forgets to wire `apply_domain_reverse`
+    /// into its arm fails here instead of silently rendering ascending.
+    #[test]
+    fn linear_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Linear { common: reverse_common(None, None, true), nice: false, zero: false };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((100.0, 0.0)));
+    }
+
+    #[test]
+    fn log_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![1.0, 1000.0]);
+        let spec = ScaleSpec::Log { base: 10.0, common: reverse_common(None, None, true), nice: false };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((1000.0, 1.0)));
+    }
+
+    #[test]
+    fn time_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 86_400_000.0]);
+        let spec = ScaleSpec::Time { common: reverse_common(None, None, true), nice: false };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((86_400_000.0, 0.0)));
+    }
+
+    #[test]
+    fn symlog_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![-100.0, 100.0]);
+        let spec = ScaleSpec::Symlog { constant: 1.0, common: reverse_common(None, None, true), nice: false };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((100.0, -100.0)));
+    }
+
+    #[test]
+    fn pow_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Pow { exponent: 2.0, common: reverse_common(None, None, true) };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((100.0, 0.0)));
+    }
+
+    #[test]
+    fn sqrt_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Sqrt { common: reverse_common(None, None, true) };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((100.0, 0.0)));
+    }
+
+    #[test]
+    fn utc_reverse_true_swaps_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 86_400_000.0]);
+        let spec = ScaleSpec::Utc { common: reverse_common(None, None, true), nice: false };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((86_400_000.0, 0.0)));
+    }
+
+    /// `reverse=false` (the wire default) leaves every kind's domain in
+    /// ascending order — the regression guard alongside the seven flips
+    /// above.
+    #[test]
+    fn linear_reverse_false_preserves_auto_inferred_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Linear { common: reverse_common(None, None, false), nice: false, zero: false };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((0.0, 100.0)));
+    }
+
+    /// Pins the ordering `apply_domain_reverse`'s doc calls load-bearing:
+    /// the swap must run AFTER the `zero` block, not before. The `zero`
+    /// block (`positional.rs:233-236`) assumes `d[0]` is the minimum — with
+    /// an auto-inferred `[20, 80]` domain, `zero=true` extends it to
+    /// `[0.0, 80.0]`, and reversing THAT (the implemented order) yields the
+    /// correct `(80.0, 0.0)`. Reversing FIRST would hand `zero`'s
+    /// ascending-pair assumption the already-swapped `[80, 20]` pair
+    /// instead: `d[0]=80 > 0.0` zeros it, `d[1]=20 < 0.0` is false, so the
+    /// wrong-order run corrupts the result to `(0.0, 20.0)` — a RED value I
+    /// confirmed by hoisting `apply_domain_reverse` above the `zero` block
+    /// in-place, running this test (it failed with exactly `Some((0.0,
+    /// 20.0))` vs. the expected `Some((80.0, 0.0))`), and reverting the
+    /// hoist back to its original position (see the task report's cycle-3
+    /// section for the exact command/output).
+    #[test]
+    fn linear_zero_true_reverse_true_yields_non_degenerate_descending_domain() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![20.0, 80.0]);
+        let spec = ScaleSpec::Linear { common: reverse_common(None, None, true), nice: false, zero: true };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(
+            scale.data_domain(),
+            Some((80.0, 0.0)),
+            "zero=true, reverse=true must compose to the non-degenerate descending pair, not collapse to (0, 0)"
+        );
+    }
+
+    // ── §4C composition rules ──
+
+    /// Rule 1: `reverse=True` + explicit `domain=[a,b]` → the GIVEN pair is
+    /// swapped (not the auto-inferred one — the column here carries values
+    /// the explicit domain ignores entirely).
+    #[test]
+    fn linear_reverse_true_with_explicit_domain_swaps_the_given_pair() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![-999.0, 999.0]);
+        let spec = ScaleSpec::Linear {
+            common: reverse_common(Some(vec![10.0, 90.0]), None, true),
+            nice: false,
+            zero: false,
+        };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((90.0, 10.0)));
+    }
+
+    /// Rule 2: `reverse=True` + explicit `range=[hi,lo]` → both apply as
+    /// stated. The domain still swaps; the range passes through completely
+    /// untouched by `reverse` (a reversed explicit range means what it
+    /// says, independent of the domain-swap sugar).
+    #[test]
+    fn linear_reverse_true_composes_with_reversed_explicit_range() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Linear {
+            common: reverse_common(None, Some(vec![500.0, 0.0]), true),
+            nice: false,
+            zero: false,
+        };
+        let scale = resolve_scale(&spec, "v", &batch, (0.0, 500.0));
+        assert_eq!(scale.data_domain(), Some((100.0, 0.0)), "reverse still swaps the domain");
+        let ScaleKind::Linear(linear) = &scale else { panic!("expected Linear scale") };
+        assert_eq!(
+            linear.range_pair(),
+            [500.0, 0.0],
+            "the explicit reversed range passes through unmodified by `reverse`"
+        );
+    }
+
+    /// Rule 3: `coord_cartesian(x_domain=)` wins over the encoding scale's
+    /// `reverse` — it replaces the domain wholesale and its own endpoint
+    /// order is respected, regardless of what the encoding's scale asked
+    /// for. Asserted through the real production sequence
+    /// (`resolve_scales` → `build_axis_scale` → `apply_coord_domain_overrides`)
+    /// rather than hand-calling the two functions in the test body, so a
+    /// future reorder of that pipeline would be caught here.
+    #[test]
+    fn coord_cartesian_x_domain_override_wins_over_encoding_reverse() {
+        use crate::spec::coord::CoordKind;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+
+        let batch = {
+            use arrow::array::Float64Array;
+            use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+            use std::sync::Arc;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", ArrowDataType::Float64, false),
+                Field::new("y", ArrowDataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![0.0, 100.0])),
+                    Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let spec = crate::spec::chart::ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    scale: Some(ScaleSpec::Linear {
+                        common: reverse_common(None, None, true),
+                        nice: false,
+                        zero: false,
+                    }),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(CoordKind::Cartesian {
+                x_domain: Some((5.0, 20.0)),
+                y_domain: None,
+                expand: true,
+                clip: true,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = crate::layout::ThemeInputs::default();
+        let (scales, _) =
+            crate::render::scale_resolve::resolve_scales(&spec, &batch, (0.0, 500.0), (0.0, 500.0), &theme).unwrap();
+        // The override's own (5.0, 20.0) endpoint order wins outright — the
+        // encoding scale's `reverse=true` never gets a chance to swap it,
+        // because `apply_coord_domain_overrides` replaces the whole scale.
+        assert_eq!(scales.x.data_domain(), Some((5.0, 20.0)));
+    }
+
+    // ── spec §9's discriminating y-axis assertion ──
+
+    /// Resolves a `ScaleSpec::Linear` y-axis scale through the REAL
+    /// `build_axis_scale("y", ...)` entry point (not `build_from_scale_spec`
+    /// directly), so `axis_pixel_range`'s structural pixel-range inversion
+    /// for the y channel is actually computed by production code and fed
+    /// forward — a future reorder of that composition would fail this test,
+    /// not just a hand-mirrored fixture.
+    ///
+    /// An explicit `domain=[0, 100]` (with no explicit `range`) keeps the
+    /// pixel math exact: an explicit domain suppresses the default 5%
+    /// padding inset (`resolve_padding_fraction`), so the un-padded plot
+    /// range `(0.0, 400.0)` passed in comes back out of `axis_pixel_range`'s
+    /// y-inversion as exactly `(400.0, 0.0)`, with no inset arithmetic to
+    /// account for in the assertions below.
+    fn build_y_axis_scale(reverse: bool) -> ScaleKind {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        use std::collections::HashMap;
+
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let enc = EncodingSpec {
+            field: "v".into(),
+            type_: None,
+            scale: Some(ScaleSpec::Linear {
+                common: reverse_common(Some(vec![0.0, 100.0]), None, reverse),
+                nice: false,
+                zero: false,
+            }),
+            ..Default::default()
+        };
+        // `spec` is unused on the explicit-`enc.scale` bypass `build_axis_scale`
+        // takes here (it returns before ever consulting `spec`), so any valid
+        // `ChartSpec` satisfies the parameter.
+        let spec = crate::spec::chart::ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Default::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let mut warnings = Vec::new();
+        super::build_axis_scale(
+            "y",
+            &enc,
+            None,
+            super::PositionalFields { x: None, y: Some("v") },
+            &batch,
+            &outputs,
+            (0.0, 400.0),
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+        .unwrap()
+    }
+
+    /// `reverse=true` composes with the y-channel's structural pixel-range
+    /// inversion (`axis_pixel_range`, computed inside `build_axis_scale`
+    /// before `build_from_scale_spec` ever sees the range) without one
+    /// mechanism clobbering the other: marks (`to_pixel_f64`) and tick
+    /// labels (`tick_labels`, index-aligned with `tick_fractions`) flip
+    /// together, not independently.
+    #[test]
+    fn linear_reverse_true_on_y_channel_flips_marks_and_labels_together() {
+        let baseline = build_y_axis_scale(false);
+        let reversed = build_y_axis_scale(true);
+
+        // Marks: the minimum data value (0) sits at the BOTTOM (pixel 400)
+        // on the default axis, and at the TOP (pixel 0) once reversed.
+        assert_eq!(baseline.to_pixel_f64(0.0), Some(400.0));
+        assert_eq!(reversed.to_pixel_f64(0.0), Some(0.0));
+        assert_eq!(baseline.to_pixel_f64(100.0), Some(0.0));
+        assert_eq!(reversed.to_pixel_f64(100.0), Some(400.0));
+
+        // Labels: `tick_labels`/`tick_fractions` stay index-aligned on BOTH
+        // scales, and the reversed scale's own tick VALUES (the same order
+        // `tick_labels` uses) come out descending — the label order flipped
+        // along with the marks, not independently of them.
+        let base_values = baseline.tick_values_raw(5).unwrap();
+        let rev_values = reversed.tick_values_raw(5).unwrap();
+        assert_eq!(baseline.tick_labels(5).len(), baseline.tick_fractions(5).len());
+        assert_eq!(reversed.tick_labels(5).len(), reversed.tick_fractions(5).len());
+        assert!(!rev_values.is_empty());
+        assert!(base_values.windows(2).all(|w| w[0] <= w[1]), "baseline ticks ascend: {base_values:?}");
+        assert!(rev_values.windows(2).all(|w| w[0] >= w[1]), "reversed ticks descend: {rev_values:?}");
+
+        // Same underlying tick set, reordered — `reverse` must not change
+        // WHICH values get labeled, only the order they're labeled in.
+        let mut base_sorted = base_values.clone();
+        let mut rev_sorted = rev_values.clone();
+        base_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        rev_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(base_sorted, rev_sorted, "reverse reorders ticks, it does not pick a different set");
     }
 }

@@ -96,6 +96,49 @@ pub struct ContinuousScaleCommon {
     /// resolution; WASM reads it to rescale live.
     #[serde(rename = "domainParam", default, skip_serializing_if = "Option::is_none")]
     pub domain_param: Option<String>,
+    /// Domain-swap sugar (F-L04-07): after domain resolution, `reverse=true`
+    /// swaps the resolved domain pair. For an explicit `domain=[a, b]` with
+    /// `zero=false`, this is exactly equivalent to writing `domain=[b, a]`
+    /// by hand; it is NOT exactly equivalent in general — an auto-inferred
+    /// domain keeps the default padding inset an explicit `domain=` would
+    /// suppress, and `Linear`'s `zero=true` extension runs before the swap
+    /// (see `apply_domain_reverse`'s doc in `render::scale_resolve::positional`
+    /// for why reversing first would collapse the domain instead). Range
+    /// orientation, the structural y-inversion predicate, and tick
+    /// label/fraction pairing are untouched; this only flips which end of
+    /// the domain lands at which end of the range.
+    /// `#[serde(default, skip_serializing_if = "std::ops::Not::not")]` (the
+    /// `Layer::independent_y` idiom) so every pre-existing wire form
+    /// serializes byte-identically when `reverse` is unset (spec §6, decision
+    /// 5: domain-swap over range-swap since descending domains are already
+    /// tolerated, tested, and normalized everywhere downstream).
+    ///
+    /// **Positional resolution only.** `ContinuousScaleCommon` is also read
+    /// by non-positional channels that only pull `domain`/`range` from it
+    /// and never consult this field: color (`build_color_scale`, which
+    /// honors `reverse` solely on the separate `ScaleSpec::Sequential`
+    /// variant — `ScaleSpec::Diverging` has no `reverse` field at all,
+    /// documented at `scale_spec_is_reversed`'s doc in
+    /// `scale_resolve::color`) and size/opacity (`linear_overrides` in
+    /// `scale_resolve::auxiliary`). A raw-dict color- or size-channel scale
+    /// like `{"type": "linear", "reverse": true}` deserializes this field
+    /// today and it is silently inert there — the same silent-no-op class
+    /// F-L04-07 exists to close. A raw-dict `{"type": "diverging",
+    /// "reverse": true}` is a THIRD, more silent case: `Diverging` has no
+    /// `reverse` field to deserialize into, so serde drops the key entirely
+    /// during deserialization (the documented `#[serde(flatten)]`/
+    /// internally-tagged carve-out above `ScaleSpec` covers this) — the key
+    /// does not even round-trip, let alone take effect. Cross-task note:
+    /// Task 4's scale-key gate keys off scale *type*, not channel, so it
+    /// will accept `reverse` on a non-positional channel's continuous scale
+    /// (the `Linear`/`Log`/etc. case above) without catching that; and
+    /// separately, `Diverging`'s accepted-key set is scale-type-derived, so
+    /// whether it should even LIST `reverse` as accepted is a call Task 4
+    /// has to make explicitly, not inherit by default. Either a future gate
+    /// revision closes these, or a docs task records the inertness — either
+    /// way, don't assume the gate alone closes every corner here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse: bool,
 }
 
 /// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
@@ -141,6 +184,19 @@ pub struct ContinuousScaleCommon {
 /// scale key (e.g. `clammp` for `clamp`) inside a `scale` sub-dict is tolerated and
 /// silently dropped. This is a structural serde limitation, not an oversight — adding
 /// the attribute would be a no-op (or a compile error) given the flatten.
+///
+/// **Planned: a gate closes this at the wire boundary, not here (F-L04-07,
+/// batch-C task 4 — not yet implemented as of this commit).** The structural
+/// serde limitation above is permanent — `deny_unknown_fields` still cannot
+/// see through the flatten — but Task 4 of batch-C is scheduled to add a
+/// scale-key validation gate at the Python→Rust wire boundary
+/// (accepted-key sets derived from this schema, beside the existing
+/// `validate_chart_config_keys` precedent) that will refuse an unknown
+/// raw-dict scale key before serde ever gets a chance to drop it silently.
+/// `reverse` on `ContinuousScaleCommon` above is the reason this needs
+/// closing: until Task 4 lands, a typo'd `"reverse"` (e.g. `"reveres"`)
+/// still vanishes with no error and no visible effect, indistinguishable
+/// from the flag doing nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ScaleSpec {
@@ -1146,6 +1202,7 @@ mod tests {
                     padding: None,
                     scheme: None,
                     domain_param: None,
+                    reverse: false,
                 },
                 nice: true,
             }),
@@ -1746,7 +1803,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: true }),
+                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false }, nice: true }),
                 title: Some("Value (log2)".into()),
                 axis: Some(Box::new(crate::render::chart_config::AxisStyleSpec {
                     grid: Some(false),
@@ -1782,7 +1839,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Temporal),
-                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: true, zero: false }),
+                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false }, nice: true, zero: false }),
                 title: Some("Parent Title".into()),
                 scheme: Some("parent_scheme".into()),
                 format: Some("parent_fmt".into()),
@@ -1795,7 +1852,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: false }),
+                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None, reverse: false }, nice: false }),
                 title: Some("Child Title".into()),
                 scheme: Some("child_scheme".into()),
                 format: Some("child_fmt".into()),
