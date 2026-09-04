@@ -4,7 +4,30 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-*No unreleased changes.*
+A scale-subsystem correctness batch: `reverse=` lands on every continuous positional scale, `BandScale`/`PointScale` padding and align become real render geometry (closing [#67](https://github.com/chris-santiago/ferrum/issues/67)), `TimeScale` gains an optional datetime-accepting domain and a pinned UTC contract, and unknown raw-dict `scale=` keys refuse at the wire instead of vanishing silently.
+
+### Added
+
+- `reverse=True` on `LinearScale`, `LogScale`, `PowScale`, `SqrtScale`, `SymlogScale`, and `TimeScale` — domain-swap sugar applied at render time; the raw-dict `scale={"type": ..., "reverse": true}` spelling is honored identically. `PointScale.reverse` (a different mechanism, [#65](https://github.com/chris-santiago/ferrum/issues/65)) is unaffected.
+- `TimeScale(domain=None)` constructs with an inferred domain like its continuous siblings; `domain=` also accepts `datetime.date`, `datetime.datetime` (naive or aware), and ISO-8601 strings, in addition to epoch-ms floats
+- Unknown raw-dict `scale={...}` keys refuse at the wire boundary, naming the offending key, the scale type, and the accepted list — closing the last `#[serde(flatten)]` silent-drop carve-out; the accepted-key table is published as `ferrum._core.scale_accepted_keys(scale_type)`
+
+### Fixed
+
+- `BandScale(padding=/padding_inner=/padding_outer=/align=)` and `PointScale(padding=)` observably change bar/box/tick/heatmap-cell geometry, following d3's own layout model; categorical axis tick labels now land exactly on bar/box/tick centers for a padded scale with no explicit `range=` — previously the two disagreed by several pixels ([#67](https://github.com/chris-santiago/ferrum/issues/67))
+- `TimeScale(utc=True)`/`utc=False` render byte-identical SVG, and the `utc` wire tag survives resolution (previously silently dropped to `false` regardless of the source tag)
+- `.override(<channel>_scale_domain=...)` on a `mark_bar()` chart no longer includes a spurious zero-anchor — it now matches the equivalent explicit `scale={"domain": [...], "zero": False}` spelling (behavior change; see `ferrum-spec.md` §3.6's 2026-09-04 dated note)
+- `BandScale(range=...)` combined with an explicit `Axis(values=...)` tick-value override no longer panics — it now renders, landing the relabeled ticks on uniform slots
+
+### Breaking changes
+
+- `BandScale.scale()` returns d3's band leading edge, which moves for `padding_inner > 0`: `BandScale(domain=list("abcd"), range=[40, 260]).scale("a")` is now `45.366`, was `48.049` — correcting a placement that let the last band extend past the declared range end. `bandwidth()` and `PointScale.scale()` are unaffected. Default (unpadded) output is byte-identical.
+- Naming `BandScale()` explicitly now carries d3's own `padding = 0.1` default (on both sides), where an auto-inferred categorical axis still constructs unpadded — a chart with `scale=fm.BandScale()` (or any explicit `BandScale(...)` with no `padding=` argument) renders narrower bands than before, with no padding argument anywhere in user code (four categories, `mark_bar()`: `112.327`px auto-inferred vs. `98.629`px for `scale=fm.BandScale()`).
+- The label-collision budget (`cascade_slot_w`/`cascade_slot_h`) now derives from the true adjacent-tick spacing (`min_adjacent_gap(centers)`) instead of a scale-blind quarter-slot heuristic, changing when axis labels rotate or wrap on non-default categorical scales: about 2.4% tighter (`w/4 → w/4.1`, more rotation/wrapping) under `padding=0.1`, and about 33% looser (`w/4 → w/3`, less) under `PointScale(padding=0)`. Default (unpadded) categorical axes are unaffected (the change is ulp-scale only there).
+
+### Documentation
+
+- Corrected two falsified claims below: the `0.10.0` (2026-05-20) entry claiming `reverse=` on continuous positional scales had shipped (it hadn't — not until this release), and the `0.20.2` (2026-07-23) entry claiming `BandScale(padding_inner=)` was confirmed geometrically inert on the dodge path (it no longer is, as of this release)
 
 ## 0.20.2 — 2026-07-23
 
@@ -18,6 +41,8 @@ None
 
 - Labeled `annotate_arrow` stays a plain `Chart` and survives `+` overlay — previously the labeled form returned a `VConcatChart`, raising `TypeError` on overlay and splitting standalone rendering into two panels ([#84](https://github.com/chris-santiago/ferrum/issues/84))
 - Dodged mark widths (bar/rect/tick) clamp to their sub-band, so `Dodge(padding > 0.1)` can no longer render overlapping groups; `BandScale(padding_inner=)` was confirmed geometrically inert on the dodge path ([#66](https://github.com/chris-santiago/ferrum/issues/66))
+
+  > **Correction (2026-09-04, batch C):** `BandScale(padding_inner=)` is no longer inert on the dodge path — the Unreleased batch above made scale padding real render geometry system-wide (closing [#67](https://github.com/chris-santiago/ferrum/issues/67)), and `Dodge` composes with it: scale padding defines the drawn band, and `Dodge` subdivides that band and applies its own padding within it.
 - Boxplot median lines span exactly their box body instead of twice its width — a tick-vs-rect `band_size` semantics drift in the boxplot desugar, exposed by the dodge clamp; affected goldens regenerated and visually verified ([#66](https://github.com/chris-santiago/ferrum/issues/66))
 - Tooltip provenance is carried by an explicit promotion marker instead of re-derived from structure: a genuine chart-wide `.encode(tooltip=)` on a merged chart now suppresses per-layer auto-injection even with mixed per-layer tooltips, and field-based linked selections get per-layer tooltip fields (own auto fields ∪ selection fields) instead of one shared set ([#78](https://github.com/chris-santiago/ferrum/issues/78), [#58](https://github.com/chris-santiago/ferrum/issues/58))
 - Horizontal stacked histograms and densities render correctly — `mark_histogram(orient="horizontal", multiple="stack")` previously raised `ValueError` for every input. The stack's value axis is now carried on the wire (`Stack.value_axis`), mark drawers and domain widening are axis-aware, and all four bar drawers draw true base-to-value stacked segments — fixing the default vertical stacked histogram and real coord-flip stacked bars, whose segments previously overlapped and only looked stacked via opaque paint order ([#77](https://github.com/chris-santiago/ferrum/issues/77))
@@ -644,6 +669,8 @@ A post-v0.15.0 audit (bug-hunters, seam auditors, and heavyweight cohesion revie
 - PNG `scale=` parameter on `show_png()` and `save()` for DPI control
 - PDF export via `save("chart.pdf")` (zero-dependency minimal PDF writer)
 - `reverse=` on continuous positional scales
+
+  > **Correction (2026-09-04):** this line was inaccurate — `reverse=` was never actually implemented on any continuous positional scale (`LinearScale`, `LogScale`, `PowScale`, `SqrtScale`, `SymlogScale`, `TimeScale`) at this release, or for several releases after it. It shipped only in the batch documented in the Unreleased section above (2026-09-04). `PointScale.reverse` — a different, unrelated mechanism — shipped separately in 0.20.0 ([#65](https://github.com/chris-santiago/ferrum/issues/65)).
 - 5 new aggregate functions: `variance`, `stdev`, `q1`, `q3`, `distinct`
 - 4 KDE kernels: `epanechnikov`, `tophat`, `cosine` (plus existing `gaussian`)
 - Smooth method aliases: `"linear"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`

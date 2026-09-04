@@ -244,7 +244,7 @@ chart
 
 ### Reversed axis
 
-Swap the domain endpoints to reverse an axis:
+Pass `reverse=True` to any continuous positional scale (`LinearScale`, `LogScale`, `PowScale`, `SqrtScale`, `SymlogScale`, `TimeScale`) to reverse its axis — marks and axis tick labels flip together:
 
 ```python
 # Reversed y-axis (high values at bottom)
@@ -253,10 +253,18 @@ chart = (
     .mark_point()
     .encode(
         x="x:Q",
-        y=fm.Y("depth", scale=fm.LinearScale(domain=[100, 0])),
+        y=fm.Y("depth", scale=fm.LinearScale(domain=[0, 100], reverse=True)),
     )
 )
 ```
+
+Equivalently, with an explicit `domain=`, swapping the endpoints by hand produces the identical rendered chart:
+
+```python
+y=fm.Y("depth", scale=fm.LinearScale(domain=[100, 0]))
+```
+
+`reverse=True` is the clearer spelling when the domain is auto-inferred from data (no `domain=` to swap by hand) or when a `param`/data-driven domain makes writing `[hi, lo]` inconvenient. `PointScale.reverse` reverses its sorted category order instead of swapping a numeric domain pair — a different mechanism under the same name.
 
 ## Legend control
 
