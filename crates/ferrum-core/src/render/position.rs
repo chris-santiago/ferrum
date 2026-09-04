@@ -563,6 +563,43 @@ fn apply_dodge(
 /// `coord_flipped` alone) and supplies the pixel bandwidth. `slot_domain` is
 /// the color-scale domain order threaded from [`apply_dodge`]: `Some` orders
 /// sub-band slots by legend order, `None` keeps first-appearance order.
+///
+/// # Composition rule: scale padding vs. `Dodge` padding
+///
+/// The two paddings compose; they do not replace or double-count each other
+/// (F-L04-03, spec §4A, decision 2). **The scale's padding defines the drawn
+/// band** — `bandwidth_px` below is the padding-aware
+/// [`OrdinalScale::bandwidth`](crate::scale::ordinal::OrdinalScale::bandwidth),
+/// i.e. `|step|·(1 − padding_inner)`, which is the band the user actually
+/// sees, not the full `step` slot. **`Dodge` then subdivides THAT band**, and
+/// its own `padding` is taken out of it: `n_groups` sub-bands of
+/// `(bandwidth_px·(1 − 2·padding)) / n_groups`, laid end to end from the
+/// band's leading edge.
+///
+/// Worked example — `BandScale(padding_inner=0.2)` over `[0, 360]` with two
+/// categories, `Dodge(padding=0.05)` with two groups: `step = 200`, drawn
+/// band `= 160` of that 200px slot; Dodge's padding eats `160·0.05 = 8` at
+/// each end, leaving two 72px sub-bands. The bar formulas then take
+/// `bandwidth_px / n_groups · factor` (`160/2·0.8 = 64`) and clamp it to the
+/// 72px sub-band via [`BatchPositionMeta::clamp_width`] — so both paddings
+/// are visible in the result and neither is applied twice.
+///
+/// Before F-L04-03 `bandwidth()` ignored `padding_inner`, so Dodge subdivided
+/// the whole slot: sub-bands (and the GH #66 clamp derived from them) were
+/// computed against a band wider than the one drawn.
+///
+/// One consequence is worth stating because it is what makes the composition
+/// *safe* rather than merely defined: a mark's raw width is
+/// `bandwidth_px/n_groups·factor` and its clamp bound is
+/// `bandwidth_px·(1 − 2·padding)/n_groups`, so now that both derive from the
+/// SAME padding-aware bandwidth their ratio is `factor/(1 − 2·padding)` —
+/// **independent of the scale's padding**. The GH #66 clamp therefore fires at
+/// exactly the Dodge-padding thresholds it always did (`padding > 0.1` for
+/// bar's 0.8 factor, `> 0.2` for box/tick's 0.6) whatever the scale does.
+/// Pre-fix the ratio was `factor/((1 − padding_inner)·(1 − 2·padding))`, so
+/// scale padding alone could push the clamp into firing and erase Dodge's own
+/// padding — at `padding_inner = 0.25, padding = 0.05` the bar ratio was
+/// `0.8/(0.75·0.9) = 1.185 > 1`, clamped, and both paddings collapsed into one.
 fn apply_dodge_ordinal(
     batch: &RecordBatch,
     by_cats: &[String],
@@ -626,11 +663,14 @@ fn apply_dodge_ordinal(
     // Also stamp the computed pixel sub-band width (GH #66 remediation):
     // `sub_band` here is the true per-group slot width in the same pixel
     // space the offsets above are computed in. Mark-width formulas
-    // (`bar_width = band_extent / n_categories / n_groups * 0.8`, and the
-    // analogous box/tick formulas) are blind to `padding` — they narrow by
+    // (`bar_width = bandwidth_px / n_groups * 0.8`, and the analogous
+    // box/tick formulas) are blind to DODGE's `padding` — they narrow by
     // `n_groups` but never account for the padding eaten out of each
     // sub-band, so at `padding > ~0.1` (bar) the 0.8-factor width can exceed
-    // this `sub_band` and adjacent dodge groups overlap. Stamping `sub_band`
+    // this `sub_band` and adjacent dodge groups overlap. (They are no longer
+    // blind to the SCALE's padding: since F-L04-03 they divide the same
+    // padding-aware `bandwidth_px` this function does, which is what makes
+    // the two paddings compose — see the composition rule above.) Stamping `sub_band`
     // here — where `padding` is already in scope — lets those mark renderers
     // clamp their width to it (`BatchPositionMeta::clamp_width`) without
     // threading `padding` through `DrawCtx` or re-deriving it from a
@@ -685,6 +725,13 @@ fn apply_jitter(
     // post-scale. The pixel offset is `(u - 0.5) * width * bandwidth_px`, so
     // `width=1.0` spans the full band; `width=0.4` (default) keeps points
     // well within their band.
+    //
+    // "Band" here is the DRAWN band, the same one Dodge subdivides: since
+    // F-L04-03 `bandwidth()` is padding-aware, so on a padded `BandScale` the
+    // spread narrows with the band instead of scattering points across the
+    // full slot and into the gap the padding opened. Jitter's `width` is its
+    // own fraction OF that band — the two compose exactly as scale padding and
+    // `Dodge`'s padding do (see `apply_dodge_ordinal`'s composition rule).
     let x_is_ordinal = matches!(scales.x, ScaleKind::Ordinal(_));
     let y_is_ordinal = matches!(scales.y, ScaleKind::Ordinal(_));
     let x_bandwidth = if let ScaleKind::Ordinal(s) = &scales.x { s.bandwidth() } else { 1.0 };
@@ -3725,6 +3772,70 @@ mod tests {
         );
     }
 
+    /// Jitter's spread is a fraction of the DRAWN band, the same band Dodge
+    /// subdivides (F-L04-03, spec §4A).
+    ///
+    /// Two categories over `[0, 300]`: unpadded `step = bandwidth = 150`;
+    /// at `padding_inner = 0.5`, `denom = 1.5`, `step = 200` and the drawn
+    /// band is `100`. Every row's pixel offset is `(u − 0.5) · width ·
+    /// bandwidth` off the same seeded `u`, so the padded offsets must be
+    /// exactly `100/150` of their unpadded twins — and with `width = 1.0`
+    /// (spread spans the whole band) each padded point must still land within
+    /// `±50` of its center, i.e. inside the band the user actually sees rather
+    /// than out in the gap the padding opened.
+    #[test]
+    fn jitter_spread_follows_the_padding_aware_band() {
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let scales = |layout| ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(
+                vec!["a".into(), "b".into()],
+                vec![0.0, 300.0],
+                layout,
+            )),
+            y: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 100.0],
+                vec![0.0, 100.0],
+                false,
+                false,
+            )),
+            color: None,
+            size: None,
+            shape: None,
+            opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
+            x2: None,
+            y2: None,
+            y_slots: Default::default(),
+        };
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 1.0, seed: Some(7) };
+        let jitter = |layout| {
+            let out = apply_position(&b, Some(&pos), &scales(layout), &enc, false, &mut Vec::new())
+                .unwrap();
+            offset_col(&out, "__pos_x_offset__")
+        };
+
+        let unpadded = jitter(DiscreteLayout::UNPADDED);
+        let padded = jitter(DiscreteLayout::band(0.5, 0.0, 0.5));
+        assert_eq!(unpadded.len(), 4);
+        for (i, (p, u)) in padded.iter().zip(unpadded.iter()).enumerate() {
+            assert!(u.abs() > 1e-6, "row {i}: fixture must produce a non-zero offset");
+            assert!(
+                (p - u * (100.0 / 150.0)).abs() < 1e-9,
+                "row {i}: padded spread must be 100/150 of the unpadded one; got {p} vs {u}"
+            );
+            assert!(
+                p.abs() <= 50.0,
+                "row {i}: a jittered point must stay inside the 100px drawn band; got {p}"
+            );
+        }
+    }
+
     /// Default Dodge `padding=0.05` (E=600, n=3 categories, g=2 groups): the
     /// 0.8-factor raw bar width (80.0) already fits inside the sub-band
     /// (90.0), so the GH #66 clamp (`BatchPositionMeta::clamp_width`) is a
@@ -4046,8 +4157,8 @@ impl BatchPositionMeta {
     /// Clamp a dodged band-axis mark's pixel width to its Dodge sub-band.
     ///
     /// `raw_width` is the mark's ordinary width formula
-    /// (`band_extent / n_categories / dodge_n_groups * factor`, for whatever
-    /// `factor` the mark uses — bar's fixed `0.8`, box/tick's `band_size`).
+    /// (`scale bandwidth / dodge_n_groups * factor`, for whatever `factor` the
+    /// mark uses — bar's fixed `0.8`, box/tick's `band_size`).
     /// That formula narrows by `dodge_n_groups` but is blind to Dodge's
     /// `padding`, so at high padding the factor-scaled width can exceed the
     /// true per-group slot width and adjacent dodge groups overlap (GH #66).

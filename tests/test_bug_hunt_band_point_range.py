@@ -16,11 +16,15 @@ Known divergences and their pins:
   through too, but only moves geometry when the denominator clamp fires (a
   single category with padding large enough to force ``denom < 1``) and is
   algebraically inert on the point model for ``n >= 2``; it is not a general
-  mover. Mark *width* formulas haven't caught up to the padded model yet --
-  e.g. ``test_band_scale_on_x_and_y_simultaneously_heatmap`` below still
-  pins a padded ``BandScale``'s ``mark_rect`` cell width at the unpadded
-  ``extent / n``, not ``bandwidth()``; that is Task 6's territory, not a gap
-  in this file. What remains genuinely open until batch-C T7 is narrower: a
+  mover. As of batch-C T6, mark *width* formulas in this file's Cartesian
+  band/point territory have caught up to the padded model --
+  ``test_band_scale_on_x_and_y_simultaneously_heatmap`` below now pins a
+  padded ``BandScale``'s ``mark_rect`` cell width at the drawn band
+  ``bandwidth()``, not the unpadded ``extent / n``. (``bar::build_polar``'s
+  angular band is a deliberate, documented exception -- it stays
+  batch-counted, a spec §3 non-goal with no pixel range or resolved
+  ordinal scale behind it, out of scope for this file entirely.) What
+  remains genuinely open until batch-C T7 is narrower: a
   padded band/point scale rendered with NO explicit ``range=`` places marks
   at the d3 centers but the categorical axis still resolves tick placement
   via ``uniform_center`` (gated on range-explicitness), so labels and marks
@@ -583,12 +587,17 @@ def test_band_scale_on_x_and_y_simultaneously_heatmap():
         ),
     )
     assert len(cells) == 4, f"expected 4 heatmap cells, got {len(cells)}"
+    # batch-C T6: a cell is the drawn band, not extent / n. Default
+    # padding_inner=0.1, padding_outer=0.1 on both axes, n=2 categories:
+    # denom = n - padding_inner + 2*padding_outer = 2 - 0.1 + 0.2 = 2.1
+    # x: step = 220/2.1 = 104.761904..., width = step * (1 - padding_inner) = 94.285714...
+    # y: step = 160/2.1 = 76.190476...,  height = step * (1 - padding_inner) = 68.571428...
     for a in cells:
-        assert float(a["width"]) == pytest.approx(110.0, abs=0.5), (
-            f"cell width should be |260-40|/2 = 110, got {a['width']}"
+        assert float(a["width"]) == pytest.approx(94.285714, abs=0.5), (
+            f"cell width should be the drawn band 220/2.1*0.9 = 94.2857..., got {a['width']}"
         )
-        assert float(a["height"]) == pytest.approx(80.0, abs=0.5), (
-            f"cell height should be |190-30|/2 = 80, got {a['height']}"
+        assert float(a["height"]) == pytest.approx(68.571429, abs=0.5), (
+            f"cell height should be the drawn band 160/2.1*0.9 = 68.5714..., got {a['height']}"
         )
 
 
@@ -646,6 +655,87 @@ def test_explicit_band_range_on_faceted_chart_marks_stay_in_each_panel():
         f"(the other panel's marks are clipped invisible): panel clip x-extents "
         f"{[(p.get('x'), p.get('width')) for p in panels]}, bar centers {bar_centers}"
     )
+
+
+def test_a_batch_missing_categories_still_sizes_bars_by_the_domain_not_the_batch():
+    """A faceted bar chart where one facet panel's batch is missing a
+    category still sizes its bars by the DOMAIN category count, not its own
+    batch's distinct-category count -- batch-C T6 (``bar::build_ordinal`` now
+    divides by ``x.bandwidth()``, which is keyed off the scale's shared
+    domain, not the render batch's distinct count).
+
+    Fixture: two facet panels share the categorical domain ``{a, b, c}``
+    (default ``share_scale``), but the "sparse" panel's own rows only cover
+    ``{a, b}`` -- its batch never sees "c". Facet columns get equal-width
+    plot areas, so under the T6 fix every bar in both panels shares ONE
+    bandwidth: ``x.bandwidth() / n_groups`` is a property of the shared
+    3-category domain, identical regardless of which panel drew it.
+
+    RED proof by construction (no simulation needed): the pre-T6 formula was
+    ``band_extent_or(x, panel.w) / n_batch / n_groups`` where ``n_batch`` is
+    the render BATCH's own distinct category count -- 3 in the full panel,
+    2 in the sparse panel. Dividing the same panel extent by 3 in one panel
+    and by 2 in the other yields two different widths (the sparse panel's
+    bars ~1.5x wider), so this assertion would have failed before T6 and
+    passes now only because the divisor is the domain count in both panels.
+    """
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b", "c", "a", "b"],
+            "val": [10.0, 20.0, 30.0, 15.0, 25.0],
+            "panel": ["full", "full", "full", "sparse", "sparse"],
+        }
+    )
+    svg = (
+        fr.Chart(df)
+        .mark_bar()
+        .encode(x="cat:N", y="val:Q")
+        .facet(col="panel")
+        .properties(width=700, height=350)
+        .to_svg()
+    )
+    _assert_finite_svg(svg)
+    bars = _svg_elements(svg, "rect", lambda a: a.get("fill") == "#2563eb")
+    assert len(bars) == 5, f"expected 5 bars (3 full + 2 sparse), got {len(bars)}: {bars}"
+    widths = [float(a["width"]) for a in bars]
+    assert max(widths) - min(widths) <= 0.5, (
+        f"bar widths differ across facet panels: {widths}. Under the shared "
+        "domain {a, b, c}, every bar's width must be bandwidth() / n_groups "
+        "regardless of which categories its own panel's batch happens to "
+        "carry; unequal widths mean a panel divided by its own (smaller) "
+        "batch category count instead of the domain count."
+    )
+
+    # Magnitude pin, not just cross-panel equality: derive the expected width
+    # from the actual rendered panel extent so an all-zero or a uniformly-wrong
+    # divisor (e.g. a future bandwidth() that silently drops padding) can't
+    # pass alongside the equality check above.
+    panels = [
+        dict(re.findall(r'([\w-]+)="([^"]+)"', m))
+        for m in re.findall(r"<clipPath[^>]*>\s*<rect([^/]*)/>", svg)
+    ]
+    assert len(panels) >= 2, f"expected >= 2 facet panel clip rects, got {len(panels)}"
+    panel_widths = {round(float(p["width"]), 6) for p in panels}
+    assert len(panel_widths) == 1, (
+        f"facet panels have unequal plot-area widths {panel_widths}; the magnitude "
+        "pin below assumes equal-width columns"
+    )
+    panel_extent = panel_widths.pop()
+    # x="cat:N" with no explicit fr.BandScale(...) resolves through
+    # crates/ferrum-core/src/spec/encoding.rs's `ScaleSpec::Ordinal`, whose
+    # `padding` is `#[serde(default)]` -> 0.0 -- unlike this file's other
+    # heatmap tests, which construct `fr.BandScale(...)` explicitly and get
+    # d3's default padding_inner=padding_outer=0.1. So denom = n - 0 + 2*0 = n
+    # (n=3, the shared domain {a, b, c}); bandwidth = extent/n * (1 - 0) =
+    # extent/3; bar width = bandwidth / n_groups * 0.8 (n_groups=1, mark_bar's
+    # default band_size). Confirmed against the actual render, not assumed:
+    # panel_extent/3*0.8 reproduces the measured width to 3 decimal places.
+    expected_width = panel_extent / 3 * 0.8
+    for w in widths:
+        assert w == pytest.approx(expected_width, abs=0.5), (
+            f"bar width {w} does not match the derived drawn-band width "
+            f"{expected_width} (panel extent {panel_extent} / 3 * 0.8)"
+        )
 
 
 def test_data_category_absent_from_explicit_domain_is_skipped_cleanly():

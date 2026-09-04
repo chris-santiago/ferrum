@@ -26,13 +26,15 @@
 //!   `theta="x"` puts the angular channel on `x` and the radial channel on `y`;
 //!   `theta="y"` mirrors. Byte-identical to both marks' prior inline `match`.
 //!
-//! - [`band_extent_or`] — the band-geometry-unification consumer pattern (GH
-//!   #39 phase 2): bar/box/heatmap/tick width and extent formulas divide by a
-//!   panel-extent term (`panel.w` / `panel.h`) that must instead honor an
-//!   explicit `BandScale`/`PointScale`/positional-`OrdinalScale` pixel range
-//!   when the resolver recorded one. Ten call sites across `bar`, `rect`, and
-//!   `tick` repeat this exact substitution, so it is unified here rather than
-//!   left as ten copies of the same `.map(f64::abs).unwrap_or(..)` line.
+//! `band_extent_or` used to live here too — the GH #39 phase-2 substitution
+//! that let bar/box/heatmap/tick width formulas honor an explicit
+//! `BandScale`/`PointScale` pixel range in place of the panel extent. It is
+//! gone (F-L04-03, spec §4A, #67): those formulas no longer divide a pixel
+//! extent by a batch-derived category count at all. They ask the resolved
+//! scale for its drawn band directly
+//! ([`ScaleKind::bandwidth`](crate::render::scale_resolve::ScaleKind)), which
+//! is padding-aware and domain-counted, so the extent-vs-fallback choice this
+//! helper existed to make no longer has a caller.
 
 use crate::render::color::Color;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, resolve_stroke_dash, DrawCtx};
@@ -71,22 +73,6 @@ pub(crate) enum ColorColumns {
 /// because those consumers never dispatch on the choice, so a match would buy
 /// them nothing.
 pub(crate) type ColorColumnPair = (Option<Vec<Option<String>>>, Option<Vec<Option<f64>>>);
-
-/// Band-pixel extent for a mark's width/size/extent formula (band-geometry
-/// unification design §6 consumer contract): `scale`'s explicit range extent
-/// when the resolver recorded one, otherwise `fallback` — the exact panel-
-/// extent expression (`panel.w` / `panel.h`) each call site used before this
-/// unification, so the no-range path stays byte-identical (§7 invariant).
-///
-/// `scale` must be the resolved scale on the *same axis* as `fallback`'s panel
-/// dimension (x-axis scale with `panel.w`, y-axis scale with `panel.h`).
-/// [`ScaleKind::explicit_band_extent`] returns `None` for every non-ordinal
-/// scale, so passing a scale that carries no band range (including the dummy
-/// unit scale synthesized for an absent axis) is safe: this always falls
-/// through to `fallback`.
-pub(crate) fn band_extent_or(scale: &ScaleKind, fallback: f64) -> f64 {
-    scale.explicit_band_extent().map(f64::abs).unwrap_or(fallback)
-}
 
 /// Load the per-row color-encoding columns for fill resolution (C9).
 ///

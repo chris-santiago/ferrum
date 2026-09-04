@@ -259,6 +259,15 @@ BAND_STEP = 53.65853658536586
 # cannot silently drift out of sync with it.
 BAND_START = BAND_RANGE[0] + 0.1 * BAND_STEP
 BAND_CENTERS = [69.51219512195122, 123.17073170731709, 176.82926829268294, 230.4878048780488]
+
+# Heatmap cell width for a 2-category BandScale over BAND_RANGE, same shared
+# d3 model as BAND_STEP above (batch-C T6: a mark_rect cell is now the drawn
+# band, not extent / n_categories): denom = n - p_in + 2*p_out
+# = 2 - 0.1 + 0.2 = 2.1, step = (260 - 40) / 2.1 = 104.76190476190476,
+# width = |step| * (1 - p_in) = 104.76190476190476 * 0.9. Written as an
+# expression over BAND_RANGE (the BAND_START precedent above) rather than a
+# bare literal, so it cannot silently drift out of sync with BAND_RANGE.
+HEATMAP_CELL_WIDTH = abs(BAND_RANGE[1] - BAND_RANGE[0]) / 2.1 * 0.9
 _TOL = 0.5
 
 
@@ -371,7 +380,8 @@ def test_ordinal_y_range_constrains_bar_heights_and_tick_labels():
 
 def test_heatmap_cell_extent_matches_explicit_range():
     """mark_rect (heatmap) cell extent on a ranged categorical axis equals
-    |range| / n_categories; the unranged axis is unaffected.
+    the drawn band, |range|/denom * (1 - padding_inner) (batch-C T6); the
+    unranged axis is unaffected.
 
     Regression: issue #39 phase 2 — heatmap cell width/height is
     independently re-derived from the full panel extent
@@ -409,11 +419,11 @@ def test_heatmap_cell_extent_matches_explicit_range():
         f"Expected 4 baseline heatmap cells, got {len(baseline_cells)}: {baseline_cells}"
     )
 
-    expected_width = abs(BAND_RANGE[1] - BAND_RANGE[0]) / 2  # 2 row categories
+    expected_width = HEATMAP_CELL_WIDTH  # 2 row categories, see derivation above
     for attrs in ranged_cells:
         width = float(attrs["width"])
         assert abs(width - expected_width) <= _TOL, (
-            f"Heatmap cell width {width} does not match |range|/n_categories "
+            f"Heatmap cell width {width} does not match the drawn band "
             f"({expected_width}) for explicit x range {BAND_RANGE}: {attrs!r}"
         )
 

@@ -63,17 +63,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     Ok(v) => v,
                     Err(_) => return empty(),
                 };
-                let n_cats = {
-                    let mut set = std::collections::HashSet::<&str>::new();
-                    for v in ys.iter().flatten() { set.insert(v.as_str()); }
-                    set.len().max(1)
-                };
-                // Band-geometry unification (#39 phase 2): x is unencoded in
-                // this mode, so `ctx.scales.x` is the dummy unit scale, whose
-                // `explicit_band_extent()` is always `None` — this always
-                // falls through to `panel.w`, matching the site-pairing
-                // convention (cross-axis tick length keyed to the panel-w
-                // term regardless of which field is ordinal).
+                // x is unencoded in this mode, so this crossbar runs along the
+                // CROSS axis and its length is keyed by convention to the
+                // panel-w term. `bandwidth_over(panel.w)` divides that term by
+                // the y scale's own slot count and applies its padding
+                // fraction, so this arm stays on the same domain count and the
+                // same drawn-band fraction as its sibling arms (F-L04-03, spec
+                // §4A) instead of a batch count and no padding. `None` is
+                // unreachable — this branch is gated on an ordinal y.
                 //
                 // GH #66 sub-band clamp NOT applicable here: Dodge offsets
                 // `cy` (the band axis, y), but this tick's length runs along
@@ -83,7 +80,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 // — the `n_groups` divisor here is purely a cosmetic
                 // width-pairing convention with the band-axis formulas, not
                 // a collision-prone one.
-                let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
+                let band_width = match ctx.scales.y.bandwidth_over(panel.w) {
+                    Some(w) => w,
+                    None => return empty(),
+                };
                 // band_size is now a FULL-length factor (rect's convention,
                 // GH #85): default 0.6 (formerly a HALF-length factor
                 // defaulting to 0.3) keeps the default rendered length
@@ -91,7 +91,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 // division, so `tick_half` here is bit-for-bit the old
                 // `tick_half = extent * 0.3` (see the crate's tick.rs test
                 // module for the bit-identity proof).
-                let tick_full = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+                let tick_full = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
                 let tick_half = tick_full / 2.0;
                 let baseline_x = panel.x;
                 let mut acc = MarkNodes::with_capacity(ys.len());
@@ -153,19 +153,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         if let Some(yf) = y_field(ctx, spec) {
             let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
-            let n_cats = {
-                let mut set = std::collections::HashSet::<&str>::new();
-                for v in xs.iter().flatten() { set.insert(v.as_str()); }
-                set.len().max(1)
-            };
-            // Band-geometry unification (#39 phase 2): honor an explicit
-            // x-band pixel range when the resolver recorded one; otherwise
-            // identical to `panel.w`.
-            let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
+            // Length is the resolved x scale's drawn band × `band_size`
+            // (F-L04-03, spec §4A; see `ScaleKind::bandwidth`). `None` is
+            // unreachable — this branch is gated on an ordinal x.
+            let band_width = match ctx.scales.x.bandwidth() { Some(w) => w, None => return empty() };
             // band_size is now a FULL-length factor (rect's convention, GH
             // #85); default 0.6 keeps this bit-identical to the old
             // half-length default of 0.3 (see the bit-identity proof below).
-            let tick_full_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+            let tick_full_raw = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
             // Clamp to the Dodge sub-band (GH #66): this tick spans the SAME
             // axis (x) that Dodge offsets `cx` along, so — unlike the
             // ordinal-only crossbar modes above, whose tick length runs along
@@ -215,19 +210,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         if let Some(yf) = y_field(ctx, spec) {
             let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
-            let n_cats = {
-                let mut set = std::collections::HashSet::<&str>::new();
-                for v in ys.iter().flatten() { set.insert(v.as_str()); }
-                set.len().max(1)
-            };
-            // Band-geometry unification (#39 phase 2): honor an explicit
-            // y-band pixel range when the resolver recorded one; otherwise
-            // identical to `panel.h`.
-            let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
+            // The y twin of the ordinal-x mode's length (F-L04-03, spec §4A;
+            // see `ScaleKind::bandwidth`). `None` is unreachable — this branch
+            // is gated on an ordinal y.
+            let band_width = match ctx.scales.y.bandwidth() { Some(w) => w, None => return empty() };
             // band_size is now a FULL-length factor (rect's convention, GH
             // #85); default 0.6 keeps this bit-identical to the old
             // half-length default of 0.3.
-            let tick_full_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+            let tick_full_raw = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
             // Clamp to the Dodge sub-band (GH #66); see the ordinal-x mode's
             // analogous comment above — this tick spans y, the same axis
             // Dodge offsets `cy` along, so the overlap risk (and the
@@ -269,17 +259,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Ok(v) => v,
             Err(_) => return empty(),
         };
-        let n_cats = {
-            let mut set = std::collections::HashSet::<&str>::new();
-            for v in xs.iter().flatten() { set.insert(v.as_str()); }
-            set.len().max(1)
-        };
-        // Band-geometry unification (#39 phase 2): y is unencoded in this
-        // mode, so `ctx.scales.y` is the dummy unit scale, whose
-        // `explicit_band_extent()` is always `None` — this always falls
-        // through to `panel.h`, matching the site-pairing convention
-        // (cross-axis tick length keyed to the panel-h term regardless of
-        // which field is ordinal).
+        // y is unencoded in this mode, so this crossbar runs along the CROSS
+        // axis and its length is keyed by convention to the panel-h term;
+        // `bandwidth_over(panel.h)` divides that term by the x scale's own
+        // slot count and applies its padding fraction (see the ordinal-y-only
+        // mode above for the full rationale). `None` is unreachable — this
+        // branch is gated on an ordinal x.
         //
         // GH #66 sub-band clamp NOT applicable here: Dodge offsets `cx` (the
         // band axis, x), but this tick's length runs along the CROSS axis
@@ -287,11 +272,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // column, so this tick length cannot collide with a neighbouring
         // group regardless of `padding` — see the analogous "ordinal y only"
         // mode above.
-        let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
+        let band_width = match ctx.scales.x.bandwidth_over(panel.h) {
+            Some(w) => w,
+            None => return empty(),
+        };
         // band_size is now a FULL-length factor (rect's convention, GH #85);
         // default 0.6 keeps the default rendered length byte-identical (see
         // the ordinal-y-only mode's analogous comment above).
-        let tick_full = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+        let tick_full = (band_width / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
         let tick_half = tick_full / 2.0;
         let baseline_y = panel.y + panel.h;
         let mut acc = MarkNodes::with_capacity(xs.len());

@@ -28,3 +28,10 @@ pub(crate) mod channels;
 /// spans the family; see the module's own doc.
 #[cfg(test)]
 mod color_dtype_parity;
+
+/// Test-only: the cross-mark band-width family invariant (F-L04-03, spec §4A)
+/// — every ordinal mark's width is the resolved scale's drawn band times its
+/// own `band_size` factor. Same reason as above: nine formulas across `bar`,
+/// `rect` and `tick` implement one sentence.
+#[cfg(test)]
+mod band_width;

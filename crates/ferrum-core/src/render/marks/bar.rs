@@ -200,6 +200,13 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             cat_order.push(s.as_str());
         }
     }
+    // Polar angular band: `tau / n`, counted off the BATCH's distinct angular
+    // categories. Deliberately untouched by the F-L04-03 band-geometry work
+    // (spec §3 non-goals): this is an angular model with no pixel range, no
+    // `padding_inner`/`padding_outer`/`align`, and no resolved ordinal scale
+    // behind it — `theta` is remapped in Python and never resolves a
+    // `ScaleKind::Ordinal`, so there is no `bandwidth()` to ask. Padding here
+    // is `pad_angle`, a separate radial-chart concept.
     let n_cats = cat_order.len().max(1);
     let tau = std::f64::consts::TAU;
     let band = tau / n_cats as f64;
@@ -312,18 +319,18 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let panel = ctx.panel.plot_area;
     let baseline_y = panel.y + panel.h;
 
-    let n_categories = x_strs.iter().flatten().collect::<std::collections::HashSet<_>>().len().max(1);
-
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
     // Under an ordinal-band Dodge, shrink each bar to its sub-band so adjacent
     // dodge groups don't overlap (single source of truth: `dodge_n_groups`).
     // No Dodge → n_groups == 1 → byte-identical to the non-dodged width.
     let n_groups = pos_meta.dodge_n_groups();
-    // Band-geometry unification (#39 phase 2): honor an explicit x-band pixel
-    // range when the resolver recorded one; otherwise identical to `panel.w`.
-    let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-    let bar_width_raw = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
+    // Width is the resolved scale's drawn band × bar's 0.8 factor (F-L04-03,
+    // spec §4A) — padding-aware, counted off the scale's DOMAIN, and the band
+    // Dodge subdivides. See `ScaleKind::bandwidth` for the full contract.
+    // `None` is unreachable: `build` dispatches here only for an ordinal x.
+    let band_width = match ctx.scales.x.bandwidth() { Some(w) => w, None => return empty_result() };
+    let bar_width_raw = (band_width / n_groups as f64) * 0.8;
     // Clamp to the Dodge sub-band (GH #66): the 0.8-factor width above is
     // blind to Dodge's `padding` and can exceed the true per-group slot
     // width at high padding, overlapping neighbouring dodge groups. No-op
@@ -469,22 +476,15 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let panel = ctx.panel.plot_area;
     let baseline_x = panel.x;
 
-    let n_categories = y_strs
-        .iter()
-        .flatten()
-        .collect::<std::collections::HashSet<_>>()
-        .len()
-        .max(1);
-
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     // Under an ordinal-band Dodge, shrink each horizontal bar to its sub-band so
     // adjacent dodge groups don't overlap (mirrors `build_ordinal`; the band
     // dimension is height here). No Dodge → n_groups == 1 → byte-identical.
     let n_groups = pos_meta.dodge_n_groups();
-    // Band-geometry unification (#39 phase 2): honor an explicit y-band pixel
-    // range when the resolver recorded one; otherwise identical to `panel.h`.
-    let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-    let bar_height_raw = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
+    // The y twin of `build_ordinal`'s width: the resolved y scale's drawn band
+    // × bar's 0.8 factor (F-L04-03, spec §4A; see `ScaleKind::bandwidth`).
+    let band_width = match ctx.scales.y.bandwidth() { Some(w) => w, None => return empty_result() };
+    let bar_height_raw = (band_width / n_groups as f64) * 0.8;
     // Clamp to the Dodge sub-band (GH #66); see `build_ordinal`'s analogous
     // comment — byte-identical no-op when undodged or at low/default padding.
     let bar_height = pos_meta.clamp_width(bar_height_raw);
@@ -2795,14 +2795,27 @@ mod tests {
         }
     }
 
-    /// Explicitness is a recorded fact, not inferred by comparing the scale's
-    /// range to the panel extent (design §8). An `OrdinalScale` carrying a
-    /// numeric range but `with_explicit_range(false)` must still divide by
-    /// `panel.w`, ignoring its own range entirely — the discriminating check
-    /// against a float-comparison-based gate (which this scale's `[40, 260]`
-    /// range, being unequal to `[0, 300]`, would also happen to satisfy).
+    /// The resolved scale is the UNCONDITIONAL source of band geometry
+    /// (F-L04-03, spec §4A, #67): a bar's width is the scale's drawn band
+    /// whatever the range's provenance, and the panel extent no longer
+    /// participates in the formula at all.
+    ///
+    /// This pin used to assert the opposite — that a scale carrying a
+    /// `[40, 260]` range but no explicit-range flag must still divide
+    /// `panel.w` — because the width formula consulted `explicit_band_extent()`
+    /// and fell back to the panel dimension. That fallback is deleted, so the
+    /// same scale now yields 88.0 (its own 220px extent), identical to its
+    /// explicitly-ranged twin above.
+    ///
+    /// Nothing in production output moves: the resolver builds a
+    /// non-explicit ordinal scale's range *as* `[plot.x, plot.x + plot.w]`, so
+    /// asking the scale and asking the panel are the same question there —
+    /// pinned through the real resolver by
+    /// `render::marks::band_width::unpadded_auto_path_reproduces_the_former_panel_extent_width`.
+    /// A scale whose range disagrees with its panel, like this one, is
+    /// reachable only by hand-construction.
     #[test]
-    fn bar_ordinal_x_no_explicit_range_ignores_scale_range_uses_panel() {
+    fn bar_ordinal_x_width_follows_the_scale_range_whatever_its_provenance() {
         use crate::render::scale_resolve::ResolvedScales;
         use crate::scale::linear::LinearScale;
         use crate::scale::ordinal::OrdinalScale;
@@ -2832,10 +2845,10 @@ mod tests {
             if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
         }).collect();
         assert_eq!(widths.len(), 2);
-        // panel.w = 300, 2 categories, 1 group → width = 300 / 2 * 0.8 = 120.0
-        // (NOT 88.0, which the scale's own [40,260] range would give).
+        // The scale's own [40, 260] range, not panel.w = 300: 220 / 2 * 0.8 =
+        // 88.0. Pre-F-L04-03 this asserted 120.0 (the panel fallback).
         for w in widths {
-            assert!((w - 120.0).abs() < 1e-9, "expected panel-fallback bar width 120.0, got {w}");
+            assert!((w - 88.0).abs() < 1e-9, "expected the scale's 220px extent → 88.0, got {w}");
         }
     }
 

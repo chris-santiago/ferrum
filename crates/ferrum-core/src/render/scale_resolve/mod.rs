@@ -327,19 +327,54 @@ impl ScaleKind {
         (r[0], r[1])
     }
 
-    /// Signed band-pixel extent (`r1 − r0`, in range order) of an ordinal
-    /// positional scale's range, but only when the resolver recorded that
-    /// range as **explicitly supplied** by the user (`BandScale`/`PointScale`/
-    /// positional `OrdinalScale` `range=`) rather than the panel-extent
-    /// fallback. `None` for every other scale kind, and `None` for an ordinal
-    /// scale using the fallback range — even though that range is numerically
-    /// a valid extent, explicitness is a fact recorded at construction, never
-    /// inferred by comparing floats (band-geometry unification design §6).
+    /// The pixel width of one category's **drawn band** on this scale — the
+    /// single source every ordinal mark-width formula multiplies by its own
+    /// `band_size` factor (F-L04-03, spec §4A). `None` for every non-ordinal
+    /// scale kind.
     ///
-    /// Consumer contract: `scale.explicit_band_extent().map(f64::abs).unwrap_or(panel_extent)`.
-    pub(in crate::render) fn explicit_band_extent(&self) -> Option<f64> {
+    /// Two facts come with it, and both are the point of routing widths
+    /// through the scale rather than through the panel extent:
+    ///
+    /// - It is **padding-aware**: `|step|·(1 − padding_inner)` under the band
+    ///   model (`|step|` under the point model, whose positions have no width
+    ///   of their own). A `BandScale(padding_inner=…)` therefore narrows marks
+    ///   as well as moving them, instead of leaving full-slot-width marks
+    ///   centered on padded centers.
+    /// - Its category count is the scale's **domain**, not the drawing batch's
+    ///   distinct values. A layer whose batch is missing a category — an empty
+    ///   facet cell, a filtered layer, a shared-domain composite leaf — sizes
+    ///   like its siblings instead of inflating to fill the panel.
+    ///
+    /// On the zero-padding path (every auto-inferred ordinal axis) this is
+    /// `|range extent| / n`, i.e. the pre-F-L04-03 `panel_extent / n_categories`
+    /// arithmetic in the same association, so default output is unchanged.
+    ///
+    /// Dodge composition: this is the band Dodge subdivides. Mark formulas
+    /// divide it by the dodge group count and `Dodge`'s own `padding` applies
+    /// *within* each sub-band (see [`crate::render::position`]'s
+    /// `apply_dodge_ordinal`), so the two paddings compose rather than
+    /// double-count.
+    pub(in crate::render) fn bandwidth(&self) -> Option<f64> {
         match self {
-            ScaleKind::Ordinal(s) => s.explicit_band_extent(),
+            ScaleKind::Ordinal(s) => Some(s.bandwidth()),
+            _ => None,
+        }
+    }
+
+    /// [`bandwidth`](Self::bandwidth) measured over `extent` pixels instead of
+    /// this scale's own range: what one category's drawn band *would* be if
+    /// this scale's domain and padding were laid out across `extent`.
+    ///
+    /// Exists for `mark_tick`'s two ordinal-only crossbar modes, whose line
+    /// runs along the axis that carries **no** encoding: their length is keyed
+    /// by convention to the cross-axis panel dimension divided by the
+    /// categorical axis's slot count. Asking the categorical scale for that
+    /// division keeps those two lengths on the same domain count and the same
+    /// padding fraction as their sibling arms, rather than on a batch count
+    /// and no padding at all.
+    pub(in crate::render) fn bandwidth_over(&self, extent: f64) -> Option<f64> {
+        match self {
+            ScaleKind::Ordinal(s) => Some(s.bandwidth_over(extent)),
             _ => None,
         }
     }

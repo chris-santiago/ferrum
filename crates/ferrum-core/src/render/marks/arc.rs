@@ -271,6 +271,13 @@ fn build_nominal_theta(
             cat_order.push(s.as_str());
         }
     }
+    // Polar angular band: `tau / n`, counted off the BATCH's distinct angular
+    // categories — the same model `bar::build_polar` uses, and untouched by the
+    // F-L04-03 band-geometry work for the same reason (spec §3 non-goals):
+    // there is no pixel range, no `padding_inner`/`padding_outer`/`align`, and
+    // no resolved ordinal scale behind `theta` (it is remapped in Python and
+    // never resolves a `ScaleKind::Ordinal`), so there is no `bandwidth()` to
+    // ask. Padding here is `pad_angle`, a separate radial-chart concept.
     let n_cats = cat_order.len().max(1);
     let tau = std::f64::consts::TAU;
     let band = tau / n_cats as f64;

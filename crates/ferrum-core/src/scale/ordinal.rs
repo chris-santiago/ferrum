@@ -130,8 +130,7 @@ impl OrdinalRangeValue {
 ///   sites (`render::scale_resolve::positional`) that resolved a
 ///   user-supplied `BandScale`/`PointScale`/positional-`OrdinalScale` pixel
 ///   range (GH #39 phase 2), as opposed to the panel-extent fallback. Feeds
-///   `explicit_band_extent()`, `explicit_band_centers()`, and
-///   `translate_explicit_range()`.
+///   `explicit_band_centers()` and `translate_explicit_range()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RangeProvenance {
     Default,
@@ -286,20 +285,6 @@ impl OrdinalScale {
         self
     }
 
-    /// Signed pixel extent (`r1 − r0`, in range order) of this scale's band
-    /// range, but only when [`with_explicit_range`](Self::with_explicit_range)
-    /// recorded it as user-supplied. `None` for the panel-extent fallback,
-    /// even though that range is numerically valid — explicitness is recorded
-    /// at construction, never inferred by comparing floats.
-    pub(crate) fn explicit_band_extent(&self) -> Option<f64> {
-        if !self.range_provenance.is_explicit_pixel() {
-            return None;
-        }
-        let r0 = *self.data.range.first()?;
-        let r1 = *self.data.range.last()?;
-        Some(r1 - r0)
-    }
-
     /// Absolute band-center pixels, one per domain category in order, but only
     /// when [`with_explicit_range`](Self::with_explicit_range) recorded this
     /// scale's range as user-supplied (GH #39 phase 2, band-geometry
@@ -331,13 +316,29 @@ impl OrdinalScale {
     /// the band model, `|step|` under the point model (whose positions have no
     /// width of their own — see `DiscreteGeometry::bandwidth`). Used by
     /// render-side position adjustments (Phase 9c Dodge) to compute sub-band
-    /// offsets. The returned value is non-negative even when the range is
-    /// reversed (lo > hi), and zero for an empty domain.
+    /// offsets, and — since F-L04-03 — by every ordinal mark-width formula
+    /// (`ScaleKind::bandwidth`). The returned value is non-negative even when
+    /// the range is reversed (lo > hi), and zero for an empty domain.
     ///
     /// Before F-L04-03 this was the full step regardless of padding — the
     /// unpadded model still reports exactly that, since `1 − 0 = 1`.
     pub(crate) fn bandwidth(&self) -> f64 {
         self.data.geometry().bandwidth()
+    }
+
+    /// [`bandwidth`](Self::bandwidth) as it would resolve over a range of
+    /// `extent` pixels rather than over this scale's own range — same domain
+    /// size, same d3 model, different extent.
+    ///
+    /// The one consumer is `mark_tick`'s pair of ordinal-only crossbar modes,
+    /// which measure a cross-axis length against this scale's slot count (see
+    /// `ScaleKind::bandwidth_over`). Laid out over `[0, extent]`, so at zero
+    /// padding it is exactly `extent / n`.
+    pub(crate) fn bandwidth_over(&self, extent: f64) -> f64 {
+        self.data
+            .layout
+            .geometry(self.data.domain.len(), 0.0, extent)
+            .bandwidth()
     }
 
     pub(crate) fn range_pair(&self) -> [f64; 2] {
@@ -367,7 +368,7 @@ impl OrdinalScale {
     /// shifted again.
     ///
     /// Only `data.range` is load-bearing at render time (mark placement,
-    /// `explicit_band_extent()`, `explicit_band_centers()`); this deliberately
+    /// `bandwidth()`, `explicit_band_centers()`); this deliberately
     /// leaves the wire/getter-facing `range_orig` untouched. A render-internal
     /// `OrdinalScale` (built via `new_internal` + `with_explicit_range`) never
     /// flows back through the `.range` Python getter or `to_scale_spec()` — those
@@ -641,7 +642,10 @@ mod tests {
         .with_explicit_range(true);
         scale.translate_explicit_range(100.0);
         assert_eq!(scale.range_pair(), [140.0, 360.0]);
-        assert_eq!(scale.explicit_band_extent(), Some(220.0), "shifting preserves the signed extent");
+        // The 220px extent survives the shift, so both centers move by exactly
+        // `offset` and the bandwidth is unchanged: 110px step over [140, 360].
+        assert_eq!(scale.explicit_band_centers(), Some(vec![195.0, 305.0]));
+        assert_eq!(scale.bandwidth(), 110.0);
     }
 
     /// A non-explicit (panel-extent fallback) range is untouched by
@@ -807,7 +811,6 @@ mod tests {
         );
         assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
-        assert_eq!(scale.explicit_band_extent(), None);
         assert_eq!(scale.explicit_band_centers(), None);
     }
 
@@ -826,7 +829,7 @@ mod tests {
         .unwrap();
         assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
-        assert_eq!(scale.explicit_band_extent(), None);
+        assert_eq!(scale.explicit_band_centers(), None);
     }
 
     /// `OrdinalScale::new` without a `range=` kwarg matches old
@@ -837,7 +840,7 @@ mod tests {
         let scale = OrdinalScale::new(vec!["a".into(), "b".into()], None, 0.0).unwrap();
         assert!(!scale.range_provenance.range_is_user_set(), "old range_user_set was false");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
-        assert_eq!(scale.explicit_band_extent(), None);
+        assert_eq!(scale.explicit_band_centers(), None);
     }
 
     /// `with_explicit_range(true)` flips only the explicit-side answer: the
@@ -854,7 +857,8 @@ mod tests {
         .with_explicit_range(true);
         assert!(scale.range_provenance.range_is_user_set(), "range_is_user_set unaffected");
         assert!(scale.range_provenance.is_explicit_pixel());
-        assert_eq!(scale.explicit_band_extent(), Some(100.0));
+        // The explicit-side accessor is live: two bands over [0, 100].
+        assert_eq!(scale.explicit_band_centers(), Some(vec![25.0, 75.0]));
     }
 
     /// `with_explicit_range(false)` is the default state `new_internal`

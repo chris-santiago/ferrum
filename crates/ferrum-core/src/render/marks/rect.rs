@@ -14,12 +14,6 @@ use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_das
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 
-fn count_distinct(values: &[Option<String>]) -> usize {
-    let mut seen = std::collections::HashSet::<&str>::new();
-    for v in values.iter().flatten() { seen.insert(v); }
-    seen.len()
-}
-
 // ── Scene-graph build path (11a) ────────────────────────────────────
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -188,8 +182,6 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x_is_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
     let y_is_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
 
-    let panel = ctx.panel.plot_area;
-
     // The ordinal-range path binds only the categorical half of the shared
     // loader: its rects have no continuous fill path, so a `Numeric` color
     // scale's column is loaded and dropped here and every `resolve_fill_color`
@@ -221,10 +213,6 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
             Some(f) => f, None => return empty_result(),
         };
-        let n_categories = {
-            let xs_probe = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-            count_distinct(&xs_probe).max(1)
-        };
         let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
@@ -233,10 +221,11 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // adjacent dodge groups don't overlap. No Dodge → n_groups == 1 →
         // byte-identical to the non-dodged box width.
         let n_groups = pos_meta.dodge_n_groups();
-        // Band-geometry unification (#39 phase 2): honor an explicit x-band
-        // pixel range when the resolver recorded one; otherwise `panel.w`.
-        let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-        let box_w_raw = (band_extent / n_categories as f64 / n_groups as f64)
+        // Width is the resolved scale's drawn band × the box `band_size` factor
+        // (F-L04-03, spec §4A; see `ScaleKind::bandwidth`). `None` is
+        // unreachable — this branch is gated on `x_is_ordinal`.
+        let band_width = match ctx.scales.x.bandwidth() { Some(w) => w, None => return empty_result() };
+        let box_w_raw = (band_width / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
         // Clamp to the Dodge sub-band (GH #66): the band_size-factor width
         // above is blind to Dodge's `padding` and can exceed the true
@@ -320,10 +309,6 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
             Some(f) => f, None => return empty_result(),
         };
-        let n_categories = {
-            let ys_probe = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-            count_distinct(&ys_probe).max(1)
-        };
         let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
@@ -332,10 +317,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // body to its sub-band so adjacent dodge groups don't overlap. No Dodge
         // → n_groups == 1 → byte-identical to the non-dodged box height.
         let n_groups = pos_meta.dodge_n_groups();
-        // Band-geometry unification (#39 phase 2): honor an explicit y-band
-        // pixel range when the resolver recorded one; otherwise `panel.h`.
-        let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-        let box_h_raw = (band_extent / n_categories as f64 / n_groups as f64)
+        // The y twin of the x-ordinal branch's width (F-L04-03, spec §4A; see
+        // `ScaleKind::bandwidth`). `None` is unreachable — `y_is_ordinal`.
+        let band_width = match ctx.scales.y.bandwidth() { Some(w) => w, None => return empty_result() };
+        let box_h_raw = (band_width / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
         // Clamp to the Dodge sub-band (GH #66); see the x-ordinal branch's
         // analogous comment above — byte-identical no-op when undodged or at
@@ -442,16 +427,23 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if xs.len() != ys.len() { return empty_result(); }
 
-    let panel = ctx.panel.plot_area;
-    let n_x = match &ctx.scales.x { ScaleKind::Ordinal(_) => count_distinct(&xs).max(1), _ => return empty_result() };
-    let n_y = match &ctx.scales.y { ScaleKind::Ordinal(_) => count_distinct(&ys).max(1), _ => return empty_result() };
-    // Band-geometry unification (#39 phase 2): heatmap cells honor an explicit
-    // band pixel range per axis when the resolver recorded one; otherwise
-    // identical to `panel.w` / `panel.h`. Denominators stay per-axis category
-    // counts (`n_x` / `n_y`), not `n_categories`/`n_groups` — only the extent
-    // term changes.
-    let cell_w = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w) / n_x as f64;
-    let cell_h = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h) / n_y as f64;
+    // A heatmap cell IS its band on both axes: the drawn band of each resolved
+    // scale, with no `band_size` factor (cells tile the grid). Both axes must
+    // be ordinal — the `None` arms are this path's ordinality gate, replacing
+    // the pair of `ScaleKind::Ordinal` matches that used to guard the
+    // distinct-count denominators.
+    //
+    // Padding semantics for cells (F-L04-03, spec §4A): under a padded
+    // `BandScale` a cell is the DRAWN band, `|step|·(1 − padding_inner)`, so
+    // padding opens visible gutters between cells instead of leaving them
+    // edge-to-edge — the same meaning it has for a bar. At the default zero
+    // padding the cells still tile exactly, since the band is the whole slot.
+    // The count is the scale's domain, so a matrix missing a row/column cell
+    // keeps the cell size its complete siblings have.
+    let (cell_w, cell_h) = match (ctx.scales.x.bandwidth(), ctx.scales.y.bandwidth()) {
+        (Some(w), Some(h)) => (w, h),
+        _ => return empty_result(),
+    };
 
     let (color_strings, color_numeric) = color_column_loader(ctx);
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
