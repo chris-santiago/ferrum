@@ -602,6 +602,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::scale::discrete::DiscreteLayout;
     use super::*;
     use crate::layout::{PanelLayout, Rect, ThemeInputs};
     use crate::render::draw::{resolve_mark_style, DrawCtx};
@@ -976,7 +977,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let scales_default = ResolvedScales {
-            x: ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![25.0, 75.0], 0.0)),
+            x: ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![25.0, 75.0], DiscreteLayout::UNPADDED)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![1.0, 4.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None,
             opacity: Some(OpacityScale {
@@ -1300,12 +1301,12 @@ mod tests {
             x: ScaleKind::Ordinal(OrdinalScale::new_internal(
                 vec!["A".into(), "C".into()],
                 vec![50.0, 250.0],
-                0.0,
+                DiscreteLayout::UNPADDED,
             )),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(
                 vec!["p".into()],
                 vec![150.0],
-                0.0,
+                DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
@@ -1662,12 +1663,12 @@ mod tests {
             x: ScaleKind::Ordinal(OrdinalScale::new_internal(
                 vec!["A".into(), "C".into()],
                 vec![50.0, 250.0],
-                0.0,
+                DiscreteLayout::UNPADDED,
             )),
             y: ScaleKind::Ordinal(OrdinalScale::new_internal(
                 vec!["p".into()],
                 vec![150.0],
-                0.0,
+                DiscreteLayout::UNPADDED,
             )),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
@@ -1929,7 +1930,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(x_scale),
@@ -1994,7 +1995,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 300.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![2.0, 8.0], vec![0.0, 100.0], false, false)),
@@ -2054,10 +2055,10 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 400.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         // y (col) keeps its ordinary panel-derived fallback range — no explicit flag.
-        let y_scale = OrdinalScale::new_internal(vec!["x".into(), "y".into()], vec![0.0, 400.0], 0.0);
+        let y_scale = OrdinalScale::new_internal(vec!["x".into(), "y".into()], vec![0.0, 400.0], DiscreteLayout::UNPADDED);
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Ordinal(y_scale),

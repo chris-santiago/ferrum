@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
+use crate::scale::discrete::{DiscreteLayout, DEFAULT_ALIGN};
 use crate::scale::linear::LinearScale;
 use crate::scale::log::LogScale;
 use crate::scale::ordinal::OrdinalScale;
@@ -124,7 +125,7 @@ pub(in crate::render) fn build_axis_scale(
             let mut domain = match shared {
                 Some(SharedDomain::Ordinal(cats)) => {
                     return Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
-                        cats.clone(), vec![pr.0, pr.1], 0.0,
+                        cats.clone(), vec![pr.0, pr.1], DiscreteLayout::UNPADDED,
                     )));
                 }
                 _ => distinct_positional_categories_shared(
@@ -156,8 +157,11 @@ pub(in crate::render) fn build_axis_scale(
                 y_field: positional_fields.y,
             };
             apply_sort_to_domain(&mut domain, enc.sort.as_ref(), &sort_ctx, warnings);
+            // An auto-inferred categorical axis has no user padding to honor:
+            // the unpadded band model, which reduces to the pre-F-L04-03
+            // symmetric model bit-exactly (see `crate::scale::discrete`).
             Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
-                domain, vec![pr.0, pr.1], 0.0,
+                domain, vec![pr.0, pr.1], DiscreteLayout::UNPADDED,
             )))
         }
         SpecDataType::Temporal => {
@@ -262,8 +266,11 @@ pub(in crate::render) fn build_from_scale_spec(
             // String values (color ranges) are handled by `build_color_scale` —
             // fall back to the pixel-range default when the range has no numbers.
             let (pixel_range, explicit) = ordinal_pixel_range(range.as_deref(), pr);
+            // `ScaleSpec::Ordinal` carries only an inner padding (no outer, no
+            // align) — the band model with d3's default alignment.
+            let layout = DiscreteLayout::band(*padding, 0.0, DEFAULT_ALIGN);
             ScaleKind::Ordinal(
-                OrdinalScale::new_internal(d, pixel_range, *padding)
+                OrdinalScale::new_internal(d, pixel_range, layout)
                     .with_explicit_range(explicit),
             )
         }
@@ -282,20 +289,26 @@ pub(in crate::render) fn build_from_scale_spec(
             let d = apply_domain_reverse(d, common.reverse);
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
-        ScaleSpec::Band { domain, padding, padding_inner, range, .. } => {
+        ScaleSpec::Band { domain, padding, padding_inner, padding_outer, align, range } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
-            let effective_padding = padding_inner.unwrap_or(*padding);
+            // d3's `padding` is a shorthand that sets BOTH inner and outer;
+            // an explicit `padding_inner`/`padding_outer` overrides its side.
+            let layout = DiscreteLayout::band(
+                padding_inner.unwrap_or(*padding),
+                padding_outer.unwrap_or(*padding),
+                *align,
+            );
             let (band_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
             ScaleKind::Ordinal(
-                OrdinalScale::new_internal(d, band_range, effective_padding)
+                OrdinalScale::new_internal(d, band_range, layout)
                     .with_explicit_range(explicit),
             )
         }
-        ScaleSpec::Point { domain, padding, range, reverse, .. } => {
+        ScaleSpec::Point { domain, padding, align, range, reverse } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field)?,
@@ -304,21 +317,20 @@ pub(in crate::render) fn build_from_scale_spec(
             // PointScale(reverse=True) reverses the resolved domain order (GH #65).
             // Domain reversal — not a pixel-range flip — so axis tick labels
             // (domain-order via tick_labels/uniform_center) and explicit-range band
-            // centers follow the marks automatically. Within this resolver's
-            // symmetric band model ((i + 0.5) * step centers), reversing the domain
-            // is the same transform as mirroring each center about the range
-            // midpoint — the reverse semantic of the pyclass facade
-            // (scale/point.rs). Only the reverse *transform* is equivalent: the
-            // facade's BASE positions use the true point formula
-            // (extent/(n-1+2p), endpoints at the range edges) and do NOT match
-            // this band model — that divergence is the #67 north star. Applied
-            // after sort: "sort, then reverse", matching d3/Vega composition.
+            // centers follow the marks automatically. Reversing the domain mirrors
+            // every position about the range midpoint, which is the reverse
+            // semantic of the pyclass facade (scale/point.rs). The facade's BASE
+            // positions used to diverge from this resolver's symmetric band model
+            // (the former #67 north star); as of F-L04-03 both compute the true
+            // point formula from `crate::scale::discrete`, so only the reverse
+            // *mechanism* differs now, not the positions. Applied after sort:
+            // "sort, then reverse", matching d3/Vega composition.
             if *reverse {
                 d.reverse();
             }
             let (point_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
             ScaleKind::Ordinal(
-                OrdinalScale::new_internal(d, point_range, *padding)
+                OrdinalScale::new_internal(d, point_range, DiscreteLayout::point(*padding, *align))
                     .with_explicit_range(explicit),
             )
         }
@@ -675,6 +687,7 @@ pub(in crate::render) fn apply_axis_domain_config(
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};
+    use crate::scale::discrete::DiscreteLayout;
     use arrow::record_batch::RecordBatch;
     use crate::render::scale_resolve::ScaleKind;
     use crate::scale::linear::LinearScale;
@@ -828,7 +841,7 @@ mod tests {
             crate::scale::ordinal::OrdinalScale::new_internal(
                 vec!["a".into(), "b".into()],
                 range,
-                0.0,
+                DiscreteLayout::UNPADDED,
             )
             .with_explicit_range(explicit),
         );
@@ -844,7 +857,7 @@ mod tests {
             crate::scale::ordinal::OrdinalScale::new_internal(
                 vec!["a".into(), "b".into()],
                 range,
-                0.0,
+                DiscreteLayout::UNPADDED,
             )
             .with_explicit_range(explicit),
         );
@@ -863,7 +876,7 @@ mod tests {
             crate::scale::ordinal::OrdinalScale::new_internal(
                 vec!["a".into(), "b".into()],
                 range,
-                0.0,
+                DiscreteLayout::UNPADDED,
             )
             .with_explicit_range(explicit),
         );
@@ -884,7 +897,7 @@ mod tests {
             crate::scale::ordinal::OrdinalScale::new_internal(
                 vec!["a".into(), "b".into()],
                 range,
-                0.0,
+                DiscreteLayout::UNPADDED,
             )
             .with_explicit_range(explicit),
         );
@@ -906,13 +919,12 @@ mod tests {
 
     // ── PointScale(reverse=True) domain reversal (GH #65) ──
 
-    /// Builds a one-column string batch and a `ScaleSpec::Point` for it, then
-    /// resolves via the real `build_from_scale_spec` arm — the same seam
-    /// `build_axis_scale` calls when an encoding carries an explicit `scale`.
-    fn resolve_point_scale(
-        explicit_domain: Vec<String>,
-        range: Option<Vec<f64>>,
-        reverse: bool,
+    /// Resolve `spec` for a one-column string batch of `cats` through the real
+    /// `build_from_scale_spec` arm — the same seam `build_axis_scale` calls
+    /// when an encoding carries an explicit `scale`. Panel extent `(0, 500)`.
+    fn resolve_scale_spec_for_cats(
+        spec: &crate::spec::encoding::ScaleSpec,
+        cats: &[String],
     ) -> ScaleKind {
         use arrow::array::StringArray;
         use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
@@ -921,17 +933,10 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("cat", ArrowDataType::Utf8, false)]));
         let batch = arrow::record_batch::RecordBatch::try_new(
             schema,
-            vec![Arc::new(StringArray::from(explicit_domain.clone()))],
+            vec![Arc::new(StringArray::from(cats.to_vec()))],
         )
         .unwrap();
 
-        let scale_spec = crate::spec::encoding::ScaleSpec::Point {
-            domain: Some(explicit_domain),
-            padding: 0.0,
-            align: 0.5,
-            reverse,
-            range,
-        };
         let enc = crate::spec::encoding::EncodingSpec {
             field: "cat".into(),
             type_: None,
@@ -944,55 +949,213 @@ mod tests {
             y_field: None,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec(&scale_spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
+        super::build_from_scale_spec(spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
             .unwrap()
     }
 
+    /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
+    fn resolve_point_scale(
+        explicit_domain: Vec<String>,
+        range: Option<Vec<f64>>,
+        reverse: bool,
+    ) -> ScaleKind {
+        let spec = crate::spec::encoding::ScaleSpec::Point {
+            domain: Some(explicit_domain.clone()),
+            padding: 0.0,
+            align: 0.5,
+            reverse,
+            range,
+        };
+        resolve_scale_spec_for_cats(&spec, &explicit_domain)
+    }
+
     /// GH #65: `reverse=True` reverses the resolved domain order, so the
-    /// *first* category of the original domain lands on the *last* band
-    /// center (and vice versa) — a domain-vector reversal, not a pixel-range
+    /// *first* category of the original domain lands on the *last* point
+    /// position (and vice versa) — a domain-vector reversal, not a pixel-range
     /// flip.
+    ///
+    /// The positions are the d3 point formula's (F-L04-03): these fixtures set
+    /// `padding = 0.0`, which puts the outer categories exactly on the range
+    /// endpoints. Before F-L04-03 the resolver placed point scales on the band
+    /// model's `(i + 0.5)·step` centers (62.5 / 187.5 / 312.5 / 437.5 here) and
+    /// `padding` moved nothing.
     #[test]
     fn point_scale_reverse_true_reverses_domain_order() {
         let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
         let scale = resolve_point_scale(domain, None, true);
         let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
 
-        // Panel-extent range (0.0, 500.0), 4 categories → step = 125.0,
-        // centers at 62.5, 187.5, 312.5, 437.5. Non-reversed, "a" would sit
-        // at the first center (62.5); reversed, it sits at the last (437.5).
-        assert_eq!(ordinal.scale_internal("a"), Some(437.5));
-        assert_eq!(ordinal.scale_internal("d"), Some(62.5));
+        // Panel-extent range (0.0, 500.0), 4 categories, padding 0 → step =
+        // 500/3, positions 0 / 166.6… / 333.3… / 500. Non-reversed, "a" would
+        // sit on the first (0.0); reversed, it sits on the last (500.0).
+        assert_eq!(ordinal.scale_internal("a"), Some(500.0));
+        assert_eq!(ordinal.scale_internal("d"), Some(0.0));
     }
 
-    /// GH #65: `reverse=True` composes with an explicit pixel range —
-    /// centers for original domain `[a, b, c, d]` over range `[40, 260]`
-    /// come out as `[232.5, 177.5, 122.5, 67.5]`.
+    /// GH #65: `reverse=True` composes with an explicit pixel range — with
+    /// `padding = 0.0` over `[40, 260]` the original domain `[a, b, c, d]`
+    /// mirrors onto `[260, 186.6…, 113.3…, 40]`.
     #[test]
     fn point_scale_reverse_true_composes_with_explicit_range() {
         let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
         let scale = resolve_point_scale(domain, Some(vec![40.0, 260.0]), true);
         let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
 
-        assert_eq!(ordinal.scale_internal("a"), Some(232.5));
-        assert_eq!(ordinal.scale_internal("b"), Some(177.5));
-        assert_eq!(ordinal.scale_internal("c"), Some(122.5));
-        assert_eq!(ordinal.scale_internal("d"), Some(67.5));
+        let step = 220.0 / 3.0;
+        for (cat, expected) in
+            [("a", 260.0), ("b", 260.0 - step), ("c", 40.0 + step), ("d", 40.0)]
+        {
+            let got = ordinal.scale_internal(cat).expect("category in domain");
+            assert!((got - expected).abs() < 1e-9, "{cat}: {got} vs {expected}");
+        }
     }
 
-    /// GH #65 regression: `reverse=False` (the pre-fix default) is
-    /// unchanged — domain order is preserved and band centers ascend in
-    /// original domain order.
+    /// GH #65 regression: `reverse=False` (the pre-fix default) preserves
+    /// domain order — positions ascend in original domain order, and with
+    /// `padding = 0.0` the first and last sit on the range endpoints.
     #[test]
     fn point_scale_reverse_false_preserves_domain_order() {
         let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
         let scale = resolve_point_scale(domain, Some(vec![40.0, 260.0]), false);
         let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
 
+        let step = 220.0 / 3.0;
+        for (cat, expected) in
+            [("a", 40.0), ("b", 40.0 + step), ("c", 260.0 - step), ("d", 260.0)]
+        {
+            let got = ordinal.scale_internal(cat).expect("category in domain");
+            assert!((got - expected).abs() < 1e-9, "{cat}: {got} vs {expected}");
+        }
+    }
+
+    /// The d3 point default (`padding = 0.5`, what `fr.PointScale()` emits)
+    /// reproduces the pre-F-L04-03 symmetric band centers exactly — the
+    /// coincidence that keeps every default point-scale render byte-identical
+    /// while `padding` becomes real. Discriminating against the `padding = 0`
+    /// case above, which lands on the endpoints instead.
+    #[test]
+    fn point_scale_default_padding_matches_former_band_centers() {
+        use crate::spec::encoding::ScaleSpec;
+        let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let spec = ScaleSpec::Point {
+            domain: Some(domain.clone()),
+            padding: 0.5,
+            align: 0.5,
+            reverse: false,
+            range: Some(vec![40.0, 260.0]),
+        };
+        let scale = resolve_scale_spec_for_cats(&spec, &domain);
+        let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
+
         assert_eq!(ordinal.scale_internal("a"), Some(67.5));
         assert_eq!(ordinal.scale_internal("b"), Some(122.5));
         assert_eq!(ordinal.scale_internal("c"), Some(177.5));
         assert_eq!(ordinal.scale_internal("d"), Some(232.5));
+    }
+
+    // ── ScaleSpec::Band → d3 layout threading (F-L04-03) ────────────────────
+
+    /// Resolve a `ScaleSpec::Band` over `[a, b, c, d]` on `[40, 260]` with the
+    /// given padding trio, and report its centers and bandwidth.
+    fn band_geometry(
+        padding: f64,
+        padding_inner: Option<f64>,
+        padding_outer: Option<f64>,
+        align: f64,
+    ) -> (Vec<f64>, f64) {
+        let cats: Vec<String> = ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let spec = crate::spec::encoding::ScaleSpec::Band {
+            domain: Some(cats.clone()),
+            padding,
+            padding_inner,
+            padding_outer,
+            align,
+            range: Some(vec![40.0, 260.0]),
+        };
+        let ScaleKind::Ordinal(ordinal) = resolve_scale_spec_for_cats(&spec, &cats) else {
+            panic!("expected Ordinal scale")
+        };
+        (
+            cats.iter().map(|c| ordinal.scale_internal(c).expect("in domain")).collect(),
+            ordinal.bandwidth(),
+        )
+    }
+
+    /// A zero-padding band spec resolves to the former symmetric geometry
+    /// exactly — the reduction every default golden depends on.
+    #[test]
+    fn band_spec_zero_padding_keeps_symmetric_centers() {
+        let (centers, bandwidth) = band_geometry(0.0, None, None, 0.5);
+        assert_eq!(centers, vec![67.5, 122.5, 177.5, 232.5]);
+        assert_eq!(bandwidth, 55.0);
+    }
+
+    /// d3's `padding` shorthand sets BOTH sides: `padding = 0.2` must resolve
+    /// identically to `padding_inner = padding_outer = 0.2`, and differently
+    /// from setting only one side (F-L04-03's mapping contract).
+    #[test]
+    fn band_spec_padding_shorthand_sets_inner_and_outer() {
+        let shorthand = band_geometry(0.2, None, None, 0.5);
+        let both_explicit = band_geometry(0.0, Some(0.2), Some(0.2), 0.5);
+        assert_eq!(shorthand, both_explicit, "padding must set both sides");
+
+        let inner_only = band_geometry(0.0, Some(0.2), None, 0.5);
+        assert_ne!(
+            shorthand, inner_only,
+            "padding_inner alone must not reproduce the shorthand's outer padding"
+        );
+        // Explicit sides override the shorthand independently.
+        assert_eq!(band_geometry(0.2, Some(0.0), None, 0.5), band_geometry(0.0, None, Some(0.2), 0.5));
+    }
+
+    /// Hand-computed d3 oracle through the resolver: `[a, b, c, d]` on
+    /// `[40, 260]` with `padding_inner = 0.2`, `padding_outer = 0.3`.
+    /// denom = 4 − 0.2 + 0.6 = 4.4 → step = 50, bandwidth = 40,
+    /// start = 40 + 0.3·50 = 55 → band middles 75 / 125 / 175 / 225.
+    #[test]
+    fn band_spec_padding_moves_geometry_to_d3_values() {
+        let (centers, bandwidth) = band_geometry(0.0, Some(0.2), Some(0.3), 0.5);
+        assert!((bandwidth - 40.0).abs() < 1e-9, "bandwidth {bandwidth}");
+        for (got, want) in centers.iter().zip([75.0, 125.0, 175.0, 225.0]) {
+            assert!((got - want).abs() < 1e-9, "center {got} vs {want} in {centers:?}");
+        }
+
+        // Discriminating companion: `padding_inner = 0.2, padding_outer = 0.1`
+        // leaves the denominator at 4.0, so the step and every band middle are
+        // the unpadded ones — inner padding narrows the band without moving it.
+        let (unpadded_centers, unpadded_bandwidth) = band_geometry(0.0, None, None, 0.5);
+        let (narrowed_centers, narrowed_bandwidth) = band_geometry(0.0, Some(0.2), Some(0.1), 0.5);
+        assert_eq!(narrowed_centers, unpadded_centers);
+        assert_eq!(unpadded_bandwidth, 55.0);
+        assert_eq!(narrowed_bandwidth, 44.0);
+    }
+
+    /// `align` reaches the resolved scale: it is inert while the denominator
+    /// clamp leaves no leftover, and moves the lone band when it does (n=1,
+    /// `padding_inner = 0.5` → denom 0.5, clamped to 1).
+    #[test]
+    fn band_spec_align_threads_through_to_the_clamped_case() {
+        let cats = vec!["only".to_string()];
+        let center = |align: f64| {
+            let spec = crate::spec::encoding::ScaleSpec::Band {
+                domain: Some(cats.clone()),
+                padding: 0.0,
+                padding_inner: Some(0.5),
+                padding_outer: Some(0.0),
+                align,
+                range: Some(vec![0.0, 100.0]),
+            };
+            let ScaleKind::Ordinal(ordinal) = resolve_scale_spec_for_cats(&spec, &cats) else {
+                panic!("expected Ordinal scale")
+            };
+            ordinal.scale_internal("only").expect("in domain")
+        };
+        // step = 100 (clamped), leftover = 50, bandwidth = 50, and the band's
+        // middle is `start + bandwidth/2`, so align sweeps it across the
+        // leftover without ever leaving [0, 100].
+        assert_eq!(center(0.0), 25.0);
+        assert_eq!(center(0.5), 50.0);
+        assert_eq!(center(1.0), 75.0);
     }
 
     // ── explicitness gates: degenerate inputs (ported from

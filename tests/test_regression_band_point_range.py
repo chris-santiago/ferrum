@@ -234,10 +234,31 @@ def test_band_scale_without_range_omits_range_key():
 # ---------------------------------------------------------------------------
 
 BAND_RANGE = [40.0, 260.0]
-# domain of 4 categories over BAND_RANGE: step = (260 - 40) / 4 = 55,
-# centers at range[0] + step * (i + 0.5) for i in 0..4.
-BAND_STEP = 55.0
-BAND_CENTERS = [67.5, 122.5, 177.5, 232.5]
+# domain of 4 categories over BAND_RANGE under BandScale's default padding
+# (0.1, applied to both padding_inner and padding_outer -- batch-C T5, d3 band
+# model, explicit padding now real). Placement follows d3's upstream
+# lead-based formula (band(i) = start + i*step, whole gap after each band),
+# which batch-C T5's S3 repair unified the render path and the BandScale
+# compute facade onto (the shared model in
+# crates/ferrum-core/src/scale/discrete.rs) -- bands can no longer escape
+# the range. T5's first cut had ported the *old* facade's formula, which
+# centered each band in its padded slot and was itself not true d3; the S3
+# repair changed both the render path and the facade's own output
+# (BandScale.scale() values moved too) onto the corrected shared model, not
+# just the render side: denom = n - p_in + 2*p_out = 4 - 0.1 + 0.2 = 4.1,
+# step = (260 - 40) / 4.1 = 53.65853658536586, start = range[0] + p_out *
+# step = 45.36585365853659,
+# lead(i) = start + i * step (the band's leading/low edge), bandwidth =
+# |step| * (1 - p_in) = 48.29268292682927, center(i) = lead(i) +
+# bandwidth / 2 * sign(step). Before batch-C T5, BandScale(padding=0.1) was
+# silently inert on the render path and these constants pinned the unpadded
+# symmetric model (step = extent / n, centers at range[0] + step * (i + 0.5)).
+BAND_STEP = 53.65853658536586
+# Slot origin under the padded model (start = range[0] + padding_outer *
+# step); derived from BAND_STEP rather than pinned as a second literal so it
+# cannot silently drift out of sync with it.
+BAND_START = BAND_RANGE[0] + 0.1 * BAND_STEP
+BAND_CENTERS = [69.51219512195122, 123.17073170731709, 176.82926829268294, 230.4878048780488]
 _TOL = 0.5
 
 
@@ -324,16 +345,19 @@ def test_ordinal_y_range_constrains_bar_heights_and_tick_labels():
     # offset. Two checks avoid both false negatives (raw offset vs. center)
     # and false positives (too-loose a tolerance could pass by accident):
     # (a) each label falls within its own band interval -- the offset
-    # (~3.67px) is far smaller than the half-step (27.5px), so this can't
+    # (~3.67px) is far smaller than the half-step (26.83px), so this can't
     # pass under panel-uniform placement by coincidence; and (b) the
     # label-minus-center delta is uniform across all four labels, which
     # locks in true band-center alignment without hardcoding the font
-    # metric as an exact oracle.
+    # metric as an exact oracle. Band intervals are anchored at BAND_START
+    # (the padded slot origin), not BAND_RANGE[0] -- the outer-padding inset
+    # (padding_outer * step = 5.37px) shifts every slot's low edge off the
+    # range boundary under the real d3 model.
     deltas = []
     for i, label in enumerate(["a", "b", "c", "d"]):
         actual = _axis_tick_label_pos(svg, label, coord="y")
-        band_lo = BAND_RANGE[0] + BAND_STEP * i
-        band_hi = BAND_RANGE[0] + BAND_STEP * (i + 1)
+        band_lo = BAND_START + BAND_STEP * i
+        band_hi = BAND_START + BAND_STEP * (i + 1)
         assert band_lo <= actual <= band_hi, (
             f"y tick label {label!r} at y={actual} falls outside its own band "
             f"interval [{band_lo}, {band_hi}] under range {BAND_RANGE}"
@@ -409,7 +433,7 @@ def test_tick_mark_half_extent_scales_with_explicit_range():
     Regression: issue #39 phase 2 — tick.rs's ordinal-x + quantitative-y mode
     (``tick_full = panel.w / n_cats / n_groups * band_size``, GH #85) was
     panel-derived and ignored ``range=``, spilling ticks outside [40, 260]
-    and sizing them far wider than a 55px band step.
+    and sizing them far wider than the ``BAND_STEP`` (53.66px) band step.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
     chart = (
@@ -609,10 +633,11 @@ def test_point_scale_reverse_composes_with_explicit_range():
     the explicit range: reversed centers are the forward centers assigned to
     the domain in reverse order, and every mark stays inside the range.
 
-    Regression: issue #65 -- with 3 categories over range=[40, 260], step =
-    (260-40)/3 = 73.333 and forward centers are [76.667, 150.0, 223.333]
-    (range[0] + step*(i+0.5)); reversed, category "x" takes the last slot
-    (~223.333) instead of the first.
+    Regression: issue #65 -- with 3 categories over range=[40, 260] and
+    PointScale's default padding (0.5): step = (260-40)/3 = 73.333, start =
+    range[0] + padding*step = 40 + 0.5*73.333 = 76.667, and forward centers
+    are start + i*step for i in 0..3 = [76.667, 150.0, 223.333]; reversed,
+    category "x" takes the last slot (~223.333) instead of the first.
     """
     svg = _point_scale_svg(reverse=True, range_=BAND_RANGE)
     cxs = _circle_cxs(svg)

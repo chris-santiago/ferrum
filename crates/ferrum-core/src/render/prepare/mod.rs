@@ -2636,6 +2636,7 @@ fn partition_batch_by_two_fields(
 mod tests {
     use super::*;
     use crate::layout::{AuxLegendInput, SymbolKind};
+    use crate::scale::discrete::{DiscreteLayout, DEFAULT_ALIGN};
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
@@ -2777,7 +2778,7 @@ mod tests {
         ScaleKind::Ordinal(OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into()],
             vec![0.0, 1.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         ))
     }
 
@@ -5081,7 +5082,7 @@ mod tests {
         let scale = ScaleKind::Ordinal(OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into()],
             vec![0.0, 30.0],
-            0.1,
+            DiscreteLayout::band(0.1, 0.0, DEFAULT_ALIGN),
         ));
         let (x_labels, x_proj, _t) = build_axis_tick_inputs(
             &scale,

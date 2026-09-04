@@ -2,6 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
+use super::discrete::DiscreteLayout;
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,25 +14,21 @@ struct PointScaleData {
 }
 
 impl PointScaleData {
+    /// Map a category to its point pixel, `reverse` included.
+    ///
+    /// The point formulas live in [`crate::scale::discrete`], which the
+    /// render-side `OrdinalScale` also calls (F-L04-03). `reverse` stays here:
+    /// it is a facade-level mirroring of the resolved positions, whereas the
+    /// renderer implements `PointScale(reverse=True)` by reversing the resolved
+    /// domain (GH #65) so axis ticks follow the marks.
     fn scale_str(&self, s: &str, range_lo: f64, range_hi: f64) -> f64 {
         let idx = match self.domain.iter().position(|c| c == s) {
             Some(i) => i,
             None => return f64::NAN,
         };
-        let n = self.domain.len();
-        if n <= 1 {
-            // Single category: place at center of extent
-            let center = (range_lo + range_hi) / 2.0;
-            return center;
-        }
-        let extent = range_hi - range_lo;
-        // A point scale is essentially a band scale with bandwidth=0.
-        // step = extent / (n - 1 + padding * 2)
-        let denom = (n as f64 - 1.0) + self.padding * 2.0;
-        let step = extent / denom;
-        let start = range_lo + self.padding * step
-            + self.align * (extent - denom * step).max(0.0);
-        let pos = start + (idx as f64) * step;
+        let pos = DiscreteLayout::point(self.padding, self.align)
+            .geometry(self.domain.len(), range_lo, range_hi)
+            .position(idx);
         if self.reverse {
             range_hi - (pos - range_lo)
         } else {
@@ -46,15 +43,31 @@ impl PointScaleData {
 /// (zero bandwidth). Similar to a band scale with bandwidth=0. Useful
 /// for dot plots, strip plots, and Cleveland-style charts.
 ///
+/// A ``PointScale`` passed to an encoding resolves through the same point
+/// model this class computes with, so ``scale()`` here gives the pixel a mark
+/// for that category is drawn at.
+///
 /// Parameters
 /// ----------
 /// domain : list[str], optional
 ///     Ordered list of category labels. When ``None``, the renderer derives
 ///     the domain from data.
 /// padding : float, default 0.5
-///     Outer padding expressed as a fraction of step size.
+///     Outer padding expressed as a fraction of step size:
+///     ``step = extent / (n - 1 + 2 * padding)``. ``0.0`` puts the first and
+///     last categories exactly on the range endpoints; the default ``0.5``
+///     holds half a step at each end, which places the points on the same
+///     pixels an unpadded band scale centers its bands at.
 /// align : float, default 0.5
-///     Alignment within leftover space, in ``[0.0, 1.0]``.
+///     Where the points sit within any *leftover* space, in ``[0.0, 1.0]``.
+///
+///     A point scale never has leftover: its padded positions fill the range
+///     exactly for any ``padding``, so ``align`` is algebraically inert here:
+///     it is accepted and validated, but no value of it moves a point. Use
+///     ``padding`` to control the space at the ends. (d3 reaches the same
+///     positions by distributing that end padding through ``align``, where a
+///     non-default ``align`` does shift them; the two agree at the default
+///     ``align=0.5``.)
 /// reverse : bool, default False
 ///     Reverse the category order within the range.
 /// range : list[float], optional
@@ -182,6 +195,53 @@ impl PointScale {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scale::discrete::DiscreteLayout;
+    use crate::scale::ordinal::OrdinalScale;
+
+    // ── facade ↔ render seam oracle (spec §10, F-L04-03) ────────────────────
+
+    /// The point half of the facade/render seam check: for identical
+    /// parameters, `PointScale.scale()` must equal the pixel the renderer
+    /// places the mark at. Before F-L04-03 the renderer put point scales on
+    /// band centers (`(i + 0.5)·step`) and ignored `padding` entirely, so the
+    /// two agreed only by the `padding = 0.5` coincidence; the sweep below
+    /// includes paddings on both sides of it.
+    ///
+    /// `reverse` is deliberately excluded: the facade mirrors positions while
+    /// the resolver reverses the domain vector (GH #65). Those are equivalent
+    /// transforms of the same base positions, which is what this pins.
+    #[test]
+    fn facade_and_render_scale_agree_on_point_positions() {
+        let cats = ["a", "b", "c", "d"];
+        let domain: Vec<String> = cats.iter().map(|s| s.to_string()).collect();
+        for (lo, hi) in [(40.0, 260.0), (0.0, 500.0), (260.0, 40.0)] {
+            for (padding, align) in [(0.0, 0.5), (0.5, 0.5), (1.0, 0.5), (0.25, 0.0), (0.75, 1.0)] {
+                let facade = PointScale {
+                    data: PointScaleData {
+                        domain: domain.clone(),
+                        padding,
+                        align,
+                        reverse: false,
+                    },
+                    range: Some([lo, hi]),
+                };
+                let rendered = OrdinalScale::new_internal(
+                    domain.clone(),
+                    vec![lo, hi],
+                    DiscreteLayout::point(padding, align),
+                );
+                for cat in cats {
+                    let center = rendered.scale_internal(cat).expect("category in domain");
+                    assert!(
+                        (facade.scale(cat) - center).abs() < 1e-9,
+                        "position disagreement for {cat} (range=[{lo}, {hi}] padding={padding} \
+                         align={align}): facade {} vs render {center}",
+                        facade.scale(cat)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn point_scale_basic_positions() {

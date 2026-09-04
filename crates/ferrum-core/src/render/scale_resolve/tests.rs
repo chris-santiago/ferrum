@@ -4,6 +4,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
 use std::sync::Arc;
 
 use crate::layout::ThemeInputs;
+use crate::scale::discrete::{DiscreteLayout, DEFAULT_ALIGN};
 use arrow::record_batch::RecordBatch;
 
 fn make_batch_q_q_n() -> RecordBatch {
@@ -4149,7 +4150,7 @@ fn ordinal_scalekind_yields_empty_minor_fractions_via_early_return() {
     let ordinal = ScaleKind::Ordinal(OrdinalScale::new_internal(
         vec!["a".into(), "b".into(), "c".into()],
         vec![0.0, 100.0],
-        0.1,
+        DiscreteLayout::band(0.1, 0.0, DEFAULT_ALIGN),
     ));
     let ordinal_minors = ordinal.minor_tick_fractions();
     assert!(

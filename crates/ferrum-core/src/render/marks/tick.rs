@@ -351,6 +351,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::scale::discrete::DiscreteLayout;
     use super::*;
     use crate::layout::{PanelLayout, Rect, ThemeInputs};
     use crate::render::draw::resolve_mark_style;
@@ -1033,7 +1034,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(x_scale),
@@ -1095,7 +1096,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 300.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![3.0, 5.0], vec![0.0, 100.0], false, false)),

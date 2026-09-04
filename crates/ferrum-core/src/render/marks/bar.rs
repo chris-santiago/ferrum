@@ -889,6 +889,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
 
 #[cfg(test)]
 mod tests {
+    use crate::scale::discrete::DiscreteLayout;
     use super::*;
     use crate::layout::{PanelLayout, ThemeInputs};
     use crate::render::draw::resolve_mark_style;
@@ -1675,7 +1676,7 @@ mod tests {
             ]).unwrap();
             let scales = ResolvedScales {
                 x: ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
-                    vec!["a".to_string()], vec![0.0, 100.0], 0.0,
+                    vec!["a".to_string()], vec![0.0, 100.0], DiscreteLayout::UNPADDED,
                 )),
                 y: y_scale(),
                 color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
@@ -2768,7 +2769,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(x_scale),
@@ -2812,7 +2813,7 @@ mod tests {
 
         // Same numeric range as the explicit test above, but the explicitness
         // flag defaults to false (never called `with_explicit_range`).
-        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0);
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED);
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(x_scale),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![100.0, 0.0], false, false)),
@@ -2872,7 +2873,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 300.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
-        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(true);
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 100.0], false, false)),
@@ -3021,7 +3022,7 @@ mod tests {
             ..Default::default()
         };
         let scales = ResolvedScales {
-            x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 300.0], 0.0)),
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 300.0], DiscreteLayout::UNPADDED)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
@@ -3195,7 +3196,7 @@ mod tests {
         };
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
-            y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 100.0], 0.0)),
+            y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let pos = PositionAdjust::Stack {
@@ -3425,7 +3426,7 @@ mod tests {
         };
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
-            y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["1".into(), "2".into(), "3".into()], vec![0.0, 100.0], 0.0)),
+            y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["1".into(), "2".into(), "3".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
             color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
         };
         // Sanity: this schema is genuinely stamp-less.

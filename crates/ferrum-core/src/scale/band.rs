@@ -2,6 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
+use super::discrete::{DiscreteGeometry, DiscreteLayout};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,36 +14,40 @@ struct BandScaleData {
 }
 
 impl BandScaleData {
-    /// Compute bandwidth and step given a pixel extent.
+    /// Pixel geometry of this band scale over `[range_lo, range_hi]`.
     ///
-    /// `bandwidth` is always non-negative, even when `extent` is negative
+    /// The band formulas themselves live in [`crate::scale::discrete`] (which
+    /// documents where the model departs from upstream d3), and the render-side
+    /// `OrdinalScale` calls them too — this facade and the renderer compute band
+    /// geometry from one implementation (F-L04-03). Unification was not
+    /// output-preserving for this facade: its own placement inset each band
+    /// half an inner gap into its slot, which let the last band run past
+    /// `range_hi`, so the shared model uses upstream d3's placement and
+    /// `scale()` now returns a different pixel for `padding_inner > 0`.
+    ///
+    /// `bandwidth` is always non-negative, even when the extent is negative
     /// (an inverted explicit `range=[hi, lo]`, GH #69): d3's band scale never
     /// reports a negative bandwidth, and downstream `cx - bandwidth/2`
     /// consumers would silently flip sides if it went negative. `step` stays
-    /// signed — it drives `scale_str`'s position arithmetic, which must place
-    /// bands in descending order for a descending range.
-    fn layout(&self, extent: f64) -> (f64, f64) {
-        let n = self.domain.len() as f64;
-        if n == 0.0 { return (0.0, 0.0); }
-        // step = extent / (n + padding_outer * 2 + padding_inner * (n - 1) - padding_inner)
-        // Simplified: step = extent / (n - padding_inner + 2 * padding_outer + padding_inner * n - padding_inner)
-        // D3 formula: step = extent / max(1, n - paddingInner + paddingOuter * 2)
-        let denom = (n - self.padding_inner + self.padding_outer * 2.0).max(1.0);
-        let step = extent / denom;
-        let bandwidth = (step * (1.0 - self.padding_inner)).abs();
-        (bandwidth, step)
+    /// signed — it drives the position arithmetic, which must place bands in
+    /// descending order for a descending range.
+    fn geometry(&self, range_lo: f64, range_hi: f64) -> DiscreteGeometry {
+        DiscreteLayout::band(self.padding_inner, self.padding_outer, self.align).geometry(
+            self.domain.len(),
+            range_lo,
+            range_hi,
+        )
     }
 
+    /// The leading edge of `s`'s band (d3's `band(x)`), not its middle. For an
+    /// inverted range the step is negative, so this is the band's
+    /// high-coordinate edge.
     fn scale_str(&self, s: &str, range_lo: f64, range_hi: f64) -> f64 {
         let idx = match self.domain.iter().position(|c| c == s) {
             Some(i) => i,
             None => return f64::NAN,
         };
-        let extent = range_hi - range_lo;
-        let (_bandwidth, step) = self.layout(extent);
-        let start = range_lo + self.padding_outer * step
-            + self.align * (extent - (self.domain.len() as f64 - self.padding_inner + self.padding_outer * 2.0) * step).max(0.0);
-        start + (idx as f64) * step + step * self.padding_inner / 2.0
+        self.geometry(range_lo, range_hi).lead(idx)
     }
 }
 
@@ -51,6 +56,17 @@ impl BandScaleData {
 /// Maps a categorical (string) domain to pixel bands with configurable
 /// inner and outer padding. Each category occupies a band of equal width
 /// within the range, suitable for bar/column charts.
+///
+/// Every parameter below moves rendered geometry: a ``BandScale`` passed to an
+/// encoding resolves through the same band model this class computes with, so
+/// ``scale()``/``bandwidth()`` here describe what the chart draws. ``scale(v)``
+/// is the band's *leading* edge, so for an ascending range the band spans
+/// ``[scale(v), scale(v) + bandwidth()]`` and a mark for ``v`` is drawn at
+/// ``scale(v) + bandwidth() / 2``. For a descending ``range=[hi, lo]`` the
+/// bands run the other way: subtract instead of adding (the general form is
+/// ``scale(v) + bandwidth() / 2 * sign``, with ``sign`` the sign of
+/// ``range[1] - range[0]``). The inner gap follows each band, so the bands
+/// always stay inside the declared range.
 ///
 /// Parameters
 /// ----------
@@ -61,11 +77,30 @@ impl BandScaleData {
 ///     Shorthand that sets both ``padding_inner`` and ``padding_outer`` when
 ///     those are not given explicitly.
 /// padding_inner : float, optional
-///     Fractional inner padding between bands, in ``[0.0, 1.0)``.
+///     Fractional inner padding between bands, in ``[0.0, 1.0)``. Narrows each
+///     band: ``bandwidth = |step| * (1 - padding_inner)``, with the freed space
+///     becoming the gap that follows it.
 /// padding_outer : float, optional
 ///     Fractional outer padding before the first and after the last band.
 /// align : float, default 0.5
-///     Alignment within leftover space, in ``[0.0, 1.0]``.
+///     Where the bands sit within any *leftover* space, in ``[0.0, 1.0]``
+///     (0 = against the low end of the range, 1 = against the high end).
+///
+///     Leftover exists only when the band denominator
+///     ``n - padding_inner + 2 * padding_outer`` falls below 1 and is clamped
+///     to 1: in practice, a single-category domain with a large
+///     ``padding_inner``. Otherwise the bands fill the range exactly and
+///     ``align`` moves nothing, whatever value it takes. Example: one category
+///     over ``range=[0, 100]`` with ``padding_inner=0.5`` gives a 50px band and
+///     50px of leftover, so the band's leading edge sits at 0 (``align=0``),
+///     25 (``align=0.5``) or 50 (``align=1``, flush against the high end).
+///
+///     An inverted ``range=[hi, lo]`` has no leftover to distribute in the
+///     direction ``align`` names, so ``align`` is inert there. d3 also routes
+///     *outer* padding through ``align``; this scale applies outer padding
+///     directly, so the two agree whenever ``align=0.5`` or
+///     ``padding_outer=0`` and differ only for a non-default ``align``
+///     combined with outer padding.
 /// range : list[float], optional
 ///     Pixel extent ``[lo, hi]``. When ``None``, the renderer fills from
 ///     the plot-area dimensions.
@@ -150,9 +185,22 @@ impl BandScale {
         })
     }
 
-    /// Map a category label to its band-center pixel coordinate.
+    /// Map a category label to the leading pixel edge of its band.
     ///
-    /// Returns ``f64::NAN`` for labels not in the domain.
+    /// Changed in the batch-C scale unification (F-L04-03): for
+    /// ``padding_inner > 0`` this returns d3's band edge, half an inner gap
+    /// lower than earlier releases reported (for
+    /// ``BandScale(domain=list("abcd"), range=[40, 260])`` — default
+    /// ``padding=0.1`` — ``scale("a")`` is 45.366, was 48.049). The old value
+    /// placed the band block so that the last band ran past ``range[1]``.
+    ///
+    /// This is d3's ``band(x)``. For an ascending range it is the band's
+    /// low-coordinate edge: the band spans ``[scale(v), scale(v) + bandwidth()]``
+    /// and the pixel a mark for ``v`` is drawn at is
+    /// ``scale(v) + bandwidth() / 2``. For a descending ``range=[hi, lo]`` the
+    /// band runs back from this edge instead, so the mark sits at
+    /// ``scale(v) - bandwidth() / 2``. Returns ``f64::NAN`` for labels not in
+    /// the domain.
     fn scale(&self, value: &str) -> f64 {
         let [r0, r1] = self.range.unwrap_or([0.0, 1.0]);
         self.data.scale_str(value, r0, r1)
@@ -161,8 +209,7 @@ impl BandScale {
     /// Compute the bandwidth (bar width) in pixels.
     fn bandwidth(&self) -> f64 {
         let [r0, r1] = self.range.unwrap_or([0.0, 1.0]);
-        let (bw, _) = self.data.layout(r1 - r0);
-        bw
+        self.data.geometry(r0, r1).bandwidth()
     }
 
     /// Return the domain categories in order.
@@ -211,6 +258,68 @@ impl BandScale {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scale::ordinal::OrdinalScale;
+
+    // ── facade ↔ render seam oracle (spec §10, F-L04-03) ────────────────────
+
+    /// The sharpest seam-check this change has: for identical parameters the
+    /// compute facade and the render-side scale must describe the SAME
+    /// geometry. `BandScale.bandwidth()` must equal `OrdinalScale::bandwidth()`,
+    /// and the facade's band — `[scale(v), scale(v) + bandwidth()]` — must be
+    /// centered on the pixel the renderer places the mark at.
+    ///
+    /// This is what F-L04-03 broke: the facade computed the d3 model while the
+    /// renderer computed a symmetric one in which padding moved nothing, so the
+    /// two disagreed for every padded scale. A single shared implementation
+    /// (`crate::scale::discrete`) is what makes this test pass; re-forking
+    /// either side fails it.
+    #[test]
+    fn facade_and_render_scale_agree_on_band_geometry() {
+        let cats = ["a", "b", "c", "d"];
+        let domain: Vec<String> = cats.iter().map(|s| s.to_string()).collect();
+        for (lo, hi) in [(40.0, 260.0), (0.0, 500.0), (260.0, 40.0)] {
+            for (pi, po, align) in [
+                (0.0, 0.0, 0.5),
+                (0.1, 0.1, 0.5),
+                (0.5, 0.0, 0.0),
+                (0.2, 0.35, 1.0),
+                (0.0, 0.5, 0.5),
+            ] {
+                let facade = BandScale {
+                    data: BandScaleData {
+                        domain: domain.clone(),
+                        padding_inner: pi,
+                        padding_outer: po,
+                        align,
+                    },
+                    range: Some([lo, hi]),
+                };
+                let rendered = OrdinalScale::new_internal(
+                    domain.clone(),
+                    vec![lo, hi],
+                    DiscreteLayout::band(pi, po, align),
+                );
+                let ctx = format!("range=[{lo}, {hi}] pi={pi} po={po} align={align}");
+                assert_eq!(
+                    facade.bandwidth(),
+                    rendered.bandwidth(),
+                    "bandwidth disagreement ({ctx})"
+                );
+                // The facade reports the band's leading edge; the renderer
+                // places marks at its center. `step` carries the sign, so a
+                // descending range walks the half-band the other way.
+                let half = facade.bandwidth() / 2.0 * facade.data.geometry(lo, hi).step().signum();
+                for cat in cats {
+                    let center = rendered.scale_internal(cat).expect("category in domain");
+                    assert!(
+                        (facade.scale(cat) + half - center).abs() < 1e-9,
+                        "center disagreement for {cat} ({ctx}): facade lead {} + half {half} vs render {center}",
+                        facade.scale(cat)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn band_scale_basic_layout() {
@@ -220,9 +329,9 @@ mod tests {
             padding_outer: 0.0,
             align: 0.5,
         };
-        let (bw, step) = s.layout(300.0);
-        assert!((step - 100.0).abs() < 1e-9, "step={step}");
-        assert!((bw - 100.0).abs() < 1e-9, "bandwidth={bw}");
+        let g = s.geometry(0.0, 300.0);
+        assert!((g.step() - 100.0).abs() < 1e-9, "step={}", g.step());
+        assert!((g.bandwidth() - 100.0).abs() < 1e-9, "bandwidth={}", g.bandwidth());
     }
 
     #[test]
@@ -233,15 +342,15 @@ mod tests {
             padding_outer: 0.1,
             align: 0.5,
         };
-        let (bw, step) = s.layout(200.0);
+        let g = s.geometry(0.0, 200.0);
         // denom = 2 - 0.2 + 0.1*2 = 2.0, step = 100
-        assert!((step - 100.0).abs() < 1e-9, "step={step}");
+        assert!((g.step() - 100.0).abs() < 1e-9, "step={}", g.step());
         // bandwidth = step * (1 - padding_inner) = 100 * 0.8 = 80
-        assert!((bw - 80.0).abs() < 1e-9, "bandwidth={bw}");
+        assert!((g.bandwidth() - 80.0).abs() < 1e-9, "bandwidth={}", g.bandwidth());
     }
 
     #[test]
-    fn band_scale_center_positions() {
+    fn band_scale_lead_positions() {
         let s = BandScaleData {
             domain: vec!["a".into(), "b".into(), "c".into()],
             padding_inner: 0.0,
@@ -251,7 +360,7 @@ mod tests {
         let ya = s.scale_str("a", 0.0, 300.0);
         let yb = s.scale_str("b", 0.0, 300.0);
         let yc = s.scale_str("c", 0.0, 300.0);
-        // With no padding: step=100, centers at 0, 100, 200
+        // With no padding: step=100, band leading edges at 0, 100, 200
         assert!((ya - 0.0).abs() < 1e-9, "ya={ya}");
         assert!((yb - 100.0).abs() < 1e-9, "yb={yb}");
         assert!((yc - 200.0).abs() < 1e-9, "yc={yc}");
@@ -282,13 +391,17 @@ mod tests {
             padding_outer: 0.0,
             align: 0.5,
         };
-        let (bw, step) = s.layout(200.0);
-        assert!((step - 200.0).abs() < 1e-9, "denominator must clamp to 1.0; step={step}");
-        assert!((bw - 20.0).abs() < 1e-9, "bandwidth = extent * (1 - pi); got {bw}");
+        let g = s.geometry(0.0, 200.0);
+        assert!((g.step() - 200.0).abs() < 1e-9, "denominator must clamp to 1.0; step={}", g.step());
+        assert!(
+            (g.bandwidth() - 20.0).abs() < 1e-9,
+            "bandwidth = extent * (1 - pi); got {}",
+            g.bandwidth()
+        );
     }
 
-    /// Empty domain: layout early-returns (0, 0) and `scale_str` returns NaN —
-    /// no division by the n==0 denominator.
+    /// Empty domain: the geometry is inert (zero step, zero bandwidth) and
+    /// `scale_str` returns NaN — no division by the n==0 denominator.
     #[test]
     fn band_empty_domain_layout_zero_and_nan_lookup() {
         let s = BandScaleData {
@@ -297,7 +410,8 @@ mod tests {
             padding_outer: 0.1,
             align: 0.5,
         };
-        assert_eq!(s.layout(300.0), (0.0, 0.0));
+        let g = s.geometry(0.0, 300.0);
+        assert_eq!((g.bandwidth(), g.step()), (0.0, 0.0));
         assert!(s.scale_str("a", 0.0, 300.0).is_nan());
     }
 
@@ -317,7 +431,7 @@ mod tests {
             padding_outer: 0.0,
             align: 0.5,
         };
-        let (bw, _step) = s.layout(40.0 - 260.0); // extent as computed for range=[260, 40]
+        let bw = s.geometry(260.0, 40.0).bandwidth();
         // n=2, pi=po=0 → denom=2, step = -220/2 = -110, bandwidth = |step| = 110.0.
         assert!((bw - 110.0).abs() < 1e-9, "bandwidth must be |step| = 110.0 for an inverted range; got {bw}");
         assert!(bw >= 0.0, "bandwidth must be non-negative for an inverted range; got {bw}");
@@ -325,8 +439,9 @@ mod tests {
 
     /// align leftover activation: the ONLY reachable leftover > 0 case is the
     /// denominator clamp (denom_raw < 1). n=1, pi=0.5, po=0 over [0, 100]:
-    /// step = 100, leftover = 100 - 0.5*100 = 50. align=0 keeps position at
-    /// pi/2 * step = 25; align=1 shifts by the full leftover to 75.
+    /// step = 100, leftover = 100 - 0.5*100 = 50. `scale()` is the band's
+    /// leading edge, so align=0 puts it at 0 (band [0, 50]) and align=1 shifts
+    /// it by the full leftover to 50 (band [50, 100]).
     #[test]
     fn band_align_shifts_within_clamped_leftover() {
         let mk = |align: f64| BandScaleData {
@@ -337,7 +452,7 @@ mod tests {
         };
         let p0 = mk(0.0).scale_str("a", 0.0, 100.0);
         let p1 = mk(1.0).scale_str("a", 0.0, 100.0);
-        assert!((p0 - 25.0).abs() < 1e-9, "align=0 position; got {p0}");
-        assert!((p1 - 75.0).abs() < 1e-9, "align=1 position must shift by the leftover; got {p1}");
+        assert!((p0 - 0.0).abs() < 1e-9, "align=0 lead; got {p0}");
+        assert!((p1 - 50.0).abs() < 1e-9, "align=1 lead must shift by the leftover; got {p1}");
     }
 }

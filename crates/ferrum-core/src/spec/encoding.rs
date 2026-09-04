@@ -157,8 +157,8 @@ pub struct ContinuousScaleCommon {
 /// | `Pow` | `ScaleKind::Pow` (stored exponent) |
 /// | `Sqrt` | `ScaleKind::Pow(0.5)` |
 /// | `Ordinal` | `ScaleKind::Ordinal` |
-/// | `Band` | `ScaleKind::Ordinal` (`padding_inner` as effective padding) |
-/// | `Point` | `ScaleKind::Ordinal` (outer `padding`; `reverse` reverses the resolved domain order post-sort, GH #65; `align` is unwired — inert in this band model) |
+/// | `Band` | `ScaleKind::Ordinal` under the band model: inner = `padding_inner.unwrap_or(padding)`, outer = `padding_outer.unwrap_or(padding)` (d3's `padding` shorthand sets BOTH sides), `align` threaded |
+/// | `Point` | `ScaleKind::Ordinal` under the point model: `padding` (an end padding) and `align` per the point formula; `reverse` reverses the resolved domain order post-sort, GH #65 |
 /// | `Sequential`, `Diverging`, `Quantize` | `ScaleKind::Linear` (positional fallback) |
 /// | `BinOrdinal` | `ScaleKind::Linear` |
 ///

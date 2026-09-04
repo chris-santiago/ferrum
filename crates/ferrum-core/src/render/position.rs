@@ -1064,6 +1064,7 @@ pub(crate) fn apply_stack(
 
 #[cfg(test)]
 mod tests {
+    use crate::scale::discrete::DiscreteLayout;
     use super::*;
     use crate::layout::Rect;
     use crate::render::scale_resolve::ColorScale;
@@ -1196,7 +1197,7 @@ mod tests {
         let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![0.0, 100.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         ));
         let lin = ScaleKind::Linear(LinearScale::new_internal(
             vec![0.0, 100.0],
@@ -1337,7 +1338,7 @@ mod tests {
         let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![0.0, 100.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         ));
         let lin = ScaleKind::Linear(LinearScale::new_internal(
             vec![0.0, 100.0],
@@ -3565,7 +3566,7 @@ mod tests {
         let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into()],
             vec![0.0, 600.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         ));
         let lin = ScaleKind::Linear(LinearScale::new_internal(
             vec![0.0, 100.0], vec![0.0, 100.0], false, false,
@@ -3662,33 +3663,65 @@ mod tests {
         }
     }
 
-    /// GH #66's refuted premise: the issue as filed blamed `BandScale(padding_inner=)`
-    /// for dodge overlap. `OrdinalScale::bandwidth()` and the render-side band
-    /// centers never read `padding` — it only feeds `invert_band` hit-testing,
-    /// never the dodge geometry seam. Pins that inertness directly against the
-    /// real `OrdinalScale`: bandwidth and every category's `scale_internal`
-    /// center are byte-identical whether `padding` is 0.0 or 0.9 (ported from
-    /// tests/bug_hunt_dodge_subband_overlap.rs `dodge_padding_inner_is_geometrically_inert`, R1).
+    /// The dodge seam's view of band padding, under the d3 model (F-L04-03).
+    ///
+    /// This test used to pin the *opposite* fact: `dodge_padding_inner_is_geometrically_inert`
+    /// asserted that `OrdinalScale`'s padding perturbed neither `bandwidth()`
+    /// nor any band center, because the render-side model ignored it outright
+    /// (that inertness is what refuted GH #66's filed premise, and what
+    /// F-L04-03 called a lie). It is no longer true, and the replacement pins
+    /// what d3 actually does at this seam:
+    ///
+    /// - `padding_inner` narrows the drawn band — n=3 over [0, 600] with
+    ///   `padding_inner = 0.9` gives denom 2.1, step 285.71…, bandwidth
+    ///   28.571… — so a dodge sub-band computed from `bandwidth()` shrinks with
+    ///   it, which is the composition rule (scale defines the band, `Dodge`
+    ///   subdivides it).
+    /// - `padding_outer` is the parameter that moves centers off the unpadded
+    ///   100 / 300 / 500.
+    /// - The unpadded model still reports exactly the old numbers, which is why
+    ///   every default-scale dodge render is byte-identical.
     #[test]
-    fn dodge_padding_inner_is_geometrically_inert() {
+    fn dodge_band_padding_follows_the_d3_model() {
         use crate::scale::ordinal::OrdinalScale;
         let domain = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let low_padding = OrdinalScale::new_internal(domain.clone(), vec![0.0, 600.0], 0.0);
-        let high_padding = OrdinalScale::new_internal(domain.clone(), vec![0.0, 600.0], 0.9);
+        let band = |layout| OrdinalScale::new_internal(domain.clone(), vec![0.0, 600.0], layout);
 
-        assert_eq!(low_padding.bandwidth(), 200.0);
-        assert_eq!(low_padding.bandwidth(), high_padding.bandwidth(), "padding must not perturb bandwidth");
-
-        for cat in &domain {
-            assert_eq!(
-                low_padding.scale_internal(cat),
-                high_padding.scale_internal(cat),
-                "padding must not perturb the band center for {cat}"
-            );
-        }
+        let unpadded = band(DiscreteLayout::UNPADDED);
+        assert_eq!(unpadded.bandwidth(), 200.0);
         assert_eq!(
-            domain.iter().map(|c| low_padding.scale_internal(c)).collect::<Vec<_>>(),
+            domain.iter().map(|c| unpadded.scale_internal(c)).collect::<Vec<_>>(),
             vec![Some(100.0), Some(300.0), Some(500.0)],
+            "the unpadded model must still report the pre-F-L04-03 centers",
+        );
+
+        // padding_inner = 0.9: denom = 3 - 0.9 = 2.1 → step = 600/2.1.
+        let inner = band(DiscreteLayout::band(0.9, 0.0, 0.5));
+        let step = 600.0 / 2.1;
+        assert!(
+            (inner.bandwidth() - step * 0.1).abs() < 1e-9,
+            "inner padding must narrow the band to |step|·(1 - 0.9); got {}",
+            inner.bandwidth()
+        );
+        assert!(
+            inner.bandwidth() < unpadded.bandwidth(),
+            "a dodge sub-band derived from bandwidth() must shrink with inner padding"
+        );
+        // Each category sits at the middle of its own narrow band, which starts
+        // at the slot edge (the inner gap follows the band).
+        for (i, cat) in domain.iter().enumerate() {
+            let expected = step * 0.1 / 2.0 + i as f64 * step;
+            let got = inner.scale_internal(cat).expect("category in domain");
+            assert!((got - expected).abs() < 1e-9, "center for {cat}: {got} vs {expected}");
+        }
+
+        // padding_outer = 0.5: denom = 3 + 1 = 4 → step = 150, start = 75.
+        let outer = band(DiscreteLayout::band(0.0, 0.5, 0.5));
+        assert_eq!(outer.bandwidth(), 150.0, "outer padding leaves bands full-slot");
+        assert_eq!(
+            domain.iter().map(|c| outer.scale_internal(c)).collect::<Vec<_>>(),
+            vec![Some(150.0), Some(300.0), Some(450.0)],
+            "outer padding must inset the centers",
         );
     }
 

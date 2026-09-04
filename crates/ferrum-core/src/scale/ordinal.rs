@@ -3,6 +3,7 @@ use pyo3::types::PyList;
 use serde::{Deserialize, Serialize};
 
 use super::core::{scale_spec_to_py_dict, validate_ordinal, validate_ordinal_domain};
+use super::discrete::{DiscreteGeometry, DiscreteLayout, DEFAULT_ALIGN};
 use crate::spec::encoding::ScaleSpec;
 
 /// A single element of an `OrdinalScale` range: either a pixel coordinate
@@ -155,18 +156,25 @@ impl RangeProvenance {
 struct OrdinalScaleData {
     domain: Vec<String>,
     range: Vec<f64>,
-    padding: f64,
+    /// The d3 model this scale places categories under: band (with inner/outer
+    /// padding) or point. `DiscreteLayout::UNPADDED` for every auto-inferred
+    /// axis, which is why default output is unchanged by the d3 model landing
+    /// here (F-L04-03) — see `crate::scale::discrete`'s module docs.
+    layout: DiscreteLayout,
 }
 
 impl OrdinalScaleData {
-    fn layout(&self) -> (f64, f64, f64) {
-        let r_lo = *self.range.first().unwrap();
-        let r_hi = *self.range.last().unwrap();
-        let n = self.domain.len() as f64;
-        let step = (r_hi - r_lo) / n;
-        let half_band = step.abs() * (1.0 - self.padding) / 2.0;
-        let first_center = r_lo + step / 2.0;
-        (first_center, step, half_band)
+    /// Pixel geometry for this scale's domain over its range.
+    ///
+    /// `range` is non-empty by construction: `new_internal` is always handed a
+    /// resolved pixel range, and the PyO3 constructor substitutes the
+    /// `[0.0, 1.0]` placeholder when the user's range carried no numbers.
+    fn geometry(&self) -> DiscreteGeometry {
+        self.layout.geometry(
+            self.domain.len(),
+            *self.range.first().unwrap(),
+            *self.range.last().unwrap(),
+        )
     }
 
     fn scale_str(&self, s: &str) -> f64 {
@@ -174,19 +182,18 @@ impl OrdinalScaleData {
             Some(i) => i,
             None => return f64::NAN,
         };
-        let (first_center, step, _) = self.layout();
-        first_center + (idx as f64) * step
+        self.geometry().position(idx)
     }
 
     fn invert_band(&self, y: f64) -> Option<String> {
         if y.is_nan() { return None; }
-        let (first_center, step, half_band) = self.layout();
-        if step == 0.0 { return None; }
-        let raw = (y - first_center) / step;
+        let g = self.geometry();
+        if g.step() == 0.0 { return None; }
+        let raw = (y - g.position(0)) / g.step();
         let idx = raw.round() as i64;
         if idx < 0 || idx as usize >= self.domain.len() { return None; }
-        let center = first_center + (idx as f64) * step;
-        if (y - center).abs() <= half_band {
+        let center = g.position(idx as usize);
+        if (y - center).abs() <= g.bandwidth() / 2.0 {
             Some(self.domain[idx as usize].clone())
         } else {
             None
@@ -246,12 +253,19 @@ pub struct OrdinalScale {
 impl OrdinalScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
     ///
-    /// Always supplies a numeric range; `range_orig` is set to match.
-    pub(crate) fn new_internal(domain: Vec<String>, range: Vec<f64>, padding: f64) -> Self {
+    /// Always supplies a numeric range; `range_orig` is set to match. `layout`
+    /// is the d3 model the axis places categories under — `DiscreteLayout::UNPADDED`
+    /// for an auto-inferred axis, the resolved `ScaleSpec::Band`/`Point`/`Ordinal`
+    /// parameters for a user-declared one.
+    pub(crate) fn new_internal(
+        domain: Vec<String>,
+        range: Vec<f64>,
+        layout: DiscreteLayout,
+    ) -> Self {
         let range_orig: Vec<OrdinalRangeValue> =
             range.iter().map(|&f| OrdinalRangeValue::Number(f)).collect();
         OrdinalScale {
-            data: OrdinalScaleData { domain, range, padding },
+            data: OrdinalScaleData { domain, range, layout },
             range_provenance: RangeProvenance::UserSet,
             range_orig: Some(range_orig),
         }
@@ -313,15 +327,17 @@ impl OrdinalScale {
         self.data.domain.clone()
     }
 
-    /// Per-category band width in pixels (the full step between consecutive
-    /// band centers). Used by render-side position adjustments (Phase 9c
-    /// Dodge) to compute sub-band offsets. The returned value is positive even
-    /// when the range is reversed (lo > hi).
+    /// Per-category drawn width in pixels: `|step| · (1 − padding_inner)` under
+    /// the band model, `|step|` under the point model (whose positions have no
+    /// width of their own — see `DiscreteGeometry::bandwidth`). Used by
+    /// render-side position adjustments (Phase 9c Dodge) to compute sub-band
+    /// offsets. The returned value is non-negative even when the range is
+    /// reversed (lo > hi), and zero for an empty domain.
+    ///
+    /// Before F-L04-03 this was the full step regardless of padding — the
+    /// unpadded model still reports exactly that, since `1 − 0 = 1`.
     pub(crate) fn bandwidth(&self) -> f64 {
-        if self.data.domain.is_empty() { return 0.0; }
-        let r_lo = *self.data.range.first().unwrap();
-        let r_hi = *self.data.range.last().unwrap();
-        ((r_hi - r_lo) / self.data.domain.len() as f64).abs()
+        self.data.geometry().bandwidth()
     }
 
     pub(crate) fn range_pair(&self) -> [f64; 2] {
@@ -368,10 +384,13 @@ impl OrdinalScale {
     }
 
     pub(crate) fn repr_string(&self) -> String {
-        let OrdinalScaleData { domain, range, padding } = &self.data;
+        let OrdinalScaleData { domain, range, layout } = &self.data;
         format!(
             "OrdinalScale(domain={:?}, range=[{}, {}], padding={})",
-            domain, range.first().copied().unwrap_or(0.0), range.last().copied().unwrap_or(0.0), padding
+            domain,
+            range.first().copied().unwrap_or(0.0),
+            range.last().copied().unwrap_or(0.0),
+            layout.padding_inner()
         )
     }
 
@@ -389,7 +408,9 @@ impl OrdinalScale {
                 Some(self.data.domain.clone())
             },
             range: self.range_orig.as_ref().filter(|v| !v.is_empty()).cloned(),
-            padding: self.data.padding,
+            // `ScaleSpec::Ordinal` carries a single inner padding; only the
+            // PyO3 constructor (band model, no outer padding) reaches here.
+            padding: self.data.layout.padding_inner(),
         }
     }
 }
@@ -434,7 +455,13 @@ impl OrdinalScale {
         };
 
         Ok(OrdinalScale {
-            data: OrdinalScaleData { domain, range: internal_range, padding },
+            data: OrdinalScaleData {
+                domain,
+                range: internal_range,
+                // `OrdinalScale(padding=)` is an inner padding: the band model
+                // with no outer padding and d3's default alignment.
+                layout: DiscreteLayout::band(padding, 0.0, DEFAULT_ALIGN),
+            },
             range_provenance,
             range_orig,
         })
@@ -493,7 +520,7 @@ impl OrdinalScale {
     /// Fractional inner padding between bands.
     #[getter]
     fn padding(&self) -> f64 {
-        self.data.padding
+        self.data.layout.padding_inner()
     }
 
     /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
@@ -508,11 +535,14 @@ impl OrdinalScale {
 mod tests {
     use super::*;
 
-    fn d(domain: Vec<&str>, range: Vec<f64>, padding: f64) -> OrdinalScaleData {
+    /// An `OrdinalScaleData` under the band model with `padding_inner` and no
+    /// outer padding — the shape the `OrdinalScale(padding=)` constructor and
+    /// the `ScaleSpec::Ordinal` resolver arm both build.
+    fn d(domain: Vec<&str>, range: Vec<f64>, padding_inner: f64) -> OrdinalScaleData {
         OrdinalScaleData {
             domain: domain.into_iter().map(String::from).collect(),
             range,
-            padding,
+            layout: DiscreteLayout::band(padding_inner, 0.0, DEFAULT_ALIGN),
         }
     }
 
@@ -557,7 +587,7 @@ mod tests {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
             vec![40.0, 260.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
         let centers = scale.explicit_band_centers().expect("explicit → Some");
@@ -575,7 +605,7 @@ mod tests {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
             vec![0.0, 220.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         );
         assert_eq!(scale.explicit_band_centers(), None);
     }
@@ -587,7 +617,7 @@ mod tests {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
             vec![260.0, 40.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
         let centers = scale.explicit_band_centers().expect("explicit → Some");
@@ -606,7 +636,7 @@ mod tests {
         let mut scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![40.0, 260.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
         scale.translate_explicit_range(100.0);
@@ -622,7 +652,7 @@ mod tests {
         let mut scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![40.0, 260.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         ); // no `.with_explicit_range(true)` — range_provenance stays UserSet
         scale.translate_explicit_range(100.0);
         assert_eq!(scale.range_pair(), [40.0, 260.0]);
@@ -635,7 +665,7 @@ mod tests {
         let mut scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![40.0, 260.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
         scale.translate_explicit_range(0.0);
@@ -650,7 +680,7 @@ mod tests {
         let scale = OrdinalScale::new_internal(
             vec!["A".into(), "B".into(), "C".into()],
             vec![0.0, 300.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         );
         // Internal range preserved for positional math.
         assert_eq!(scale.data.range, vec![0.0, 300.0]);
@@ -672,7 +702,7 @@ mod tests {
             data: OrdinalScaleData {
                 domain: vec!["A".into(), "B".into(), "C".into()],
                 range: vec![0.0, 1.0], // placeholder for string-only range
-                padding: 0.0,
+                layout: DiscreteLayout::UNPADDED,
             },
             range_provenance: RangeProvenance::UserSet,
             range_orig: Some(vec![
@@ -773,7 +803,7 @@ mod tests {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![0.0, 100.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         );
         assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
         assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
@@ -819,7 +849,7 @@ mod tests {
         let scale = OrdinalScale::new_internal(
             vec!["a".into(), "b".into()],
             vec![0.0, 100.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         )
         .with_explicit_range(true);
         assert!(scale.range_provenance.range_is_user_set(), "range_is_user_set unaffected");
@@ -832,8 +862,8 @@ mod tests {
     /// `new_internal` result.
     #[test]
     fn with_explicit_range_false_is_noop_vs_new_internal_default() {
-        let plain = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![0.0, 100.0], 0.0);
-        let explicit_false = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![0.0, 100.0], 0.0)
+        let plain = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED);
+        let explicit_false = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)
             .with_explicit_range(false);
         assert_eq!(plain.range_provenance, explicit_false.range_provenance);
     }
@@ -856,7 +886,7 @@ mod tests {
         let ord = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into()],
             vec![150.0, 150.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         );
         assert_eq!(ord.bandwidth(), 0.0);
     }
@@ -884,7 +914,7 @@ mod tests {
         let ord = OrdinalScale::new_internal(
             vec!["a".into(), "b".into(), "c".into(), "d".into()],
             vec![260.0, 40.0],
-            0.0,
+            DiscreteLayout::UNPADDED,
         );
         assert_eq!(ord.bandwidth(), 55.0, "bandwidth must be |step| under a reversed range");
     }
@@ -923,25 +953,29 @@ mod tests {
     fn ordinal_single_category_explicit_range_center_is_midpoint() {
         let s = d(vec!["only"], vec![40.0, 260.0], 0.0);
         assert_eq!(s.scale_str("only"), 150.0);
-        let ord = OrdinalScale::new_internal(vec!["only".into()], vec![40.0, 260.0], 0.0);
+        let ord = OrdinalScale::new_internal(vec!["only".into()], vec![40.0, 260.0], DiscreteLayout::UNPADDED);
         assert_eq!(ord.bandwidth(), 220.0);
         // Under the inverted form the midpoint is the same pixel.
         let inv = d(vec!["only"], vec![260.0, 40.0], 0.0);
         assert_eq!(inv.scale_str("only"), 150.0);
     }
 
-    /// Empty domain (0-row data resolved with an explicit range): step is
-    /// `extent / 0` = ±inf internally, but every public lookup stays safe —
-    /// `scale_str` returns NaN (category can't be found), invert returns
-    /// `None`, bandwidth returns 0. Pins that the inf never escapes.
+    /// Empty domain (0-row data resolved with an explicit range): every public
+    /// lookup stays safe — `scale_str` returns NaN (category can't be found),
+    /// invert returns `None`, bandwidth returns 0.
+    ///
+    /// The old model divided `extent / 0` and relied on the ±inf staying
+    /// contained (`raw = (y − inf)/inf = NaN`, `NaN.round() as i64` saturating
+    /// to 0, `0 >= len() == 0` → `None`). `DiscreteLayout::geometry` now
+    /// short-circuits `n == 0` to zero step and zero bandwidth, so `invert_band`
+    /// refuses at its `step == 0.0` guard instead. Same answers, no infinity in
+    /// the arithmetic.
     #[test]
     fn ordinal_empty_domain_lookups_are_contained() {
         let s = d(Vec::new(), vec![40.0, 260.0], 0.0);
         assert!(s.scale_str("anything").is_nan());
-        let ord = OrdinalScale::new_internal(Vec::new(), vec![40.0, 260.0], 0.0);
+        let ord = OrdinalScale::new_internal(Vec::new(), vec![40.0, 260.0], DiscreteLayout::UNPADDED);
         assert_eq!(ord.bandwidth(), 0.0);
-        // invert on the inf-step layout: raw = (y - inf)/inf = NaN; NaN.round()
-        // as i64 saturates to 0; 0 >= domain.len()==0 → None. Must not panic.
         assert_eq!(s.invert_band(150.0), None);
         assert_eq!(s.invert_band(f64::NAN), None);
     }

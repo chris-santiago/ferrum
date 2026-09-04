@@ -11,8 +11,16 @@
 //!
 //! - `BandScale` and `PointScale` constructed here never participate in rendering.
 //!   A `ScaleSpec::Band` / `ScaleSpec::Point` resolves to `ScaleKind::Ordinal` via
-//!   `OrdinalScale::new_internal`; the `BandScale`/`PointScale` layout math
-//!   (`.bandwidth()`, `.scale()`) is user-query-only.
+//!   `OrdinalScale::new_internal`; the `BandScale`/`PointScale` *instances* are
+//!   user-query-only. Their layout **formulas** are not: as of 2026-09-03
+//!   (F-L04-03) the d3 band/point model lives once, in `scale::discrete`, and
+//!   both the facades and the render-side `OrdinalScale` compute their
+//!   geometry from it. Before that the render side carried a second,
+//!   symmetric model in which `padding_inner`/`padding_outer`/`align` moved
+//!   nothing. Unification changed both sides: the render side gained real
+//!   padding, and `BandScale.scale()` — a public compute API — moved for a
+//!   padded scale, because the facade's own placement let the last band run
+//!   past the range end.
 //! - `SequentialScale`, `DivergingScale`, `BinOrdinalScale`, and the `Quantize`,
 //!   `Quantile`, and `Threshold` wire types all have `ScaleSpec` variants but no
 //!   dedicated `ScaleKind`; the positional resolver degrades
@@ -42,6 +50,7 @@
 //! numeric domain/range that `ScaleSpec` does not carry.
 
 pub(crate) mod core;
+pub(crate) mod discrete;
 pub(crate) mod ticks;
 pub(crate) mod linear;
 pub(crate) mod log;

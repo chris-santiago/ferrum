@@ -5,13 +5,31 @@ carried to the wire and positional resolver, band geometry gate-split on
 range-explicitness, categorical axis ticks at explicit-range band centers,
 ``PointScale(reverse=)``, and Diverging positional domains.
 
-Known, deliberately-untested divergences (tracked, not re-pinned here):
+Known divergences and their pins:
 
-* GH #67 north star — the pyclass compute facades (``BandScale.scale()`` /
-  ``PointScale.scale()``) use the true d3 band/point formulas while the render
-  resolver uses the symmetric ``(i + 0.5) * step`` band model, so
-  ``padding_inner`` / ``padding_outer`` / ``align`` are render-inert by design.
-  No failing test is added for that decided divergence.
+* GH #67 north star — as of batch-C T5, the render resolver (``OrdinalScale``,
+  via ``crates/ferrum-core/src/scale/discrete.rs``) shares the true d3
+  band/point model with the pyclass compute facades (``BandScale.scale()`` /
+  ``PointScale.scale()``); ``padding_inner`` and ``padding_outer`` are
+  threaded through to the render path and move mark geometry (see the
+  padding-derived literal pins throughout this file). ``align`` is threaded
+  through too, but only moves geometry when the denominator clamp fires (a
+  single category with padding large enough to force ``denom < 1``) and is
+  algebraically inert on the point model for ``n >= 2``; it is not a general
+  mover. Mark *width* formulas haven't caught up to the padded model yet --
+  e.g. ``test_band_scale_on_x_and_y_simultaneously_heatmap`` below still
+  pins a padded ``BandScale``'s ``mark_rect`` cell width at the unpadded
+  ``extent / n``, not ``bandwidth()``; that is Task 6's territory, not a gap
+  in this file. What remains genuinely open until batch-C T7 is narrower: a
+  padded band/point scale rendered with NO explicit ``range=`` places marks
+  at the d3 centers but the categorical axis still resolves tick placement
+  via ``uniform_center`` (gated on range-explicitness), so labels and marks
+  can diverge by several pixels for that one case.
+  ``test_padded_no_range_band_scale_axis_labels_align_with_bar_centers``
+  below is an ``xfail(strict=True)`` forward pin for exactly that transient:
+  it will XPASS -- and strict mode will turn the XPASS into a failure --
+  the moment T7 collapses the gate, forcing that task to flip the marker
+  rather than ship the fix silently.
 """
 
 from __future__ import annotations
@@ -24,6 +42,7 @@ import polars as pl
 import pytest
 
 import ferrum as fr
+from tests._svg_extents import axis_tick_labels
 
 _THEME_BACKGROUND = "#faf7f2"
 
@@ -309,12 +328,22 @@ def test_inverted_explicit_range_bars_within_range_and_labels_reversed():
             f"bar [{x0}, {x1}] escapes the inverted range [260, 40]: {a!r}"
         )
         assert float(a["width"]) > 0.0, f"bar has non-positive width: {a!r}"
-    # Reversed range → 'a' takes the RIGHTMOST band center (232.5), 'd' the leftmost.
+    # Reversed range → 'a' takes the RIGHTMOST band center, 'd' the leftmost.
+    # Under BandScale's default padding (0.1 both sides -- batch-C T5, d3 band
+    # model, explicit padding now real, placement per d3's upstream
+    # lead-based formula that T5's S3 repair unified the render path and the
+    # BandScale compute facade onto) over range=[260, 40]: extent = -220,
+    # denom = 4.1, step = -53.65853658536586, start = 260 + 0.1*step =
+    # 254.6341463414634, lead(0) = start, bandwidth = |step|*(1-0.1) =
+    # 48.29268292682927, and 'a' (i=0) sits at lead(0) + bandwidth/2*sign(step)
+    # = 254.6341463414634 - 24.146341463414635 = 230.48780487804876. Before
+    # batch-C T5 padding was inert and 'a' pinned the unpadded symmetric
+    # center (232.5).
     a_pos = _axis_tick_label_pos(svg, "a", coord="x")
     d_pos = _axis_tick_label_pos(svg, "d", coord="x")
     assert a_pos > d_pos, f"inverted range must reverse label pixel order: a={a_pos}, d={d_pos}"
-    assert a_pos == pytest.approx(232.5, abs=0.5), (
-        f"'a' center under [260,40] should be 232.5, got {a_pos}"
+    assert a_pos == pytest.approx(230.48780487804876, abs=0.5), (
+        f"'a' center under [260,40] should be ~230.488, got {a_pos}"
     )
 
 
@@ -388,8 +417,32 @@ def test_infinite_explicit_range_produces_finite_svg_or_raises():
 def test_single_category_band_explicit_range_centers_at_midpoint():
     """A 1-category BandScale over [40, 260] puts the bar center at 150.
 
-    Targets the resolver band model with n == 1 (step = extent, center =
-    0.5 * step + range_lo) and the single-tick axis path.
+    Targets the resolver band model with n == 1 under BandScale's default
+    padding (0.1 both sides -- batch-C T5, d3 band model, explicit padding
+    now real). Under d3's upstream lead-based placement formula (the shared
+    model in crates/ferrum-core/src/scale/discrete.rs that T5's S3 repair
+    unified the render path and the BandScale compute facade onto):
+    denom = n - p_in + 2*p_out = 1 - 0.1 + 0.2 = 1.1, step = 220 / 1.1 = 200,
+    start = range_lo + p_out*step = 40 + 20 = 60, bandwidth =
+    |step|*(1 - p_in) = 180, center = lead(0) + bandwidth/2*sign(step) =
+    60 + 90 = 150. For n == 1 with padding_inner == padding_outer (as here),
+    this reduces algebraically to the plain range midpoint
+    (range_lo + extent/2) for *any* padding value -- the padding terms
+    cancel -- which is also the pre-batch (unpadded) answer, so 150 is not a
+    coincidence, it's the n == 1 invariant of the corrected formula.
+
+    T5's first cut (cycle 1 of this task) pinned 160, not 150: at that
+    point the render path had been ported to match the *old* compute
+    facade, which centered each band in its padded slot
+    (start + step/2, i.e. including the outer gap) rather than placing it
+    at the drawn band's own leading edge (lead + bandwidth/2) -- and that
+    old facade formula was itself not true upstream d3. The S3 repair
+    replaced that shared (facade-and-render) formula with d3's actual
+    lead-based placement, which changed BandScale.scale()'s own output too,
+    not only the render path; restoring the n == 1 invariant and reverting
+    this pin to 150 is a consequence of both sides now computing the
+    correct d3 formula, not of the render side being made to match a
+    facade that stayed fixed.
     """
     svg = _band_bar_svg([40.0, 260.0], domain=("only",))
     _assert_finite_svg(svg)
@@ -871,3 +924,63 @@ def test_point_scale_getters_round_trip_all_fields():
     assert s.reverse is True
     assert s.range == [10.0, 90.0]
     assert math.isnan(s.scale("zzz")), "unknown category must map to NaN"
+
+
+# ---------------------------------------------------------------------------
+# GH #67 centers-gate transient (forward pin for batch-C T7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GH #67 centers-gate transient: a padded BandScale rendered with no "
+        "explicit range= places marks at the d3 band centers (batch-C T5) "
+        "but the categorical axis still resolves tick placement via "
+        "uniform_center, gated on range-explicitness. Batch-C T7 collapses "
+        "that gate so axis and marks share one center formula; this xfail "
+        "must flip to a real assertion (not be silently deleted) the "
+        "moment T7 lands, since strict=True turns the resulting XPASS "
+        "into a failure."
+    ),
+)
+def test_padded_no_range_band_scale_axis_labels_align_with_bar_centers():
+    """Axis tick labels should align with bar centers for a padded BandScale
+    with no explicit range=, the same coherence contract already pinned
+    (under an explicit range=) by
+    ``test_x_axis_tick_labels_align_with_band_centers`` in
+    ``tests/test_regression_band_point_range.py``.
+
+    Reproduced today (post T5's S3 placement repair): a 4-category
+    ``BandScale(padding=0.1)`` with no range=, at width=600, renders bar
+    centers [130.0975, 257.9575, 385.8175, 513.6775] against axis tick
+    centers [125.303, 256.359, 387.416, 518.472] -- the S3 repair narrowed
+    the divergence from ~11px to ~1.6-4.8px per label, but it's still well
+    outside this test's 0.5px tolerance, so this xfails for the intended
+    reason (centers diverge) rather than a parse failure.
+    """
+    df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
+    chart = (
+        fr.Chart(df)
+        .mark_bar()
+        .encode(
+            x=fr.X("cat", scale=fr.BandScale(domain=["a", "b", "c", "d"], padding=0.1)),
+            y="val",
+        )
+        .properties(width=600, height=400)
+    )
+    svg = chart.to_svg()
+    bars = _data_bar_rects(svg)
+    assert len(bars) == 4, f"expected 4 bars, got {len(bars)}"
+    bar_centers = sorted(float(a["x"]) + float(a["width"]) / 2.0 for a in bars)
+
+    labels = axis_tick_labels(svg, axis="x")
+    assert labels == ["a", "b", "c", "d"], f"unexpected tick label screen order: {labels}"
+    label_positions = [_axis_tick_label_pos(svg, label, coord="x") for label in labels]
+
+    for bar_center, label_pos, label in zip(bar_centers, label_positions, labels):
+        assert bar_center == pytest.approx(label_pos, abs=0.5), (
+            f"axis tick label {label!r} at x={label_pos} does not align with mark "
+            f"band center {bar_center} for a padded BandScale with no explicit "
+            f"range= (GH #67 centers-gate transient, closed by batch-C T7)"
+        )
