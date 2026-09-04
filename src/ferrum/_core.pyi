@@ -139,6 +139,7 @@ class LinearScale:
     range: list[float] | None
     clamp: bool
     padding: float | None
+    reverse: bool
     def __init__(
         self,
         *,
@@ -147,6 +148,7 @@ class LinearScale:
         clamp: bool = False,
         nice: bool = False,
         padding: float | None = None,
+        reverse: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -161,6 +163,7 @@ class LogScale:
     base: float
     clamp: bool
     padding: float | None
+    reverse: bool
     def __init__(
         self,
         *,
@@ -170,6 +173,7 @@ class LogScale:
         clamp: bool = False,
         nice: bool = False,
         padding: float | None = None,
+        reverse: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -184,6 +188,7 @@ class TimeScale:
     clamp: bool
     padding: float | None
     utc: bool
+    reverse: bool
     def __init__(
         self,
         *,
@@ -193,6 +198,7 @@ class TimeScale:
         nice: bool = False,
         padding: float | None = None,
         utc: bool = False,
+        reverse: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -207,6 +213,7 @@ class SymlogScale:
     constant: float
     clamp: bool
     padding: float | None
+    reverse: bool
     def __init__(
         self,
         *,
@@ -216,6 +223,7 @@ class SymlogScale:
         clamp: bool = False,
         nice: bool = False,
         padding: float | None = None,
+        reverse: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -281,6 +289,7 @@ class PowScale:
     exponent: float
     clamp: bool
     padding: Optional[float]
+    reverse: bool
     def __init__(
         self,
         *,
@@ -290,6 +299,7 @@ class PowScale:
         clamp: bool = False,
         nice: bool = False,
         padding: Optional[float] = None,
+        reverse: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -304,6 +314,7 @@ class SqrtScale:
     exponent: float
     clamp: bool
     padding: Optional[float]
+    reverse: bool
     def __init__(
         self,
         *,
@@ -312,6 +323,7 @@ class SqrtScale:
         clamp: bool = False,
         nice: bool = False,
         padding: Optional[float] = None,
+        reverse: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...

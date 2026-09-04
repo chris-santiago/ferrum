@@ -25,6 +25,14 @@ use crate::spec::encoding::{encode_serde_value_for_py, ContinuousScaleCommon, Sc
 /// each pyclass's `domain()`/`range()` getter) plus the `scheme`/`domain_param`
 /// fields, which are always `None` on a freshly-constructed `*Scale` (those wire
 /// keys originate from the dict-form scale path, never from a pyclass instance).
+///
+/// `reverse` is domain-swap sugar (F-L04-07): it is carried through to the wire
+/// unswapped — the actual domain-pair swap happens later, at the resolver's
+/// continuous chokepoint (`apply_domain_reverse` in
+/// `render::scale_resolve::positional`), not here and not at pyclass
+/// construction. `LinearScale::scale`/`invert`/`ticks` and its five siblings
+/// therefore never see the swapped domain; only the rendered/resolved scale
+/// does.
 pub(crate) fn continuous_common(
     domain: [f64; 2],
     domain_user_set: bool,
@@ -32,6 +40,7 @@ pub(crate) fn continuous_common(
     range_user_set: bool,
     clamp: bool,
     padding: Option<f64>,
+    reverse: bool,
 ) -> ContinuousScaleCommon {
     ContinuousScaleCommon {
         domain: domain_user_set.then(|| domain.to_vec()),
@@ -40,11 +49,7 @@ pub(crate) fn continuous_common(
         padding,
         scheme: None,
         domain_param: None,
-        // The six continuous pyclasses gain a `reverse` kwarg in a
-        // downstream batch-C task; until that lands, every pyclass
-        // construction path stays `false` here so this helper's output is
-        // unchanged.
-        reverse: false,
+        reverse,
     }
 }
 

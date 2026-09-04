@@ -254,6 +254,16 @@ impl LogScaleData {
 ///     Clamp out-of-domain inputs to the range endpoints.
 /// nice : bool, default False
 ///     Round domain endpoints to the nearest power of ``base``.
+/// reverse : bool, default False
+///     Swap the resolved domain endpoints when this scale resolves inside a
+///     chart render, producing a descending axis — equivalent, AT RENDER
+///     TIME, to writing ``domain=[hi, lo]`` for an explicit domain (an
+///     auto-inferred domain keeps its usual padding before the swap). The
+///     swap applies only at render resolution: this object's own
+///     ``scale()``/``invert()``/``ticks()`` and its ``domain`` getter keep
+///     reporting the constructor's domain unchanged. This diverges from
+///     ``PointScale``'s identically-named ``reverse``, which DOES apply
+///     inside ``PointScale.scale()``.
 ///
 /// Examples
 /// --------
@@ -270,6 +280,7 @@ pub struct LogScale {
     padding: Option<f64>,
     range_user_set: bool,
     domain_user_set: bool,
+    reverse: bool,
 }
 
 impl LogScale {
@@ -277,7 +288,7 @@ impl LogScale {
     pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, base: f64, clamp: bool, nice: bool) -> Self {
         let mut d = LogScaleData::new([domain[0], domain[1]], [range[0], range[1]], base, clamp);
         if nice { d = d.nice(); }
-        LogScale { data: d, padding: None, range_user_set: true, domain_user_set: true }
+        LogScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false }
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
@@ -364,9 +375,12 @@ impl LogScale {
         } else {
             "None".to_string()
         };
+        // `reverse` only appears when non-default (mirrors `TimeScale::repr_string`'s
+        // `utc` prefix), so the default-shaped repr stays byte-identical to before.
+        let reverse_s = if self.reverse { ", reverse=True" } else { "" };
         format!(
-            "LogScale(domain={}, range={}, base={}, clamp={})",
-            domain_s, range_s, base, if *clamp { "True" } else { "False" }
+            "LogScale(domain={}, range={}, base={}, clamp={}{})",
+            domain_s, range_s, base, if *clamp { "True" } else { "False" }, reverse_s
         )
     }
 
@@ -383,6 +397,7 @@ impl LogScale {
                 self.range_user_set,
                 self.data.clamp,
                 self.padding,
+                self.reverse,
             ),
             nice: false,
         }
@@ -392,7 +407,7 @@ impl LogScale {
 #[pymethods]
 impl LogScale {
     #[new]
-    #[pyo3(signature = (*, domain = None, range = None, base = 10.0, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, base = 10.0, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
@@ -400,6 +415,7 @@ impl LogScale {
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
+        reverse: bool,
     ) -> PyResult<Self> {
         if !base.is_finite() || base <= 0.0 || base == 1.0 {
             return Err(PyValueError::new_err(format!(
@@ -429,6 +445,7 @@ impl LogScale {
             padding,
             range_user_set: resolved.range_user_set,
             domain_user_set: resolved.domain_user_set,
+            reverse,
         })
     }
 
@@ -448,6 +465,7 @@ impl LogScale {
             padding: self.padding,
             range_user_set: self.range_user_set,
             domain_user_set: self.domain_user_set,
+            reverse: self.reverse,
         }
     }
 
@@ -476,6 +494,13 @@ impl LogScale {
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool { self.data.clamp }
+
+    /// Whether this scale's domain is swapped when it resolves inside a
+    /// chart render (descending axis). Does not affect this object's own
+    /// `scale`/`invert`/`ticks`/`domain` — unlike `PointScale::reverse`,
+    /// which DOES apply inside `PointScale::scale`.
+    #[getter]
+    fn reverse(&self) -> bool { self.reverse }
 
     /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
     fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -568,18 +593,62 @@ mod tests {
     #[test]
     fn log_named_fields_round_trip() {
         let with_domain = LogScale::new(
-            Some(vec![1.0, 1000.0]), Some(vec![0.0, 300.0]), 10.0, false, false, Some(0.1),
+            Some(vec![1.0, 1000.0]), Some(vec![0.0, 300.0]), 10.0, false, false, Some(0.1), false,
         ).unwrap();
         assert_eq!(with_domain.domain(), Some(vec![1.0, 1000.0]));
         assert_eq!(with_domain.range(), Some(vec![0.0, 300.0]));
         assert_eq!(with_domain.base(), 10.0);
         assert_eq!(with_domain.padding(), Some(0.1));
+        assert!(!with_domain.reverse());
 
-        let no_domain = LogScale::new(None, None, 2.0, false, false, None).unwrap();
+        let no_domain = LogScale::new(None, None, 2.0, false, false, None, false).unwrap();
         assert_eq!(no_domain.domain(), None);
         assert_eq!(no_domain.range(), None);
         assert_eq!(no_domain.domain_pair(), [1.0, 10.0]);
         assert_eq!(no_domain.base(), 2.0);
+    }
+
+    // ── `reverse` kwarg (F-L04-07, batch-C task 2) ──────────────────────────
+
+    #[test]
+    fn log_reverse_round_trips_through_to_scale_spec() {
+        let s = LogScale::new(Some(vec![1.0, 1000.0]), None, 10.0, false, false, None, true).unwrap();
+        assert!(s.reverse());
+        match s.to_scale_spec() {
+            ScaleSpec::Log { common, .. } => {
+                assert!(common.reverse, "reverse=True must survive to the wire spec");
+                assert_eq!(common.domain, Some(vec![1.0, 1000.0]));
+            }
+            other => panic!("expected ScaleSpec::Log, got {other:?}"),
+        }
+    }
+
+    /// Default (`reverse` unset) omits the wire key entirely, matching every
+    /// pre-existing baseline in `test_scale_spec_parity`.
+    #[test]
+    fn log_reverse_default_emits_no_reverse_key() {
+        let s = LogScale::new(None, None, 10.0, false, false, None, false).unwrap();
+        assert!(!s.reverse());
+        let json = serde_json::to_string(&s.to_scale_spec()).unwrap();
+        assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    /// `repr_string()` pinned in both directions (quality-review F2): the
+    /// default-shaped repr is byte-identical to before this change, and
+    /// `reverse=True` appends the exact `, reverse=True)` suffix.
+    #[test]
+    fn log_repr_pins_both_reverse_branches() {
+        let default_scale = LogScale::new(None, None, 10.0, false, false, None, false).unwrap();
+        assert_eq!(
+            default_scale.repr_string(),
+            "LogScale(domain=None, range=None, base=10, clamp=False)",
+        );
+
+        let reversed_scale = LogScale::new(None, None, 10.0, false, false, None, true).unwrap();
+        assert_eq!(
+            reversed_scale.repr_string(),
+            "LogScale(domain=None, range=None, base=10, clamp=False, reverse=True)",
+        );
     }
 
     // F17 — Underflow contract:

@@ -94,6 +94,16 @@ impl LinearScaleData {
 ///     Clamp out-of-domain inputs to the range endpoints.
 /// nice : bool, default False
 ///     Round domain endpoints to "nice" values for tick generation.
+/// reverse : bool, default False
+///     Swap the resolved domain endpoints when this scale resolves inside a
+///     chart render, producing a descending axis — equivalent, AT RENDER
+///     TIME, to writing ``domain=[hi, lo]`` for an explicit domain (an
+///     auto-inferred domain keeps its usual padding before the swap). The
+///     swap applies only at render resolution: this object's own
+///     ``scale()``/``invert()``/``ticks()`` and its ``domain`` getter keep
+///     reporting the constructor's domain unchanged. This diverges from
+///     ``PointScale``'s identically-named ``reverse``, which DOES apply
+///     inside ``PointScale.scale()``.
 ///
 /// Examples
 /// --------
@@ -111,6 +121,7 @@ pub struct LinearScale {
     padding: Option<f64>,
     range_user_set: bool,
     domain_user_set: bool,
+    reverse: bool,
 }
 
 impl LinearScale {
@@ -127,7 +138,7 @@ impl LinearScale {
         if nice {
             d = d.nice();
         }
-        LinearScale { data: d, padding: None, range_user_set: true, domain_user_set: true }
+        LinearScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false }
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
@@ -210,9 +221,12 @@ impl LinearScale {
         } else {
             "None".to_string()
         };
+        // `reverse` only appears when non-default (mirrors `TimeScale::repr_string`'s
+        // `utc` prefix), so the default-shaped repr stays byte-identical to before.
+        let reverse_s = if self.reverse { ", reverse=True" } else { "" };
         format!(
-            "LinearScale(domain={}, range={}, clamp={})",
-            domain_s, range_s, if *clamp { "True" } else { "False" }
+            "LinearScale(domain={}, range={}, clamp={}{})",
+            domain_s, range_s, if *clamp { "True" } else { "False" }, reverse_s
         )
     }
 
@@ -230,6 +244,7 @@ impl LinearScale {
                 self.range_user_set,
                 self.data.clamp,
                 self.padding,
+                self.reverse,
             ),
             nice: false,
             zero: false,
@@ -240,13 +255,14 @@ impl LinearScale {
 #[pymethods]
 impl LinearScale {
     #[new]
-    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
+        reverse: bool,
     ) -> PyResult<Self> {
         // Sentinel [0.0, 1.0] when no domain supplied; render-time inference
         // replaces it before any scale computation occurs.
@@ -264,6 +280,7 @@ impl LinearScale {
             padding,
             range_user_set: resolved.range_user_set,
             domain_user_set: resolved.domain_user_set,
+            reverse,
         })
     }
 
@@ -290,6 +307,7 @@ impl LinearScale {
             padding: self.padding,
             range_user_set: self.range_user_set,
             domain_user_set: self.domain_user_set,
+            reverse: self.reverse,
         }
     }
 
@@ -318,6 +336,15 @@ impl LinearScale {
     #[getter]
     fn clamp(&self) -> bool {
         self.data.clamp
+    }
+
+    /// Whether this scale's domain is swapped when it resolves inside a
+    /// chart render (descending axis). Does not affect this object's own
+    /// `scale`/`invert`/`ticks`/`domain` — unlike `PointScale::reverse`,
+    /// which DOES apply inside `PointScale::scale`.
+    #[getter]
+    fn reverse(&self) -> bool {
+        self.reverse
     }
 
     /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
@@ -443,18 +470,73 @@ mod tests {
     #[test]
     fn linear_named_fields_round_trip() {
         let with_domain = LinearScale::new(
-            Some(vec![2.0, 8.0]), Some(vec![0.0, 100.0]), true, false, Some(0.25),
+            Some(vec![2.0, 8.0]), Some(vec![0.0, 100.0]), true, false, Some(0.25), false,
         ).unwrap();
         assert_eq!(with_domain.domain(), Some(vec![2.0, 8.0]));
         assert_eq!(with_domain.range(), Some(vec![0.0, 100.0]));
         assert!(with_domain.clamp());
         assert_eq!(with_domain.padding(), Some(0.25));
+        assert!(!with_domain.reverse());
 
-        let no_domain = LinearScale::new(None, None, false, false, None).unwrap();
+        let no_domain = LinearScale::new(None, None, false, false, None, false).unwrap();
         assert_eq!(no_domain.domain(), None);
         assert_eq!(no_domain.range(), None);
         // Sentinel preserved internally so render-time inference can replace it.
         assert_eq!(no_domain.domain_pair(), [0.0, 1.0]);
+    }
+
+    // ── `reverse` kwarg (F-L04-07, batch-C task 2) ──────────────────────────
+
+    /// `reverse=True` round-trips through the getter and into the wire
+    /// `ScaleSpec::Linear.common.reverse` bit unswapped — the actual domain
+    /// swap happens downstream at the resolver (`apply_domain_reverse`), not
+    /// here (see `continuous_common`'s doc).
+    #[test]
+    fn linear_reverse_round_trips_through_to_scale_spec() {
+        let s = LinearScale::new(Some(vec![2.0, 8.0]), None, false, false, None, true).unwrap();
+        assert!(s.reverse());
+        match s.to_scale_spec() {
+            ScaleSpec::Linear { common, .. } => {
+                assert!(common.reverse, "reverse=True must survive to the wire spec");
+                // The domain itself is NOT swapped by the pyclass — only the flag travels.
+                assert_eq!(common.domain, Some(vec![2.0, 8.0]));
+            }
+            other => panic!("expected ScaleSpec::Linear, got {other:?}"),
+        }
+    }
+
+    /// Default (`reverse` unset) emits `reverse: false` on the spec, and the
+    /// wire serialization omits the key entirely (`skip_serializing_if`),
+    /// matching every pre-existing baseline in `test_scale_spec_parity`.
+    #[test]
+    fn linear_reverse_default_emits_no_reverse_key() {
+        let s = LinearScale::new(None, None, false, false, None, false).unwrap();
+        assert!(!s.reverse());
+        match s.to_scale_spec() {
+            ScaleSpec::Linear { common, .. } => assert!(!common.reverse),
+            other => panic!("expected ScaleSpec::Linear, got {other:?}"),
+        }
+        let json = serde_json::to_string(&s.to_scale_spec()).unwrap();
+        assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    /// `repr_string()` pinned in both directions (quality-review F2): the
+    /// default-shaped repr is byte-identical to before this change (no
+    /// `reverse` mention at all — not even `reverse=False`), and
+    /// `reverse=True` appends the exact `, reverse=True)` suffix.
+    #[test]
+    fn linear_repr_pins_both_reverse_branches() {
+        let default_scale = LinearScale::new(None, None, false, false, None, false).unwrap();
+        assert_eq!(
+            default_scale.repr_string(),
+            "LinearScale(domain=None, range=None, clamp=False)",
+        );
+
+        let reversed_scale = LinearScale::new(None, None, false, false, None, true).unwrap();
+        assert_eq!(
+            reversed_scale.repr_string(),
+            "LinearScale(domain=None, range=None, clamp=False, reverse=True)",
+        );
     }
 
     // ── Minor tick tests ─────────────────────────────────────────────────────

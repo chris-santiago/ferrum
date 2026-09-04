@@ -9,6 +9,15 @@ The parsers recover per-panel tick extents from a rendered SVG: numeric
 panels, giving each panel's ``(lo, hi)`` value range. Auto-inferred scale
 domains exist only Rust-side, so rendered tick extents are the observable
 proxy for "these panels share (or don't share) an axis domain".
+
+``ordered_text_entries`` is the base parser: it owns the
+``<text x y>value</text>`` regex once so no sibling module re-copies it.
+``numeric_text_entries`` filters that down to float-parseable ticks (the
+multi-panel extent helpers below only ever compare numeric domains).
+``axis_tick_labels`` is the single-panel, raw-string counterpart — it keeps
+non-numeric tick text (e.g. ``TimeScale``'s ``"HH:MM:SS"`` formatting) and
+preserves screen-order, which the extent helpers below deliberately discard
+in favor of per-panel ``(min, max)``.
 """
 
 from __future__ import annotations
@@ -23,24 +32,81 @@ class AxisExtent(NamedTuple):
     hi: float
 
 
-def numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
-    """Return (x, y, value) for every ``<text>`` element whose content parses as float.
+def ordered_text_entries(svg: str) -> list[tuple[float, float, str]]:
+    """Return ``(x, y, text)`` for every non-empty ``<text>`` element, in document order.
 
-    This is the single text-node tick parser shared by the extent helpers below
-    and by sibling render tests (e.g. ``test_composite_render_grid.py``): the
-    ``<text x y>value</text>`` regex lives here once so new tests never re-copy it.
+    This is the single text-node parser shared by every helper in this
+    module and by sibling render tests (e.g. ``test_composite_render_grid.py``
+    via ``numeric_text_entries``, ``test_scale_reverse.py`` via
+    ``axis_tick_labels``): the ``<text x y>value</text>`` regex lives here
+    once so new tests never re-copy it. Unlike ``numeric_text_entries``, this
+    keeps the raw label string — callers that need float values (and don't
+    care about non-numeric labels) should use ``numeric_text_entries``.
     """
-    entries = []
+    entries: list[tuple[float, float, str]] = []
     for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg):
-        try:
-            val = float(text.strip())
-        except ValueError:
+        text = text.strip()
+        if not text:
             continue
         x_m = re.search(r'x="([^"]+)"', attrs)
         y_m = re.search(r'y="([^"]+)"', attrs)
         if x_m and y_m:
-            entries.append((float(x_m.group(1)), float(y_m.group(1)), val))
+            entries.append((float(x_m.group(1)), float(y_m.group(1)), text))
     return entries
+
+
+def numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
+    """Return (x, y, value) for every ``<text>`` element whose content parses as float."""
+    entries = []
+    for x, y, text in ordered_text_entries(svg):
+        try:
+            val = float(text)
+        except ValueError:
+            continue
+        entries.append((x, y, val))
+    return entries
+
+
+def axis_tick_labels(svg: str, *, axis: str) -> list[str]:
+    """Return raw tick-label text for one axis of a single-panel SVG, in screen order.
+
+    x-axis ticks share the largest rounded ``y`` (the bottom row); returned
+    left-to-right (ascending screen ``x``). y-axis ticks share the smallest
+    rounded ``x`` (the left column); returned top-to-bottom (ascending
+    screen ``y``). Groups smaller than 3 entries are axis/legend titles, not
+    the tick row/column, and are excluded.
+
+    This is the single-panel, raw-string sibling of ``x_axis_extents``/
+    ``y_axis_extents`` below: those assume multiple side-by-side panels and
+    split a tick row/column by value-reset into per-panel ``(min, max)``,
+    discarding both non-numeric text and screen order. Use this instead when
+    the assertion cares about the exact rendered order (e.g. proving a
+    ``reverse=True`` scale's ticks descend) or when labels aren't
+    float-parseable (e.g. ``TimeScale``'s ``"HH:MM:SS"`` formatting).
+    """
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+
+    entries = ordered_text_entries(svg)
+
+    if axis == "x":
+        rows: dict[int, list[tuple[float, str]]] = defaultdict(list)
+        for x, y, text in entries:
+            rows[round(y)].append((x, text))
+        candidates = [(y, ents) for y, ents in rows.items() if len(ents) >= 3]
+        if not candidates:
+            return []
+        _, ents = max(candidates, key=lambda item: item[0])
+        return [text for _, text in sorted(ents)]
+
+    cols: dict[int, list[tuple[float, str]]] = defaultdict(list)
+    for x, y, text in entries:
+        cols[round(x)].append((y, text))
+    candidates = [(x, ents) for x, ents in cols.items() if len(ents) >= 3]
+    if not candidates:
+        return []
+    _, ents = min(candidates, key=lambda item: item[0])
+    return [text for _, text in sorted(ents)]
 
 
 def x_axis_extents(svg: str) -> list[AxisExtent]:

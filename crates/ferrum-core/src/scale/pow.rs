@@ -95,6 +95,16 @@ impl PowScaleData {
 ///     Round domain endpoints to "nice" values for tick generation.
 /// padding : float, optional
 ///     Fractional inward pixel padding.
+/// reverse : bool, default False
+///     Swap the resolved domain endpoints when this scale resolves inside a
+///     chart render, producing a descending axis — equivalent, AT RENDER
+///     TIME, to writing ``domain=[hi, lo]`` for an explicit domain (an
+///     auto-inferred domain keeps its usual padding before the swap). The
+///     swap applies only at render resolution: this object's own
+///     ``scale()``/``invert()``/``ticks()`` and its ``domain`` getter keep
+///     reporting the constructor's domain unchanged. This diverges from
+///     ``PointScale``'s identically-named ``reverse``, which DOES apply
+///     inside ``PointScale.scale()``.
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct PowScale {
@@ -102,6 +112,7 @@ pub struct PowScale {
     padding: Option<f64>,
     range_user_set: bool,
     domain_user_set: bool,
+    reverse: bool,
 }
 
 impl PowScale {
@@ -113,7 +124,7 @@ impl PowScale {
             exponent,
             clamp,
         };
-        PowScale { data: d, padding: None, range_user_set: true, domain_user_set: true }
+        PowScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false }
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
@@ -199,6 +210,7 @@ impl PowScale {
                 self.range_user_set,
                 self.data.clamp,
                 self.padding,
+                self.reverse,
             ),
         }
     }
@@ -215,9 +227,12 @@ impl PowScale {
         } else {
             "None".to_string()
         };
+        // `reverse` only appears when non-default (mirrors `TimeScale::repr_string`'s
+        // `utc` prefix), so the default-shaped repr stays byte-identical to before.
+        let reverse_s = if self.reverse { ", reverse=True" } else { "" };
         format!(
-            "PowScale(domain={}, range={}, exponent={}, clamp={})",
-            domain_s, range_s, exponent, if *clamp { "True" } else { "False" }
+            "PowScale(domain={}, range={}, exponent={}, clamp={}{})",
+            domain_s, range_s, exponent, if *clamp { "True" } else { "False" }, reverse_s
         )
     }
 }
@@ -225,7 +240,7 @@ impl PowScale {
 #[pymethods]
 impl PowScale {
     #[new]
-    #[pyo3(signature = (*, domain = None, range = None, exponent = 2.0, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, exponent = 2.0, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
@@ -233,6 +248,7 @@ impl PowScale {
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
+        reverse: bool,
     ) -> PyResult<Self> {
         if !exponent.is_finite() || exponent <= 0.0 {
             return Err(PyValueError::new_err(format!(
@@ -256,6 +272,7 @@ impl PowScale {
             padding,
             range_user_set: resolved.range_user_set,
             domain_user_set: resolved.domain_user_set,
+            reverse,
         })
     }
 
@@ -276,6 +293,7 @@ impl PowScale {
             padding: self.padding,
             range_user_set: self.range_user_set,
             domain_user_set: self.domain_user_set,
+            reverse: self.reverse,
         }
     }
 
@@ -304,6 +322,13 @@ impl PowScale {
     #[getter]
     fn clamp(&self) -> bool { self.data.clamp }
 
+    /// Whether this scale's domain is swapped when it resolves inside a
+    /// chart render (descending axis). Does not affect this object's own
+    /// `scale`/`invert`/`ticks`/`domain` — unlike `PointScale::reverse`,
+    /// which DOES apply inside `PointScale::scale`.
+    #[getter]
+    fn reverse(&self) -> bool { self.reverse }
+
     /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
     fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         scale_spec_to_py_dict(py, self.to_scale_spec())
@@ -329,6 +354,16 @@ impl PowScale {
 ///     Round domain endpoints to "nice" values for tick generation.
 /// padding : float, optional
 ///     Fractional inward pixel padding.
+/// reverse : bool, default False
+///     Swap the resolved domain endpoints when this scale resolves inside a
+///     chart render, producing a descending axis — equivalent, AT RENDER
+///     TIME, to writing ``domain=[hi, lo]`` for an explicit domain (an
+///     auto-inferred domain keeps its usual padding before the swap). The
+///     swap applies only at render resolution: this object's own
+///     ``scale()``/``invert()``/``ticks()`` and its ``domain`` getter keep
+///     reporting the constructor's domain unchanged. This diverges from
+///     ``PointScale``'s identically-named ``reverse``, which DOES apply
+///     inside ``PointScale.scale()``.
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqrtScale {
@@ -336,6 +371,7 @@ pub struct SqrtScale {
     padding: Option<f64>,
     range_user_set: bool,
     domain_user_set: bool,
+    reverse: bool,
 }
 
 impl SqrtScale {
@@ -374,6 +410,7 @@ impl SqrtScale {
                 self.range_user_set,
                 self.data.clamp,
                 self.padding,
+                self.reverse,
             ),
         }
     }
@@ -382,13 +419,14 @@ impl SqrtScale {
 #[pymethods]
 impl SqrtScale {
     #[new]
-    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
+        reverse: bool,
     ) -> PyResult<Self> {
         // Sentinel [0.0, 1.0] when no domain supplied; render-time inference
         // replaces it before any scale computation occurs.
@@ -407,6 +445,7 @@ impl SqrtScale {
             padding,
             range_user_set: resolved.range_user_set,
             domain_user_set: resolved.domain_user_set,
+            reverse,
         })
     }
 
@@ -427,6 +466,7 @@ impl SqrtScale {
             padding: self.padding,
             range_user_set: self.range_user_set,
             domain_user_set: self.domain_user_set,
+            reverse: self.reverse,
         }
     }
 
@@ -455,6 +495,13 @@ impl SqrtScale {
     #[getter]
     fn clamp(&self) -> bool { self.data.clamp }
 
+    /// Whether this scale's domain is swapped when it resolves inside a
+    /// chart render (descending axis). Does not affect this object's own
+    /// `scale`/`invert`/`ticks`/`domain` — unlike `PointScale::reverse`,
+    /// which DOES apply inside `PointScale::scale`.
+    #[getter]
+    fn reverse(&self) -> bool { self.reverse }
+
     /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
     fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         scale_spec_to_py_dict(py, self.to_scale_spec())
@@ -472,9 +519,12 @@ impl SqrtScale {
         } else {
             "None".to_string()
         };
+        // `reverse` only appears when non-default (mirrors `TimeScale::repr_string`'s
+        // `utc` prefix), so the default-shaped repr stays byte-identical to before.
+        let reverse_s = if self.reverse { ", reverse=True" } else { "" };
         format!(
-            "SqrtScale(domain={}, range={}, clamp={})",
-            domain_s, range_s, if *clamp { "True" } else { "False" }
+            "SqrtScale(domain={}, range={}, clamp={}{})",
+            domain_s, range_s, if *clamp { "True" } else { "False" }, reverse_s
         )
     }
 }
@@ -570,6 +620,7 @@ mod tests {
             padding: None,
             range_user_set: true,
             domain_user_set: true,
+            reverse: false,
         };
         assert_eq!(s.data.exponent, 3.0);
     }
@@ -581,6 +632,7 @@ mod tests {
             padding: None,
             range_user_set: true,
             domain_user_set: true,
+            reverse: false,
         };
         assert_eq!(s.data.exponent, 0.5);
     }
@@ -590,24 +642,104 @@ mod tests {
     #[test]
     fn pow_sqrt_named_fields_round_trip() {
         let pow = PowScale::new(
-            Some(vec![0.0, 100.0]), Some(vec![0.0, 600.0]), 2.0, false, false, Some(0.05),
+            Some(vec![0.0, 100.0]), Some(vec![0.0, 600.0]), 2.0, false, false, Some(0.05), false,
         ).unwrap();
         assert_eq!(pow.domain(), Some(vec![0.0, 100.0]));
         assert_eq!(pow.range(), Some(vec![0.0, 600.0]));
         assert_eq!(pow.exponent(), 2.0);
         assert_eq!(pow.padding(), Some(0.05));
+        assert!(!pow.reverse());
 
-        let pow_none = PowScale::new(None, None, 2.0, false, false, None).unwrap();
+        let pow_none = PowScale::new(None, None, 2.0, false, false, None, false).unwrap();
         assert_eq!(pow_none.domain(), None);
         assert_eq!(pow_none.range(), None);
         assert_eq!(pow_none.domain_pair(), [0.0, 1.0]);
 
         let sqrt = SqrtScale::new(
-            Some(vec![0.0, 49.0]), Some(vec![0.0, 7.0]), false, false, None,
+            Some(vec![0.0, 49.0]), Some(vec![0.0, 7.0]), false, false, None, false,
         ).unwrap();
         assert_eq!(sqrt.domain(), Some(vec![0.0, 49.0]));
         assert_eq!(sqrt.range(), Some(vec![0.0, 7.0]));
         assert_eq!(sqrt.exponent(), 0.5);
+        assert!(!sqrt.reverse());
+    }
+
+    // ── `reverse` kwarg (F-L04-07, batch-C task 2) ──────────────────────────
+
+    #[test]
+    fn pow_reverse_round_trips_through_to_scale_spec() {
+        let s = PowScale::new(Some(vec![0.0, 100.0]), None, 2.0, false, false, None, true).unwrap();
+        assert!(s.reverse());
+        match s.to_scale_spec() {
+            ScaleSpec::Pow { common, .. } => {
+                assert!(common.reverse, "reverse=True must survive to the wire spec");
+                assert_eq!(common.domain, Some(vec![0.0, 100.0]));
+            }
+            other => panic!("expected ScaleSpec::Pow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pow_reverse_default_emits_no_reverse_key() {
+        let s = PowScale::new(None, None, 2.0, false, false, None, false).unwrap();
+        let json = serde_json::to_string(&s.to_scale_spec()).unwrap();
+        assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    /// `repr_string()` pinned in both directions (quality-review F2): the
+    /// default-shaped repr is byte-identical to before this change, and
+    /// `reverse=True` appends the exact `, reverse=True)` suffix.
+    #[test]
+    fn pow_repr_pins_both_reverse_branches() {
+        let default_scale = PowScale::new(None, None, 2.0, false, false, None, false).unwrap();
+        assert_eq!(
+            default_scale.repr_string(),
+            "PowScale(domain=None, range=None, exponent=2, clamp=False)",
+        );
+
+        let reversed_scale = PowScale::new(None, None, 2.0, false, false, None, true).unwrap();
+        assert_eq!(
+            reversed_scale.repr_string(),
+            "PowScale(domain=None, range=None, exponent=2, clamp=False, reverse=True)",
+        );
+    }
+
+    #[test]
+    fn sqrt_reverse_round_trips_through_to_scale_spec() {
+        let s = SqrtScale::new(Some(vec![0.0, 49.0]), None, false, false, None, true).unwrap();
+        assert!(s.reverse());
+        match s.to_scale_spec() {
+            ScaleSpec::Sqrt { common } => {
+                assert!(common.reverse, "reverse=True must survive to the wire spec");
+                assert_eq!(common.domain, Some(vec![0.0, 49.0]));
+            }
+            other => panic!("expected ScaleSpec::Sqrt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sqrt_reverse_default_emits_no_reverse_key() {
+        let s = SqrtScale::new(None, None, false, false, None, false).unwrap();
+        let json = serde_json::to_string(&s.to_scale_spec()).unwrap();
+        assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    /// `__repr__()` pinned in both directions (quality-review F2): the
+    /// default-shaped repr is byte-identical to before this change, and
+    /// `reverse=True` appends the exact `, reverse=True)` suffix.
+    #[test]
+    fn sqrt_repr_pins_both_reverse_branches() {
+        let default_scale = SqrtScale::new(None, None, false, false, None, false).unwrap();
+        assert_eq!(
+            default_scale.__repr__(),
+            "SqrtScale(domain=None, range=None, clamp=False)",
+        );
+
+        let reversed_scale = SqrtScale::new(None, None, false, false, None, true).unwrap();
+        assert_eq!(
+            reversed_scale.__repr__(),
+            "SqrtScale(domain=None, range=None, clamp=False, reverse=True)",
+        );
     }
 
     // ── Minor tick tests ─────────────────────────────────────────────────────

@@ -22,6 +22,16 @@ use crate::spec::encoding::ScaleSpec;
 ///     Clamp out-of-domain inputs to the range endpoints.
 /// nice : bool, default False
 ///     Extend domain endpoints to the nearest calendar interval boundary.
+/// reverse : bool, default False
+///     Swap the resolved domain endpoints when this scale resolves inside a
+///     chart render, producing a descending (most recent-first) axis —
+///     equivalent, AT RENDER TIME, to writing ``domain=[hi, lo]`` for an
+///     explicit domain (an auto-inferred domain keeps its usual padding
+///     before the swap). The swap applies only at render resolution: this
+///     object's own ``scale()``/``invert()``/``ticks()`` and its ``domain``
+///     getter keep reporting the constructor's domain unchanged. This
+///     diverges from ``PointScale``'s identically-named ``reverse``, which
+///     DOES apply inside ``PointScale.scale()``.
 ///
 /// Examples
 /// --------
@@ -44,6 +54,7 @@ pub struct TimeScale {
     range_user_set: bool,
     utc: bool,
     domain_user_set: bool,
+    reverse: bool,
 }
 
 impl TimeScale {
@@ -62,6 +73,7 @@ impl TimeScale {
             range_user_set: true,
             utc: false,
             domain_user_set: true,
+            reverse: false,
         };
         if nice { s.time_nice() } else { s }
     }
@@ -138,9 +150,12 @@ impl TimeScale {
     pub(crate) fn repr_string(&self) -> String {
         let LinearScaleData { domain, range, clamp } = &self.data;
         let prefix = if self.utc { "TimeScale(utc=True, " } else { "TimeScale(" };
+        // `reverse` only appears when non-default, matching the `utc` prefix's own
+        // convention, so the default-shaped repr stays byte-identical to before.
+        let reverse_s = if self.reverse { ", reverse=True" } else { "" };
         format!(
-            "{}domain=[{}, {}], range=[{}, {}], clamp={})",
-            prefix, domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
+            "{}domain=[{}, {}], range=[{}, {}], clamp={}{})",
+            prefix, domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }, reverse_s
         )
     }
 
@@ -157,6 +172,7 @@ impl TimeScale {
             self.range_user_set,
             self.data.clamp,
             self.padding,
+            self.reverse,
         );
         if self.utc {
             ScaleSpec::Utc { common, nice: false }
@@ -194,6 +210,7 @@ impl TimeScale {
                         range_user_set: self.range_user_set,
                         utc: self.utc,
                         domain_user_set: self.domain_user_set,
+                        reverse: self.reverse,
                     };
                 };
                 let Some(dt_hi) = Utc.timestamp_millis_opt(hi as i64).single() else {
@@ -234,6 +251,7 @@ impl TimeScale {
             range_user_set: self.range_user_set,
             utc: self.utc,
             domain_user_set: self.domain_user_set,
+            reverse: self.reverse,
         }
     }
 }
@@ -241,7 +259,7 @@ impl TimeScale {
 #[pymethods]
 impl TimeScale {
     #[new]
-    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None, utc = false))]
+    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None, utc = false, reverse = false))]
     fn new(
         domain: Vec<f64>,
         range: Option<Vec<f64>>,
@@ -249,6 +267,7 @@ impl TimeScale {
         nice: bool,
         padding: Option<f64>,
         utc: bool,
+        reverse: bool,
     ) -> PyResult<Self> {
         // `domain` is a required positional argument, so it is always
         // user-set when constructed through Python; the field exists for
@@ -268,6 +287,7 @@ impl TimeScale {
             range_user_set,
             utc,
             domain_user_set: true,
+            reverse,
         };
         if nice {
             Ok(s.time_nice())
@@ -323,6 +343,13 @@ impl TimeScale {
     #[getter]
     fn utc(&self) -> bool { self.utc }
 
+    /// Whether this scale's domain is swapped when it resolves inside a
+    /// chart render (descending axis). Does not affect this object's own
+    /// `scale`/`invert`/`ticks`/`domain` — unlike `PointScale::reverse`,
+    /// which DOES apply inside `PointScale::scale`.
+    #[getter]
+    fn reverse(&self) -> bool { self.reverse }
+
     /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
     fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         scale_spec_to_py_dict(py, self.to_scale_spec())
@@ -345,6 +372,7 @@ mod tests {
             false,
             false,
             None,
+            false,
             false,
         ).unwrap();
         let mid = (1_767_225_600_000.0 + 1_798_761_599_000.0) / 2.0;
@@ -376,6 +404,7 @@ mod tests {
             false,
             None,
             false,
+            false,
         ).unwrap();
         let ticks = t.ticks(10);
         assert!(!ticks.is_empty(), "expected non-empty ticks");
@@ -394,10 +423,10 @@ mod tests {
     fn test_time_utc_independent_of_domain_user_set() {
         let domain = vec![1_767_225_600_000.0, 1_798_761_599_000.0];
         let utc_scale = TimeScale::new(
-            domain.clone(), Some(vec![0.0, 1000.0]), false, false, None, true,
+            domain.clone(), Some(vec![0.0, 1000.0]), false, false, None, true, false,
         ).unwrap();
         let local_scale = TimeScale::new(
-            domain.clone(), Some(vec![0.0, 1000.0]), false, false, None, false,
+            domain.clone(), Some(vec![0.0, 1000.0]), false, false, None, false, false,
         ).unwrap();
 
         assert!(utc_scale.utc(), "utc flag must be honoured");
@@ -413,10 +442,91 @@ mod tests {
     #[test]
     fn test_time_domain_returns_option() {
         let t = TimeScale::new(
-            vec![0.0, 1000.0], Some(vec![0.0, 1.0]), false, false, None, false,
+            vec![0.0, 1000.0], Some(vec![0.0, 1.0]), false, false, None, false, false,
         ).unwrap();
         let domain: Option<Vec<f64>> = t.domain();
         assert_eq!(domain, Some(vec![0.0, 1000.0]));
+    }
+
+    // ── `reverse` kwarg (F-L04-07, batch-C task 2) ──────────────────────────
+
+    #[test]
+    fn time_reverse_round_trips_through_to_scale_spec() {
+        let t = TimeScale::new(
+            vec![1_767_225_600_000.0, 1_798_761_599_000.0],
+            None, false, false, None, false, true,
+        ).unwrap();
+        assert!(t.reverse());
+        match t.to_scale_spec() {
+            ScaleSpec::Time { common, .. } => {
+                assert!(common.reverse, "reverse=True must survive to the wire spec");
+                assert_eq!(common.domain, Some(vec![1_767_225_600_000.0, 1_798_761_599_000.0]));
+            }
+            other => panic!("expected ScaleSpec::Time, got {other:?}"),
+        }
+    }
+
+    /// `utc=True` composed with `reverse=True` must select `ScaleSpec::Utc`
+    /// (not `Time`) while still carrying the reverse bit — the two flags are
+    /// independent fields (see `test_time_utc_independent_of_domain_user_set`
+    /// for the same independence guarantee against `domain_user_set`).
+    #[test]
+    fn time_utc_and_reverse_compose_independently() {
+        let t = TimeScale::new(
+            vec![1_767_225_600_000.0, 1_798_761_599_000.0],
+            None, false, false, None, true, true,
+        ).unwrap();
+        assert!(t.utc());
+        assert!(t.reverse());
+        match t.to_scale_spec() {
+            ScaleSpec::Utc { common, .. } => assert!(common.reverse),
+            other => panic!("expected ScaleSpec::Utc, got {other:?}"),
+        }
+    }
+
+    /// Default (`reverse` unset) omits the wire key entirely, matching every
+    /// pre-existing baseline in `test_scale_spec_parity`.
+    #[test]
+    fn time_reverse_default_emits_no_reverse_key() {
+        let t = TimeScale::new(
+            vec![1_767_225_600_000.0, 1_798_761_599_000.0],
+            None, false, false, None, false, false,
+        ).unwrap();
+        assert!(!t.reverse());
+        let json = serde_json::to_string(&t.to_scale_spec()).unwrap();
+        assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    /// `repr_string()` pinned in both directions (quality-review F2): the
+    /// default-shaped repr is byte-identical to before this change, and
+    /// `reverse=True` appends the exact `, reverse=True)` suffix. `TimeScale`
+    /// is the useful second pin (alongside `linear_repr_pins_both_reverse_branches`)
+    /// because `reverse` composes with the pre-existing `utc=True` prefix.
+    #[test]
+    fn time_repr_pins_both_reverse_branches() {
+        let default_scale = TimeScale::new(
+            vec![0.0, 1000.0], None, false, false, None, false, false,
+        ).unwrap();
+        assert_eq!(
+            default_scale.repr_string(),
+            "TimeScale(domain=[0, 1000], range=[0, 1], clamp=False)",
+        );
+
+        let reversed_scale = TimeScale::new(
+            vec![0.0, 1000.0], None, false, false, None, false, true,
+        ).unwrap();
+        assert_eq!(
+            reversed_scale.repr_string(),
+            "TimeScale(domain=[0, 1000], range=[0, 1], clamp=False, reverse=True)",
+        );
+
+        let utc_reversed_scale = TimeScale::new(
+            vec![0.0, 1000.0], None, false, false, None, true, true,
+        ).unwrap();
+        assert_eq!(
+            utc_reversed_scale.repr_string(),
+            "TimeScale(utc=True, domain=[0, 1000], range=[0, 1], clamp=False, reverse=True)",
+        );
     }
 
     // ── Minor tick tests ─────────────────────────────────────────────────────
