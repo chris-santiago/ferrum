@@ -4,13 +4,30 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-A scale-subsystem correctness batch: `reverse=` lands on every continuous positional scale, `BandScale`/`PointScale` padding and align become real render geometry (closing [#67](https://github.com/chris-santiago/ferrum/issues/67)), `TimeScale` gains an optional datetime-accepting domain and a pinned UTC contract, and unknown raw-dict `scale=` keys refuse at the wire instead of vanishing silently.
+*No unreleased changes.*
+
+## 0.21.0 — 2026-09-04
+
+Four correctness campaigns land at once: the appearance-resolution batch (color/opacity/dash scales resolve end to end, one CSS color parser), the config-plumbing batch (every parsed `configure_*`/format/padding/legend field honored or typed-refused), the scale-variants batch (`reverse=` on every continuous positional scale, real d3 band/point padding+align geometry closing [#67](https://github.com/chris-santiago/ferrum/issues/67), `TimeScale` datetime domains and a pinned UTC contract, a wire-level scale-key gate), and the 2026-08 residuals/findings batches (total overlay chrome dedup, keyed interactive transitions, typed panel chrome slots). Silent parameter drops die loudly throughout.
+
 
 ### Added
 
 - `reverse=True` on `LinearScale`, `LogScale`, `PowScale`, `SqrtScale`, `SymlogScale`, and `TimeScale` — domain-swap sugar applied at render time; the raw-dict `scale={"type": ..., "reverse": true}` spelling is honored identically. `PointScale.reverse` (a different mechanism, [#65](https://github.com/chris-santiago/ferrum/issues/65)) is unaffected.
 - `TimeScale(domain=None)` constructs with an inferred domain like its continuous siblings; `domain=` also accepts `datetime.date`, `datetime.datetime` (naive or aware), and ISO-8601 strings, in addition to epoch-ms floats
 - Unknown raw-dict `scale={...}` keys refuse at the wire boundary, naming the offending key, the scale type, and the accepted list — closing the last `#[serde(flatten)]` silent-drop carve-out; the accepted-key table is published as `ferrum._core.scale_accepted_keys(scale_type)`
+- `Chart.override` scale paths now derive from the wire schema itself: seven wire keys gained override paths (`nice`, `zero`, `stops`, `domainParam`, `paddingInner`, `paddingOuter`, `domainMid`), snake_case aliases (`padding_inner`, `padding_outer`, `domain_mid`, `domain_param`) are accepted alongside the wire spellings, and five previously advertised-but-broken leaves now work; `utc` and `quantiles` (never functional as overrides) refuse with the registry's own guided error. `ferrum._core.validate_scale_dict(scale)` validates any raw scale dict through the same gate that enforces it.
+- `scale=` honored for `StrokeOpacity` and `StrokeDash`; opacity and dash scales resolve end to end with auxiliary legends
+- One full-CSS color parser — 148 named colors, `rgb()`/`rgba()`, strict boundaries; literal colors validate at mark construction (loud, sentinel-aware)
+- Discretizing color scales (`Quantile`/`Quantize`/`Threshold`) resolve — buckets, swatched colorbars, loud configuration; `ContinuousScheme` is constructible and `Gradient` renders under `scale=`
+- Heatmap appearance kwargs take real effect; inert continuous color on line and ribbon now fails loudly instead of silently flattening
+- Config wire-key gate, `axis_y2`, and a field-disposition manifest; format presets resolve on all five Python surfaces; `format_type` threads end to end (time presets, real ordinal, typed spec refusals)
+- Padding validates at every Python entry point with typed pixel-contract refusals; `padding.auto` is real and opt-in, and `PaddingExceedsViewport` tells the truth
+- Axis label culling is reachable with a real pixel-gap semantic; the legend `orient`/`direction`/`values` contract is real; axis config plumbing — every parsed field honored or typed-refused
+- `raster_aggregate` honest surface — construction refusals, `raster_field` threaded
+- Typed chrome-vs-content `Panel` slots (`below_marks`, `chrome_above`); total overlay chrome dedup — one shared plot rect, suppression gate retired ([#89](https://github.com/chris-santiago/ferrum/issues/89))
+- `mark_boxen(palette=)` colors the depth bands ([#91](https://github.com/chris-santiago/ferrum/issues/91)); keyed interactive transitions with object constancy — enter/exit fades at any batch size ([#93](https://github.com/chris-santiago/ferrum/issues/93))
+- `label_angle` honored on the y axis (full transpose); theta-gated single-axis exemption for arc marks
 
 ### Fixed
 
@@ -18,12 +35,26 @@ A scale-subsystem correctness batch: `reverse=` lands on every continuous positi
 - `TimeScale(utc=True)`/`utc=False` render byte-identical SVG, and the `utc` wire tag survives resolution (previously silently dropped to `false` regardless of the source tag)
 - `.override(<channel>_scale_domain=...)` on a `mark_bar()` chart no longer includes a spurious zero-anchor — it now matches the equivalent explicit `scale={"domain": [...], "zero": False}` spelling (behavior change; see `ferrum-spec.md` §3.6's 2026-09-04 dated note)
 - `BandScale(range=...)` combined with an explicit `Axis(values=...)` tick-value override no longer panics — it now renders, landing the relabeled ticks on uniform slots
+- `LayerChart` gains `|` and `&` composition operators; one canonical `to_polars` coercion; user-facing messages name channels as the user wrote them under `CoordFlip`
+- `encode()` is a total function — five channel buckets, `key` honored, silent drops killed; the 17 accept-and-delete mark parameters resolved (implemented, removed, or documented); closed vocabularies enforce at construction
+- Deprecated axis `x`/`y` override spellings refuse with an accurate typed hint
+- One axis label-band quantity, gated on labels actually drawing ([#97](https://github.com/chris-santiago/ferrum/issues/97)); degenerate-domain guards across continuous scales ([#99](https://github.com/chris-santiago/ferrum/issues/99), [#104](https://github.com/chris-santiago/ferrum/issues/104))
+- Non-Utf8 color columns group line and ribbon series; literal-paint layers keep their paint under inherited color channels; categorical-intent `color_field` columns type Nominal at the desugar
+- Phase-10 diagnostic charts (ROC/PR family) gained their legend titles; heatmap default cell borders now parse — goldens re-blessed and visually verified
+- Temporal scale domains accept `numpy` scalars and `Decimal` identically on chart-level and layer routes
 
 ### Breaking changes
 
 - `BandScale.scale()` returns d3's band leading edge, which moves for `padding_inner > 0`: `BandScale(domain=list("abcd"), range=[40, 260]).scale("a")` is now `45.366`, was `48.049` — correcting a placement that let the last band extend past the declared range end. `bandwidth()` and `PointScale.scale()` are unaffected. Default (unpadded) output is byte-identical.
 - Naming `BandScale()` explicitly now carries d3's own `padding = 0.1` default (on both sides), where an auto-inferred categorical axis still constructs unpadded — a chart with `scale=fm.BandScale()` (or any explicit `BandScale(...)` with no `padding=` argument) renders narrower bands than before, with no padding argument anywhere in user code (four categories, `mark_bar()`: `112.327`px auto-inferred vs. `98.629`px for `scale=fm.BandScale()`).
 - The label-collision budget (`cascade_slot_w`/`cascade_slot_h`) now derives from the true adjacent-tick spacing (`min_adjacent_gap(centers)`) instead of a scale-blind quarter-slot heuristic, changing when axis labels rotate or wrap on non-default categorical scales: about 2.4% tighter (`w/4 → w/4.1`, more rotation/wrapping) under `padding=0.1`, and about 33% looser (`w/4 → w/3`, less) under `PointScale(padding=0)`. Default (unpadded) categorical axes are unaffected (the change is ulp-scale only there).
+- `mark_tick(band_size=)` and `mark_rect(band_size=)` unify on full-length semantics ([#85](https://github.com/chris-santiago/ferrum/issues/85)): an explicit `band_size=` value that previously measured a half-length extent now measures the full slot, so explicit values render up to twice their previous extent (defaults unchanged).
+
+### Changed
+
+- `config_apply` extracted from `render/mod.rs` — configuration-application ordering is a test-pinned API property ([#143](https://github.com/chris-santiago/ferrum/issues/143)); `render/mod.rs` roughly halves
+- Structural refactor waves: `StructuralOutput` collapse, `SlotRescaleCtx`/`PanelResolveCtx` bundles, typed `RangeProvenance`, slot-index accessors, `BatchPositionMeta` ([#41](https://github.com/chris-santiago/ferrum/issues/41), [#57](https://github.com/chris-santiago/ferrum/issues/57), [#61](https://github.com/chris-santiago/ferrum/issues/61), [#63](https://github.com/chris-santiago/ferrum/issues/63), [#64](https://github.com/chris-santiago/ferrum/issues/64), [#79](https://github.com/chris-santiago/ferrum/issues/79), [#86](https://github.com/chris-santiago/ferrum/issues/86))
+- ~38 closed-choice validation sites route through one `validate_choice`; the five-bucket channel policy homed in `encoding/_channel_policy.py` ([#103](https://github.com/chris-santiago/ferrum/issues/103)); inverted marks/diagnostics → plots dependency edges deleted; `coord_flipped` is a typed state
 
 ### Documentation
 
