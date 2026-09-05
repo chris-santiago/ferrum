@@ -4,7 +4,7 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-*No unreleased changes.*
+- **Fixed:** `mark_swarm(size=/spacing=)` and `mark_raster()`'s default `resolution="screen"` were silently inert in every real render — the transform pipeline never received the chart's pixel dimensions, so swarm always used a fixed collision radius **in raw data units** (not pixels) and `resolution="screen"` always produced a fixed 256×256 grid regardless of chart size. Both now respond to the chart's actual dimensions via a pre-layout size estimate — raster's grid genuinely scales up with a bigger panel. Swarm's pixel spread (a vertical-only mark) responds **only to panel height, inversely**: a taller panel produces a smaller spread at the same `size=`, since less horizontal displacement is needed to avoid collisions. Panel width has no effect. This is an approximation (it excludes axis/legend/facet-strip gutters, unknowable before layout), not an exact match for the rendered plot area — see the dated note in `ferrum-spec.md` §3.3 (Marks) for the full contract. An explicit numeric `resolution=` is unaffected. `mark_raster()`/`mark_violin` charts change by a small amount (the estimate is close to the true panel size); `mark_swarm` charts change **qualitatively**, not slightly — since the pre-fix radius was a constant in the *value column's own units*, a column ranging over thousands produced no collisions at all and the cloud collapsed to a single line, regardless of `size=`/`spacing=`. No other chart's output changes.
 
 ## 0.21.0 — 2026-09-04
 

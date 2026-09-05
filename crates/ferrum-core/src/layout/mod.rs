@@ -995,13 +995,61 @@ fn reserve_axis_bands(
 /// cap treats it as the space auto must
 /// never encroach on, so all three read the identical quantity instead of
 /// each re-deriving `padding_<side>.unwrap_or(padding)` by hand.
-fn base_padding_insets(theme: &ThemeInputs) -> Inset {
+pub(crate) fn base_padding_insets(theme: &ThemeInputs) -> Inset {
     Inset {
         top: theme.padding.padding_top.unwrap_or(theme.padding.padding),
         right: theme.padding.padding_right.unwrap_or(theme.padding.padding),
         bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
         left: theme.padding.padding_left.unwrap_or(theme.padding.padding),
     }
+}
+
+/// Pre-layout best-estimate of one facet panel's pixel size (M2, spec §4.2 of
+/// `2026-09-05-batch-d-transform-engine-design.md`; decision doc's same-dated
+/// M2 entry). Computed as the viewport minus [`base_padding_insets`] — the
+/// same theme-padding resolution `compute_layout` itself uses — divided
+/// per-axis by `grid_dims` (`(cols, rows)`; pass `(1, 1)` for an unfaceted
+/// chart).
+///
+/// This is an ESTIMATE, not the true rendered panel size: true panel size is
+/// circular pre-layout (layout measures a panel's plot rect only after axis
+/// bands, legends, and facet strip bands are reserved, all of which are
+/// unknowable before this pass runs). It deliberately excludes axis/legend/
+/// facet-strip gutters. It exists solely to seed
+/// [`crate::transform::context::TransformContext::panel_pixel_size`] before
+/// transforms run — `compute_layout` never reads it, and it must not be
+/// confused with any later, exact panel rect. A second full layout pass could
+/// compute the true value but would double the render cost and risk
+/// byte-determinism drift; the north star (a post-layout transform phase) is
+/// filed, not built (see the decision doc's M2 "Rejected" note).
+///
+/// **Contract: always returns a dimension ≥ 1 on each axis.** When the
+/// theme's resolved padding meets or exceeds the viewport, the true inner
+/// extent is zero or negative; rather than propagate that degenerate `0`
+/// to callers (a bare zero-sized estimate is a hazard no consumer of
+/// `panel_pixel_size` is built to survive — see the `transform::raster`
+/// `"screen"` arm's panic before this floor was added), this clamps to a
+/// floor of `(1, 1)`. The floor is a deliberately unusable placeholder, not
+/// a real panel size: `compute_layout` runs downstream of this estimate on
+/// the SAME viewport/theme and independently detects the same
+/// padding-exceeds-viewport condition, raising its own typed
+/// `LayoutError::PaddingExceedsViewport` before the transform's `(1, 1)`
+/// output would ever reach a renderer. The floor exists only to let the
+/// transform pass complete without panicking; layout's refusal remains the
+/// one and only observable error for this condition.
+pub(crate) fn estimate_panel_pixel_size(
+    viewport: Viewport,
+    theme: &ThemeInputs,
+    grid_dims: (u32, u32),
+) -> (u32, u32) {
+    let pad = base_padding_insets(theme);
+    let inner_w = (viewport.width - pad.left - pad.right).max(0.0);
+    let inner_h = (viewport.height - pad.top - pad.bottom).max(0.0);
+    let (cols, rows) = (grid_dims.0.max(1) as f64, grid_dims.1.max(1) as f64);
+    (
+        ((inner_w / cols).round() as u32).max(1),
+        ((inner_h / rows).round() as u32).max(1),
+    )
 }
 
 /// Scales `extra_low`/`extra_high` — an already-computed TOTAL `padding.auto`
@@ -2078,6 +2126,62 @@ pub fn compute_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── M2 (batch D task 5): `estimate_panel_pixel_size` ──────────────────
+
+    #[test]
+    fn estimate_panel_pixel_size_subtracts_theme_padding_unfaceted() {
+        let theme = ThemeInputs::default(); // padding.padding == 16.0 on every side
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        assert_eq!(
+            estimate_panel_pixel_size(viewport, &theme, (1, 1)),
+            (568, 368),
+            "600-16-16=568, 400-16-16=368 for the default flat 16px padding"
+        );
+    }
+
+    #[test]
+    fn estimate_panel_pixel_size_divides_by_grid_dims() {
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let (w, h) = estimate_panel_pixel_size(viewport, &theme, (1, 1));
+        let (fw, fh) = estimate_panel_pixel_size(viewport, &theme, (3, 2));
+        assert_eq!(fw, ((w as f64) / 3.0).round() as u32);
+        assert_eq!(fh, ((h as f64) / 2.0).round() as u32);
+    }
+
+    #[test]
+    fn estimate_panel_pixel_size_floors_at_one_when_padding_exceeds_viewport() {
+        // Contract: the estimate never returns a zero dimension. When
+        // padding meets or exceeds the viewport, the true inner extent is
+        // <= 0, and this floors each axis at 1 rather than propagate a
+        // zero-sized estimate to consumers (`transform::raster`'s `"screen"`
+        // arm cannot survive a zero — see the module doc on
+        // `estimate_panel_pixel_size`). `compute_layout` independently
+        // detects this same condition downstream and raises the typed
+        // `LayoutError::PaddingExceedsViewport` refusal; this floor is not a
+        // real panel size, just a value that lets the transform pass
+        // complete without panicking before layout's own refusal fires.
+        let mut theme = ThemeInputs::default();
+        theme.padding.padding = 1000.0;
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        assert_eq!(estimate_panel_pixel_size(viewport, &theme, (1, 1)), (1, 1));
+    }
+
+    #[test]
+    fn estimate_panel_pixel_size_honors_per_side_padding_overrides() {
+        let mut theme = ThemeInputs::default();
+        theme.padding.padding_left = Some(50.0);
+        theme.padding.padding_right = Some(10.0);
+        theme.padding.padding_top = Some(0.0);
+        theme.padding.padding_bottom = Some(0.0);
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        assert_eq!(
+            estimate_panel_pixel_size(viewport, &theme, (1, 1)),
+            (540, 400),
+            "600 - 50 - 10 = 540 width; full 400 height with 0/0 top/bottom"
+        );
+    }
 
     /// Test helper: `AxisInput::new` plus the theme-default fold
     /// `AxesInput::apply_show_defaults` performs in production (against

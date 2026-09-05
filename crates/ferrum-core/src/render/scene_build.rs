@@ -3357,6 +3357,7 @@ mod tests {
             &spec,
             &batch,
             &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -3637,6 +3638,7 @@ mod tests {
             spec,
             batch,
             &theme,
+            viewport,
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -5106,6 +5108,7 @@ mod tests {
             spec,
             batch,
             &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -5529,6 +5532,7 @@ mod tests {
             &spec,
             &batch,
             &theme,
+            viewport,
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -5767,6 +5771,7 @@ mod tests {
             &spec,
             &batch,
             &theme,
+            viewport,
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -5904,6 +5909,7 @@ mod tests {
             &spec,
             &batch,
             &theme,
+            viewport,
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -6064,6 +6070,7 @@ mod tests {
             &spec,
             &batch,
             &ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -6098,6 +6105,7 @@ mod tests {
             &spec,
             &batch,
             &ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -6199,6 +6207,7 @@ mod tests {
             &flipped_spec,
             &batch,
             &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )
@@ -6216,6 +6225,7 @@ mod tests {
             &unflipped_spec,
             &batch,
             &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None,
         )

@@ -177,6 +177,18 @@ pub(crate) fn apply_with_context(
             }
             (*a, *b)
         }
+        // `panel_pixel_size` carries the production pipeline's pre-layout
+        // panel-size estimate (M2, `TransformContext::panel_pixel_size`'s
+        // doc); the fixed 256x256 fallback fires only for a direct
+        // `apply()`/`apply_with_context(TransformContext::default())` call
+        // with no render context (unit tests, notebook/WASM direct usage).
+        // `layout::estimate_panel_pixel_size` floors each axis at 1, so a
+        // degenerate viewport (theme padding meeting or exceeding it) can
+        // never hand this arm a zero-sized `(nx, ny)` that would drive the
+        // binning loop below to an out-of-bounds index — `compute_layout`
+        // independently detects that same condition downstream and raises
+        // its own typed `LayoutError::PaddingExceedsViewport` refusal before
+        // this arm's (unusable, `(1, 1)`-floored) output would ever render.
         ResolutionSpec::Named(s) if s == "screen" => ctx.panel_pixel_size.unwrap_or((256, 256)),
         ResolutionSpec::Named(s) => {
             return Err(PyValueError::new_err(format!(

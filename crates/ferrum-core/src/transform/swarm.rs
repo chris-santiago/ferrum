@@ -243,10 +243,14 @@ pub(crate) fn apply_with_context(
             }
         }
         _ => {
-            // No pixel context available (e.g. headless / test render without
-            // a panel size). Fall back to radius_data = 1.0 so placement still
-            // runs; callers that need accurate geometry must supply panel_pixel_size
-            // via TransformContext.
+            // No pixel context available. The production render pipeline
+            // always supplies `panel_pixel_size` (M2's pre-layout estimate,
+            // see `TransformContext::panel_pixel_size`'s doc), so this arm
+            // fires only for a direct `apply()`/
+            // `apply_with_context(TransformContext::default())` call (unit
+            // tests, notebook/WASM direct usage). Fall back to
+            // radius_data = 1.0 so placement still runs; callers that need
+            // accurate geometry must supply `panel_pixel_size` themselves.
             1.0
         }
     };
@@ -386,6 +390,8 @@ pub(crate) fn apply_with_context(
                 1.0
             }
         }
+        // See the `radius_data` match above: this arm fires only for a
+        // direct `apply()` call with no render-supplied `panel_pixel_size`.
         _ => 1.0,
     };
     let pos_offset: Float64Array = swarm_x

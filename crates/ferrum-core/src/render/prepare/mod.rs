@@ -1,4 +1,4 @@
-//! prepare_render_inputs(spec, batch) →
+//! prepare_render_inputs(spec, batch, theme, viewport, chart_config, leaf_scales) →
 //!   1. Apply Phase 5 transforms.
 //!   2. Build provisional ResolvedScales for tick-label generation.
 //!   3. Derive AxesInput (titles, tick_labels).
@@ -693,6 +693,7 @@ pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
     theme: &crate::layout::ThemeInputs,
+    viewport: crate::layout::Viewport,
     chart_config: &crate::render::chart_config::ChartConfig,
     leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<PreparedInputs, RenderError> {
@@ -707,8 +708,9 @@ pub fn prepare_render_inputs(
     // Run the Phase 5 transform pipeline, applying the facet-aware partition →
     // per-panel transforms → inject → concat path when a facet is present and
     // the plain single-partition path otherwise. The D10 impute step runs once
-    // inside, in both branches (SPINE-12).
-    let transform_outputs = run_transforms_with_facet(spec, &normalized)?;
+    // inside, in both branches (SPINE-12). `viewport`/`theme` seed the M2
+    // pre-layout panel-size estimate (see `run_transforms_with_facet`'s doc).
+    let transform_outputs = run_transforms_with_facet(spec, &normalized, viewport, theme)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
@@ -891,13 +893,27 @@ pub fn prepare_render_inputs(
 /// panels. When there is no facet, the pipeline is the plain single-partition
 /// path (one partition = full batch). Both branches apply the D10 impute step
 /// (`apply_impute_to_final`) exactly once on `FINAL_OUTPUT_KEY`.
+///
+/// `viewport`/`theme` seed `TransformContext.panel_pixel_size` with the M2
+/// pre-layout estimate (spec §4.2; `layout::estimate_panel_pixel_size`'s doc)
+/// — the viewport minus the theme's padding, divided per-axis by this chart's
+/// OWN facet grid dimensions when it facets (`(1, 1)` otherwise). This is the
+/// single production construction site for `TransformContext`; every other
+/// `TransformContext::default()` in this crate is a direct-`apply()` fallback
+/// path, unaffected by this estimate.
 fn run_transforms_with_facet(
     spec: &ChartSpec,
     normalized: &RecordBatch,
+    viewport: crate::layout::Viewport,
+    theme: &crate::layout::ThemeInputs,
 ) -> Result<HashMap<String, RecordBatch>, RenderError> {
-    let ctx = TransformContext::default();
     let Some(fspec) = &spec.facet else {
-        // No facet: unchanged pipeline (single partition = full batch).
+        // No facet: unchanged pipeline (single partition = full batch); one
+        // panel occupies the whole estimated viewport.
+        let ctx = TransformContext {
+            panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(viewport, theme, (1, 1))),
+            ..TransformContext::default()
+        };
         let mut outputs = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         apply_impute_to_final(&mut outputs, spec);
@@ -923,6 +939,25 @@ fn run_transforms_with_facet(
             .into_iter()
             .map(|(col_val, batch)| ((col_val, None), batch))
             .collect()
+    };
+
+    // Grid dims for the per-cell panel-size estimate (M2): grid mode's
+    // nrows/ncols are explicit on the facet spec; wrap mode's ncols is
+    // explicit and nrows is derived from the observed panel count the same
+    // way `FacetGrid::compute_wrap` derives it for the real layout later, so
+    // the estimate divides by the same grid the chart will actually lay out.
+    let grid_dims: (u32, u32) = match &fspec.mode {
+        crate::layout::FacetMode::Grid { nrows, ncols } => (*ncols, *nrows),
+        crate::layout::FacetMode::Wrap { ncols } => {
+            let ncols = (*ncols).max(1);
+            let n_panels = partitions.len() as u32;
+            let nrows = n_panels.div_ceil(ncols);
+            (ncols, nrows.max(1))
+        }
+    };
+    let ctx = TransformContext {
+        panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(viewport, theme, grid_dims)),
+        ..TransformContext::default()
     };
 
     // Pin a shared value-axis extent from the full (pre-partition) batch for
@@ -3711,6 +3746,7 @@ mod tests {
         let spec = spec_color_facet();
         let batch = batch3();
         let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prep.axes.x.title.as_deref(), Some("x"));
@@ -3773,8 +3809,203 @@ mod tests {
 
     fn prep(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
         prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap()
+    }
+
+    // ── M2 (batch D task 5): TransformContext.panel_pixel_size pre-layout
+    //    estimate, threaded from `run_transforms_with_facet`'s viewport/theme
+    //    params. These exercise the one production construction site through
+    //    `prepare_render_inputs` (not a hand-built `TransformContext`), so a
+    //    regression to `TransformContext::default()` there fails them. ────
+
+    fn raster_screen_spec() -> ChartSpec {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let mut spec = base_spec();
+        spec.transforms = vec![TransformSpec::Raster(RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Named("screen".into()),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        })];
+        spec
+    }
+
+    fn raster_fixed_spec(n: u32) -> ChartSpec {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let mut spec = base_spec();
+        spec.transforms = vec![TransformSpec::Raster(RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(n),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        })];
+        spec
+    }
+
+    /// Row 0's `(width, height)` columns of the raster transform's output
+    /// batch — the grid dimensions `resolution="screen"` actually resolved to.
+    fn raster_grid_dims(outputs: &HashMap<String, RecordBatch>) -> (u32, u32) {
+        use arrow::array::UInt32Array;
+        let batch = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+        let w = batch
+            .column_by_name("width")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap()
+            .value(0);
+        let h = batch
+            .column_by_name("height")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap()
+            .value(0);
+        (w, h)
+    }
+
+    /// F-L03-06's literal repro, at `run_transforms_with_facet` (the one
+    /// production `TransformContext` construction site): a larger viewport
+    /// must yield a larger `resolution="screen"` grid, and neither dimension
+    /// is pinned to the old hardcoded 256x256 fallback.
+    #[test]
+    fn raster_screen_resolution_scales_with_viewport() {
+        let spec = raster_screen_spec();
+        let batch = extent_pin_batch_2d();
+        let small = run_transforms_with_facet(
+            &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 },
+            &crate::layout::ThemeInputs::default(),
+        ).unwrap();
+        let large = run_transforms_with_facet(
+            &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 },
+            &crate::layout::ThemeInputs::default(),
+        ).unwrap();
+        let (sw, sh) = raster_grid_dims(&small);
+        let (lw, lh) = raster_grid_dims(&large);
+        assert_ne!((sw, sh), (256, 256), "must not be pinned to the old hardcoded fallback");
+        assert_ne!((lw, lh), (256, 256), "must not be pinned to the old hardcoded fallback");
+        assert!(
+            lw > sw && lh > sh,
+            "larger viewport must yield a larger screen grid: small=({sw},{sh}) large=({lw},{lh})"
+        );
+    }
+
+    /// An explicit `resolution=64` is unaffected by the viewport — same
+    /// grid regardless of chart size.
+    #[test]
+    fn raster_explicit_resolution_unaffected_by_viewport() {
+        let spec = raster_fixed_spec(64);
+        let batch = extent_pin_batch_2d();
+        let small = run_transforms_with_facet(
+            &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 },
+            &crate::layout::ThemeInputs::default(),
+        ).unwrap();
+        let large = run_transforms_with_facet(
+            &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 },
+            &crate::layout::ThemeInputs::default(),
+        ).unwrap();
+        assert_eq!(raster_grid_dims(&small), (64, 64));
+        assert_eq!(raster_grid_dims(&large), (64, 64));
+    }
+
+    /// A faceted chart's per-cell estimate divides the viewport by the
+    /// facet grid's own dimensions: `extent_pin_batch_2d()` carries two `p`
+    /// groups ("A", "B"); wrap mode with `ncols=1` makes `nrows=2`, so the
+    /// height estimate is roughly HALF the unfaceted estimate at the same
+    /// viewport, while the width estimate (1 column) is unchanged.
+    #[test]
+    fn raster_screen_resolution_facet_grid_divides_estimate() {
+        let batch = extent_pin_batch_2d();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let theme = crate::layout::ThemeInputs::default();
+
+        let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme).unwrap();
+        let (w0, h0) = raster_grid_dims(&unfaceted);
+
+        let mut faceted_spec = raster_screen_spec();
+        faceted_spec.facet = Some(crate::layout::FacetSpec {
+            field: "p".into(),
+            row: None,
+            mode: crate::layout::FacetMode::Wrap { ncols: 1 },
+            spacing: None,
+            resolve: crate::layout::FacetResolve::default(),
+        });
+        let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme).unwrap();
+        let (w1, h1) = raster_grid_dims(&faceted);
+
+        assert_eq!(w1, w0, "one column: width estimate must be unchanged");
+        assert!(
+            h1 < h0 && (h1 as f64 - h0 as f64 / 2.0).abs() <= 1.0,
+            "two rows: height estimate must be roughly half the unfaceted estimate, got h0={h0} h1={h1}"
+        );
+    }
+
+    /// A transform that never reads `panel_pixel_size` (Bin) is byte-identical
+    /// regardless of the viewport the estimate is computed from — the M2
+    /// estimate is plumbed to every transform's `TransformContext`, but only
+    /// raster/swarm/violin actually consume it.
+    #[test]
+    fn non_pixel_dependent_transform_byte_identical_across_viewports() {
+        let spec = spec_with_one_bin(None);
+        let batch = price_weight_batch();
+        let theme = crate::layout::ThemeInputs::default();
+        let small = run_transforms_with_facet(
+            &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 }, &theme,
+        ).unwrap();
+        let large = run_transforms_with_facet(
+            &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 }, &theme,
+        ).unwrap();
+        let small_batch = small.get(FINAL_OUTPUT_KEY).unwrap();
+        let large_batch = large.get(FINAL_OUTPUT_KEY).unwrap();
+        assert_eq!(
+            small_batch, large_batch,
+            "Bin output must be byte-identical across viewports; it never reads panel_pixel_size"
+        );
+    }
+
+    /// Round-2 required fix (rust-quality Fix 3): a degenerate viewport
+    /// whose (default) theme padding meets or exceeds it must not panic
+    /// `run_transforms_with_facet` — the production `TransformContext`
+    /// construction site. `layout::estimate_panel_pixel_size` floors each
+    /// axis at 1 exactly so this case can never hand the raster `"screen"`
+    /// arm a zero-sized `(nx, ny)` (the S4 bug the zero-guard fix closes).
+    /// The actual user-facing refusal for this geometry is
+    /// `compute_layout`'s typed `LayoutError::PaddingExceedsViewport`,
+    /// raised downstream of this call — see
+    /// `tests/test_panel_size_transforms.py`'s
+    /// `test_raster_on_degenerate_viewport_raises_typed_layout_error` for
+    /// that half of the contract through the public Python API.
+    #[test]
+    fn raster_screen_resolution_survives_degenerate_viewport_without_panicking() {
+        let spec = raster_screen_spec();
+        let batch = extent_pin_batch_2d();
+        // 30x30 viewport with the default 16px-per-side theme padding: the
+        // true inner extent is negative on both axes.
+        let viewport = crate::layout::Viewport { width: 30.0, height: 30.0 };
+        let theme = crate::layout::ThemeInputs::default();
+        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+            .expect("must not panic or error on a degenerate viewport");
+        assert_eq!(
+            raster_grid_dims(&outputs),
+            (1, 1),
+            "the floored (1, 1) estimate, not a panic-inducing zero"
+        );
     }
 
     #[test]
@@ -3913,6 +4144,7 @@ mod tests {
         spec.encoding.color = None;
         spec.facet = None;
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap_err();
         assert!(matches!(err, RenderError::EmptyBatch));
@@ -3966,6 +4198,7 @@ mod tests {
         let spec = single_layer_spec();
         let batch = price_weight_batch();
         let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prepared.layers.len(), 1);
@@ -4008,6 +4241,7 @@ mod tests {
         ]);
         let batch = price_weight_batch();
         let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prepared.layers.len(), 2);
@@ -4071,6 +4305,7 @@ mod tests {
         let spec = spec_with_one_bin(None);
         let batch = price_weight_batch();
         let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         // __final__ is always present.
@@ -4102,6 +4337,7 @@ mod tests {
         let spec = spec_with_one_bin(Some("box".into()));
         let batch = price_weight_batch();
         let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert!(prep.transform_outputs.contains_key("box"));
@@ -4156,6 +4392,7 @@ mod tests {
         }]);
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap_err();
         let msg = err.to_string();
@@ -4174,6 +4411,7 @@ mod tests {
         spec.coord = Some(CoordKind::Flip);
         let batch = price_weight_batch();
         let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert!(prepared.coord_flipped);
@@ -4220,6 +4458,7 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prep.axes.x.overrides.label_format.as_deref(), Some(",.0f"));
@@ -4238,6 +4477,7 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         let gx = prep.axes.x.overrides.grid_color.expect("per-channel grid_color must reach x AxisInput");
@@ -4260,6 +4500,7 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prep.axes.x.orient, AxisOrient::Top);
@@ -4275,6 +4516,7 @@ mod tests {
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "left" })));
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
             .expect_err("x orient='left' must fail loud");
@@ -4303,6 +4545,7 @@ mod tests {
         spec.encoding.y = Some(enc_with_axis("weight", serde_json::json!({ "orient": "left" })));
         let batch = price_weight_batch();
         let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
             .expect_err("y orient='left', swapped onto x, must fail loud");
@@ -4318,6 +4561,7 @@ mod tests {
         let text = format!(
             "{}",
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
                 .unwrap_err()
@@ -4354,6 +4598,7 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
@@ -4372,6 +4617,7 @@ mod tests {
         let batch = price_weight_batch();
         let baseline =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         let base_count = baseline.axes.x.tick_labels.len();
@@ -4380,6 +4626,7 @@ mod tests {
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_min_step": 1e9 })));
         let mut prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         // The adjustment runs in `config_apply::resync_ticks_after_axis_merge`;
@@ -4486,6 +4733,7 @@ mod tests {
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_extra": true })));
         let mut prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         let before = prep.axes.x.tick_labels.len();
@@ -4514,6 +4762,7 @@ mod tests {
         let batch = price_weight_batch();
         let mut prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel value set in prep");
@@ -4544,6 +4793,7 @@ mod tests {
         let batch = price_weight_batch();
         let mut prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         // Probing `prep.axes.{x,y}` HERE, before `AxesInput::apply_show_defaults`
@@ -4599,6 +4849,7 @@ mod tests {
         let batch = price_weight_batch();
         let mut prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         // Apply the threaded override exactly as render/mod.rs does.
@@ -4626,6 +4877,7 @@ mod tests {
             Some(EncodingSpec { field: "price".into(), ..Default::default() });
         let default_prep =
             prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
                 .unwrap();
@@ -4635,6 +4887,7 @@ mod tests {
             Some(enc_with_axis("price", serde_json::json!({ "tick_count": 2 })));
         let limited_prep =
             prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
                 .unwrap();
@@ -4883,6 +5136,7 @@ mod tests {
         let batch = cat_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
 
@@ -5237,6 +5491,7 @@ mod tests {
 
         let theme = crate::layout::ThemeInputs::default();
         let prep = prepare_render_inputs(&spec, &batch, &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
 
@@ -5338,6 +5593,7 @@ mod tests {
 
         let theme = crate::layout::ThemeInputs::default();
         let err = prepare_render_inputs(&spec, &batch, &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
             .expect_err("orient='top' on the secondary y axis must fail loud");
@@ -5433,6 +5689,7 @@ mod tests {
 
         let theme = crate::layout::ThemeInputs::default();
         let err = prepare_render_inputs(&spec, &batch, &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None)
             .expect_err("orient='top' on the secondary y axis must fail loud");
@@ -5483,6 +5740,7 @@ mod tests {
 
         let theme = crate::layout::ThemeInputs::default();
         let prep = prepare_render_inputs(&spec, &batch, &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
             &crate::render::chart_config::ChartConfig::default(),
             None).unwrap();
         assert!(prep.axes.secondary_y.is_empty());

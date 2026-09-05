@@ -862,7 +862,7 @@ fn prepare_and_layout(
     // refuses fast, once per render, not once per tick/label. See
     // `config_apply::validate_chart_format_specs`'s doc.
     config_apply::validate_chart_format_specs(spec, chart_config)?;
-    let mut prep = prepare::prepare_render_inputs(spec, batch, theme, chart_config, leaf_scales)?;
+    let mut prep = prepare::prepare_render_inputs(spec, batch, theme, viewport, chart_config, leaf_scales)?;
     let mut warnings = prep.warnings.clone();
 
     // Every chart-level `configure_*()` override, applied in the one order
@@ -2633,7 +2633,7 @@ mod orchestration_tests {
         let cfg = config::RenderConfig::default();
         let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg, &ChartConfig::default()).unwrap().bytes;
 
-        let mut prep = prepare::prepare_render_inputs(&spec, &batch, &theme, &ChartConfig::default(), None).unwrap();
+        let mut prep = prepare::prepare_render_inputs(&spec, &batch, &theme, viewport, &ChartConfig::default(), None).unwrap();
         let mut warnings = prep.warnings.clone();
 
         // Mirror `prepare_and_layout`'s chart-config application by CALLING it,

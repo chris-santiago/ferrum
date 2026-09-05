@@ -1918,8 +1918,9 @@ mod pipeline_order_tests {
         chart_config: &ChartConfig,
     ) -> (prepare::PreparedInputs, AppliedChartConfig, Vec<RenderWarning>) {
         let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
         let mut prep =
-            prepare::prepare_render_inputs(spec, batch, &theme, chart_config, None).unwrap();
+            prepare::prepare_render_inputs(spec, batch, &theme, viewport, chart_config, None).unwrap();
         let mut warnings = prep.warnings.clone();
         let applied =
             apply_chart_config_pipeline(&mut prep, &theme, chart_config, &mut warnings).unwrap();

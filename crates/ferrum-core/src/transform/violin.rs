@@ -375,7 +375,13 @@ pub(crate) fn apply_with_context(
     // factor — a violin of `width=0.4` (default) then spans 80% of its band,
     // which matches the standard violin convention.
     // Without panel context (e.g. tests calling `apply` directly) we fall back
-    // to a sensible per-band default so the column is still populated.
+    // to a sensible per-band default so the column is still populated. The
+    // production pipeline always supplies `panel_pixel_size` (M2's pre-layout
+    // estimate — see `TransformContext::panel_pixel_size`'s doc), which
+    // improves this band's accuracy over the former always-inert 256/1.0
+    // defaults without resolving the padding/domain/range divergence below
+    // (that divergence is orthogonal: it is about SCALE vs. PANEL geometry,
+    // not about how good the panel-size number itself is).
     //
     // DIVERGENCE (2026-09-04, F-L04-03 / spec §4A, adjudicated in batch-C task 7):
     // `panel_dim / n_groups` is the UNPADDED band. Every other ordinal mark width
@@ -405,6 +411,9 @@ pub(crate) fn apply_with_context(
     // unlike a resolved bandwidth), which is a TransformContext contract change,
     // not a formula change here.
     let n_groups = groups.len().max(1);
+    // The `100.0` arms below fire only for a direct `apply()` call with no
+    // render-supplied `panel_pixel_size` (unit tests, notebook/WASM direct
+    // usage) — see the fallback note above.
     let band_pixels: f64 = if spec.horizontal {
         match ctx.panel_pixel_size {
             Some((_, h)) if h > 0 => (h as f64) / (n_groups as f64),
