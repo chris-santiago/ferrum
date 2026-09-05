@@ -234,13 +234,13 @@ df = pl.DataFrame({
 
 chart = (
     fm.Chart(df)
-    .transform(fm.transform_top_k(3, field="revenue", op="sum"))
+    .transform(fm.transform_top_k(3, field="revenue", op="sum", groupby=["product"]))
     .mark_bar()
     .encode(x="product:N", y="sum(revenue):Q")
 )
 ```
 
-This keeps only the three products with the highest total revenue.
+This keeps only the three products with the highest total revenue: the aggregate (`op="sum"` over `revenue`) is computed per `groupby` key, the keys are ranked, and every row belonging to a top-3 key survives. Without `groupby=`, the transform ranks the distinct values of `field` itself by their own aggregate — useful for trimming a long tail of raw values, but not a per-category ranking. Note that a row whose `groupby` key is null belongs to no group and is always dropped from grouped output, regardless of `n`; the ungrouped form instead collects null field values into their own `"__null__"` group, which can survive the ranking.
 
 ### `transform_bin` — binning
 
@@ -538,7 +538,7 @@ df = pl.DataFrame({
 chart = (
     fm.Chart(df)
     # Step 1: keep only top-3 products by total revenue
-    .transform(fm.transform_top_k(3, field="revenue", op="sum"))
+    .transform(fm.transform_top_k(3, field="revenue", op="sum", groupby=["product"]))
     # Step 2: aggregate by product and region
     .transform(fm.transform_aggregate(
         {"field": "revenue", "fn": "sum", "as": "total"},

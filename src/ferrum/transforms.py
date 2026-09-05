@@ -943,6 +943,7 @@ def transform_top_k(
     field: str,
     op: str = "sum",
     sort: str = "descending",
+    groupby: Sequence[str] | None = None,
 ) -> dict:
     """Keep top-k groups by an aggregate value.
 
@@ -956,11 +957,31 @@ def transform_top_k(
         Aggregation operation: "sum", "mean", "count", "min", "max".
     sort : str, default "descending"
         Sort direction: "descending" or "ascending".
+    groupby : list of str, optional
+        Rank groups defined by these columns' distinct value tuples,
+        aggregating ``op`` over ``field`` within each group — the
+        top-k-per-category use case (e.g. top 3 products by revenue sum).
+        Every row belonging to one of the top-``n`` groups is kept; no rows
+        or columns are synthesized. When omitted, the legacy behavior is
+        preserved byte-identically: ``field``'s own distinct values double
+        as the group key, so ranking degenerates to the field's raw value
+        rather than a separate category — a documented historical quirk
+        (F-L05-01), not the intended use case. Pass ``groupby=`` for that.
+        An empty sequence (``groupby=[]``) takes the same legacy ungrouped
+        path as omitting the parameter entirely — it is not treated as "no
+        groups", consistent with the rest of the ``groupby=``-accepting
+        transform family.
 
     Returns
     -------
     dict
         Transform specification for the Rust engine.
+
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
 
     Examples
     --------
@@ -970,8 +991,21 @@ def transform_top_k(
     'top_k'
     >>> t["n"]
     5
+
+    >>> t = fm.transform_top_k(3, field="revenue", op="sum", groupby=["product"])
+    >>> t["groupby"]
+    ['product']
     """
-    return {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
+    spec: dict = {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
+    if groupby is not None:
+        if isinstance(groupby, str):
+            raise ValueError(
+                f"transform_top_k: groupby must be a sequence of column names "
+                f"(list or tuple), got a bare string {groupby!r}; iterating "
+                f"a string yields individual characters"
+            )
+        spec["groupby"] = list(groupby)
+    return spec
 
 
 def transform_stack(

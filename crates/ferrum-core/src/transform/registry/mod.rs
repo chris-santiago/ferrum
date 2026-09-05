@@ -542,7 +542,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "top_k" => TransformRegistryEntry {
             methods: vec!["sum", "mean", "count", "min", "max"],
             outputs: vec![],
-            params: vec!["n", "field", "op", "sort", "name"],
+            params: vec!["n", "field", "op", "sort", "groupby", "name"],
         },
         "data_stack" => TransformRegistryEntry {
             methods: vec!["zero", "normalize", "center"],

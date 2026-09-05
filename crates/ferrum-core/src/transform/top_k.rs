@@ -14,6 +14,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
+use crate::transform::group_key::{group_partition_multi, parse_groupby_pyany, KeyValue};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TopKSpec {
@@ -27,6 +29,12 @@ pub(crate) struct TopKSpec {
     /// Sort direction: "descending" (default) or "ascending".
     #[serde(default = "default_sort")]
     pub sort: String,
+    /// When set, groups are the distinct tuples of these columns (ranked by
+    /// `op` aggregated over `field`) instead of the legacy "group by the
+    /// `field` value itself" behavior. `None`/absent preserves the original
+    /// wire and byte-identical output (F-L05-01).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub groupby: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -103,6 +111,18 @@ fn numeric_key_at(col: &dyn Array, row: usize) -> Option<String> {
 }
 
 pub(crate) fn apply(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    match &spec.groupby {
+        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols),
+        _ => apply_ungrouped(spec, batch),
+    }
+}
+
+/// Legacy (no `groupby`) behavior, preserved byte-identically: the `field`
+/// column doubles as its own groupby key — every distinct `field` value
+/// forms one group, ranked by `op` aggregated over that same column. This
+/// is documented as a historical quirk (F-L05-01), not the intended
+/// top-k-per-category use case; pass `groupby=` for that.
+fn apply_ungrouped(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let n_rows = batch.num_rows();
 
@@ -117,6 +137,22 @@ pub(crate) fn apply(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatc
     // Coerce to f64 once; None means non-numeric (falls back to count aggregate).
     let numeric_vals: Option<Vec<Option<f64>>> = numeric_col_as_f64(col.as_ref());
 
+    // The field column doubles as the group key here, so every non-null row
+    // must be able to produce one: either a string value or a numeric key.
+    // Any other dtype (e.g. Boolean, Date) used to fall back to a synthesized
+    // `row_{n}` key per row (silently defeating grouping entirely — every row
+    // became its own singleton group). That is now a typed refusal instead.
+    if numeric_vals.is_none() && col.as_any().downcast_ref::<StringArray>().is_none() {
+        return Err(PyValueError::new_err(format!(
+            "data_top_k: field column '{}' has unsupported dtype {:?} for ungrouped top_k \
+             (the field doubles as the group key); expected Utf8 or a numeric dtype \
+             (Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Float32/Float64) — \
+             pass groupby= to rank by a separate category column instead",
+            spec.field,
+            col.data_type()
+        )));
+    }
+
     // Build groups — keys for numeric dtypes use the coerced numeric value
     // so that equal integers collapse to the same group.
     let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
@@ -129,7 +165,9 @@ pub(crate) fn apply(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatc
         } else if let Some(k) = numeric_key_at(col.as_ref(), row) {
             k
         } else {
-            format!("row_{row}")
+            unreachable!(
+                "validated above: field column dtype supports key extraction (Utf8 or numeric)"
+            )
         };
         groups.entry(key).or_default().push(row);
     }
@@ -192,6 +230,106 @@ pub(crate) fn apply(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatc
         .map_err(|e| PyValueError::new_err(format!("data_top_k: {e}")))
 }
 
+/// With `groupby=` set, groups are the distinct `groupby`-column tuples
+/// (via the shared [`group_partition_multi`] partitioner), ranked by `op`
+/// aggregated over `field`; every original row belonging to one of the
+/// top-`n` groups is kept.
+///
+/// Unlike the `smooth.rs`/`regression_data.rs` partition-fit-concat
+/// template (spec §4.3's default grouped-transform shape), top_k
+/// synthesizes no new rows or columns per group — it selects a subset of
+/// the batch's existing rows, so this is closer to `impute.rs`'s
+/// row-preserving idea, simplified further: there is no per-row fill
+/// value to compute, just a `take` over the surviving row indices. The
+/// groupby columns need no separate materialization (unlike smooth/
+/// regression_data/impute) because they already exist, verbatim, on every
+/// kept row — `group_key`'s partitioning is used purely to find those rows.
+///
+/// **Null-groupby-key rows are dropped, unconditionally.** `group_partition_multi`
+/// excludes any row whose groupby value is null from every group (its own
+/// documented null-key policy), so such a row can never appear in a kept
+/// group's index list and is never selected — regardless of `n`, even when
+/// `n` is large enough to keep every real group. This mirrors `outliers.rs`'s
+/// row-filter over the same partitioner: "an outlier point with no
+/// corresponding box would be orphaned otherwise" applies here too, since a
+/// selected row needs a group to have been ranked by. It is a deliberate
+/// asymmetry with [`apply_ungrouped`], which collects null `field` values
+/// into their own `"__null__"` group that CAN survive top-n: there, `field`
+/// doubles as the group key so a null key is still a key; here, the groupby
+/// column is a distinct category axis and a null category has nothing to
+/// rank.
+fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) -> PyResult<RecordBatch> {
+    let schema = batch.schema();
+
+    let field_idx = schema.index_of(&spec.field).map_err(|_| {
+        PyValueError::new_err(format!("data_top_k: column '{}' not found", spec.field))
+    })?;
+    let field_col = batch.column(field_idx);
+
+    // Coerce to f64 once; None means non-numeric (falls back to count
+    // aggregate) — same policy as the ungrouped path, but here `field` is
+    // purely the aggregate target, never a group key, so no dtype refusal
+    // is needed: any dtype is a valid thing to count.
+    let numeric_vals: Option<Vec<Option<f64>>> = numeric_col_as_f64(field_col.as_ref());
+
+    let (group_order, group_idx_map, _group_dtypes) =
+        group_partition_multi(batch, group_cols, "data_top_k")?;
+
+    let mut group_aggs: Vec<(Vec<KeyValue>, f64)> = group_order
+        .iter()
+        .map(|g| {
+            let rows = &group_idx_map[g];
+            let agg_val = match &numeric_vals {
+                Some(vals) => {
+                    let col_vals: Vec<f64> = rows
+                        .iter()
+                        .filter_map(|&r| {
+                            let v = vals[r]?;
+                            if v.is_nan() { None } else { Some(v) }
+                        })
+                        .collect();
+                    compute_agg(&col_vals, &spec.op)
+                }
+                None => {
+                    // Non-numeric field: fall back to count.
+                    rows.len() as f64
+                }
+            };
+            (g.clone(), agg_val)
+        })
+        .collect();
+
+    // Sort by aggregate.
+    if spec.sort == "ascending" {
+        group_aggs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        group_aggs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    // Collect row indices belonging to the top-n groups, in ascending row
+    // order (via the final sort), matching the ungrouped path's `take` shape.
+    // `group_aggs`/`group_idx_map` only ever contain the non-null-key groups
+    // `group_partition_multi` returned, so a null-groupby row is already
+    // absent here and can never be kept — see the null-groupby-key policy
+    // documented on this function above.
+    let mut keep_indices: Vec<u32> = Vec::new();
+    for (key, _) in group_aggs.iter().take(spec.n) {
+        if let Some(rows) = group_idx_map.get(key) {
+            keep_indices.extend(rows.iter().map(|&r| r as u32));
+        }
+    }
+    keep_indices.sort_unstable();
+
+    let idx_array = UInt32Array::from(keep_indices);
+    let columns: Vec<ArrayRef> = (0..batch.num_columns())
+        .map(|i| take(batch.column(i).as_ref(), &idx_array, None))
+        .collect::<Result<_, _>>()
+        .map_err(|e| PyValueError::new_err(format!("data_top_k: take: {e}")))?;
+
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|e| PyValueError::new_err(format!("data_top_k: {e}")))
+}
+
 fn compute_agg(vals: &[f64], op: &str) -> f64 {
     if vals.is_empty() {
         return f64::NEG_INFINITY;
@@ -218,15 +356,28 @@ pub(crate) struct PyTopK(pub(crate) TransformSpec);
 #[pymethods]
 impl PyTopK {
     #[new]
-    #[pyo3(signature = (n, field, *, op = "sum", sort = "descending", name = None))]
-    fn new(n: usize, field: String, op: &str, sort: &str, name: Option<String>) -> Self {
-        PyTopK(TransformSpec::TopK(TopKSpec {
+    #[pyo3(signature = (n, field, *, op = "sum", sort = "descending", groupby = None, name = None))]
+    fn new(
+        n: usize,
+        field: String,
+        op: &str,
+        sort: &str,
+        groupby: Option<&Bound<'_, PyAny>>,
+        name: Option<String>,
+    ) -> PyResult<Self> {
+        // Normalized through the same boundary helper as PyBin/PyKde/PyKde2d/
+        // PySmooth so `str | list[str] | None` is accepted uniformly across
+        // the transform family (quality-review finding, cycle 2).
+        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = (!groupby.is_empty()).then_some(groupby);
+        Ok(PyTopK(TransformSpec::TopK(TopKSpec {
             n,
             field,
             op: op.into(),
             sort: sort.into(),
+            groupby,
             name,
-        }))
+        })))
     }
 
     fn __repr__(&self) -> String {
@@ -273,6 +424,7 @@ mod tests {
             field: "cat".into(),
             op: "count".into(),
             sort: "descending".into(),
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -313,6 +465,7 @@ mod tests {
             field: "score".into(),
             op: "sum".into(),
             sort: "descending".into(),
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -362,6 +515,7 @@ mod tests {
             field: "val".into(),
             op: "max".into(),
             sort: "descending".into(),
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -405,6 +559,7 @@ mod tests {
             field: "x".into(),
             op: "sum".into(),
             sort: "descending".into(),
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -444,6 +599,7 @@ mod tests {
             field: "x".into(),
             op: "sum".into(),
             sort: "ascending".into(),
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -477,6 +633,7 @@ mod tests {
             field: "val".into(),
             op: "sum".into(),
             sort: "descending".into(),
+            groupby: None,
             name: None,
         };
         let out = apply(&spec, &batch2).unwrap();
@@ -492,5 +649,329 @@ mod tests {
         let kept: Vec<f64> = (0..out.num_rows()).map(|i| val_col.value(i)).collect();
         assert!(kept.contains(&100.0), "100.0 must be in top-2 by sum");
         assert!(kept.contains(&20.0), "20.0 must be in top-2 by sum");
+    }
+
+    // ── M3 groupby coverage (F-L05-01) ────────────────────────────────────
+    //
+    // Before this fix, `TopKSpec` had no `groupby` field at all: top_k
+    // always grouped by the `field` column's own distinct values, making
+    // top-k-per-category impossible. These tests use the guide's own
+    // product/revenue repro and are constructed so that the naive
+    // "group by field value" behavior yields a DIFFERENT top-n set than
+    // correct per-groupby-key aggregation — so a fix that silently ignores
+    // `groupby` and falls through to the legacy path fails loudly here.
+
+    fn make_batch_product_revenue() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("product", DataType::Utf8, false),
+            Field::new("revenue", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "B", "C", "D", "E", "E"])),
+                Arc::new(Float64Array::from(vec![50.0, 55.0, 80.0, 170.0, 82.0, 40.0, 45.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// F-L05-01 repro: per-product revenue sums are A=105, B=80, C=170,
+    /// D=82, E=85 — top 3 by sum = {C, A, E} (spec's own {A, C, E}).
+    ///
+    /// The bug this pins: grouping by `revenue`'s own (mostly unique)
+    /// values instead of `product` would treat each row as close to its
+    /// own singleton group and rank by raw revenue value, keeping
+    /// {C(170), D(82), B(80)} instead — a verifiably different set of
+    /// rows and row count.
+    #[test]
+    fn top_k_groupby_ranks_by_group_not_by_field_value() {
+        let batch = make_batch_product_revenue();
+        let spec = TopKSpec {
+            n: 3,
+            field: "revenue".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["product".into()]),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        let products = out
+            .column_by_name("product")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let kept: std::collections::BTreeSet<&str> =
+            (0..out.num_rows()).map(|i| products.value(i)).collect();
+        let expected: std::collections::BTreeSet<&str> = ["A", "C", "E"].into_iter().collect();
+        assert_eq!(
+            kept, expected,
+            "top-3 by per-product revenue sum must be {{A, C, E}}, got {kept:?}"
+        );
+        // A (2 rows) + C (1 row) + E (2 rows) = 5 rows; B and D dropped entirely.
+        assert_eq!(out.num_rows(), 5);
+    }
+
+    /// Per-group sums verified exactly against the finding's own numbers
+    /// (n=5 keeps every group, since there are exactly 5 distinct products,
+    /// so this also confirms the grouped path is row-preserving: all 7
+    /// input rows survive when no group is filtered out).
+    #[test]
+    fn top_k_groupby_per_group_sums_match_hand_computed() {
+        let batch = make_batch_product_revenue();
+        let spec = TopKSpec {
+            n: 5,
+            field: "revenue".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["product".into()]),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 7, "n=5 keeps all 5 groups (7 rows total)");
+
+        let products = out
+            .column_by_name("product")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let revenues = out
+            .column_by_name("revenue")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let mut sums: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+        for i in 0..out.num_rows() {
+            *sums.entry(products.value(i).to_string()).or_insert(0.0) += revenues.value(i);
+        }
+        assert_eq!(sums["A"], 105.0);
+        assert_eq!(sums["B"], 80.0);
+        assert_eq!(sums["C"], 170.0);
+        assert_eq!(sums["D"], 82.0);
+        assert_eq!(sums["E"], 85.0);
+    }
+
+    /// Wire-compat: a pre-groupby-era serialized `TopKSpec` (no `"groupby"`
+    /// key at all) must still deserialize, defaulting `groupby` to `None`
+    /// (the ungrouped, byte-identical legacy path).
+    #[test]
+    fn top_k_wire_compat_old_json_without_groupby_parses() {
+        let json = r#"{"n": 3, "field": "revenue", "op": "sum", "sort": "descending"}"#;
+        let spec: TopKSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.groupby, None);
+        assert_eq!(spec.n, 3);
+        assert_eq!(spec.field, "revenue");
+    }
+
+    /// F-L05-01: the ungrouped path's `row_{n}` synthesized-key fallback
+    /// (for a `field` column that is neither Utf8 nor numeric — e.g.
+    /// Boolean) is now a typed refusal, not a silent per-row singleton
+    /// group. Before this fix, this call succeeded (each row became its
+    /// own group under a `"row_{n}"` key), silently defeating grouping.
+    #[test]
+    fn top_k_ungrouped_unsupported_field_dtype_errors_instead_of_row_n_fallback() {
+        pyo3::Python::initialize();
+        use arrow::array::BooleanArray;
+        let schema = Arc::new(Schema::new(vec![Field::new("flag", DataType::Boolean, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(BooleanArray::from(vec![true, false, true]))],
+        )
+        .unwrap();
+        let spec = TopKSpec {
+            n: 1,
+            field: "flag".into(),
+            op: "count".into(),
+            sort: "descending".into(),
+            groupby: None,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("data_top_k"), "err: {msg}");
+        assert!(msg.contains("flag"), "err must name the column: {msg}");
+        assert!(msg.contains("Boolean"), "err must name the dtype: {msg}");
+    }
+
+    // ── round-2 quality-review coverage (F-L05-01, cycle 2) ────────────────
+
+    /// S3-1: a null groupby-key row is dropped even when `n` is large enough
+    /// to keep every real group. Fixture: 5 rows, 3 real products (A, B, C)
+    /// plus one row with a null `product`; `n=10` keeps all 3 real groups, so
+    /// the only way the row count can be less than 5 is the null-key drop
+    /// documented on `apply_grouped`. This is the reviewer's own repro
+    /// (`transform_top_k(10, field='revenue', op='sum', groupby=['product'])`
+    /// -> 4 rows out of 5), re-derived through the Rust `apply()` entry point.
+    #[test]
+    fn top_k_groupby_null_key_row_is_dropped_even_when_n_keeps_every_group() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("product", DataType::Utf8, true),
+            Field::new("revenue", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("A"),
+                    Some("A"),
+                    Some("B"),
+                    None,
+                    Some("C"),
+                ])),
+                Arc::new(Float64Array::from(vec![50.0, 55.0, 80.0, 999.0, 10.0])),
+            ],
+        )
+        .unwrap();
+        let spec = TopKSpec {
+            n: 10,
+            field: "revenue".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["product".into()]),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(
+            out.num_rows(), 4,
+            "n=10 keeps all 3 real groups (4 rows: A x2, B x1, C x1); the \
+             null-product row is dropped regardless of n"
+        );
+    }
+
+    /// S3-2 sibling coverage: a multi-column `groupby` on the grouped path
+    /// ranks by the composite (region, product) key, not either column
+    /// alone. Region/product sums: (east,A)=50+55=105, (west,B)=80,
+    /// (east,C)=10 -> top 2 by sum = {(east,A), (west,B)}.
+    #[test]
+    fn top_k_groupby_multi_column_ranks_by_composite_key() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("region", DataType::Utf8, false),
+            Field::new("product", DataType::Utf8, false),
+            Field::new("revenue", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["east", "east", "west", "east"])),
+                Arc::new(StringArray::from(vec!["A", "A", "B", "C"])),
+                Arc::new(Float64Array::from(vec![50.0, 55.0, 80.0, 10.0])),
+            ],
+        )
+        .unwrap();
+        let spec = TopKSpec {
+            n: 2,
+            field: "revenue".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["region".into(), "product".into()]),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // (east,A) keeps 2 rows, (west,B) keeps 1 row; (east,C) dropped.
+        assert_eq!(out.num_rows(), 3, "top-2 composite groups keep 3 of 4 rows");
+
+        let products = out
+            .column_by_name("product")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let kept: std::collections::BTreeSet<&str> =
+            (0..out.num_rows()).map(|i| products.value(i)).collect();
+        assert!(!kept.contains("C"), "(east,C), the lowest composite sum, must be dropped");
+    }
+
+    /// S3-2 sibling coverage: `sort="ascending"` on the grouped path keeps
+    /// the LOWEST-ranked groups by `op`, mirroring the ungrouped path's
+    /// ascending branch. Per-product sums: A=105, B=80, C=170, D=82, E=85;
+    /// ascending top-2 = {B(80), D(82)}, the two smallest.
+    #[test]
+    fn top_k_groupby_ascending_sort_keeps_lowest_groups() {
+        let batch = make_batch_product_revenue();
+        let spec = TopKSpec {
+            n: 2,
+            field: "revenue".into(),
+            op: "sum".into(),
+            sort: "ascending".into(),
+            groupby: Some(vec!["product".into()]),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        let products = out
+            .column_by_name("product")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let kept: std::collections::BTreeSet<&str> =
+            (0..out.num_rows()).map(|i| products.value(i)).collect();
+        let expected: std::collections::BTreeSet<&str> = ["B", "D"].into_iter().collect();
+        assert_eq!(
+            kept, expected,
+            "ascending top-2 by per-product sum must be the two LOWEST groups {{B, D}}, got {kept:?}"
+        );
+        assert_eq!(out.num_rows(), 2, "B and D are each single-row groups");
+    }
+
+    /// Sibling precedent: `regression_data.rs`'s
+    /// `regression_groupby_none_and_empty_vec_are_both_ungrouped`.
+    /// `groupby: Some(vec![])` must dispatch to the ungrouped path exactly
+    /// like `groupby: None` — `apply`'s `Some(cols) if !cols.is_empty()`
+    /// guard is what makes this true; this test pins that guard against a
+    /// future edit that drops the emptiness check and routes an empty vec
+    /// into `apply_grouped` (which would panic-free but wrongly report zero
+    /// groupby columns as a group-by-nothing single group, not the
+    /// legacy field-doubles-as-key behavior).
+    #[test]
+    fn top_k_groupby_some_empty_vec_dispatches_to_ungrouped_path() {
+        let batch = make_batch_string_float(
+            vec!["a", "a", "b", "b", "c"],
+            vec![10.0, 20.0, 1.0, 2.0, 100.0],
+        );
+        let spec_none = TopKSpec {
+            n: 2,
+            field: "val".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: None,
+            name: None,
+        };
+        let spec_empty = TopKSpec {
+            groupby: Some(vec![]),
+            ..spec_none.clone()
+        };
+        let out_none = apply(&spec_none, &batch).unwrap();
+        let out_empty = apply(&spec_empty, &batch).unwrap();
+        assert_eq!(
+            out_none.num_rows(), out_empty.num_rows(),
+            "groupby: Some(vec![]) must behave identically to groupby: None"
+        );
+        assert_eq!(out_empty.num_rows(), 2, "ungrouped path: top-2 unique-val groups");
+    }
+
+    /// A missing groupby column on the grouped path produces the
+    /// `data_top_k` ctx-prefixed error from `group_partition_multi`, naming
+    /// the offending column.
+    #[test]
+    fn top_k_groupby_missing_column_errors_with_data_top_k_ctx() {
+        pyo3::Python::initialize();
+        let batch = make_batch_product_revenue();
+        let spec = TopKSpec {
+            n: 2,
+            field: "revenue".into(),
+            op: "sum".into(),
+            sort: "descending".into(),
+            groupby: Some(vec!["nonexistent".into()]),
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("data_top_k"), "err: {msg}");
+        assert!(msg.contains("nonexistent"), "err must name the missing column: {msg}");
     }
 }

@@ -851,6 +851,7 @@ class TopK:
         *,
         op: str = "sum",
         sort: str = "descending",
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

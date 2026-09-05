@@ -898,7 +898,8 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         ("flatten", Flatten(FlattenSpec { fields: vec![], as_: None, name: None })),
         ("sample", Sample(SampleSpec { n: 10, seed: 0, name: None })),
         ("top_k", TopK(TopKSpec {
-            n: 5, field: "v".into(), op: "sum".into(), sort: "descending".into(), name: None,
+            n: 5, field: "v".into(), op: "sum".into(), sort: "descending".into(), groupby: None,
+            name: None,
         })),
         ("data_stack", DataStack(DataStackSpec {
             field: "v".into(), groupby: vec![], sort: None, as_: ("y0".into(), "y1".into()),

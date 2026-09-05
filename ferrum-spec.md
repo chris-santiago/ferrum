@@ -1085,7 +1085,7 @@ Data transforms are applied before stat transforms, in the Rust engine. They res
 | `transform_impute(field, *, method="value", value=None, groupby=None, key=None, keyvals=None)` | Fill missing values | |
 | `transform_flatten(fields, *, as_=None)` | Expand list-typed columns | |
 | `transform_sample(n)` | Random row sample | |
-| `transform_top_k(n, *, field, op="mean", sort="descending")` | Keep top-k by aggregate | |
+| `transform_top_k(n, *, field, op="sum", sort="descending", groupby=None)` | Keep top-k by aggregate | 2026-09-05: gained `groupby=` — the aggregate is computed and ranked per groupby key (batch D, F-L05-01); previously the row also mis-documented `op="mean"` (the shipped default has always been `"sum"`) |
 | `transform_stack(field, *, groupby, sort=None, as_=("start","end"), offset="zero")` | Stacking transform for area/bar | |
 | `transform_timeunit(field, unit, *, utc=False, as_=None)` | Temporal unit extraction | |
 
