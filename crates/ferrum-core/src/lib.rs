@@ -55,6 +55,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // PyAggregateOp is the op-spec helper class, not a TransformSpec
     // variant — registered manually.
     m.add_class::<transform::aggregate::PyAggregateOp>()?;
+    // Batch-D task 1 (spec §4.6): the transform metadata registry — method
+    // vocabularies, primary output schemas, and wire params per transform
+    // kind, one Rust-owned table Python queries instead of hand-mirroring.
+    m.add_function(wrap_pyfunction!(transform::registry::transform_registry, m)?)?;
     m.add_function(wrap_pyfunction!(layout::binding::compute_layout, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;

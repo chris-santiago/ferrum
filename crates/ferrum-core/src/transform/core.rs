@@ -177,10 +177,13 @@ macro_rules! for_each_transform {
         }
     };
 }
-// `for_each_transform!` is the full 41-variant dispatch table, invoked only
-// within this module (`apply`, `spec_name`). The Python-facing sites use
-// `for_each_py_transform!` (re-exported below); there is no external consumer
-// of the full table, so it is not re-exported.
+// `for_each_transform!` is the full dispatch table (`apply`, `spec_name` use
+// it directly within this module). It is also re-exported for
+// `transform::registry`, which drives its per-kind metadata coverage test off
+// the same table (batch-D task 1, spec §4.6) — a new variant lands here and
+// in the enum together, so the registry's exhaustiveness test fails the
+// moment a kind is missing a metadata decision.
+pub(crate) use for_each_transform;
 
 /// The subset of [`for_each_transform!`] whose variants still expose a Python
 /// wrapper class (`Py<Variant>`). This is the table that drives the three

@@ -995,19 +995,27 @@ pub(crate) fn accepted_keys_for_section(section: &str) -> Option<Vec<&'static st
 const CHART_CONFIG_MANIFEST_JSON: &str = include_str!("chart_config_manifest.json");
 
 /// Test-only: parse the accepted-field set out of a serde `deny_unknown_fields`
-/// error produced by deserializing with ONE bogus key. serde_json renders the
-/// message as `unknown field \`x\`, expected one of \`a\`, \`b\`, … \`z\` at
-/// line 1 column N` — this slices after the `expected one of ` marker, drops
-/// the trailing ` at line …` position suffix, then collects every
-/// backtick-delimited token. Shared by every wire-schema drift test in this
-/// crate (hoisted here from `binding.rs`'s prior private copy, per the
-/// mirror-by-reference rule — both files are in this task's footprint):
-/// `THEME_KNOWN_KEYS`'s `serde_accepted_fields_match_manifest`
-/// (`binding.rs`) is the pattern this generalizes, and every `*_match_serde`
-/// test below reuses it.
+/// error produced by deserializing with ONE bogus key. serde_json's `OneOf`
+/// formatter (the type behind every `unknown_field` error) renders three
+/// shapes depending on the struct's accepted-field COUNT, not on what's in
+/// the input: `expected \`a\`` (1 field), `expected \`a\` or \`b\`` (2
+/// fields), or `expected one of \`a\`, \`b\`, … or \`z\`` (3+, the shape the
+/// original `"expected one of "` marker assumed). Matching on the shorter,
+/// always-present `"expected "` prefix (batch-D task 1 round 2, 2026-09-04 —
+/// needed by the transform registry's `params` drift guard, whose smallest
+/// spec struct (`IdentitySpec`) has exactly one accepted field) handles all
+/// three: the backtick tokenizer below already treats `"one of "`/`" or "`/
+/// `", "` as inter-token noise, so widening the marker doesn't change parsing
+/// for the 3+-field case this was written against. Drops the trailing
+/// ` at line …` position suffix, then collects every backtick-delimited
+/// token. Shared by every wire-schema drift test in this crate (hoisted here
+/// from `binding.rs`'s prior private copy, per the mirror-by-reference rule
+/// — both files are in this task's footprint): `THEME_KNOWN_KEYS`'s
+/// `serde_accepted_fields_match_manifest` (`binding.rs`) is the pattern this
+/// generalizes, and every `*_match_serde` test below reuses it.
 #[cfg(test)]
 pub(crate) fn accepted_fields_from_deny_unknown_error(msg: &str) -> std::collections::BTreeSet<String> {
-    const MARKER: &str = "expected one of ";
+    const MARKER: &str = "expected ";
     let after = msg
         .find(MARKER)
         .map(|i| &msg[i + MARKER.len()..])

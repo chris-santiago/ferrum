@@ -348,12 +348,10 @@ fn build_fitted_batch(
     x: Vec<f64>, y: Vec<f64>, lo: Vec<f64>, hi: Vec<f64>,
     metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
-    let mut fields = vec![
-        Field::new("x",        DataType::Float64, true),
-        Field::new("y",        DataType::Float64, true),
-        Field::new("ci_lower", DataType::Float64, true),
-        Field::new("ci_upper", DataType::Float64, true),
-    ];
+    // Batch-D M6 schema-collapse (spec §4.6): shared with `smooth.rs`
+    // (Fitted)/`logistic.rs`/`glm.rs` and the `transform_registry` entries
+    // for all four.
+    let mut fields = crate::transform::registry::fit_output_fields();
     let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(x.clone())),
         Arc::new(Float64Array::from(y.clone())),

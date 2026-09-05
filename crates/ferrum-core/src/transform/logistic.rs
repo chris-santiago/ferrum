@@ -10,7 +10,7 @@
 //! where `y` is the fitted probability `P(y=1 | x)`.
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -250,12 +250,10 @@ use crate::transform::linalg::invert_2x2;
 fn build_logistic_batch(
     x: Vec<f64>, y: Vec<f64>, lo: Vec<f64>, hi: Vec<f64>,
 ) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("x",        DataType::Float64, true),
-        Field::new("y",        DataType::Float64, true),
-        Field::new("ci_lower", DataType::Float64, true),
-        Field::new("ci_upper", DataType::Float64, true),
-    ]));
+    // Batch-D M6 schema-collapse (spec §4.6): shared with `smooth.rs`
+    // (Fitted)/`glm.rs`/`robust.rs` (Fitted) and the `transform_registry`
+    // entries for all four.
+    let schema = Arc::new(Schema::new(crate::transform::registry::fit_output_fields()));
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(x)),
         Arc::new(Float64Array::from(y)),
