@@ -527,7 +527,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         "impute" => TransformRegistryEntry {
             methods: vec!["value", "mean", "median", "min", "max"],
             outputs: vec![],
-            params: vec!["field", "method", "value", "groupby", "key", "name"],
+            params: vec!["field", "method", "value", "groupby", "key", "keyvals", "name"],
         },
         "flatten" => TransformRegistryEntry {
             methods: vec![],

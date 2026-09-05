@@ -27,7 +27,7 @@ from __future__ import annotations
 import math
 import numbers
 import operator
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum.position import _validate_stack_offset
 
@@ -755,6 +755,50 @@ def transform_loess(
     return spec
 
 
+def _normalize_keyval(value: object, *, key: str | None) -> bool | int | float | str:
+    """Normalize one ``transform_impute(keyvals=...)`` element to a plain,
+    JSON-serializable Python scalar.
+
+    Mirrors ``_expr_literal``'s ABC-based (not concrete-type) numeric/bool
+    acceptance boundary: a numpy scalar from ``df[col].unique()`` — the
+    routine way to build a ``keyvals`` list off the key column itself —
+    normalizes the same way its Python-native twin does (``np.int64`` and
+    ``np.float64`` both accepted), rather than reaching the JSON encoder as
+    an unserializable numpy scalar (``TypeError: Object of type int64 is
+    not JSON serializable``, naming neither ``transform_impute`` nor
+    ``keyvals``). Unlike ``_expr_literal``, this returns a plain scalar
+    rather than a grammar-literal string, since ``keyvals`` rides the wire
+    as JSON, not an expression.
+    """
+    if isinstance(value, bool):
+        return value
+    # Accept numpy bool scalars the same way we accept their Python twin.
+    try:
+        import numpy as np
+
+        if isinstance(value, np.bool_):
+            return bool(value)
+    except (ImportError, AttributeError):
+        pass
+    if isinstance(value, str):
+        return value
+    where = f" for key {key!r}" if key is not None else ""
+    if isinstance(value, numbers.Integral):
+        return operator.index(value)
+    if isinstance(value, numbers.Real):
+        as_float = float(value)
+        if not math.isfinite(as_float):
+            raise ValueError(
+                f"transform_impute: non-finite float {value!r} not allowed in "
+                f"keyvals{where}; accepted: string, number, or bool"
+            )
+        return as_float
+    raise TypeError(
+        f"transform_impute: {type(value).__name__} {value!r} not allowed in "
+        f"keyvals{where}; accepted: string, number, or bool"
+    )
+
+
 def transform_impute(
     field: str,
     *,
@@ -762,6 +806,7 @@ def transform_impute(
     value: float | None = None,
     groupby: Sequence[str] | None = None,
     key: str | None = None,
+    keyvals: Sequence[Any] | None = None,
 ) -> dict:
     """Impute missing values in a column.
 
@@ -774,9 +819,29 @@ def transform_impute(
     value : float, optional
         Constant value for method="value".
     groupby : list of str, optional
-        Impute within groups.
+        Impute within groups: the fill value (per ``method``) is computed
+        separately for each group, not once across the whole column.
     key : str, optional
-        Key column for sequence generation.
+        Key column. Within each group (or, with no ``groupby``, the whole
+        batch as one implicit group — Vega's "no groupby means one group"
+        rule), a key value present in the key universe (see ``keyvals``)
+        but missing from that group gets one appended row: the group's own
+        columns, the missing key, and that group's own imputed value; every
+        other column is null.
+    keyvals : list or tuple, optional
+        The key universe. **Requires** ``key`` — passing ``keyvals``
+        without ``key`` raises ``ValueError`` at render time, since there
+        is no key column for the universe to apply to. Must be a sequence
+        (list, tuple, or other iterable), never a bare string — a bare
+        string iterates into characters, not key values, and raises
+        ``ValueError`` at construction time.
+        When omitted, the universe is the distinct ``key`` values observed
+        across the whole batch. Each value is typed against the key
+        column's own dtype at render time: a whole-valued float (e.g.
+        ``1.0``) coerces onto an integer key column, but a genuinely
+        fractional float against an integer key column raises ``ValueError``
+        (that coercion would be lossy); a string against a numeric key
+        column raises the same way.
 
     Returns
     -------
@@ -799,6 +864,14 @@ def transform_impute(
         spec["groupby"] = list(groupby)
     if key is not None:
         spec["key"] = key
+    if keyvals is not None:
+        if isinstance(keyvals, str):
+            raise ValueError(
+                f"transform_impute: keyvals must be a sequence of key values "
+                f"(list or tuple), got a bare string {keyvals!r}; iterating "
+                f"a string yields individual characters"
+            )
+        spec["keyvals"] = [_normalize_keyval(v, key=key) for v in keyvals]
     return spec
 
 

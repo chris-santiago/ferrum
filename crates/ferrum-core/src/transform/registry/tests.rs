@@ -892,7 +892,8 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
             as_: ("x".into(), "y".into()), name: None,
         })),
         ("impute", Impute(ImputeSpec {
-            field: "v".into(), method: "mean".into(), value: None, groupby: None, key: None, name: None,
+            field: "v".into(), method: "mean".into(), value: None, groupby: None, key: None,
+            keyvals: None, name: None,
         })),
         ("flatten", Flatten(FlattenSpec { fields: vec![], as_: None, name: None })),
         ("sample", Sample(SampleSpec { n: 10, seed: 0, name: None })),
