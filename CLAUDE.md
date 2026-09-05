@@ -36,10 +36,18 @@ Ferrum is a Rust-backed Python statistical visualization library. The Python lay
 > `~/.cargo/env` first if `cargo` is not on your PATH (`source ~/.cargo/env`).
 
 > **macOS `cargo test` note:** On macOS with uv-managed Python, the test binary cannot
-> resolve `@rpath/libpython3.10.dylib` at runtime without `DYLD_LIBRARY_PATH` pointing to
+> resolve `@rpath/libpython3.x.dylib` at runtime without `DYLD_LIBRARY_PATH` pointing to
 > the Python lib directory. The command above uses `sys.base_prefix` (not `sysconfig.get_config_var('LIBDIR')`,
 > which returns a bogus `/install/lib` on uv-managed cpython builds).
+> **The `sys.base_prefix` recipe fails when the test binary links a different libpython than
+> uv's base Python** (check with `otool -L target/debug/deps/ferrum_core-*`): pyo3 links
+> whichever Python its build found, e.g. Homebrew's. In that case point `DYLD_LIBRARY_PATH`
+> at *that* Python's lib dir instead — on a Homebrew python@3.13 machine:
+> `DYLD_LIBRARY_PATH=/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/lib cargo test -p ferrum-core`.
 > This is a macOS SIP + uv RPATH constraint; it does not affect `maturin develop` or pytest.
+> **Clippy: never add `--tests`** — it can mask dead-code lints on production items (observed
+> 2026-09-03); measure with the documented no-`--tests` recipe and judge by delta against the
+> pre-existing in-crate baseline (~166).
 
 `pip install -e .` will **not** compile the Rust extension. Always use `maturin develop`.
 
