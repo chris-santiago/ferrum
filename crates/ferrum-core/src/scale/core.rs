@@ -18,6 +18,23 @@ use pyo3::{Py, PyAny, PyResult, Python};
 
 use crate::spec::encoding::{encode_serde_value_for_py, ContinuousScaleCommon, ScaleSpec};
 
+/// Named-field input to [`continuous_common`] (rust-design review S2,
+/// refactor 3): replaces seven positional parameters — four of them bool —
+/// at all six call sites (one per continuous `*Scale` pyclass's
+/// `to_scale_spec`). Positionally, `self.data.clamp, self.padding,
+/// self.reverse` type-checked in the order the caller happened to declare
+/// them; transposing `clamp` and `reverse` would have compiled and shipped a
+/// wrong wire dict silently. Field names remove that hazard.
+pub(crate) struct ContinuousCommonParts {
+    pub(crate) domain: [f64; 2],
+    pub(crate) domain_user_set: bool,
+    pub(crate) range: [f64; 2],
+    pub(crate) range_user_set: bool,
+    pub(crate) clamp: bool,
+    pub(crate) padding: Option<f64>,
+    pub(crate) reverse: bool,
+}
+
 /// Build the `ContinuousScaleCommon` payload shared by the seven affine
 /// continuous `ScaleSpec` variants (Linear, Log, Time, Symlog, Pow, Sqrt, Utc).
 ///
@@ -33,15 +50,9 @@ use crate::spec::encoding::{encode_serde_value_for_py, ContinuousScaleCommon, Sc
 /// construction. `LinearScale::scale`/`invert`/`ticks` and its five siblings
 /// therefore never see the swapped domain; only the rendered/resolved scale
 /// does.
-pub(crate) fn continuous_common(
-    domain: [f64; 2],
-    domain_user_set: bool,
-    range: [f64; 2],
-    range_user_set: bool,
-    clamp: bool,
-    padding: Option<f64>,
-    reverse: bool,
-) -> ContinuousScaleCommon {
+pub(crate) fn continuous_common(parts: ContinuousCommonParts) -> ContinuousScaleCommon {
+    let ContinuousCommonParts { domain, domain_user_set, range, range_user_set, clamp, padding, reverse } =
+        parts;
     ContinuousScaleCommon {
         domain: domain_user_set.then(|| domain.to_vec()),
         range: range_user_set.then(|| range.to_vec()),

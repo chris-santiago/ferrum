@@ -224,7 +224,13 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Width is the resolved scale's drawn band × the box `band_size` factor
         // (F-L04-03, spec §4A; see `ScaleKind::bandwidth`). `None` is
         // unreachable — this branch is gated on `x_is_ordinal`.
-        let band_width = match ctx.scales.x.bandwidth() { Some(w) => w, None => return empty_result() };
+        let band_width = match ctx.scales.x.bandwidth() {
+            Some(w) => w,
+            None => {
+                debug_assert!(false, "build_ordinal_range's x_is_ordinal branch dispatches only for an ordinal x scale, which always reports a bandwidth");
+                return empty_result();
+            }
+        };
         let box_w_raw = (band_width / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
         // Clamp to the Dodge sub-band (GH #66): the band_size-factor width
@@ -319,7 +325,13 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let n_groups = pos_meta.dodge_n_groups();
         // The y twin of the x-ordinal branch's width (F-L04-03, spec §4A; see
         // `ScaleKind::bandwidth`). `None` is unreachable — `y_is_ordinal`.
-        let band_width = match ctx.scales.y.bandwidth() { Some(w) => w, None => return empty_result() };
+        let band_width = match ctx.scales.y.bandwidth() {
+            Some(w) => w,
+            None => {
+                debug_assert!(false, "build_ordinal_range's y_is_ordinal branch dispatches only for an ordinal y scale, which always reports a bandwidth");
+                return empty_result();
+            }
+        };
         let box_h_raw = (band_width / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
         // Clamp to the Dodge sub-band (GH #66); see the x-ordinal branch's

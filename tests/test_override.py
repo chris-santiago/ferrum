@@ -25,6 +25,7 @@ from ferrum.exceptions import FerrumOverrideError
 from ferrum.marks.base import _VALID_MARK_KWARGS
 from ferrum.structural import BreakAxis, Inset, SecondaryY
 from ferrum import _override_apply as oa
+from ferrum._core import scale_accepted_keys
 
 
 # ---------------------------------------------------------------------------
@@ -367,12 +368,107 @@ class TestOverrideRegistryParity:
         rule = next(r for r in oa._PREFIX_RULES if r.prefix == "mark_")
         assert rule.valid_leaves == _VALID_MARK_KWARGS
 
-    def test_scale_leaves_include_common_options_and_exclude_derived(self):
+    def test_scale_leaves_are_the_gates_wire_keys_plus_snake_aliases(self):
+        # The registry is derived from the wire gate's own per-type
+        # accepted-key table, not from the *Scale pyclasses' attributes.
+        # Pin the derivation exactly: the union of every type's accepted keys,
+        # plus "type", plus one snake_case alias per camelCase wire key.
         rule = next(r for r in oa._PREFIX_RULES if r.prefix == "x_scale_")
-        # Settable scale-spec leaves are present.
-        assert {"domain", "range", "type", "scheme", "padding"} <= rule.valid_leaves
-        # Derived getters are not settable leaves.
-        assert "num_bins" not in rule.valid_leaves
+        wire_union = set()
+        for scale_type in oa._SCALE_TYPE_TAGS:
+            wire_union.update(scale_accepted_keys(scale_type))
+        expected = wire_union | {"type"} | set(oa._SCALE_LEAF_WIRE_ALIASES)
+        assert rule.valid_leaves == expected
+        # Derived read-only getters are not leaves: `num_bins` is
+        # `len(bins)` on BinOrdinalScale, `quantiles` is QuantileScale's
+        # computed thresholds, and `utc` is a TimeScale constructor flag
+        # whose real override spelling is `x_scale_type="utc"`. None of the
+        # three names a wire key of any scale type.
+        assert {"num_bins", "quantiles", "utc"}.isdisjoint(rule.valid_leaves)
+
+    def test_scale_type_tags_cover_every_tag_the_scale_classes_emit(self):
+        """``_SCALE_TYPE_TAGS`` is the one hand-listed thing left in the scale
+        registry (each tag's KEYS are asked of the gate). Guard it from both
+        sides: every listed tag must be a real variant the gate answers for,
+        and every tag ferrum's own scale classes can serialise must be listed —
+        a Rust-side variant with no entry here would silently withhold its
+        variant-specific keys from the whole override surface.
+        """
+        from ferrum._core import (
+            BandScale,
+            BinOrdinalScale,
+            DivergingScale,
+            LinearScale,
+            LogScale,
+            OrdinalScale,
+            PointScale,
+            PowScale,
+            QuantileScale,
+            QuantizeScale,
+            SequentialScale,
+            SqrtScale,
+            SymlogScale,
+            ThresholdScale,
+            TimeScale,
+        )
+
+        for scale_type in oa._SCALE_TYPE_TAGS:
+            assert scale_accepted_keys(scale_type), scale_type
+
+        instances = [
+            LinearScale(),
+            LogScale(),
+            PowScale(),
+            SqrtScale(),
+            SymlogScale(),
+            OrdinalScale(domain=["a"]),
+            BandScale(),
+            PointScale(),
+            SequentialScale(),
+            DivergingScale(),
+            QuantizeScale(domain=[0.0, 1.0], range=["#000", "#fff"]),
+            QuantileScale(domain=[0.0, 1.0], range=[0.0, 1.0]),
+            ThresholdScale(domain=[0.0, 1.0], range=[0.0, 1.0, 2.0]),
+            BinOrdinalScale(bins=[1.0, 2.0]),
+            TimeScale(utc=False),
+            TimeScale(utc=True),
+        ]
+        emitted_tags = {inst._to_scale_spec_dict()["type"] for inst in instances}
+        assert emitted_tags <= set(oa._SCALE_TYPE_TAGS)
+
+    def test_every_registry_leaf_emits_a_wire_key_some_scale_type_accepts(self):
+        """The single assertion that makes the override-leaf / wire-key class
+        of divergence impossible.
+
+        The registry used to advertise five leaves (``padding_inner``,
+        ``padding_outer``, ``domain_mid``, ``quantiles``, ``utc``) that the
+        wire gate then refused for EVERY scale type, with no working spelling
+        anywhere: the gate's message named the spelling the registry rejected
+        and the registry's did-you-mean named the spelling the gate rejected.
+        Every leaf must fold to a key at least one scale type accepts.
+
+        Asserted on what ``build_payload`` actually EMITS (the production
+        fold, snake→wire alias included), not on the alias map read back.
+        """
+        wire_union = set()
+        for scale_type in oa._SCALE_TYPE_TAGS:
+            wire_union.update(scale_accepted_keys(scale_type))
+
+        emitted = set()
+        for leaf in oa._scale_leaves():
+            payload = oa.build_payload({f"x_scale_{leaf}": None})
+            emitted.update(payload.encoding["x"]["scale"])
+
+        assert emitted - {"type"} <= wire_union
+
+    @pytest.mark.parametrize("orphan_leaf", ["utc", "quantiles", "num_bins"])
+    def test_leaf_with_no_wire_key_refuses_at_the_registry(self, orphan_leaf, base_chart):
+        """A scale attribute that names no wire key of any type is not a
+        registry leaf, so it refuses with the registry's own actionable error
+        rather than an opaque wire refusal further downstream.
+        """
+        with pytest.raises(FerrumOverrideError, match="Unknown override path"):
+            base_chart.override(**{f"x_scale_{orphan_leaf}": True}).to_svg()
 
     def test_coord_leaves_match_coord_dataclass_fields(self):
         rule = next(r for r in oa._PREFIX_RULES if r.prefix == "coord_")
@@ -719,7 +815,82 @@ class TestOverrideRenderColor:
         assert baseline != recolored
 
 
+# One renderable override per registry scale leaf: the channel to override,
+# the field bound to it, the scale type that accepts the leaf's wire key (None
+# for `type` itself, whose value IS the type), and a legal value.
+#
+# The keys are pinned equal to `_scale_leaves()` by the sweep below, so a new
+# registry leaf cannot land without a render case, and a leaf that stops being
+# reachable fails the sweep instead of quietly losing coverage.
+_SCALE_LEAF_RENDER_CASES: dict[str, tuple[str, str, str | None, object]] = {
+    "type": ("x", "num", None, "linear"),
+    "domain": ("x", "num", "linear", [0.0, 5.0]),
+    "range": ("x", "num", "linear", [0.0, 200.0]),
+    "clamp": ("x", "num", "linear", True),
+    "padding": ("x", "num", "linear", 5.0),
+    "reverse": ("x", "num", "linear", True),
+    "nice": ("x", "num", "linear", True),
+    "zero": ("x", "num", "linear", True),
+    "domainParam": ("x", "num", "linear", "p"),
+    "domain_param": ("x", "num", "linear", "p"),
+    "base": ("x", "num", "log", 2.0),
+    "constant": ("x", "num", "symlog", 2.0),
+    "exponent": ("x", "num", "pow", 2.0),
+    "align": ("x", "cat", "band", 0.0),
+    "paddingInner": ("x", "cat", "band", 0.3),
+    "padding_inner": ("x", "cat", "band", 0.3),
+    "paddingOuter": ("x", "cat", "band", 0.2),
+    "padding_outer": ("x", "cat", "band", 0.2),
+    "scheme": ("color", "val", "sequential", "viridis"),
+    "stops": ("color", "val", "sequential", [[0.0, "#ff0000"], [1.0, "#00ff00"]]),
+    "domainMid": ("color", "val", "diverging", 15.0),
+    "domain_mid": ("color", "val", "diverging", 15.0),
+    "bins": ("color", "val", "bin-ordinal", [0.0, 10.0, 20.0, 30.0]),
+}
+
+
 class TestOverrideRenderEncodingScale:
+    def test_render_cases_cover_every_registry_leaf(self):
+        assert set(_SCALE_LEAF_RENDER_CASES) == set(oa._scale_leaves())
+
+    @pytest.mark.parametrize("leaf", sorted(_SCALE_LEAF_RENDER_CASES))
+    def test_every_scale_leaf_renders_through_override(self, leaf):
+        """Every advertised ``<channel>_scale_<leaf>`` override path actually
+        reaches the wire and renders.
+
+        The render block used to prove exactly ONE scale leaf (``x_scale_domain``,
+        the single leaf whose Python spelling coincides with its wire spelling),
+        which is why a registry derived from Python attribute names could drift
+        from the per-type wire gate unnoticed: five advertised leaves resolved
+        here and were then hard-refused at the wire with no working spelling
+        anywhere. This sweep is the RED proof for that fix and the guard against
+        the next schema divergence.
+        """
+        channel, field, scale_type, value = _SCALE_LEAF_RENDER_CASES[leaf]
+        df = pl.DataFrame(
+            {"cat": ["a", "b", "c"], "num": [1.0, 2.0, 3.0], "val": [10.0, 20.0, 15.0]}
+        )
+        encoding = {"x": "cat", "y": "val", channel: field}
+        overrides: dict[str, object] = {f"{channel}_scale_{leaf}": value}
+        if scale_type is not None:
+            overrides[f"{channel}_scale_type"] = scale_type
+        chart = fm.Chart(df).mark_point().encode(**encoding).override(**overrides)
+        assert "<svg" in chart.to_svg()
+
+    def test_snake_and_wire_spellings_of_one_leaf_render_identically(self):
+        """Both accepted spellings fold to the same wire key, so they must
+        produce byte-identical SVG — the "accept both, emit the wire one" half
+        of the registry fix, proven at the render boundary rather than by
+        reading the alias map back.
+        """
+        df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+        base = fm.Chart(df).mark_bar().encode(x="cat", y="val")
+        snake = base.override(x_scale_type="band", x_scale_padding_inner=0.3).to_svg()
+        wire = base.override(x_scale_type="band", x_scale_paddingInner=0.3).to_svg()
+        unpadded = base.override(x_scale_type="band", x_scale_paddingInner=0.0).to_svg()
+        assert snake == wire
+        assert snake != unpadded, "the override must actually change geometry, or this is vacuous"
+
     def test_x_scale_domain_changes_axis_extent(self, base_chart):
         def x_tick_labels(svg):
             root = ET.fromstring(svg)

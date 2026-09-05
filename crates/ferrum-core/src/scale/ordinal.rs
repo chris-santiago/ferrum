@@ -367,7 +367,7 @@ impl OrdinalScale {
     ///
     /// An explicit range is chart-absolute by design (#39 phase 2): every
     /// panel's resolver call receives the SAME literal `[lo, hi]`, so under
-    /// faceting every panel's marks — and, via `explicit_band_centers`, its
+    /// faceting every panel's marks — and, via `categorical_placement`, its
     /// axis ticks — would otherwise land at the identical absolute pixels,
     /// correct for at most one panel and overlapping/clipped for the rest.
     /// The render-side caller (`scene_build::resolve_panel_scales`) translates
@@ -981,7 +981,7 @@ mod tests {
 
     /// Inverted explicit range [260, 40] (hi < lo): 4 categories, step = -55,
     /// centers descend 232.5 / 177.5 / 122.5 / 67.5 — the signed-extent oracle
-    /// consumed by `explicit_band_centers` — and `OrdinalScale::bandwidth()`
+    /// consumed by `categorical_placement` — and `OrdinalScale::bandwidth()`
     /// stays positive (55).
     #[test]
     fn ordinal_inverted_range_descending_centers_positive_bandwidth() {

@@ -1,389 +1,84 @@
 """Feature tests for the raw-dict scale key gate (F-L04-07 completeness half
 + F-L04-10 raw-dict coverage, batch-C task 4).
 
-Batch-C task 4's Rust half (``.sdd/task-4-report.md``) closed the last
-documented ``#[serde(flatten)]`` silent-drop carve-out on ``ScaleSpec``: every
-raw ``scale={...}`` dict is now validated against a schema-derived, per-type
-accepted-key set at ``ScaleSpec``'s own ``Deserialize`` boundary — the single
-chokepoint every ``fm.X(...)``/``fm.Y(...)``/``ChartSpec.from_json`` scale
-dict passes through, regardless of caller (an UNTYPED raw dict, e.g.
-``{"zero": False}`` with no ``"type"`` key, reaches this chokepoint as
-``linear`` because ``ferrum.encoding._scale._scale_to_dict`` injects
-``{"type": "linear", ...}`` first — see item 7 below, which names that
-injection explicitly rather than leaving it implicit). An unknown key (a
-typo like ``clammp`` for ``clamp``, or ``reveres`` for ``reverse``) now
-refuses, naming the offending key, the scale type, and the sorted
-accepted-key list — where it previously vanished silently
-(``tests/test_bug_hunt_encoding_step4.py::test_scale_dict_typo_key_is_rejected``
-is the flipped positive mirror of that old tolerance pin).
+The gate validates every raw ``scale={...}`` dict against a schema-derived,
+per-type accepted-key set at ``ScaleSpec``'s own ``Deserialize`` boundary --
+the single chokepoint every ``fm.X(...)``/``fm.Y(...)``/``ChartSpec.from_json``
+scale dict passes through -- closing the last documented ``#[serde(flatten)]``
+silent-drop carve-out on ``ScaleSpec``. An unknown key (a typo like ``clammp``
+for ``clamp``) refuses naming the offending key, the scale type, and the sorted
+accepted-key list, where it previously vanished silently.
+``tests/test_bug_hunt_encoding_step4.py::test_scale_dict_typo_key_is_rejected``
+is the flipped positive mirror of that old tolerance pin, and makes every
+refusal test here non-vacuously RED against any pre-gate build by construction.
 
-The same Rust change also made a raw-dict temporal domain
-(``{"type": "time"/"utc", "domain": [datetime.date(...), ...]}``) convert to
-epoch-ms before ``json.dumps`` would otherwise choke on a non-JSON-serializable
-``datetime`` object — but only on the chart-level channel path
-(``EncodingSpec::new``). A quality-review remediation cycle found and closed
-two gate-interaction regressions this module's first cut missed:
-
-- **S4** — ``_spec_build.py``'s bar y-axis zero-anchor used to stamp
-  ``"zero": True`` onto ANY y-channel scale dict regardless of type. Before
-  the gate, that was a harmless no-op for every non-linear type (``zero``
-  isn't a field on ``ScaleSpec::Log``/``Symlog``/``Sqrt``/``Band``/etc., so
-  serde's flatten silently dropped it); after the gate, it refused outright
-  — a real regression this module's original "no over-refusal" sweep could
-  not see, because that sweep only exercised hand-written literals, never a
-  dict as ferrum's own producers actually emit one (item 8 below closes
-  that blind spot generically; ``tests/test_bar_zero.py`` carries the
-  full, mark-specific regression suite).
-- **S3** — the raw-dict temporal-domain conversion (item 5 below) only ran
-  on the chart-level channel path (Rust's ``EncodingSpec::new`` hook). A
-  ``Layer``/composite-mark channel bypasses that constructor entirely
-  (``coerce_layers`` -> ``pyo3_serde::from_py`` json-dumps the dict
-  directly), so the identical ``scale={"type": "time", "domain":
-  [date(...), ...]}`` that rendered on a bare chart crashed with an opaque
-  ``TypeError: Object of type date is not JSON serializable`` on
-  ``chart_a + chart_b`` or any composite mark. Fixed at the ONE Python seam
-  both routes share — ``ferrum.encoding._scale._scale_to_dict`` — since
-  both ``_spec_build.py``'s chart-level and per-layer encoding-dict builders
-  call the identical ``ChannelBase.to_encoding_spec_dict()`` method, which
-  dispatches ``scale=`` through ``_scale_to_dict`` either way (item 9
-  below proves the layer path directly).
+The same Rust change converts a raw-dict temporal domain
+(``{"type": "time"/"utc", "domain": [datetime.date(...), ...]}``) to epoch-ms
+before ``json.dumps`` would otherwise choke on it -- but only on the
+chart-level channel path (``EncodingSpec::new``, a constructor the layer /
+composite-mark path never enters). Both the conversion and its matching
+refusal therefore live at the one Python seam BOTH routes share,
+``ferrum.encoding._scale._scale_to_dict``; items 9 and 11 pin each half on
+both routes.
 
 Covers:
   1. Unknown-key refusal: the typo case names the real key among the sorted
      accepted list, at both wire-boundary entry points (``ChartSpec.from_json``
      and the ``EncodingSpec::new`` constructor path), and generalizes across
-     all 16 known ``ScaleSpec`` types (not just ``linear``).
+     all 16 known ``ScaleSpec`` types.
   2. A valid-keys sweep: every accepted key, for every scale type, populated
      in one hand-authored raw dict, still parses and builds a ``ChartSpec``.
-     This proves the gate accepts every key IT ENUMERATES for a type — it is
+     This proves the gate accepts every key IT ENUMERATES for a type -- it is
      necessarily silent on a legal shape the hand-authored fixture omits (see
-     item 8, which closes that specific blind spot with producer-emitted
-     dicts instead of literals).
+     item 8, which closes that blind spot with producer-emitted dicts).
   3. ``reverse`` accepted (no refusal) via raw dict on all seven continuous
-     types, including an end-to-end render-order flip proof for ``utc``
-     (the one continuous type with no dedicated Python scale class, so
+     types, including an end-to-end render-order flip proof for ``utc`` (the
+     one continuous type with no dedicated Python scale class, so
      ``tests/test_scale_reverse.py``'s class-based sweep cannot reach it).
-  4. ``{"type": "diverging", "reverse": true}`` refused (no such field) —
-     the third silent-no-op case the gate closes, named explicitly.
-  5. Raw-dict temporal domains (``{"type": "time"/"utc", "domain":
-     [datetime.date(...), ...]}``) render byte-identical SVG to the
-     epoch-float equivalent — the raw-dict path specifically, as distinct
-     from ``tests/test_timescale_domain.py``'s class-constructor path (T3),
-     which the raw-dict conversion added by this task does not go through.
+  4. ``{"type": "diverging", "reverse": true}`` refused (no such field).
+  5. Raw-dict temporal domains render byte-identical SVG to the epoch-float
+     equivalent -- the raw-dict path specifically, as distinct from
+     ``tests/test_timescale_domain.py``'s class-constructor path.
   6. A non-temporal domain element on a raw-dict time/utc scale refuses,
      naming the accepted forms.
-  7. The untyped raw-dict spelling (no ``"type"`` key at all) — the most
-     common one in the codebase — reaches the gate as ``linear`` via the
-     ``_scale_to_dict`` injection named above, both for a legal key
-     (``{"zero": False}``) and a typo (``{"clammp": True}``, refused naming
-     ``linear``'s accepted list).
+  7. The untyped raw-dict spelling (no ``"type"`` key at all) reaches the gate
+     as ``linear`` via ``_scale_to_dict``'s injection, both for a legal key
+     and for a typo (refused naming ``linear``'s accepted list).
   8. A producer-emitted-dict arm in the "no over-refusal" sweep: dicts built
-     by ``_scale_to_dict``/a real ``Chart.to_spec()`` call, not hand-written
-     literals — the shape of coverage that would have caught the S4 bar
-     zero-anchor regression inside this module, not just in
-     ``tests/test_bar_zero.py``.
+     by ``_scale_to_dict`` / a real ``Chart.to_spec()`` call, not hand-written
+     literals -- the shape of coverage that catches a ferrum-internal emitter
+     writing a gate-refused key (as the bar zero-anchor once did; see
+     ``tests/test_bar_zero.py`` for that mark-specific suite).
   9. Raw-dict temporal domains render on the LAYER path (``chart.layer(...)``
-     and ``chart_a + chart_b``), not just the chart-level channel path — the
-     S3 regression above.
+     and ``chart_a + chart_b``), not just the chart-level channel path.
+ 10. One coherent ``TimeScale domain value`` vocabulary for both bad-element
+     kinds (unparseable ISO string, non-temporal element) regardless of which
+     side catches them, with a live cross-language guard against Rust's own
+     wording (NOT byte-identical for the ISO case: Rust quotes with ``{s:?}``,
+     Python with ``{value!r}``).
+ 11. The temporal seam owns conversion AND refusal: the temporal tag set is
+     derived from the live ``TimeScale`` class rather than hand-listed, the
+     refusal message is byte-identical to Rust's, and the chart-level and
+     layer routes refuse the same malformed dict identically.
 
-**Round 3** (a second quality-review remediation cycle) closed one
-RECURRING S4 finding and two smaller ones at the same edited block:
-
-- **S4, recurring** — ``_spec_build.py``'s override-scale merge
-  (``{**base_scale, **scale_overrides}``) still emitted gate-refused dicts
-  whenever ``Chart.override(<channel>_scale_type=...)`` switched the
-  effective type over an EXPLICIT base scale — e.g. ``fm.LinearScale()``'s
-  own emitted dict carries ``"zero": False`` (a real ``ScaleSpec::Linear``
-  field, always serialized), which survived unfiltered onto a
-  ``.override(y_scale_type="log")`` switch and got refused. Round 3 fixed
-  this with a Python mirror of Rust's ``ContinuousScaleCommon`` flatten-key
-  set (``_spec_build._CONTINUOUS_COMMON_SCALE_KEYS``); item 11 below is the
-  regression coverage that mirror's fix earned.
-- **S3, exception drift** — moving temporal-domain conversion into Python
-  (item 5/9 above) meant a bad ISO string in a scale domain reported from
-  ``ferrum.annotation.coords``'s "annotation coordinate" vocabulary instead
-  of a scale-domain one. Item 12 below pins the fix (re-raised in Rust's
-  own ``TimeScale domain value`` wording, though NOT byte-identical to it —
-  see item 12's own note) alongside the sibling non-ISO-junk-element case,
-  which was already coherent and unchanged.
-- The ``mark_bar()`` + ``.override(<y>_scale_domain=...)`` behavior change
-  from round 2's reorder (zero-anchor no longer widens an
-  override-supplied domain) is ADJUDICATED KEPT — item 13 below pins it
-  with the sharper equals-explicit-zero-False / differs-from-explicit-
-  zero-True repro pair rather than a tick-label assertion, and flags it
-  for a changelog callout (T8).
-
-  11. Regression coverage for the recurring S4 finding: every one of the
-      reviewer's repro spellings (class, typed-dict, untyped-dict), both
-      directions of the type switch (linear->log and log->linear), and two
-      marks (bar and point, since the bug is not bar-specific) — plus a
-      same-type-override control proving the filter does NOT over-drop a
-      variant-specific key when the type isn't actually changing.
-  12. The ISO-string and non-ISO-junk sibling failures now read one
-      coherent ``TimeScale domain value`` vocabulary regardless of which
-      subsystem (Python or Rust) catches them — NOT byte-identical wording
-      (Rust formats the offending value with ``{s:?}``, double quotes;
-      Python with ``{value!r}``, single quotes), only the surrounding
-      sentence.
-  13. ``mark_bar()`` + ``.override(y_scale_domain=...)`` matches the
-      explicit ``zero: False`` spelling and differs from the explicit
-      ``zero: True`` spelling — the deliberate, disclosed round-2 behavior
-      change.
-
-**Round 4** (a third quality-review remediation cycle) replaced round 3's
-``_CONTINUOUS_COMMON_SCALE_KEYS`` mechanism outright, rather than patching
-it, because both reviewers converged on the same root cause: filtering
-``base_scale`` against a hand-maintained INTERSECTION of the 7 continuous
-types' accepted keys is simultaneously too narrow (it drops a key the
-*target* type genuinely accepts — ``nice`` is on ``linear``/``log``/
-``time``/``symlog``/``utc`` but not in their intersection, since it's
-absent from ``pow``/``sqrt``, so a ``linear(nice=True)`` -> ``log`` switch
-silently lost ``nice``) and does nothing at all for a continuous <->
-non-continuous switch (``band``/``point``/``sequential``/etc., which share
-no ``ContinuousScaleCommon``-equivalent struct with anything, so round 3's
-filter never even fired for them and they kept hard-raising on shapes that
-rendered pre-gate).
-
-``_merge_override_scale`` (``src/ferrum/_spec_build.py``) now filters
-``base_scale`` against ``ferrum._core.scale_accepted_keys(new_type)`` — the
-gate's OWN per-type accepted-key table, published from Rust
-(``crates/ferrum-core/src/spec/encoding.rs``'s ``accepted_keys_for_scale_type``,
-already this task's own Rust half) — for ANY type-changing switch, not just
-a continuous-to-continuous one. A key the new type accepts survives; a key
-it doesn't is dropped, in both cases matching pre-gate behavior (serde's
-flatten either kept or silently dropped the key, depending on whether the
-target variant declared it). ``_CONTINUOUS_SCALE_TYPES``,
-``_CONTINUOUS_COMMON_SCALE_KEYS``, and the cross-language guard test that
-existed only to police that mirror are deleted — there is nothing left to
-mirror once Python asks Rust directly.
-
-  11b. Survival coverage: a key both the old and new type accept
-       (``nice``, on a ``linear``->``log`` and a ``time``->``utc`` switch)
-       must SURVIVE the type-changing override, using the same
-       equals-explicit / differs-from-explicit-omitted shape as item 13.
-       Round 3's fix failed this pair silently (no test caught it).
-  11c. Mixed-family switch coverage: every repro from both cycle-3
-       verdicts (``point``<->``band``, ``band``<->``point``,
-       ``band``->``log``, ``log``->``band``, ``point``->``linear``,
-       ``linear``->``band``, and ``Color(LinearScale())``->``sequential``)
-       renders and drops exactly the stale key named in each verdict.
-       Round 3's fix could not reach any of these (its gate required BOTH
-       sides to be in the 7-member continuous family).
-  12b. A live cross-language guard for item 12's ISO-parse message (there
-       was none before round 4): Rust's wording is triggered through the
-       real ``ferrum._core.EncodingSpec`` PyO3 constructor directly (not a
-       hand-built mirror), and compared against Python's own message with
-       the one known quoting difference normalized — so a future drift in
-       either side's wording fails this test instead of silently
-       diverging.
-
-**Round 5** (a fourth quality-review remediation cycle) closed the last gap
-in ``_merge_override_scale``: round 4's filter only ever asked whether the
-NEW type accepts a base-scale key, never whether the OLD type did. A key
-outside the OLD type's accepted set is not a legitimate leftover a type
-switch is entitled to carry — it is a typo (or a plain-inapplicable key)
-the gate would already refuse with no override at all. Two live shapes
-proved the gap:
-
-- a typo'd key (``clammp``) that happens to be invalid for BOTH the old
-  and the new type silently vanished behind a type-changing override,
-  restoring the exact silent-drop carve-out this whole task exists to
-  close;
-- sharper: a key invalid for the OLD type but that coincidentally names a
-  REAL field of the NEW type (``nice`` is not a ``band`` field, but IS a
-  ``log`` field) got silently PROMOTED to an effective setting after the
-  switch — worse than the pre-gate baseline, where ``band``'s flatten just
-  dropped it.
-
-``_merge_override_scale`` now validates ``base_scale``'s own keys against
-``scale_accepted_keys(old_type)`` FIRST, and refuses (matching the gate's
-own non-switch-path refusal) before any type-switch filtering ever runs
-— see item 14 below for both regression pins, plus the case-A no-override
-control asserted alongside each. A second, independent gap in the SAME
-helper: a non-``str`` ``<channel>_scale_type=`` override value (e.g. a user
-writing ``y_scale_type=fm.LogScale()`` by mistake, reaching for
-``y_scale=``) used to reach ``scale_accepted_keys`` directly whenever the
-channel carried an explicit base scale, and PyO3's own argument-coercion
-error surfaced instead of the gate's own message — see item 15 below.
-
-  14. Old-type-validity regression pins: the typo-escapes-via-override case
-      (case B) and the sharper invalid-key-gets-promoted case (case C),
-      each asserted against the no-override control (case A) to prove the
-      override path now refuses identically rather than divergently.
-  15. Non-string override-type regression pins: the PyO3 argument-coercion
-      error must not leak through an explicit base scale (regardless of
-      which downstream error the malformed value ultimately produces), an
-      unknown-string override type over an explicit base scale still
-      surfaces the gate's own "unknown variant" refusal (round 4's
-      fallback branch, previously executed by zero tests), and a
-      non-string spelling now produces the identical error class with and
-      without an explicit base scale on the channel.
-
-**Round 6** (a fifth quality-review remediation cycle) closed the last two
-gaps at ``_merge_override_scale``, both at the old-type-validity check round
-5 added:
-
-- Round 5's ``isinstance(new_type, str)`` guard protected only the NEW-type
-  ``scale_accepted_keys`` call. The OLD-type call one branch earlier had no
-  such guard, so a non-string base ``"type"`` (an int, a float, ``bytes``,
-  or a scale pyclass instance under ``"type"`` by mistake) behind a
-  type-changing override raised PyO3's raw ``TypeError: argument
-  'scale_type': ...`` instead of whatever the real gate raises for that
-  base standalone — the exact leak round 5's own item-15 tests forbid, on
-  the sibling call those tests never parametrized.
-- Round 5's docstring claimed an unknown old-type tag (``{"type":
-  "linearr"}``) "falls through unfiltered, since the gate will refuse the
-  base type's own tag downstream regardless" — false on a type-changing
-  override, because the override supplies its OWN ``"type"`` and the base's
-  invalid tag never reaches the wire on that spelling; the user's actual
-  mistake would go unreported.
-
-Rather than patch both gaps with more per-call ``isinstance`` guards (a
-growing list of patched call sites), round 6 replaces the WHOLE
-old-type-validity check with a probe of the real gate:
-``ferrum._core.EncodingSpec("<override-scale-probe>", scale=base_scale)``
-validates ``base_scale`` AS-AUTHORED — before any filtering or merging —
-through the exact production deserialize path, for ANY type-changing
-override. This is preferred over a hand-synthesized message (round 5's
-``f"unknown key '{k}' for type '{t}'; accepted: ..."`` literal, now
-deleted) because it gives byte-true gate messages for every invalid-base
-shape at once — bad key, unknown type tag, non-string/non-hashable type
-value — with no drift guard to maintain, since it IS the gate raising it,
-not a Python copy of its wording. It is a cold path (only type-changing
-overrides reach it), so the extra ``EncodingSpec`` construction has no
-render-path cost. Once the probe passes, ``old_type`` is guaranteed to be
-a real ``ScaleSpec`` variant tag and every one of ``base_scale``'s keys is
-valid for it, so the type-switch filtering in part 2 of the docstring can
-call ``scale_accepted_keys(old_type)`` unconditionally.
-
-A companion Python-side gap closed in the same round: ``_scale_to_dict``
-(``src/ferrum/encoding/_scale.py``) tested a user-supplied ``"type"``
-value for frozenset membership with no type guard, so an unhashable
-``"type"`` (a scale pyclass instance) raised ``TypeError: unhashable
-type: ...`` from inside a temporal-conversion helper — a message naming
-no ferrum concept, on a line this task's own cycle-2 diff added (not
-pre-existing, despite round 5's report attributing it to a pre-task
-cause). Guarding the membership test with ``isinstance(..., str)``
-restores the pre-task JSON-serialization ``TypeError`` shape.
-
-  16. Old-type non-string parity (every malformed ``"type"`` value from
-      item 15's list, now on the BASE side): the override spelling and the
-      no-override control must raise the identical exception type and
-      message. The unknown-old-type-tag case (round 5's false docstring
-      claim): a type-changing override over a typo'd base type must refuse
-      identically to the no-override control, not fall through. The
-      ``_scale_to_dict`` membership-check guard: a scale pyclass instance
-      under a raw dict's ``"type"`` key produces the pre-task
-      JSON-serialization ``TypeError``, not ``unhashable type``.
-
-**Round 7** (a sixth quality-review remediation cycle) closed one recurring
-gap and one over-refusal, both at ``_merge_override_scale``:
-
-- **Recurring — the old-type validity check's own entry guard laundered
-  ``{"type": None}``.** ``old_type is None`` conflated "no scale on the
-  channel at all" (``base_scale == {}``, which correctly must keep
-  short-circuiting) with "the channel's scale explicitly claims ``"type":
-  None``" (a real, present claim — ``scale={"type": maybe_type}`` where
-  ``maybe_type`` resolved to ``None`` is not an exotic spelling), so the
-  latter's type-changing override skipped the round-6 probe entirely and
-  rendered — including a bad key getting silently PROMOTED to an effective
-  new-type setting, the exact outcome the probe exists to refuse. Fixed by
-  keying the guard on ``"type" not in base_scale`` instead: item 16's
-  parametrization gains ``("none:None", None)``.
-- **Over-refusal — the round-6 probe validated base_scale's VALUES, not
-  just its tag and keys, under a type the switch is actively replacing.**
-  A key both the old and new type accept (most commonly ``domain``) got
-  refused whenever its value only type-checked under the NEW type —
-  ``{"domain": ["a","b","c"]}`` stamped ``"linear"`` by ``_scale_to_dict``'s
-  untyped-dict default, switched to ``"band"``, used to refuse ``invalid
-  type: string "a", expected f64`` even though the final, merged dict is a
-  perfectly legal ``band`` scale. Measured blast radius (240 ordered
-  type-pair sweep, base populated with every key the old type accepts): 48
-  of 240 pairs flipped from render (round 4/5 mechanism) to refuse (round
-  6), 0 newly accepted. Fixed by splitting the single whole-dict probe into
-  two narrower ones — a tag-only probe (``{"type": old_type}``) plus a
-  key-membership probe over ONLY the keys ``old_type`` doesn't recognize
-  (``unknown_under_old`` in the source) — so a key ``old_type`` DOES
-  recognize is never value-validated here at all; its value reaches
-  ``new_type``'s own downstream validation on the final merged dict,
-  exactly as production always ran for a key that survives the filter.
-  Item 17 below is the regression coverage for this, in the
-  producer-composition shape (``_scale_to_dict``'s untyped-dict default
-  composed with a type-changing override), not isolated literals.
-
-Both fixes are shape-preserving for every previously-closed case: the
-tag-only probe still raises byte-true gate messages for a non-string/
-non-hashable/unknown-tag ``old_type`` (round 6, item 16); the
-key-membership probe still refuses the two round-5 "old-type validity"
-regressions (item 14's case B ``clammp`` and case C ``nice``-not-a-``band``-
-field, both keys the OLD type does not recognize either way).
-
-  17. Producer-composition regression coverage for the round-7 over-refusal
-      fix: an untyped raw-dict scale (``_scale_to_dict``'s ``"linear"``
-      default) whose ``domain`` is only legal under the NEW type, composed
-      with a type-changing ``Chart.override(<channel>_scale_type=...)``,
-      renders and carries the domain through — parametrized over
-      ``x_scale_type="band"``/``"point"``/``"ordinal"`` (a string domain)
-      and ``y_scale_type="time"`` (an ISO-string domain, asserting the
-      epoch-ms conversion still runs), plus the explicit-``"type":"linear"``
-      spelling of the same shape.
-
-**Round 8** (a narrow, single-predicate closing round) closed the last of
-the three buckets ``_merge_override_scale``'s key partition could produce: a
-key ``old_type`` accepts but ``new_type`` doesn't — the ``drop =
-accepted_old - accepted_new`` set round 4 introduced — was silently
-dropped by the type-switch filter with NO validation anywhere: not by
-``unknown_under_old``'s probe (the key IS a member of ``accepted_old``, so
-it never enters that set), and not by ``new_type``'s own downstream gate
-(the key is gone from the merged dict by the time that gate runs). A key
-in this bucket whose VALUE is invalid under ``old_type`` therefore rendered
-silently behind a type-changing override, even though the same base scale
-refused standalone — e.g. ``{"type": "linear", "zero": "yes"}`` (an
-invalid ``bool`` value) + ``.override(y_scale_type="log")`` rendered,
-because ``zero`` is a ``linear`` field, not a ``log`` one, so the filter
-dropped it before anyone checked it was garbage. Fixed by probing
-``base_scale.keys() & (accepted_old - accepted_new)`` under ``old_type``,
-the same shape as ``unknown_under_old``'s probe, before dropping those
-keys — so every key of ``base_scale`` is now validated exactly once: under
-``old_type`` if it is dropped or unknown, under ``new_type`` if it
-survives. Verified this touches none of round 7's 48 restored survival
-pairs: a survivor is, by definition, accepted by BOTH types, so it is
-never a member of ``drop`` and is never sent to this probe.
-
-  18. Dropped-bucket regression coverage: a key accepted by ``old_type``
-      but not ``new_type``, whose value is invalid under ``old_type``,
-      must refuse identically with and without the type-changing override
-      — parametrized over three repro shapes (``zero`` invalid on
-      ``linear``, switched to both ``log`` and ``band``; ``base`` invalid
-      on ``log``, switched to ``band``; ``align`` invalid on ``band``,
-      switched to ``linear``) — plus a control proving a SURVIVING key
-      (accepted by both types) is untouched by the new probe.
-
-RED-proof note (discriminating by construction, not a toggled runtime
-check): before this batch's Rust half landed, ``ScaleSpec``'s internally
-tagged, ``#[serde(flatten)]``-based deserialize had no way to enforce
-``deny_unknown_fields`` — a typo'd scale key silently round-tripped as a
-no-op. ``tests/test_bug_hunt_encoding_step4.py``'s now-flipped test proved
-this directly: it asserted ``ChartSpec.from_json(...)`` did NOT raise for a
-``clammp`` typo and that the typo'd key was silently dropped from the
-round-trip. Every refusal test below is the exact positive mirror of that
-prior assertion — non-vacuously RED against any pre-gate build by
-construction, since the assertions here (``pytest.raises`` where the old
-test asserted no raise) fail outright without the gate. Items 8 and 9 above
-are separately RED-proofed against the actual pre-remediation code in this
-cycle's own history (not simulated): the S4 bar+``LogScale`` case and the
-layer-path temporal-date case both raised on the working tree before the
-``_spec_build.py``/``_scale.py`` fixes in this cycle landed, confirmed by
-direct reproduction before writing the fix (see the coordinator's
-remediation-cycle record for the exact repro commands).
+Scope note (per the repo's test-file convention, stated in
+``tests/test_boxen_palette.py``): this module covers the wire GATE. The
+``Chart.override(<channel>_scale_*=...)`` cascade regressions that the gate's
+introduction earned -- the type-switch merge and its eight remediation rounds
+-- live in ``tests/test_override_scale_merge.py``, next to
+``tests/test_override.py`` where the rest of the override surface is pinned.
+The round-by-round remediation narrative that used to open this module is in
+the commit history and ``.sdd/``, where it cannot go stale against the code.
 """
 
 from __future__ import annotations
 
 import calendar
 import datetime as dt
+import decimal
 import json
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -1072,196 +767,7 @@ def test_chart_plus_chart_composition_raw_dict_date_domain_renders() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 11. Recurring S4: override-scale-merge type switch over an explicit base
-# ---------------------------------------------------------------------------
-
-_TYPE_SWITCH_BASE_SCALES: list[tuple[str, object]] = [
-    ("class:LinearScale", fm.LinearScale()),
-    ("dict:typed-linear-zero-false", {"type": "linear", "zero": False}),
-    ("dict:untyped-zero-false", {"zero": False}),
-]
-_TYPE_SWITCH_BASE_IDS = [name for name, _scale in _TYPE_SWITCH_BASE_SCALES]
-
-_TYPE_SWITCH_MARKS: list[tuple[str, str]] = [("bar", "cat"), ("point", "cat")]
-_TYPE_SWITCH_MARK_IDS = [name for name, _x in _TYPE_SWITCH_MARKS]
-
-
-def _chart_with_y_scale(mark_name: str, scale: object) -> "fm.Chart":
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    chart = fm.Chart(df).encode(x="cat", y=fm.Y("val", scale=scale))
-    return chart.mark_bar() if mark_name == "bar" else chart.mark_point()
-
-
-@pytest.mark.parametrize("mark_name, _x", _TYPE_SWITCH_MARKS, ids=_TYPE_SWITCH_MARK_IDS)
-@pytest.mark.parametrize(
-    "scale_name, base_scale", _TYPE_SWITCH_BASE_SCALES, ids=_TYPE_SWITCH_BASE_IDS
-)
-def test_override_type_switch_linear_to_log_drops_stale_zero_key(
-    mark_name: str, _x: str, scale_name: str, base_scale: object
-) -> None:
-    """``.override(y_scale_type="log")`` over an explicit linear-ish base
-    scale (class, typed dict, or untyped dict — all three carry/normalize
-    to a real ``"zero"`` key) must not carry ``zero`` onto ``log``, on both
-    ``bar`` and ``point`` (the bug is not bar-specific: the zero-anchor
-    guard only ever protects the bar-injected key, not a user-authored
-    ``LinearScale()``'s own ``zero`` field).
-    """
-    chart = _chart_with_y_scale(mark_name, base_scale).override(y_scale_type="log")
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["y"]["scale"]
-    assert scale["type"] == "log"
-    assert "zero" not in scale
-    assert "<svg" in chart.to_svg()
-
-
-@pytest.mark.parametrize("mark_name, _x", _TYPE_SWITCH_MARKS, ids=_TYPE_SWITCH_MARK_IDS)
-def test_override_type_switch_log_to_linear_drops_stale_base_key(mark_name: str, _x: str) -> None:
-    """The reverse-direction switch: ``fm.LogScale()`` (carries ``base``)
-    overridden to ``linear`` must drop ``base`` — the sibling repro from
-    the quality review, proving the fix is not accidentally one-directional.
-    """
-    chart = _chart_with_y_scale(mark_name, fm.LogScale()).override(y_scale_type="linear")
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["y"]["scale"]
-    assert scale["type"] == "linear"
-    assert "base" not in scale
-    assert "<svg" in chart.to_svg()
-
-
-def test_override_same_type_control_keeps_variant_specific_key() -> None:
-    """Control: when the override does NOT change the effective type (only
-    ``y_scale_domain`` is overridden, ``fm.LogScale(base=2.0)``'s own
-    ``type`` is untouched), the merge must NOT filter — ``base`` must
-    survive. Proves the type-aware filter fires only on an actual type
-    change, not on every override.
-    """
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "val": [10.0, 20.0, 15.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x="x", y=fm.Y("val", scale=fm.LogScale(base=2.0)))
-        .override(y_scale_domain=[1, 100])
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["y"]["scale"]
-    assert scale["type"] == "log"
-    assert scale["base"] == 2.0
-    assert scale["domain"] == [1.0, 100.0]
-    assert "<svg" in chart.to_svg()
-
-
-# ---------------------------------------------------------------------------
-# 11b. Round 4: filter against the TARGET type's own accepted-key set
-# (ferrum._core.scale_accepted_keys), not a hand-mirrored intersection —
-# survival of a shared key, and mixed continuous/non-continuous switches
-# ---------------------------------------------------------------------------
-
-_SURVIVAL_TYPE_SWITCHES: list[tuple[str, str]] = [
-    ("linear", "log"),
-    ("time", "utc"),
-]
-_SURVIVAL_IDS = [f"{old}->{new}" for old, new in _SURVIVAL_TYPE_SWITCHES]
-
-
-@pytest.mark.parametrize("old_type, new_type", _SURVIVAL_TYPE_SWITCHES, ids=_SURVIVAL_IDS)
-def test_override_type_switch_keeps_a_key_the_new_type_also_accepts(
-    old_type: str, new_type: str
-) -> None:
-    """A key both the old and new type accept (``nice``, on every continuous
-    type except ``pow``/``sqrt``) must SURVIVE a type-changing
-    ``Chart.override(<channel>_scale_type=...)``, not just a variant-specific
-    key be dropped. Round 3's ``_CONTINUOUS_COMMON_SCALE_KEYS`` intersection
-    mirror filtered ``nice`` out on every one of these switches (it is
-    per-variant, not in ``ContinuousScaleCommon``), silently moving the axis
-    relative to the explicit spelling — this is the equality/inequality
-    shape already used at
-    ``test_bar_override_y_scale_domain_matches_explicit_zero_false_not_zero_true``
-    above, applied to ``nice`` instead of ``domain``/``zero``.
-    """
-    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-
-    def _svg(scale: dict) -> str:
-        return fm.Chart(df).mark_point().encode(x=fm.X("x", scale=scale), y="y").to_svg()
-
-    svg_override = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x=fm.X("x", scale={"type": old_type, "nice": True}), y="y")
-        .override(x_scale_type=new_type)
-        .to_svg()
-    )
-    svg_explicit_nice_true = _svg({"type": new_type, "nice": True})
-    svg_explicit_nice_omitted = _svg({"type": new_type})
-    assert svg_override == svg_explicit_nice_true, (
-        f"nice=True must survive the {old_type}->{new_type} override switch"
-    )
-    assert svg_override != svg_explicit_nice_omitted, (
-        "the two explicit spellings must render differently, or this pair is vacuous"
-    )
-
-
-_MIXED_FAMILY_SWITCHES: list[tuple[str, object, str, str]] = [
-    # (id, base_scale, override_type, stale_key_expected_absent)
-    ("point_padding->band", fm.PointScale(padding=0.5), "band", "reverse"),
-    ("band_paddingInner->point", fm.BandScale(padding_inner=0.4), "point", "paddingInner"),
-    ("band_paddingInner->log", fm.BandScale(padding_inner=0.4), "log", "paddingInner"),
-    ("log_base->band", fm.LogScale(base=2.0), "band", "base"),
-    ("point_align->linear", fm.PointScale(align=0.0), "linear", "align"),
-    ("linear->band", fm.LinearScale(), "band", "zero"),
-]
-_MIXED_FAMILY_IDS = [case_id for case_id, *_rest in _MIXED_FAMILY_SWITCHES]
-
-
-@pytest.mark.parametrize(
-    "base_scale, override_type, stale_key",
-    [c[1:] for c in _MIXED_FAMILY_SWITCHES],
-    ids=_MIXED_FAMILY_IDS,
-)
-def test_override_mixed_family_type_switch_renders_without_stale_key(
-    base_scale: object, override_type: str, stale_key: str
-) -> None:
-    """A type-changing override across the continuous/non-continuous
-    boundary (``point``/``band``/``log``/``linear`` mixed pairwise) used to
-    hard-raise, since round 3's filter only fired when BOTH the old and new
-    type were in the 7-member continuous family. Every one of these shapes
-    rendered pre-gate (the carried key is not a field on the target
-    variant, so serde's flatten silently dropped it), so filtering by the
-    target type's own accepted-key set — which fires on any type change,
-    not just a continuous-to-continuous one — must restore that.
-    """
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "val": [10.0, 20.0, 15.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x=fm.X("x", scale=base_scale), y="val")
-        .override(x_scale_type=override_type)
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["x"]["scale"]
-    assert scale["type"] == override_type
-    assert stale_key not in scale
-    assert "<svg" in chart.to_svg()
-
-
-def test_override_mixed_family_type_switch_on_color_channel_renders() -> None:
-    """The non-positional-channel sibling of the mixed-family switches
-    above: ``Color(scale=fm.LinearScale())`` (carries ``zero``/``clamp``/
-    ``nice``, none of which ``sequential`` has) overridden to
-    ``color_scale_type="sequential"`` used to raise
-    ``unknown key 'clamp' for type 'sequential'``.
-    """
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "val": [10.0, 20.0, 15.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x="x", y="val", color=fm.Color("val", scale=fm.LinearScale()))
-        .override(color_scale_type="sequential")
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["color"]["scale"]
-    assert scale["type"] == "sequential"
-    assert "clamp" not in scale
-    assert "zero" not in scale
-    assert "<svg" in chart.to_svg()
-
-
-# ---------------------------------------------------------------------------
-# 12. Exception-drift fix: coherent vocabulary for both bad-domain-element
+# 10. Exception-drift fix: coherent vocabulary for both bad-domain-element
 # kinds
 # ---------------------------------------------------------------------------
 
@@ -1356,308 +862,8 @@ def test_iso_parse_message_matches_rust_wording_modulo_quoting() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 13. Adjudicated-kept: bar + override(y_scale_domain=...) no longer widens
+# 11. The temporal seam owns conversion AND refusal, identically on both routes
 # ---------------------------------------------------------------------------
-
-
-def test_bar_override_y_scale_domain_matches_explicit_zero_false_not_zero_true() -> None:
-    """DELIBERATE BEHAVIOR CHANGE (round 2's override-merge/zero-anchor
-    reorder; flag for a T8 changelog callout): before the reorder, a bar's
-    ``.override(y_scale_domain=[...])`` got the zero-anchor injected FIRST
-    onto an empty scale (``{"type": "linear", "zero": True}``), then had
-    ``domain`` merged on top, producing ``{"type": "linear", "zero": True,
-    "domain": [lo, hi]}`` — Rust's positional resolver would then widen the
-    resolved axis extent to include zero even though the user explicitly
-    supplied a domain. Now the override merge runs first, so ``domain`` is
-    present by the time the zero-anchor check runs and the injection is
-    correctly suppressed — matching the pre-existing, documented rule that
-    a channel-level ``scale={"domain": ...}`` already suppresses the
-    zero-anchor (``tests/test_bar_zero.py::test_bar_explicit_domain_no_zero``).
-    Sharper than a tick-label assertion (per the spec reviewer's addendum):
-    equality with the explicit ``zero: False`` spelling AND inequality
-    with the explicit ``zero: True`` spelling, over the exact repro pair
-    the spec reviewer independently confirmed.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [50.0, 120.0, 90.0]})
-    svg_override = (
-        fm.Chart(df).mark_bar().encode(x="cat", y="val").override(y_scale_domain=[50, 200]).to_svg()
-    )
-    svg_zero_false = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="cat", y=fm.Y("val", scale={"domain": [50, 200], "zero": False}))
-        .to_svg()
-    )
-    svg_zero_true = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="cat", y=fm.Y("val", scale={"domain": [50, 200], "zero": True}))
-        .to_svg()
-    )
-    assert svg_override == svg_zero_false, (
-        "override(y_scale_domain=...) must match the explicit zero=False spelling"
-    )
-    assert svg_override != svg_zero_true, (
-        "override(y_scale_domain=...) must NOT widen to the old zero=True behavior"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 14. Round 5: old-type validity — a key invalid for the OLD type must not
-# be laundered through a type-changing override
-# ---------------------------------------------------------------------------
-
-
-def test_override_type_switch_typo_base_key_still_refuses() -> None:
-    """Case B (spec review cycle 4, finding 1): ``clammp`` (a typo of
-    ``clamp``) is not a real field of ``linear`` OR ``log``, so a
-    type-changing override must refuse it exactly as the no-override
-    control (case A) does, rather than letting it vanish silently the way
-    it did before round 5's old-type-validity check — round 4's filter only
-    dropped keys the target type rejects that the SOURCE type accepted, so
-    a source-invalid key it happened to also reject was passed through
-    unfiltered and then silently dropped by the merge's own ``**`` spread
-    once it reached a type with no such field.
-
-    Round 6 replaced the hand-synthesized refusal message with a probe of
-    the real gate (``ferrum._core.EncodingSpec``), so the override spelling
-    and the no-override control are now literally the same call on the
-    same dict — asserted here as exact message equality, not a shared
-    substring.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    scale = {"type": "linear", "clammp": True}
-
-    with pytest.raises(ValueError, match="unknown key 'clammp' for type 'linear'") as no_override:
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=scale)).to_svg()
-
-    with pytest.raises(ValueError) as with_override:
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=scale)).override(
-            y_scale_type="log"
-        ).to_svg()
-
-    assert str(with_override.value) == str(no_override.value), (
-        "the override spelling must raise the identical message as the no-override control"
-    )
-
-
-def test_override_type_switch_key_invalid_for_old_type_is_not_promoted() -> None:
-    """Case C (spec review cycle 4, finding 1, "sharper"): ``nice`` is not
-    a ``band`` field, so ``{"type": "band", "nice": True}`` refuses with no
-    override at all (case A control, asserted first). ``nice`` IS a real
-    ``log`` field, though, so before round 5's old-type-validity check, a
-    ``.override(x_scale_type="log")`` switch let it pass through unfiltered
-    (round 4's filter only drops keys against the SOURCE type's own accepted
-    set for keys the source type actually has) and ``log``'s own field
-    silently absorbed it — worse than the pre-gate baseline, where
-    ``band``'s flatten just dropped an inapplicable key. Both the
-    no-override and the override spelling must refuse identically.
-
-    Round 6 note: this is now a probe of the real gate rather than a
-    synthesized message (see previous test's docstring), so equality is
-    asserted directly rather than a shared substring.
-    """
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "val": [10.0, 20.0, 15.0]})
-    scale = {"type": "band", "nice": True}
-
-    with pytest.raises(ValueError, match="unknown key 'nice' for type 'band'") as no_override:
-        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=scale), y="val").to_svg()
-
-    with pytest.raises(ValueError) as with_override:
-        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=scale), y="val").override(
-            x_scale_type="log"
-        ).to_svg()
-
-    assert str(with_override.value) == str(no_override.value), (
-        "the override spelling must raise the identical message as the no-override control"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 15. Round 5: non-string override-type value must not leak a PyO3
-# argument-coercion error through an explicit base scale
-#
-# Shared with item 16's old-type parametrization below (round 7,
-# rust-quality cycle-6 finding 7): one list of malformed "type" values
-# feeds both the override slot (this section) and the base slot (item 16),
-# so the two positions cannot drift apart the way round 6's two
-# independently hand-typed lists did (``float:1.5`` was override-only-
-# absent, ``none:None`` was missing from both).
-# ---------------------------------------------------------------------------
-
-_NONSTRING_TYPE_VALUES: list[tuple[str, object]] = [
-    ("int:5", 5),
-    ("float:1.5", 1.5),
-    ("bytes:log", b"log"),
-    ("class:LogScale", fm.LogScale()),
-    ("none:None", None),
-]
-_NONSTRING_IDS = [name for name, _value in _NONSTRING_TYPE_VALUES]
-
-
-@pytest.mark.parametrize(
-    "new_type_value", [value for _name, value in _NONSTRING_TYPE_VALUES], ids=_NONSTRING_IDS
-)
-def test_override_nonstring_type_over_explicit_base_does_not_leak_pyo3_argument_error(
-    new_type_value: object,
-) -> None:
-    """A non-``str`` ``<channel>_scale_type=`` override value (a user
-    reaching for ``y_scale=`` and mistyping ``y_scale_type=``) used to
-    surface PyO3's own argument-coercion error naming an internal
-    parameter the user never wrote (``argument 'scale_type': 'LogScale'
-    object is not an instance of 'str'``) whenever the channel carried an
-    explicit base scale — because ``_merge_override_scale`` handed the raw
-    value straight to ``ferrum._core.scale_accepted_keys`` before any gate
-    ever saw it. It must not, regardless of which downstream error the
-    malformed value ultimately produces once it reaches the real gate.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    with pytest.raises(Exception) as excinfo:
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=fm.LinearScale())).override(
-            y_scale_type=new_type_value
-        ).to_svg()
-    assert "argument 'scale_type'" not in str(excinfo.value)
-
-
-@pytest.mark.parametrize(
-    "new_type_value", [value for _name, value in _NONSTRING_TYPE_VALUES], ids=_NONSTRING_IDS
-)
-def test_override_nonstring_type_same_error_class_with_and_without_base_scale(
-    new_type_value: object,
-) -> None:
-    """The same malformed ``<channel>_scale_type=`` value, with vs. without
-    an explicit base scale on the channel, must land in the SAME downstream
-    error path — not diverge into the PyO3 argument-coercion error on one
-    side (explicit base) and the real gate's own message on the other (no
-    base), which is exactly the class/no-base inconsistency the round-4
-    rust-quality review found and this round's ``isinstance`` guard closes.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-
-    with pytest.raises(Exception) as with_base:
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=fm.LinearScale())).override(
-            y_scale_type=new_type_value
-        ).to_svg()
-    with pytest.raises(Exception) as without_base:
-        fm.Chart(df).mark_bar().encode(x="cat", y="val").override(
-            y_scale_type=new_type_value
-        ).to_svg()
-
-    assert type(with_base.value) is type(without_base.value), (
-        "with-base and no-base spellings must raise the same exception type"
-    )
-    assert str(with_base.value) == str(without_base.value), (
-        "with-base and no-base spellings must raise the same message"
-    )
-
-
-def test_override_bogus_type_over_explicit_base_surfaces_gate_unknown_variant() -> None:
-    """Round 4's ``except ValueError`` fallback branch around
-    ``scale_accepted_keys`` — reached when the override's type string names
-    no known ``ScaleSpec`` variant — was executed by zero tests before this
-    round. An unknown override-type string over an EXPLICIT base scale must
-    still fall through to the real gate's own "unknown variant" refusal,
-    not get swallowed or mis-shaped by the merge helper.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    with pytest.raises(ValueError, match=r"unknown variant `bogus`"):
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=fm.LogScale())).override(
-            y_scale_type="bogus"
-        ).to_svg()
-
-
-# ---------------------------------------------------------------------------
-# 16. Round 6: old-type validity is now a probe of the REAL gate (not a
-# hand-synthesized message) -- closes the old-type non-string leak (round
-# 5's isinstance guard only protected the NEW-type call one branch below)
-# and the unknown-old-type-tag fall-through (round 5's docstring claimed
-# it was safe; it wasn't, since a type-changing override replaces the tag
-# before the gate could ever see the base's own claim). Round 7 (below)
-# folded ``None`` into this parametrization -- round 6's entry guard
-# (``old_type is None``) skipped the probe entirely for an EXPLICIT
-# ``{"type": None}`` base, which is the one shape this section's own
-# universality claim did not yet cover; see item 17's narrative note.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "old_type_value", [value for _name, value in _NONSTRING_TYPE_VALUES], ids=_NONSTRING_IDS
-)
-def test_override_type_switch_nonstring_old_type_same_error_as_no_override_control(
-    old_type_value: object,
-) -> None:
-    """Round 5's ``isinstance(new_type, str)`` guard (item 15) covered only
-    the OVERRIDE's own type value. The sibling call one branch earlier --
-    validating ``base_scale``'s OWN ``"type"`` -- had no such guard, so a
-    non-string base ``"type"`` behind a type-changing override raised
-    PyO3's raw ``TypeError: argument 'scale_type': ...`` (naming an
-    internal parameter the user never wrote) instead of whatever the real
-    gate raises for that exact base scale standalone.
-
-    Round 6 replaced the whole old-type-validity check with a probe of the
-    real gate (``ferrum._core.EncodingSpec``) that never hands an
-    unvalidated value to the ``&str``-typed ``scale_accepted_keys`` at
-    all, so the override spelling and the no-override control are now the
-    identical call on the identical dict for every case the probe actually
-    reached. The claim was NOT yet true for ``old_type_value is None``,
-    though: round 6's entry guard (``old_type is None``) short-circuited
-    BEFORE the probe for that one value, skipping it entirely rather than
-    validating it -- round 7 replaced the guard with ``"type" not in
-    base_scale`` (a base scale with an explicit ``"type": None`` key IS a
-    real, present claim, distinct from a channel with no ``scale=`` at
-    all), so the probe now runs unconditionally on every malformed
-    ``old_type_value`` including ``None`` and the claim is true: this can
-    no longer diverge by construction, for ANY malformed ``"type"`` value,
-    not just the ones enumerated here.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-
-    def render(*, override: bool):
-        scale = {"type": old_type_value, "domain": [0.0, 30.0]}
-        c = fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=scale))
-        if override:
-            c = c.override(y_scale_type="log")
-        return c.to_svg()
-
-    with pytest.raises(Exception) as no_override:
-        render(override=False)
-    with pytest.raises(Exception) as with_override:
-        render(override=True)
-
-    assert "argument 'scale_type'" not in str(with_override.value)
-    assert type(with_override.value) is type(no_override.value), (
-        "with-override and no-override spellings must raise the same exception type"
-    )
-    assert str(with_override.value) == str(no_override.value), (
-        "with-override and no-override spellings must raise the same message"
-    )
-
-
-def test_override_type_switch_unknown_old_type_tag_refuses_matching_control() -> None:
-    """A base scale whose OWN ``"type"`` names no known ``ScaleSpec``
-    variant (a typo like ``"linearr"``) must refuse a type-changing
-    override exactly as it refuses standalone -- NOT fall through
-    unfiltered. Round 5's docstring claimed the fall-through was safe
-    "since the gate will refuse the base type's own tag downstream
-    regardless"; that was false, because the override supplies its OWN
-    ``"type"`` and the base's invalid tag never reaches the wire on that
-    spelling -- the user's actual mistake (the typo'd base type) would
-    never be named.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    scale = {"type": "linearr", "zero": True}
-
-    with pytest.raises(ValueError, match=r"unknown variant `linearr`") as no_override:
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=scale)).to_svg()
-    with pytest.raises(ValueError) as with_override:
-        fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=scale)).override(
-            y_scale_type="log"
-        ).to_svg()
-
-    assert str(with_override.value) == str(no_override.value), (
-        "an unknown old-type tag must refuse identically with and without the override, "
-        "not be silently replaced by the override before the gate ever sees it"
-    )
 
 
 def test_scale_to_dict_temporal_membership_check_tolerates_nonstring_type() -> None:
@@ -1685,166 +891,133 @@ def test_scale_to_dict_temporal_membership_check_tolerates_nonstring_type() -> N
     assert "is not JSON serializable" in str(excinfo.value)
 
 
-# ---------------------------------------------------------------------------
-# 17. Round 7: producer-composition regression coverage for the narrowed
-# old-type-validity probe -- a key both the old and new type accept, whose
-# VALUE only legal-typechecks under the NEW type, must survive a
-# type-changing override rather than being value-refused under the type
-# the switch is actively replacing
-# ---------------------------------------------------------------------------
+def test_temporal_scale_types_are_derived_from_the_live_scale_class() -> None:
+    """``_TEMPORAL_SCALE_TYPES`` is asked of ``TimeScale`` -- the one scale
+    class with a temporal domain -- rather than hand-listed, so a renamed or
+    added temporal wire tag cannot leave the Python conversion seam behind.
 
-_UNTYPED_STRING_DOMAIN_OVERRIDE_TARGETS = ["band", "point", "ordinal"]
-
-
-@pytest.mark.parametrize("new_type", _UNTYPED_STRING_DOMAIN_OVERRIDE_TARGETS)
-def test_override_type_switch_untyped_string_domain_survives_switch_to_categorical(
-    new_type: str,
-) -> None:
-    """An UNTYPED raw-dict scale (``_scale_to_dict``'s ``"linear"`` default,
-    stamped by ``_emit_scale`` before ``_merge_override_scale`` ever sees
-    it) whose ``domain`` is a string list -- only legal under a categorical
-    scale, not the stamped-default ``linear`` -- used to refuse under round
-    6's whole-dict old-type probe (``invalid type: string "a", expected
-    f64``) even though the final, override-merged scale is a perfectly
-    legal ``band``/``point``/``ordinal`` domain. ``domain`` is a key both
-    ``linear`` and the target type accept, so round 7's narrower probe
-    (tag-only, plus a key-membership probe over only the keys ``linear``
-    does NOT recognize) never value-validates it under ``linear`` at all --
-    its value reaches the target type's own downstream validation on the
-    final merged dict, unchanged.
+    ``scale_accepted_keys`` cannot answer this question (it publishes key
+    NAMES, and a temporal ``domain`` is spelled ``domain`` like every other
+    continuous type's), so this is the derivation that replaces the literal
+    ``frozenset({"time", "utc"})``. Pinned against the tags the class actually
+    emits, both directions, so the derivation cannot silently return a subset.
     """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x=fm.X("cat", scale={"domain": ["a", "b", "c"]}), y="val")
-        .override(x_scale_type=new_type)
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["x"]["scale"]
-    assert scale["type"] == new_type
-    assert scale["domain"] == ["a", "b", "c"]
-    assert "<svg" in chart.to_svg()
+    from ferrum._core import TimeScale
+    from ferrum.encoding._scale import _TEMPORAL_SCALE_TYPES
+
+    emitted = {TimeScale(utc=utc)._to_scale_spec_dict()["type"] for utc in (False, True)}
+    assert _TEMPORAL_SCALE_TYPES == emitted
+    assert len(emitted) == 2, "utc=False/True must emit two distinct wire tags"
 
 
-def test_override_type_switch_untyped_iso_domain_survives_switch_to_time() -> None:
-    """The temporal sibling of the case above: an UNTYPED raw-dict scale
-    (stamped ``"linear"``) whose ``domain`` is a list of ISO date strings
-    used to refuse the identical way under round 6's whole-dict probe (a
-    string is not a valid ``linear`` domain element). The override-merged
-    scale is a legal ``time`` scale, and asserting the domain converted to
-    the exact epoch-ms pair also proves ``_scale_to_dict``'s temporal
-    conversion runs on the POST-override effective type -- the switch is
-    not laundering the ISO strings past the conversion the way it used to
-    launder them past validation.
-    """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(
-            x="cat",
-            y=fm.Y("val", scale={"domain": ["2021-01-01", "2021-12-31"]}),
-        )
-        .override(y_scale_type="time")
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["y"]["scale"]
-    assert scale["type"] == "time"
-    assert scale["domain"] == [1_609_459_200_000.0, 1_640_908_800_000.0]
-    assert "<svg" in chart.to_svg()
-
-
-def test_override_type_switch_explicit_linear_string_domain_survives_switch_to_band() -> None:
-    """The explicit-``"type"`` sibling of the untyped case above:
-    ``{"type": "linear", "domain": ["a", "b"]}`` -- the user's own claimed
-    type, not a ``_scale_to_dict`` default -- switched to ``band`` must
-    also survive; the fix is not conditioned on the type having been
-    stamped by ``_scale_to_dict`` rather than authored directly.
-    """
-    df = pl.DataFrame({"cat": ["a", "b"], "val": [10.0, 20.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x=fm.X("cat", scale={"type": "linear", "domain": ["a", "b"]}), y="val")
-        .override(x_scale_type="band")
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["x"]["scale"]
-    assert scale["type"] == "band"
-    assert scale["domain"] == ["a", "b"]
-    assert "<svg" in chart.to_svg()
-
-
-# ---------------------------------------------------------------------------
-# 18. Round 8: the DROPPED-key bucket -- a key accepted_old recognizes but
-# accepted_new doesn't, about to be silently dropped by the type-switch
-# filter -- must be validated under old_type before it's dropped, not
-# laundered into a silent render. This is the third bucket of the
-# partition item 17's docstring names: unknown_under_old (refused),
-# survivors (validated downstream under new_type), and now dropped
-# (validated here, under old_type, the same shape as unknown_under_old).
-# ---------------------------------------------------------------------------
-
-_DROPPED_BUCKET_CASES = [
-    pytest.param({"type": "linear", "zero": "yes"}, "log", id="linear_zero-to-log"),
-    pytest.param({"type": "linear", "zero": "yes"}, "band", id="linear_zero-to-band"),
-    pytest.param({"type": "log", "base": "ten"}, "band", id="log_base-to-band"),
-    pytest.param({"type": "band", "align": "left"}, "linear", id="band_align-to-linear"),
+_MALFORMED_TEMPORAL_ELEMENTS = [
+    pytest.param(True, id="bool"),
+    pytest.param(object(), id="object"),
+    pytest.param(None, id="none"),
+    pytest.param([1.0], id="list"),
 ]
 
 
-@pytest.mark.parametrize("base_scale,new_type", _DROPPED_BUCKET_CASES)
-def test_override_type_switch_dropped_key_bad_value_refuses_matching_control(
-    base_scale: dict, new_type: str
+@pytest.mark.parametrize("bad_element", _MALFORMED_TEMPORAL_ELEMENTS)
+def test_non_temporal_element_message_matches_rust_wording(bad_element: object) -> None:
+    """The Python seam's accepted-forms refusal is byte-identical to the one
+    Rust's own ``temporal_value_to_epoch_ms`` raises for the same element.
+
+    ``_convert_temporal_domain_elements`` now owns the refusal (it is the only
+    point BOTH wire routes pass through), so it runs BEFORE Rust's hook on the
+    chart-level path and the chart-level message must not have changed. Rust's
+    wording is obtained from the real production PyO3 constructor
+    (``ferrum._core.EncodingSpec``, the class ``_build_encoding_specs``
+    instantiates) called with the raw dict directly, so Python's conversion
+    layer is bypassed -- not a hand-built mirror of Rust's message.
+    """
+    from ferrum._core import EncodingSpec
+
+    scale = {"type": "time", "domain": [bad_element, 1.0]}
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+
+    with pytest.raises(TypeError) as py_exc:
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=scale), y="y").to_spec()
+    with pytest.raises(TypeError) as rust_exc:
+        EncodingSpec("x", "quantitative", scale=scale)
+
+    assert str(py_exc.value) == str(rust_exc.value)
+    assert "TimeScale domain values must be" in str(py_exc.value)
+
+
+@pytest.mark.parametrize("bad_element", _MALFORMED_TEMPORAL_ELEMENTS)
+def test_chart_level_and_layer_routes_refuse_a_bad_element_identically(
+    bad_element: object,
 ) -> None:
-    """A key ``old_type`` accepts but ``new_type`` doesn't is dropped by
-    the type-switch filter before ``new_type``'s own downstream gate ever
-    sees it -- and ``unknown_under_old``'s probe never checks it either,
-    since it IS a member of ``old_type``'s accepted-key set. Before this
-    round, nothing validated its VALUE at all: ``{"type": "linear", "zero":
-    "yes"}`` (an invalid ``bool``) + ``.override(y_scale_type="log")``
-    rendered silently, even though the identical base scale refuses
-    standalone. The dropped-bucket probe closes this: the override
-    spelling must refuse with the exact same exception type and message as
-    the no-override control.
+    """Route parity: the SAME malformed raw dict raises the same exception
+    type and the same message on the chart-level channel route and on the
+    layer/composite-mark route.
+
+    Rust's ``convert_raw_dict_temporal_domain`` hook runs at
+    ``EncodingSpec::new``, a constructor the layer route never enters, so
+    delegating refusal to it gave one user mistake three vocabularies: Rust's
+    accepted-forms ``TypeError`` on a bare chart, serde's ``invalid type:
+    boolean `true`, expected f64`` on a layer, and ``json.dumps``'s generic
+    "not JSON serializable" for an element serde could not even reach. Owning
+    the rule at the one shared Python seam collapses all three onto one.
     """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
+    from ferrum.layer import Layer
 
-    def render(*, override: bool):
-        c = fm.Chart(df).mark_bar().encode(x="cat", y=fm.Y("val", scale=base_scale))
-        if override:
-            c = c.override(y_scale_type=new_type)
-        return c.to_svg()
+    scale = {"type": "time", "domain": [bad_element, 1.0]}
+    df = pl.DataFrame({"d": [1.0, 2.0], "y": [3.0, 4.0]})
 
-    with pytest.raises(Exception) as no_override:
-        render(override=False)
-    with pytest.raises(Exception) as with_override:
-        render(override=True)
+    with pytest.raises(Exception) as chart_level:
+        fm.Chart(df).mark_point().encode(x=fm.X("d", type="T", scale=scale), y="y").to_svg()
 
-    assert type(with_override.value) is type(no_override.value), (
-        "a dropped key's bad value must refuse with the same exception type as the "
-        "no-override control, not render silently once the type switch drops it"
+    base = fm.Chart(df).mark_point().encode(x="d", y="y")
+    layer = Layer(mark="line", encoding={"x": fm.X("d", type="T", scale=scale), "y": "y"})
+    with pytest.raises(Exception) as layer_route:
+        base.layer(layer).to_svg()
+
+    assert type(layer_route.value) is type(chart_level.value), (
+        "both routes must raise the same exception type for the same malformed dict"
     )
-    assert str(with_override.value) == str(no_override.value), (
-        "a dropped key's bad value must refuse with the same message as the no-override control"
+    assert str(layer_route.value) == str(chart_level.value), (
+        "both routes must raise the same message for the same malformed dict"
     )
 
 
-def test_override_type_switch_surviving_key_untouched_by_dropped_bucket_probe() -> None:
-    """Control for the fix above: a key BOTH the old and new type accept
-    (``domain``, legal on both ``linear`` and ``band``) is a survivor, not
-    a member of ``drop = accepted_old - accepted_new`` -- the new
-    dropped-bucket probe must never see it, so it keeps reaching
-    ``new_type``'s own downstream validation untouched, exactly as item 17
-    already pins. A regression that widened the dropped-bucket probe to
-    cover survivors too would refuse this case; it must still render.
+@pytest.mark.parametrize(
+    "good_element",
+    [
+        pytest.param(np.float32(0), id="np.float32"),
+        pytest.param(np.int64(0), id="np.int64"),
+        pytest.param(decimal.Decimal("0"), id="Decimal"),
+    ],
+)
+def test_chart_level_and_layer_routes_accept_a_float_able_numeric_identically(
+    good_element: object,
+) -> None:
+    """The numeric branch of ``_convert_temporal_domain_elements`` used to
+    append the ORIGINAL value rather than ``float(value)``, on the rationale
+    that Rust's ``extract::<f64>()`` (which goes through ``__float__``/
+    ``__index__``) accepts a numpy scalar or a ``Decimal`` as a valid
+    epoch-ms element. That rationale holds only on the chart-level route,
+    which reaches Rust's extractor -- the layer/composite-mark route reaches
+    ``json.dumps`` instead, which cannot serialize a numpy scalar or a
+    ``Decimal`` at all. A domain built from ``arr.min()``/``arr.max()`` on a
+    float32 or int64 array is an ordinary way to build a domain, so this
+    rendered fine on a bare chart and hard-failed only once layered --
+    exactly the shape a boundary bug should not have. Appending
+    ``float(value)`` widens the layer route up to match the chart route;
+    this pins that both routes now render identically for the same element.
     """
-    df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 15.0]})
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x=fm.X("cat", scale={"type": "linear", "domain": ["a", "b", "c"]}), y="val")
-        .override(x_scale_type="band")
-    )
-    scale = json.loads(chart.to_spec().to_json())["encoding"]["x"]["scale"]
-    assert scale["type"] == "band"
-    assert scale["domain"] == ["a", "b", "c"]
-    assert "<svg" in chart.to_svg()
+    df = pl.DataFrame({"d": [1.0, 2.0], "y": [3.0, 4.0]})
+    scale = {"type": "time", "domain": [good_element, 5.0]}
+    encoding = {"x": fm.X("d", type="T", scale=scale), "y": "y"}
+
+    chart_svg = fm.Chart(df).mark_point().encode(**encoding).to_svg()
+
+    from ferrum.layer import Layer
+
+    base = fm.Chart(df).mark_point().encode(x="d", y="y")
+    layer = Layer(mark="point", encoding=encoding)
+    layer_svg = base.layer(layer).to_svg()
+
+    assert isinstance(chart_svg, str) and chart_svg
+    assert isinstance(layer_svg, str) and layer_svg

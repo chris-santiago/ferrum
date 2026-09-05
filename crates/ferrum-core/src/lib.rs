@@ -20,6 +20,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // filters against the SAME source of truth the gate enforces instead of
     // a hand-mirrored copy.
     m.add_function(wrap_pyfunction!(spec::encoding::scale_accepted_keys, m)?)?;
+    // Batch-C close remediation: validates a raw scale dict through the SAME
+    // gate `EncodingSpec(field, scale={...})` enforces, so `_spec_build.py`'s
+    // override-scale merge can stop constructing a throwaway `EncodingSpec`
+    // for the side effect of its exception (rust-design recommendation 5 /
+    // python-design S2, converged).
+    m.add_function(wrap_pyfunction!(spec::encoding::validate_scale_dict, m)?)?;
     m.add_class::<scale::linear::LinearScale>()?;
     m.add_class::<scale::log::LogScale>()?;
     m.add_class::<scale::symlog::SymlogScale>()?;

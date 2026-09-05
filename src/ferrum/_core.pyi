@@ -929,6 +929,15 @@ def theme_color_keys() -> list[str]: ...
 # unknown ``scale_type`` tag.
 def scale_accepted_keys(scale_type: str) -> list[str]: ...
 
+# Batch C close remediation: the same wire gate ``EncodingSpec(field,
+# scale={...})`` enforces, callable for validation only. Raises the gate's own
+# ValueError (byte-identical to the EncodingSpec route's message, since both
+# call one shared Rust helper) on an invalid scale dict; returns None on a
+# valid one. Exists so Python's override-scale merge can ask "is this scale
+# dict valid?" without constructing a throwaway EncodingSpec for the side
+# effect of its exception.
+def validate_scale_dict(scale: dict) -> None: ...
+
 # ---------- Palette registry accessors ----------
 #
 # Read-only views over the Rust palette registry (categorical + continuous).

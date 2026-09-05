@@ -82,7 +82,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 // a collision-prone one.
                 let band_width = match ctx.scales.y.bandwidth_over(panel.w) {
                     Some(w) => w,
-                    None => return empty(),
+                    None => {
+                        debug_assert!(false, "this crossbar mode dispatches only for an ordinal y scale, which always reports a bandwidth");
+                        return empty();
+                    }
                 };
                 // band_size is now a FULL-length factor (rect's convention,
                 // GH #85): default 0.6 (formerly a HALF-length factor
@@ -156,7 +159,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // Length is the resolved x scale's drawn band × `band_size`
             // (F-L04-03, spec §4A; see `ScaleKind::bandwidth`). `None` is
             // unreachable — this branch is gated on an ordinal x.
-            let band_width = match ctx.scales.x.bandwidth() { Some(w) => w, None => return empty() };
+            let band_width = match ctx.scales.x.bandwidth() {
+                Some(w) => w,
+                None => {
+                    debug_assert!(false, "this ordinal-x mode dispatches only for an ordinal x scale, which always reports a bandwidth");
+                    return empty();
+                }
+            };
             // band_size is now a FULL-length factor (rect's convention, GH
             // #85); default 0.6 keeps this bit-identical to the old
             // half-length default of 0.3 (see the bit-identity proof below).
@@ -213,7 +222,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // The y twin of the ordinal-x mode's length (F-L04-03, spec §4A;
             // see `ScaleKind::bandwidth`). `None` is unreachable — this branch
             // is gated on an ordinal y.
-            let band_width = match ctx.scales.y.bandwidth() { Some(w) => w, None => return empty() };
+            let band_width = match ctx.scales.y.bandwidth() {
+                Some(w) => w,
+                None => {
+                    debug_assert!(false, "this ordinal-y mode dispatches only for an ordinal y scale, which always reports a bandwidth");
+                    return empty();
+                }
+            };
             // band_size is now a FULL-length factor (rect's convention, GH
             // #85); default 0.6 keeps this bit-identical to the old
             // half-length default of 0.3.
@@ -274,7 +289,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // mode above.
         let band_width = match ctx.scales.x.bandwidth_over(panel.h) {
             Some(w) => w,
-            None => return empty(),
+            None => {
+                debug_assert!(false, "this crossbar mode dispatches only for an ordinal x scale, which always reports a bandwidth");
+                return empty();
+            }
         };
         // band_size is now a FULL-length factor (rect's convention, GH #85);
         // default 0.6 keeps the default rendered length byte-identical (see

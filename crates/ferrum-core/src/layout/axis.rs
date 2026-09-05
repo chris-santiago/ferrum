@@ -3654,6 +3654,15 @@ mod tests {
     fn paired_band_centers_accepts_matched_length_and_rejects_mismatched() {
         assert_eq!(paired_band_centers(Some(&[1.0, 2.0]), 2), Some(&[1.0, 2.0][..]));
         assert_eq!(paired_band_centers(Some(&[1.0, 2.0]), 3), None);
+        // Mutation-tester (batch-C close remediation, fix 1): the carrier
+        // LONGER than `tick_count` must also be refused, not just the
+        // shorter-carrier case above — a `==` guard relaxed to `>=` would
+        // still pass both assertions above (both carriers there are shorter
+        // than or equal to `tick_count`) but would let a longer carrier
+        // (e.g. a `tick_values` override with fewer labels than categories)
+        // pair label *i* onto category *i*'s center, which is not that
+        // label's category — exactly what this function's own doc forbids.
+        assert_eq!(paired_band_centers(Some(&[1.0, 2.0, 3.0]), 2), None);
     }
 
     /// Without a placement, the y-axis keeps uniform-slot placement.

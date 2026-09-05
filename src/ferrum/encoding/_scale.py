@@ -21,7 +21,9 @@ domain rendered on a bare chart but crashed with an opaque
 ``TypeError: Object of type date is not JSON serializable`` on any layered
 or composite-mark chart. Converting here, at the one shared seam, closes
 both routes in one place instead of chasing every JSON-serialization
-call site individually.
+call site individually.  The matching REFUSAL (an element that is neither
+numeric nor date/datetime/string) lives here for the same reason — see
+:func:`_convert_temporal_domain_elements`.
 """
 
 from __future__ import annotations
@@ -29,47 +31,69 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any
 
+
+def _temporal_scale_types() -> frozenset[str]:
+    """Return the ``ScaleSpec`` ``"type"`` tags whose ``domain`` is temporal.
+
+    Asked of the live schema rather than hand-listed: ``TimeScale`` is the one
+    scale class carrying a temporal domain, and its ``utc=`` flag selects which
+    of its two wire tags it serialises as, so the tags it can emit ARE the
+    temporal tag set.  ``ferrum._core.scale_accepted_keys`` cannot answer this
+    one — it publishes key NAMES, and a temporal ``domain`` is spelled
+    ``domain`` exactly like every other continuous type's.
+    """
+    from ferrum._core import TimeScale  # type: ignore[attr-defined]
+
+    return frozenset(TimeScale(utc=utc)._to_scale_spec_dict()["type"] for utc in (False, True))
+
+
 # ScaleSpec "type" tags whose `domain` is temporal (epoch-ms based).
-_TEMPORAL_SCALE_TYPES = frozenset({"time", "utc"})
+_TEMPORAL_SCALE_TYPES = _temporal_scale_types()
+
+# The accepted-forms sentence Rust's `temporal_value_to_epoch_ms`
+# (`crates/ferrum-core/src/scale/time/mod.rs`) raises for the same mistake.
+# Kept byte-identical to it so a malformed element reads the same regardless of
+# which side catches it; pinned by
+# `tests/test_scale_dict_gate.py::test_non_temporal_element_message_matches_rust_wording`.
+_TEMPORAL_ACCEPTED_FORMS = (
+    "TimeScale domain values must be float (epoch-ms), datetime.date, "
+    "datetime.datetime, or an ISO-8601 date/datetime string"
+)
 
 
 def _convert_temporal_domain_elements(domain: list | tuple) -> list:
-    """Convert a temporal scale's raw ``domain`` elements to epoch-ms (UTC).
+    """Convert a temporal scale's raw ``domain`` elements to epoch-ms (UTC), or refuse.
 
     Every ``datetime.date``/``datetime.datetime``/ISO-8601 string element is
     converted via :func:`ferrum.annotation.coords.temporal_coord_to_epoch_ms`
     — the canonical Python-side converter, cross-language-parity-pinned
     against Rust's own ``TimeScale(domain=...)`` extraction by
     ``tests/test_timescale_domain.py``. Elements already numeric (``float``/
-    ``int``, i.e. already epoch-ms) pass through unchanged.
+    ``int``, i.e. already epoch-ms) are coerced via ``float()`` to ensure
+    consistent serialization across both wire routes (chart-level and layer).
 
-    This performs the CONVERSION half only. An element that is neither
-    numeric nor date/datetime/str (a genuinely malformed value, e.g.
-    ``object()`` or a ``bool``) is also left unchanged here rather than
-    raised — refusing it with a clear "accepted forms" message stays the
-    job of the downstream Rust gate
-    (``crates/ferrum-core/src/spec/encoding.rs::convert_raw_dict_temporal_domain``),
-    which still runs on the chart-level channel path after this conversion
-    (a no-op there once the valid elements are already floats). The
-    layer/composite-mark path has no equivalent Rust-side refusal today
-    (only the conversion gap this function closes) — a malformed element on
-    that path still surfaces as ``json.dumps``'s generic
-    ``TypeError: Object of type ... is not JSON serializable``, unchanged
-    from before this task and not a regression it introduces.
+    This seam owns the whole rule, conversion AND refusal, because it is the
+    only point BOTH wire routes pass through. Rust's own
+    ``convert_raw_dict_temporal_domain`` hook runs at ``EncodingSpec::new``, a
+    constructor the layer/composite-mark route never enters, so delegating
+    refusal to it left one user mistake with three vocabularies: Rust's
+    accepted-forms ``TypeError`` on a bare chart, serde's ``invalid type:
+    boolean`` on a layer, and ``json.dumps``'s generic "not JSON serializable"
+    for an element serde could not even reach. An element that is neither
+    numeric nor ``date``/``datetime``/``str`` is therefore raised here, in
+    Rust's own accepted-forms wording (:data:`_TEMPORAL_ACCEPTED_FORMS`) and
+    with its exception type (``TypeError``), so the chart-level message is
+    unchanged and the layer route now matches it. ``bool`` gets Rust's
+    dedicated sub-message: it is an ``int`` subclass, and silently reading
+    ``True`` as ``1.0`` epoch-ms is the footgun ``TimeScale``'s own domain
+    contract already refuses. Rust's hook stays in place as a belt-and-braces
+    no-op on the chart-level route.
 
-    An unparseable ISO string, by contrast, IS raised here (there is
-    nothing downstream to catch it — a bad string still survives
-    ``json.dumps`` just fine as a JSON string, so Rust's gate would never
-    see it as an error at all, just a wrong epoch value). It is re-raised
-    in the exact vocabulary the Rust-side hook uses for the identical
-    mistake (``iso8601_string_epoch_ms`` in
-    ``crates/ferrum-core/src/scale/time/mod.rs``), not
-    ``temporal_coord_to_epoch_ms``'s own "annotation coordinate" wording —
-    a bad ISO string in a *scale* domain is a scale-domain mistake, and the
-    message must read as one coherent taxonomy regardless of which path
-    (Python, here, for a raw dict's date/datetime/str elements; Rust, for
-    everything else) happens to catch it, not two subsystems' worth of
-    unrelated vocabulary for the same input.
+    An unparseable ISO string raises ``ValueError``, in the vocabulary Rust's
+    ``iso8601_string_epoch_ms`` uses for the identical mistake rather than
+    ``temporal_coord_to_epoch_ms``'s own "annotation coordinate" wording — a
+    bad ISO string in a *scale* domain is a scale-domain mistake and must read
+    as one.
     """
     from ferrum.annotation.coords import temporal_coord_to_epoch_ms
 
@@ -83,8 +107,28 @@ def _convert_temporal_domain_elements(domain: list | tuple) -> list:
                     f"Cannot parse TimeScale domain value {value!r} as an ISO-8601 date or "
                     "datetime. Use 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS[.ffffff][±HH:MM]'."
                 ) from exc
+        elif isinstance(value, bool):
+            raise TypeError(
+                f"{_TEMPORAL_ACCEPTED_FORMS}; got bool ({value}), which is not accepted "
+                "as a numeric epoch-ms value"
+            )
         else:
-            converted.append(value)
+            # Duck-typed numeric check, matching Rust's `extract::<f64>()`
+            # (which goes through `__float__`/`__index__`, so a numpy scalar
+            # or a Decimal is a valid epoch-ms element there too). But that
+            # `extract::<f64>()` argument only holds on the route that
+            # reaches Rust's extractor (the chart-level path); the
+            # layer/composite-mark route reaches `json.dumps` instead, which
+            # cannot serialize a numpy scalar or a Decimal. Appending
+            # `float(value)` widens the layer route up to the chart route
+            # (both now accept the same set) rather than narrowing either:
+            # Rust deserializes `1` and `1.0` into the same `f64`, so no
+            # bytes move on the route that was already correct.
+            try:
+                converted_value = float(value)
+            except (TypeError, ValueError):
+                raise TypeError(f"{_TEMPORAL_ACCEPTED_FORMS}; got {type(value).__name__}") from None
+            converted.append(converted_value)
     return converted
 
 

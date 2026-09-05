@@ -26,215 +26,35 @@ from ferrum._facet import (
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._layer_transforms import _infer_agg_groupby
+from ferrum._override_consume import merge_encoding_scale as _merge_encoding_scale
+
+
+def _scale_type_accepts_zero(scale_type: Any) -> bool:
+    """Whether a scale ``"type"`` tag accepts the ``zero`` wire key.
+
+    Asked of the gate's own published table
+    (``ferrum._core.scale_accepted_keys``) rather than compared against a
+    ``"linear"`` literal, so the bar zero-anchor tracks the Rust schema instead
+    of mirroring one row of it.  ``None`` means the dict carries no ``type`` at
+    all, which reaches the wire as ``linear`` (``_scale_to_dict``'s default);
+    any non-``str`` or unknown tag answers ``False`` so the zero-anchor stays
+    out of the way and the gate itself does the refusing.
+    """
+    if scale_type is None:
+        return True
+    if not isinstance(scale_type, str):
+        return False
+    try:
+        return "zero" in _scale_accepted_keys(scale_type)
+    except ValueError:
+        return False
+
 
 # Channels excluded from auto-tooltip field derivation: tooltip/tooltip_fields
 # are the explicit-tooltip escape hatch (handled by the caller before this
 # runs), and detail/key/href/description/url each have their own dedicated
 # purpose that isn't "show this raw value on hover".
 _AUTO_TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
-
-
-def _merge_override_scale(base_scale: dict, scale_overrides: dict) -> dict:
-    """Merge a channel's own scale dict with a ``Chart.override(<channel>_scale_*=...)``
-    scale-leaf dict, dropping ``base_scale``'s keys the *new* type doesn't
-    accept when the override switches the effective scale ``type`` — and
-    refusing outright when ``base_scale`` was already invalid under its OWN
-    type, rather than letting the type switch silently launder it.
-
-    Every one of ``base_scale``'s own keys belongs to ``base_scale``'s own
-    ``type`` — a ``ScaleSpec::Log``'s ``base`` field means nothing on
-    ``ScaleSpec::Band``. Before the raw-dict scale key gate (F-L04-07),
-    carrying a stale key across a type-changing override was a harmless
-    no-op — serde's flatten silently dropped whatever the new type didn't
-    recognize. The gate now refuses it outright: e.g.
-    ``.override(y_scale_type="log")`` over an explicit ``fm.LinearScale()``
-    base (whose own emitted dict carries ``zero``) used to raise
-    ``unknown key 'zero' for type 'log'`` — a real, user-reachable
-    regression this task's gate introduced.
-
-    DECIDED RULE, in two parts:
-
-    1. **Old-type TAG and KEY-membership come first, checked through the
-       REAL gate — VALUES are not (with one qualifier, see below).** When
-       the merge's effective ``type`` is changing, ``base_scale``'s own
-       claimed ``type`` is probed alone first (``EncodingSpec(...,
-       scale={"type": old_type})``), through the exact production
-       deserialize path (``ferrum._core.EncodingSpec``). This surfaces a
-       non-string/non-hashable ``type`` value or an unknown type tag as
-       whatever the gate itself raises for that shape — because it *is*
-       the gate raising it, not a Python mirror of its wording. Once the
-       tag is confirmed real, every one of ``base_scale``'s OTHER keys is
-       checked for membership in ``old_type``'s own accepted-key set
-       (``scale_accepted_keys``); any key ``old_type`` doesn't recognize is
-       probed the same way (``{"type": old_type, **those keys}``) so the
-       refusal is again the gate's own message, not a hand-rebuilt one.
-       Neither probe evaluates the VALUE of a key ``old_type`` *does*
-       recognize — see part 2 for the full three-way partition of
-       ``base_scale``'s keys and why a recognized key's value ends up
-       checked exactly once, by exactly one of two paths (this function or
-       ``new_type``'s own downstream gate), never both and never neither.
-       None of this is allowed to be laundered by the type switch:
-       dropping an invalid key silently would swallow the typo again (the
-       exact carve-out this task's gate exists to close); keeping it
-       unfiltered would silently *promote* it to a real, effective setting
-       whenever the new type happens to define a same-named field (e.g.
-       ``nice`` not being a ``band`` field but becoming effective after
-       switching to ``log``, which does have one) — worse than either
-       pre-gate outcome. So this function refuses immediately, with the
-       exact refusal the gate gives that same ``base_scale`` standalone
-       with no override at all, before the type ever switches — modulo one
-       qualifier: this equivalence holds for what THIS function's own
-       narrowed probes actually send to the gate (the tag; the keys
-       ``old_type`` doesn't recognize; the keys the switch is about to drop,
-       per part 2), not for ``base_scale`` json-dumped as a whole. On a
-       doubly-malformed base — an unknown key alongside a
-       non-JSON-serializable value on a DIFFERENT, known key, e.g.
-       ``{"clammp": True, "domain": object()}`` — the standalone spelling's
-       ``json.dumps`` chokes on the whole dict first, raising ``TypeError:
-       Object of type object is not JSON serializable``, while this
-       function's narrower probe (which excludes the known ``domain`` key
-       by design) raises the cleaner ``ValueError: unknown key 'clammp'
-       for type ...`` instead. Both refuse; the wording differs, and the
-       override path's message is the more actionable of the two. An
-       unknown old type tag (``{"type": "weird"}``) refuses here too, for
-       the same reason — it is invalid under its own claimed type, and
-       letting the switch replace that tag before the gate ever sees it
-       would silently discard the user's actual mistake. A base scale with
-       no ``"type"`` key at all (an empty ``{}``, the one shape a channel
-       with no ``scale=`` at all produces) is NOT probed — there is no tag
-       to validate, and the switch is expected to supply one; a base scale
-       with an EXPLICIT ``"type": None`` IS probed (and refused, matching
-       its own standalone refusal), since that is a real, present claim the
-       user (or a programmatically-built dict) made, not the "no scale"
-       case.
-    2. **Type-switch filtering — every one of base_scale's keys is
-       validated EXACTLY ONCE.** Passing part 1 guarantees ``old_type`` is
-       a real ``ScaleSpec`` variant tag and every one of ``base_scale``'s
-       keys is a member of its accepted-key set (``accepted_old``). Once
-       ``new_type``'s own accepted-key set (``accepted_new``) is known,
-       every key in ``base_scale`` falls into exactly one of three buckets,
-       and exactly one path validates it:
-
-       - **Unknown under ``old_type``** (part 1's ``unknown_under_old``) —
-         already refused above, before this bucket is even reached.
-       - **Accepted by ``old_type`` but NOT by ``new_type``**
-         (``drop = accepted_old - accepted_new``) — about to be silently
-         dropped by the filter below, which means it will NEVER reach
-         ``new_type``'s own downstream gate on the merged dict. Nobody
-         would validate its VALUE at all if this function didn't — which
-         is exactly what let a value-invalid dropped key render silently
-         behind a type-changing override (``{"type": "linear", "zero":
-         "yes"}`` + ``.override(y_scale_type="log")`` — ``zero`` is a
-         ``linear`` field, not a ``log`` one, so the filter below drops it,
-         and nothing downstream was ever checking its value). So this
-         bucket IS probed here, under ``old_type`` (the type it actually
-         claims), the same way ``unknown_under_old`` is probed above:
-         ``{"type": old_type, **those keys}``. It refuses with
-         ``old_type``'s own message for the bad value (e.g. ``invalid
-         type: string "yes", expected a boolean``) instead of letting the
-         switch launder it into a silent render.
-       - **Accepted by BOTH ``old_type`` and ``new_type``** (the
-         survivors) — deliberately NOT value-validated here. This key must
-         reach ``new_type``'s own downstream validation with its value
-         untouched (e.g. ``domain``, accepted by both ``linear`` and
-         ``band``, whose string elements are illegal under ``linear`` but
-         legal under ``band`` — ``{"domain": ["a","b","c"]}`` stamped
-         ``"linear"`` by ``_scale_to_dict``'s untyped-dict default, then
-         switched to ``"band"``, is a legal ``band`` domain that an
-         earlier, wider probe used to refuse as ``invalid type: string
-         "a", expected f64`` — a real regression the per-bucket probing
-         shape avoids by construction, since a survivor is never sent to
-         any probe under ``old_type`` at all).
-
-       So ``ferrum._core.scale_accepted_keys(old_type)`` cannot itself
-       raise here (part 1 already proved every key is a member); the
-       dropped-key probe can raise for a value-invalid dropped key; a
-       non-``str`` override type (e.g. a scale pyclass instance passed to
-       ``y_scale_type=`` by mistake) skips both the dropped-key probe and
-       the filtering step entirely — ``scale_accepted_keys`` only accepts a
-       real type string, and PyO3's own argument-coercion error is not
-       this gate's voice — so the merged dict reaches the real gate
-       unfiltered and its own "invalid type: ... expected variant
-       identifier" surfaces instead. When the type is NOT changing (same
-       type, or the override doesn't touch ``type`` at all), no filtering
-       and no dropped-key probing happens — the base scale's own keys still
-       fully apply, e.g. an override that only sets ``y_scale_domain`` on
-       an explicit ``LogScale()`` must still keep that scale's own
-       ``base``.
-    """
-    old_type = base_scale.get("type")
-    new_type = scale_overrides.get("type", old_type)
-    # "type" not in base_scale (rather than "old_type is None") is the
-    # correct no-tag test: a channel with no scale= at all reaches here as
-    # `{}`, which has no "type" key and must keep short-circuiting -- but
-    # an EXPLICIT `{"type": None, ...}` (e.g. a programmatically built
-    # `scale={"type": maybe_type}` dict where `maybe_type` resolved to
-    # None) DOES have a "type" key, is a real claim the user made, and must
-    # reach the probe below like any other invalid tag. Keying on
-    # `old_type is None` let that shape's type-changing override render
-    # silently instead of refusing -- see part 1 of the docstring.
-    if "type" not in base_scale or new_type == old_type:
-        return {**base_scale, **scale_overrides}
-
-    # Type is changing: validate base_scale's TAG first, alone, through the
-    # real gate -- see part 1 of the docstring for why this and the
-    # key-membership probe below are deliberately narrower than validating
-    # base_scale as a whole. This raises the gate's own exception
-    # (ValueError for an unknown tag, TypeError for a value that can't even
-    # reach serde, e.g. a non-str/non-hashable `type`) with the identical
-    # message a standalone, override-free `scale={"type": old_type}` would
-    # raise.
-    _EncodingSpec("<override-scale-probe>", scale={"type": old_type})
-
-    # old_type is now confirmed a real ScaleSpec variant tag, so this
-    # cannot raise.
-    accepted_old = set(_scale_accepted_keys(old_type))
-
-    # Key-membership under old_type, for keys accepted_old doesn't
-    # recognize -- probed with ONLY those keys (not the whole base_scale)
-    # so a key old_type DOES recognize is never value-validated here; see
-    # part 2 of the docstring for why that matters (a key new_type also
-    # accepts must reach new_type's own downstream validation untouched).
-    unknown_under_old = {k for k in base_scale if k != "type" and k not in accepted_old}
-    if unknown_under_old:
-        _EncodingSpec(
-            "<override-scale-probe>",
-            scale={"type": old_type, **{k: base_scale[k] for k in unknown_under_old}},
-        )
-
-    accepted_new: set[str] | None
-    if isinstance(new_type, str):
-        try:
-            accepted_new = set(_scale_accepted_keys(new_type))
-        except ValueError:
-            # Unknown new type: let the merged dict reach the gate
-            # unfiltered so its own "unknown variant" error surfaces.
-            accepted_new = None
-    else:
-        # Non-string type value: don't hand it to the PyO3-backed
-        # scale_accepted_keys (it would raise an argument TypeError naming
-        # an internal parameter, not this gate's message). Fall through
-        # unfiltered so the real gate's own type error surfaces instead.
-        accepted_new = None
-    if accepted_new is not None:
-        drop = accepted_old - accepted_new
-        # Dropped-bucket probe (part 2 of the docstring): a key old_type
-        # recognizes but new_type doesn't is about to be silently dropped
-        # by the filter below, so it will never reach new_type's own
-        # downstream gate on the merged dict -- nobody validates its VALUE
-        # if this probe doesn't. Probed under old_type (the type it
-        # actually claims), same shape as unknown_under_old's probe above,
-        # so every key of base_scale is validated exactly once: under
-        # old_type if it's dropped or unknown, under new_type if it
-        # survives.
-        dropped_present = {k for k in base_scale if k != "type" and k in drop}
-        if dropped_present:
-            _EncodingSpec(
-                "<override-scale-probe>",
-                scale={"type": old_type, **{k: base_scale[k] for k in dropped_present}},
-            )
-        base_scale = {k: v for k, v in base_scale.items() if k not in drop}
-    return {**base_scale, **scale_overrides}
 
 
 def _auto_tooltip_fields(enc: dict) -> list[dict]:
@@ -537,7 +357,7 @@ class SpecBuildMixin:
 
                     existing_scale = d.get("scale")
                     base_scale = existing_scale if isinstance(existing_scale, dict) else {}
-                    d["scale"] = _scale_to_dict(_merge_override_scale(base_scale, scale_overrides))
+                    d["scale"] = _scale_to_dict(_merge_encoding_scale(base_scale, scale_overrides))
             # Bar y-axis zero-anchor (gallery defaults A3): inject
             # scale.zero=True on the y-encoding so bar charts always
             # start at zero unless the caller explicitly sets domain or
@@ -572,15 +392,15 @@ class SpecBuildMixin:
                 # it into e.g. a `log`/`symlog`/`sqrt`/`time`/`band` scale
                 # dict was a harmless no-op — serde's flatten silently
                 # dropped the unrecognized key. The gate now refuses it, so
-                # injection must be scoped to the scale types that actually
-                # accept `zero` (absent/default type, or explicit "linear")
-                # to reproduce that exact pre-gate effective behavior rather
-                # than newly breaking every non-linear bar y-scale.
+                # injection is scoped to the scale types that actually accept
+                # `zero`, asked of the gate itself, to reproduce that exact
+                # pre-gate effective behavior rather than newly breaking
+                # every non-linear bar y-scale.
                 _scale_type = scale.get("type")
                 if (
                     "domain" not in scale
                     and "zero" not in scale
-                    and (_scale_type is None or _scale_type == "linear")
+                    and _scale_type_accepts_zero(_scale_type)
                 ):
                     d["scale"] = {"type": _scale_type or "linear", **scale, "zero": True}
             # D5b: strip ``stack=`` on marks that cannot honor stacking and emit

@@ -8,6 +8,14 @@ deprecation warnings.  It runs **last** among presentation sources so override w
 the cascade (spec §7: override > per-channel ``axis=``/``legend=`` > ``configure_*``
 > theme > ``set_default_theme`` > Rust defaults).
 
+There is one function per payload piece: :func:`merge_encoding_scale` (encoding),
+:func:`merge_chart_config`, :func:`apply_mark_style`, :func:`apply_coord`,
+:func:`apply_properties`, plus :func:`emit_deprecations`.  The encoding piece's
+merge used to live in ``_spec_build.py`` beside its one call site, which put the
+override contract's two halves — the leaf registry and the merge gate — in
+modules that could not see each other; a design review traced a live
+override-leaf/wire-key divergence to exactly that separation.
+
 The functions here are pure (no ``Chart`` import, no I/O, no global state) apart from
 :func:`emit_deprecations`, whose sole effect is the documented ``DeprecationWarning``.
 The Chart render path (:meth:`Chart._render_inputs`, :meth:`Chart.to_spec`) builds the
@@ -19,8 +27,98 @@ from __future__ import annotations
 import warnings
 from typing import Any
 
+from ferrum._core import (  # type: ignore[attr-defined]
+    scale_accepted_keys as _scale_accepted_keys,
+    validate_scale_dict as _validate_scale_dict,
+)
 from ferrum._override_apply import OverridePayload
 from ferrum.exceptions import FerrumOverrideError
+
+
+def merge_encoding_scale(base_scale: dict, scale_overrides: dict) -> dict:
+    """Return one channel's own scale dict merged with its override scale leaves.
+
+    The encoding piece's injection point (called from
+    ``SpecBuildMixin._build_encoding_specs``), and so the sibling of
+    :func:`merge_chart_config` / :func:`apply_mark_style` / :func:`apply_coord`
+    / :func:`apply_properties` for ``payload.encoding``.
+
+    Contract:
+
+    - Override leaves win over the channel's own ``scale=`` keys (spec §7).
+    - When the effective ``type`` is unchanged — or the channel carries no
+      ``scale=`` at all, which reaches here as ``{}`` — nothing is filtered and
+      every base-scale key still applies.
+    - When the type IS changing, each base-scale key is validated exactly once
+      and only the keys the new type also accepts survive.  A key the OLD type
+      never accepted, and a key the switch is about to drop, are both probed
+      under the old type through the real wire gate
+      (``ferrum._core.validate_scale_dict``), so they refuse with the identical
+      message that base scale raises standalone.  The switch may neither
+      launder a bad key into silence nor promote one into effect because the
+      new type happens to declare a same-named field.
+    - A key BOTH types accept is deliberately NOT value-validated here: its
+      value must reach the new type's own downstream gate untouched (a string
+      ``domain`` is illegal under ``linear`` and legal under ``band``).
+    - A non-``str`` or unknown override ``type`` skips filtering entirely, so
+      the gate's own "unknown variant" / type error surfaces instead of a PyO3
+      argument-coercion error naming ``scale_accepted_keys``'s parameter.
+
+    ``base_scale`` is never mutated.  The eight remediation rounds behind these
+    rules are recorded in the commit history and ``.sdd/``, not here;
+    ``tests/test_override_scale_merge.py`` pins each one.
+    """
+    old_type = base_scale.get("type")
+    new_type = scale_overrides.get("type", old_type)
+    # "type" not in base_scale, NOT "old_type is None": a channel with no
+    # scale= at all reaches here as `{}` and must short-circuit, but an
+    # EXPLICIT `{"type": None}` is a real claim the user made and must be
+    # probed like any other invalid tag.
+    if "type" not in base_scale or new_type == old_type:
+        return {**base_scale, **scale_overrides}
+
+    # Validate the base scale's TAG alone first, through the real gate: an
+    # unknown tag, or a value serde cannot even reach, raises exactly what a
+    # standalone `scale={"type": old_type}` raises.
+    _validate_scale_dict({"type": old_type})
+
+    # old_type is now known to be a real ScaleSpec variant tag.
+    accepted_old = set(_scale_accepted_keys(old_type))
+
+    # Bucket 1: keys old_type does not recognize. Probed with ONLY those keys,
+    # so a key old_type DOES recognize is never value-validated under a type
+    # the switch is replacing.
+    unknown_under_old = {k for k in base_scale if k != "type" and k not in accepted_old}
+    if unknown_under_old:
+        _validate_scale_dict(
+            {"type": old_type, **{k: base_scale[k] for k in unknown_under_old}},
+        )
+
+    accepted_new: set[str] | None
+    if isinstance(new_type, str):
+        try:
+            accepted_new = set(_scale_accepted_keys(new_type))
+        except ValueError:
+            # Unknown new type: fall through unfiltered so the gate's own
+            # "unknown variant" error surfaces.
+            accepted_new = None
+    else:
+        # Non-string type: don't hand it to the &str-typed
+        # scale_accepted_keys, whose argument error is not this gate's voice.
+        accepted_new = None
+    if accepted_new is not None:
+        drop = accepted_old - accepted_new
+        # Bucket 2: keys the filter below is about to drop. They never reach
+        # new_type's downstream gate, so nobody validates their VALUE if this
+        # probe doesn't. Bucket 3 (accepted by both) is the survivors, checked
+        # downstream under new_type.
+        dropped_present = {k for k in base_scale if k != "type" and k in drop}
+        if dropped_present:
+            _validate_scale_dict(
+                {"type": old_type, **{k: base_scale[k] for k in dropped_present}},
+            )
+        base_scale = {k: v for k, v in base_scale.items() if k not in drop}
+    return {**base_scale, **scale_overrides}
 
 
 def merge_chart_config(chart_config: dict[str, Any], payload: OverridePayload) -> dict[str, Any]:

@@ -329,7 +329,13 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // spec §4A) — padding-aware, counted off the scale's DOMAIN, and the band
     // Dodge subdivides. See `ScaleKind::bandwidth` for the full contract.
     // `None` is unreachable: `build` dispatches here only for an ordinal x.
-    let band_width = match ctx.scales.x.bandwidth() { Some(w) => w, None => return empty_result() };
+    let band_width = match ctx.scales.x.bandwidth() {
+        Some(w) => w,
+        None => {
+            debug_assert!(false, "build_ordinal dispatches only for an ordinal x scale, which always reports a bandwidth");
+            return empty_result();
+        }
+    };
     let bar_width_raw = (band_width / n_groups as f64) * 0.8;
     // Clamp to the Dodge sub-band (GH #66): the 0.8-factor width above is
     // blind to Dodge's `padding` and can exceed the true per-group slot
@@ -483,7 +489,15 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n_groups = pos_meta.dodge_n_groups();
     // The y twin of `build_ordinal`'s width: the resolved y scale's drawn band
     // × bar's 0.8 factor (F-L04-03, spec §4A; see `ScaleKind::bandwidth`).
-    let band_width = match ctx.scales.y.bandwidth() { Some(w) => w, None => return empty_result() };
+    // `None` is unreachable: `build_ordinal_y` dispatches here only for an
+    // ordinal y (CoordFlip's `build_ordinal` twin).
+    let band_width = match ctx.scales.y.bandwidth() {
+        Some(w) => w,
+        None => {
+            debug_assert!(false, "build_ordinal_y dispatches only for an ordinal y scale, which always reports a bandwidth");
+            return empty_result();
+        }
+    };
     let bar_height_raw = (band_width / n_groups as f64) * 0.8;
     // Clamp to the Dodge sub-band (GH #66); see `build_ordinal`'s analogous
     // comment — byte-identical no-op when undodged or at low/default padding.

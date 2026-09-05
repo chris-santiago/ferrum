@@ -2,12 +2,20 @@
 
 ``Chart.override(**kwargs)`` is a flat snake_case escape hatch onto the chart's
 *presentation* spec (config dataclasses, encoding scales, mark style, coord,
-``width``/``height``).  Because the Rust spec deserializers silently drop unknown
-fields, a misspelled path cannot fail-loud on the Rust side; validation is
-therefore Python-side against a registry built **at import from the live schemas**
-so the valid-leaf sets stay synchronized with the typed surface, except for
-deprecated keys (``x``/``y`` on ``AxisConfig``) which are intentionally
-excluded and refused with a typed error.
+``width``/``height``).  For most of those targets the Rust spec deserializers
+silently drop unknown fields, so a misspelled path cannot fail-loud on the Rust
+side; validation is therefore Python-side against a registry built **at import
+from the live schemas** so the valid-leaf sets stay synchronized with the typed
+surface, except for deprecated keys (``x``/``y`` on ``AxisConfig``) which are
+intentionally excluded and refused with a typed error.
+
+Encoding scales are the one target that DOES fail loud on the Rust side (the
+F-L04-07 raw-dict scale-key gate refuses an unknown key naming the accepted
+list).  The registry is therefore not a substitute for that gate but a mirror
+of it, and it is built from the gate's own published table
+(``ferrum._core.scale_accepted_keys``) rather than from Python attribute names
+— when the two disagreed, an advertised override leaf refused at the wire with
+no working spelling anywhere.  See :func:`_scale_leaves`.
 
 This module is a pure transform: it resolves paths, validates a whole override
 dict, and builds a plain :class:`OverridePayload` data object.  It never imports
@@ -26,8 +34,11 @@ chart-config
     ``{target_key: {leaf: value}}``.
 encoding-scale
     ``<channel>_scale_<leaf>`` for each scale-bearing encoding channel.  Valid
-    leaves are the scale-spec field names.  Folds into
-    ``{channel: {"scale": {leaf: value}}}``.
+    leaves are the wire keys the scale-key gate accepts for at least one scale
+    type, plus a snake_case spelling of each camelCase one
+    (:data:`_SCALE_LEAF_WIRE_ALIASES`).  Folds into
+    ``{channel: {"scale": {wire_leaf: value}}}`` — both spellings are accepted,
+    the wire one is emitted.
 mark
     ``mark_<leaf>``; valid leaves are ``ferrum.marks.base._VALID_MARK_KWARGS``.
     Folds into ``mark_style[leaf]``.
@@ -93,8 +104,11 @@ class SpecLocation(NamedTuple):
         which has no intermediate key (leaves fold directly into ``mark_style``).
     leaf:
         The terminal field name written under ``target_key`` (e.g.
-        ``"label_angle"``, ``"domain"``, ``"corner_radius"``).  For the
-        properties target this equals ``target_key`` (``"width"``/``"height"``).
+        ``"label_angle"``, ``"domain"``, ``"corner_radius"``), as the user
+        spelled it.  For the properties target this equals ``target_key``
+        (``"width"``/``"height"``).  For encoding-scale leaves this is the
+        registry spelling, which :func:`build_payload` translates to the wire
+        spelling through :data:`_SCALE_LEAF_WIRE_ALIASES` before folding.
     """
 
     target_key: str | None
@@ -140,8 +154,10 @@ class OverridePayload:
         ``{target_key: {leaf: value}}`` for chart-config targets, e.g.
         ``{"axis_x": {"label_angle": -45}, "color": {"scheme": "viridis"}}``.
     encoding:
-        ``{channel: {"scale": {leaf: value}}}`` for encoding-scale targets, e.g.
-        ``{"x": {"scale": {"domain": [0, 10]}}}``.
+        ``{channel: {"scale": {wire_key: value}}}`` for encoding-scale targets,
+        e.g. ``{"x": {"scale": {"domain": [0, 10]}}}``.  Keys are always the
+        gate's wire spelling, so ``x_scale_padding_inner`` and
+        ``x_scale_paddingInner`` both fold to ``{"paddingInner": ...}``.
     mark_style:
         ``{leaf: value}`` for mark-style targets, e.g. ``{"corner_radius": 4}``.
     coord:
@@ -201,65 +217,80 @@ def _coord_leaves() -> frozenset[str]:
     return frozenset(leaves)
 
 
-# Derived (read-only) scale attributes that are not settable spec leaves.
-# ``num_bins`` is ``len(bins)`` on ``BinOrdinalScale`` — a computed getter, not a
-# field the user can set.  Guarded by the registry-parity test.
-_SCALE_DERIVED_ATTRS = frozenset({"num_bins"})
+# Every ``ScaleSpec`` ``"type"`` tag, i.e. every argument
+# ``ferrum._core.scale_accepted_keys`` answers for. Only the TAGS are listed
+# here; each tag's accepted-key set is asked of the gate, never mirrored. A tag
+# that stopped being a real variant fails ``_scale_leaves()`` loudly at import
+# (``scale_accepted_keys`` raises for an unknown tag), and a tag missing from
+# this tuple is caught by ``tests/test_override.py``'s drift test, which checks
+# it against the scale classes' own emitted tags.
+_SCALE_TYPE_TAGS: tuple[str, ...] = (
+    "linear",
+    "log",
+    "time",
+    "symlog",
+    "pow",
+    "sqrt",
+    "utc",
+    "ordinal",
+    "band",
+    "point",
+    "sequential",
+    "diverging",
+    "quantize",
+    "quantile",
+    "threshold",
+    "bin-ordinal",
+)
+
+#: snake_case override spellings for the camelCase wire keys, so
+#: ``.override(x_scale_padding_inner=0.3)`` reads like every other flat
+#: snake_case override path while still emitting the spelling the wire gate
+#: accepts. Both spellings resolve; :func:`build_payload` emits the wire one.
+#: An entry whose wire key no scale type accepts is dropped from the registry
+#: by :func:`_scale_leaves` — an override path that cannot reach the wire is
+#: worse than no path at all, because it advertises a spelling the gate then
+#: refuses.
+_SCALE_LEAF_WIRE_ALIASES: dict[str, str] = {
+    "padding_inner": "paddingInner",
+    "padding_outer": "paddingOuter",
+    "domain_mid": "domainMid",
+    "domain_param": "domainParam",
+}
 
 
 def _scale_leaves() -> frozenset[str]:
-    """Return the settable scale-spec leaf names, introspected from the live schemas.
+    """Return the valid ``<channel>_scale_<leaf>`` leaf names.
 
-    The PyO3 scale classes do not expose introspectable ``__init__`` signatures,
-    so the leaf set is the union of public, non-callable data attributes across a
-    representative instance of every scale type, minus the derived-attr blocklist,
-    plus ``type`` (the scale-kind discriminator the user sets via override).
-    New scale fields therefore appear automatically.
+    Derived from the wire gate's own per-type accepted-key table
+    (``ferrum._core.scale_accepted_keys``, published from
+    ``crates/ferrum-core/src/spec/encoding.rs``), unioned across every scale
+    type, plus ``type`` (the scale-kind discriminator the user sets via
+    override) and the snake_case aliases in :data:`_SCALE_LEAF_WIRE_ALIASES`.
+
+    This asks the gate rather than introspecting the ``*Scale`` pyclasses'
+    attributes, which is what the registry used to do.  Those attributes are
+    Python spellings of a union across all types, and the gate enforces wire
+    spellings per type, so the two sets diverged: five advertised leaves
+    (``padding_inner``, ``padding_outer``, ``domain_mid``, ``quantiles``,
+    ``utc``) resolved here and were then refused at the wire with no working
+    spelling, while seven wire keys (``nice``, ``zero``, ``stops``,
+    ``domainParam``, ``paddingInner``, ``paddingOuter``, ``domainMid``) had no
+    override path at all.  ``quantiles`` and ``utc`` are gone entirely: neither
+    names a wire key of any scale type (``quantiles`` is
+    ``QuantileScale``'s computed thresholds, a read-only getter; ``utc`` is a
+    ``TimeScale`` constructor flag that selects the ``"utc"`` *type tag*, so
+    ``.override(<channel>_scale_type="utc")`` is its real spelling), and they
+    now refuse with this registry's own "Unknown override path" error instead
+    of an opaque wire refusal.
     """
-    from ferrum._core import (  # type: ignore[attr-defined]
-        BandScale,
-        BinOrdinalScale,
-        DivergingScale,
-        LinearScale,
-        LogScale,
-        OrdinalScale,
-        PointScale,
-        PowScale,
-        QuantileScale,
-        QuantizeScale,
-        SequentialScale,
-        SqrtScale,
-        SymlogScale,
-        ThresholdScale,
-        TimeScale,
-    )
+    from ferrum._core import scale_accepted_keys  # type: ignore[attr-defined]
 
-    instances = [
-        LinearScale(),
-        LogScale(),
-        PowScale(),
-        SqrtScale(),
-        SymlogScale(),
-        OrdinalScale(domain=["a"]),
-        BandScale(),
-        PointScale(),
-        SequentialScale(),
-        DivergingScale(),
-        QuantizeScale(domain=[0.0, 1.0], range=["#000", "#fff"]),
-        QuantileScale(domain=[0.0, 1.0], range=[0.0, 1.0]),
-        ThresholdScale(domain=[0.0, 1.0], range=[0.0, 1.0, 2.0]),
-        BinOrdinalScale(bins=[1.0, 2.0]),
-        TimeScale(domain=[0.0, 1.0], range=[0.0, 1.0]),
-    ]
-    leaves: set[str] = {"type"}
-    for inst in instances:
-        for attr in dir(inst):
-            if attr.startswith("_") or attr in _SCALE_DERIVED_ATTRS:
-                continue
-            if callable(getattr(inst, attr)):
-                continue
-            leaves.add(attr)
-    return frozenset(leaves)
+    wire: set[str] = {"type"}
+    for scale_type in _SCALE_TYPE_TAGS:
+        wire.update(scale_accepted_keys(scale_type))
+    aliases = {snake for snake, key in _SCALE_LEAF_WIRE_ALIASES.items() if key in wire}
+    return frozenset(wire | aliases)
 
 
 def _scale_bearing_channels() -> tuple[str, ...]:
@@ -704,7 +735,11 @@ def build_payload(overrides: dict[str, Any]) -> OverridePayload:
         elif resolved.target is Target.ENCODING_SCALE:
             assert loc.target_key is not None
             channel = encoding.setdefault(loc.target_key, {})
-            channel.setdefault("scale", {})[loc.leaf] = value
+            # Emit the WIRE spelling: the scale-key gate accepts
+            # ``paddingInner``, the flat override surface reads
+            # ``padding_inner``, and both must land on the same wire key.
+            wire_leaf = _SCALE_LEAF_WIRE_ALIASES.get(loc.leaf, loc.leaf)
+            channel.setdefault("scale", {})[wire_leaf] = value
         elif resolved.target is Target.MARK:
             mark_style[loc.leaf] = value
         elif resolved.target is Target.COORD:

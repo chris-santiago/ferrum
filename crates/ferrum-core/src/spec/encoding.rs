@@ -919,6 +919,55 @@ fn convert_raw_dict_temporal_domain<'py>(
     Ok(Some(out.into_any()))
 }
 
+/// Convert + deserialize a scale value into a `ScaleSpec`, exactly as
+/// `EncodingSpec::new`'s `scale=` parameter does: raw-dict temporal-domain
+/// conversion first (`convert_raw_dict_temporal_domain`), then a JSON
+/// round-trip through `ScaleSpec`'s own gated `Deserialize` impl
+/// (`validate_scale_spec_keys`, run at that impl's own boundary).
+///
+/// **The single chokepoint both `EncodingSpec::new` and [`validate_scale_dict`]
+/// call** — batch-C close remediation, converging the rust- and
+/// python-design reviews' independent findings on the same fix: neither
+/// caller re-implements the dict→JSON→`ScaleSpec` sequence, so there is no
+/// second validation path that could drift from this one. Error messages are
+/// therefore byte-identical between the two callers by construction, not by
+/// coincidence — pinned by
+/// `validate_scale_dict_message_matches_encoding_spec_route` below.
+fn deserialize_scale_value(
+    py: Python,
+    scale: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<ScaleSpec>> {
+    let scale_converted = convert_raw_dict_temporal_domain(scale)?;
+    let Some(obj) = scale_converted else { return Ok(None) };
+    let json_module = py.import("json")?;
+    let s: String = json_module.call_method1("dumps", (obj,))?.extract()?;
+    Ok(Some(
+        serde_json::from_str(&s).map_err(|e| PyValueError::new_err(format!("scale: {e}")))?,
+    ))
+}
+
+/// Validate a raw scale dict against the SAME gate `EncodingSpec(field,
+/// scale={...})` enforces, without constructing an `EncodingSpec` for the
+/// side effect of its exception (rust-design review recommendation 5 /
+/// python-design review's S2 on the probe idiom, converged): raises the
+/// gate's own `ValueError` — byte-identical to the `EncodingSpec` route's
+/// message, since both call [`deserialize_scale_value`] — on an invalid
+/// dict, returns `None` on a valid one.
+///
+/// Exists so `_override_consume.py`'s override-scale merge can ask "is this scale
+/// dict valid?" directly instead of via
+/// `_EncodingSpec("<override-scale-probe>", scale={...})`, a throwaway
+/// production object built purely to catch its constructor's exception. A
+/// `{"type": "time"/"utc", "domain": [...]}` dict carrying `datetime.date`/
+/// `datetime.datetime` elements validates rather than exploding on
+/// `json.dumps`, exactly like the `EncodingSpec` route: `deserialize_scale_value`
+/// runs `convert_raw_dict_temporal_domain` first, before any JSON encoding
+/// is attempted.
+#[pyfunction]
+pub fn validate_scale_dict(py: Python, scale: &Bound<'_, PyDict>) -> PyResult<()> {
+    deserialize_scale_value(py, Some(scale.as_any())).map(|_| ())
+}
+
 #[pymethods]
 impl EncodingSpec {
     #[new]
@@ -969,12 +1018,10 @@ impl EncodingSpec {
             ))
         }
 
-        let scale_converted = convert_raw_dict_temporal_domain(scale)?;
-
         Ok(EncodingSpec {
             field: field.to_string(),
             type_,
-            scale: json_round(py, scale_converted.as_ref(), "scale")?,
+            scale: deserialize_scale_value(py, scale)?,
             title,
             axis: json_round(py, axis, "axis")?,
             legend: json_round(py, legend, "legend")?,
@@ -1764,6 +1811,125 @@ mod tests {
                 }
                 other => panic!("expected ScaleSpec::Time, got {other:?}"),
             }
+        });
+    }
+
+    // ── `validate_scale_dict` (batch-C close remediation) ───────────────────
+
+    /// A valid dict for a representative sample of scale types returns
+    /// `None` (no error) rather than raising.
+    #[test]
+    fn validate_scale_dict_accepts_representative_valid_dicts() {
+        attach(|py| {
+            let linear = PyDict::new(py);
+            linear.set_item("type", "linear").unwrap();
+            linear.set_item("domain", (0.0, 1.0)).unwrap();
+            linear.set_item("clamp", true).unwrap();
+
+            let band = PyDict::new(py);
+            band.set_item("type", "band").unwrap();
+            band.set_item("padding", 0.2).unwrap();
+            band.set_item("align", 0.5).unwrap();
+
+            let point = PyDict::new(py);
+            point.set_item("type", "point").unwrap();
+            point.set_item("reverse", true).unwrap();
+
+            let diverging = PyDict::new(py);
+            diverging.set_item("type", "diverging").unwrap();
+            diverging.set_item("domainMid", 0.0).unwrap();
+
+            let quantile = PyDict::new(py);
+            quantile.set_item("type", "quantile").unwrap();
+            quantile.set_item("domain", (1.0, 2.0, 3.0)).unwrap();
+
+            for dict in [linear, band, point, diverging, quantile] {
+                let scale_type: String = dict.get_item("type").unwrap().unwrap().extract().unwrap();
+                validate_scale_dict(py, &dict)
+                    .unwrap_or_else(|e| panic!("expected type '{scale_type}' to validate, got {e}"));
+            }
+        });
+    }
+
+    /// An unknown key refuses with a `ValueError` naming the key, the type,
+    /// and the accepted set — the same shape `accepted_keys_for_scale_type`'s
+    /// gate produces everywhere else.
+    #[test]
+    fn validate_scale_dict_refuses_unknown_key() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "linear").unwrap();
+            d.set_item("clammp", true).unwrap();
+            let err = validate_scale_dict(py, &d).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("clammp") && msg.contains("linear"), "msg: {msg}");
+        });
+    }
+
+    /// An unknown `"type"` tag falls through to the derived deserialize's own
+    /// "unknown variant" error, exactly like the `EncodingSpec` route.
+    #[test]
+    fn validate_scale_dict_refuses_unknown_tag() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "not-a-real-type").unwrap();
+            let err = validate_scale_dict(py, &d).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    /// A non-string `"type"` also refuses (the gate itself is permissive on
+    /// this shape and defers to the derived deserialize's type-mismatch
+    /// error, which still raises).
+    #[test]
+    fn validate_scale_dict_refuses_non_str_tag() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", 123).unwrap();
+            let err = validate_scale_dict(py, &d).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+        });
+    }
+
+    /// The load-bearing claim: `validate_scale_dict`'s error message is
+    /// BYTE-IDENTICAL to constructing an `EncodingSpec` with the same
+    /// offending dict — both call `deserialize_scale_value`, so this is a
+    /// property of the shared chokepoint, not a coincidence to maintain by
+    /// hand.
+    #[test]
+    fn validate_scale_dict_message_matches_encoding_spec_route() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "linear").unwrap();
+            d.set_item("clammp", true).unwrap();
+            let direct_err = validate_scale_dict(py, &d).unwrap_err();
+
+            let encoding_err = EncodingSpec::new(
+                py, "x", None, Some(d.as_any()), None, None, None, None, None, None, None,
+                None, None, None,
+            )
+            .unwrap_err();
+
+            assert_eq!(direct_err.value(py).to_string(), encoding_err.value(py).to_string());
+        });
+    }
+
+    /// A datetime-bearing `{"type": "time", "domain": [...]}` dict validates
+    /// rather than exploding on `json.dumps` — the raw-dict temporal-domain
+    /// conversion runs before any JSON encoding is attempted, exactly like
+    /// the `EncodingSpec` route.
+    #[test]
+    fn validate_scale_dict_accepts_datetime_bearing_temporal_domain() {
+        attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("type", "time").unwrap();
+            let date_lo = pyo3::types::PyDate::new(py, 2020, 1, 1).unwrap();
+            let date_hi = pyo3::types::PyDate::new(py, 2020, 12, 31).unwrap();
+            d.set_item("domain", (date_lo, date_hi)).unwrap();
+            validate_scale_dict(py, &d).unwrap_or_else(|e| {
+                panic!("expected a datetime-bearing temporal domain to validate, got {e}")
+            });
         });
     }
 

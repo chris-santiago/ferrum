@@ -1,7 +1,10 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::{continuous_common, degenerate_ratio, resolve_continuous, scale_spec_to_py_dict};
+use super::core::{
+    continuous_common, degenerate_ratio, resolve_continuous, scale_spec_to_py_dict,
+    ContinuousCommonParts,
+};
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
 
@@ -226,15 +229,15 @@ impl SymlogScale {
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
         ScaleSpec::Symlog {
             constant: self.data.constant,
-            common: continuous_common(
-                self.data.domain,
-                self.domain_user_set,
-                self.data.range,
-                self.range_user_set,
-                self.data.clamp,
-                self.padding,
-                self.reverse,
-            ),
+            common: continuous_common(ContinuousCommonParts {
+                domain: self.data.domain,
+                domain_user_set: self.domain_user_set,
+                range: self.data.range,
+                range_user_set: self.range_user_set,
+                clamp: self.data.clamp,
+                padding: self.padding,
+                reverse: self.reverse,
+            }),
             nice: false,
         }
     }

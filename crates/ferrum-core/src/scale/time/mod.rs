@@ -3,7 +3,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDate, PyDateTime, PyTzInfoAccess};
 
-use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict};
+use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict, ContinuousCommonParts};
 use super::linear::LinearScaleData;
 use super::ticks::{calendar_ticks, minor_ticks_default, nice_calendar_interval, nice_time_interval_ms, CalendarInterval, Tick};
 use crate::spec::encoding::ScaleSpec;
@@ -236,15 +236,15 @@ impl TimeScale {
     /// `"utc"`/`"time"` wire tag the legacy `_scale_to_dict` emitted. `nice` is
     /// baked into the domain at construction, so it is always `false` here.
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
-        let common = continuous_common(
-            self.data.domain,
-            self.domain_user_set,
-            self.data.range,
-            self.range_user_set,
-            self.data.clamp,
-            self.padding,
-            self.reverse,
-        );
+        let common = continuous_common(ContinuousCommonParts {
+            domain: self.data.domain,
+            domain_user_set: self.domain_user_set,
+            range: self.data.range,
+            range_user_set: self.range_user_set,
+            clamp: self.data.clamp,
+            padding: self.padding,
+            reverse: self.reverse,
+        });
         if self.utc {
             ScaleSpec::Utc { common, nice: false }
         } else {

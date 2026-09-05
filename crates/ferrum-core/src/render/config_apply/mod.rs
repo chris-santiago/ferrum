@@ -241,21 +241,6 @@ fn fill_axis_slots_specific_before_shared(
 
 // ── Tier 3 (passes 7–10): tick products, re-derived after the merge ─────────
 
-/// Re-derive every tick product that the axis-slot merge above can have
-/// changed — AFTER that merge, so each adjustment sees the effective value
-/// (per-channel wins, chart-level fallback) rather than a half-merged one.
-///
-/// `tick_extra` / `tick_min_step` (B5 unit 2) adjust the generated ticks
-/// against the provisional scale; `apply_label_format_to_axis` re-formats the
-/// labels (it requires the axis config to be set first);
-/// `sync_tick_placement_to_tick_values` re-pairs the axis's placement carrier
-/// (continuous projection or categorical placement) with those new labels, so
-/// neither is left index-addressed against a stale length. No-ops when none of
-/// those fields is set, so default output is byte-identical.
-///
-/// The non-ordinal y labels/fractions were reversed in prepare, so the raw
-/// values are reversed in lockstep. The EXPLICIT labels are not reversed
-/// (unlike auto labels), so the value-order fractions align directly.
 /// Everything the tick re-sync READS, as one bundle: the resolved scales and
 /// the tick counts each axis was built with. Every field is a by-axis
 /// correspondence — `scales.x`/`x_tick_count` describe one axis,
@@ -281,6 +266,21 @@ struct TickResyncCtx<'a> {
     secondary_tick_counts: &'a [usize],
 }
 
+/// Re-derive every tick product that the axis-slot merge above can have
+/// changed — AFTER that merge, so each adjustment sees the effective value
+/// (per-channel wins, chart-level fallback) rather than a half-merged one.
+///
+/// `tick_extra` / `tick_min_step` (B5 unit 2) adjust the generated ticks
+/// against the provisional scale; `apply_label_format_to_axis` re-formats the
+/// labels (it requires the axis config to be set first);
+/// `sync_tick_placement_to_tick_values` re-pairs the axis's placement carrier
+/// (continuous projection or categorical placement) with those new labels, so
+/// neither is left index-addressed against a stale length. No-ops when none of
+/// those fields is set, so default output is byte-identical.
+///
+/// The non-ordinal y labels/fractions were reversed in prepare, so the raw
+/// values are reversed in lockstep. The EXPLICIT labels are not reversed
+/// (unlike auto labels), so the value-order fractions align directly.
 fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickResyncCtx<'_>) {
     let TickResyncCtx {
         scales,

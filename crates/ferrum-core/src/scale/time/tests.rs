@@ -360,14 +360,19 @@ fn temporal_extraction_accepts_date_as_midnight_utc() {
     assert_eq!(ms, 1_590_969_600_000.0);
 }
 
-/// A naive `datetime.datetime` means UTC: 2020-06-01T12:30:00 is
-/// 1590969600000 (midnight) + 45000 seconds * 1000.
+/// A naive `datetime.datetime` means UTC: 2020-06-01T12:30:45 is
+/// 1590969600000 (midnight) + 45045 seconds * 1000. Deliberately a non-zero
+/// SECONDS component (mutation-tester, batch-C close remediation, fix 2):
+/// every naive-datetime/ISO-string fixture that reaches `naive_epoch_ms` used
+/// second == 0, so dropping its `+ second as i64` term from `seconds_of_day`
+/// went undetected — this is a fixture gap, not a coverage gap (the sibling
+/// `minute * 60` term is already pinned by 3 other tests).
 #[test]
 fn temporal_extraction_accepts_naive_datetime_as_utc() {
     let ms = attach_and_extract(|py| {
-        Ok(pyo3::types::PyDateTime::new(py, 2020, 6, 1, 12, 30, 0, 0, None)?.into_any())
+        Ok(pyo3::types::PyDateTime::new(py, 2020, 6, 1, 12, 30, 45, 0, None)?.into_any())
     }).unwrap();
-    assert_eq!(ms, 1_591_014_600_000.0);
+    assert_eq!(ms, 1_591_014_645_000.0);
 }
 
 /// An aware `datetime.datetime` converts to UTC: 2020-06-01T12:00:00+05:00
