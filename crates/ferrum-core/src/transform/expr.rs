@@ -13,6 +13,11 @@ pub enum ExprValue {
     Str(String),
     Bool(bool),
     Null,
+    /// Array literal value — produced only by evaluating an array literal
+    /// node (`[e1, e2, …]`); never read from a datum column. Exists so
+    /// builtin functions like `indexof` can consume array literals as
+    /// evaluated expressions rather than a separate non-evaluated AST shape.
+    Array(Vec<ExprValue>),
 }
 
 impl ExprValue {
@@ -23,6 +28,7 @@ impl ExprValue {
             Self::Number(n) => *n != 0.0 && !n.is_nan(),
             Self::Str(s) => !s.is_empty(),
             Self::Null => false,
+            Self::Array(items) => !items.is_empty(),
         }
     }
 
@@ -66,11 +72,45 @@ pub struct Expr {
 #[derive(Debug, Clone)]
 enum Node {
     Literal(ExprValue),
+    Array(Vec<Node>),
+    Call(String, Vec<Node>),
     DatumAccess(Vec<String>),
     UnaryNeg(Box<Node>),
     UnaryNot(Box<Node>),
     BinaryOp(BinOp, Box<Node>, Box<Node>),
     Ternary(Box<Node>, Box<Node>, Box<Node>),
+}
+
+/// Signature every builtin evaluator implements: given the call's
+/// already-parsed argument nodes and the current row's datum accessor,
+/// produce the call's result.
+type BuiltinFn = fn(&[Node], &dyn Fn(&str) -> ExprValue) -> ExprValue;
+
+/// Builtin function table: name -> (arity, eval fn). This is the single
+/// point to register a future builtin — add an entry here, pairing the
+/// name and arity with its evaluator in one tuple. Because the evaluator
+/// lives in the same row as the arity, a new entry cannot compile without
+/// its dispatch arm, unlike a separate arity table plus a hand-matched
+/// `eval_call` that could silently drift out of sync.
+const BUILTINS: &[(&str, usize, BuiltinFn)] = &[("indexof", 2, eval_indexof)];
+
+fn resolve_builtin(name: &str) -> Option<usize> {
+    BUILTINS
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, arity, _)| *arity)
+}
+
+fn find_builtin(name: &str) -> Option<BuiltinFn> {
+    BUILTINS.iter().find(|(n, ..)| *n == name).map(|(_, _, f)| *f)
+}
+
+fn supported_builtins() -> String {
+    BUILTINS
+        .iter()
+        .map(|(n, ..)| *n)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -114,6 +154,7 @@ enum Token {
     Bang,
     Question,
     Colon,
+    Comma,
     Dot,
     LParen,
     RParen,
@@ -169,6 +210,10 @@ fn tokenize(input: &str) -> Result<Vec<Located>, ExprError> {
             }
             b':' => {
                 tokens.push(Located { token: Token::Colon, pos: start });
+                i += 1;
+            }
+            b',' => {
+                tokens.push(Located { token: Token::Comma, pos: start });
                 i += 1;
             }
             b'.' => {
@@ -259,20 +304,45 @@ fn tokenize(input: &str) -> Result<Vec<Located>, ExprError> {
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
                         i += 1;
                         match bytes[i] {
-                            b'n' => s.push('\n'),
-                            b't' => s.push('\t'),
-                            b'\\' => s.push('\\'),
-                            b'\'' => s.push('\''),
-                            b'"' => s.push('"'),
-                            c => {
+                            b'n' => {
+                                s.push('\n');
+                                i += 1;
+                            }
+                            b't' => {
+                                s.push('\t');
+                                i += 1;
+                            }
+                            b'\\' => {
                                 s.push('\\');
-                                s.push(c as char);
+                                i += 1;
+                            }
+                            b'\'' => {
+                                s.push('\'');
+                                i += 1;
+                            }
+                            b'"' => {
+                                s.push('"');
+                                i += 1;
+                            }
+                            _ => {
+                                // Non-ASCII byte after a backslash (e.g. `\é`):
+                                // decode the full char rather than treating
+                                // its lead byte as Latin-1.
+                                let ch = input[i..].chars().next().unwrap();
+                                s.push('\\');
+                                s.push(ch);
+                                i += ch.len_utf8();
                             }
                         }
                     } else {
-                        s.push(bytes[i] as char);
+                        // Decode one UTF-8 char at a time (not one byte at a
+                        // time) so multi-byte characters (e.g. "Zürich")
+                        // round-trip correctly instead of being mangled into
+                        // one mojibake char per byte.
+                        let ch = input[i..].chars().next().unwrap();
+                        s.push(ch);
+                        i += ch.len_utf8();
                     }
-                    i += 1;
                 }
                 if i >= bytes.len() {
                     return Err(ExprError {
@@ -503,20 +573,39 @@ impl Parser {
                         self.parse_datum_access()
                     }
                     _ => {
-                        // Check if it looks like a function call (reject)
                         self.advance();
                         if *self.peek() == Token::LParen {
-                            return Err(ExprError {
-                                message: format!(
-                                    "function calls are not supported: '{id}(...)'"
-                                ),
+                            self.advance(); // consume '('
+                            let args = self.parse_call_args()?;
+                            self.expect(&Token::RParen)?;
+                            match resolve_builtin(&id) {
+                                Some(arity) => {
+                                    if args.len() != arity {
+                                        return Err(ExprError {
+                                            message: format!(
+                                                "{id} expects {arity} argument{}, found {}",
+                                                if arity == 1 { "" } else { "s" },
+                                                args.len()
+                                            ),
+                                            position: pos,
+                                        });
+                                    }
+                                    Ok(Node::Call(id, args))
+                                }
+                                None => Err(ExprError {
+                                    message: format!(
+                                        "unknown function '{id}'; supported: {}",
+                                        supported_builtins()
+                                    ),
+                                    position: pos,
+                                }),
+                            }
+                        } else {
+                            Err(ExprError {
+                                message: format!("unexpected identifier: '{id}'"),
                                 position: pos,
-                            });
+                            })
                         }
-                        Err(ExprError {
-                            message: format!("unexpected identifier: '{id}'"),
-                            position: pos,
-                        })
                     }
                 }
             }
@@ -526,11 +615,45 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(inner)
             }
+            Token::LBracket => {
+                self.advance();
+                let mut elements = Vec::new();
+                if *self.peek() != Token::RBracket {
+                    loop {
+                        elements.push(self.parse_expr()?);
+                        if *self.peek() == Token::Comma {
+                            self.advance();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(Node::Array(elements))
+            }
             _ => Err(ExprError {
                 message: format!("unexpected token: {:?}", self.peek()),
                 position: self.peek_pos(),
             }),
         }
+    }
+
+    /// Parse a comma-separated argument list up to (not including) the
+    /// closing `)`. Shared by call-site parsing; array-literal elements use
+    /// the same comma-loop inline since they close on `]` instead.
+    fn parse_call_args(&mut self) -> Result<Vec<Node>, ExprError> {
+        let mut args = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                args.push(self.parse_expr()?);
+                if *self.peek() == Token::Comma {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+        Ok(args)
     }
 
     fn parse_datum_access(&mut self) -> Result<Node, ExprError> {
@@ -613,6 +736,10 @@ impl Expr {
 fn eval_node(node: &Node, datum: &dyn Fn(&str) -> ExprValue) -> ExprValue {
     match node {
         Node::Literal(v) => v.clone(),
+        Node::Array(elements) => {
+            ExprValue::Array(elements.iter().map(|e| eval_node(e, datum)).collect())
+        }
+        Node::Call(name, args) => eval_call(name, args, datum),
         Node::DatumAccess(fields) => {
             // For nested access like datum.a.b, we only support single-level
             // column access in Arrow (the first field). Additional segments
@@ -690,6 +817,30 @@ fn eval_node(node: &Node, datum: &dyn Fn(&str) -> ExprValue) -> ExprValue {
     }
 }
 
+/// Dispatch a resolved builtin call. `Node::Call` is only ever constructed
+/// for a name that `resolve_builtin` found in `BUILTINS` (see
+/// `parse_primary`), and `find_builtin` reads the same table, so a lookup
+/// miss here would mean the parser and evaluator disagree about the table's
+/// contents — an invariant violation, not a reachable user input.
+fn eval_call(name: &str, args: &[Node], datum: &dyn Fn(&str) -> ExprValue) -> ExprValue {
+    match find_builtin(name) {
+        Some(f) => f(args, datum),
+        None => unreachable!("'{name}' passed parse-time resolution but has no table entry"),
+    }
+}
+
+/// `indexof(haystack, needle)` — index of the first array element equal to
+/// `needle`, or -1 if `haystack` is not an array or contains no match.
+fn eval_indexof(args: &[Node], datum: &dyn Fn(&str) -> ExprValue) -> ExprValue {
+    let haystack = eval_node(&args[0], datum);
+    let needle = eval_node(&args[1], datum);
+    let index = match haystack {
+        ExprValue::Array(items) => items.iter().position(|item| *item == needle),
+        _ => None,
+    };
+    ExprValue::Number(index.map(|i| i as f64).unwrap_or(-1.0))
+}
+
 fn eval_add(l: &ExprValue, r: &ExprValue) -> ExprValue {
     // String concatenation if either operand is a string
     match (l, r) {
@@ -712,6 +863,10 @@ fn format_value(v: &ExprValue) -> String {
         ExprValue::Str(s) => s.clone(),
         ExprValue::Bool(b) => b.to_string(),
         ExprValue::Null => "null".to_string(),
+        ExprValue::Array(items) => {
+            let inner: Vec<String> = items.iter().map(format_value).collect();
+            format!("[{}]", inner.join(", "))
+        }
     }
 }
 
@@ -1013,10 +1168,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_function_call() {
+    fn invalid_function_call_unknown_name() {
         let err = Expr::parse("open()").unwrap_err();
         assert!(
-            err.message.contains("function calls are not supported"),
+            err.message.contains("unknown function 'open'") && err.message.contains("indexof"),
             "got: {}",
             err.message
         );
@@ -1108,5 +1263,193 @@ mod tests {
             ExprValue::Number(n) => assert!(n.is_nan()),
             other => panic!("expected Number(NAN), got {other:?}"),
         }
+    }
+
+    // ─── Membership syntax: array literals + indexof (F-L05-06) ───────────
+
+    #[test]
+    fn membership_numeric_found_and_not_found() {
+        let result = eval_with(
+            "indexof([1, 2, 3], datum.id) >= 0",
+            &[("id", ExprValue::Number(2.0))],
+        );
+        assert_bool(result, true);
+
+        let result = eval_with(
+            "indexof([1, 2, 3], datum.id) >= 0",
+            &[("id", ExprValue::Number(5.0))],
+        );
+        assert_bool(result, false);
+    }
+
+    #[test]
+    fn membership_string_found_and_not_found() {
+        let result = eval_with(
+            "indexof([\"US\", \"DE\", \"JP\"], datum.country) >= 0",
+            &[("country", ExprValue::Str("DE".into()))],
+        );
+        assert_bool(result, true);
+
+        let result = eval_with(
+            "indexof([\"US\", \"DE\", \"JP\"], datum.country) >= 0",
+            &[("country", ExprValue::Str("FR".into()))],
+        );
+        assert_bool(result, false);
+    }
+
+    #[test]
+    fn indexof_returns_first_matching_index() {
+        let result = eval_with("indexof([10, 20, 30], 20)", &[]);
+        assert_num(result, 1.0);
+
+        let result = eval_with("indexof([10, 20, 30], 99)", &[]);
+        assert_num(result, -1.0);
+    }
+
+    #[test]
+    fn indexof_empty_array_is_not_found() {
+        let result = eval_with("indexof([], 1)", &[]);
+        assert_num(result, -1.0);
+    }
+
+    #[test]
+    fn indexof_mixed_dtype_array() {
+        // Elements compare equal only within the same ExprValue variant —
+        // a numeric needle never matches a string element and vice versa.
+        let result = eval_with("indexof([1, \"two\", 3], \"two\")", &[]);
+        assert_num(result, 1.0);
+
+        let result = eval_with("indexof([1, \"two\", 3], 2)", &[]);
+        assert_num(result, -1.0);
+
+        let result = eval_with("indexof([1, \"two\", 3], 3)", &[]);
+        assert_num(result, 2.0);
+    }
+
+    #[test]
+    fn indexof_non_array_first_arg_is_not_found() {
+        // datum.x is a scalar Number, not an Array — indexof treats a
+        // non-array haystack as empty rather than panicking.
+        let result = eval_with("indexof(datum.x, 1)", &[("x", ExprValue::Number(1.0))]);
+        assert_num(result, -1.0);
+    }
+
+    #[test]
+    fn indexof_arity_error_names_function_and_count() {
+        let err = Expr::parse("indexof([1, 2])").unwrap_err();
+        assert_eq!(err.message, "indexof expects 2 arguments, found 1");
+
+        let err = Expr::parse("indexof([1, 2], 1, 3)").unwrap_err();
+        assert_eq!(err.message, "indexof expects 2 arguments, found 3");
+    }
+
+    #[test]
+    fn unknown_function_names_supported_set() {
+        let err = Expr::parse("lookup([1, 2], 1)").unwrap_err();
+        assert!(
+            err.message.contains("unknown function 'lookup'") && err.message.contains("indexof"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn array_literal_with_expression_elements() {
+        // "any expression elements" — not just literals.
+        let result = eval_with(
+            "indexof([datum.a + 1, datum.b * 2], 6)",
+            &[("a", ExprValue::Number(1.0)), ("b", ExprValue::Number(3.0))],
+        );
+        assert_num(result, 1.0);
+    }
+
+    // ─── Previously-valid corpus regression sweep ──────────────────────────
+    //
+    // Every construct in the documented syntax table (plus the
+    // implemented-but-undocumented forms: %, true/false/null, scientific
+    // notation, chained-looking paths, datum bracket access) must stay
+    // byte-stable after the grammar additions above. This is the RED-proof
+    // target for the Comma-token removal check (see the removed-and-restored
+    // Comma arm proof run alongside this suite).
+    #[test]
+    fn previously_valid_corpus_is_byte_stable() {
+        assert_num(eval_with("datum.x + datum.y", &[("x", ExprValue::Number(2.0)), ("y", ExprValue::Number(3.0))]), 5.0);
+        assert_num(eval_with("datum.x - datum.y", &[("x", ExprValue::Number(5.0)), ("y", ExprValue::Number(2.0))]), 3.0);
+        assert_num(eval_with("datum.x * datum.y", &[("x", ExprValue::Number(4.0)), ("y", ExprValue::Number(2.0))]), 8.0);
+        assert_num(eval_with("datum.x / datum.y", &[("x", ExprValue::Number(9.0)), ("y", ExprValue::Number(3.0))]), 3.0);
+        assert_num(eval_with("datum.x % datum.y", &[("x", ExprValue::Number(10.0)), ("y", ExprValue::Number(3.0))]), 1.0);
+        assert_bool(eval_with("datum.x > 1 && datum.y < 10", &[("x", ExprValue::Number(2.0)), ("y", ExprValue::Number(5.0))]), true);
+        assert_bool(eval_with("datum.x == true", &[("x", ExprValue::Bool(true))]), true);
+        assert_bool(eval_with("datum.x == false", &[("x", ExprValue::Bool(false))]), true);
+        assert_bool(eval_with("datum.x == null", &[("x", ExprValue::Null)]), true);
+        assert_num(eval_with("1e3 + 2.5E-1", &[]), 1000.25);
+        assert_bool(
+            eval_with(
+                "datum[\"full name\"] == \"Alice\"",
+                &[("full name", ExprValue::Str("Alice".into()))],
+            ),
+            true,
+        );
+        assert_num(
+            eval_with(
+                "datum.x > 0 ? datum.x : -datum.x",
+                &[("x", ExprValue::Number(-4.0))],
+            ),
+            4.0,
+        );
+        assert_bool(
+            eval_with(
+                "datum.city == \"Zürich\"",
+                &[("city", ExprValue::Str("Zürich".into()))],
+            ),
+            true,
+        );
+        // datum.a.b: only the first path segment is used (documented flat-
+        // datum convention) — unaffected by the Comma/Array/Call additions.
+        assert_bool(
+            eval_with("datum.a.b == 1", &[("a", ExprValue::Number(1.0))]),
+            true,
+        );
+    }
+
+    // ─── Non-ASCII string literals (rust-quality Required Fix 1) ──────────
+
+    #[test]
+    fn non_ascii_string_literal_equality() {
+        let result = eval_with(
+            "datum.city == \"Zürich\"",
+            &[("city", ExprValue::Str("Zürich".into()))],
+        );
+        assert_bool(result, true);
+
+        let result = eval_with(
+            "datum.city == \"Zürich\"",
+            &[("city", ExprValue::Str("Paris".into()))],
+        );
+        assert_bool(result, false);
+    }
+
+    #[test]
+    fn non_ascii_string_literal_membership() {
+        let result = eval_with(
+            "indexof([\"Zürich\", \"Paris\"], datum.city) >= 0",
+            &[("city", ExprValue::Str("Zürich".into()))],
+        );
+        assert_bool(result, true);
+
+        let result = eval_with(
+            "indexof([\"Zürich\", \"Paris\"], datum.city) >= 0",
+            &[("city", ExprValue::Str("Berlin".into()))],
+        );
+        assert_bool(result, false);
+    }
+
+    #[test]
+    fn non_ascii_string_literal_after_escape() {
+        // A backslash-escape immediately followed by a non-ASCII char (the
+        // fallback arm of the escape match) must also decode the full char,
+        // not just its lead byte.
+        let result = eval_with(r#""\é" == "\é""#, &[]);
+        assert_bool(result, true);
     }
 }

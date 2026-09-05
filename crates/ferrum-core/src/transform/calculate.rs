@@ -38,7 +38,7 @@ pub(crate) fn apply(spec: &CalculateSpec, batch: &RecordBatch) -> PyResult<Recor
     }
 
     // Determine output dtype from the results.
-    let (dtype, col): (DataType, ArrayRef) = infer_and_build_column(&results);
+    let (dtype, col): (DataType, ArrayRef) = infer_and_build_column(&spec.expr, &results)?;
 
     // Build new schema with the additional column.
     let old_schema = batch.schema();
@@ -56,13 +56,31 @@ pub(crate) fn apply(spec: &CalculateSpec, batch: &RecordBatch) -> PyResult<Recor
 }
 
 /// Infer the Arrow dtype from expression results and build the column array.
-fn infer_and_build_column(results: &[ExprValue]) -> (DataType, ArrayRef) {
+///
+/// An array-valued result (e.g. a bare `[1, 2, 3]` expression, or a ternary
+/// branch that evaluates to an array) has no column representation: per the
+/// batch's raise-never-null policy, `[Node]` arrays exist only as
+/// `indexof(...)` intermediates, not as materializable values, so this
+/// raises a typed error naming the offending expression and row rather than
+/// silently emitting a debug-formatted string or an all-NaN column. That
+/// guard runs first and unconditionally, which is what makes the
+/// `ExprValue::Array` arms in the branches below genuinely unreachable
+/// (the same early-return-guarantees-the-match pattern `eval_call` in
+/// `expr.rs` uses for its `BinOp::And | BinOp::Or` arm).
+fn infer_and_build_column(expr: &str, results: &[ExprValue]) -> PyResult<(DataType, ArrayRef)> {
+    if let Some(row) = results.iter().position(|v| matches!(v, ExprValue::Array(_))) {
+        return Err(PyValueError::new_err(format!(
+            "data_calculate: expression '{expr}' evaluated to an array value at row {row}; \
+             arrays are only valid as an indexof(...) argument, not as a calculate column result"
+        )));
+    }
+
     // Check if all results are the same type.
     let has_str = results.iter().any(|v| matches!(v, ExprValue::Str(_)));
     let has_bool = results.iter().any(|v| matches!(v, ExprValue::Bool(_)));
     let has_num = results.iter().any(|v| matches!(v, ExprValue::Number(_)));
 
-    if has_str {
+    let (dtype, col): (DataType, ArrayRef) = if has_str {
         // Coerce everything to string.
         let values: Vec<Option<String>> = results
             .iter()
@@ -71,6 +89,7 @@ fn infer_and_build_column(results: &[ExprValue]) -> (DataType, ArrayRef) {
                 ExprValue::Number(n) => Some(format!("{n}")),
                 ExprValue::Bool(b) => Some(b.to_string()),
                 ExprValue::Null => None,
+                ExprValue::Array(_) => unreachable!("ruled out above"),
             })
             .collect();
         (DataType::Utf8, Arc::new(StringArray::from(values)))
@@ -94,10 +113,12 @@ fn infer_and_build_column(results: &[ExprValue]) -> (DataType, ArrayRef) {
                 ExprValue::Bool(false) => Some(0.0),
                 ExprValue::Null => None,
                 ExprValue::Str(_) => Some(f64::NAN),
+                ExprValue::Array(_) => unreachable!("ruled out above"),
             })
             .collect();
         (DataType::Float64, Arc::new(Float64Array::from(values)))
-    }
+    };
+    Ok((dtype, col))
 }
 
 // No PyO3 wrapper: `DataCalculate` is constructed only via the dict-emitting
@@ -174,5 +195,41 @@ mod tests {
         let x = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(x.value(0), 1.0);
         assert_eq!(x.value(1), 2.0);
+    }
+
+    // ─── Array-valued results raise, never silently null (rust-quality
+    // Required Fix 3 / orchestrator adjudication) ──────────────────────────
+
+    #[test]
+    fn calculate_bare_array_literal_raises_typed_error() {
+        pyo3::Python::initialize();
+        let batch = make_batch();
+        let spec = CalculateSpec {
+            as_field: "arr".into(),
+            expr: "[1, 2, 3]".into(),
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("data_calculate:"), "got: {msg}");
+        assert!(msg.contains("[1, 2, 3]"), "got: {msg}");
+        assert!(msg.contains("array"), "got: {msg}");
+    }
+
+    #[test]
+    fn calculate_ternary_branch_array_raises_typed_error() {
+        // The array can also arrive via a ternary branch rather than being
+        // the whole expression — both are reachable from `to_svg`.
+        pyo3::Python::initialize();
+        let batch = make_batch();
+        let spec = CalculateSpec {
+            as_field: "arr".into(),
+            expr: "datum.x > 1 ? \"hi\" : [1, 2]".into(),
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("data_calculate:"), "got: {msg}");
+        assert!(msg.contains("row 0"), "got: {msg}");
     }
 }

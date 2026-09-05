@@ -24,6 +24,9 @@ contract.  Do not change the inner-dict key.
 
 from __future__ import annotations
 
+import math
+import numbers
+import operator
 from typing import TYPE_CHECKING, Sequence
 
 from ferrum.position import _validate_stack_offset
@@ -158,6 +161,90 @@ __all__ = [
 ]
 
 
+def _expr_literal(value: object, *, field: str | None = None) -> str:
+    """Serialize a Python scalar as a ferrum expression-grammar literal.
+
+    Used by ``transform_filter``'s dict-shorthand branches to build a
+    ``datum.field <op> <literal>`` / ``indexof([<literal>, ...], datum.field)``
+    predicate string the Rust expression grammar (``transform/expr.rs``) can
+    parse — plain ``repr()`` disagrees with the grammar for bools (``True``
+    vs. ``true``) and ``None`` (``None`` vs. ``null``), and does not escape
+    embedded quotes the way the grammar's string tokenizer expects.
+
+    ``field`` is the predicate field name the value came from, threaded
+    through only to name it in raised error messages; it does not affect
+    the emitted literal.
+
+    Boolean and numeric acceptance boundaries
+    ------------------------------------------
+    Booleans are accepted as Python ``bool`` or numpy ``bool_`` (the routine
+    result of a pandas/polars boolean column access), both normalized to
+    ``"true"`` or ``"false"``.
+
+    Numeric values are accepted by ABC (``numbers.Integral`` /
+    ``numbers.Real``), not by concrete type, so numpy scalars — the routine
+    result of a pandas/polars aggregation (``df[col].mean()``,
+    ``.max()``, ...) — are accepted and normalized to a plain literal
+    rather than forwarding a hostile ``repr()`` (numpy >= 2's
+    ``repr(np.float64(2.0))`` is ``"np.float64(2.0)"``, which the grammar's
+    tokenizer cannot parse). Integers and floats are normalized separately
+    (``operator.index`` / ``float``) rather than collapsed into one path,
+    since routing a large integer through ``float()`` would lose precision.
+    ``decimal.Decimal`` and ``datetime`` are deliberately *not* accepted:
+    neither is registered under ``numbers.Real`` (the stdlib's own
+    ``decimal`` module opts out for the same reason — silently coercing a
+    ``Decimal`` to ``float`` reintroduces the precision-loss hazard this
+    normalization exists to avoid), so both types still raise ``TypeError``.
+
+    Note on large-integer precision
+    --------------------------------
+    The emitted literal for a large integer represents the input exactly
+    (e.g. ``2**60 + 1`` emits the exact digit string). However, the Rust
+    expression grammar evaluates all numbers as ``f64``, so a filter that
+    should match only ``2**60 + 1`` can match its ``f64``-equivalent neighbor
+    ``2**60`` end-to-end. This is a grammar-side limitation, not a
+    serialization gap.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    # Accept numpy bool scalars the same way we accept their Python twin.
+    # np.bool_ is not a bool subclass, so it must be checked separately.
+    try:
+        import numpy as np
+
+        if isinstance(value, np.bool_):
+            return "true" if bool(value) else "false"
+    except (ImportError, AttributeError):
+        pass
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
+        return f'"{escaped}"'
+    if isinstance(value, numbers.Integral):
+        return repr(operator.index(value))
+    if isinstance(value, numbers.Real):
+        as_float = float(value)
+        if not math.isfinite(as_float):
+            where = f" for field {field!r}" if field is not None else ""
+            accepted = "string, number, bool, or None"
+            msg = (
+                f"transform_filter: non-finite float {value!r} not allowed{where}; "
+                f"accepted: {accepted}"
+            )
+            raise ValueError(msg)
+        return repr(as_float)
+    where = f" for field {field!r}" if field is not None else ""
+    accepted = "string, number, bool, or None"
+    msg = f"transform_filter: {type(value).__name__} {value!r} not allowed{where}; accepted: {accepted}"
+    raise TypeError(msg)
+
+
 def transform_filter(predicate: "str | dict | Parameter") -> dict:
     """Filter rows by a predicate expression or a reactive parameter.
 
@@ -197,13 +284,13 @@ def transform_filter(predicate: "str | dict | Parameter") -> dict:
         parts = []
         for field, constraint in predicate.items():
             if isinstance(constraint, (list, tuple)):
-                values_str = ", ".join(repr(v) for v in constraint)
+                values_str = ", ".join(_expr_literal(v, field=field) for v in constraint)
                 parts.append(f"indexof([{values_str}], datum.{field}) >= 0")
             elif isinstance(constraint, dict):
                 for op, val in constraint.items():
-                    parts.append(f"datum.{field} {op} {val!r}")
+                    parts.append(f"datum.{field} {op} {_expr_literal(val, field=field)}")
             else:
-                parts.append(f"datum.{field} == {constraint!r}")
+                parts.append(f"datum.{field} == {_expr_literal(constraint, field=field)}")
         predicate = " && ".join(parts) if parts else "true"
     return {"type": "filter", "predicate": str(predicate)}
 
