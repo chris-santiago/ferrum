@@ -1,14 +1,14 @@
 //! Outliers: per-group IQR row filter.
 //! Output schema = input schema, filtered to outlier rows.
 
-use arrow::array::{Array, BooleanArray, Float64Array, RecordBatch};
+use arrow::array::{Array, BooleanArray, RecordBatch};
 use arrow::compute::filter_record_batch;
-use arrow::datatypes::DataType;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
 use crate::transform::group_key::group_partition_multi;
+use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -27,24 +27,14 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
         return Ok(batch.clone());
     }
 
-    // Validate value field exists and is Float64.
+    // Validate the value field exists; any numeric dtype is coerced to Float64.
     let schema = batch.schema();
     let val_idx = schema
         .index_of(&spec.field)
         .map_err(|_| PyValueError::new_err(format!(
             "stat_outliers: column '{}' not found", spec.field
         )))?;
-    if schema.field(val_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_outliers: column '{}' must be Float64", spec.field
-        )));
-    }
-    let values_arr = batch
-        .column(val_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_outliers: expected Float64Array for column '{}'", spec.field)))?;
+    let values_arr = coerce_to_float64(batch.column(val_idx), "stat_outliers", &spec.field)?;
 
     // Partition rows by groupby columns, sharing the group-keying idiom used by
     // BoxStats/LetterValue/violin (Utf8/LargeUtf8, Float64/Float32,
@@ -120,8 +110,8 @@ fn quartiles_q1_q3(values: &[f64]) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::StringArray;
-    use arrow::datatypes::{Field, Schema};
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
     fn batch(field: &str, values: Vec<f64>) -> RecordBatch {
@@ -320,7 +310,9 @@ use pyo3::prelude::*;
 /// Parameters
 /// ----------
 /// field : str
-///     Numeric column to test (must be Float64).
+///     Numeric column to test (any integer, unsigned, or float dtype; widened
+///     to Float64). A non-numeric column raises, naming the transform,
+///     column, and dtype.
 /// groupby : list of str, default []
 ///     Columns to group by; fences computed independently per group.
 /// extent : float, default 1.5

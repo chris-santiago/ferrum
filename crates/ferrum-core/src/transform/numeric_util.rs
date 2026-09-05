@@ -63,6 +63,76 @@ pub(crate) fn coerce_to_float64(
     }
 }
 
+/// Whether `dt` is a dtype [`coerce_to_float64`] accepts (`Float64` itself, or
+/// any other integer/unsigned/float dtype it casts). Kept in sync with
+/// `coerce_to_float64`'s own match arms by test assertion — see
+/// `is_numeric_dtype_matches_coerce_to_float64s_accepted_set` which verifies
+/// both accept and reject the same set of dtypes. Both lists live in this
+/// module. Used where a caller must *select* the numeric columns out of a
+/// mixed batch before coercing each one individually, e.g.
+/// `linkage::extract_matrix` picking feature columns out of a batch that also
+/// carries a non-numeric row/column label column.
+pub(crate) fn is_numeric_dtype(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Float64
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+    )
+}
+
+/// Coerce a paired `(x, y)` column pair into jointly-clean `f64` vectors.
+///
+/// Both columns are resolved by name, coerced through [`coerce_to_float64`] (so
+/// any integer/unsigned/float dtype is accepted and anything else raises), then
+/// walked once keeping only the rows that are non-null and non-NaN in *both*
+/// columns — paired listwise deletion, since a row missing either coordinate
+/// cannot contribute to a fit.
+///
+/// `ctx` is the transform-name prefix used in every error message, so each
+/// caller keeps its own error voice. This is the single ingestion path for the
+/// two-column fit family (`logistic`, `glm`, `robust`); `smooth` needs the
+/// index-restricted variant and keeps its own walk.
+pub(crate) fn coerce_xy_pairs(
+    batch: &RecordBatch,
+    x_field: &str,
+    y_field: &str,
+    ctx: &str,
+) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    let schema = batch.schema();
+    let xi = schema
+        .index_of(x_field)
+        .map_err(|_| PyValueError::new_err(format!("{ctx}: column '{x_field}' not found")))?;
+    let yi = schema
+        .index_of(y_field)
+        .map_err(|_| PyValueError::new_err(format!("{ctx}: column '{y_field}' not found")))?;
+    let xa = coerce_to_float64(batch.column(xi), ctx, x_field)?;
+    let ya = coerce_to_float64(batch.column(yi), ctx, y_field)?;
+
+    let mut xs = Vec::with_capacity(xa.len());
+    let mut ys = Vec::with_capacity(ya.len());
+    for i in 0..xa.len() {
+        if xa.is_null(i) || ya.is_null(i) {
+            continue;
+        }
+        let (xv, yv) = (xa.value(i), ya.value(i));
+        if xv.is_nan() || yv.is_nan() {
+            continue;
+        }
+        xs.push(xv);
+        ys.push(yv);
+    }
+    Ok((xs, ys))
+}
+
 /// Extract clean `f64` values from a Float64Array, dropping null and NaN entries.
 ///
 /// When `only_indices` is `Some(ixs)`, only the rows at those positions are
@@ -360,6 +430,188 @@ mod tests {
         assert!(msg.contains("must be numeric"), "err: {msg}");
         assert!(msg.contains("stat_kde"), "err should carry ctx: {msg}");
         assert!(msg.contains("'x'"), "err should carry field: {msg}");
+    }
+
+    // ---------- is_numeric_dtype ----------
+
+    #[test]
+    fn is_numeric_dtype_matches_coerce_to_float64s_accepted_set() {
+        pyo3::Python::initialize();
+
+        // Accepted numeric dtypes: is_numeric_dtype should return true, and
+        // coerce_to_float64 should accept a one-element array.
+        for dt in [
+            DataType::Float64,
+            DataType::Float32,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+        ] {
+            assert!(
+                is_numeric_dtype(&dt),
+                "{dt:?} should be numeric per is_numeric_dtype"
+            );
+
+            // Build a one-element array of this dtype and verify coerce accepts it.
+            let test_arr: ArrayRef = match &dt {
+                DataType::Float64 => Arc::new(Float64Array::from(vec![1.5])),
+                DataType::Float32 => {
+                    Arc::new(arrow::array::Float32Array::from(vec![1.5_f32]))
+                }
+                DataType::Int8 => Arc::new(arrow::array::Int8Array::from(vec![1_i8])),
+                DataType::Int16 => Arc::new(arrow::array::Int16Array::from(vec![1_i16])),
+                DataType::Int32 => Arc::new(Int32Array::from(vec![1_i32])),
+                DataType::Int64 => Arc::new(Int64Array::from(vec![1_i64])),
+                DataType::UInt8 => Arc::new(arrow::array::UInt8Array::from(vec![1_u8])),
+                DataType::UInt16 => Arc::new(arrow::array::UInt16Array::from(vec![1_u16])),
+                DataType::UInt32 => Arc::new(arrow::array::UInt32Array::from(vec![1_u32])),
+                DataType::UInt64 => Arc::new(UInt64Array::from(vec![1_u64])),
+                _ => panic!("unhandled dtype in test: {dt:?}"),
+            };
+
+            let result = coerce_to_float64(&test_arr, "test", "col");
+            assert!(
+                result.is_ok(),
+                "{dt:?} should be accepted by coerce_to_float64; got {result:?}"
+            );
+        }
+
+        // Note: Float16 is listed in coerce_to_float64's match and is_numeric_dtype's matches,
+        // but is not tested here due to the complexity of constructing a Float16Array in tests.
+        // Its coverage is ensured by being handled in the same code paths as Float32.
+
+        // Refused dtypes: is_numeric_dtype should return false, and
+        // coerce_to_float64 should reject a one-element array.
+        for dt in [
+            DataType::Utf8,
+            DataType::Boolean,
+            DataType::LargeUtf8,
+            DataType::Decimal128(38, 10),
+            DataType::Date32,
+        ] {
+            assert!(
+                !is_numeric_dtype(&dt),
+                "{dt:?} should not be numeric per is_numeric_dtype"
+            );
+
+            // Build a one-element array of this dtype and verify coerce rejects it.
+            let test_arr: ArrayRef = match &dt {
+                DataType::Utf8 => Arc::new(StringArray::from(vec!["test"])),
+                DataType::Boolean => {
+                    Arc::new(arrow::array::BooleanArray::from(vec![true]))
+                }
+                DataType::LargeUtf8 => {
+                    Arc::new(arrow::array::LargeStringArray::from(vec!["test"]))
+                }
+                DataType::Decimal128(_, _) => {
+                    Arc::new(
+                        arrow::array::Decimal128Array::from(vec![Some(1_i128)])
+                            .with_data_type(dt.clone()),
+                    )
+                }
+                DataType::Date32 => Arc::new(arrow::array::Date32Array::from(vec![18993_i32])),
+                _ => panic!("unhandled dtype in test: {dt:?}"),
+            };
+
+            let result = coerce_to_float64(&test_arr, "test", "col");
+            assert!(
+                result.is_err(),
+                "{dt:?} should be rejected by coerce_to_float64; got {result:?}"
+            );
+        }
+    }
+
+    // ---------- coerce_xy_pairs ----------
+
+    fn xy_batch(x: ArrayRef, y: ArrayRef) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", x.data_type().clone(), true),
+            Field::new("y", y.data_type().clone(), true),
+        ]));
+        RecordBatch::try_new(schema, vec![x, y]).unwrap()
+    }
+
+    #[test]
+    fn coerce_xy_pairs_float64_passthrough() {
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
+        );
+        let (xs, ys) = coerce_xy_pairs(&b, "x", "y", "Glm").unwrap();
+        assert_eq!(xs, vec![1.0, 2.0, 3.0]);
+        assert_eq!(ys, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn coerce_xy_pairs_int_columns_match_their_float_equivalents() {
+        let ints = xy_batch(
+            Arc::new(Int64Array::from(vec![1_i64, 2, 3])),
+            Arc::new(Int32Array::from(vec![4_i32, 5, 6])),
+        );
+        let floats = xy_batch(
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
+        );
+        assert_eq!(
+            coerce_xy_pairs(&ints, "x", "y", "Glm").unwrap(),
+            coerce_xy_pairs(&floats, "x", "y", "Glm").unwrap()
+        );
+    }
+
+    #[test]
+    fn coerce_xy_pairs_drops_rows_null_or_nan_in_either_column() {
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![
+                Some(1.0),
+                None,
+                Some(3.0),
+                Some(f64::NAN),
+                Some(5.0),
+            ])),
+            Arc::new(Float64Array::from(vec![
+                Some(10.0),
+                Some(20.0),
+                None,
+                Some(40.0),
+                Some(50.0),
+            ])),
+        );
+        let (xs, ys) = coerce_xy_pairs(&b, "x", "y", "Robust").unwrap();
+        assert_eq!(xs, vec![1.0, 5.0]);
+        assert_eq!(ys, vec![10.0, 50.0]);
+    }
+
+    #[test]
+    fn coerce_xy_pairs_non_numeric_raises_with_ctx_column_and_dtype() {
+        pyo3::Python::initialize();
+        let b = xy_batch(
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+        );
+        let msg = coerce_xy_pairs(&b, "x", "y", "Logistic")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Logistic"), "err: {msg}");
+        assert!(msg.contains("'x'"), "err must name the column: {msg}");
+        assert!(msg.contains("Utf8"), "err must name the dtype: {msg}");
+    }
+
+    #[test]
+    fn coerce_xy_pairs_missing_column_raises_with_ctx() {
+        pyo3::Python::initialize();
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+        );
+        let msg = coerce_xy_pairs(&b, "x", "ghost", "data_loess")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("data_loess: column 'ghost' not found"), "err: {msg}");
     }
 
     // ---- R1-relocated coverage (tests/bug_hunt_release_transforms.rs, 2026-08-27) ----

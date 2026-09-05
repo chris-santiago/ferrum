@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+use crate::transform::numeric_util::coerce_to_float64;
 
 fn default_point_size() -> f64 {
     5.0
@@ -199,19 +200,9 @@ pub(crate) fn apply_with_context(
         .map_err(|_| PyValueError::new_err(format!(
             "stat_swarm: column '{}' not found", spec.value
         )))?;
-    if schema.field(val_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_swarm: value column '{}' must be Float64", spec.value
-        )));
-    }
 
     let n = batch.num_rows();
-    let val_arr = batch
-        .column(val_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_swarm: expected Float64Array for value column '{}'", spec.value)))?;
+    let val_arr = coerce_to_float64(batch.column(val_idx), "stat_swarm", &spec.value)?;
 
     // 2. Compute value range for radius_data.
     let mut vmin = f64::INFINITY;

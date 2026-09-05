@@ -98,12 +98,8 @@ pub(crate) fn apply_with_context(
     let v_idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("stat_violin: column '{}' not found", spec.field))
     })?;
-    if schema.field(v_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_violin: column '{}' must be Float64",
-            spec.field
-        )));
-    }
+    // Any numeric dtype is accepted; the value column is coerced to Float64
+    // below via the shared `numeric_util` helper, which raises on non-numeric.
 
     let mut group_dtypes: Vec<DataType> = Vec::with_capacity(spec.groupby.len());
     for g in &spec.groupby {
@@ -162,11 +158,11 @@ pub(crate) fn apply_with_context(
             .map_err(|e| PyValueError::new_err(format!("stat_violin: {e}")));
     }
 
-    let v_arr = batch
-        .column(v_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err("stat_violin: expected Float64Array for value column"))?;
+    let v_arr = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(v_idx),
+        "stat_violin",
+        &spec.field,
+    )?;
 
     // Bucket rows by group key (BTreeMap → deterministic ordering).
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
@@ -447,7 +443,9 @@ use pyo3::prelude::*;
 /// Parameters
 /// ----------
 /// field : str
-///     Numeric column to estimate (must be Float64).
+///     Numeric column to estimate (any integer, unsigned, or float dtype;
+///     widened to Float64). A non-numeric column raises, naming the
+///     transform, column, and dtype.
 /// groupby : list of str, default []
 ///     Columns to group by; a separate density curve is produced per group.
 /// bandwidth : float or {"scott", "silverman"}, optional

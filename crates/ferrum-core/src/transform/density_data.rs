@@ -147,16 +147,11 @@ fn apply_one_group(
     field_idx: usize,
     only_rows: Option<&[usize]>,
 ) -> PyResult<RecordBatch> {
-    let col = batch
-        .column(field_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "data_density: column '{}' must be Float64",
-                spec.field
-            ))
-        })?;
+    let col = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(field_idx),
+        "data_density",
+        &spec.field,
+    )?;
 
     // Extract clean values.
     let mut data: Vec<f64> = Vec::new();

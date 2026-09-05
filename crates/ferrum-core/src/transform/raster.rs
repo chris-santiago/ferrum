@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
-use crate::transform::numeric_util::column_extent;
+use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
 fn default_aggregate() -> String {
     "count".into()
@@ -92,10 +92,13 @@ pub(crate) struct RasterSpec {
 /// nicing), like the other 2-D pins and unlike 1-D `Bin`. Each axis uses the
 /// shared `column_extent` helper, which coerces integer columns to Float64 —
 /// previously this transform's local fold hard-required Float64 and returned
-/// `None` for integer axes, diverging from its 2-D siblings (XFORM-02). The
-/// divergence was inert (`apply` rejects non-Float64 x/y outright, so an integer
-/// axis never reaches a successful render), and coercion is now the single
-/// behavior across every extent-pin transform.
+/// `None` for integer axes, diverging from its 2-D siblings (XFORM-02). At the
+/// time, the divergence was inert because `apply` also hard-rejected
+/// non-Float64 x/y (so an integer axis never reached a successful render);
+/// the batch-D M1 sweep widened `apply` itself to coerce non-Float64 x/y
+/// through the same `coerce_to_float64` helper, so an integer axis now
+/// renders and this extent-pin fold has to agree with it — coercion is the
+/// single behavior across every extent-pin transform.
 pub(crate) fn global_extent(
     spec: &RasterSpec,
     batch: &RecordBatch,
@@ -120,26 +123,14 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    // 1. Validate x, y columns exist + Float64.
+    // 1. Validate x, y columns exist and are numeric (any int/float dtype).
     let schema = batch.schema();
     let xi = schema
         .index_of(&spec.x)
         .map_err(|_| PyValueError::new_err(format!("stat_raster: column '{}' not found", spec.x)))?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_raster: column '{}' must be Float64",
-            spec.x
-        )));
-    }
     let yi = schema
         .index_of(&spec.y)
         .map_err(|_| PyValueError::new_err(format!("stat_raster: column '{}' not found", spec.y)))?;
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_raster: column '{}' must be Float64",
-            spec.y
-        )));
-    }
 
     // 2. Validate aggregate.
     let agg = spec.aggregate.as_str();
@@ -157,27 +148,14 @@ pub(crate) fn apply_with_context(
         )));
     }
 
-    // 3. Validate field column if Some + Float64.
-    let field_arr: Option<&Float64Array> = match &spec.field {
+    // 3. Validate the field column if Some (any numeric dtype, coerced to Float64).
+    let field_arr: Option<Float64Array> = match &spec.field {
         None => None,
         Some(name) => {
             let fi = schema.index_of(name).map_err(|_| {
                 PyValueError::new_err(format!("stat_raster: column '{}' not found", name))
             })?;
-            if schema.field(fi).data_type() != &DataType::Float64 {
-                return Err(PyValueError::new_err(format!(
-                    "stat_raster: column '{}' must be Float64",
-                    name
-                )));
-            }
-            Some(
-                batch
-                    .column(fi)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| PyValueError::new_err(format!(
-                        "stat_raster: expected Float64Array for field column '{}'", name)))?,
-            )
+            Some(coerce_to_float64(batch.column(fi), "stat_raster", name)?)
         }
     };
 
@@ -207,18 +185,8 @@ pub(crate) fn apply_with_context(
         }
     };
 
-    let xa = batch
-        .column(xi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_raster: expected Float64Array for column '{}'", spec.x)))?;
-    let ya = batch
-        .column(yi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_raster: expected Float64Array for column '{}'", spec.y)))?;
+    let xa = coerce_to_float64(batch.column(xi), "stat_raster", &spec.x)?;
+    let ya = coerce_to_float64(batch.column(yi), "stat_raster", &spec.y)?;
 
     // 5. Filter to (x, y) pairs that are non-null, non-NaN. Capture field values
     // in lockstep when present.
@@ -235,7 +203,7 @@ pub(crate) fn apply_with_context(
         if xv.is_nan() || yv.is_nan() {
             continue;
         }
-        let fv = match field_arr {
+        let fv = match field_arr.as_ref() {
             None => 0.0,
             Some(fa) => {
                 if fa.is_null(i) {

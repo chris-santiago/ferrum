@@ -9,6 +9,7 @@ use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, KeyValue,
 };
+use crate::transform::numeric_util::coerce_to_float64;
 use crate::transform::residuals;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -475,16 +476,8 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
         .map_err(|_| PyValueError::new_err(format!("stat_smooth: column '{}' not found", spec.x)))?;
     let yi = schema.index_of(&spec.y)
         .map_err(|_| PyValueError::new_err(format!("stat_smooth: column '{}' not found", spec.y)))?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("stat_smooth: '{}' must be Float64", spec.x)));
-    }
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("stat_smooth: '{}' must be Float64", spec.y)));
-    }
-    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("stat_smooth: expected Float64Array for '{}'", spec.x)))?;
-    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("stat_smooth: expected Float64Array for '{}'", spec.y)))?;
+    let xa = coerce_to_float64(batch.column(xi), "stat_smooth", &spec.x)?;
+    let ya = coerce_to_float64(batch.column(yi), "stat_smooth", &spec.y)?;
     // Collect row indices that are valid in BOTH arrays (non-null, non-NaN).
     // Uses the same null+NaN predicate as clean_float64_values in numeric_util,
     // but applied to paired columns so only jointly-clean rows are kept.
@@ -503,8 +496,8 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
 
     // Extract each column at the valid indices via the shared cleaner.
     // This reuses the same null+NaN drop logic across all transform callers.
-    let xs = clean_float64_values(xa, Some(&valid_indices));
-    let ys = clean_float64_values(ya, Some(&valid_indices));
+    let xs = clean_float64_values(&xa, Some(&valid_indices));
+    let ys = clean_float64_values(&ya, Some(&valid_indices));
     Ok((xs, ys))
 }
 
@@ -1062,9 +1055,13 @@ use crate::transform::core::TransformSpec;
 /// Parameters
 /// ----------
 /// x : str
-///     Predictor column (must be Float64).
+///     Predictor column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// y : str
-///     Response column (must be Float64).
+///     Response column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// method : {"loess", "lm"}, default "loess"
 ///     Smoothing method. ``"loess"`` fits locally-weighted polynomial
 ///     regression; ``"lm"`` fits a global linear model.

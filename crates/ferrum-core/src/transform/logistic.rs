@@ -9,12 +9,14 @@
 //! Output schema: `[x: Float64, y: Float64, ci_lower: Float64, ci_upper: Float64]`
 //! where `y` is the fitted probability `P(y=1 | x)`.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
-use arrow::datatypes::{DataType, Schema};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
+use arrow::datatypes::Schema;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::numeric_util::coerce_xy_pairs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +33,7 @@ pub(crate) struct LogisticSpec {
 }
 
 pub(crate) fn apply(spec: &LogisticSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let (xs, ys) = extract_xy(spec, batch)?;
+    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "Logistic")?;
     validate_binary_y(&ys)?;
 
     if xs.len() < 2 {
@@ -86,33 +88,6 @@ pub(crate) fn apply(spec: &LogisticSpec, batch: &RecordBatch) -> PyResult<Record
     };
 
     build_logistic_batch(grid, y_fit, lo, hi)
-}
-
-fn extract_xy(spec: &LogisticSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f64>)> {
-    let schema = batch.schema();
-    let xi = schema.index_of(&spec.x)
-        .map_err(|_| PyValueError::new_err(format!("Logistic: column '{}' not found", spec.x)))?;
-    let yi = schema.index_of(&spec.y)
-        .map_err(|_| PyValueError::new_err(format!("Logistic: column '{}' not found", spec.y)))?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("Logistic: '{}' must be Float64", spec.x)));
-    }
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("Logistic: '{}' must be Float64", spec.y)));
-    }
-    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("Logistic: expected Float64Array for '{}'", spec.x)))?;
-    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("Logistic: expected Float64Array for '{}'", spec.y)))?;
-    let mut xs = Vec::with_capacity(xa.len());
-    let mut ys = Vec::with_capacity(ya.len());
-    for i in 0..xa.len() {
-        if xa.is_null(i) || ya.is_null(i) { continue; }
-        let xv = xa.value(i); let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() { continue; }
-        xs.push(xv); ys.push(yv);
-    }
-    Ok((xs, ys))
 }
 
 fn validate_binary_y(ys: &[f64]) -> PyResult<()> {
@@ -323,9 +298,13 @@ use crate::transform::core::TransformSpec;
 /// Parameters
 /// ----------
 /// x : str
-///     Predictor column (must be Float64).
+///     Predictor column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// y : str
-///     Binary response column (must be Float64; values should be 0 or 1).
+///     Binary response column (any integer, unsigned, or float dtype;
+///     widened to Float64; values should be 0 or 1). A non-numeric column
+///     raises, naming the transform, column, and dtype.
 /// n_grid : int, default 100
 ///     Number of evenly-spaced grid points to evaluate. Must be > 0.
 /// ci : float, optional
@@ -410,7 +389,7 @@ impl PyLogistic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, RecordBatch};
+    use arrow::array::{Array, Float64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 

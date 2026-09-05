@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -49,16 +50,7 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
     let field_idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("data_stack: column '{}' not found", spec.field))
     })?;
-    let field_col = batch
-        .column(field_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "data_stack: column '{}' must be Float64",
-                spec.field
-            ))
-        })?;
+    let field_col = coerce_to_float64(batch.column(field_idx), "data_stack", &spec.field)?;
 
     // Build group keys.
     let group_cols: Vec<usize> = spec

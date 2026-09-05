@@ -10,6 +10,7 @@ use crate::transform::group_key::{
     groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     KeyValue,
 };
+use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -25,6 +26,66 @@ pub(crate) enum AggFn {
     Q1,
     Q3,
     Distinct,
+}
+
+/// An aggregate op's source column, resolved once per batch.
+///
+/// Batch-D dtype policy (spec §4.1): a numeric op accepts every integer /
+/// unsigned / float dtype by widening to Float64, and refuses anything else by
+/// name. `Count` is the documented exception — it counts non-null rows at any
+/// dtype, so a non-Float64 column under `Count` is kept in its original form.
+///
+/// Shared by `stat_aggregate`, `data_aggregate`, and `data_join_aggregate`,
+/// which previously carried three drifted copies of this dispatch (one silently
+/// returning `NaN`, one erroring without naming the column).
+///
+/// `fn_` is captured at `resolve` time and carried inside the variant rather
+/// than passed again to `aggregate_rows`, so a caller cannot resolve a column
+/// for one `AggFn` and then aggregate it as another — that mismatch used to be
+/// representable (and silently wrong) even though every call site happened to
+/// pass the same `fn_` both times.
+pub(crate) enum AggColumn {
+    /// Numeric source, widened to Float64.
+    Numeric { arr: Float64Array, fn_: AggFn },
+    /// `Count` over a non-Float64 column: non-null rows are counted as-is.
+    NonNullCount(ArrayRef),
+}
+
+impl AggColumn {
+    /// Resolve `col` for `fn_`, raising when a numeric op meets a non-numeric
+    /// column. `ctx` is the calling transform's error-message prefix.
+    pub(crate) fn resolve(col: &ArrayRef, field: &str, fn_: AggFn, ctx: &str) -> PyResult<Self> {
+        if fn_ == AggFn::Count && col.data_type() != &DataType::Float64 {
+            return Ok(AggColumn::NonNullCount(col.clone()));
+        }
+        Ok(AggColumn::Numeric { arr: coerce_to_float64(col, ctx, field)?, fn_ })
+    }
+
+    /// Aggregate one group's rows, dropping null and NaN entries, using the
+    /// `AggFn` captured at `resolve` time.
+    pub(crate) fn aggregate_rows(&self, rows: &[usize]) -> f64 {
+        match self {
+            AggColumn::NonNullCount(col) => {
+                rows.iter().filter(|&&r| !col.is_null(r)).count() as f64
+            }
+            AggColumn::Numeric { arr, fn_ } => {
+                let vals: Vec<f64> = rows
+                    .iter()
+                    .filter_map(|&r| {
+                        if arr.is_null(r) {
+                            return None;
+                        }
+                        let v = arr.value(r);
+                        if v.is_nan() {
+                            return None;
+                        }
+                        Some(v)
+                    })
+                    .collect();
+                aggregate(&vals, *fn_, rows.len())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,12 +113,15 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     }
     let schema = batch.schema();
 
-    // Validate fields/dtypes for ops.
+    // Validate fields and resolve each op's source column once, per the shared
+    // dtype policy (numeric ops widen; non-numeric refuses; Count counts any dtype).
     // Count with an empty field (i.e., `count():Q` shorthand) uses the batch row count
-    // directly — no column lookup is needed, so we skip validation in that case.
+    // directly — no column lookup is needed, so we skip resolution in that case.
+    let mut op_columns: Vec<Option<AggColumn>> = Vec::with_capacity(spec.ops.len());
     for op in &spec.ops {
         let is_count_star = op.fn_ == AggFn::Count && (op.field.is_empty() || op.field == "*");
         if is_count_star {
+            op_columns.push(None);
             continue;
         }
         let idx = schema.index_of(&op.field).map_err(|_| {
@@ -65,11 +129,12 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
                 "stat_aggregate: column '{}' not found", op.field
             ))
         })?;
-        if op.fn_ != AggFn::Count && schema.field(idx).data_type() != &DataType::Float64 {
-            return Err(PyValueError::new_err(format!(
-                "stat_aggregate: op field '{}' must be Float64", op.field
-            )));
-        }
+        op_columns.push(Some(AggColumn::resolve(
+            batch.column(idx),
+            &op.field,
+            op.fn_,
+            "stat_aggregate",
+        )?));
     }
 
     // Validate groupby fields and capture their dtypes for output schema preservation.
@@ -134,30 +199,10 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
                 continue;
             }
 
-            let col = batch
-                .column(schema.index_of(&op.field).expect("invariant: op fields validated above"));
-
-            if op.fn_ == AggFn::Count && col.data_type() != &DataType::Float64 {
-                // Count on non-numeric columns: count non-null rows.
-                let non_null = rows.iter().filter(|&&r| !col.is_null(r)).count();
-                op_values_out[op_i].push(non_null as f64);
-            } else {
-                let arr = col
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| PyValueError::new_err(format!(
-                        "stat_aggregate: expected Float64Array for op field '{}'", op.field
-                    )))?;
-                // Filter to non-null, non-NaN values within this group.
-                let vals: Vec<f64> = rows.iter().filter_map(|&r| {
-                    if arr.is_null(r) { return None; }
-                    let v = arr.value(r);
-                    if v.is_nan() { return None; }
-                    Some(v)
-                }).collect();
-                let result = aggregate(&vals, op.fn_, rows.len());
-                op_values_out[op_i].push(result);
-            }
+            let resolved = op_columns[op_i]
+                .as_ref()
+                .expect("invariant: only count-star ops are unresolved, handled above");
+            op_values_out[op_i].push(resolved.aggregate_rows(rows));
         }
     }
 
@@ -1149,5 +1194,89 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("unsupported dtype"), "expected 'unsupported dtype' in: {msg}");
         assert!(msg.contains("grp"), "expected column name 'grp' in error: {msg}");
+    }
+
+    // ---- Batch-D dtype policy (spec §4.1) ----
+
+    fn int_value_batch(values: Vec<i64>, groups: Vec<&str>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",     DataType::Int64, true),
+            Field::new("group", DataType::Utf8,  true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(values)),
+                Arc::new(StringArray::from(groups)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn mean_of_v(groupby: Vec<String>) -> AggregateSpec {
+        AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "v".into(),
+                fn_: AggFn::Mean,
+                as_: "m".into(),
+            }],
+            groupby,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_int_column_matches_its_float64_equivalent() {
+        let ints = int_value_batch(vec![1, 3, 10, 20], vec!["a", "a", "b", "b"]);
+        let floats = batch_value_group(
+            vec![Some(1.0), Some(3.0), Some(10.0), Some(20.0)],
+            vec!["a", "a", "b", "b"],
+        );
+        let spec = mean_of_v(vec!["group".into()]);
+
+        let from_ints = apply(&spec, &ints).unwrap();
+        let from_floats = apply(&spec, &floats).unwrap();
+        assert_eq!(col_f64(&from_ints, "m"), col_f64(&from_floats, "m"));
+        assert_eq!(col_str(&from_ints, "group"), col_str(&from_floats, "group"));
+    }
+
+    #[test]
+    fn aggregate_non_numeric_under_numeric_op_raises_naming_column_and_dtype() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![Some(1.0), Some(2.0)], vec!["a", "b"]);
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "group".into(),
+                fn_: AggFn::Mean,
+                as_: "m".into(),
+            }],
+            groupby: vec![],
+            name: None,
+        };
+        let msg = apply(&spec, &batch).unwrap_err().to_string();
+        assert!(msg.contains("stat_aggregate"), "err: {msg}");
+        assert!(msg.contains("'group'"), "err must name the column: {msg}");
+        assert!(msg.contains("Utf8"), "err must name the dtype: {msg}");
+    }
+
+    #[test]
+    fn aggregate_count_still_counts_non_null_rows_at_any_dtype() {
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec![Some("a"), None, Some("c")]))],
+        )
+        .unwrap();
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp {
+                field: "s".into(),
+                fn_: AggFn::Count,
+                as_: "n".into(),
+            }],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(col_f64(&out, "n"), vec![2.0]);
     }
 }

@@ -10,6 +10,7 @@ use crate::transform::group_key::{
     groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     KeyValue,
 };
+use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -40,12 +41,6 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
     let v_idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("stat_summary: column '{}' not found", spec.field))
     })?;
-    if schema.field(v_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_summary: column '{}' must be Float64",
-            spec.field
-        )));
-    }
 
     let mut group_dtypes: Vec<DataType> = Vec::with_capacity(spec.groupby.len());
     for g in &spec.groupby {
@@ -72,12 +67,7 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
         return Err(PyValueError::new_err("stat_summary: empty input batch"));
     }
 
-    let v_arr = batch
-        .column(v_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_summary: expected Float64Array for column '{}'", spec.field)))?;
+    let v_arr = coerce_to_float64(batch.column(v_idx), "stat_summary", &spec.field)?;
 
     // Collect rows per group key.
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
@@ -236,7 +226,9 @@ use crate::transform::core::TransformSpec;
 /// Parameters
 /// ----------
 /// field : str
-///     Numeric column to summarize (must be Float64).
+///     Numeric column to summarize (any integer, unsigned, or float dtype;
+///     widened to Float64). A non-numeric column raises, naming the
+///     transform, column, and dtype.
 /// groupby : list of str, optional
 ///     Columns to group by. Default is ``[]`` (whole-batch summary).
 /// error_fn : {"ci", "stderr", "stdev"}, default "ci"

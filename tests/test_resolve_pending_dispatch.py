@@ -15,10 +15,26 @@ exercise the cross-kind prep steps.  Each case asserts:
 * ``chart.to_json()`` equals the captured baseline (the resolved ChartSpec is
   byte-identical), and
 * the resolved chart's layer structure (names, marks, ``data_source``, encoding
-  fields) and data dtypes (the Float64 casts) match the baseline.
+  fields) and data dtypes match the baseline.
 
 The baseline strings below were captured from the pre-refactor implementation
 and verified byte-identical against the dispatch-table implementation.
+
+Historical note: boxen/boxplot/violin/swarm used to carry a post-desugar
+Float64-cast step here (``_desugar.cast_columns_to_float64``), mirroring a
+Rust-side hard-``Float64`` requirement.  Batch D's dtype-policy sweep moved
+that widening into the transform engine itself (any integer/unsigned/float
+dtype coerces engine-side; anything else raises a typed refusal) and the
+Python-side mirror was deleted as redundant (box/boxen/violin) or actively
+wrong (swarm silently coerced numeric-*string* columns instead of letting the
+engine refuse them by type).  The dtype-fingerprint assertions below were
+flipped accordingly: ``_resolve_pending()`` no longer mutates column dtypes at
+all, for any composite mark, so the fingerprints now pin the *pass-through*
+column dtype rather than a Python-side Float64 cast.  End-to-end numeric-dtype
+rendering (byte-identity against a Float64 equivalent) and the typed-refusal
+behavior are covered by ``tests/test_transform_dtypes.py``, which exercises
+the real Rust transform through ``to_svg()``; this module only pins the
+desugar/dispatch layer, which never reaches the Rust engine.
 """
 
 from __future__ import annotations
@@ -155,15 +171,16 @@ _BASELINE = {
             "dtypes": {"x": "Int64", "y_lo": "Float64", "y_hi": "Float64"},
         },
     },
-    "boxen_cast_and_sort": {
-        # boxen casts the int value column to Float64 (post-desugar branch).
+    "boxen_no_python_cast": {
+        # boxen no longer casts the value column post-desugar; the int dtype
+        # passes through unchanged (the Rust transform widens it engine-side).
         "shape": {
-            "dtypes": {"cat": "String", "val": "Float64"},
+            "dtypes": {"cat": "String", "val": "Int64"},
         },
     },
-    "swarm_cast": {
+    "swarm_no_python_cast": {
         "shape": {
-            "dtypes": {"cat": "String", "val": "Float64"},
+            "dtypes": {"cat": "String", "val": "Int64"},
         },
     },
 }
@@ -210,10 +227,14 @@ def test_ribbon_injects_y2_field() -> None:
     assert _build("ribbon").to_json() == _BASELINE["ribbon"]["json"]
 
 
-def test_boxen_casts_int_value_to_float64() -> None:
-    """boxen post-desugar cast turns the integer value column into Float64."""
+def test_boxen_does_not_cast_value_column_python_side() -> None:
+    """boxen no longer casts the value column in Python (batch D, M1).
+
+    The Rust ``stat_letter_value`` transform now widens any integer/float
+    dtype itself; the Python-side mirror was redundant and has been deleted.
+    """
     shape = _resolved_shape(_build("boxen"))
-    assert shape["dtypes"] == _BASELINE["boxen_cast_and_sort"]["shape"]["dtypes"]
+    assert shape["dtypes"] == _BASELINE["boxen_no_python_cast"]["shape"]["dtypes"]
 
 
 def test_boxen_aggregate_sort_routes_into_letter_value_transform() -> None:
@@ -253,18 +274,25 @@ def test_errorbar_does_not_inject_y_sort() -> None:
     assert resolved._layers is not None  # resolves cleanly
 
 
-def test_violin_casts_int_value_and_infers_color() -> None:
-    """violin casts int value→Float64 and threads color into layers."""
+def test_violin_does_not_cast_value_column_and_infers_color() -> None:
+    """violin no longer casts the int value column in Python; color still threads.
+
+    ``stat_violin`` widens the value column engine-side now (batch D, M1).
+    """
     shape = _resolved_shape(_build("violin_hue"))
-    assert shape["dtypes"]["v"] == "Float64"
+    assert shape["dtypes"]["v"] == "Int64"
     body = next(ly for ly in shape["layers"] if ly["name"] == "body")
     assert body["enc_fields"].get("color") == "hue"
 
 
-def test_swarm_casts_value_field_to_float64() -> None:
-    """swarm casts the categorical-axis value column to Float64 post-desugar."""
+def test_swarm_does_not_cast_value_field_python_side() -> None:
+    """swarm no longer casts the categorical-axis value column post-desugar.
+
+    ``stat_swarm`` widens any integer/float dtype engine-side now (batch D,
+    M1); the Python-side mirror was deleted.
+    """
     shape = _resolved_shape(_build("swarm"))
-    assert shape["dtypes"] == _BASELINE["swarm_cast"]["shape"]["dtypes"]
+    assert shape["dtypes"] == _BASELINE["swarm_no_python_cast"]["shape"]["dtypes"]
 
 
 def test_hex_infers_aggregate_field_from_color() -> None:
@@ -306,22 +334,33 @@ def test_smooth_single_mode_no_prior() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Swarm Float64 predicate characterization tests (Fix-round 1 regression pins).
+# Swarm/boxplot dtype pass-through tests (batch D, M1 re-adjudication).
 #
-# The old chart.py swarm cast block used `dtype != pl.Float64` (any non-Float64),
-# NOT just integer dtypes.  After the CHART-07 dispatch-table restructure, the
-# shared `cast_columns_to_float64` helper defaulted to int-only, silently
-# narrowing the swarm predicate.  These tests pin the correct behavior.
+# These used to pin a Python-side ``_desugar.cast_columns_to_float64`` cast:
+# swarm's predicate was "any non-Float64 dtype" (so it also silently coerced
+# Float32 *and numeric-string* columns), boxplot's was "integer dtypes only".
+# The Rust dtype-policy sweep moved the widening into the transform engine
+# itself, so the Python-side mirror is gone. Two consequences pinned below:
+#
+# 1. Neither branch touches column dtypes at ``_resolve_pending()`` time
+#    anymore — the previously-cast columns now pass through unchanged, for
+#    every dtype (not just Float32).
+# 2. The old numeric-string swarm test (`test_swarm_casts_numeric_string_...`)
+#    pinned the *wrong* behavior: it asserted the shim silently coerced a
+#    numeric-string column instead of letting the Rust transform refuse it by
+#    type. That assertion is deleted outright rather than flipped in place —
+#    ``_resolve_pending()`` never reaches the Rust engine, so there is nothing
+#    to assert about the refusal at this layer. The refusal itself (a typed
+#    ``ValueError`` naming transform/column/dtype, reached through
+#    ``to_svg()``) is pinned in ``tests/test_transform_dtypes.py``.
 # ---------------------------------------------------------------------------
 
 
-def test_swarm_casts_float32_value_to_float64() -> None:
-    """swarm with a Float32 value column must cast it to Float64.
+def test_swarm_does_not_cast_float32_value_python_side() -> None:
+    """swarm no longer touches a Float32 value column in Python.
 
-    A Float32 column passes the integer-only predicate untouched but fails the
-    Rust swarm transform's hard Float64 requirement.  This test pins the
-    original 'any non-Float64' predicate that the old chart.py swarm cast block
-    used (``dtype != pl.Float64``).
+    ``stat_swarm`` widens Float32 (and every other numeric dtype) itself now;
+    the Python-side "any non-Float64" cast this used to pin is deleted.
     """
     df = pl.DataFrame(
         {"cat": ["a"] * 10 + ["b"] * 10, "val": pl.Series(list(range(20)), dtype=pl.Float32)}
@@ -329,38 +368,16 @@ def test_swarm_casts_float32_value_to_float64() -> None:
     chart = fm.Chart(df).mark_swarm().encode(x="cat:N", y="val:Q")
     resolved = chart._resolve_pending()
     assert isinstance(resolved._data, pl.DataFrame)
-    assert resolved._data["val"].dtype == pl.Float64, (
-        "swarm must cast Float32 value → Float64 (any non-Float64 predicate)"
-    )
-
-
-def test_swarm_casts_numeric_string_value_to_float64() -> None:
-    """swarm with a numeric-string value column must cast it to Float64.
-
-    A Utf8/String column containing numeric strings (e.g. '1.0', '2.5') is not
-    an integer dtype, so the int-only predicate leaves it untouched.  The old
-    swarm block's ``dtype != pl.Float64`` predicate would have cast it.
-    """
-    df = pl.DataFrame(
-        {
-            "cat": ["a"] * 5 + ["b"] * 5,
-            "val": pl.Series(["1.0", "2.0", "3.0", "4.0", "5.0"] * 2, dtype=pl.Utf8),
-        }
-    )
-    chart = fm.Chart(df).mark_swarm().encode(x="cat:N", y="val:Q")
-    resolved = chart._resolve_pending()
-    assert isinstance(resolved._data, pl.DataFrame)
-    assert resolved._data["val"].dtype == pl.Float64, (
-        "swarm must cast numeric-string value → Float64 (any non-Float64 predicate)"
+    assert resolved._data["val"].dtype == pl.Float32, (
+        "swarm must not cast the value column in Python anymore"
     )
 
 
 def test_boxplot_does_not_cast_float32_value() -> None:
-    """boxplot's int-only predicate must NOT cast Float32 columns.
+    """boxplot never casts its value column in Python (int or otherwise).
 
-    The box/violin/boxen cast is intentionally int-only: Float32 columns are
-    valid inputs for those transforms and should NOT be silently widened.
-    This test pins that the fix to swarm did not change the boxplot predicate.
+    Float32 columns are valid inputs for ``stat_box_stats``, which now widens
+    them engine-side; there is no Python-side cast left to skip or apply.
     """
     df = pl.DataFrame(
         {
@@ -372,5 +389,5 @@ def test_boxplot_does_not_cast_float32_value() -> None:
     resolved = chart._resolve_pending()
     assert isinstance(resolved._data, pl.DataFrame)
     assert resolved._data["val"].dtype == pl.Float32, (
-        "boxplot int-only cast must NOT widen Float32 → Float64"
+        "boxplot must not cast the value column in Python"
     )

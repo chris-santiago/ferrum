@@ -3,7 +3,7 @@
 //! Computes grouped aggregates and joins them back to the original rows,
 //! so the output has the same number of rows as the input plus new columns.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::transform::aggregate::AggFn;
+use crate::transform::aggregate::{AggColumn, AggFn};
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 
 /// A single aggregation specification for JoinAggregate.
@@ -66,11 +66,17 @@ pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<R
             ))
         })?;
 
-        // Compute per-group aggregate.
+        // Resolve the source column once, then compute per-group aggregates.
+        let agg_column = AggColumn::resolve(
+            batch.column(col_idx),
+            &agg.field,
+            agg.fn_,
+            "data_join_aggregate",
+        )?;
         let mut row_values: Vec<f64> = vec![f64::NAN; n_rows];
 
         for rows in groups.values() {
-            let agg_val = compute_agg(batch.column(col_idx).as_ref(), rows, agg.fn_)?;
+            let agg_val = agg_column.aggregate_rows(rows);
             for &r in rows {
                 row_values[r] = agg_val;
             }
@@ -130,37 +136,6 @@ fn build_group_keys(
     Ok(keys)
 }
 
-fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> PyResult<f64> {
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        let vals: Vec<f64> = rows
-            .iter()
-            .filter_map(|&r| {
-                if arr.is_null(r) {
-                    return None;
-                }
-                let v = arr.value(r);
-                if v.is_nan() {
-                    return None;
-                }
-                Some(v)
-            })
-            .collect();
-
-        use crate::transform::aggregate::aggregate as agg_fn;
-        Ok(agg_fn(&vals, fn_, rows.len()))
-    } else {
-        // Count on non-numeric columns.
-        if matches!(fn_, AggFn::Count) {
-            let non_null = rows.iter().filter(|&&r| !col.is_null(r)).count();
-            Ok(non_null as f64)
-        } else {
-            Err(PyValueError::new_err(
-                "data_join_aggregate: non-count aggregation requires Float64 column",
-            ))
-        }
-    }
-}
-
 // ─── PyO3 wrapper ──────────────────────────────────────────────────────────
 
 use pyo3::prelude::*;
@@ -190,7 +165,7 @@ impl PyJoinAggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, StringArray};
+    use arrow::array::{Array, Float64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
 

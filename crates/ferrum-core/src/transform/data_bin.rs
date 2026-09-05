@@ -49,13 +49,11 @@ pub(crate) fn apply(spec: &DataBinSpec, batch: &RecordBatch) -> PyResult<RecordB
     let col_idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("data_bin: column '{}' not found", spec.field))
     })?;
-    let col = batch
-        .column(col_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!("data_bin: column '{}' must be Float64", spec.field))
-        })?;
+    let col = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(col_idx),
+        "data_bin",
+        &spec.field,
+    )?;
 
     let n_rows = batch.num_rows();
 

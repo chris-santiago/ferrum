@@ -9,7 +9,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::numeric_util::clean_float64_values;
+use crate::transform::numeric_util::{clean_float64_values, coerce_to_float64};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -43,20 +43,9 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
         PyValueError::new_err(format!("data_impute: column '{}' not found", spec.field))
     })?;
 
-    if schema.field(col_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "data_impute: column '{}' must be Float64",
-            spec.field
-        )));
-    }
-
-    let col = batch
-        .column(col_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!("data_impute: expected Float64Array for '{}'", spec.field))
-        })?;
+    // Any numeric dtype is accepted; the imputed column is emitted as Float64
+    // (the fill value is a float, so the column widens by construction).
+    let col = coerce_to_float64(batch.column(col_idx), "data_impute", &spec.field)?;
 
     let n_rows = batch.num_rows();
 
@@ -64,11 +53,11 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
     let fill_value = match spec.method.as_str() {
         "value" => spec.value.unwrap_or(0.0),
         "mean" => {
-            let (sum, count) = clean_stats(col);
+            let (sum, count) = clean_stats(&col);
             if count == 0 { 0.0 } else { sum / count as f64 }
         }
         "median" => {
-            let mut vals = clean_float64_values(col, None);
+            let mut vals = clean_float64_values(&col, None);
             if vals.is_empty() {
                 0.0
             } else {
@@ -82,11 +71,11 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
             }
         }
         "min" => {
-            let vals = clean_float64_values(col, None);
+            let vals = clean_float64_values(&col, None);
             vals.iter().fold(f64::INFINITY, |a, &b| a.min(b))
         }
         "max" => {
-            let vals = clean_float64_values(col, None);
+            let vals = clean_float64_values(&col, None);
             vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
         }
         other => {

@@ -3,7 +3,7 @@
 //! Same semantics as stat_aggregate but exposed as a data transform.
 //! Delegates to the existing aggregate module's logic.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::transform::aggregate::AggFn;
+use crate::transform::aggregate::AggColumn;
 use crate::transform::group_key::{
     groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     KeyValue,
@@ -104,18 +104,25 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
     let mut group_key_vecs: Vec<Vec<KeyValue>> = Vec::with_capacity(n_out_rows);
     let mut agg_results: Vec<Vec<f64>> = vec![Vec::with_capacity(n_out_rows); spec.aggregates.len()];
 
-    for (key, rows) in &groups {
-        group_key_vecs.push(key.clone());
-        for (ai, agg) in spec.aggregates.iter().enumerate() {
+    // Resolve each aggregate's source column once, per the shared dtype policy.
+    let agg_columns: Vec<AggColumn> = spec
+        .aggregates
+        .iter()
+        .map(|agg| {
             let col_idx = schema.index_of(&agg.field).map_err(|_| {
                 PyValueError::new_err(format!(
                     "data_aggregate: column '{}' not found",
                     agg.field
                 ))
             })?;
-            let col = batch.column(col_idx);
-            let val = compute_agg(col.as_ref(), rows, agg.fn_);
-            agg_results[ai].push(val);
+            AggColumn::resolve(batch.column(col_idx), &agg.field, agg.fn_, "data_aggregate")
+        })
+        .collect::<PyResult<_>>()?;
+
+    for (key, rows) in &groups {
+        group_key_vecs.push(key.clone());
+        for ai in 0..spec.aggregates.len() {
+            agg_results[ai].push(agg_columns[ai].aggregate_rows(rows));
         }
     }
 
@@ -148,34 +155,6 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
         .map_err(|e| PyValueError::new_err(format!("data_aggregate: {e}")))
 }
 
-fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> f64 {
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        let vals: Vec<f64> = rows
-            .iter()
-            .filter_map(|&r| {
-                if arr.is_null(r) {
-                    return None;
-                }
-                let v = arr.value(r);
-                if v.is_nan() {
-                    return None;
-                }
-                Some(v)
-            })
-            .collect();
-
-        use crate::transform::aggregate::aggregate as agg_fn;
-        agg_fn(&vals, fn_, rows.len())
-    } else {
-        // Count on non-numeric.
-        if matches!(fn_, AggFn::Count) {
-            rows.iter().filter(|&&r| !col.is_null(r)).count() as f64
-        } else {
-            f64::NAN
-        }
-    }
-}
-
 // No PyO3 wrapper: `DataAggregate` is constructed only via the dict-emitting
 // `transform_aggregate` Python function and carried through the
 // `transforms_json` serde path (SEAM-02). `DataAggregateSpec` above is the
@@ -185,7 +164,7 @@ fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> f64 {
 mod tests {
     use super::*;
     use crate::transform::aggregate::AggFn;
-    use arrow::array::{Float64Array, StringArray};
+    use arrow::array::{Array, Float64Array, StringArray};
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
 

@@ -474,13 +474,21 @@ mod tests {
             }),
         ];
 
-        // bin produces UInt64 count, but stat_aggregate requires Float64 for op fields.
-        // The pipeline is expected to fail with a clear schema-mismatch error from stat_aggregate.
+        // Bin produces a UInt64 `count` column. Before the batch-D dtype policy
+        // (spec §4.1) stat_aggregate hard-rejected anything but Float64, so this
+        // pipeline failed with a schema-mismatch error; it now coerces the count
+        // column and sums it. Ten input rows → total_count 10.
         let ctx = TransformContext::default();
-        let err = apply_transforms_named(&pipeline, &batch, &ctx).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("Float64") || msg.contains("dtype"),
-            "expected dtype error from stat_aggregate; got: {msg}");
+        let outputs = apply_transforms_named(&pipeline, &batch, &ctx).unwrap();
+        let out = &outputs[FINAL_OUTPUT_KEY];
+        assert_eq!(out.schema().field(0).name(), "total_count");
+        let totals = out
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("total_count is Float64");
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals.value(0), 10.0);
     }
 
     #[test]

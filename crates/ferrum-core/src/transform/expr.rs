@@ -4,6 +4,8 @@
 //! like `"datum.x > 10"` or `"datum.age * 2 + 1"`. Used by `transform_filter`
 //! and `transform_calculate` to evaluate predicates and computed columns.
 
+use std::collections::BTreeSet;
+
 // ─── Values ─────────────��───────────────────────────────────────���───────────
 
 /// Runtime value produced by expression evaluation.
@@ -731,6 +733,42 @@ impl Expr {
     pub fn eval(&self, datum: &dyn Fn(&str) -> ExprValue) -> ExprValue {
         eval_node(&self.root, datum)
     }
+
+    /// Every column name this expression reads, in sorted order.
+    ///
+    /// Only the first segment of a `datum.a.b` path is reported, matching what
+    /// [`Self::eval`] actually looks up (Arrow columns are flat). Callers use
+    /// this to validate column dtypes **once per batch** instead of per row —
+    /// a dtype is a schema property, so the check belongs before evaluation.
+    pub(crate) fn field_refs(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        collect_field_refs(&self.root, &mut out);
+        out
+    }
+}
+
+fn collect_field_refs(node: &Node, out: &mut BTreeSet<String>) {
+    match node {
+        Node::Literal(_) => {}
+        Node::DatumAccess(fields) => {
+            out.insert(fields[0].clone());
+        }
+        Node::Array(elements) | Node::Call(_, elements) => {
+            for e in elements {
+                collect_field_refs(e, out);
+            }
+        }
+        Node::UnaryNeg(inner) | Node::UnaryNot(inner) => collect_field_refs(inner, out),
+        Node::BinaryOp(_, left, right) => {
+            collect_field_refs(left, out);
+            collect_field_refs(right, out);
+        }
+        Node::Ternary(cond, then, other) => {
+            collect_field_refs(cond, out);
+            collect_field_refs(then, out);
+            collect_field_refs(other, out);
+        }
+    }
 }
 
 fn eval_node(node: &Node, datum: &dyn Fn(&str) -> ExprValue) -> ExprValue {
@@ -1451,5 +1489,36 @@ mod tests {
         // not just its lead byte.
         let result = eval_with(r#""\é" == "\é""#, &[]);
         assert_bool(result, true);
+    }
+
+    // ---- field_refs (batch-D: per-batch dtype validation needs the ref set) ----
+
+    fn refs(src: &str) -> Vec<String> {
+        Expr::parse(src).unwrap().field_refs().into_iter().collect()
+    }
+
+    #[test]
+    fn field_refs_collects_from_every_node_kind() {
+        // Binary + unary + ternary + array + call, all in one expression.
+        let got = refs(
+            "!datum.flag ? -datum.a + datum.b : indexof([datum.c, 2], datum.d)",
+        );
+        assert_eq!(got, vec!["a", "b", "c", "d", "flag"]);
+    }
+
+    #[test]
+    fn field_refs_is_deduplicated_and_sorted() {
+        assert_eq!(refs("datum.z > 1 && datum.a < datum.z"), vec!["a", "z"]);
+    }
+
+    #[test]
+    fn field_refs_reports_only_the_first_path_segment() {
+        // eval() looks up `fields[0]`; field_refs must agree with it.
+        assert_eq!(refs("datum.a.b > 1"), vec!["a"]);
+    }
+
+    #[test]
+    fn field_refs_empty_for_literal_only_expressions() {
+        assert!(refs("1 + 2 > 2").is_empty());
     }
 }

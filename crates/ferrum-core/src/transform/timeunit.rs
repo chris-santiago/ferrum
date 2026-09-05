@@ -1,7 +1,8 @@
 //! Data transform: TimeUnit — extract temporal unit from a datetime field.
 //!
 //! Extracts year, month, day, hour, minute, second, day_of_week, week,
-//! quarter from a timestamp column and outputs a new Float64 column.
+//! quarter from a Timestamp column, or from any numeric column treated as
+//! epoch milliseconds, and outputs a new Float64 column.
 
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit as ArrowTimeUnit};
@@ -9,6 +10,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -34,14 +37,25 @@ pub(crate) fn apply(spec: &TimeUnitSpec, batch: &RecordBatch) -> PyResult<Record
     })?;
     let col = batch.column(col_idx);
 
-    // Handle Float64 columns (epoch millis) or Timestamp columns.
-    let millis: Vec<Option<i64>> = extract_millis(col.as_ref(), schema.field(col_idx).data_type())?;
+    // Validate the unit once, against extract_unit's own dispatch, so an
+    // unrecognised name refuses by name instead of yielding an all-NaN column.
+    if extract_unit(0, &spec.unit).is_none() {
+        return Err(PyValueError::new_err(format!(
+            "data_timeunit: unknown unit '{}'; expected {}",
+            spec.unit,
+            SUPPORTED_UNITS.join(" | ")
+        )));
+    }
 
-    // Extract the unit.
+    // Handle Timestamp columns, or any numeric column treated as epoch millis.
+    let millis: Vec<Option<i64>> =
+        extract_millis(col, schema.field(col_idx).data_type(), &spec.field)?;
+
+    // Extract the unit. A null input timestamp yields a null output cell.
     let values: Vec<f64> = millis
         .iter()
         .map(|opt_ms| match opt_ms {
-            Some(ms) => extract_unit(*ms, &spec.unit),
+            Some(ms) => extract_unit(*ms, &spec.unit).expect("invariant: unit validated above"),
             None => f64::NAN,
         })
         .collect();
@@ -65,7 +79,7 @@ pub(crate) fn apply(spec: &TimeUnitSpec, batch: &RecordBatch) -> PyResult<Record
         .map_err(|e| PyValueError::new_err(format!("data_timeunit: {e}")))
 }
 
-fn extract_millis(col: &dyn Array, dtype: &DataType) -> PyResult<Vec<Option<i64>>> {
+fn extract_millis(col: &ArrayRef, dtype: &DataType, field: &str) -> PyResult<Vec<Option<i64>>> {
     let n = col.len();
     // Timestamp types.
     match dtype {
@@ -86,11 +100,24 @@ fn extract_millis(col: &dyn Array, dtype: &DataType) -> PyResult<Vec<Option<i64>
                 })
                 .collect())
         }
-        DataType::Float64 => {
-            // Treat as epoch millis.
-            let arr = col.as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-                PyValueError::new_err("data_timeunit: expected Float64Array")
-            })?;
+        DataType::Int64 => {
+            let arr = col
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| {
+                    PyValueError::new_err("data_timeunit: expected Int64Array")
+                })?;
+            Ok((0..n)
+                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
+                .collect())
+        }
+        other if is_numeric_dtype(other) => {
+            // Batch-D M1 policy: every remaining numeric dtype (Float32,
+            // UInt64, Int32, ...) is treated as epoch millis via the shared
+            // coercion helper. Int64 keeps its own arm above because arrow
+            // already stores it at the right width with no cast needed (avoiding
+            // precision loss above 2^53).
+            let arr = coerce_to_float64(col, "data_timeunit", field)?;
             Ok((0..n)
                 .map(|i| {
                     if arr.is_null(i) {
@@ -106,33 +133,48 @@ fn extract_millis(col: &dyn Array, dtype: &DataType) -> PyResult<Vec<Option<i64>
                 })
                 .collect())
         }
-        DataType::Int64 => {
-            let arr = col
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| {
-                    PyValueError::new_err("data_timeunit: expected Int64Array")
-                })?;
-            Ok((0..n)
-                .map(|i| if arr.is_null(i) { None } else { Some(arr.value(i)) })
-                .collect())
-        }
         other => Err(PyValueError::new_err(format!(
-            "data_timeunit: unsupported dtype {:?} for field; expected Timestamp, Float64, or Int64",
+            "data_timeunit: unsupported dtype {:?} for field; expected Timestamp or any numeric (int/uint/float)",
             other
         ))),
     }
 }
 
+/// Unit names [`extract_unit`] recognises, for error messages.
+///
+/// `every_supported_unit_is_recognised` pins one direction — every name listed
+/// here is recognised by `extract_unit` — so the error message can never claim
+/// a unit that doesn't actually work. It does not pin the converse: an arm
+/// added to `extract_unit`'s dispatch without a matching entry here would
+/// drift silently (the unit would work but the error message wouldn't offer
+/// it). `extract_unit`'s own match is still the single source of truth for
+/// *behavior*; this list only has to stay a subset of it.
+const SUPPORTED_UNITS: &[&str] = &[
+    "year",
+    "quarter",
+    "month",
+    "week",
+    "day",
+    "day_of_week",
+    "hour",
+    "minute",
+    "second",
+];
+
 /// Extract a temporal unit from millisecond epoch.
-fn extract_unit(ms: i64, unit: &str) -> f64 {
+///
+/// Returns `None` for an unrecognised unit name. `apply` validates the spec's
+/// unit against this once per batch, so an unknown unit refuses by name rather
+/// than silently producing an all-NaN column.
+fn extract_unit(ms: i64, unit: &str) -> Option<f64> {
     // Simple calendar decomposition from epoch millis.
     // This uses a simplified algorithm without timezone handling.
     let secs = ms / 1000;
     let days_since_epoch = secs.div_euclid(86400);
     let time_of_day = secs.rem_euclid(86400);
+    let ymd = || days_to_ymd(days_since_epoch);
 
-    match unit {
+    Some(match unit {
         "hour" => (time_of_day / 3600) as f64,
         "minute" => ((time_of_day % 3600) / 60) as f64,
         "second" => (time_of_day % 60) as f64,
@@ -140,23 +182,18 @@ fn extract_unit(ms: i64, unit: &str) -> f64 {
             // 1970-01-01 was Thursday (4). 0=Sunday convention.
             ((days_since_epoch + 4) % 7) as f64
         }
-        "year" | "month" | "day" | "week" | "quarter" => {
-            let (y, m, d) = days_to_ymd(days_since_epoch);
-            match unit {
-                "year" => y as f64,
-                "month" => m as f64,
-                "day" => d as f64,
-                "quarter" => ((m - 1) / 3 + 1) as f64,
-                "week" => {
-                    // ISO week approximation: day of year / 7 + 1.
-                    let doy = day_of_year(y, m, d);
-                    ((doy - 1) / 7 + 1) as f64
-                }
-                _ => f64::NAN,
-            }
+        "year" => ymd().0 as f64,
+        "month" => ymd().1 as f64,
+        "day" => ymd().2 as f64,
+        "quarter" => ((ymd().1 - 1) / 3 + 1) as f64,
+        "week" => {
+            // ISO week approximation: day of year / 7 + 1.
+            let (y, m, d) = ymd();
+            let doy = day_of_year(y, m, d);
+            ((doy - 1) / 7 + 1) as f64
         }
-        _ => f64::NAN,
-    }
+        _ => return None,
+    })
 }
 
 /// Convert days since epoch to (year, month, day).
@@ -285,5 +322,90 @@ mod tests {
         let out = apply(&spec, &batch).unwrap();
         let h = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(h.value(0), 14.0);
+    }
+
+    // ---- Batch-D dtype policy (spec §4.1) ----
+    //
+    // extract_millis previously accepted only Timestamp, Float64, and Int64,
+    // so an epoch-millis column of any other numeric dtype raised
+    // "unsupported dtype" even though the M1 policy elsewhere in the sweep
+    // widens every int/uint/float dtype. These pin the widened `other` arm.
+
+    #[test]
+    fn timeunit_extracts_year_from_float32_epoch_millis() {
+        // 2023-06-15 12:30:00 UTC, narrowed to Float32 (loses some precision
+        // in the millisecond digits but not enough to move the year/month).
+        use arrow::array::Float32Array;
+        let ms: f32 = 1_686_831_000_000.0;
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Float32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Float32Array::from(vec![ms]))]).unwrap();
+        let spec = TimeUnitSpec {
+            field: "ts".into(),
+            unit: "year".into(),
+            utc: true,
+            as_: Some("yr".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let yr = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(yr.value(0), 2023.0);
+    }
+
+    #[test]
+    fn timeunit_extracts_hour_from_uint64_epoch_millis() {
+        // 2023-01-01 14:30:00 UTC as UInt64 epoch millis.
+        use arrow::array::UInt64Array;
+        let ms: u64 = 1_672_583_400_000;
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::UInt64, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![ms]))]).unwrap();
+        let spec = TimeUnitSpec {
+            field: "ts".into(),
+            unit: "hour".into(),
+            utc: true,
+            as_: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let h = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(h.value(0), 14.0);
+    }
+
+    #[test]
+    fn timeunit_unknown_unit_raises_naming_it_and_the_accepted_set() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Float64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![1_686_831_000_000.0]))],
+        )
+        .unwrap();
+        let spec = TimeUnitSpec {
+            field: "ts".into(),
+            unit: "fortnight".into(),
+            utc: true,
+            as_: None,
+            name: None,
+        };
+
+        let msg = apply(&spec, &batch).unwrap_err().to_string();
+        assert!(msg.contains("data_timeunit"), "err: {msg}");
+        assert!(msg.contains("'fortnight'"), "err must name the unit: {msg}");
+        assert!(msg.contains("day_of_week"), "err must list the accepted set: {msg}");
+    }
+
+    #[test]
+    fn every_supported_unit_is_recognised() {
+        // One-directional pin: every name the error message lists must
+        // actually be handled by extract_unit. Does not catch the converse
+        // (a unit extract_unit handles but SUPPORTED_UNITS omits) — see the
+        // doc comment on SUPPORTED_UNITS.
+        for unit in SUPPORTED_UNITS {
+            assert!(
+                extract_unit(1_686_831_000_000, unit).is_some(),
+                "SUPPORTED_UNITS lists '{unit}' but extract_unit does not handle it"
+            );
+        }
     }
 }

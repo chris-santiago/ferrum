@@ -15,6 +15,7 @@ use crate::transform::group_key::{
     groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     KeyValue,
 };
+use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -59,20 +60,11 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
             ))
         })?;
 
-    // Validate value column (must be Float64).
+    // Validate value column (any numeric dtype, coerced to Float64).
     let value_idx = schema.index_of(&spec.value).map_err(|_| {
         PyValueError::new_err(format!("data_pivot: column '{}' not found", spec.value))
     })?;
-    let value_col = batch
-        .column(value_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "data_pivot: column '{}' must be Float64",
-                spec.value
-            ))
-        })?;
+    let value_col = coerce_to_float64(batch.column(value_idx), "data_pivot", &spec.value)?;
 
     // Resolve groupby columns.
     let groupby = spec.groupby.clone().unwrap_or_default();

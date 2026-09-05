@@ -124,7 +124,7 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
     k.min(K_MAX_NAMED)
 }
 
-use crate::transform::numeric_util::quantile_sorted;
+use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
 
 struct DepthRow {
     group: Option<String>,
@@ -138,14 +138,7 @@ fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)
         .map_err(|_| PyValueError::new_err(format!("stat_letter_value: column '{}' not found", spec.value)))?;
-    if schema.field(vi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_letter_value: column '{}' must be Float64", spec.value
-        )));
-    }
-    let varr = batch.column(vi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_letter_value: expected Float64Array for column '{}'", spec.value)))?;
+    let varr = coerce_to_float64(batch.column(vi), "stat_letter_value", &spec.value)?;
 
     let g_arr_opt = if let Some(g) = &spec.group {
         let gi = schema.index_of(g.as_str())
@@ -489,7 +482,9 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// Parameters
 /// ----------
 /// value : str
-///     Numeric column to summarize (must be Float64).
+///     Numeric column to summarize (any integer, unsigned, or float dtype;
+///     widened to Float64). A non-numeric column raises, naming the
+///     transform, column, and dtype.
 /// group : str, optional
 ///     Single group-key column; letter-values computed independently per
 ///     group.

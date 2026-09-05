@@ -23,14 +23,15 @@
 //! Output schema: `[x: Float64, y: Float64, ci_lower: Float64, ci_upper: Float64]`
 //! where `y` is the fitted mean E[y|x] in response space.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
-use arrow::datatypes::{DataType, Schema};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
+use arrow::datatypes::Schema;
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::logistic::inv_normal_cdf;
+use crate::transform::numeric_util::coerce_xy_pairs;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -259,7 +260,7 @@ fn erf(x: f64) -> f64 {
 
 pub(crate) fn apply(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     validate_pair(spec.family, spec.link)?;
-    let (xs, ys) = extract_xy(spec, batch)?;
+    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "Glm")?;
 
     if xs.len() < 2 {
         return Err(PyValueError::new_err(
@@ -345,33 +346,6 @@ pub(crate) fn apply(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     };
 
     build_glm_batch(grid, y_fit, lo, hi)
-}
-
-fn extract_xy(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f64>)> {
-    let schema = batch.schema();
-    let xi = schema.index_of(&spec.x)
-        .map_err(|_| PyValueError::new_err(format!("Glm: column '{}' not found", spec.x)))?;
-    let yi = schema.index_of(&spec.y)
-        .map_err(|_| PyValueError::new_err(format!("Glm: column '{}' not found", spec.y)))?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("Glm: '{}' must be Float64", spec.x)));
-    }
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("Glm: '{}' must be Float64", spec.y)));
-    }
-    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("Glm: expected Float64Array for '{}'", spec.x)))?;
-    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("Glm: expected Float64Array for '{}'", spec.y)))?;
-    let mut xs = Vec::with_capacity(xa.len());
-    let mut ys = Vec::with_capacity(ya.len());
-    for i in 0..xa.len() {
-        if xa.is_null(i) || ya.is_null(i) { continue; }
-        let xv = xa.value(i); let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() { continue; }
-        xs.push(xv); ys.push(yv);
-    }
-    Ok((xs, ys))
 }
 
 /// Compute initial μ for IRLS given family and observations.
@@ -582,9 +556,13 @@ fn parse_link(s: &str) -> PyResult<GlmLink> {
 /// Parameters
 /// ----------
 /// x : str
-///     Predictor column (must be Float64).
+///     Predictor column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// y : str
-///     Response column (must be Float64).
+///     Response column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// family : {"gaussian", "binomial", "poisson", "gamma", \
 ///           "inverse_gaussian"}, default "gaussian"
 ///     Error distribution family.
@@ -690,7 +668,7 @@ impl PyGlm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, RecordBatch};
+    use arrow::array::{Array, Float64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 

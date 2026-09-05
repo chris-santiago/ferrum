@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::expr::{Expr, ExprValue};
-use crate::transform::filter::batch_field_value;
+use crate::transform::filter::{batch_field_value, ensure_expr_fields_supported};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +27,8 @@ pub(crate) fn apply(spec: &CalculateSpec, batch: &RecordBatch) -> PyResult<Recor
     let parsed = Expr::parse(&spec.expr).map_err(|e| {
         PyValueError::new_err(format!("data_calculate: invalid expression: {e}"))
     })?;
+
+    ensure_expr_fields_supported(&parsed, &batch.schema(), "data_calculate")?;
 
     let n_rows = batch.num_rows();
 

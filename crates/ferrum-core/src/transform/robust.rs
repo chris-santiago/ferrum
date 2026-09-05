@@ -24,7 +24,7 @@
 //! With `output = Residuals`, mirrors the Smooth contract:
 //!   `[x: Float64, residual: Float64]` at the original (un-gridded) xs.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::logistic::inv_normal_cdf;
+use crate::transform::numeric_util::coerce_xy_pairs;
 use crate::transform::residuals;
 use crate::transform::smooth::SmoothOutput;
 
@@ -66,7 +67,7 @@ pub(crate) struct RobustSpec {
 // ---------- Main apply ----------
 
 pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let (xs, ys) = extract_xy(spec, batch)?;
+    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "Robust")?;
 
     let n_grid = spec.n_grid.max(1);
 
@@ -244,33 +245,6 @@ fn grid_vec(x_min: f64, x_max: f64, n_grid: usize) -> Vec<f64> {
         .collect()
 }
 
-fn extract_xy(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<(Vec<f64>, Vec<f64>)> {
-    let schema = batch.schema();
-    let xi = schema.index_of(&spec.x)
-        .map_err(|_| PyValueError::new_err(format!("Robust: column '{}' not found", spec.x)))?;
-    let yi = schema.index_of(&spec.y)
-        .map_err(|_| PyValueError::new_err(format!("Robust: column '{}' not found", spec.y)))?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("Robust: '{}' must be Float64", spec.x)));
-    }
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!("Robust: '{}' must be Float64", spec.y)));
-    }
-    let xa = batch.column(xi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("Robust: expected Float64Array for '{}'", spec.x)))?;
-    let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!("Robust: expected Float64Array for '{}'", spec.y)))?;
-    let mut xs = Vec::with_capacity(xa.len());
-    let mut ys = Vec::with_capacity(ya.len());
-    for i in 0..xa.len() {
-        if xa.is_null(i) || ya.is_null(i) { continue; }
-        let xv = xa.value(i); let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() { continue; }
-        xs.push(xv); ys.push(yv);
-    }
-    Ok((xs, ys))
-}
-
 /// Closed-form 2×2 OLS for X=[1, x]. Returns (α, β); falls back to (0, 0) on
 /// zero-variance x (caller already guards but keep safe).
 fn ols_2x2(xs: &[f64], ys: &[f64]) -> (f64, f64) {
@@ -425,9 +399,13 @@ use crate::transform::core::TransformSpec;
 /// Parameters
 /// ----------
 /// x : str
-///     Predictor column (must be Float64).
+///     Predictor column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// y : str
-///     Response column (must be Float64).
+///     Response column (any integer, unsigned, or float dtype; widened to
+///     Float64). A non-numeric column raises, naming the transform, column,
+///     and dtype.
 /// n_grid : int, default 100
 ///     Number of evenly-spaced grid points for the fitted line. Must be > 0.
 /// ci : float, optional
@@ -556,7 +534,7 @@ impl PyRobust {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, RecordBatch};
+    use arrow::array::{Array, Float64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 

@@ -3,12 +3,14 @@
 //! Fits a regression model (linear, polynomial, or exponential/log/power)
 //! to the data and outputs the fitted line as a two-column batch.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
+use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::numeric_util::coerce_xy_pairs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -38,46 +40,8 @@ fn default_regression_as() -> (String, String) {
 }
 
 pub(crate) fn apply(spec: &RegressionDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let schema = batch.schema();
-
-    let x_idx = schema.index_of(&spec.x).map_err(|_| {
-        PyValueError::new_err(format!("data_regression: column '{}' not found", spec.x))
-    })?;
-    let y_idx = schema.index_of(&spec.y).map_err(|_| {
-        PyValueError::new_err(format!("data_regression: column '{}' not found", spec.y))
-    })?;
-
-    let x_col = batch
-        .column(x_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!("data_regression: column '{}' must be Float64", spec.x))
-        })?;
-    let y_col = batch
-        .column(y_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!("data_regression: column '{}' must be Float64", spec.y))
-        })?;
-
-    // Extract clean paired data.
-    let mut xs: Vec<f64> = Vec::new();
-    let mut ys: Vec<f64> = Vec::new();
-    let n_rows = batch.num_rows();
-    for i in 0..n_rows {
-        if x_col.is_null(i) || y_col.is_null(i) {
-            continue;
-        }
-        let xv = x_col.value(i);
-        let yv = y_col.value(i);
-        if xv.is_nan() || yv.is_nan() {
-            continue;
-        }
-        xs.push(xv);
-        ys.push(yv);
-    }
+    // Extract clean paired data (any numeric dtype; non-numeric raises).
+    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "data_regression")?;
 
     if xs.len() < 2 {
         return empty_result(spec);
@@ -338,7 +302,7 @@ impl PyRegressionData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Float64Array;
+    use arrow::array::{Array, Float64Array};
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
 

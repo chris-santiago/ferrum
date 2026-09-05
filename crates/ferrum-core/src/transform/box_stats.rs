@@ -14,6 +14,7 @@ use crate::transform::group_key::{
     groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     KeyValue,
 };
+use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -49,12 +50,6 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
             spec.field
         ))
     })?;
-    if schema.field(v_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_box_stats: column '{}' must be Float64",
-            spec.field
-        )));
-    }
 
     let mut group_dtypes: Vec<DataType> = Vec::with_capacity(spec.groupby.len());
     for g in &spec.groupby {
@@ -81,11 +76,7 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
         return Err(PyValueError::new_err("stat_box_stats: empty input batch"));
     }
 
-    let v_arr = batch
-        .column(v_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err("stat_box_stats: expected Float64Array for value column"))?;
+    let v_arr = coerce_to_float64(batch.column(v_idx), "stat_box_stats", &spec.field)?;
 
     // Bucket rows by group key (BTreeMap → deterministic ordering).
     let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
@@ -278,7 +269,9 @@ impl WhiskerExtentArg {
 /// Parameters
 /// ----------
 /// field : str
-///     Numeric column to summarize (must be Float64).
+///     Numeric column to summarize (any integer, unsigned, or float dtype;
+///     widened to Float64). A non-numeric column raises, naming the
+///     transform, column, and dtype.
 /// groupby : list of str, default []
 ///     Columns to group by before computing statistics.
 /// whisker_extent : float or "min-max", default 1.5

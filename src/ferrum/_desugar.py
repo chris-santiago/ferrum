@@ -14,11 +14,23 @@ encoding dict.
 The historical per-``kind`` ``if`` chain is replaced by a dispatch table
 (``_PENDING_PREP``) keyed by mark kind.  ``_resolve_pending_impl`` is a uniform
 orchestrator: resolve x/y fields and sorts → split style kwargs → run the
-kind's declared kwarg-injection prep steps → call ``desugar_fn`` → run the
-kind's declared post-desugar Float64-cast steps → route layered-vs-single
-result.  The dispatch table produces the *exact same* transform-kwarg
-injections, sort keys, color/groupby inference, name forcing, and dtype casts,
-in the same order, as the old chain — the change is structural, not behavioural.
+kind's declared kwarg-injection prep steps → call ``desugar_fn`` → route
+layered-vs-single result.  The dispatch table produces the *exact same*
+transform-kwarg injections, sort keys, color/groupby inference, and name
+forcing, in the same order, as the old chain — the change is structural, not
+behavioural.
+
+Composite marks used to carry a post-desugar Float64-cast step
+(``cast_columns_to_float64``) here, because the Rust transforms it fed
+(``box_stats``/``letter_value``/``violin``/``swarm``) once hard-rejected any
+value column that was not exactly ``Float64``.  The Rust dtype-policy sweep
+(batch D, M1) moved that widening into the transform engine itself
+(``numeric_util::coerce_to_float64``): every integer/unsigned/float dtype now
+coerces engine-side, and anything else raises a typed refusal naming the
+transform, column, and dtype.  The Python-side mirror is gone — it was
+redundant for the int-only box/boxen/violin predicate and actively wrong for
+swarm's any-non-Float64 predicate, which silently coerced numeric-*string*
+columns instead of letting the engine refuse them by type.
 
 These are free functions; ``chart.py`` imports them, so this module must never
 import ``Chart`` at module level (that would create an import cycle).
@@ -27,7 +39,7 @@ import ``Chart`` at module level (that would create an import cycle).
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from ferrum._layer import _PRIMITIVE_MARKS, _Layer
@@ -305,74 +317,14 @@ def _propagate_layer_scale(chart_encoding: dict, layer: _Layer) -> _Layer:
     return replace(layer, encoding=new_encoding)
 
 
-def cast_columns_to_float64(data, fields, *, int_only: bool = True) -> Any:
-    """Return *data* with columns in *fields* cast to Float64.
-
-    Several Rust composite transforms (swarm, box_stats, letter_value, violin)
-    require their value column to be ``Float64``.  This helper performs the cast
-    in one place where the encoding (value field name) and the polars data are
-    both available.  *data* is returned unchanged when polars is unavailable,
-    *data* is not a polars DataFrame, or no listed field qualifies for casting.
-
-    Parameters
-    ----------
-    data:
-        The polars DataFrame to cast.
-    fields:
-        Iterable of column names to consider for casting.
-    int_only:
-        When ``True`` (default), cast only integer-dtype columns
-        (``Int8``/``Int16``/…/``UInt64``).  This is the predicate used by
-        boxplot, boxen, and violin.
-        When ``False``, cast any column whose dtype is not already ``Float64``
-        — including ``Float32`` and numeric-string columns.  This is the
-        predicate required by the swarm transform, which the Rust layer rejects
-        unless the value column is exactly ``Float64``.
-    """
-    try:
-        import polars as pl
-    except ImportError:
-        return data
-    if data is None or not isinstance(data, pl.DataFrame):
-        return data
-    _INT_DTYPES = (
-        pl.Int8,
-        pl.Int16,
-        pl.Int32,
-        pl.Int64,
-        pl.UInt8,
-        pl.UInt16,
-        pl.UInt32,
-        pl.UInt64,
-    )
-    try:
-        if int_only:
-            casts = [
-                pl.col(fld).cast(pl.Float64)
-                for fld in fields
-                if fld and fld in data.columns and data[fld].dtype in _INT_DTYPES
-            ]
-        else:
-            casts = [
-                pl.col(fld).cast(pl.Float64)
-                for fld in fields
-                if fld and fld in data.columns and data[fld].dtype != pl.Float64
-            ]
-        if casts:
-            return data.with_columns(casts)
-    except (TypeError, AttributeError, ValueError):
-        return data
-    return data
-
-
 @dataclass
 class _ResolveContext:
     """Mutable working state threaded through the per-kind preprocessing steps.
 
     A single context object lets the dispatch-table prep functions read and
     write the same fields the old per-``kind`` ``if`` chain mutated inline
-    (``transform_kwargs``, ``x_sort``/``y_sort``, and the post-desugar cast
-    field list), so the orchestration stays a flat, readable sequence.
+    (``transform_kwargs``, ``x_sort``/``y_sort``), so the orchestration stays a
+    flat, readable sequence.
     """
 
     chart: "Chart"
@@ -382,11 +334,6 @@ class _ResolveContext:
     transform_kwargs: dict
     x_sort: Any
     y_sort: Any
-    # Fields to Float64-cast on the cloned chart's data after desugar runs.
-    cast_fields: list[str] = field(default_factory=list)
-    # When False, cast any non-Float64 column (swarm semantics).
-    # When True (default), cast only integer-dtype columns (box/violin semantics).
-    cast_int_only: bool = True
 
     def _color_field(self) -> str | None:
         color_enc = self.chart._encoding.get("color")
@@ -540,61 +487,24 @@ def _prep_smooth_force_name(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "name": "smooth"}
 
 
-def _cast_swarm_value(ctx: _ResolveContext) -> None:
-    """swarm: the Rust swarm transform requires the value column to be Float64.
-
-    Detect the value field via the categorical-axis convention, where both the
-    encoding (value field name) and the data are available.
-
-    The predicate is "any non-Float64 dtype" (not just integers), matching the
-    original chart.py swarm cast block.  Float32 and numeric-string columns must
-    also be cast so the Rust layer's hard Float64 requirement is satisfied.
-    """
-    _, _, value_field = _resolve_cat_axis(
-        ctx.transform_kwargs, ctx.x_field, ctx.y_field, ctx.x_sort, ctx.y_sort
-    )
-    if value_field:
-        ctx.cast_fields = [value_field]
-        ctx.cast_int_only = False
-
-
-def _cast_xy_value(ctx: _ResolveContext) -> None:
-    """boxplot/boxen/violin: the Rust box_stats / letter_value / violin transforms
-    require the value column to be Float64.
-
-    catplot orient="h" encodes x=numeric, y=categorical but does not pass
-    horizontal=True to mark_boxplot — CoordFlip handles the visual flip at render
-    time.  Instead of relying on the horizontal kwarg, detect the value field by
-    dtype: cast whichever of x_field / y_field holds an integer column (string /
-    categorical columns are skipped by ``cast_columns_to_float64``).
-    """
-    ctx.cast_fields = [f for f in (ctx.x_field, ctx.y_field) if f]
-
-
-# Each kind's ordered list of (pre-desugar) prep steps and (post-desugar) cast
-# steps.  Order within each list matches the original control flow exactly.
+# Each kind's ordered list of pre-desugar prep steps.  Order within each list
+# matches the original control flow exactly.  (A post-desugar Float64-cast
+# step used to live here for boxen/boxplot/violin/swarm — see the module
+# docstring for why it was removed.)
 @dataclass(frozen=True)
 class _KindPrep:
     pre: tuple[Callable[[_ResolveContext], None], ...] = ()
-    post_cast: tuple[Callable[[_ResolveContext], None], ...] = ()
 
 
 _PENDING_PREP: dict[str, _KindPrep] = {
     "ribbon": _KindPrep(pre=(_prep_ribbon_y2,)),
     "boxen": _KindPrep(
         pre=(_prep_boxen_agg_sort, _prep_cat_axis_sorts, _prep_boxen_palette_color_conflict),
-        post_cast=(_cast_xy_value,),
     ),
-    "boxplot": _KindPrep(
-        pre=(_prep_cat_axis_sorts, _prep_color_field),
-        post_cast=(_cast_xy_value,),
-    ),
+    "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
     "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
-    "violin": _KindPrep(
-        pre=(_prep_cat_axis_sorts, _prep_color_field),
-        post_cast=(_cast_xy_value,),
-    ),
-    "swarm": _KindPrep(pre=(_prep_cat_axis_sorts,), post_cast=(_cast_swarm_value,)),
+    "violin": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
+    "swarm": _KindPrep(pre=(_prep_cat_axis_sorts,)),
     "errorband": _KindPrep(pre=(_prep_color_field,)),
     "density": _KindPrep(pre=(_prep_groupby_from_color,)),
     "histogram": _KindPrep(pre=(_prep_groupby_from_color,)),
@@ -688,17 +598,6 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     result = desugar_fn(x_field, y_field, **transform_kwargs)
     new = chart._clone()
     new._pending_stat_mark = None
-
-    # Run the kind's declared post-desugar Float64-cast steps against the cloned
-    # chart's data, where both the encoding (value field name) and the data are
-    # available.
-    if prep is not None and prep.post_cast:
-        for step in prep.post_cast:
-            step(ctx)
-        if ctx.cast_fields:
-            new._data = cast_columns_to_float64(
-                new._data, ctx.cast_fields, int_only=ctx.cast_int_only
-            )
 
     # Build a scatter layer from the prior mark if present.
     _prior_mark = chart._pending_stat_mark.prior_mark

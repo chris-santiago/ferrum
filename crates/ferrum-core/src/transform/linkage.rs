@@ -22,6 +22,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype};
+
 // ---------- Spec types ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,30 +90,40 @@ const LINKAGE_REFS: &str = include_str!("fixtures/linkage_refs.json");
 
 // ---------- Core math helpers ----------
 
-/// Extract a 2D matrix (rows x cols) of f64 from all Float64 columns in a RecordBatch.
+/// Extract a 2D matrix (rows x cols) of f64 from every numeric feature column
+/// in a RecordBatch.
+///
+/// Column selection is deliberate, not a fallback: `Linkage` runs over the
+/// chart's full untransformed batch — `clustermap` chains it directly on
+/// `Chart(data)`, so the batch also carries the row/column label column
+/// (`id_col`, typically Utf8) alongside the numeric feature columns. Excluding
+/// non-numeric columns from the distance computation is therefore by design;
+/// what was a bug is which columns counted as "numeric". Every column whose
+/// dtype [`is_numeric_dtype`] accepts (any int/uint/float dtype, per the
+/// batch-D M1 policy) is coerced to Float64 and included — previously only
+/// columns that were *already* exactly Float64 were selected, so an Int64
+/// feature column silently dropped out of the distance matrix instead of
+/// widening, making the clustering result depend on the feature columns'
+/// dtypes with no warning.
+///
 /// Returns (n_rows, n_features, flat row-major Vec<f64>).
 fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
     let schema = batch.schema();
-    let mut col_indices: Vec<usize> = Vec::new();
+    let mut feature_cols: Vec<Float64Array> = Vec::new();
     for (i, field) in schema.fields().iter().enumerate() {
-        if field.data_type() == &DataType::Float64 {
-            col_indices.push(i);
+        if is_numeric_dtype(field.data_type()) {
+            feature_cols.push(coerce_to_float64(batch.column(i), "linkage", field.name())?);
         }
     }
-    if col_indices.is_empty() {
+    if feature_cols.is_empty() {
         return Err(PyValueError::new_err(
-            "linkage: input must have at least one Float64 column",
+            "linkage: input must have at least one numeric column",
         ));
     }
     let n_rows = batch.num_rows();
-    let n_cols = col_indices.len();
+    let n_cols = feature_cols.len();
     let mut mat = vec![0.0f64; n_rows * n_cols];
-    for (feat_idx, &col_idx) in col_indices.iter().enumerate() {
-        let arr = batch
-            .column(col_idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
+    for (feat_idx, arr) in feature_cols.iter().enumerate() {
         for row in 0..n_rows {
             mat[row * n_cols + feat_idx] = arr.value(row);
         }
@@ -1100,5 +1112,65 @@ mod tests {
         assert_eq!(order_batch.num_rows(), 4);
         let (_, seg_batch) = secondaries.iter().find(|(k, _)| k == "segments").unwrap();
         assert_eq!(seg_batch.num_rows(), 9); // 3*(4-1) = 9
+    }
+
+    // ---- Batch-D dtype policy (spec §4.1) ----
+
+    /// Build a batch shaped like `clustermap`'s: a Utf8 `id` label column
+    /// followed by the numeric feature columns `extract_matrix` must select.
+    fn labeled_feature_batch(id: Vec<&str>, feature_arrays: Vec<ArrayRef>, n_feat: usize) -> RecordBatch {
+        let mut fields = vec![Field::new("id", DataType::Utf8, false)];
+        for i in 0..n_feat {
+            fields.push(Field::new(format!("f{i}"), feature_arrays[i].data_type().clone(), false));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let mut cols: Vec<ArrayRef> = vec![Arc::new(arrow::array::StringArray::from(id))];
+        cols.extend(feature_arrays);
+        RecordBatch::try_new(schema, cols).unwrap()
+    }
+
+    #[test]
+    fn extract_matrix_widens_int64_feature_columns_and_excludes_the_label_column() {
+        // Regression: extract_matrix used to select only columns that were
+        // *already* exactly Float64, so an Int64 feature column silently
+        // dropped out of the distance matrix instead of widening. It must now
+        // cluster identically whether the feature columns are Int64 or
+        // Float64, and the Utf8 label column must still be excluded (by
+        // design, not as a fallback).
+        let int_batch = labeled_feature_batch(
+            vec!["r0", "r1", "r2", "r3"],
+            vec![
+                Arc::new(Int64Array::from(vec![1_i64, 3, 5, 2])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![2_i64, 4, 1, 6])) as ArrayRef,
+            ],
+            2,
+        );
+        let float_batch = labeled_feature_batch(
+            vec!["r0", "r1", "r2", "r3"],
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 2.0])) as ArrayRef,
+                Arc::new(Float64Array::from(vec![2.0, 4.0, 1.0, 6.0])) as ArrayRef,
+            ],
+            2,
+        );
+        let spec = ward_spec();
+        let from_int = apply(&spec, &int_batch).unwrap();
+        let from_float = apply(&spec, &float_batch).unwrap();
+        assert_eq!(col_f64(&from_int, "distance"), col_f64(&from_float, "distance"));
+        assert_eq!(col_i64(&from_int, "left"), col_i64(&from_float, "left"));
+        assert_eq!(col_i64(&from_int, "right"), col_i64(&from_float, "right"));
+    }
+
+    #[test]
+    fn extract_matrix_all_label_columns_raises_naming_numeric() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::StringArray::from(vec!["a", "b"]))],
+        )
+        .unwrap();
+        let err = apply(&ward_spec(), &batch).unwrap_err();
+        assert!(err.to_string().contains("at least one numeric column"));
     }
 }
