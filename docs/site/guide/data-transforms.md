@@ -386,7 +386,7 @@ chart = (
 Methods: `"linear"`, `"poly"` (set `order=` for degree), `"exp"`, `"log"`, `"pow"`.
 
 !!! note "mark_smooth method aliases"
-    `mark_smooth(method=)` accepts several friendly aliases in addition to the primary names. `"linear"`, `"quadratic"`, and `"cubic"` map to OLS polynomial fits of degree 1, 2, and 3 respectively; `"log"` and `"sqrt"` fit log and square-root curves. `"lm"` is the primary name for linear fits (pass `degree=` for higher-order polynomials); `"loess"` is the name for locally weighted regression; `"glm"` fits a generalized linear model (Gaussian/Identity). All of the following are valid: `method="lm"`, `method="linear"`, `method="loess"`, `method="quadratic"`, `method="cubic"`, `method="log"`, `method="sqrt"`, `method="glm"`.
+    `mark_smooth(method=)` accepts several friendly aliases in addition to the primary names. `"linear"`, `"quadratic"`, and `"cubic"` map to OLS polynomial fits of degree 1, 2, and 3 respectively; `"log"` and `"sqrt"` fit log and square-root curves. `"lm"` is the primary name for linear fits (pass `degree=` for higher-order polynomials); `"loess"` is the name for locally weighted regression; `"glm"` fits a generalized linear model (Gaussian/Identity); `"gam"` fits a generalized additive model — a penalized cubic B-spline with a GCV-chosen smoothing parameter, deterministic and unaffected by `seed=`. All of the following are valid: `method="lm"`, `method="linear"`, `method="loess"`, `method="quadratic"`, `method="cubic"`, `method="log"`, `method="sqrt"`, `method="glm"`, `method="gam"`.
 
 ### `transform_loess` — LOESS smoothing
 

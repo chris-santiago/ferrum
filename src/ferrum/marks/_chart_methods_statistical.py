@@ -215,6 +215,16 @@ class StatisticalMarksMixin:
             - ``"sqrt"`` -- linear fit on sqrt-transformed x
             - ``"glm"`` -- Generalized Linear Model (Gaussian family, identity
               link) fit via IRLS
+            - ``"gam"`` -- Generalized Additive Model: a penalized cubic
+              B-spline (P-spline) whose smoothing parameter is chosen by
+              generalized cross-validation. Bends to follow the data like
+              ``"loess"`` does, but deterministically -- its confidence band
+              is the spline's Bayesian posterior band, so ``seed`` does not
+              affect it. Outside the observed x range it holds its boundary
+              value rather than extrapolating. Needs at least 4 distinct x
+              values to build its basis; fewer degrade to that slice's NaN
+              range (no fit line drawn), like any degenerate fit in this
+              family.
         degree : int, optional
             Acceptance depends on ``method``:
 
@@ -228,8 +238,9 @@ class StatisticalMarksMixin:
               matches the method's fixed degree (``2``/``3``); any other
               value raises.
             - ``"loess"`` -- the local-fit degree, ``1`` or ``2``.
-            - ``"log"``/``"sqrt"``/``"glm"`` -- no degree concept; passing
-              any value raises.
+            - ``"log"``/``"sqrt"``/``"glm"``/``"gam"`` -- no degree concept;
+              passing any value raises. (``"gam"``'s spline degree is fixed
+              at 3; its smoothness comes from the GCV-chosen penalty.)
         bandwidth : float, optional
             LOESS bandwidth fraction in ``(0, 1]``.  Default is ``0.75``.
         n : int, optional

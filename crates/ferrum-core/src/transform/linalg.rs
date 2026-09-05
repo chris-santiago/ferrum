@@ -123,6 +123,42 @@ pub(crate) fn hat_diagonal(x: &Mat<f64>) -> Vec<f64> {
 }
 
 
+/// Invert a symmetric positive-definite matrix via Cholesky.
+///
+/// Returns `None` when the factorization fails (not positive-definite, or
+/// numerically singular) or when any entry of the result is non-finite —
+/// the caller decides what a failed inversion means for its problem.
+///
+/// Added for the penalized-spline (GAM) fit, whose penalized normal-equation
+/// matrix `BᵀB + λS` is SPD and small (at most 10×10) and which needs the
+/// explicit inverse, not a single solve: the same matrix supplies the
+/// posterior covariance and the effective degrees of freedom
+/// `tr(A⁻¹BᵀB)`. Lives here with the other `faer`-backed routines
+/// (`hat_diagonal`/`corrcoef`) as the shared home for SPD inversion —
+/// `gam.rs` still uses `faer::Mat` directly for its basis/penalty assembly,
+/// so this is code-sharing, not an isolation boundary.
+pub(crate) fn invert_spd(m: &Mat<f64>) -> Option<Mat<f64>> {
+    let n = m.nrows();
+    if n == 0 || m.ncols() != n {
+        return None;
+    }
+    let llt = Llt::new(m.as_ref(), Side::Lower).ok()?;
+    let mut identity = Mat::zeros(n, n);
+    for i in 0..n {
+        identity[(i, i)] = 1.0;
+    }
+    let inverse = llt.solve(&identity);
+    for i in 0..n {
+        for j in 0..n {
+            if !inverse[(i, j)].is_finite() {
+                return None;
+            }
+        }
+    }
+    Some(inverse)
+}
+
+
 /// Pearson correlation matrix for X (n × p). Returns a p × p Mat<f64>.
 ///
 /// Each entry C\[i,j\] = cor(X\[:,i\], X\[:,j\]). Diagonal is pinned to 1.0
@@ -360,6 +396,39 @@ mod tests {
         let h = hat_diagonal(&x);
         let trace: f64 = h.iter().sum();
         assert!(approx_eq(trace, p as f64, 1e-9), "trace = {}", trace);
+    }
+
+    // ---- invert_spd ----
+
+    #[test]
+    fn test_invert_spd_round_trip_gives_identity() {
+        let m = mat_from_flat(
+            &[4.0, 12.0, -16.0, 12.0, 37.0, -43.0, -16.0, -43.0, 98.0],
+            3,
+            3,
+        )
+        .unwrap();
+        let inv = invert_spd(&m).unwrap();
+        for i in 0..3 {
+            for j in 0..3 {
+                let entry: f64 = (0..3).map(|k| m[(i, k)] * inv[(k, j)]).sum();
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(approx_eq(entry, expected, 1e-9), "(M·M⁻¹)[{i},{j}] = {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_invert_spd_rejects_non_positive_definite() {
+        // Symmetric but indefinite (eigenvalues 3 and -1).
+        let m = mat_from_flat(&[1.0, 2.0, 2.0, 1.0], 2, 2).unwrap();
+        assert!(invert_spd(&m).is_none());
+    }
+
+    #[test]
+    fn test_invert_spd_rejects_empty_and_non_square() {
+        assert!(invert_spd(&Mat::<f64>::zeros(0, 0)).is_none());
+        assert!(invert_spd(&Mat::<f64>::zeros(2, 3)).is_none());
     }
 
     // ---- corrcoef ----

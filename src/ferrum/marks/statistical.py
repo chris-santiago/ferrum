@@ -389,7 +389,9 @@ def desugar_smooth(
     y_field : str
         Numeric response column.
     method : str, default "loess"
-        Smoothing method (e.g. ``"loess"``, ``"linear"``, ``"quadratic"``).
+        Smoothing method (e.g. ``"loess"``, ``"linear"``, ``"quadratic"``,
+        ``"glm"``, ``"gam"``).  The full vocabulary is owned by the Rust
+        ``Smooth`` transform; an unknown spelling raises, naming it.
     ci : float or None, default None
         Confidence interval level (e.g. ``0.95``).  ``None`` disables the
         CI band and returns a single-mark (line) result.
@@ -415,8 +417,11 @@ def desugar_smooth(
           the way to get that degree.
         - ``"loess"``: ``1`` or ``2`` (Rust defaults to ``2`` when
           omitted); any other value raises.
-        - ``"log"``/``"sqrt"``/``"glm"``: no degree concept; passing any
-          value raises.
+        - ``"log"``/``"sqrt"``/``"glm"``/``"gam"``: no degree concept;
+          passing any value raises. ``"gam"`` fits a penalized cubic
+          B-spline whose degree is fixed at 3 and whose smoothness is set
+          by a GCV-chosen penalty, so there is nothing a ``degree`` could
+          mean for it.
     n : int, default 200
         Number of evaluation points in the output.
     seed : int, default 0

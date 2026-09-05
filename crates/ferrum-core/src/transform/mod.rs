@@ -30,6 +30,7 @@ pub(crate) mod linkage;
 pub(crate) mod letter_value;
 pub(crate) mod logistic;
 pub(crate) mod glm;
+pub(crate) mod gam;
 pub(crate) mod robust;
 pub(crate) mod identity;
 pub(crate) mod residuals;

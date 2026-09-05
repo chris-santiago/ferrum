@@ -4,8 +4,12 @@ Covers the "first half" of F-L03-08: `method="glm"` must route to a real
 GLM fit (not silently alias to `"lm"`), `method="lm"` with `degree >= 2`
 must resolve to a real polynomial fit, and `degree` on a method with no
 degree concept ("log"/"sqrt"/"glm") must refuse rather than being
-silently ignored (closing D9). GAM (`method="gam"`) is a separate task
-(T10) on the same file and is intentionally not covered here.
+silently ignored (closing D9).
+
+T10 extends this module with the second half of F-L03-08: `method="gam"`
+must fit a real generalized additive model — a deterministic penalized
+cubic B-spline, not a refusal and not an alias for an existing method.
+Those tests live at the bottom, under their own banner.
 
 Round 2 additions: `degree` on `"quadratic"`/`"cubic"` is accepted only as
 a no-op when it matches the alias's fixed degree and otherwise refuses
@@ -193,7 +197,7 @@ def test_smooth_lm_degree_zero_refuses():
         Smooth(x="x", y="y", method="lm", degree=0)
 
 
-@pytest.mark.parametrize("method", ["log", "sqrt", "glm"])
+@pytest.mark.parametrize("method", ["log", "sqrt", "glm", "gam"])
 def test_smooth_degree_refused_for_non_polynomial_non_loess_methods(method):
     with pytest.raises(ValueError, match="degree"):
         Smooth(x="x", y="y", method=method, degree=2)
@@ -344,3 +348,179 @@ def test_mark_smooth_facet_boolean_groupby_with_show_metrics_renders():
         .to_svg()
     )
     assert "<svg" in svg
+
+
+# ---------------------------------------------------------------------------
+# T10: gam (penalized cubic B-splines)
+# ---------------------------------------------------------------------------
+
+
+def _wiggly(n: int = 60) -> pl.DataFrame:
+    """Data with two genuine turning points.
+
+    `curved_xy_df` (conftest) is a monotone quadratic — a real polynomial
+    fit tracks it exactly, so it cannot distinguish a spline from a
+    quadratic. A sine over more than one period can only be followed by a
+    method that bends more than once, which is what `gam` claims to do.
+    """
+    import math
+
+    xs = [i * 0.15 for i in range(n)]
+    ys = [math.sin(x * 1.4) * 5.0 + 0.3 * x for x in xs]
+    return pl.DataFrame({"x": xs, "y": ys})
+
+
+def test_smooth_gam_constructs_and_round_trips():
+    """`Smooth(method="gam")` is accepted (it raised "unknown method"
+    before T10) and survives a spec JSON round-trip."""
+    t = Smooth("x", "y", method="gam", ci=None)
+    chart = fm.Chart(_wiggly()).transform(t).encode(x="x", y="y").mark_line()
+    spec = chart.to_spec()
+    assert spec == type(spec).from_json(spec.to_json())
+    assert json.loads(spec.to_json())["transforms"][0]["method"] == "gam"
+
+
+def test_mark_smooth_gam_renders_svg():
+    """The gam fit line must actually be drawn — counted, not grepped, for
+    the reason spelled out in `test_mark_smooth_glm_renders_svg`."""
+    svg = fm.Chart(_wiggly()).mark_smooth(method="gam", ci=None).encode(x="x", y="y").to_svg()
+    assert "<svg" in svg
+    assert "NaN" not in svg
+    assert svg.count("<polyline") == 1
+
+
+def test_smooth_gam_differs_from_lm_and_loess_discriminating():
+    """RED-proof discriminator: `gam` is neither `lm` nor `loess` in
+    disguise. All three must render a real fit line (so a broken render
+    cannot masquerade as "different"), and gam's must differ from both on
+    data with two turning points."""
+    df = _wiggly()
+
+    def render(method: str) -> str:
+        svg = fm.Chart(df).mark_smooth(method=method, ci=None).encode(x="x", y="y").to_svg()
+        assert svg.count("<polyline") == 1, f"{method} must draw exactly one fit line"
+        assert "NaN" not in svg, f"{method} render must not contain NaN"
+        return svg
+
+    gam, lm, loess = render("gam"), render("lm"), render("loess")
+    assert gam != lm
+    assert gam != loess
+
+
+def test_smooth_gam_is_deterministic_and_seed_invariant():
+    """gam uses no randomness: repeated renders are byte-identical, and
+    unlike `loess` (whose CI band is a seeded bootstrap) its band does not
+    move with `seed=`. The loess control keeps the second half of this
+    assertion honest."""
+    df = _wiggly()
+
+    def render(method: str, seed: int) -> str:
+        return (
+            fm.Chart(df)
+            .mark_smooth(method=method, ci=0.95, seed=seed)
+            .encode(x="x", y="y")
+            .to_svg()
+        )
+
+    assert render("gam", 0) == render("gam", 0)
+    assert render("gam", 0) == render("gam", 987654)
+    assert render("loess", 0) != render("loess", 987654)
+
+
+def test_smooth_gam_ci_band_renders_a_ribbon():
+    """With `ci` set, gam emits a posterior band that renders as a filled
+    ribbon path alongside the fit polyline."""
+    svg = fm.Chart(_wiggly()).mark_smooth(method="gam", ci=0.95).encode(x="x", y="y").to_svg()
+    assert svg.count("<polyline") == 1
+    assert svg.count("<path") == 1
+    assert "NaN" not in svg
+
+
+def test_smooth_gam_degree_refuses():
+    """`gam` has no degree concept (fixed cubic spline; smoothness comes
+    from the GCV-chosen penalty), so `degree=` must refuse rather than be
+    silently ignored — the same disposition `log`/`sqrt`/`glm` get."""
+    with pytest.raises(ValueError, match="degree"):
+        Smooth("x", "y", method="gam", degree=2)
+    with pytest.raises(ValueError, match="degree"):
+        fm.Chart(_wiggly()).mark_smooth(method="gam", degree=2).encode(x="x", y="y").to_svg()
+
+
+def test_smooth_gam_grouped_renders_one_curve_per_group():
+    """Grouped gam composes with the shared groupby plumbing: two groups,
+    two fit lines."""
+    df = _wiggly()
+    doubled = pl.concat(
+        [
+            df.with_columns(pl.lit("a").alias("g")),
+            df.with_columns((pl.col("y") + 30.0).alias("y"), pl.lit("b").alias("g")),
+        ]
+    )
+    svg = (
+        fm.Chart(doubled)
+        .mark_smooth(method="gam", ci=None, groupby="g")
+        .encode(x="x", y="y", color="g")
+        .to_svg()
+    )
+    assert svg.count("<polyline") == 2
+    assert "NaN" not in svg
+
+
+def test_smooth_gam_facet_sparse_panel_degrades_instead_of_failing():
+    """A facet panel too sparse for a cubic basis degrades to a blank fit
+    for that panel while the well-supported panel still renders — the
+    partition contract every other method in the family follows."""
+    dense = _wiggly(40).with_columns(pl.lit("many").alias("panel"))
+    sparse = pl.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 4.0], "panel": ["few"] * 3})
+    svg = (
+        fm.Chart(pl.concat([dense, sparse]))
+        .mark_smooth(method="gam", ci=None)
+        .encode(x="x", y="y")
+        .facet(col="panel")
+        .to_svg()
+    )
+    assert "<svg" in svg
+    assert svg.count("<polyline") == 1, "only the well-supported panel draws a fit"
+    assert "NaN" not in svg
+
+
+def test_smooth_gam_whole_frame_too_sparse_renders_blank_not_raises():
+    """gam's whole-frame policy: too little data is DATA degeneracy, not a
+    caller's bad parameter, so it degrades like `lm` on a zero-variance x
+    rather than raising the way a rank-deficient `degree=` does."""
+    df = pl.DataFrame({"x": [1.0, 1.0, 2.0, 2.0], "y": [1.0, 2.0, 3.0, 4.0]})
+    svg = fm.Chart(df).mark_smooth(method="gam", ci=None).encode(x="x", y="y").to_svg()
+    assert "<svg" in svg
+    assert svg.count("<polyline") == 0
+    assert "NaN" not in svg
+
+
+def test_smooth_gam_show_metrics_renders_one_annotation():
+    """gam composes with `show_metrics`. The metrics are computed from
+    `build_predictor`'s gam arm — a missing arm there would fall back to
+    some other method's residuals — so the annotation must be present
+    exactly once AND differ from the linear fit's, which is what proves the
+    gam predictor (not a sibling's) produced it."""
+    df = _wiggly()
+
+    def render(method: str) -> str:
+        svg = (
+            fm.Chart(df)
+            .mark_smooth(method=method, ci=None, show_metrics=True)
+            .encode(x="x", y="y")
+            .to_svg()
+        )
+        assert svg.count("R²") == 1
+        assert "NaN" not in svg
+        return svg
+
+    assert render("gam") != render("lm")
+
+
+def test_smooth_gam_appears_in_the_registry_methods_vocabulary():
+    """The registry's `smooth` vocabulary is derived from the same Rust
+    `METHODS` const the parser checks, so `"gam"` must be visible to any
+    registry consumer without a second edit."""
+    from ferrum import _core
+
+    assert "gam" in _core.transform_registry("smooth")["methods"]

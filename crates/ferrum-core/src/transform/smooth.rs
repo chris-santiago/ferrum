@@ -1,7 +1,14 @@
 //! Fit-family transform: `Smooth` — LOESS, polynomial/linear (OLS), log-x,
-//! sqrt-x, and GLM (Gaussian family, Identity link) regression lines with
-//! optional confidence bands, evaluated over an evenly-spaced x grid. See
-//! [`PySmooth`] for the full parameter contract.
+//! sqrt-x, GLM (Gaussian family, Identity link), and GAM (penalized cubic
+//! B-spline) regression lines with optional confidence bands, evaluated
+//! over an evenly-spaced x grid. See [`PySmooth`] for the full parameter
+//! contract.
+//!
+//! The heavier fitting cores live beside this file rather than inside it:
+//! [`crate::transform::glm`] owns IRLS and the Wald band,
+//! [`crate::transform::gam`] owns the penalized-spline basis, penalty, and
+//! GCV λ selection. This module owns method routing, the evaluation grid,
+//! the CI-band assembly, and the grouped/partitioned dispositions below.
 //!
 //! ## Degenerate-input policy (batch-D T9 round 3)
 //!
@@ -42,6 +49,19 @@
 //!     — set only at `render::prepare::run_transforms_with_facet`'s facet
 //!     construction site — and gating the refusal on `!ctx.is_partition` in
 //!     addition to `groupby.is_empty()`.
+//!
+//! **`gam` contributes no third case (batch-D T10).** The whole-frame
+//! refusal above exists for exactly one shape: the CALLER's `degree`
+//! parameter is what makes the design undeterminable, so a silent empty
+//! render would hide the caller's own mistake. `gam` exposes no such
+//! parameter — its basis dimension is derived from the data
+//! (`clamp(distinct_x, 4, 10)`) and its smoothness from a GCV-selected
+//! penalty — so every way a `gam` fit can fail is data degeneracy, and
+//! data degeneracy degrades here. A whole-frame `gam` on fewer than 4
+//! distinct x values therefore emits an all-NaN grid exactly like `lm` on
+//! a zero-variance x, rather than raising. Adding a refusal would mean
+//! refusing charts that `method="loess"` renders (blank) on the same data,
+//! for no caller-actionable reason.
 //!
 //!   `apply_one_group`'s `only_indices` parameter is `None` for every
 //!   ungrouped call, whether or not that call is itself a facet panel;
@@ -112,6 +132,14 @@ pub(crate) enum SmoothMethod {
     /// moment family/link is ever exposed, and its CI band would not match
     /// the real GLM's Wald band, which `glm_fit` reproduces exactly).
     Glm,
+    /// Generalized Additive Model: a penalized cubic B-spline smoother
+    /// (P-spline) with the smoothing parameter chosen by GCV. Batch-D T10
+    /// (spec §4.6): the numerical core lives in
+    /// [`crate::transform::gam`], which documents the basis, knot
+    /// placement, penalty, and λ-selection defaults. Deterministic — it
+    /// uses no randomness, so unlike `Loess` its band does not depend on
+    /// `seed`.
+    Gam,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -326,6 +354,7 @@ fn apply_one_group(
         SmoothMethod::LogX => log_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::SqrtX => sqrt_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::Glm => glm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
+        SmoothMethod::Gam => gam_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
     }
 }
 
@@ -607,6 +636,10 @@ fn build_predictor(spec: &SmoothSpec, xs_fit: &[f64], ys_fit: &[f64]) -> Box<dyn
                 Err(_) => Box::new(|_| f64::NAN),
             }
         }
+        SmoothMethod::Gam => match crate::transform::gam::fit(xs_fit, ys_fit) {
+            Some(fit) => Box::new(move |x: f64| fit.predict(x)),
+            None => Box::new(|_| f64::NAN),
+        },
     }
 }
 
@@ -1051,6 +1084,56 @@ fn glm_fit(
     build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
 
+/// Generalized Additive Model fit — a penalized cubic B-spline (P-spline)
+/// with a GCV-chosen smoothing parameter — evaluated over `grid`. Batch-D
+/// T10 (spec §4.6). The fitting math, its documented defaults (basis
+/// dimension, uniform knots, second-order difference penalty, the λ grid),
+/// and the no-extrapolation policy all live in
+/// [`crate::transform::gam`]'s module doc.
+///
+/// The band is assembled here, from `gam`'s posterior standard error and
+/// this file's own [`student_t_critical`], on the fit's fractional `n −
+/// edf` residual degrees of freedom: `f̂(x) ± t · se(x)`. That matches the
+/// t-distribution band `lm`/`poly`/`log`/`sqrt` build a few functions up
+/// (`glm`'s Wald-z band is the family's one deliberate exception), and it
+/// keeps `gam.rs` to the fitting math rather than teaching it about
+/// confidence levels.
+///
+/// A fit `gam` cannot compute (fewer than 4 distinct x values, zero x
+/// variance, no λ leaving usable residual degrees of freedom) degrades to
+/// an all-NaN grid like every other degenerate branch in this file. `gam`
+/// adds no refusal of its own — it has no caller-supplied parameter that
+/// could make the design absurd, which is the only thing the polynomial
+/// path's whole-frame refusal exists to catch.
+fn gam_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    let fit = match crate::transform::gam::fit(xs, ys) {
+        Some(f) => f,
+        None => return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()),
+    };
+
+    let y_fit: Vec<f64> = grid.iter().map(|&x| fit.predict(x)).collect();
+
+    let (lo, hi) = match ci {
+        None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
+        Some(level) => {
+            let t_crit = student_t_critical(level, fit.residual_dof());
+            let mut lo = Vec::with_capacity(n_grid);
+            let mut hi = Vec::with_capacity(n_grid);
+            for (&x, &yhat) in grid.iter().zip(y_fit.iter()) {
+                let half_width = t_crit * fit.std_error(x);
+                lo.push(yhat - half_width);
+                hi.push(yhat + half_width);
+            }
+            (lo, hi)
+        }
+    };
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+}
+
 fn lm_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     metrics: Option<(f64, f64, f64)>,
@@ -1328,14 +1411,20 @@ use crate::transform::core::TransformSpec;
 ///     Float64). A non-numeric column raises, naming the transform, column,
 ///     and dtype.
 /// method : {"loess", "lm", "linear", "quadratic", "cubic", "log", "sqrt", \
-///           "glm"}, default "loess"
+///           "glm", "gam"}, default "loess"
 ///     Smoothing method. ``"loess"`` fits locally-weighted polynomial
 ///     regression; ``"lm"``/``"linear"`` fits a global linear model
 ///     (promoted to a polynomial fit when ``degree >= 2`` is also given);
 ///     ``"quadratic"``/``"cubic"`` fit fixed degree-2/3 polynomials;
 ///     ``"log"``/``"sqrt"`` fit a linear model on a transformed x;
 ///     ``"glm"`` fits a Generalized Linear Model (Gaussian family, Identity
-///     link — the standalone ``Glm`` transform's own default) via IRLS.
+///     link — the standalone ``Glm`` transform's own default) via IRLS;
+///     ``"gam"`` fits a Generalized Additive Model — a penalized cubic
+///     B-spline (P-spline) whose smoothing parameter is chosen by
+///     generalized cross-validation. Unlike ``"loess"``, ``"gam"`` uses no
+///     randomness: its confidence band is the spline's Bayesian posterior
+///     band, so ``seed`` has no effect on it. ``"gam"`` holds its boundary
+///     value rather than extrapolating outside the observed x range.
 /// ci : float or None, default 0.95
 ///     Confidence level in (0, 1) for the confidence band. Set to
 ///     ``None`` to suppress the band.
@@ -1353,8 +1442,10 @@ use crate::transform::core::TransformSpec;
 ///     optional and must match the method's fixed degree (``2``/``3``) when
 ///     given — a conflicting value (e.g. ``method="quadratic", degree=5``)
 ///     raises rather than silently fitting degree 2 anyway. Passing
-///     ``degree`` with ``method="log"``/``"sqrt"``/``"glm"`` raises, since
-///     those methods have no degree concept to apply it to.
+///     ``degree`` with ``method="log"``/``"sqrt"``/``"glm"``/``"gam"``
+///     raises, since those methods have no degree concept to apply it to
+///     (``"gam"``'s spline degree is fixed at 3; its smoothness comes from
+///     the GCV-chosen penalty, not from a degree).
 /// n : int, default 200
 ///     Number of grid points to evaluate. Must be > 0.
 /// seed : int, default 0
@@ -1469,6 +1560,7 @@ impl PySmooth {
             "log" => SmoothMethod::LogX,
             "sqrt" => SmoothMethod::SqrtX,
             "glm" => SmoothMethod::Glm,
+            "gam" => SmoothMethod::Gam,
             // Batch-D T9 round 3 (cycle-2 finding B): the `METHODS` pre-check
             // above guarantees `accepted ⊆ METHODS`, not `METHODS ⊆ match
             // arms` — nothing compile-time-enforces the reverse, so an entry
@@ -1489,9 +1581,15 @@ impl PySmooth {
         // "sqrt", "glm") used to be silently ignored; it now refuses so a
         // misunderstood `degree=` can't render the wrong fit quietly.
         // "lm"/"linear" (promotable), "loess", "quadratic", and "cubic" all
-        // accept it.
+        // accept it. Batch-D T10: "gam" joins the refusing side from birth —
+        // its spline degree is fixed at 3 by the method's contract and its
+        // smoothness is set by the GCV-chosen penalty, not by a degree, so
+        // there is nothing for a caller's `degree=` to mean.
         if degree.is_some()
-            && matches!(resolved_method, SmoothMethod::LogX | SmoothMethod::SqrtX | SmoothMethod::Glm)
+            && matches!(
+                resolved_method,
+                SmoothMethod::LogX | SmoothMethod::SqrtX | SmoothMethod::Glm | SmoothMethod::Gam
+            )
         {
             return Err(PyValueError::new_err(format!(
                 "Smooth: degree is not valid for method='{method}'; degree only \
@@ -1611,7 +1709,7 @@ impl PySmooth {
 /// of panicking at the PyO3 boundary; `test_all_method_aliases_accepted_by_pysmooth_new`
 /// (iterating `METHODS` itself) still catches the gap at test time.
 pub(crate) const METHODS: &[&str] =
-    &["lm", "linear", "loess", "quadratic", "cubic", "log", "sqrt", "glm"];
+    &["lm", "linear", "loess", "quadratic", "cubic", "log", "sqrt", "glm", "gam"];
 
 #[cfg(test)]
 mod tests {
@@ -2711,11 +2809,12 @@ mod tests {
     }
 
     /// Closing D9: `degree` on a method with no degree concept ("log",
-    /// "sqrt", "glm") must refuse rather than being silently ignored.
+    /// "sqrt", "glm", and — batch-D T10 — "gam") must refuse rather than
+    /// being silently ignored.
     #[test]
     fn test_degree_refused_for_non_polynomial_non_loess_methods() {
         pyo3::Python::initialize();
-        for method in &["log", "sqrt", "glm"] {
+        for method in &["log", "sqrt", "glm", "gam"] {
             let result = PySmooth::new(
                 "x", "y", method, None, 0.75, Some(2), 200, 0, None, None, "fitted",
                 false, false, None, None, None,
@@ -3080,5 +3179,326 @@ mod tests {
         for i in 5..10 {
             assert!(metrics_text.is_null(i), "group 'b' row {i} _metrics_text must be null, not a garbage anchor");
         }
+    }
+
+    // ---- Batch-D T10: GAM (penalized cubic B-splines) ----
+
+    /// A genuinely curved fixture with two turning points — no straight
+    /// line, and no single quadratic, can track it. Shared by the gam
+    /// discriminators below so they all argue about the same data.
+    fn curved_xy() -> (Vec<f64>, Vec<f64>) {
+        let xs: Vec<f64> = (0..60).map(|i| i as f64 * 0.15).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| (x * 1.4).sin() * 5.0 + 0.3 * x).collect();
+        (xs, ys)
+    }
+
+    fn gam_spec(ci: Option<f64>, n: usize) -> SmoothSpec {
+        SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Gam,
+            ci,
+            bandwidth: 0.75, degree: 1, n, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        }
+    }
+
+    /// Count sign changes in the fitted curve's first difference — the
+    /// number of turning points the fit actually renders.
+    fn turning_points(ys: &[f64]) -> usize {
+        let diffs: Vec<f64> = ys.windows(2).map(|w| w[1] - w[0]).collect();
+        diffs
+            .windows(2)
+            .filter(|w| w[0] * w[1] < 0.0)
+            .count()
+    }
+
+    /// RED-proof: `"gam"` reaches a real fit through the actual string
+    /// parser (before T10 it was rejected as an unknown method), and that
+    /// fit is finite everywhere on the grid.
+    #[test]
+    fn test_gam_method_accepted_and_produces_finite_fit() {
+        pyo3::Python::initialize();
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys);
+        let ctor = PySmooth::new(
+            "x", "y", "gam",
+            None, 0.75, None, 25, 0,
+            None, None, "fitted",
+            false, false, None, None, None,
+        ).expect("PySmooth::new(method='gam') must be accepted by the string parser");
+        let spec = match ctor.0 {
+            TransformSpec::Smooth(s) => s,
+            _ => panic!("expected Smooth spec"),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let yf = col(&out, "y");
+        assert_eq!(yf.len(), 25);
+        assert!(yf.iter().all(|v| v.is_finite()), "gam fit must be finite; got {yf:?}");
+    }
+
+    /// The discriminator that a lazy `"gam" => SmoothMethod::Lm` (or
+    /// `Poly`) alias could not pass: on data with two genuine turning
+    /// points, the gam fit must BEND — it renders at least two turning
+    /// points where the linear fit renders none, and tracks the data an
+    /// order of magnitude more closely. Pins curvature properties, not a
+    /// bare inequality.
+    #[test]
+    fn test_gam_captures_curvature_that_lm_cannot() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs.clone(), ys.clone());
+        let gam_out = apply(&gam_spec(None, 60), &batch).unwrap();
+        let lm_out = apply(
+            &SmoothSpec { method: SmoothMethod::Lm, ..gam_spec(None, 60) },
+            &batch,
+        ).unwrap();
+
+        let gam_y = col(&gam_out, "y");
+        let lm_y = col(&lm_out, "y");
+
+        assert_eq!(turning_points(&lm_y), 0, "a linear fit cannot turn");
+        assert!(
+            turning_points(&gam_y) >= 2,
+            "gam must render the fixture's two turning points; got {} (fit = {gam_y:?})",
+            turning_points(&gam_y),
+        );
+
+        // The grid is the data's own x here (n = 60 over the same span),
+        // so fitted-vs-observed error is directly comparable.
+        let rmse = |fit: &[f64]| -> f64 {
+            (fit.iter().zip(ys.iter()).map(|(f, y)| (f - y) * (f - y)).sum::<f64>()
+                / ys.len() as f64).sqrt()
+        };
+        let gam_rmse = rmse(&gam_y);
+        let lm_rmse = rmse(&lm_y);
+        assert!(
+            gam_rmse * 10.0 < lm_rmse,
+            "gam RMSE {gam_rmse} should be far below lm RMSE {lm_rmse}"
+        );
+    }
+
+    /// gam is not loess in disguise. Two independent structural proofs:
+    /// (1) the fitted curves differ materially on curved data, and (2) gam
+    /// is seed-invariant — loess's CI band comes from a seeded bootstrap,
+    /// so changing `seed` moves loess's band and cannot move gam's, which
+    /// is a closed-form posterior band.
+    #[test]
+    fn test_gam_is_not_loess_point_estimates_and_seed_dependence_both_differ() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys.clone());
+        let y_range = ys.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            - ys.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+
+        let gam_out = apply(&gam_spec(Some(0.95), 40), &batch).unwrap();
+        let loess_out = apply(
+            &SmoothSpec {
+                method: SmoothMethod::Loess,
+                degree: 2,
+                ..gam_spec(Some(0.95), 40)
+            },
+            &batch,
+        ).unwrap();
+        let max_gap = col(&gam_out, "y").iter().zip(col(&loess_out, "y").iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_gap > 0.01 * y_range,
+            "gam and loess must differ materially on curved data; max gap {max_gap} \
+             vs y range {y_range}"
+        );
+
+        // Seed dependence: loess's bootstrap band moves, gam's does not.
+        let reseed = |mut s: SmoothSpec| { s.seed = 987_654; s };
+        let gam_reseeded = apply(&reseed(gam_spec(Some(0.95), 40)), &batch).unwrap();
+        for (a, b) in col(&gam_out, "ci_lower").iter().zip(col(&gam_reseeded, "ci_lower").iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "gam's band must not depend on seed");
+        }
+        let loess_reseeded = apply(
+            &reseed(SmoothSpec {
+                method: SmoothMethod::Loess,
+                degree: 2,
+                ..gam_spec(Some(0.95), 40)
+            }),
+            &batch,
+        ).unwrap();
+        let loess_band_moved = col(&loess_out, "ci_lower").iter()
+            .zip(col(&loess_reseeded, "ci_lower").iter())
+            .any(|(a, b)| (a - b).abs() > 1e-12);
+        assert!(
+            loess_band_moved,
+            "control: loess's bootstrap band should move with the seed — if this ever \
+             stops holding, the seed-invariance half of this discriminator proves nothing"
+        );
+    }
+
+    /// The CI band must bracket the fit and stay finite across the grid.
+    #[test]
+    fn test_gam_ci_band_brackets_the_fit() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys);
+        let out = apply(&gam_spec(Some(0.95), 30), &batch).unwrap();
+        let y = col(&out, "y");
+        let lo = col(&out, "ci_lower");
+        let hi = col(&out, "ci_upper");
+        for i in 0..y.len() {
+            assert!(lo[i].is_finite() && hi[i].is_finite(), "band must be finite at grid point {i}");
+            assert!(lo[i] < y[i] && y[i] < hi[i], "band must bracket the fit at grid point {i}");
+        }
+    }
+
+    /// `ci=None` leaves the band NaN, like every sibling method.
+    #[test]
+    fn test_gam_without_ci_emits_nan_band() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys);
+        let out = apply(&gam_spec(None, 10), &batch).unwrap();
+        assert!(col(&out, "ci_lower").iter().all(|v| v.is_nan()));
+        assert!(col(&out, "ci_upper").iter().all(|v| v.is_nan()));
+        assert!(col(&out, "y").iter().all(|v| v.is_finite()));
+    }
+
+    /// Determinism through the production entry point: two applies of the
+    /// same spec produce bit-identical columns (no RNG anywhere in gam).
+    #[test]
+    fn test_gam_is_byte_deterministic_through_apply() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys);
+        let a = apply(&gam_spec(Some(0.9), 37), &batch).unwrap();
+        let b = apply(&gam_spec(Some(0.9), 37), &batch).unwrap();
+        for name in ["x", "y", "ci_lower", "ci_upper"] {
+            let (ca, cb) = (col(&a, name), col(&b, name));
+            for (i, (va, vb)) in ca.iter().zip(cb.iter()).enumerate() {
+                assert_eq!(va.to_bits(), vb.to_bits(), "column {name} row {i} must be bit-identical");
+            }
+        }
+    }
+
+    /// Grouped gam: one curve per group, each fitted on its own rows.
+    #[test]
+    fn test_gam_grouped_fit_emits_one_curve_per_group() {
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        let mut g = Vec::new();
+        for i in 0..40 {
+            let x = i as f64 * 0.2;
+            xs.push(x);
+            ys.push((x * 1.3).sin() * 4.0);
+            g.push("a");
+            xs.push(x);
+            ys.push((x * 1.3).sin() * 4.0 + 25.0);
+            g.push("b");
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(arrow::array::StringArray::from(g)),
+        ]).unwrap();
+
+        let spec = SmoothSpec { groupby: vec!["g".into()], ..gam_spec(None, 12) };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 24, "2 groups × 12 grid points");
+        let y = col(&out, "y");
+        assert!(y.iter().all(|v| v.is_finite()), "both groups must fit: {y:?}");
+        // Group 'b' is group 'a' shifted up by 25 — the fits must carry
+        // that offset, proving each group was fitted on its own rows.
+        for i in 0..12 {
+            let gap = y[12 + i] - y[i];
+            assert!(
+                (gap - 25.0).abs() < 0.5,
+                "per-group offset at grid point {i} is {gap}, expected ~25"
+            );
+        }
+    }
+
+    /// The degenerate-group contract, for gam: a group with too few
+    /// distinct x values to place a cubic basis degrades to that group's
+    /// own NaN range instead of failing the whole grouped fit.
+    #[test]
+    fn test_gam_degenerate_group_degrades_to_nan_not_refusal() {
+        let mut xs: Vec<f64> = (0..20).map(|i| i as f64 * 0.3).collect();
+        let mut ys: Vec<f64> = xs.iter().map(|x| (x * 1.5).sin() * 3.0).collect();
+        let mut g: Vec<&str> = vec!["a"; 20];
+        // Group 'b': only 3 distinct x values — below the cubic basis minimum.
+        for x in [1.0, 2.0, 3.0] {
+            xs.push(x);
+            ys.push(x * 2.0);
+            g.push("b");
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(arrow::array::StringArray::from(g)),
+        ]).unwrap();
+
+        let spec = SmoothSpec { groupby: vec!["g".into()], ..gam_spec(None, 6) };
+        let out = apply(&spec, &batch)
+            .expect("a group too sparse for a spline must degrade, not fail the grouped fit");
+        assert_eq!(out.num_rows(), 12, "2 groups × 6 grid points");
+        let y = col(&out, "y");
+        assert!(y[..6].iter().all(|v| v.is_finite()), "group 'a' must fit");
+        assert!(y[6..].iter().all(|v| v.is_nan()), "group 'b' must degrade to NaN");
+    }
+
+    /// gam's whole-frame policy (module doc, "gam contributes no third
+    /// case"): a whole-frame fit the data cannot support degrades to an
+    /// all-NaN grid rather than raising, because no caller parameter is
+    /// responsible for the failure. Contrast
+    /// `test_rank_deficient_degree_refuses_on_ungrouped_path`, where the
+    /// caller's own `degree` is.
+    #[test]
+    fn test_gam_whole_frame_too_sparse_degrades_rather_than_refusing() {
+        // 3 distinct x values: below the 4 a cubic basis needs.
+        let batch = xy_batch(vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let out = apply(&gam_spec(Some(0.95), 5), &batch)
+            .expect("gam has no caller-supplied parameter to blame, so it degrades, not refuses");
+        assert!(col(&out, "y").iter().all(|v| v.is_nan()));
+        assert!(col(&out, "ci_lower").iter().all(|v| v.is_nan()));
+    }
+
+    /// gam composes with `output="residuals"` and `inject_metrics` like
+    /// every other method — the shared `build_predictor` arm is wired.
+    #[test]
+    fn test_gam_residuals_output_and_metrics_compose() {
+        let (xs, ys) = curved_xy();
+        let n_rows = xs.len();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            output: SmoothOutput::Residuals,
+            inject_metrics: true,
+            ..gam_spec(None, 20)
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), n_rows, "residuals output is one row per input row");
+        let resid = col(&out, "residual");
+        assert!(resid.iter().all(|v| v.is_finite()), "gam residuals must be finite");
+        // A spline that tracks this fixture leaves small residuals.
+        let max_abs = resid.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+        assert!(max_abs < 1.0, "max |residual| = {max_abs} on a smooth sine fixture");
+        assert!(out.schema().index_of("_metrics_text").is_ok(), "inject_metrics must add its columns");
+    }
+
+    /// The degenerate path still emits a spec-determined schema (round-4
+    /// contract) when gam is the method that degenerated.
+    #[test]
+    fn test_gam_degenerate_fit_with_inject_metrics_emits_null_metrics_columns() {
+        let batch = xy_batch(vec![1.0, 1.0, 2.0, 2.0], vec![1.0, 2.0, 3.0, 4.0]);
+        let spec = SmoothSpec { inject_metrics: true, ..gam_spec(None, 4) };
+        let out = apply(&spec, &batch).unwrap();
+        let metrics_text = out
+            .column(out.schema().index_of("_metrics_text").unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        assert!((0..out.num_rows()).all(|i| metrics_text.is_null(i)),
+            "a degenerate gam fit must emit present-but-null metrics columns");
     }
 }
