@@ -99,13 +99,32 @@ pub(crate) fn is_numeric_dtype(dt: &DataType) -> bool {
 ///
 /// `ctx` is the transform-name prefix used in every error message, so each
 /// caller keeps its own error voice. This is the single ingestion path for the
-/// two-column fit family (`logistic`, `glm`, `robust`); `smooth` needs the
-/// index-restricted variant and keeps its own walk.
+/// two-column fit family (`logistic`, `glm`, `robust`); a caller that needs the
+/// index-restricted variant (grouped per-partition fits) should use
+/// [`coerce_xy_pairs_at`] instead of duplicating this walk. `smooth.rs::extract_xy`
+/// remains a separate walk — it isn't routed through this helper.
 pub(crate) fn coerce_xy_pairs(
     batch: &RecordBatch,
     x_field: &str,
     y_field: &str,
     ctx: &str,
+) -> PyResult<(Vec<f64>, Vec<f64>)> {
+    coerce_xy_pairs_at(batch, x_field, y_field, ctx, None)
+}
+
+/// [`coerce_xy_pairs`], restricted to `only_indices` when given.
+///
+/// When `only_indices` is `Some(ixs)`, only the rows at those positions are
+/// considered (used by groupby partitioning — each group's fit ingests only
+/// its own rows). When it is `None`, all rows are scanned, and this is
+/// byte-identical to [`coerce_xy_pairs`]. Mirrors the `only_indices` pattern
+/// already established by [`clean_float64_values`] in this module.
+pub(crate) fn coerce_xy_pairs_at(
+    batch: &RecordBatch,
+    x_field: &str,
+    y_field: &str,
+    ctx: &str,
+    only_indices: Option<&[usize]>,
 ) -> PyResult<(Vec<f64>, Vec<f64>)> {
     let schema = batch.schema();
     let xi = schema
@@ -117,9 +136,15 @@ pub(crate) fn coerce_xy_pairs(
     let xa = coerce_to_float64(batch.column(xi), ctx, x_field)?;
     let ya = coerce_to_float64(batch.column(yi), ctx, y_field)?;
 
-    let mut xs = Vec::with_capacity(xa.len());
-    let mut ys = Vec::with_capacity(ya.len());
-    for i in 0..xa.len() {
+    let candidate_iter: Box<dyn Iterator<Item = usize>> = match only_indices {
+        Some(ixs) => Box::new(ixs.iter().copied()),
+        None => Box::new(0..xa.len()),
+    };
+
+    let cap = only_indices.map_or(xa.len(), <[usize]>::len);
+    let mut xs = Vec::with_capacity(cap);
+    let mut ys = Vec::with_capacity(cap);
+    for i in candidate_iter {
         if xa.is_null(i) || ya.is_null(i) {
             continue;
         }
@@ -599,6 +624,53 @@ mod tests {
         assert!(msg.contains("Logistic"), "err: {msg}");
         assert!(msg.contains("'x'"), "err must name the column: {msg}");
         assert!(msg.contains("Utf8"), "err must name the dtype: {msg}");
+    }
+
+    // ---------- coerce_xy_pairs_at (only_indices) ----------
+
+    #[test]
+    fn coerce_xy_pairs_at_none_matches_coerce_xy_pairs() {
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![4.0, 5.0, 6.0])),
+        );
+        assert_eq!(
+            coerce_xy_pairs_at(&b, "x", "y", "Test", None).unwrap(),
+            coerce_xy_pairs(&b, "x", "y", "Test").unwrap()
+        );
+    }
+
+    #[test]
+    fn coerce_xy_pairs_at_restricts_to_only_indices() {
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+        );
+        let (xs, ys) = coerce_xy_pairs_at(&b, "x", "y", "Test", Some(&[0, 2])).unwrap();
+        assert_eq!(xs, vec![10.0, 30.0]);
+        assert_eq!(ys, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn coerce_xy_pairs_at_only_indices_still_drops_null_and_nan() {
+        let b = xy_batch(
+            Arc::new(Float64Array::from(vec![
+                Some(1.0),
+                Some(f64::NAN),
+                Some(3.0),
+                None,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                Some(10.0),
+                Some(20.0),
+                Some(30.0),
+                Some(40.0),
+            ])),
+        );
+        // Restrict to all four indices; NaN at 1 and null at 3 must still drop.
+        let (xs, ys) = coerce_xy_pairs_at(&b, "x", "y", "Test", Some(&[0, 1, 2, 3])).unwrap();
+        assert_eq!(xs, vec![1.0, 3.0]);
+        assert_eq!(ys, vec![10.0, 30.0]);
     }
 
     #[test]

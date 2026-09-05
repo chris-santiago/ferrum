@@ -10,7 +10,10 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::numeric_util::coerce_xy_pairs;
+use crate::transform::group_key::{
+    group_partition_multi, groupby_field_nullable, materialize_groupby_col, KeyValue,
+};
+use crate::transform::numeric_util::coerce_xy_pairs_at;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -39,12 +42,30 @@ fn default_regression_as() -> (String, String) {
     ("x".into(), "y".into())
 }
 
+/// Grid size shared by [`apply_one_group`] and [`all_nan_output`] — kept as
+/// one constant so the two can't drift apart.
+const N_OUT: usize = 100;
+
 pub(crate) fn apply(spec: &RegressionDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    match &spec.groupby {
+        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols),
+        _ => apply_one_group(spec, batch, None),
+    }
+}
+
+/// Fit one regression over `batch`, restricted to `only_indices` when given.
+/// Ingests via [`coerce_xy_pairs_at`] so a grouped partition and the
+/// ungrouped path (`only_indices = None`) share one cleaning walk (T2/M1).
+fn apply_one_group(
+    spec: &RegressionDataSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+) -> PyResult<RecordBatch> {
     // Extract clean paired data (any numeric dtype; non-numeric raises).
-    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "data_regression")?;
+    let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "data_regression", only_indices)?;
 
     if xs.len() < 2 {
-        return empty_result(spec);
+        return all_nan_output(spec);
     }
 
     // Fit the model.
@@ -63,13 +84,12 @@ pub(crate) fn apply(spec: &RegressionDataSpec, batch: &RecordBatch) -> PyResult<
     // Generate output points along the x range.
     let x_min = xs.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     let x_max = xs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let n_out = 100;
-    let step = (x_max - x_min) / (n_out - 1).max(1) as f64;
+    let step = (x_max - x_min) / (N_OUT - 1).max(1) as f64;
 
-    let mut out_x: Vec<f64> = Vec::with_capacity(n_out);
-    let mut out_y: Vec<f64> = Vec::with_capacity(n_out);
+    let mut out_x: Vec<f64> = Vec::with_capacity(N_OUT);
+    let mut out_y: Vec<f64> = Vec::with_capacity(N_OUT);
 
-    for i in 0..n_out {
+    for i in 0..N_OUT {
         let xv = x_min + i as f64 * step;
         let yv = predict(xv, &coeffs, &spec.method);
         out_x.push(xv);
@@ -88,14 +108,101 @@ pub(crate) fn apply(spec: &RegressionDataSpec, batch: &RecordBatch) -> PyResult<
         .map_err(|e| PyValueError::new_err(format!("data_regression: {e}")))
 }
 
-fn empty_result(spec: &RegressionDataSpec) -> PyResult<RecordBatch> {
+/// Partition `batch` by `group_cols`, fit each partition independently via
+/// [`apply_one_group`], then stack the per-group grids into one batch with
+/// the group columns appended at their original dtype (XFORM-03) as
+/// additional fields — the `smooth.rs:186-275` multi-column grouped template
+/// (spec §4.3 / decision-doc M3a).
+///
+/// Each group's output grid spans that group's OWN x range (`x_min`/`x_max`
+/// derived from its own rows inside `apply_one_group`), not a range shared
+/// across groups — this mirrors `stat_smooth`'s grouped behavior (see
+/// `smooth.rs::apply_one_group`, which folds `data_x_min`/`data_x_max` from
+/// the group-restricted `xs`), so a per-group fit line only ever draws over
+/// the x-values that group actually has.
+///
+/// A group with fewer than 2 usable (non-null, non-NaN) rows cannot support a
+/// fit; `apply_one_group` returns [`all_nan_output`] for it rather than an
+/// empty batch, so that group still contributes [`N_OUT`] rows and keeps its
+/// group key in the concatenated output — the same choice `smooth.rs` makes
+/// for its below-threshold groups. A silent 0-row drop would remove the group
+/// from the color-scale domain and legend entirely; a NaN-filled row set
+/// draws no visible curve (the line mark filters non-finite points) but keeps
+/// the group's identity intact everywhere else.
+fn apply_grouped(
+    spec: &RegressionDataSpec,
+    batch: &RecordBatch,
+    group_cols: &[String],
+) -> PyResult<RecordBatch> {
+    let (group_order, group_idx_map, gtypes) =
+        group_partition_multi(batch, group_cols, "data_regression")?;
+
+    let mut all_x: Vec<f64> = Vec::new();
+    let mut all_y: Vec<f64> = Vec::new();
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
+
+    for g in &group_order {
+        let ixs = group_idx_map.get(g).ok_or_else(|| {
+            PyValueError::new_err(format!("data_regression: missing group key {g:?} in index map"))
+        })?;
+        let out = apply_one_group(spec, batch, Some(ixs))?;
+        let out_x = out.column(0).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+            PyValueError::new_err("data_regression: expected Float64Array in grouped output")
+        })?;
+        let out_y = out.column(1).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+            PyValueError::new_err("data_regression: expected Float64Array in grouped output")
+        })?;
+        for i in 0..out.num_rows() {
+            all_x.push(out_x.value(i));
+            all_y.push(out_y.value(i));
+            group_keys_out.push(g.clone());
+        }
+    }
+
+    let mut out_fields = vec![
+        Field::new(&spec.as_.0, DataType::Float64, false),
+        Field::new(&spec.as_.1, DataType::Float64, false),
+    ];
+    let mut out_cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(all_x)),
+        Arc::new(Float64Array::from(all_y)),
+    ];
+
+    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
+        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
+        let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
+            .map_err(PyValueError::new_err)?;
+        out_cols.push(group_col_arr);
+    }
+
+    let out_schema = Arc::new(Schema::new(out_fields));
+    RecordBatch::try_new(out_schema, out_cols)
+        .map_err(|e| PyValueError::new_err(format!("data_regression: {e}")))
+}
+
+/// Below-fit-threshold (`xs.len() < 2`) output: mirrors
+/// `smooth.rs::all_nan_output` by emitting [`N_OUT`] NaN-valued rows instead
+/// of an empty batch.
+///
+/// **Serves both grouped and ungrouped paths:** Under `apply_grouped`, a
+/// below-threshold group contributes its full [`N_OUT`]-row count and keeps
+/// its group key when concatenated — it stays in the output schema, the
+/// color-scale domain, and the legend, rather than silently vanishing (see
+/// the `apply_grouped` doc comment for the full rationale). Under the
+/// ungrouped path (`apply_one_group(..., None)`), an entire below-threshold
+/// input frame likewise emits [`N_OUT`] NaN rows rather than 0 rows, which
+/// means such a chart renders with a fabricated fallback 0–1 domain for the
+/// axes (since there is no real x-range to draw from empty input) — no error,
+/// no warning, but also no visible curve (the line mark filters non-finite
+/// points before building polylines).
+fn all_nan_output(spec: &RegressionDataSpec) -> PyResult<RecordBatch> {
     let out_schema = Arc::new(Schema::new(vec![
         Field::new(&spec.as_.0, DataType::Float64, false),
         Field::new(&spec.as_.1, DataType::Float64, false),
     ]));
     let cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(Vec::<f64>::new())),
-        Arc::new(Float64Array::from(Vec::<f64>::new())),
+        Arc::new(Float64Array::from(vec![f64::NAN; N_OUT])),
+        Arc::new(Float64Array::from(vec![f64::NAN; N_OUT])),
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("data_regression: {e}")))
@@ -343,5 +450,237 @@ mod tests {
         assert!((out_y.value(99) - 9.0).abs() < 1e-6);
         assert!((out_x.value(0) - 0.0).abs() < 1e-10);
         assert!((out_x.value(99) - 4.0).abs() < 1e-10);
+    }
+
+    // ── M3a groupby coverage (F-L05-03) ──────────────────────────────────────
+
+    fn spec_with_groupby(groupby: Option<Vec<String>>) -> RegressionDataSpec {
+        RegressionDataSpec {
+            x: "x".into(),
+            y: "y".into(),
+            method: "linear".into(),
+            order: 1,
+            groupby,
+            as_: ("rx".into(), "ry".into()),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn regression_grouped_fits_each_group_independently() {
+        use arrow::array::StringArray;
+        // Group A: y = 2x (exact). Group B: y = 10 - 3x (exact).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "A", "A", "B", "B", "B", "B"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 6.0, 10.0, 7.0, 4.0, 1.0])),
+            ],
+        )
+        .unwrap();
+
+        let spec = spec_with_groupby(Some(vec!["g".into()]));
+        let out = apply(&spec, &batch).unwrap();
+
+        // Schema: rx, ry, g (group column appended, XFORM-03 dtype-preserved).
+        assert_eq!(out.num_columns(), 3);
+        assert_eq!(out.schema().field(2).name(), "g");
+        assert_eq!(out.schema().field(2).data_type(), &DataType::Utf8);
+        // 100 grid points per group, first-appearance order (A, B).
+        assert_eq!(out.num_rows(), 200);
+
+        let rx = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let ry = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let g = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        // Group A occupies rows [0, 100): y = 2x exactly.
+        assert_eq!(g.value(0), "A");
+        assert!((rx.value(0) - 0.0).abs() < 1e-9);
+        assert!((ry.value(0) - 0.0).abs() < 1e-6, "A at x=0 should be y=0, got {}", ry.value(0));
+        assert!((rx.value(99) - 3.0).abs() < 1e-9);
+        assert!((ry.value(99) - 6.0).abs() < 1e-6, "A at x=3 should be y=6, got {}", ry.value(99));
+
+        // Group B occupies rows [100, 200): y = 10 - 3x exactly.
+        assert_eq!(g.value(100), "B");
+        assert!((rx.value(100) - 0.0).abs() < 1e-9);
+        assert!((ry.value(100) - 10.0).abs() < 1e-6, "B at x=0 should be y=10, got {}", ry.value(100));
+        assert!((rx.value(199) - 3.0).abs() < 1e-9);
+        assert!((ry.value(199) - 1.0).abs() < 1e-6, "B at x=3 should be y=1, got {}", ry.value(199));
+
+        // Neither per-group fit matches the blended global line (y = 5 - 0.5x),
+        // proving these are independent per-group fits, not one shared curve.
+        let global_at_0 = 5.0;
+        assert!((ry.value(0) - global_at_0).abs() > 1.0);
+        assert!((ry.value(100) - global_at_0).abs() > 1.0);
+    }
+
+    #[test]
+    fn regression_grouped_int_group_dtype_preserved() {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Int64, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![0_i64, 0, 1, 1])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 2.0])),
+            ],
+        )
+        .unwrap();
+
+        let spec = spec_with_groupby(Some(vec!["g".into()]));
+        let out = apply(&spec, &batch).unwrap();
+
+        assert_eq!(out.schema().field(2).data_type(), &DataType::Int64);
+        let g = out.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        // First-appearance order: group 0 then group 1.
+        assert_eq!(g.value(0), 0);
+        assert_eq!(g.value(100), 1);
+    }
+
+    #[test]
+    fn regression_grouped_multi_column_partitions_distinct_combos() {
+        use arrow::array::{Int64Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g1", DataType::Utf8, false),
+            Field::new("g2", DataType::Int64, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        // Two distinct (g1, g2) combos, each with 4 rows of exact linear data.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "A", "A", "B", "B", "B", "B"])),
+                Arc::new(Int64Array::from(vec![1_i64, 1, 1, 1, 2, 2, 2, 2])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 2.0, 4.0, 6.0])),
+            ],
+        )
+        .unwrap();
+
+        let spec = spec_with_groupby(Some(vec!["g1".into(), "g2".into()]));
+        let out = apply(&spec, &batch).unwrap();
+
+        // Schema: rx, ry, g1, g2 — both groupby columns appended, in order.
+        assert_eq!(out.num_columns(), 4);
+        assert_eq!(out.schema().field(2).name(), "g1");
+        assert_eq!(out.schema().field(3).name(), "g2");
+        assert_eq!(out.schema().field(3).data_type(), &DataType::Int64);
+        // 2 distinct combos × 100 grid points each.
+        assert_eq!(out.num_rows(), 200);
+    }
+
+    #[test]
+    fn regression_grouped_below_threshold_group_emits_nan_rows_with_group_key() {
+        use arrow::array::StringArray;
+        // Group A: 4 healthy rows (exact linear fit, y = 2x). Group B: 1 row —
+        // below the <2-point fit threshold. Per the `apply_grouped` doc
+        // comment (mirroring `smooth.rs::all_nan_output`), B must still
+        // contribute N_OUT rows and keep its group key, not vanish.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "A", "A", "B"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 5.0])),
+                Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 6.0, 9.0])),
+            ],
+        )
+        .unwrap();
+
+        let spec = spec_with_groupby(Some(vec!["g".into()]));
+        let out = apply(&spec, &batch).unwrap();
+
+        // Group A contributes N_OUT real rows; group B contributes N_OUT NaN
+        // rows — the group is not dropped from the output.
+        assert_eq!(out.num_rows(), 2 * N_OUT);
+        assert_eq!(out.num_columns(), 3);
+
+        let ry = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let g = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        assert_eq!(g.value(0), "A");
+        assert!(!ry.value(0).is_nan(), "healthy group A must produce real fit values");
+
+        assert_eq!(g.value(N_OUT), "B");
+        for i in N_OUT..2 * N_OUT {
+            assert!(ry.value(i).is_nan(), "below-threshold group B row {i} should be NaN, got {}", ry.value(i));
+            assert_eq!(g.value(i), "B", "below-threshold group B must keep its group key at row {i}");
+        }
+    }
+
+    #[test]
+    fn regression_groupby_none_and_empty_vec_are_both_ungrouped() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 6.0])),
+            ],
+        )
+        .unwrap();
+
+        let out_none = apply(&spec_with_groupby(None), &batch).unwrap();
+        let out_empty = apply(&spec_with_groupby(Some(vec![])), &batch).unwrap();
+
+        assert_eq!(out_none.num_columns(), 2, "ungrouped output has no group column");
+        assert_eq!(out_empty.num_columns(), 2, "empty groupby list is also ungrouped");
+        assert_eq!(out_none.num_rows(), out_empty.num_rows());
+    }
+
+    #[test]
+    fn regression_ungrouped_below_threshold_emits_nan_rows() {
+        // Ungrouped input with 1 row — below the <2-point fit threshold.
+        // Per the `all_nan_output` doc comment, the ungrouped path emits [`N_OUT`]
+        // NaN rows rather than 0 rows, mirroring the grouped-degenerate behavior
+        // and `smooth.rs` semantics. No error, no warning, but no visible curve
+        // (line mark filters non-finite points).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![5.0])),
+                Arc::new(Float64Array::from(vec![9.0])),
+            ],
+        )
+        .unwrap();
+
+        let spec = spec_with_groupby(None);
+        let out = apply(&spec, &batch).unwrap();
+
+        // Below-threshold ungrouped input should emit N_OUT NaN rows, not 0 rows.
+        assert_eq!(out.num_rows(), N_OUT, "ungrouped below-threshold must emit N_OUT rows");
+        assert_eq!(out.num_columns(), 2, "ungrouped output has no group column");
+
+        let out_y = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..out.num_rows() {
+            assert!(
+                out_y.value(i).is_nan(),
+                "ungrouped below-threshold output row {i} should be NaN, got {}",
+                out_y.value(i)
+            );
+        }
     }
 }
