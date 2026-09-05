@@ -249,9 +249,10 @@ class StatisticalMarksMixin:
             Confidence level for the interval band, e.g. ``0.95``.  When set,
             produces a layered ribbon + line chart.  Default is ``None``.
         groupby : str, optional
-            Group-key column (string, integer, or boolean dtype).  When
-            set, the smooth is computed independently per group and the
-            group column is preserved at its original dtype in the output
+            Group-key column (any groupby-supported dtype — string,
+            integer, float, or boolean).  When set, the smooth is
+            computed independently per group and the group column is
+            preserved at its original dtype in the output
             so downstream ``color=`` encoding maps to it.
         position : Position, optional
             Position adjustment.
@@ -706,9 +707,11 @@ class StatisticalMarksMixin:
         cmap : str or None, optional
             Back-compat alias for ``scheme``.  Pass at most one of the two.
         groupby : str or None, optional
-            Group column (Utf8). When set, one 2-D KDE surface is computed per
-            group and contour lines for each group are colored by the group field.
-            Use ``.encode(color=<groupby>)`` to match legend colors to contours.
+            Group-key column (any groupby-supported dtype — string,
+            integer, float, or boolean). When set,
+            one 2-D KDE surface is computed per group and contour lines for
+            each group are colored by the group field. Use
+            ``.encode(color=<groupby>)`` to match legend colors to contours.
             Grouped contours use isoline (segment) mode to avoid cross-group
             polygon merging issues.
         position : Position, optional

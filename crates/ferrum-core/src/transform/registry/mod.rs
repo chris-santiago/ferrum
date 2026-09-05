@@ -249,8 +249,12 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 "x", "y", "bins_x", "bins_y", "extent_x", "extent_y", "cumulative", "name",
             ],
         },
+        // `methods` reads the SAME const the parser's pre-check and error
+        // string read (`crate::transform::kde::KERNELS`) — batch-D T11,
+        // mirroring `smooth`'s `METHODS` precedent below. See `KERNELS`'s doc
+        // comment in `kde.rs`.
         "kde" => TransformRegistryEntry {
-            methods: vec!["gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine"],
+            methods: crate::transform::kde::KERNELS.to_vec(),
             outputs: vec![("value", DataType::Float64), ("density", DataType::Float64)],
             params: vec![
                 "field", "bandwidth", "bw_adjust", "n", "extent", "cumulative", "shared_extent",
@@ -353,8 +357,12 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             params: vec!["thresholds", "fill", "smooth", "name"],
         },
+        // `methods` reads the SAME const the parser's pre-check and error
+        // string read (`crate::transform::qq::DISTRIBUTIONS`) — batch-D T11,
+        // mirroring `smooth`'s `METHODS`/`kde`'s `KERNELS` precedent. See
+        // `DISTRIBUTIONS`'s doc comment in `qq.rs`.
         "qq" => TransformRegistryEntry {
-            methods: vec!["normal", "uniform", "exponential"],
+            methods: crate::transform::qq::DISTRIBUTIONS.to_vec(),
             outputs: vec![("theoretical", DataType::Float64), ("sample", DataType::Float64)],
             params: vec!["field", "distribution", "dequantize", "emit_line", "seed", "name"],
         },
@@ -512,11 +520,26 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             outputs: vec![],
             params: vec!["ops", "sort", "groupby", "frame", "ignore_peers", "name"],
         },
+        // `methods` declares `kde`'s vocabulary (round 2, batch-D T11 cycle
+        // 2, per the module doc's `methods` convention above: `kernel` is
+        // the literally-named `kernel` parameter with no orthogonal-
+        // vocabulary ambiguity, so the rule predicts a non-empty list here).
+        // `density_data` has no PyO3-constructor-time acceptance/refusal
+        // site (`PyDensityData::new` doesn't expose `kernel` at all —
+        // `DensityDataSpec` is built directly from wire JSON by
+        // `transform_density`), so unlike `kde`/`qq`/`smooth`/`hex`/
+        // `raster`/`linkage` its real enforcement point is `apply()`-time,
+        // via `kernel_density_at_grid`'s typed error — same shape as
+        // `pivot`'s "no hard-refusal site" note above, except `density_data`
+        // DOES have a real refusal site, just at `apply()` rather than
+        // `__init__`. `density_data_methods_accepted_and_bogus_kernel_rejected`
+        // (`registry/tests.rs`) asserts against that site directly.
         "density_data" => TransformRegistryEntry {
-            methods: vec![],
+            methods: crate::transform::kde::KERNELS.to_vec(),
             outputs: vec![("value", DataType::Float64), ("density", DataType::Float64)],
             params: vec![
-                "field", "bandwidth", "groupby", "extent", "steps", "cumulative", "as_", "name",
+                "field", "bandwidth", "groupby", "extent", "steps", "cumulative", "kernel", "as_",
+                "name",
             ],
         },
         "regression_data" => TransformRegistryEntry {

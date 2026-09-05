@@ -33,6 +33,25 @@ pub(crate) struct QQSpec {
 fn default_distribution() -> String {
     "normal".into()
 }
+
+/// The single source of truth for `QQ`'s free-string `distribution`
+/// vocabulary. Mirrors `smooth::METHODS`/`kde::KERNELS`'s structural-guard
+/// shape (batch-D T9/T11): consumed by THREE sites —
+/// `registry::entry_for_kind("qq")`'s `methods` list (`registry/mod.rs`, via
+/// `DISTRIBUTIONS.to_vec()`), `PyQq::new`'s pre-check below, and
+/// `theoretical_quantile`'s "unknown distribution" error (built FROM this
+/// slice, not a hand-kept parallel literal).
+///
+/// The reverse direction (`DISTRIBUTIONS ⊆ theoretical_quantile`'s match
+/// arms — an entry added here without a corresponding dispatch arm) is NOT
+/// compile-time-enforced, mirroring `kde::KERNELS`'s doc note on the same
+/// gap: `PyQq::new`'s pre-check only proves `DISTRIBUTIONS.contains(&d)` —
+/// it never calls `theoretical_quantile`, so it cannot catch a
+/// `DISTRIBUTIONS` entry with no matching arm.
+/// `test_all_distributions_reach_a_dispatch_arm` (below, round 2 batch-D
+/// T11 cycle 2) closes this gap for real by iterating `DISTRIBUTIONS`
+/// itself through `theoretical_quantile` directly.
+pub(crate) const DISTRIBUTIONS: &[&str] = &["normal", "uniform", "exponential", "lognormal"];
 fn default_emit_line() -> bool {
     true
 }
@@ -128,13 +147,26 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     }
 }
 
+/// Theoretical quantile at plotting position `p` for the requested reference
+/// distribution.
+///
+/// `"lognormal"` follows the standard Q-Q convention for a distribution
+/// defined as `Y = exp(X)` with `X ~ Normal(0, 1)`: the theoretical quantile
+/// at `p` is the standard-normal quantile at `p` exponentiated,
+/// `Q(p) = exp(Φ⁻¹(p))`. Equivalently, this is what you get by log-
+/// transforming the (positive) sample, computing standard-normal theoretical
+/// quantiles against the log-sample's plotting positions (unchanged by the
+/// log transform, since log is monotone), and exponentiating the result back
+/// onto the original scale.
 fn theoretical_quantile(p: f64, distribution: &str) -> PyResult<f64> {
     match distribution {
         "normal" => Ok(inverse_normal_cdf(p)),
         "uniform" => Ok(p),
         "exponential" => Ok(-((1.0 - p).ln())),
+        "lognormal" => Ok(inverse_normal_cdf(p).exp()),
         other => Err(PyValueError::new_err(format!(
-            "stat_qq: unknown distribution '{other}'; expected normal|uniform|exponential"
+            "stat_qq: unknown distribution '{other}'; expected {}",
+            DISTRIBUTIONS.iter().map(|d| format!("'{d}'")).collect::<Vec<_>>().join(" | "),
         ))),
     }
 }
@@ -356,8 +388,11 @@ use crate::transform::core::TransformSpec;
 /// ----------
 /// field : str
 ///     Numeric column to plot (must be Float64).
-/// distribution : {"normal", "uniform", "exponential"}, default "normal"
-///     Reference distribution for theoretical quantiles.
+/// distribution : {"normal", "uniform", "exponential", "lognormal"}, default "normal"
+///     Reference distribution for theoretical quantiles. ``"lognormal"``
+///     quantiles are the standard-normal theoretical quantiles exponentiated
+///     (``exp(Φ⁻¹(p))``) — the standard Q-Q convention for a variable whose
+///     log is normally distributed.
 /// dequantize : bool, default False
 ///     When True, add small seeded random jitter to break discrete ties.
 /// emit_line : bool, default True
@@ -399,13 +434,11 @@ impl PyQq {
         if field.is_empty() {
             return Err(PyValueError::new_err("QQ: field must be non-empty"));
         }
-        match distribution {
-            "normal" | "uniform" | "exponential" => {}
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "QQ: unknown distribution '{other}'; expected normal|uniform|exponential"
-                )))
-            }
+        if !DISTRIBUTIONS.contains(&distribution) {
+            return Err(PyValueError::new_err(format!(
+                "QQ: unknown distribution '{distribution}'; expected {}",
+                DISTRIBUTIONS.iter().map(|d| format!("'{d}'")).collect::<Vec<_>>().join(" | "),
+            )));
         }
         Ok(PyQq(TransformSpec::Qq(QQSpec {
             field: field.to_string(),
@@ -469,6 +502,135 @@ mod tests {
             assert!(
                 (got - want).abs() < 1e-3,
                 "i={i}: theoretical {got} not within 1e-3 of {want}"
+            );
+        }
+    }
+
+    // ---- T11: lognormal distribution ----
+
+    #[test]
+    fn qq_lognormal_theoretical_matches_exp_of_normal_quantile() {
+        let p = [0.1, 0.3, 0.5, 0.7, 0.9];
+        for &pi in &p {
+            let want = inverse_normal_cdf(pi).exp();
+            let got = theoretical_quantile(pi, "lognormal").unwrap();
+            assert!((got - want).abs() < 1e-12, "lognormal[{pi}]: {got} vs {want}");
+        }
+    }
+
+    /// RED-proof discriminator: a sample built as EXACTLY exp(normal
+    /// theoretical quantile) at its own plotting positions is a perfect
+    /// lognormal fit. Under `distribution="lognormal"` the (theoretical,
+    /// sample) points must land on `y=x`; under `distribution="normal"` the
+    /// same sample must show large, systematic deviation from `y=x` at the
+    /// tails, proving the two distributions produce genuinely different
+    /// shapes on identical data rather than the same computation under two
+    /// names (which is what "lognormal raises today" degenerates to before
+    /// this fix, and what a silent normal-alias would degenerate to after).
+    #[test]
+    fn qq_lognormal_discriminates_from_normal_on_lognormal_data() {
+        let n = 9usize;
+        let sample: Vec<f64> = (1..=n)
+            .map(|i| {
+                let p = (i as f64 - 0.5) / n as f64;
+                inverse_normal_cdf(p).exp()
+            })
+            .collect();
+        let batch = batch_field("v", sample);
+
+        let spec_lognormal = QQSpec {
+            field: "v".into(),
+            distribution: "lognormal".into(),
+            dequantize: false,
+            emit_line: false,
+            seed: 0,
+            name: None,
+        };
+        let out_ln = apply(&spec_lognormal, &batch).unwrap();
+        let theo_ln = col(&out_ln, "theoretical");
+        let samp_ln = col(&out_ln, "sample");
+        for i in 0..n {
+            assert!(
+                (theo_ln[i] - samp_ln[i]).abs() < 1e-9,
+                "lognormal QQ point {i} should lie on y=x: theo={} sample={}",
+                theo_ln[i],
+                samp_ln[i]
+            );
+        }
+
+        let spec_normal = QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: false,
+            seed: 0,
+            name: None,
+        };
+        let out_n = apply(&spec_normal, &batch).unwrap();
+        let theo_n = col(&out_n, "theoretical");
+        let samp_n = col(&out_n, "sample");
+        let last = n - 1;
+        assert!(
+            (theo_n[last] - samp_n[last]).abs() > 1.0,
+            "normal QQ on lognormal data should deviate sharply from y=x at the tail: theo={} sample={}",
+            theo_n[last],
+            samp_n[last]
+        );
+    }
+
+    /// Determinism pin (round 2, batch-D T11 cycle 2): `lognormal` must
+    /// produce byte-identical output across repeated `apply()` calls on
+    /// identical input, per the spec's testing section ("determinism: two
+    /// runs byte-equal"). Rust owns this pin — see the round-2 report for
+    /// why it isn't duplicated Python-side.
+    #[test]
+    fn qq_lognormal_apply_deterministic_across_runs() {
+        let batch = batch_field("v", vec![0.5, 1.2, 2.3, 0.8, 3.1, 1.9]);
+        let spec = QQSpec {
+            field: "v".into(),
+            distribution: "lognormal".into(),
+            dequantize: false,
+            emit_line: false,
+            seed: 0,
+            name: None,
+        };
+        let out1 = apply(&spec, &batch).unwrap();
+        let out2 = apply(&spec, &batch).unwrap();
+        let theo1 = col(&out1, "theoretical");
+        let theo2 = col(&out2, "theoretical");
+        let samp1 = col(&out1, "sample");
+        let samp2 = col(&out2, "sample");
+        for (i, (a, b)) in theo1.iter().zip(theo2.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "theoretical[{i}] not byte-identical: {a} vs {b}");
+        }
+        for (i, (a, b)) in samp1.iter().zip(samp2.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "sample[{i}] not byte-identical: {a} vs {b}");
+        }
+    }
+
+    /// `PyQq::new` must accept `"lognormal"` and still refuse a bogus string.
+    #[test]
+    fn qq_pyqq_new_accepts_lognormal_and_rejects_bogus() {
+        pyo3::Python::initialize();
+        let ok = PyQq::new("v", "lognormal", false, true, 0, None);
+        assert!(ok.is_ok(), "lognormal must be accepted: {:?}", ok.err().map(|e| e.to_string()));
+        let bad = PyQq::new("v", "not_a_distribution", false, true, 0, None);
+        assert!(bad.is_err(), "bogus distribution must be rejected");
+    }
+
+    /// Reverse guard (round 2, batch-D T11 cycle 2): every `DISTRIBUTIONS`
+    /// entry must reach a real dispatch arm in `theoretical_quantile`, not
+    /// just pass `PyQq::new`'s `DISTRIBUTIONS.contains` pre-check — mirrors
+    /// `kde::test_all_kernels_reach_a_dispatch_arm`.
+    #[test]
+    fn qq_all_distributions_reach_a_dispatch_arm() {
+        for &distribution in DISTRIBUTIONS {
+            let result = theoretical_quantile(0.5, distribution);
+            assert!(
+                result.is_ok(),
+                "DISTRIBUTIONS entry {distribution:?} has no matching dispatch arm in \
+                 theoretical_quantile: {:?}",
+                result.err().map(|e| e.to_string())
             );
         }
     }

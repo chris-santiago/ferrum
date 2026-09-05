@@ -404,8 +404,11 @@ use crate::transform::core::TransformSpec;
 /// (UInt32), and ``extent`` (List<Float64>, ``[xmin, xmax, ymin, ymax]``).
 ///
 /// When ``groupby`` is set, one row is emitted per distinct group and a
-/// ``<groupby>`` (Utf8) column is appended so downstream marks can color
-/// by group.
+/// ``<groupby>`` column (string, integer, floating-point, or boolean dtype —
+/// preserved from the input column, not coerced to Utf8) is appended so
+/// downstream marks can color by group. Supported dtypes: Utf8, LargeUtf8,
+/// Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Float32, Float64,
+/// Boolean.
 ///
 /// Parameters
 /// ----------

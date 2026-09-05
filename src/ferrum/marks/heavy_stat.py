@@ -46,7 +46,9 @@ def desugar_contour(
 
     ``Kde2D`` (unnamed — advances the chain) estimates a 2D kernel-density
     surface on a 128×128 grid.  When ``groupby`` is set, one surface is
-    emitted per group and a trailing Utf8 group column is appended.
+    emitted per group and a trailing group column (any groupby-supported
+    dtype — string, integer, float, or boolean — preserved at its
+    original dtype) is appended.
 
     ``Contour`` (named ``"contour"``) traces iso-density curves on that
     surface and produces:
@@ -88,8 +90,10 @@ def desugar_contour(
         Colormap name applied to the polygon layer.  ``None`` defers to the
         theme's sequential scheme.  Ignored when ``groupby`` is set.
     groupby : str or None, default None
-        Group column (Utf8). When set, ``Kde2D`` computes one surface per
-        group and ``Contour`` propagates the group column.  The layer
+        Group-key column (any groupby-supported dtype — string, integer,
+        float, or boolean — preserved at its original dtype). When set,
+        ``Kde2D`` computes one surface per group and ``Contour``
+        propagates the group column.  The layer
         uses segment marks and colors by the group field so each group's
         contour lines are a distinct categorical color.
 
@@ -470,6 +474,14 @@ register_layer_names(
 )
 
 
+# Mirrors `crate::transform::qq::DISTRIBUTIONS` (kde.rs's sibling constant
+# for `Qq`). Named at module scope (rather than inline in the
+# `validate_choice` call below) so `tests/test_density_kernels.py` can pin
+# it against `transform_registry("qq")["methods"]` by set equality instead
+# of trusting a hand-mirrored copy in the test file itself.
+_VALID_QQ_DISTRIBUTIONS = ("normal", "uniform", "exponential", "lognormal")
+
+
 def desugar_qq(
     field: str,
     *,
@@ -505,7 +517,7 @@ def desugar_qq(
     ----------
     field : str
         Numeric column to compute quantiles from.
-    distribution : {"normal", "uniform", "exponential"}, default "normal"
+    distribution : {"normal", "uniform", "exponential", "lognormal"}, default "normal"
         Theoretical distribution to compare against.
     dequantize : bool, default False
         Whether to jitter duplicate quantile values slightly.
@@ -528,7 +540,7 @@ def desugar_qq(
     >>> [layer.mark for layer in result.layers]
     ['point', 'rule']
     """
-    validate_choice("mark_qq", "distribution", distribution, ("normal", "uniform", "exponential"))
+    validate_choice("mark_qq", "distribution", distribution, _VALID_QQ_DISTRIBUTIONS)
     transforms = [
         QQ(
             field=field,

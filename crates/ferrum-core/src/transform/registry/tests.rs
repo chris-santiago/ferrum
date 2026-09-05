@@ -33,9 +33,14 @@
 //!    method/kernel/distribution/aggregate is accepted by its real PyO3
 //!    constructor, and a bogus one is refused (the
 //!    `*_accepted_and_bogus_*_rejected` tests) — the same precedent, ported
-//!    to `methods`. `pivot` is the one declared vocabulary with no such
-//!    guard: its `_ => sum` fallback (`pivot.rs`) never refuses a bogus op,
-//!    so there is no real acceptance/refusal site to assert against (see the
+//!    to `methods`. `density_data` (round 2, batch-D T11 cycle 2) extends
+//!    this to a seventh kind with a differently-shaped real refusal site:
+//!    it has no PyO3-constructor-time acceptance/refusal (`PyDensityData::new`
+//!    doesn't expose `kernel`), so `density_data_methods_accepted_and_bogus_kernel_rejected`
+//!    asserts against `apply()` directly instead of a constructor type
+//!    object. `pivot` is the one declared vocabulary with no such guard at
+//!    all: its `_ => sum` fallback (`pivot.rs`) never refuses a bogus op, so
+//!    there is no real acceptance/refusal site to assert against (see the
 //!    `"pivot"` entry's comment in `mod.rs`).
 //! 6. [`KINDS_WITH_SCHEMA_FIXTURE`] pins the per-kind fixture set (item 2)
 //!    against "every kind whose declared `outputs` is non-empty", so a new
@@ -604,6 +609,7 @@ fn density_data_outputs_match_actual_schema() {
         extent: None,
         steps: None,
         cumulative: false,
+        kernel: crate::transform::kde::default_kernel(),
         as_: ("value".into(), "density".into()),
         name: None,
     };
@@ -881,7 +887,8 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         })),
         ("density_data", DensityData(DensityDataSpec {
             field: "v".into(), bandwidth: None, groupby: None, extent: None, steps: None,
-            cumulative: false, as_: ("value".into(), "density".into()), name: None,
+            cumulative: false, kernel: "gaussian".into(), as_: ("value".into(), "density".into()),
+            name: None,
         })),
         ("regression_data", RegressionData(RegressionDataSpec {
             x: "x".into(), y: "y".into(), method: "linear".into(), order: 1, groupby: None,
@@ -1240,4 +1247,40 @@ fn linkage_methods_accepted_and_bogus_method_rejected() {
         let res = ty.call((), Some(&kwargs));
         assert!(res.is_err(), "bogus linkage method must be rejected by Linkage()");
     });
+}
+
+/// Extends the `methods` drift guard to `density_data` (round 2, batch-D T11
+/// cycle 2). Unlike `kde`/`qq`/`smooth`/`hex`/`raster`/`linkage`,
+/// `density_data` has no PyO3-constructor-time acceptance/refusal site for
+/// `kernel` — `PyDensityData::new` doesn't expose the parameter at all, so
+/// there is no type object to call through. Its real refusal site is
+/// `apply()` (via `kde::kernel_density_at_grid`'s typed error), so this
+/// guard asserts against that directly, matching the shape the quality
+/// reviewer prescribed for this fix.
+#[test]
+fn density_data_methods_accepted_and_bogus_kernel_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::density_data::DensityDataSpec;
+    let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
+    let spec_with_kernel = |kernel: &str| DensityDataSpec {
+        field: "v".into(),
+        bandwidth: None,
+        groupby: None,
+        extent: None,
+        steps: None,
+        cumulative: false,
+        kernel: kernel.to_string(),
+        as_: ("value".into(), "density".into()),
+        name: None,
+    };
+    for &kernel in &entry_for_kind("density_data").unwrap().methods {
+        let res = crate::transform::density_data::apply(&spec_with_kernel(kernel), &batch);
+        assert!(
+            res.is_ok(),
+            "declared density_data kernel {kernel:?} rejected by apply(): {:?}",
+            res.err().map(|e| e.to_string())
+        );
+    }
+    let res = crate::transform::density_data::apply(&spec_with_kernel("not_a_real_kernel"), &batch);
+    assert!(res.is_err(), "bogus density_data kernel must be rejected by apply()");
 }

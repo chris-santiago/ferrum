@@ -13,6 +13,20 @@ from ferrum._validate import validate_choice
 _ORIENTATIONS = ("horizontal", "vertical")
 _MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
 
+# mark_density's kernel vocabulary. Must stay set-equal to the Rust dispatch's
+# `kde::KERNELS` (queryable as `transform_registry("kde")["methods"]`) — pinned
+# by a drift guard in tests/test_density_kernels.py.
+_VALID_KERNELS = {
+    "gaussian",
+    "epanechnikov",
+    "epan",
+    "tophat",
+    "uniform",
+    "cosine",
+    "exponential",
+    "linear",
+}
+
 
 def desugar_density(
     field: str,
@@ -72,8 +86,9 @@ def desugar_density(
         Multiplier applied to the resolved bandwidth after rule evaluation.
         Works with all bandwidth rules (``"scott"``, ``"silverman"``, numeric).
     kernel : str, default "gaussian"
-        Reserved for future use (no-op today — the ``Kde`` transform uses
-        Gaussian exclusively).
+        Kernel function, validated against ``_VALID_KERNELS`` (set-equal to
+        the Rust dispatch's ``kde::KERNELS``) and forwarded to the ``Kde``
+        transform.
     n : int, default 512
         Number of evaluation points.
     extent : tuple[float, float] or None, default None
@@ -148,7 +163,6 @@ def desugar_density(
                 groupby=groupby if isinstance(groupby, str) else None,
             )
 
-    _VALID_KERNELS = {"gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine"}
     if kernel is not None:
         validate_choice("mark_density", "kernel", kernel, _VALID_KERNELS)
     validate_choice("mark_density", "multiple", multiple, _MULTIPLE_MODES)

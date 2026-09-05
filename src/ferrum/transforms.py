@@ -594,6 +594,7 @@ def transform_density(
     field: str,
     *,
     bandwidth: float | None = None,
+    kernel: str = "gaussian",
     groupby: Sequence[str] | None = None,
     extent: tuple[float, float] | None = None,
     steps: int | None = None,
@@ -608,6 +609,13 @@ def transform_density(
         Column to estimate density for.
     bandwidth : float, optional
         KDE bandwidth. If None, estimated automatically.
+    kernel : str, default "gaussian"
+        Kernel function: ``"gaussian"``, ``"epanechnikov"`` (alias
+        ``"epan"``), ``"tophat"`` (alias ``"uniform"``), ``"cosine"``,
+        ``"exponential"``, or ``"linear"``. An unrecognized kernel raises a
+        typed error from the Rust engine at render time (not validated here
+        -- the transform functions in this module defer vocabulary checks
+        to the single Rust-side source of truth rather than duplicating it).
     groupby : list of str, optional
         Compute separate densities per group.
     extent : tuple of (float, float), optional
@@ -632,6 +640,9 @@ def transform_density(
     'density_data'
     >>> t["as_"]
     ['value', 'density']
+    >>> t = fm.transform_density("weight", kernel="epanechnikov")
+    >>> t["kernel"]
+    'epanechnikov'
     """
     as_list = _validate_as_pair(as_, where="transform_density")
     spec: dict = {
@@ -642,6 +653,10 @@ def transform_density(
     }
     if bandwidth is not None:
         spec["bandwidth"] = bandwidth
+    # Omitted at the default so specs built before this parameter existed
+    # serialize byte-identically (mirrors DensityDataSpec's serde default).
+    if kernel != "gaussian":
+        spec["kernel"] = kernel
     if groupby is not None:
         spec["groupby"] = list(groupby)
     if extent is not None:

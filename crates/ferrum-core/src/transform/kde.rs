@@ -21,6 +21,41 @@ pub(crate) enum BandwidthSpec {
 
 pub(crate) fn default_kernel() -> String { "gaussian".to_string() }
 
+/// The single source of truth for `Kde`'s (and `DensityData`'s, which shares
+/// this module's [`kernel_density_at_grid`] dispatch) free-string `kernel`
+/// vocabulary. Mirrors `smooth::METHODS`'s structural-guard shape (batch-D
+/// T9, extended to `kde`/`density_data` by T11): consumed by THREE sites —
+/// `registry::entry_for_kind("kde")`'s `methods` list (`registry/mod.rs`, via
+/// `KERNELS.to_vec()`), `PyKde::new`'s pre-check below, and
+/// `kernel_density_at_grid`'s "unknown kernel" error (built FROM this slice,
+/// not a hand-kept parallel literal).
+///
+/// The pre-check in `PyKde::new` makes the guarantee structural for `Kde`:
+/// a dispatch arm added to `kernel_density_at_grid` for a new kernel without
+/// adding it here is unreachable at construction time. `DensityData` has no
+/// constructor-time kernel parameter at all (`PyDensityData::new` doesn't
+/// expose one — `DensityDataSpec` is built directly from wire JSON), so for
+/// that caller `kernel_density_at_grid`'s own `other => Err(...)` arm is the
+/// *only* enforcement point; this is precisely why that arm returns a typed
+/// error instead of silently defaulting to Gaussian (the prior behavior this
+/// const and its guard replace).
+///
+/// The reverse direction (`KERNELS ⊆ kernel_density_at_grid`'s match arms —
+/// an entry added here without a corresponding dispatch arm below) is NOT
+/// compile-time-enforced, the same gap `smooth::METHODS`'s doc names for
+/// itself: nothing in Rust's exhaustiveness checking ties a `&str` slice to
+/// a `match` on a different `&str`. Unlike `Smooth` (where `PySmooth::new`'s
+/// own match arm IS the dispatch, so the constructor test doubles as the
+/// reverse guard), `PyKde::new`'s pre-check only proves
+/// `KERNELS.contains(&kernel)` — it never calls `kernel_density_at_grid`, so
+/// it cannot catch a `KERNELS` entry with no matching arm.
+/// `test_all_kernels_reach_a_dispatch_arm` (below, round 2 batch-D T11 cycle
+/// 2) closes this gap for real by iterating `KERNELS` itself through
+/// `kernel_density_at_grid` directly.
+pub(crate) const KERNELS: &[&str] = &[
+    "gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine", "exponential", "linear",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KdeSpec {
@@ -40,7 +75,7 @@ pub(crate) struct KdeSpec {
     pub shared_extent: bool,
     /// Kernel function for density estimation.
     /// Supported: "gaussian" (default), "epanechnikov" / "epan",
-    /// "tophat" / "uniform", "cosine".
+    /// "tophat" / "uniform", "cosine", "exponential", "linear".
     #[serde(default = "default_kernel")]
     pub kernel: String,
     /// When non-empty, partition input by these columns and emit per-(value, group)
@@ -127,7 +162,7 @@ fn apply_one_group(
         if h <= 0.0 || !h.is_finite() {
             vec![f64::NAN; spec.n]
         } else {
-            kernel_density_at_grid(&clean, h, &grid, &spec.kernel)
+            kernel_density_at_grid(&clean, h, &grid, &spec.kernel)?
         }
     };
 
@@ -245,19 +280,36 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
-/// Dispatch to the requested kernel's density estimator.
-/// Falls back to Gaussian for any unrecognised kernel name (should not
-/// happen in practice since `PyKde::new` validates the string).
-fn kernel_density_at_grid(x: &[f64], h: f64, grid: &[f64], kernel: &str) -> Vec<f64> {
-    match kernel {
+/// Dispatch to the requested kernel's density estimator. Shared by `Kde`
+/// (`apply_one_group` above) and `DensityData`
+/// (`density_data::apply_one_group`) so the crate has exactly one
+/// kernel-math table. Returns a typed error for any kernel string not in
+/// [`KERNELS`] — no silent fallback to Gaussian; see `KERNELS`'s doc comment
+/// for why this is the only enforcement point for `DensityData`, which has
+/// no constructor-time kernel validation of its own.
+pub(crate) fn kernel_density_at_grid(
+    x: &[f64],
+    h: f64,
+    grid: &[f64],
+    kernel: &str,
+) -> PyResult<Vec<f64>> {
+    Ok(match kernel {
+        "gaussian" => gaussian_density_at_grid(x, h, grid),
         "epanechnikov" | "epan" => epanechnikov_density_at_grid(x, h, grid),
         "tophat" | "uniform" => tophat_density_at_grid(x, h, grid),
         "cosine" => cosine_density_at_grid(x, h, grid),
-        _ => gaussian_density_at_grid(x, h, grid),
-    }
+        "exponential" => exponential_density_at_grid(x, h, grid),
+        "linear" => linear_density_at_grid(x, h, grid),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "kernel_density_at_grid: unknown kernel '{other}'; expected {}",
+                KERNELS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(" | "),
+            )))
+        }
+    })
 }
 
-fn gaussian_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
+pub(crate) fn gaussian_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
     let n = x.len() as f64;
     let norm = 1.0 / (n * h * (2.0 * std::f64::consts::PI).sqrt());
     grid.iter()
@@ -339,6 +391,52 @@ fn cosine_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Exponential (double-exponential / Laplace) kernel: K(u) = (1/2)·exp(-|u|).
+/// Unlike the compact-support kernels above, this decays exponentially with
+/// no hard cutoff (support is all of ℝ) — it has a cusp (non-differentiable
+/// peak) at u=0, unlike Gaussian's smooth peak. Integrates to 1 over
+/// (-∞, ∞), so no truncation-dependent normalization is needed.
+fn exponential_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
+    let n = x.len() as f64;
+    let norm = 1.0 / (n * h);
+    grid.iter()
+        .map(|&g| {
+            let s: f64 = x
+                .iter()
+                .map(|&xi| {
+                    let u = (g - xi) / h;
+                    0.5 * (-u.abs()).exp()
+                })
+                .sum();
+            norm * s
+        })
+        .collect()
+}
+
+/// Linear (triangular) kernel: K(u) = 1 - |u| for |u| ≤ 1, else 0. Compact
+/// support with hard edges at ±h, tapering linearly to 0 (unlike
+/// Epanechnikov's parabolic taper). Integrates to 1 over [-1, 1].
+fn linear_density_at_grid(x: &[f64], h: f64, grid: &[f64]) -> Vec<f64> {
+    let n = x.len() as f64;
+    let norm = 1.0 / (n * h);
+    grid.iter()
+        .map(|&g| {
+            let s: f64 = x
+                .iter()
+                .map(|&xi| {
+                    let u = (g - xi) / h;
+                    if u.abs() <= 1.0 {
+                        1.0 - u.abs()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            norm * s
+        })
+        .collect()
+}
+
 fn trapezoidal_cumulative(grid: &[f64], y: &[f64]) -> Vec<f64> {
     let mut out = Vec::with_capacity(grid.len());
     out.push(0.0);
@@ -380,6 +478,10 @@ use crate::transform::core::TransformSpec;
 /// cumulative : bool, default False
 ///     When True, output is the cumulative distribution function (CDF)
 ///     rather than the PDF.
+/// kernel : str, default "gaussian"
+///     Kernel function. One of ``"gaussian"``, ``"epanechnikov"`` /
+///     ``"epan"``, ``"tophat"`` / ``"uniform"``, ``"cosine"``,
+///     ``"exponential"``, ``"linear"``.
 /// groupby : list[str] or str or None, optional
 ///     One or more group-key columns; KDE computed independently per group.
 ///     Output schema gains one column per groupby field after the 2nd field.
@@ -459,14 +561,13 @@ impl PyKde {
                 ));
             }
         }
-        let kernel_str = match kernel {
-            "gaussian" | "epanechnikov" | "epan" | "tophat" | "uniform" | "cosine" => {
-                kernel.to_string()
-            }
-            other => return Err(PyValueError::new_err(format!(
-                "Kde: unknown kernel '{other}'; expected 'gaussian' | 'epanechnikov' | 'epan' | 'tophat' | 'uniform' | 'cosine'"
-            ))),
-        };
+        if !KERNELS.contains(&kernel) {
+            return Err(PyValueError::new_err(format!(
+                "Kde: unknown kernel '{kernel}'; expected {}",
+                KERNELS.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(" | "),
+            )));
+        }
+        let kernel_str = kernel.to_string();
         let groupby = parse_groupby_pyany(groupby)?;
         Ok(PyKde(TransformSpec::Kde(KdeSpec {
             field: field.to_string(),
@@ -1118,6 +1219,158 @@ mod tests {
         );
     }
 
+    // ---- T11: exponential + linear kernels ----
+
+    /// Exponential kernel must produce non-zero density on simple data.
+    #[test]
+    fn test_kde_exponential_produces_nonzero_density() {
+        let batch = simple_batch();
+        let spec = kde_spec_with_kernel("exponential", 20);
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        assert!(
+            density.iter().all(|&d| d > 0.0),
+            "Exponential KDE: unbounded support means every grid point should be non-zero"
+        );
+    }
+
+    /// Exponential kernel discriminator: K(u) = exp(-|u|)/2 evaluated exactly
+    /// against a single data point at 0, h=1. This pins the dedicated formula
+    /// (not a silent Gaussian fallback, which would give ~0.3989 at u=0
+    /// instead of exactly 0.5) and its "cusp" property — the value decays by
+    /// the SAME multiplicative factor e^-1 per unit step on both sides of the
+    /// peak, unlike Gaussian's super-exponential (accelerating) falloff.
+    #[test]
+    fn test_kde_exponential_matches_exact_formula_and_has_cusp() {
+        let x = vec![0.0];
+        let grid = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let h = 1.0;
+        let got = exponential_density_at_grid(&x, h, &grid);
+        let want: Vec<f64> = grid.iter().map(|&u| 0.5 * (-(u.abs())).exp()).collect();
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-12, "exponential[{i}]: got {g}, want {w}");
+        }
+        // Gaussian's value at u=0 is 1/sqrt(2*pi) ≈ 0.3989, not 0.5 — proves
+        // this isn't the Gaussian formula under a different name.
+        assert!((got[2] - 0.5).abs() < 1e-12, "exponential K(0) must be exactly 0.5");
+        // Cusp: constant ratio e across the peak on both sides (linear decay
+        // in log-space), which a smooth (Gaussian) peak does not exhibit.
+        assert!((got[2] / got[1] - std::f64::consts::E).abs() < 1e-9);
+        assert!((got[2] / got[3] - std::f64::consts::E).abs() < 1e-9);
+    }
+
+    /// Linear kernel must produce non-zero density on simple data.
+    #[test]
+    fn test_kde_linear_produces_nonzero_density() {
+        let batch = simple_batch();
+        let spec = kde_spec_with_kernel("linear", 20);
+        let out = apply(&spec, &batch).unwrap();
+        let density = col(&out, "density");
+        let nonzero_count = density.iter().filter(|&&d| d > 0.0).count();
+        assert!(nonzero_count > 0, "Linear KDE: expected some non-zero densities");
+    }
+
+    /// Linear kernel discriminator: triangular K(u) = 1 - |u| for |u| <= 1,
+    /// with a HARD edge (exact 0) at and beyond |u| = 1 — unlike
+    /// Epanechnikov's parabolic taper (which is also compactly supported but
+    /// non-linear) and unlike exponential/Gaussian's unbounded tails.
+    #[test]
+    fn test_kde_linear_produces_hard_edged_triangular_shape() {
+        let x = vec![0.0];
+        let grid = vec![-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5];
+        let h = 1.0;
+        let got = linear_density_at_grid(&x, h, &grid);
+        let want = [0.0, 0.0, 0.5, 1.0, 0.5, 0.0, 0.0];
+        for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!((g - w).abs() < 1e-12, "linear[{i}]: got {g}, want {w}");
+        }
+        // Discriminator vs Epanechnikov: at u=0.5, Epanechnikov gives
+        // 0.75*(1-0.25) = 0.5625, not the triangular kernel's exact 0.5.
+        let epan_at_half = epanechnikov_density_at_grid(&x, h, &[0.5]);
+        assert!(
+            (epan_at_half[0] - 0.5625).abs() < 1e-12,
+            "sanity: epanechnikov(0.5) should be 0.5625, got {}",
+            epan_at_half[0]
+        );
+        assert!(
+            (got[4] - epan_at_half[0]).abs() > 1e-9,
+            "linear and epanechnikov must diverge in shape away from the peak"
+        );
+    }
+
+    /// Before this task, `kernel_density_at_grid`'s catch-all silently
+    /// substituted Gaussian for any unrecognised kernel string. A `KdeSpec`
+    /// built directly (bypassing `PyKde::new`'s validation — e.g. a spec
+    /// deserialized from wire JSON with a typo'd kernel) must now error at
+    /// `apply()` time instead of silently rendering the wrong shape.
+    #[test]
+    fn test_kde_apply_with_unvalidated_bogus_kernel_now_errors() {
+        pyo3::Python::initialize();
+        let batch = batch_with("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Fixed { value: 1.0 },
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 8,
+            extent: Some((0.0, 6.0)),
+            cumulative: false,
+            kernel: "not_a_real_kernel".into(),
+            groupby: vec![],
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("unknown kernel"), "err: {err}");
+    }
+
+    /// Reverse guard (round 2, batch-D T11 cycle 2): every `KERNELS` entry
+    /// must reach a real dispatch arm in `kernel_density_at_grid`, not just
+    /// pass `PyKde::new`'s `KERNELS.contains` pre-check — that pre-check
+    /// only proves the FORWARD direction (a dispatch arm without a `KERNELS`
+    /// entry is unreachable at construction time), and it never calls
+    /// `kernel_density_at_grid` itself, so a name added to `KERNELS` with no
+    /// matching arm would otherwise pass both the pre-check and this test
+    /// suite and only fail at render time in a user's chart. Mirrors
+    /// `smooth::test_all_method_aliases_accepted_by_pysmooth_new`, adapted to
+    /// call the actual compute site directly since (unlike `Smooth`) `Kde`'s
+    /// constructor pre-check is not itself the dispatch.
+    #[test]
+    fn test_all_kernels_reach_a_dispatch_arm() {
+        for &kernel in KERNELS {
+            let result = kernel_density_at_grid(&[0.0, 1.0], 1.0, &[0.0], kernel);
+            assert!(
+                result.is_ok(),
+                "KERNELS entry {kernel:?} has no matching dispatch arm in \
+                 kernel_density_at_grid: {:?}",
+                result.err().map(|e| e.to_string())
+            );
+        }
+    }
+
+    /// Determinism pin (round 2, batch-D T11 cycle 2): the two new kernels
+    /// must produce byte-identical output across repeated `apply()` calls on
+    /// identical input, per the spec's testing section ("determinism: two
+    /// runs byte-equal"). Rust owns this pin — see the round-2 report for
+    /// why it isn't duplicated Python-side.
+    #[test]
+    fn test_kde_exponential_and_linear_apply_deterministic_across_runs() {
+        for kernel in ["exponential", "linear"] {
+            let batch = simple_batch();
+            let spec = kde_spec_with_kernel(kernel, 50);
+            let out1 = apply(&spec, &batch).unwrap();
+            let out2 = apply(&spec, &batch).unwrap();
+            let d1 = col(&out1, "density");
+            let d2 = col(&out2, "density");
+            assert_eq!(d1.len(), d2.len());
+            for (i, (a, b)) in d1.iter().zip(d2.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(), b.to_bits(),
+                    "kernel={kernel} density[{i}] not byte-identical across runs: {a} vs {b}"
+                );
+            }
+        }
+    }
+
     /// Gaussian must produce the same output as before (regression against the
     /// hardcoded path we replaced with the dispatch).
     #[test]
@@ -1126,7 +1379,7 @@ mod tests {
         let h = 0.8_f64;
         let grid: Vec<f64> = (0..10).map(|i| -2.0 + i as f64 * 0.5).collect();
         let expected = gaussian_density_at_grid(&data, h, &grid);
-        let via_dispatch = kernel_density_at_grid(&data, h, &grid, "gaussian");
+        let via_dispatch = kernel_density_at_grid(&data, h, &grid, "gaussian").unwrap();
         for (a, b) in expected.iter().zip(via_dispatch.iter()) {
             assert_eq!(
                 a.to_bits(), b.to_bits(),

@@ -3715,6 +3715,7 @@ mod tests {
             extent: None,
             steps: None,
             cumulative: false,
+            kernel: crate::transform::kde::default_kernel(),
             as_: ("value".into(), "density".into()),
             name: None,
         }

@@ -665,7 +665,7 @@ Marks are constructors that accept visual property overrides as keyword argument
 | `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
 | `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |
 | `mark_violin(...)` | KDE + optional boxplot overlay | `bandwidth`, `inner` (`"box"`, `"quartile"`, `"point"`, `None`) |
-| `mark_qq(...)` | Quantile–quantile | `distribution` (`"normal"`, `"uniform"`, `"exponential"`, or `scipy.stats` dist), `dequantize` |
+| `mark_qq(...)` | Quantile–quantile | `distribution` (`"normal"`, `"uniform"`, `"exponential"`, `"lognormal"` — the latter newly computed 2026-09-05, batch D F-L03-07: normal theoretical quantiles exponentiated; it was documented but refused before — or `scipy.stats` dist), `dequantize` |
 | `mark_raster(...)` | Aggregates data to a pixel-resolution grid and renders as a colored image | `aggregate` (`"count"`, `"density"`, `"mean"`, `"sum"`, `"any"`), `field` (required if `aggregate` is `"mean"` or `"sum"`), `cmap`, `resolution` (`"screen"`, `int`, `tuple[int, int]`), `blend` (`"alpha"`, `"additive"`), `min_count`, `log_scale` |
 | `mark_swarm(...)` | Beeswarm for categorical data. Points are arranged along the categorical axis to avoid overplotting while preserving the value distribution. General-purpose; distinct from `mark_shap_beeswarm`. | `size`, `orient`, `spacing`, `side` (`"both"`\|`"left"`\|`"right"`), `dodge` |
 | `mark_hex(...)` | Hexagonal binning. Aggregates data into a hexagonal grid and renders each hex colored by aggregate value. Preferred over `mark_raster` when topology and shape perception matter. | `bin_size`, `aggregate` (`"count"`\|`"mean"`\|`"sum"`), `field` (required if `aggregate` is mean or sum), `cmap`, `stroke`, `stroke_width` |
@@ -1079,7 +1079,7 @@ Data transforms are applied before stat transforms, in the Rust engine. They res
 | `transform_pivot(field, value, *, groupby=None, limit=None, op="sum")` | Long → wide | |
 | `transform_join_aggregate(*aggregates, groupby=None)` | Add aggregate columns without collapsing rows | |
 | `transform_window(*window_transforms, *, sort=None, groupby=None, frame=None, ignore_peers=False)` | Window functions (rolling mean, rank, cumsum, etc.) | |
-| `transform_density(field, *, bandwidth="scott", groupby=None, extent=None, minsteps=None, steps=None, cumulative=False, as_=("value", "density"))` | KDE transform | |
+| `transform_density(field, *, bandwidth=None, kernel="gaussian", groupby=None, extent=None, steps=None, cumulative=False, as_=("value", "density"))` | KDE transform | 2026-09-05: gained `kernel=` — routed through the one shared KDE kernel dispatch, which also gained `"exponential"` and `"linear"` (batch D, F-L05-12/F-L03-07); the row also mis-documented `bandwidth="scott"` and a nonexistent `minsteps=` — corrected to the shipped signature |
 | `transform_regression(x, y, *, method="linear", order=3, groupby=None, extent=None, params=False, as_=("x","y"))` | Regression transform | |
 | `transform_loess(x, y, *, bandwidth=0.3, groupby=None, as_=("x","y"))` | LOESS transform | |
 | `transform_impute(field, *, method="value", value=None, groupby=None, key=None, keyvals=None)` | Fill missing values | |

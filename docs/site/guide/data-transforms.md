@@ -351,7 +351,7 @@ chart = (
 
 The output columns default to `"value"` and `"density"` (configurable via `as_`). Use `groupby` to compute separate densities per category.
 
-The `kernel=` parameter selects the kernel function. Supported values: `"gaussian"` (default), `"epanechnikov"`, `"tophat"`, `"cosine"`.
+The `kernel=` parameter selects the kernel function. Supported values: `"gaussian"` (default), `"epanechnikov"` (alias `"epan"`), `"tophat"`, `"uniform"`, `"cosine"`, `"exponential"`, `"linear"`.
 
 ```python
 chart = (
