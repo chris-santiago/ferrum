@@ -348,7 +348,7 @@ def desugar_smooth(
     method: str = "loess",
     ci: float | None = None,
     bandwidth: float = 0.75,
-    degree: int = 2,
+    degree: int | None = None,
     n: int = 200,
     seed: int = 0,
     x_bins: Any = None,
@@ -395,8 +395,28 @@ def desugar_smooth(
         CI band and returns a single-mark (line) result.
     bandwidth : float, default 0.75
         Smoothing bandwidth fraction (LOESS).
-    degree : int, default 2
-        Polynomial degree for the smoother.
+    degree : int or None, default None
+        Polynomial degree passed through to the ``Smooth`` transform.
+        Acceptance depends on ``method``:
+
+        - ``"lm"``/``"linear"``: any ``degree >= 1``. Omitting it or
+          passing ``1`` keeps a plain linear fit; ``>= 2`` promotes to a
+          real polynomial fit (``degree=2`` is byte-equal to
+          ``method="quadratic"``). ``degree=0`` raises. A degree that
+          leaves the design rank-deficient for the data at hand (fewer
+          usable points than ``degree + 1`` after dropping null/NaN rows
+          and any ``x_bins`` aggregation) also raises, but only for a
+          whole-frame fit; inside one group of a ``groupby`` fit, or one
+          panel of a faceted chart, that slice's output degrades to NaN
+          instead.
+        - ``"quadratic"``/``"cubic"``: accepted only when it matches the
+          method's fixed degree (``2``/``3`` respectively) as a no-op;
+          any other value raises, naming ``method="lm", degree=<d>`` as
+          the way to get that degree.
+        - ``"loess"``: ``1`` or ``2`` (Rust defaults to ``2`` when
+          omitted); any other value raises.
+        - ``"log"``/``"sqrt"``/``"glm"``: no degree concept; passing any
+          value raises.
     n : int, default 200
         Number of evaluation points in the output.
     seed : int, default 0
@@ -442,9 +462,15 @@ def desugar_smooth(
 
     if ci is None and not show_metrics:
         # 8a-compatible single-line path: keep the single-mark result so the
-        # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator when
-        # explicitly set; otherwise omit (so existing goldens stay identical).
-        smooth_kwargs: dict = dict(method=method, ci=None, bandwidth=bandwidth, degree=degree, n=n)
+        # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator/
+        # degree when explicitly set; otherwise omit so Rust's own
+        # per-method default applies (batch-D T9: forwarding an
+        # always-2 `degree` here would silently promote every bare
+        # `method="lm"` call to a quadratic fit once "lm"+degree>=2
+        # routes to a polynomial).
+        smooth_kwargs: dict = dict(method=method, ci=None, bandwidth=bandwidth, n=n)
+        if degree is not None:
+            smooth_kwargs["degree"] = degree
         if x_bins is not None:
             smooth_kwargs["x_bins"] = x_bins
         if x_estimator is not None:
@@ -459,10 +485,11 @@ def desugar_smooth(
         encoding_remap = {"x": "x", "y": "y"}
         return MarkDesugarResult(mark="line", transforms=transforms, remap=encoding_remap)
 
-    # Layered path: ci band and/or metrics-corner overlay.
-    smooth_kwargs = dict(
-        method=method, ci=ci, bandwidth=bandwidth, degree=degree, n=n, seed=seed, name="smooth"
-    )
+    # Layered path: ci band and/or metrics-corner overlay. `degree` is
+    # forwarded only when explicit — see the no-CI path above for why.
+    smooth_kwargs = dict(method=method, ci=ci, bandwidth=bandwidth, n=n, seed=seed, name="smooth")
+    if degree is not None:
+        smooth_kwargs["degree"] = degree
     if x_bins is not None:
         smooth_kwargs["x_bins"] = x_bins
     if x_estimator is not None:

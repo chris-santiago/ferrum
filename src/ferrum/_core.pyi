@@ -525,7 +525,7 @@ class Smooth:
         method: str = "loess",
         ci: Optional[float] = 0.95,
         bandwidth: float = 0.75,
-        degree: int = 2,
+        degree: Optional[int] = None,
         n: int = 200,
         seed: int = 0,
         x_bins: Optional[int] = None,

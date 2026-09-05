@@ -257,8 +257,13 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 "kernel", "groupby", "name",
             ],
         },
+        // `methods` reads the SAME const the parser's pre-check and error
+        // string read (`crate::transform::smooth::METHODS`) — batch-D T9
+        // round 2 (Required Fix 2): this is what makes the drift guard
+        // structural rather than test-detected. See `METHODS`'s doc comment
+        // in `smooth.rs`.
         "smooth" => TransformRegistryEntry {
-            methods: vec!["lm", "linear", "loess", "quadratic", "cubic", "log", "sqrt"],
+            methods: crate::transform::smooth::METHODS.to_vec(),
             outputs: fit_outputs(),
             params: vec![
                 "x", "y", "method", "ci", "bandwidth", "degree", "n", "seed", "x_bins",

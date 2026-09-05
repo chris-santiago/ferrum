@@ -1120,6 +1120,54 @@ fn smooth_methods_accepted_and_bogus_method_rejected() {
     });
 }
 
+/// Mines `Smooth::new`'s "unknown method" error message and set-compares it
+/// against the registry's declared `methods`, in the same minable
+/// `'a' | 'b' | ...` shape the `params` guard mines from serde's
+/// `deny_unknown_fields` message.
+///
+/// Historically (batch-D T9 round 1) this closed the gap the forward check
+/// above cannot: a parser accepting a value the registry omits. As of round
+/// 2 (Required Fix 2), both sides of this comparison are DERIVED FROM THE
+/// SAME SOURCE — `smooth::METHODS` (`registry::entry_for_kind("smooth")`
+/// clones it; the error string formats from it) — so this assertion can no
+/// longer fail from vocabulary drift between the two; it only proves the
+/// error message stays minable in the expected shape. The structural
+/// guarantee against vocabulary drift now lives at `smooth::METHODS`'s own
+/// doc comment: a `PySmooth::new` match arm cannot be reachable without
+/// appearing in `METHODS` (the pre-check rejects it first), and a `METHODS`
+/// entry without a match arm returns a typed error rather than panicking
+/// (batch-D T9 round 3) — see `METHODS`'s doc and the `_ =>` arm at the
+/// bottom of `PySmooth::new`.
+#[test]
+fn smooth_methods_vocabulary_matches_parser_error_message_exactly() {
+    attach(|py| {
+        let ty = py.get_type::<crate::transform::smooth::PySmooth>();
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("method", "not_a_real_method").unwrap();
+        let err = ty.call(("x", "y"), Some(&kwargs)).unwrap_err();
+        let msg = err.to_string();
+
+        const MARKER: &str = "expected ";
+        let after = msg
+            .find(MARKER)
+            .map(|i| &msg[i + MARKER.len()..])
+            .unwrap_or_else(|| panic!("smooth: error missing `{MARKER}` marker: {msg}"));
+        let mined: std::collections::BTreeSet<String> = after
+            .split('|')
+            .map(|tok| tok.trim().trim_matches('\'').to_string())
+            .collect();
+        let declared: std::collections::BTreeSet<String> =
+            entry_for_kind("smooth").unwrap().methods.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            mined, declared,
+            "smooth: parser error vocabulary drifted from the registry `methods` list.\n\
+             in parser but not registry: {:?}\nin registry but not parser: {:?}",
+            mined.difference(&declared).collect::<Vec<_>>(),
+            declared.difference(&mined).collect::<Vec<_>>(),
+        );
+    });
+}
+
 /// Required Fix 3 (round-3 cycle-2 review): extends the `methods` drift guard
 /// to `hex`. `HexSpec::new` (hex.rs) refuses a bogus `aggregate` hard, same
 /// PyO3-constructor-time shape as `kde`/`qq`/`smooth`. `hex`'s eight

@@ -262,6 +262,14 @@ impl TransformSpec {
         // standard `apply_with_context(s, batch, ctx)` signature. Reorder has a
         // different signature (`apply_with_outputs(s, batch, &named_outputs)`),
         // so it stays explicit alongside the default fallback.
+        //
+        // `Smooth` was added in batch-D T9 round 3: its rank-deficiency
+        // refusal needs `ctx.is_partition` to tell a genuine whole-frame call
+        // apart from one facet panel of a larger frame (see
+        // `smooth::apply_one_group`'s degenerate-input policy doc). Without
+        // this arm, `TransformContext` would be constructed and threaded all
+        // the way to `apply_with_context` and then silently dropped at the
+        // `_ => self.apply(batch)` fallback below.
         macro_rules! arm {
             ($($V:ident => $m:ident,)*) => {
                 match self {
@@ -276,6 +284,7 @@ impl TransformSpec {
             Raster => raster,
             Swarm  => swarm,
             Violin => violin,
+            Smooth => smooth,
         }
     }
 

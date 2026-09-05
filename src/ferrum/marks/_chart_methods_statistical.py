@@ -206,14 +206,30 @@ class StatisticalMarksMixin:
         method : str, optional
             Smoothing method.  Default is ``"loess"``.
 
-            - ``"lm"`` or ``"linear"`` -- linear regression (OLS, degree-1 polynomial)
+            - ``"lm"`` or ``"linear"`` -- linear regression (OLS, degree-1 polynomial);
+              promoted to a polynomial fit when ``degree >= 2`` is also given
             - ``"loess"`` -- local regression (LOWESS)
             - ``"quadratic"`` -- polynomial regression, degree 2
             - ``"cubic"`` -- polynomial regression, degree 3
             - ``"log"`` -- linear fit on log-transformed x
             - ``"sqrt"`` -- linear fit on sqrt-transformed x
+            - ``"glm"`` -- Generalized Linear Model (Gaussian family, identity
+              link) fit via IRLS
         degree : int, optional
-            Polynomial degree for ``"linear"``/``"quadratic"``/``"cubic"``.
+            Acceptance depends on ``method``:
+
+            - ``"lm"``/``"linear"`` -- any ``degree >= 1``; ``>= 2`` promotes
+              to ``Poly{degree}`` (``degree=2`` is byte-equal to
+              ``method="quadratic"``). ``degree=0`` raises. A degree that
+              leaves too few data points to fit (rank-deficient) raises for
+              a whole-frame fit; one group of a ``groupby`` fit, or one
+              panel of a faceted chart, degrades that slice to NaN instead.
+            - ``"quadratic"``/``"cubic"`` -- accepted only as a no-op when it
+              matches the method's fixed degree (``2``/``3``); any other
+              value raises.
+            - ``"loess"`` -- the local-fit degree, ``1`` or ``2``.
+            - ``"log"``/``"sqrt"``/``"glm"`` -- no degree concept; passing
+              any value raises.
         bandwidth : float, optional
             LOESS bandwidth fraction in ``(0, 1]``.  Default is ``0.75``.
         n : int, optional
@@ -222,9 +238,10 @@ class StatisticalMarksMixin:
             Confidence level for the interval band, e.g. ``0.95``.  When set,
             produces a layered ribbon + line chart.  Default is ``None``.
         groupby : str, optional
-            Group-key column (Utf8).  When set, the smooth is computed
-            independently per group and the group column is preserved in
-            the output so downstream ``color=`` encoding maps to it.
+            Group-key column (string, integer, or boolean dtype).  When
+            set, the smooth is computed independently per group and the
+            group column is preserved at its original dtype in the output
+            so downstream ``color=`` encoding maps to it.
         position : Position, optional
             Position adjustment.
         **mark_kwargs

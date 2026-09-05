@@ -22,6 +22,19 @@ def pairplot_df() -> pl.DataFrame:
     )
 
 
+@pytest.fixture
+def curved_xy_df() -> pl.DataFrame:
+    """Genuinely curved `(x, y)` data (a real quadratic term), shared by the
+    batch-D T9 smooth/lmplot/residplot `degree`/`order` tests
+    (`tests/test_smooth_methods.py`, `tests/test_lmplot_residplot_order.py`).
+    Near-straight-line data makes a linear and a quadratic fit coincide to
+    the point of byte-identical SVG output, which defeats any test relying
+    on them differing."""
+    xs = [i * 0.3 for i in range(20)]
+    ys = [1.0 + 2.0 * x + 3.0 * x**2 for x in xs]
+    return pl.DataFrame({"x": xs, "y": ys})
+
+
 # umap removed from Python deps in Phase 11d — handled at Rust level (manifolds-rs).
 _REQUIRED_FOR_PHASE_10 = ("sklearn", "shap", "scipy", "skops")
 

@@ -98,6 +98,26 @@ pub(crate) fn append_metrics_columns(
     cols.push(Arc::new(Float64Array::from(y_col)));
 }
 
+/// Append nullable `_metrics_text` (Utf8) / `_metrics_y` (Float64) columns
+/// of length `n`, entirely `null` — batch-D T9 round 4. Used when
+/// `inject_metrics` was requested but this particular fit degenerated
+/// (rank-deficient design, zero-variance x, non-convergent IRLS, or fewer
+/// than 2 usable points), so there is no anchor row to compute. Unlike
+/// [`append_metrics_columns`], which places one non-null row at the
+/// max-finite-x anchor, this keeps the two columns present but every row
+/// null — so a degenerate fit's output schema matches its well-supported
+/// siblings' (`x`/`y`/`ci_lower`/`ci_upper` plus these two), rather than
+/// varying with the data. The schema no longer diverging at the source is
+/// what let `render::prepare::concat_batches_by_name` and
+/// `transform::smooth::apply_grouped`'s by-name reconciliation become a
+/// belt-and-braces safety net instead of the primary defense.
+pub(crate) fn append_null_metrics_columns(fields: &mut Vec<Field>, cols: &mut Vec<ArrayRef>, n: usize) {
+    fields.push(Field::new("_metrics_text", DataType::Utf8, true));
+    cols.push(Arc::new(StringArray::from(vec![None::<&str>; n])));
+    fields.push(Field::new("_metrics_y", DataType::Float64, true));
+    cols.push(Arc::new(Float64Array::from(vec![None::<f64>; n])));
+}
+
 /// Append nullable `_ref_zero` (Float64) column of length `n` with
 /// `Some(0.0)` on the first row and `None` on the rest. A downstream
 /// `mark_rule(y="_ref_zero")` renders exactly one horizontal reference

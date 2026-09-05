@@ -73,7 +73,7 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
 
     if xs.len() < 2 {
         return match spec.output {
-            SmoothOutput::Fitted => build_nan_fitted(n_grid),
+            SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
             SmoothOutput::Residuals => build_residuals_batch(
                 Vec::new(), Vec::new(), &[],
                 spec.inject_zero_ref, spec.inject_metrics,
@@ -91,7 +91,7 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
     if !(x_max > x_min) {
         // Zero-variance x → no slope identifiable → NaN line.
         return match spec.output {
-            SmoothOutput::Fitted => build_nan_fitted(n_grid),
+            SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
             SmoothOutput::Residuals => {
                 let nans = vec![f64::NAN; xs.len()];
                 build_residuals_batch(
@@ -339,9 +339,20 @@ fn build_fitted_batch(
     RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
 }
 
-fn build_nan_fitted(n_grid: usize) -> PyResult<RecordBatch> {
+fn build_nan_fitted(n_grid: usize, metrics_requested: bool) -> PyResult<RecordBatch> {
     let nans = vec![f64::NAN; n_grid];
-    build_fitted_batch(nans.clone(), nans.clone(), nans.clone(), nans, None)
+    let mut fields = crate::transform::registry::fit_output_fields();
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(nans.clone())),
+        Arc::new(Float64Array::from(nans.clone())),
+        Arc::new(Float64Array::from(nans.clone())),
+        Arc::new(Float64Array::from(nans.clone())),
+    ];
+    if metrics_requested {
+        residuals::append_null_metrics_columns(&mut fields, &mut cols, n_grid);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
 }
 
 /// Schwabish SB-followup (2026-05-12): mirrors

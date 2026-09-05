@@ -328,24 +328,38 @@ pub(crate) fn apply(spec: &GlmSpec, batch: &RecordBatch) -> PyResult<RecordBatch
             if !(level > 0.0 && level < 1.0) {
                 return Err(PyValueError::new_err("Glm: ci must be in (0, 1)"));
             }
-            let z = inv_normal_cdf(1.0 - (1.0 - level) / 2.0);
-            let mut lo = Vec::with_capacity(n_grid);
-            let mut hi = Vec::with_capacity(n_grid);
-            for &xq in &grid {
-                // Var(η) = [1, x] Σ [1, x]'.
-                let v = cov[0][0]
-                    + 2.0 * xq * cov[0][1]
-                    + xq * xq * cov[1][1];
-                let se = if v >= 0.0 { v.sqrt() } else { f64::NAN };
-                let eta = beta[0] + beta[1] * xq;
-                lo.push(link_inverse(spec.link, eta - z * se));
-                hi.push(link_inverse(spec.link, eta + z * se));
-            }
-            (lo, hi)
+            wald_band(beta, cov, spec.link, &grid, level)
         }
     };
 
     build_glm_batch(grid, y_fit, lo, hi)
+}
+
+/// Wald confidence band on the linear predictor `η = β₀ + β₁·x`, back-
+/// transformed through the inverse link to response space:
+/// `Var(η) = [1, x] · Σ̂ · [1, x]'` where `Σ̂` is IRLS's `cov` (the final
+/// `(X'WX)⁻¹`). Batch-D T9 round 2 (Required Fix 5, rust-quality verdict):
+/// shared by `Glm::apply` (above) and `smooth.rs`'s `glm_fit`, which is a
+/// second caller into the SAME real GLM this transform routes to
+/// (`mark_smooth(method="glm")`) — the two computed this exact formula
+/// verbatim before this hoist. Lives here rather than in `smooth.rs` because
+/// the Wald-band math belongs with the GLM math it comes from; `smooth.rs`
+/// already calls into this module for `fit_irls`/`link_inverse`, so this is
+/// one more cross-module call in the same existing pairing, not a new one.
+pub(crate) fn wald_band(
+    beta: [f64; 2], cov: [[f64; 2]; 2], link: GlmLink, grid: &[f64], level: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let z = inv_normal_cdf(1.0 - (1.0 - level) / 2.0);
+    let mut lo = Vec::with_capacity(grid.len());
+    let mut hi = Vec::with_capacity(grid.len());
+    for &xq in grid {
+        let v = cov[0][0] + 2.0 * xq * cov[0][1] + xq * xq * cov[1][1];
+        let se = if v >= 0.0 { v.sqrt() } else { f64::NAN };
+        let eta = beta[0] + beta[1] * xq;
+        lo.push(link_inverse(link, eta - z * se));
+        hi.push(link_inverse(link, eta + z * se));
+    }
+    (lo, hi)
 }
 
 /// Compute initial μ for IRLS given family and observations.

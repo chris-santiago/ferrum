@@ -901,6 +901,14 @@ pub fn prepare_render_inputs(
 /// single production construction site for `TransformContext`; every other
 /// `TransformContext::default()` in this crate is a direct-`apply()` fallback
 /// path, unaffected by this estimate.
+///
+/// The facet branch also sets `TransformContext.is_partition = true` (batch-D
+/// T9 round 3): each per-panel `apply_transforms_named` call below runs on a
+/// facet panel, not the whole frame, even though `groupby` is empty for that
+/// call. Consumers that gate a refusal on "this is a genuine whole-frame
+/// call" (e.g. `Smooth`'s rank-deficiency check) read this flag to degrade
+/// like a `groupby` group instead of failing the whole render — see
+/// `TransformContext::is_partition`'s doc.
 fn run_transforms_with_facet(
     spec: &ChartSpec,
     normalized: &RecordBatch,
@@ -957,6 +965,13 @@ fn run_transforms_with_facet(
     };
     let ctx = TransformContext {
         panel_pixel_size: Some(crate::layout::estimate_panel_pixel_size(viewport, theme, grid_dims)),
+        // Batch-D T9 round 3: every partition run through this ctx is one
+        // facet panel, not the whole frame — see `TransformContext::is_partition`'s
+        // doc and `smooth::apply_one_group`'s degenerate-input policy, the
+        // consumer this unblocks (`fm.lmplot(order=3, col=...)` on a sparse
+        // facet level must degrade like a `groupby` group, not refuse the
+        // whole chart the way an actual whole-frame rank-deficient fit does).
+        is_partition: true,
         ..TransformContext::default()
     };
 
@@ -990,20 +1005,91 @@ fn run_transforms_with_facet(
             merged.entry(key).or_default().push(batch);
         }
     }
-    // Concat per-key batches across all panels into a single map.
+    // Concat per-key batches across all panels into a single map. Batches
+    // published under the same key can have DIVERGING schemas across
+    // panels when a facet panel's fit is degenerate (rank-deficient, zero-
+    // variance x, non-convergent): before batch-D T9 round 3, a rank-deficient
+    // fit always refused, so faceted charts never hit this state; round 3 now
+    // makes degenerate panels degrade to NaN instead (via `TransformContext::
+    // is_partition`). A plain `concat_batches` requires identical schemas and
+    // otherwise misaligns columns POSITIONALLY, surfacing as a confusing error
+    // naming an unrelated column. `concat_batches_by_name` unifies every
+    // batch's fields in first-appearance order and reads each batch's columns
+    // BY NAME, padding a miss with `new_null_array` at the appropriate dtype.
     let mut combined: HashMap<String, RecordBatch> = HashMap::new();
     for (key, batches) in merged {
         if batches.len() == 1 {
             combined.insert(key, batches.into_iter().next().unwrap());
         } else {
-            let schema = batches[0].schema();
-            let merged_batch = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
-                RenderError::TransformFailed(format!("concat facet partitions for key '{key}': {e}"))
-            })?;
+            let merged_batch = concat_batches_by_name(&key, batches)?;
             combined.insert(key, merged_batch);
         }
     }
     Ok(combined)
+}
+
+/// Concatenate `batches` — all outputs published under the same named-output
+/// `key` across facet panels — into one batch, tolerating schema divergence
+/// between panels. The reference schema is the UNION of every batch's fields,
+/// in first-appearance order (batch-D T9 round 4: not the single WIDEST
+/// schema, which can arbitrarily drop a field that only a narrower batch
+/// carries when two batches tie on field count). Each field is read from
+/// every batch BY NAME; a batch missing a field is padded with a null array
+/// of that field's own dtype (`arrow::array::new_null_array`) rather than
+/// erroring or (Arrow's default `concat_batches`) silently misaligning
+/// columns by position. Dtype-generic via `arrow::compute::concat` — the
+/// same widen-with-nulls shape already used for a name-miss at
+/// `transform::impute` (`concat` + `new_null_array`) and earlier in this
+/// file's own `inject_facet_column` padding — rather than hand-rolling
+/// per-dtype (`Float64`/`Utf8`-only) reconciliation a second time; any field
+/// present in at least one batch can be padded, not just those two dtypes.
+/// Every field in the union has its output nullability forced to `true`, even
+/// if every batch that carries it declared it non-nullable, since a batch
+/// missing any field is padded with nulls. The common case — every batch
+/// already sharing one schema — takes Arrow's own `concat_batches` unchanged,
+/// so a chart with no schema divergence across its facet panels renders
+/// byte-identically.
+fn concat_batches_by_name(key: &str, batches: Vec<RecordBatch>) -> Result<RecordBatch, RenderError> {
+    let same_schema = batches.windows(2).all(|w| w[0].schema() == w[1].schema());
+    if same_schema {
+        let schema = batches[0].schema();
+        return arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
+            RenderError::TransformFailed(format!("concat facet partitions for key '{key}': {e}"))
+        });
+    }
+
+    let mut out_fields: Vec<Field> = Vec::new();
+    for b in &batches {
+        for field in b.schema().fields().iter() {
+            if !out_fields.iter().any(|f| f.name() == field.name()) {
+                out_fields.push(Field::new(field.name(), field.data_type().clone(), true));
+            }
+        }
+    }
+
+    let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(out_fields.len());
+    for field in &out_fields {
+        let mut parts: Vec<ArrayRef> = Vec::with_capacity(batches.len());
+        for b in &batches {
+            match b.schema().index_of(field.name()) {
+                Ok(fi) => parts.push(Arc::clone(b.column(fi))),
+                Err(_) => parts.push(arrow::array::new_null_array(field.data_type(), b.num_rows())),
+            }
+        }
+        let refs: Vec<&dyn Array> = parts.iter().map(|a| a.as_ref()).collect();
+        let combined = arrow::compute::concat(&refs).map_err(|e| {
+            RenderError::TransformFailed(format!(
+                "concat facet partitions for key '{key}': column '{}': {e}",
+                field.name(),
+            ))
+        })?;
+        out_cols.push(combined);
+    }
+
+    let schema = Arc::new(Schema::new(out_fields));
+    RecordBatch::try_new(schema, out_cols).map_err(|e| {
+        RenderError::TransformFailed(format!("concat facet partitions for key '{key}': {e}"))
+    })
 }
 
 /// Apply the D10 impute step in place on the pipeline's `FINAL_OUTPUT_KEY`
@@ -4005,6 +4091,391 @@ mod tests {
             raster_grid_dims(&outputs),
             (1, 1),
             "the floored (1, 1) estimate, not a panic-inducing zero"
+        );
+    }
+
+    // ── Batch-D T9 round 3: Smooth's rank-deficiency refusal must not fire
+    //    per facet panel. `render::prepare::run_transforms_with_facet`
+    //    partitions by the facet field BEFORE running transforms, so an
+    //    ungrouped `Smooth` on a facet panel is indistinguishable from a
+    //    true whole-frame call unless `TransformContext.is_partition`
+    //    disambiguates them (`smooth.rs`'s degenerate-input policy doc).
+    //    These tests are the RED proof this round's dispatch required: the
+    //    `col='sp'` faceted repro, a `groupby` twin proving the same data
+    //    degrades identically under `hue=`'s mechanism, and a regression
+    //    guard that a genuine whole-frame rank-deficient call still refuses. ──
+
+    /// Two facet panels sharing one `x`/`y` numeric pair: `"few"` has 3 rows
+    /// (rank-deficient for a degree-3 fit, which needs >= 4), `"many"` has 8
+    /// rows (sufficient). Mirrors `fm.lmplot(order=3, col='sp')`'s repro
+    /// shape at the Rust transform level.
+    fn facet_smooth_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sp", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 2.0, // "few": 3 rows
+                    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, // "many": 8 rows
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 4.0, // "few"
+                    0.0, 1.0, 8.0, 27.0, 64.0, 125.0, 216.0, 343.0, // "many": y = x^3
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "few", "few", "few",
+                    "many", "many", "many", "many", "many", "many", "many", "many",
+                ])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A `ChartSpec` fitting a degree-3 polynomial over `x`/`y`, optionally
+    /// faceted or grouped by `sp` (never both — the two are the "col=" vs
+    /// "hue=" shapes this round's fix must treat symmetrically).
+    fn smooth_cubic_spec(facet: Option<crate::layout::FacetSpec>, groupby: Vec<String>) -> ChartSpec {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+        let mut spec = base_spec();
+        spec.facet = facet;
+        spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 3 },
+            ci: None, bandwidth: 0.75, degree: 3, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false,
+            groupby,
+            name: None,
+            x_range: None,
+        })];
+        spec
+    }
+
+    fn float_col(batch: &RecordBatch, name: &str) -> Vec<f64> {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column '{name}'"))
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap_or_else(|| panic!("column '{name}' is not Float64"))
+            .values()
+            .to_vec()
+    }
+
+    fn str_col(batch: &RecordBatch, name: &str) -> Vec<String> {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column '{name}'"))
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap_or_else(|| panic!("column '{name}' is not Utf8"))
+            .iter()
+            .map(|v| v.unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The blocking defect this round fixes: `fm.lmplot(order=3, col='sp')`
+    /// on a sparse level used to raise `ValueError: transform failed:
+    /// Smooth: degree=3 needs at least 4 data points...` even though the
+    /// identical data under `hue='sp'` rendered. A facet panel is an
+    /// ungrouped `apply()` call on a data subset — `only_indices.is_none()`
+    /// alone cannot tell it apart from a true whole-frame call. Post-fix:
+    /// the render succeeds, the sparse `"few"` panel degrades to NaN (T6's
+    /// contract), and the well-supported `"many"` panel still fits.
+    #[test]
+    fn smooth_facet_panel_rank_deficient_degrades_instead_of_refusing() {
+        let facet = crate::layout::FacetSpec {
+            field: "sp".into(),
+            row: None,
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::FacetResolve::default(),
+        };
+        let spec = smooth_cubic_spec(Some(facet), vec![]);
+        let batch = facet_smooth_batch();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let theme = crate::layout::ThemeInputs::default();
+
+        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+            .expect("a facet panel too sparse for degree=3 must degrade, not fail the chart");
+        let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+
+        let sp = str_col(out, "sp");
+        let y = float_col(out, "y");
+        assert_eq!(sp.len(), 10, "5 grid points per panel x 2 panels");
+
+        let few_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "few").map(|(_, v)| *v).collect();
+        let many_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "many").map(|(_, v)| *v).collect();
+        assert_eq!(few_y.len(), 5);
+        assert_eq!(many_y.len(), 5);
+        assert!(
+            few_y.iter().all(|v| v.is_nan()),
+            "the rank-deficient 'few' panel (3 points, degree=3) must degrade to NaN: {few_y:?}"
+        );
+        assert!(
+            many_y.iter().all(|v| v.is_finite()),
+            "the well-supported 'many' panel (8 points, degree=3) must still fit: {many_y:?}"
+        );
+    }
+
+    /// Symmetry twin (this round's dispatch: "the hue= twin asserting
+    /// symmetry"): the identical batch and degree, routed through `Smooth`'s
+    /// own `groupby` (the `hue=` mechanism) instead of chart-level faceting.
+    /// `groupby` already degraded correctly before this round (T6's
+    /// contract) — this pins that the facet fix did not change that path,
+    /// and that both partitioning mechanisms now produce the same per-slice
+    /// disposition for identical data.
+    #[test]
+    fn smooth_groupby_rank_deficient_degrades_symmetrically_with_facet() {
+        let spec = smooth_cubic_spec(None, vec!["sp".into()]);
+        let batch = facet_smooth_batch();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let theme = crate::layout::ThemeInputs::default();
+
+        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+            .expect("a groupby group too sparse for degree=3 must degrade, not fail the chart");
+        let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+
+        let sp = str_col(out, "sp");
+        let y = float_col(out, "y");
+        let few_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "few").map(|(_, v)| *v).collect();
+        let many_y: Vec<f64> = sp.iter().zip(&y).filter(|(s, _)| *s == "many").map(|(_, v)| *v).collect();
+        assert_eq!(few_y.len(), 5);
+        assert_eq!(many_y.len(), 5);
+        assert!(
+            few_y.iter().all(|v| v.is_nan()),
+            "groupby's sparse 'few' group must degrade to NaN, matching the facet panel: {few_y:?}"
+        );
+        assert!(
+            many_y.iter().all(|v| v.is_finite()),
+            "groupby's well-supported 'many' group must still fit: {many_y:?}"
+        );
+    }
+
+    /// Regression guard: a genuine whole-frame call (no facet, no groupby,
+    /// the batch itself too sparse for the requested degree) must still
+    /// refuse with the typed `PyValueError` — the D9 closure this round
+    /// must not undo while fixing the facet-panel misfire above.
+    #[test]
+    fn smooth_whole_frame_rank_deficient_still_refuses() {
+        let spec = smooth_cubic_spec(None, vec![]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let theme = crate::layout::ThemeInputs::default();
+
+        let err = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+            .expect_err("a true whole-frame rank-deficient degree=3 fit must still refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("degree=3") && msg.contains("rank-deficient"),
+            "expected the D9 rank-deficiency refusal, got: {msg}"
+        );
+    }
+
+    // ── Batch-D T9 round 4: `concat_batches_by_name` must be dtype-generic ──
+    //
+    // Round 3's `is_partition` fix eliminated the metrics-column schema
+    // divergence at its source (`smooth::build_degenerate_smooth_batch` now
+    // always appends `_metrics_text`/`_metrics_y`, null, when requested), so
+    // that divergence no longer reaches `concat_batches_by_name`'s widening
+    // path. A DIFFERENT divergence still does: a facet panel whose
+    // `groupby` field is entirely null degrades via `smooth::apply_grouped`'s
+    // empty-partition fallback, which returns a plain (ungrouped-shaped)
+    // batch carrying NO group column at all, while a sibling panel with real
+    // groups appends that column at its ORIGINAL dtype (XFORM-03). Before
+    // this round's fix, a non-Float64/Utf8 group column in that situation
+    // raised "schema divergence across panels is only reconcilable for
+    // Float64/Utf8 columns" — the live repro the rust-quality cycle-3
+    // verdict reproduced through the public Python API
+    // (`groupby="gi"` (Int64) + `show_metrics` + `.facet(col=...)`).
+
+    /// Two facet panels sharing one `x`/`y`/`gi` triple, `gi` an `Int64`
+    /// `groupby` field: panel `"p1"`'s `gi` is entirely null (so
+    /// `apply_grouped`'s empty-partition fallback fires and its own output
+    /// carries no `gi` column), panel `"p2"`'s `gi` has two valid groups (so
+    /// its output carries a real `Int64` `gi` column).
+    fn facet_groupby_int64_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sp", DataType::Utf8, false),
+            Field::new("gi", DataType::Int64, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 2.0])),
+                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2"])),
+                Arc::new(arrow::array::Int64Array::from(vec![
+                    None, None, None, None,
+                    Some(1), Some(1), Some(2), Some(2),
+                ])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Boolean twin of [`facet_groupby_int64_batch`] — same shape, `gb`
+    /// instead of `gi`, pinning the second dtype the reviewer's finding
+    /// named.
+    fn facet_groupby_boolean_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("sp", DataType::Utf8, false),
+            Field::new("gb", DataType::Boolean, true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 0.0, 1.0, 0.0, 2.0])),
+                Arc::new(StringArray::from(vec!["p1", "p1", "p1", "p1", "p2", "p2", "p2", "p2"])),
+                Arc::new(arrow::array::BooleanArray::from(vec![
+                    None, None, None, None,
+                    Some(true), Some(true), Some(false), Some(false),
+                ])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A degree-1 (`Lm`) `Smooth`, optionally faceted and/or grouped, with
+    /// `inject_metrics: true` — combining the metrics-column presence (round
+    /// 3's already-closed divergence) with whatever group-column divergence
+    /// `groupby` introduces, matching the reviewer's exact repro shape.
+    fn smooth_lm_groupby_spec(facet: Option<crate::layout::FacetSpec>, groupby: Vec<String>) -> ChartSpec {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+        let mut spec = base_spec();
+        spec.facet = facet;
+        spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None, bandwidth: 0.75, degree: 1, n: 3, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: true,
+            groupby,
+            name: None,
+            x_range: None,
+        })];
+        spec
+    }
+
+    fn int64_col(batch: &RecordBatch, name: &str) -> Vec<Option<i64>> {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column '{name}'"))
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap_or_else(|| panic!("column '{name}' is not Int64"))
+            .iter()
+            .collect()
+    }
+
+    fn bool_col(batch: &RecordBatch, name: &str) -> Vec<Option<bool>> {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("missing column '{name}'"))
+            .as_any()
+            .downcast_ref::<arrow::array::BooleanArray>()
+            .unwrap_or_else(|| panic!("column '{name}' is not Boolean"))
+            .iter()
+            .collect()
+    }
+
+    /// The live repro's dtype: an `Int64` `groupby` column present in one
+    /// facet panel's output and absent from another's must widen (null-pad
+    /// the panel missing it), not raise "only reconcilable for
+    /// Float64/Utf8".
+    #[test]
+    fn smooth_facet_groupby_int64_column_widens_instead_of_erroring() {
+        let facet = crate::layout::FacetSpec {
+            field: "sp".into(),
+            row: None,
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::FacetResolve::default(),
+        };
+        let spec = smooth_lm_groupby_spec(Some(facet), vec!["gi".into()]);
+        let batch = facet_groupby_int64_batch();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let theme = crate::layout::ThemeInputs::default();
+
+        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+            .expect("Int64 groupby column divergence across facet panels must widen, not error");
+        let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+
+        // Round 3's metrics-column fix already makes these uniform; confirm
+        // both fixes coexist rather than one masking a regression in the other.
+        assert!(out.schema().index_of("_metrics_text").is_ok());
+        assert!(out.schema().index_of("_metrics_y").is_ok());
+
+        let sp = str_col(out, "sp");
+        let gi = int64_col(out, "gi");
+        assert_eq!(sp.len(), gi.len());
+        for (s, g) in sp.iter().zip(&gi) {
+            if s == "p1" {
+                assert!(g.is_none(), "panel 'p1' produced no 'gi' groups; its rows must pad null: {gi:?}");
+            } else {
+                assert!(g.is_some(), "panel 'p2' has real 'gi' groups; its rows must carry the real value: {gi:?}");
+            }
+        }
+        assert!(
+            gi.iter().any(|g| *g == Some(1)) && gi.iter().any(|g| *g == Some(2)),
+            "panel 'p2's two groups (gi=1, gi=2) must both survive the merge: {gi:?}"
+        );
+    }
+
+    /// Boolean twin: the reviewer's second named dtype.
+    #[test]
+    fn smooth_facet_groupby_boolean_column_widens_instead_of_erroring() {
+        let facet = crate::layout::FacetSpec {
+            field: "sp".into(),
+            row: None,
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::FacetResolve::default(),
+        };
+        let spec = smooth_lm_groupby_spec(Some(facet), vec!["gb".into()]);
+        let batch = facet_groupby_boolean_batch();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let theme = crate::layout::ThemeInputs::default();
+
+        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+            .expect("Boolean groupby column divergence across facet panels must widen, not error");
+        let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+
+        let sp = str_col(out, "sp");
+        let gb = bool_col(out, "gb");
+        assert_eq!(sp.len(), gb.len());
+        for (s, g) in sp.iter().zip(&gb) {
+            if s == "p1" {
+                assert!(g.is_none(), "panel 'p1' produced no 'gb' groups; its rows must pad null: {gb:?}");
+            } else {
+                assert!(g.is_some(), "panel 'p2' has real 'gb' groups; its rows must carry the real value: {gb:?}");
+            }
+        }
+        assert!(
+            gb.iter().any(|g| *g == Some(true)) && gb.iter().any(|g| *g == Some(false)),
+            "panel 'p2's two groups (gb=true, gb=false) must both survive the merge: {gb:?}"
         );
     }
 

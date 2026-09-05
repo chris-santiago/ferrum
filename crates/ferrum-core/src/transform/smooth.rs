@@ -1,3 +1,78 @@
+//! Fit-family transform: `Smooth` — LOESS, polynomial/linear (OLS), log-x,
+//! sqrt-x, and GLM (Gaussian family, Identity link) regression lines with
+//! optional confidence bands, evaluated over an evenly-spaced x grid. See
+//! [`PySmooth`] for the full parameter contract.
+//!
+//! ## Degenerate-input policy (batch-D T9 round 3)
+//!
+//! Two different kinds of "this fit cannot be computed" are handled
+//! differently on purpose, and the distinction is deliberate rather than an
+//! oversight:
+//!
+//! - **Parameter absurdity, on a genuine whole-frame call.** The caller
+//!   asked for a polynomial `degree` the input cannot determine —
+//!   `degree >=` the number of usable (non-null, post-`x_bins`-aggregation) points,
+//!   i.e. the Vandermonde design is rank-deficient (`poly_ols`'s `n < p`
+//!   case). This refuses with a typed `PyValueError` naming the point count
+//!   needed — the same refusal class as `degree=0` — instead of silently
+//!   emitting an all-NaN grid (closes the spec review's finding 2:
+//!   `degree=20` on a 20-row frame used to render zero polylines with no
+//!   diagnostic at all). It fires only when the batch is genuinely the
+//!   whole frame: `groupby` is empty AND the render pipeline has not
+//!   already partitioned this batch out of a larger one.
+//! - **Data degeneracy, or a slice of a larger frame, degrades instead.**
+//!   Both of the following degrade to an all-NaN row range rather than
+//!   failing the whole render:
+//!   - A per-group rank-deficient design under `groupby` (T6's contract —
+//!     zero-variance x, non-convergent IRLS, too few points after that
+//!     group's own null/NaN drop). A grouped batch keeps succeeding even
+//!     when one group can't be fit, rather than one bad group failing the
+//!     whole chart.
+//!   - An UNGROUPED batch that is itself one partition of a larger frame —
+//!     e.g. one facet panel. Round 2 treated `groupby.is_empty()` as proof
+//!     of "whole frame", but `render::prepare::run_transforms_with_facet`
+//!     partitions the input by the facet field(s) BEFORE running
+//!     transforms, so every facet panel is an ungrouped `apply()` call on a
+//!     data subset: `fm.lmplot(order=3, col='sp')` on a sparse level raised,
+//!     while the identical data and degree under `hue='sp'` rendered (same
+//!     "not enough data for this fit" condition, two opposite dispositions
+//!     depending only on which channel partitioned it). Round 3 closes this
+//!     by having the production pipeline mark a batch as a partition via
+//!     [`TransformContext::is_partition`](crate::transform::context::TransformContext::is_partition)
+//!     — set only at `render::prepare::run_transforms_with_facet`'s facet
+//!     construction site — and gating the refusal on `!ctx.is_partition` in
+//!     addition to `groupby.is_empty()`.
+//!
+//!   `apply_one_group`'s `only_indices` parameter is `None` for every
+//!   ungrouped call, whether or not that call is itself a facet panel;
+//!   `is_partition` is the separate signal that disambiguates the two.
+//!   `apply()` (no context — direct calls, unit tests, WASM/notebook direct
+//!   usage) always treats its input as the whole frame, matching this
+//!   module's behavior before this round. `apply_grouped` passes
+//!   `Some(ixs)` to each per-group call, but its own empty-partition
+//!   fallback (every group key is null) passes `None` on the full batch, so
+//!   that fallback threads `is_partition` through too rather than being
+//!   unconditionally treated as whole-frame.
+//!
+//! ## Output schema is spec-determined, not data-determined (round 4)
+//!
+//! Every degenerate branch above (a rank-deficient design, zero-variance x,
+//! non-convergent IRLS, or fewer than 2 usable points) emits its all-NaN
+//! output via [`build_degenerate_smooth_batch`], which appends the
+//! `_metrics_text`/`_metrics_y` columns — all-null — whenever
+//! `spec.inject_metrics` is set, exactly like a well-supported sibling
+//! fit's real (non-null-anchor) output. Before this round, every
+//! degenerate branch passed `metrics: None` unconditionally, so a
+//! `Smooth`'s output schema silently depended on whether THIS PARTICULAR
+//! slice's fit happened to degenerate: one `groupby` group or facet panel
+//! could carry two more columns than a degenerate sibling. That divergence
+//! is what `apply_grouped`'s by-name reconciliation (below) and
+//! `render::prepare::concat_batches_by_name` exist to paper over across
+//! groups and facet panels respectively; with the schema fixed by the
+//! spec instead of the data, both of those are now a belt-and-braces
+//! safety net for any *other* named-output divergence, not the primary
+//! defense against this one.
+
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -5,6 +80,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, KeyValue,
@@ -25,6 +101,17 @@ pub(crate) enum SmoothMethod {
     LogX,
     /// Sqrt-x linear fit: y ~ a + b·√x.  Requires x ≥ 0.
     SqrtX,
+    /// Generalized Linear Model (Gaussian family, Identity link — the
+    /// standalone `Glm` transform's own default family/link) fit via IRLS.
+    /// Batch-D T9 (spec §4.6): delegates to `glm::fit_irls` so
+    /// `mark_smooth(method="glm")` shares one fitting implementation with
+    /// the `Glm` transform, rather than re-deriving IRLS inline or aliasing
+    /// to `Lm` — Gaussian/Identity IRLS converges to the same point
+    /// estimate as OLS, so an alias would look identical here but is the
+    /// wrong implementation choice (it silently stops being correct the
+    /// moment family/link is ever exposed, and its CI band would not match
+    /// the real GLM's Wald band, which `glm_fit` reproduces exactly).
+    Glm,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,13 +190,33 @@ pub(crate) struct SmoothSpec {
 }
 
 pub(crate) fn apply(spec: &SmoothSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby);
-    }
-    apply_one_group(spec, batch, None)
+    apply_with_context(spec, batch, &TransformContext::default())
 }
 
-fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usize]>) -> PyResult<RecordBatch> {
+/// Batch-D T9 round 3: the context-aware entry point, wired into
+/// `TransformSpec::apply_with_context`'s dispatch table (`transform/core.rs`)
+/// so the production render pipeline's `TransformContext.is_partition` (see
+/// its doc) actually reaches the rank-deficiency refusal below. `apply()`
+/// forwards here with a default context (`is_partition: false`), preserving
+/// its pre-round-3 whole-frame behavior for direct calls, unit tests, and
+/// WASM/notebook usage.
+pub(crate) fn apply_with_context(
+    spec: &SmoothSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    if !spec.groupby.is_empty() {
+        return apply_grouped(spec, batch, &spec.groupby, ctx.is_partition);
+    }
+    apply_one_group(spec, batch, None, ctx.is_partition)
+}
+
+fn apply_one_group(
+    spec: &SmoothSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+    is_partition: bool,
+) -> PyResult<RecordBatch> {
     let (xs_raw, ys_raw) = extract_xy(spec, batch, only_indices)?;
 
     // Pre-aggregate xs/ys into n equal-width bins if x_bins is set.
@@ -125,9 +232,46 @@ fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<
             SmoothOutput::Fitted => all_nan_output(spec),
             SmoothOutput::Residuals => build_residuals_batch(
                 Vec::new(), Vec::new(),
-                spec.inject_zero_ref, None,
+                spec.inject_zero_ref,
+                // Batch-D T9 round 4: zero rows either way, but when
+                // `inject_metrics` is requested the columns must still be
+                // PRESENT (empty, like every other column here) rather than
+                // dropped — the same schema-uniformity fix as the Fitted
+                // path's `build_degenerate_smooth_batch`. `residuals::compute`
+                // on empty slices is the same "no anchor row" shape
+                // `append_metrics_columns` produces for a zero-length input,
+                // so this needs no separate null-columns helper.
+                spec.inject_metrics.then(|| residuals::compute(&[], &[])),
             ),
         };
+    }
+
+    // See the module doc's "Degenerate-input policy" section: a polynomial
+    // `degree` the data cannot determine (rank-deficient Vandermonde design)
+    // is parameter absurdity, not data degeneracy, so it refuses on a
+    // genuine whole-frame call rather than falling through to `poly_fit`'s
+    // (or `build_predictor`'s) all-NaN branch. `only_indices.is_none()`
+    // alone is NOT sufficient proof of "whole frame" — `render::prepare::
+    // run_transforms_with_facet` partitions the input by facet BEFORE
+    // running transforms, so an ungrouped call can still be one panel of a
+    // larger frame. `!is_partition` is the second half of the gate: a
+    // per-group rank-deficient design under `groupby` (`only_indices` is
+    // `Some`) and an ungrouped-but-partitioned facet panel (`is_partition`
+    // is `true`) both degrade to that slice's own NaN range instead.
+    if only_indices.is_none() && !is_partition {
+        if let SmoothMethod::Poly { degree } = spec.method {
+            let min_points = degree as usize + 1;
+            if xs.len() < min_points {
+                return Err(PyValueError::new_err(format!(
+                    "Smooth: degree={degree} needs at least {min_points} data points to \
+                     fit a degree-{degree} polynomial; only {} remain after dropping \
+                     null/NaN x/y rows (and any x_bins aggregation). A degree this high \
+                     relative to the data is a rank-deficient design, not a valid fit — \
+                     lower degree or provide more data",
+                    xs.len(),
+                )));
+            }
+        }
     }
 
     if matches!(spec.output, SmoothOutput::Residuals) {
@@ -181,6 +325,7 @@ fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<
         SmoothMethod::Poly { degree } => poly_fit(&xs, &ys, &grid, spec.ci, spec.n, degree, metrics),
         SmoothMethod::LogX => log_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::SqrtX => sqrt_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
+        SmoothMethod::Glm => glm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
     }
 }
 
@@ -191,6 +336,7 @@ fn apply_grouped(
     spec: &SmoothSpec,
     batch: &RecordBatch,
     group_cols: &[String],
+    is_partition: bool,
 ) -> PyResult<RecordBatch> {
     use arrow::array::StringArray;
 
@@ -204,33 +350,76 @@ fn apply_grouped(
         let ixs = group_idx_map.get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
                 "stat_smooth: missing group key {g:?} in index map")))?;
-        let out = apply_one_group(spec, batch, Some(ixs))?;
+        // `only_indices` is `Some` here, so the rank-deficiency refusal in
+        // `apply_one_group` never gates on `is_partition` for this call —
+        // T6's per-group degrade-to-NaN contract already applies.
+        let out = apply_one_group(spec, batch, Some(ixs), is_partition)?;
         per_group_batches.push((g.clone(), out));
     }
 
     if per_group_batches.is_empty() {
-        // Fallback: ungrouped empty output.
-        return apply_one_group(spec, batch, None);
+        // Fallback: every group key was null, so there is no per-group
+        // output to stack. This call passes `None` for `only_indices` on
+        // the FULL batch (module doc's finding D, batch-D T9 round 3): it
+        // is not the `Some(ixs)` shape every other `apply_grouped` call
+        // produces, so it forwards `is_partition` too — a rank-deficient
+        // `Poly` here degrades like a group when this batch is itself a
+        // facet panel, rather than always refusing.
+        return apply_one_group(spec, batch, None, is_partition);
     }
 
-    // Build the concatenated output dynamically based on the per-group output schema.
-    let ref_schema = per_group_batches[0].1.schema();
+    // Build the concatenated output dynamically based on the WIDEST per-group
+    // output schema. Batch-D T9 round 2 (Required Fix 6, rust-quality
+    // verdict finding 5): a degenerate fit (rank-deficient/non-convergent
+    // design, zero-variance x, too few points) for one group's own slice
+    // emitted the CORE 4-column `[x, y, ci_lower, ci_upper]` batch even when
+    // `inject_metrics` was set — a divergence fixed in round 4 by routing all
+    // degenerate branches through `build_degenerate_smooth_batch`, which now
+    // emits null metrics columns when requested. Pinning the reference schema
+    // to `per_group_batches[0]` — and then indexing every OTHER group
+    // positionally against it — was wrong in both directions: a degenerate
+    // FIRST group silently dropped every later group's real metrics columns,
+    // and a degenerate LATER group under a non-degenerate first group panicked
+    // (`b.column(fi)` indexed past that group's own narrower schema — the live
+    // `PanicException` the verdict reproduced through `Chart.to_svg()` on
+    // grouped `glm`/`lm` + `inject_metrics`). The reference schema is now the
+    // WIDEST one across all groups, and each group's own batch is read by
+    // FIELD NAME rather than positional index — a name miss pads that group's
+    // rows with null/NaN instead of panicking. This is a belt-and-braces
+    // safety net now that the source divergence is closed.
+    let ref_schema = per_group_batches
+        .iter()
+        .map(|(_, b)| b.schema())
+        .max_by_key(|s| s.fields().len())
+        .expect("per_group_batches is non-empty (checked above)");
     let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
 
-    // For each field in the per-group output, collect values across all groups.
+    // For each field in the reference (widest) output schema, collect values
+    // across all groups, looking each group's column up by NAME.
     let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(ref_schema.fields().len() + group_cols.len());
     let mut out_fields: Vec<Field> = Vec::with_capacity(ref_schema.fields().len() + group_cols.len());
 
-    for (fi, field) in ref_schema.fields().iter().enumerate() {
+    for field in ref_schema.fields().iter() {
         out_fields.push(field.as_ref().clone());
         match field.data_type() {
             DataType::Float64 => {
                 let mut vals = Vec::with_capacity(total_rows);
                 for (_, b) in &per_group_batches {
-                    let arr = b.column(fi).as_any().downcast_ref::<Float64Array>()
-                        .ok_or_else(|| PyValueError::new_err("stat_smooth: expected Float64Array in grouped output"))?;
-                    for i in 0..arr.len() {
-                        if arr.is_null(i) { vals.push(f64::NAN); } else { vals.push(arr.value(i)); }
+                    match b.schema().index_of(field.name()) {
+                        Ok(fi) => {
+                            let arr = b.column(fi).as_any().downcast_ref::<Float64Array>()
+                                .ok_or_else(|| PyValueError::new_err("stat_smooth: expected Float64Array in grouped output"))?;
+                            for i in 0..arr.len() {
+                                if arr.is_null(i) { vals.push(f64::NAN); } else { vals.push(arr.value(i)); }
+                            }
+                        }
+                        Err(_) => {
+                            // This group's own fit hit a degenerate branch
+                            // that skipped this column (e.g. metrics);
+                            // pad with NaN so its rows still line up
+                            // positionally with every other field's column.
+                            for _ in 0..b.num_rows() { vals.push(f64::NAN); }
+                        }
                     }
                 }
                 out_cols.push(Arc::new(Float64Array::from(vals)));
@@ -238,10 +427,17 @@ fn apply_grouped(
             DataType::Utf8 => {
                 let mut vals: Vec<Option<String>> = Vec::with_capacity(total_rows);
                 for (_, b) in &per_group_batches {
-                    let arr = b.column(fi).as_any().downcast_ref::<StringArray>()
-                        .ok_or_else(|| PyValueError::new_err("stat_smooth: expected StringArray in grouped output"))?;
-                    for i in 0..arr.len() {
-                        if arr.is_null(i) { vals.push(None); } else { vals.push(Some(arr.value(i).to_string())); }
+                    match b.schema().index_of(field.name()) {
+                        Ok(fi) => {
+                            let arr = b.column(fi).as_any().downcast_ref::<StringArray>()
+                                .ok_or_else(|| PyValueError::new_err("stat_smooth: expected StringArray in grouped output"))?;
+                            for i in 0..arr.len() {
+                                if arr.is_null(i) { vals.push(None); } else { vals.push(Some(arr.value(i).to_string())); }
+                            }
+                        }
+                        Err(_) => {
+                            for _ in 0..b.num_rows() { vals.push(None); }
+                        }
                     }
                 }
                 out_cols.push(Arc::new(StringArray::from(
@@ -402,8 +598,24 @@ fn build_predictor(spec: &SmoothSpec, xs_fit: &[f64], ys_fit: &[f64]) -> Box<dyn
                 if !t.is_finite() { f64::NAN } else { alpha + beta * t }
             })
         }
+        SmoothMethod::Glm => {
+            use crate::transform::glm::{fit_irls, link_inverse, GlmFamily, GlmLink};
+            match fit_irls(xs_fit, ys_fit, GlmFamily::Gaussian, GlmLink::Identity, GLM_SMOOTH_MAX_ITER, GLM_SMOOTH_TOL) {
+                Ok((beta, _cov)) => {
+                    Box::new(move |x: f64| link_inverse(GlmLink::Identity, beta[0] + beta[1] * x))
+                }
+                Err(_) => Box::new(|_| f64::NAN),
+            }
+        }
     }
 }
+
+/// IRLS knobs for the `Smooth(method="glm")` routing — mirrors the
+/// standalone `Glm` transform's own PyO3 defaults (`max_iter=25`,
+/// `tol=1e-8`) since `glm_fit`/`build_predictor`'s `Glm` arm share its
+/// fitting core.
+const GLM_SMOOTH_MAX_ITER: usize = 25;
+const GLM_SMOOTH_TOL: f64 = 1e-8;
 
 /// Emit a residuals RecordBatch with the canonical ``[x, residual]``
 /// columns. Schwabish SB-followup (2026-05-12) opt-in extras:
@@ -503,8 +715,42 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
 
 fn all_nan_output(spec: &SmoothSpec) -> PyResult<RecordBatch> {
     let n = spec.n;
-    let nans = vec![f64::NAN; n];
-    build_smooth_batch(nans.clone(), nans.clone(), nans.clone(), nans, None)
+    build_degenerate_smooth_batch(&vec![f64::NAN; n], n, spec.inject_metrics)
+}
+
+/// Build the canonical all-NaN `[x, y, ci_lower, ci_upper]` batch for a fit
+/// this method could not compute — rank-deficient Vandermonde design,
+/// zero-variance x, non-convergent IRLS, or fewer than 2 usable points
+/// (batch-D T9 round 4, closing the rust-quality cycle-3 root-cause
+/// finding). Every degenerate branch in this file routes through here
+/// instead of calling `build_smooth_batch(..., None)` directly, so a
+/// Smooth's output schema no longer depends on whether THIS PARTICULAR
+/// fit happened to degenerate: when `metrics_requested` is true (every
+/// caller passes `metrics.is_some()`, since the caller only ever computes
+/// `Some(..)` when `spec.inject_metrics` was set), the `_metrics_text`/
+/// `_metrics_y` columns are still appended — all-null, since there is no
+/// fit to summarize, not the caller's already-computed (and here
+/// meaningless, since it was derived from an all-NaN predictor) `(r2,
+/// rmse, mae)` tuple. Before this fix, a degenerate fit silently emitted a
+/// narrower batch than its well-supported siblings, which is exactly the
+/// divergence `render::prepare::concat_batches_by_name` (across facet
+/// panels) and `apply_grouped` (across `groupby` groups) exist to paper
+/// over; eliminating it at the source makes both of those a
+/// belt-and-braces safety net rather than the primary defense.
+fn build_degenerate_smooth_batch(x_col: &[f64], n_grid: usize, metrics_requested: bool) -> PyResult<RecordBatch> {
+    let nans = vec![f64::NAN; n_grid];
+    let mut fields = crate::transform::registry::fit_output_fields();
+    let mut cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(x_col.to_vec())),
+        Arc::new(Float64Array::from(nans.clone())),
+        Arc::new(Float64Array::from(nans.clone())),
+        Arc::new(Float64Array::from(nans)),
+    ];
+    if metrics_requested {
+        residuals::append_null_metrics_columns(&mut fields, &mut cols, n_grid);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, cols).map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
 }
 
 /// Emit a fitted-smooth RecordBatch with the canonical
@@ -606,13 +852,7 @@ fn poly_fit(
 ) -> PyResult<RecordBatch> {
     let coeffs = poly_ols(xs, ys, degree as usize);
     if coeffs.is_empty() {
-        return build_smooth_batch(
-            grid.to_vec(),
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            None,
-        );
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
     }
 
     let y_fit: Vec<f64> = grid.iter().map(|&x| eval_poly(&coeffs, x)).collect();
@@ -701,13 +941,7 @@ fn transformed_linear_fit(
         .collect();
 
     if pairs.len() < 2 {
-        return build_smooth_batch(
-            grid.to_vec(),
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            None,
-        );
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
     }
 
     let txs: Vec<f64> = pairs.iter().map(|(t, _)| *t).collect();
@@ -729,13 +963,7 @@ fn lm_fit_on(
     let sxy: f64 = txs.iter().zip(ys).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
 
     if sxx == 0.0 {
-        return build_smooth_batch(
-            grid.to_vec(),
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            None,
-        );
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
     }
 
     let beta = sxy / sxx;
@@ -780,6 +1008,49 @@ fn lm_fit_on(
     build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
 }
 
+/// Generalized Linear Model fit (Gaussian family, Identity link — the
+/// standalone `Glm` transform's own default family/link) via IRLS,
+/// evaluated over `grid`. Batch-D T9 (spec §4.6): `mark_smooth(method="glm")`
+/// delegates to `glm::fit_irls` so the two transforms share one fitting
+/// implementation rather than re-deriving IRLS inline here.
+///
+/// The confidence band mirrors `glm.rs::apply`'s own Wald band on the
+/// linear predictor, back-transformed through the inverse link — the real
+/// GLM CI this method routes to (including its lack of dispersion scaling
+/// for non-canonical families, unchanged from `glm.rs`), not the
+/// t-distribution band the other `Smooth` methods use.
+///
+/// Degenerate designs (e.g. constant x) fail IRLS the same way `Glm` itself
+/// does; here that degrades to an all-NaN grid, matching every other
+/// method's degenerate-input handling in this file, rather than raising
+/// mid-batch.
+fn glm_fit(
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    metrics: Option<(f64, f64, f64)>,
+) -> PyResult<RecordBatch> {
+    use crate::transform::glm::{fit_irls, link_inverse, wald_band, GlmFamily, GlmLink};
+
+    let family = GlmFamily::Gaussian;
+    let link = GlmLink::Identity;
+
+    let (beta, cov) = match fit_irls(xs, ys, family, link, GLM_SMOOTH_MAX_ITER, GLM_SMOOTH_TOL) {
+        Ok(v) => v,
+        Err(_) => return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()),
+    };
+
+    let y_fit: Vec<f64> = grid.iter().map(|&x| link_inverse(link, beta[0] + beta[1] * x)).collect();
+
+    // Batch-D T9 round 2 (Required Fix 5): shared with `Glm::apply`, which
+    // reproduced this exact formula verbatim before this hoist. See
+    // `glm::wald_band`'s doc comment for why the extraction lives there.
+    let (lo, hi) = match ci {
+        None => (vec![f64::NAN; n_grid], vec![f64::NAN; n_grid]),
+        Some(level) => wald_band(beta, cov, link, grid, level),
+    };
+
+    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+}
+
 fn lm_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
     metrics: Option<(f64, f64, f64)>,
@@ -791,13 +1062,7 @@ fn lm_fit(
     let sxy: f64 = xs.iter().zip(ys).map(|(x, y)| (x - mean_x) * (y - mean_y)).sum();
 
     if sxx == 0.0 {
-        return build_smooth_batch(
-            grid.to_vec(),
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            vec![f64::NAN; n_grid],
-            None,
-        );
+        return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some());
     }
 
     let beta = sxy / sxx;
@@ -1062,17 +1327,34 @@ use crate::transform::core::TransformSpec;
 ///     Response column (any integer, unsigned, or float dtype; widened to
 ///     Float64). A non-numeric column raises, naming the transform, column,
 ///     and dtype.
-/// method : {"loess", "lm"}, default "loess"
+/// method : {"loess", "lm", "linear", "quadratic", "cubic", "log", "sqrt", \
+///           "glm"}, default "loess"
 ///     Smoothing method. ``"loess"`` fits locally-weighted polynomial
-///     regression; ``"lm"`` fits a global linear model.
+///     regression; ``"lm"``/``"linear"`` fits a global linear model
+///     (promoted to a polynomial fit when ``degree >= 2`` is also given);
+///     ``"quadratic"``/``"cubic"`` fit fixed degree-2/3 polynomials;
+///     ``"log"``/``"sqrt"`` fit a linear model on a transformed x;
+///     ``"glm"`` fits a Generalized Linear Model (Gaussian family, Identity
+///     link — the standalone ``Glm`` transform's own default) via IRLS.
 /// ci : float or None, default 0.95
-///     Confidence level in (0, 1) for bootstrap confidence bands. Set to
+///     Confidence level in (0, 1) for the confidence band. Set to
 ///     ``None`` to suppress the band.
 /// bandwidth : float, default 0.75
 ///     LOESS span in (0, 1]; fraction of data used in each local fit.
-///     Ignored when ``method="lm"``.
-/// degree : {1, 2}, default 2
-///     Polynomial degree for LOESS. Ignored when ``method="lm"``.
+///     Ignored for every other method.
+/// degree : int, optional
+///     For ``method="lm"``/``"linear"``: promotes the fit to a polynomial
+///     of this degree (``Poly{degree}``) when ``>= 2``; ``1`` (or omitting
+///     ``degree``) keeps the plain linear fit; ``0`` raises. A degree that
+///     leaves fewer usable data points than coefficients to solve for (a
+///     rank-deficient design) raises rather than silently rendering nothing.
+///     For ``method="loess"``: the local-fit degree, ``1`` or ``2`` (default
+///     when omitted is ``2``). For ``method="quadratic"``/``"cubic"``:
+///     optional and must match the method's fixed degree (``2``/``3``) when
+///     given — a conflicting value (e.g. ``method="quadratic", degree=5``)
+///     raises rather than silently fitting degree 2 anyway. Passing
+///     ``degree`` with ``method="log"``/``"sqrt"``/``"glm"`` raises, since
+///     those methods have no degree concept to apply it to.
 /// n : int, default 200
 ///     Number of grid points to evaluate. Must be > 0.
 /// seed : int, default 0
@@ -1104,13 +1386,13 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = 2, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = None, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
         ci: Option<f64>,
         bandwidth: f64,
-        degree: u8,
+        degree: Option<u8>,
         n: usize,
         seed: u64,
         x_bins: Option<usize>,
@@ -1133,34 +1415,111 @@ impl PySmooth {
                 return Err(PyValueError::new_err("Smooth: ci must be in (0, 1)"));
             }
         }
-        let method = match method {
-            "lm" | "linear" => SmoothMethod::Lm,
+        // Batch-D T9 round 2 (Required Fix 2): `METHODS` is the single
+        // vocabulary the registry, this pre-check, and the error message all
+        // read — see `METHODS`'s doc comment. A string not in `METHODS`
+        // refuses here, before the match below ever runs.
+        if !METHODS.contains(&method) {
+            return Err(PyValueError::new_err(format!(
+                "Smooth: unknown method '{method}'; expected {}",
+                METHODS.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(" | "),
+            )));
+        }
+        // Batch-D T9 (spec §4.6): "lm"/"linear" promotes to a polynomial fit
+        // when `degree >= 2` is given; `degree == 1` (or omitted) keeps the
+        // plain linear fit — the no-op case `lmplot(order=1)` (and every
+        // existing `mark_smooth(method="lm")` caller that never mentions
+        // `degree`) relies on for byte-identical output. `degree == 0`
+        // refuses rather than silently behaving like `degree == 1`.
+        //
+        // "quadratic"/"cubic" fit a FIXED degree (2/3). Batch-D T9 round 2
+        // (Required Fix 1, rust-quality verdict finding 1): a `degree=` that
+        // matches the fixed degree is accepted as a harmless no-op (the same
+        // "explicit value that agrees with the default" tolerance `lm`'s
+        // `degree=1` gets above); a CONFLICTING `degree=` used to be silently
+        // swallowed — `method="quadratic", degree=5"` quietly fit a degree-2
+        // curve with no diagnostic, the exact "silently the wrong fit" class
+        // D9 exists to close. It now refuses, naming `method="lm", degree=d`
+        // as the way to actually get that degree.
+        let resolved_method = match method {
+            "lm" | "linear" => match degree {
+                None | Some(1) => SmoothMethod::Lm,
+                Some(0) => return Err(PyValueError::new_err(
+                    "Smooth: degree must be >= 1 for method='lm'/'linear'"
+                )),
+                Some(d) => SmoothMethod::Poly { degree: d },
+            },
             "loess" => SmoothMethod::Loess,
-            "quadratic" => SmoothMethod::Poly { degree: 2 },
-            "cubic" => SmoothMethod::Poly { degree: 3 },
+            "quadratic" => match degree {
+                None | Some(2) => SmoothMethod::Poly { degree: 2 },
+                Some(d) => return Err(PyValueError::new_err(format!(
+                    "Smooth: degree={d} conflicts with method='quadratic', which fits a \
+                     fixed degree-2 polynomial; omit degree, pass degree=2, or use \
+                     method='lm', degree={d} for a degree-{d} fit"
+                ))),
+            },
+            "cubic" => match degree {
+                None | Some(3) => SmoothMethod::Poly { degree: 3 },
+                Some(d) => return Err(PyValueError::new_err(format!(
+                    "Smooth: degree={d} conflicts with method='cubic', which fits a \
+                     fixed degree-3 polynomial; omit degree, pass degree=3, or use \
+                     method='lm', degree={d} for a degree-{d} fit"
+                ))),
+            },
             "log" => SmoothMethod::LogX,
             "sqrt" => SmoothMethod::SqrtX,
-            other => return Err(PyValueError::new_err(format!(
-                "Smooth: unknown method '{other}'; expected 'lm' | 'linear' | 'loess' | 'quadratic' | 'cubic' | 'log' | 'sqrt'"
+            "glm" => SmoothMethod::Glm,
+            // Batch-D T9 round 3 (cycle-2 finding B): the `METHODS` pre-check
+            // above guarantees `accepted ⊆ METHODS`, not `METHODS ⊆ match
+            // arms` — nothing compile-time-enforces the reverse, so an entry
+            // added to `METHODS` without a matching arm here used to reach
+            // an `unreachable!()` and surface as a `PanicException` at the
+            // PyO3 boundary instead of a `ValueError`. Return the same typed
+            // error the pre-check builds; a one-line edit to `METHODS` (the
+            // const its own doc comment invites people to edit) should never
+            // be able to panic a caller.
+            _ => return Err(PyValueError::new_err(format!(
+                "Smooth: internal error — '{method}' is declared in `METHODS` but has no \
+                 parser arm in `PySmooth::new`; this is a bug in ferrum, not a user error. \
+                 expected {}",
+                METHODS.iter().map(|m| format!("'{m}'")).collect::<Vec<_>>().join(" | "),
             ))),
         };
-        if matches!(method, SmoothMethod::Loess) {
+        // Closing D9: `degree` on a method with no degree concept ("log",
+        // "sqrt", "glm") used to be silently ignored; it now refuses so a
+        // misunderstood `degree=` can't render the wrong fit quietly.
+        // "lm"/"linear" (promotable), "loess", "quadratic", and "cubic" all
+        // accept it.
+        if degree.is_some()
+            && matches!(resolved_method, SmoothMethod::LogX | SmoothMethod::SqrtX | SmoothMethod::Glm)
+        {
+            return Err(PyValueError::new_err(format!(
+                "Smooth: degree is not valid for method='{method}'; degree only \
+                 applies to 'lm'/'linear' (polynomial promotion), 'loess', \
+                 'quadratic', or 'cubic'"
+            )));
+        }
+        if matches!(resolved_method, SmoothMethod::Loess) {
             if !bandwidth.is_finite() || bandwidth <= 0.0 || bandwidth > 1.0 {
                 return Err(PyValueError::new_err(
                     "Smooth: LOESS bandwidth must be a finite value in (0, 1]",
                 ));
             }
-            if degree != 1 && degree != 2 {
+            let loess_degree = degree.unwrap_or(2);
+            if loess_degree != 1 && loess_degree != 2 {
                 return Err(PyValueError::new_err("Smooth: LOESS degree must be 1 or 2"));
             }
         }
-        if let SmoothMethod::Poly { degree: d } = method {
-            if !(2..=3).contains(&d) {
-                return Err(PyValueError::new_err(
-                    "Smooth: 'quadratic'/'cubic' supports degree 2 or 3 only"
-                ));
-            }
-        }
+        // `SmoothSpec.degree` mirrors the resolved fit's own degree where
+        // one exists (Poly/Loess); methods without a degree concept
+        // (Lm/LogX/SqrtX/Glm) store 1 as a neutral placeholder that no fit
+        // path reads.
+        let degree_for_spec: u8 = match resolved_method {
+            SmoothMethod::Poly { degree: d } => d,
+            SmoothMethod::Loess => degree.unwrap_or(2),
+            _ => 1,
+        };
+        let method = resolved_method;
         use crate::transform::aggregate::AggFn;
         let x_estimator_parsed: Option<AggFn> = match x_estimator {
             None => None,
@@ -1200,7 +1559,7 @@ impl PySmooth {
         let groupby = parse_groupby_pyany(groupby)?;
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
-            method, ci, bandwidth, degree, n, seed,
+            method, ci, bandwidth, degree: degree_for_spec, n, seed,
             x_bins,
             x_estimator: x_estimator_parsed,
             output: output_parsed,
@@ -1225,6 +1584,34 @@ impl PySmooth {
         }
     }
 }
+
+/// The single source of truth for `Smooth`'s free-string `method`
+/// vocabulary. Batch-D T9 round 2 (Required Fix 2, rust-quality verdict):
+/// consumed by THREE sites — `registry::entry_for_kind("smooth")`'s
+/// `methods` list (`registry/mod.rs`, via `METHODS.to_vec()`), the
+/// constructor's pre-check above, and the "unknown method" error string
+/// above (built FROM this slice, not a hand-kept parallel literal). The
+/// pre-check makes the guarantee structural rather than test-detected: a
+/// match arm added to `PySmooth::new` for a new alias without adding it here
+/// is unreachable dead code (the pre-check rejects the string as "unknown
+/// method" before the match ever runs), so a new method genuinely cannot
+/// "land" — become callable — without the registry seeing it in the same
+/// commit. The former guard
+/// (`smooth_methods_vocabulary_matches_parser_error_message_exactly`,
+/// `registry/tests.rs`) only proved the error message matched the registry;
+/// it could not have caught a bare match arm added without touching the
+/// message at all.
+///
+/// The reverse direction (`METHODS ⊆ match arms`, i.e. an entry added here
+/// without a corresponding arm in `PySmooth::new`'s match below) is NOT
+/// compile-time-enforced — nothing in Rust's exhaustiveness checking ties a
+/// `&str` slice to a `match` on a different `&str`. Batch-D T9 round 3: the
+/// match's `_` arm returns the same typed "unknown method" error rather than
+/// `unreachable!()`, so that direction fails safely (a `ValueError`) instead
+/// of panicking at the PyO3 boundary; `test_all_method_aliases_accepted_by_pysmooth_new`
+/// (iterating `METHODS` itself) still catches the gap at test time.
+pub(crate) const METHODS: &[&str] =
+    &["lm", "linear", "loess", "quadratic", "cubic", "log", "sqrt", "glm"];
 
 #[cfg(test)]
 mod tests {
@@ -1827,15 +2214,17 @@ mod tests {
         }
     }
 
-    /// All new method aliases must be accepted without error by PySmooth::new.
+    /// Every declared method (iterated from `METHODS` itself, not a
+    /// hand-copied literal — batch-D T9 round 2) must be accepted without
+    /// error by PySmooth::new.
     #[test]
     fn test_all_method_aliases_accepted_by_pysmooth_new() {
         pyo3::Python::initialize();
-        for method in &["linear", "quadratic", "cubic", "log", "sqrt", "lm", "loess"] {
+        for method in METHODS {
             let result = PySmooth::new(
                 "x", "y",
                 method,
-                None, 0.75, 1, 200, 0,
+                None, 0.75, None, 200, 0,
                 None, None, "fitted",
                 false, false, None, None, None,
             );
@@ -2136,12 +2525,560 @@ mod tests {
         pyo3::Python::initialize();
         let result = PySmooth::new(
             "x", "y", "polynomial",
-            None, 0.75, 1, 200, 0,
+            None, 0.75, None, 200, 0,
             None, None, "fitted",
             false, false, None, None, None,
         );
         assert!(result.is_err(), "unknown method 'polynomial' must return an error");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("unknown method"), "error message should mention 'unknown method': {msg}");
+    }
+
+    // ---- Batch-D T9: glm routing + lm degree≥2 → polynomial promotion ----
+
+    /// `Smooth(method="glm")` must be accepted BY THE STRING PARSER
+    /// (previously "glm" hit the `other` catch-all and raised "unknown
+    /// method"). Batch-D T9 round 2 (Required Fix 3, rust-quality verdict):
+    /// routes through `PySmooth::new`, not a hand-built `SmoothSpec` literal
+    /// with `method: SmoothMethod::Glm` already set — the prior version of
+    /// this test compiled and passed regardless of whether the parser
+    /// accepted `"glm"` at all, so its "no longer hits the catch-all" claim
+    /// was not actually proven by it.
+    #[test]
+    fn test_glm_method_accepted_and_produces_finite_fit() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| 3.0 + 2.0 * x + if i % 2 == 0 { 0.3 } else { -0.3 })
+            .collect();
+        let batch = xy_batch(xs, ys);
+        let ctor = PySmooth::new(
+            "x", "y", "glm",
+            None, 0.75, None, 10, 0,
+            None, None, "fitted",
+            false, false, None, None, None,
+        ).expect("PySmooth::new(method='glm') must be accepted by the string parser");
+        let spec = match ctor.0 {
+            TransformSpec::Smooth(s) => s,
+            _ => panic!("expected Smooth spec"),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let yf = col(&out, "y");
+        assert!(yf.iter().all(|v| v.is_finite()), "glm fit must be finite; got {yf:?}");
+    }
+
+    /// GLM (Gaussian, Identity link) IRLS converges to the exact OLS point
+    /// estimate, so its fitted curve must match "lm"'s to high precision —
+    /// this is the correct behavior (not a sign the two are aliased; the
+    /// CI-band test below proves the implementations are genuinely distinct).
+    #[test]
+    fn test_glm_point_estimate_matches_lm_ols() {
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| 3.0 + 2.0 * x + if i % 3 == 0 { 0.4 } else { -0.2 })
+            .collect();
+        let batch = xy_batch(xs, ys);
+        let lm_spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+        let glm_spec = SmoothSpec { method: SmoothMethod::Glm, ..lm_spec.clone() };
+        let lm_out = apply(&lm_spec, &batch).unwrap();
+        let glm_out = apply(&glm_spec, &batch).unwrap();
+        let lm_y = col(&lm_out, "y");
+        let glm_y = col(&glm_out, "y");
+        for (a, b) in lm_y.iter().zip(glm_y.iter()) {
+            assert!((a - b).abs() < 1e-8, "glm should match lm's OLS point estimate: lm={a}, glm={b}");
+        }
+    }
+
+    /// RED-proof discriminator: a `"glm" => SmoothMethod::Lm` alias would
+    /// happen to match `lm`'s point estimate (see above) but could not
+    /// reproduce `glm.rs`'s real Wald CI band, which omits the dispersion
+    /// (σ²) scaling that `lm`'s t-distribution band applies. With `ci` set,
+    /// the two bands must therefore differ even though the fitted line is
+    /// the same — proving `glm_fit` takes a genuinely distinct code path
+    /// rather than aliasing to `Lm`.
+    #[test]
+    fn test_glm_ci_band_differs_from_lm_ci_band_proving_distinct_implementation() {
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| 3.0 + 2.0 * x + if i % 2 == 0 { 1.5 } else { -1.5 })
+            .collect();
+        let batch = xy_batch(xs, ys);
+        let lm_spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: Some(0.95),
+            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+        let glm_spec = SmoothSpec { method: SmoothMethod::Glm, ..lm_spec.clone() };
+        let lm_out = apply(&lm_spec, &batch).unwrap();
+        let glm_out = apply(&glm_spec, &batch).unwrap();
+        let lm_width: Vec<f64> = col(&lm_out, "ci_upper").iter().zip(col(&lm_out, "ci_lower").iter())
+            .map(|(&hi, &lo)| hi - lo).collect();
+        let glm_width: Vec<f64> = col(&glm_out, "ci_upper").iter().zip(col(&glm_out, "ci_lower").iter())
+            .map(|(&hi, &lo)| hi - lo).collect();
+        let any_differs = lm_width.iter().zip(glm_width.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(
+            any_differs,
+            "glm and lm CI bands must differ (real GLM Wald CI has no dispersion scaling); \
+             lm_width={lm_width:?}, glm_width={glm_width:?}"
+        );
+    }
+
+    /// `Smooth(method="lm", degree=2)` must resolve to the exact same
+    /// `Poly{degree:2}` code path as `Smooth(method="quadratic")` — byte-equal
+    /// output, since both now construct the identical enum variant.
+    #[test]
+    fn test_lm_degree_2_byte_equal_to_quadratic() {
+        let xs: Vec<f64> = (0..20).map(|i| i as f64 * 0.3).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 2.0 * x + 3.0 * x * x).collect();
+        let batch = xy_batch(xs, ys);
+        let lm_deg2_spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 2 },
+            ci: None,
+            bandwidth: 0.75, degree: 2, n: 15, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+        // Route both through PySmooth::new to prove the *constructor's*
+        // resolution — not just the shared enum — treats them identically.
+        pyo3::Python::initialize();
+        let lm_ctor = PySmooth::new(
+            "x", "y", "lm", None, 0.75, Some(2), 15, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        let quad_ctor = PySmooth::new(
+            "x", "y", "quadratic", None, 0.75, None, 15, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        assert_eq!(lm_ctor.0, quad_ctor.0, "method='lm', degree=2 must construct the identical spec as method='quadratic'");
+
+        let out = apply(&lm_deg2_spec, &batch).unwrap();
+        let xg = col(&out, "x");
+        let yf = col(&out, "y");
+        for (&xq, &yq) in xg.iter().zip(yf.iter()) {
+            let expected = 1.0 + 2.0 * xq + 3.0 * xq * xq;
+            assert!((yq - expected).abs() < 1e-6, "lm+degree=2: y({xq})={yq}, expected {expected}");
+        }
+    }
+
+    /// `Smooth(method="lm")` with no `degree` and `Smooth(method="lm",
+    /// degree=1)` must both resolve to plain `SmoothMethod::Lm` — the
+    /// no-op case every existing `mark_smooth(method="lm")` caller (and
+    /// `lmplot`'s default `order=1`) relies on for unchanged output.
+    #[test]
+    fn test_lm_no_degree_and_degree_1_both_stay_linear() {
+        pyo3::Python::initialize();
+        let implicit = PySmooth::new(
+            "x", "y", "lm", None, 0.75, None, 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        let explicit_one = PySmooth::new(
+            "x", "y", "lm", None, 0.75, Some(1), 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        assert_eq!(implicit.0, explicit_one.0, "degree omitted vs degree=1 must construct the same spec");
+        match &implicit.0 {
+            TransformSpec::Smooth(s) => assert_eq!(s.method, SmoothMethod::Lm),
+            _ => panic!("expected Smooth spec"),
+        }
+    }
+
+    /// `degree=0` with `method="lm"` must refuse rather than silently
+    /// behaving like `degree=1`.
+    #[test]
+    fn test_lm_degree_zero_refuses() {
+        pyo3::Python::initialize();
+        let result = PySmooth::new(
+            "x", "y", "lm", None, 0.75, Some(0), 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        );
+        assert!(result.is_err(), "degree=0 with method='lm' must be refused");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("degree"), "error should mention 'degree': {msg}");
+    }
+
+    /// Closing D9: `degree` on a method with no degree concept ("log",
+    /// "sqrt", "glm") must refuse rather than being silently ignored.
+    #[test]
+    fn test_degree_refused_for_non_polynomial_non_loess_methods() {
+        pyo3::Python::initialize();
+        for method in &["log", "sqrt", "glm"] {
+            let result = PySmooth::new(
+                "x", "y", method, None, 0.75, Some(2), 200, 0, None, None, "fitted",
+                false, false, None, None, None,
+            );
+            assert!(result.is_err(), "degree=2 with method={method:?} must be refused");
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("degree"), "error should mention 'degree' for method={method:?}: {msg}");
+        }
+    }
+
+    // ---- Batch-D T9 round 2: quadratic/cubic alias-degree policy ----
+
+    /// `method="quadratic"` with a `degree` that AGREES with the fixed
+    /// degree (2) is a harmless no-op — accepted, not refused.
+    #[test]
+    fn test_quadratic_matching_degree_is_accepted_noop() {
+        pyo3::Python::initialize();
+        let implicit = PySmooth::new(
+            "x", "y", "quadratic", None, 0.75, None, 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        let explicit = PySmooth::new(
+            "x", "y", "quadratic", None, 0.75, Some(2), 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        assert_eq!(implicit.0, explicit.0, "degree omitted vs degree=2 must construct the same spec for 'quadratic'");
+    }
+
+    /// `method="cubic"` with a `degree` that AGREES with the fixed degree
+    /// (3) is a harmless no-op — accepted, not refused.
+    #[test]
+    fn test_cubic_matching_degree_is_accepted_noop() {
+        pyo3::Python::initialize();
+        let implicit = PySmooth::new(
+            "x", "y", "cubic", None, 0.75, None, 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        let explicit = PySmooth::new(
+            "x", "y", "cubic", None, 0.75, Some(3), 200, 0, None, None, "fitted",
+            false, false, None, None, None,
+        ).unwrap();
+        assert_eq!(implicit.0, explicit.0, "degree omitted vs degree=3 must construct the same spec for 'cubic'");
+    }
+
+    /// A `degree` that CONFLICTS with `method="quadratic"`'s fixed degree
+    /// must refuse rather than silently fitting degree 2 anyway. Batch-D T9
+    /// round 2 (Required Fix 1, rust-quality verdict finding 1): this used
+    /// to construct successfully and quietly fit a degree-2 curve.
+    #[test]
+    fn test_quadratic_conflicting_degree_refuses() {
+        pyo3::Python::initialize();
+        for bad_degree in [1u8, 3, 5] {
+            let result = PySmooth::new(
+                "x", "y", "quadratic", None, 0.75, Some(bad_degree), 200, 0, None, None, "fitted",
+                false, false, None, None, None,
+            );
+            assert!(result.is_err(), "degree={bad_degree} conflicting with method='quadratic' must be refused");
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("degree") && msg.contains("quadratic"),
+                "error should name both 'degree' and 'quadratic': {msg}");
+        }
+    }
+
+    /// A `degree` that CONFLICTS with `method="cubic"`'s fixed degree must
+    /// refuse rather than silently fitting degree 3 anyway.
+    #[test]
+    fn test_cubic_conflicting_degree_refuses() {
+        pyo3::Python::initialize();
+        for bad_degree in [1u8, 2, 4] {
+            let result = PySmooth::new(
+                "x", "y", "cubic", None, 0.75, Some(bad_degree), 200, 0, None, None, "fitted",
+                false, false, None, None, None,
+            );
+            assert!(result.is_err(), "degree={bad_degree} conflicting with method='cubic' must be refused");
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("degree") && msg.contains("cubic"),
+                "error should name both 'degree' and 'cubic': {msg}");
+        }
+    }
+
+    // ---- Batch-D T9 round 2: rank-deficient degree refuses on the ungrouped path ----
+
+    /// A `degree` that leaves the design rank-deficient (fewer usable points
+    /// than coefficients to solve for) must refuse with a typed error on the
+    /// UNGROUPED top-level call, not silently render an all-NaN grid.
+    /// RED-proves the spec review's finding 2: `degree=20` on a 20-row frame
+    /// used to render zero polylines with no diagnostic at all.
+    #[test]
+    fn test_rank_deficient_degree_refuses_on_ungrouped_path() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| x + 1.0).collect();
+        let batch = xy_batch(xs, ys);
+        for degree in [20u8, 21, 25] {
+            let ctor = PySmooth::new(
+                "x", "y", "lm", None, 0.75, Some(degree), 5, 0, None, None, "fitted",
+                false, false, None, None, None,
+            ).unwrap();
+            let spec = match ctor.0 {
+                TransformSpec::Smooth(s) => s,
+                _ => panic!("expected Smooth spec"),
+            };
+            let result = apply(&spec, &batch);
+            assert!(result.is_err(), "degree={degree} on 20 points must refuse (rank-deficient), not silently NaN");
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("degree") && msg.contains("rank-deficient"),
+                "error for degree={degree} should mention 'degree' and 'rank-deficient': {msg}");
+        }
+    }
+
+    /// The boundary case: `degree = n_points - 1` is EXACTLY determined
+    /// (not rank-deficient) and must still fit, not refuse.
+    #[test]
+    fn test_degree_exactly_n_minus_one_is_not_rank_deficient() {
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| x + 1.0).collect();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 19 },
+            ci: None,
+            bandwidth: 0.75, degree: 19, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+        let out = apply(&spec, &batch).expect("degree=19 on 20 points is exactly determined, not rank-deficient");
+        let yf = col(&out, "y");
+        assert!(yf.iter().all(|v| v.is_finite()), "exactly-determined fit must be finite; got {yf:?}");
+    }
+
+    /// A rank-deficient degree inside ONE GROUP of a grouped fit must still
+    /// degrade to that group's own all-NaN range (T6's contract) rather than
+    /// refusing the whole batch — the refusal above is specific to the
+    /// ungrouped top-level call.
+    #[test]
+    fn test_rank_deficient_degree_inside_one_group_stays_nan_not_refused() {
+        pyo3::Python::initialize();
+        // Group "a": 20 points, degree=19 is exactly determined (finite fit).
+        // Group "b": only 3 points, degree=19 is massively rank-deficient.
+        let mut all_x: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let mut all_y: Vec<f64> = all_x.iter().map(|&x| x + 1.0).collect();
+        let mut all_g: Vec<&str> = vec!["a"; 20];
+        all_x.extend([100.0, 101.0, 102.0]);
+        all_y.extend([1.0, 2.0, 3.0]);
+        all_g.extend(["b", "b", "b"]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(all_x)),
+                Arc::new(Float64Array::from(all_y)),
+                Arc::new(arrow::array::StringArray::from(all_g)),
+            ],
+        ).unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 19 },
+            ci: None,
+            bandwidth: 0.75, degree: 19, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec!["g".into()], name: None,
+        };
+        let out = apply(&spec, &batch)
+            .expect("a rank-deficient group must degrade to NaN, not refuse the whole grouped batch");
+        assert_eq!(out.num_rows(), 10, "2 groups × 5 grid points");
+        let yf = col(&out, "y");
+        assert!(yf[..5].iter().all(|v| v.is_finite()), "group 'a' (exactly determined) must be finite");
+        assert!(yf[5..].iter().all(|v| v.is_nan()), "group 'b' (rank-deficient) must be NaN, not a refusal");
+    }
+
+    // ---- Batch-D T9 round 2: apply_grouped schema-mismatch panic (Required Fix 6) ----
+
+    /// RED-proof for the live `PanicException` the rust-quality verdict
+    /// reproduced through `Chart.to_svg()`: a grouped `glm` fit with
+    /// `inject_metrics=true` where the SECOND group (not the first) is
+    /// degenerate (glm's IRLS fails on zero-variance x) used to panic inside
+    /// `apply_grouped` — the reference schema was pinned to group 0's WIDE
+    /// (6-column, metrics included) output, and group 1's NARROW (4-column)
+    /// degenerate output was then indexed positionally past its own schema
+    /// (`index out of bounds: the len is 4 but the index is 4`). `lm` and
+    /// `poly` inherit the identical `apply_grouped` template and were
+    /// equally exposed; this test pins the fix at the shared level.
+    #[test]
+    fn test_apply_grouped_survives_degenerate_non_first_group_with_inject_metrics() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 1.0, 1.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0])),
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a", "a", "a", "b", "b", "b", "b"])),
+            ],
+        ).unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Glm,
+            ci: None,
+            bandwidth: 0.75, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: true, x_range: None,
+            groupby: vec!["g".into()], name: None,
+        };
+        let out = apply(&spec, &batch)
+            .expect("grouped glm with a degenerate non-first group + inject_metrics must not panic");
+        assert_eq!(out.num_rows(), 10, "2 groups × 5 grid points");
+        let metrics_y = out
+            .column(out.schema().index_of("_metrics_y").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        // Group 'a' (rows 0..5): a real glm fit -> the anchor row (rightmost
+        // grid x, i.e. the group's LAST row) holds a finite metrics value.
+        assert!(!metrics_y.is_null(4) && metrics_y.value(4).is_finite(),
+            "group 'a' anchor row _metrics_y should be finite");
+        // Group 'b' (rows 5..10): zero-variance x -> degenerate glm ->
+        // `build_degenerate_smooth_batch` still emits the metrics columns
+        // (batch-D T9 round 4), all-null -> every row null/NaN, not a panic
+        // (and no longer via `apply_grouped`'s by-name padding fallback,
+        // since group 'b' now carries the columns itself).
+        for i in 5..10 {
+            assert!(metrics_y.is_null(i) || metrics_y.value(i).is_nan(),
+                "group 'b' row {i} _metrics_y should be null/NaN (degenerate group)");
+        }
+        let metrics_text = out
+            .column(out.schema().index_of("_metrics_text").unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        assert!(!metrics_text.is_null(4), "group 'a' anchor row _metrics_text should be present");
+        for i in 5..10 {
+            assert!(metrics_text.is_null(i), "group 'b' row {i} _metrics_text should be null (degenerate group)");
+        }
+    }
+
+    // ---- Batch-D T9 round 4: degenerate-branch schema uniformity (root cause) ----
+
+    /// RED-proof for `build_degenerate_smooth_batch` itself: when metrics
+    /// are requested it must append `_metrics_text`/`_metrics_y`, both
+    /// entirely null (no anchor row — there is no fit to summarize).
+    #[test]
+    fn build_degenerate_smooth_batch_emits_null_metrics_when_requested() {
+        let grid = vec![0.0, 1.0, 2.0];
+        let out = build_degenerate_smooth_batch(&grid, 3, true).unwrap();
+        assert_eq!(out.schema().fields().len(), 6, "core 4 + metrics 2");
+        let text = out.column(out.schema().index_of("_metrics_text").unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        let y = out.column(out.schema().index_of("_metrics_y").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..3 {
+            assert!(text.is_null(i), "row {i} _metrics_text must be null, not a garbage anchor");
+            assert!(y.is_null(i), "row {i} _metrics_y must be null, not a garbage anchor");
+        }
+    }
+
+    /// The `metrics_requested = false` side of the same contract: no columns
+    /// at all when `inject_metrics` was never set, matching every method's
+    /// pre-round-4 schema for the common (metrics-off) case.
+    #[test]
+    fn build_degenerate_smooth_batch_omits_metrics_columns_when_not_requested() {
+        let grid = vec![0.0, 1.0];
+        let out = build_degenerate_smooth_batch(&grid, 2, false).unwrap();
+        assert_eq!(out.schema().fields().len(), 4, "core columns only, no metrics");
+        assert!(out.schema().index_of("_metrics_text").is_err());
+        assert!(out.schema().index_of("_metrics_y").is_err());
+    }
+
+    /// RED-proof at the public `apply()` boundary for the reviewer's cited
+    /// `all_nan_output` example: a genuinely too-sparse ungrouped Fitted
+    /// call (1 usable point) with `inject_metrics=true` must still emit the
+    /// metrics columns — all-null — rather than dropping them (which is
+    /// exactly the divergence a sibling group/facet-panel schema then had
+    /// to reconcile around).
+    #[test]
+    fn all_nan_output_via_apply_with_inject_metrics_emits_null_metrics_columns() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        ).unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None, bandwidth: 0.75, degree: 1, n: 4, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: true, x_range: None,
+            groupby: vec![], name: None,
+        };
+        let out = apply(&spec, &batch).expect("1 usable point must degrade, not refuse (xs.len() < 2)");
+        assert_eq!(out.num_rows(), 4, "spec.n grid rows");
+        assert_eq!(out.schema().fields().len(), 6, "core 4 + metrics 2, even though the fit is all-NaN");
+        let text = out.column(out.schema().index_of("_metrics_text").unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        for i in 0..4 {
+            assert!(text.is_null(i), "row {i} _metrics_text must be null for an all-NaN degenerate fit");
+        }
+    }
+
+    /// RED-proof at the public `apply()` boundary for the reviewer's other
+    /// cited example, `poly_fit`: a `groupby` group too sparse for the
+    /// requested degree (2 points, degree=3 — rank-deficient, `poly_ols`
+    /// returns empty coefficients) with `inject_metrics=true` must emit
+    /// null metrics for that group's rows, NOT the garbage `(r2=1, rmse=0,
+    /// mae=0)` tuple `residuals::compute` derives from an all-NaN predictor
+    /// — proving `poly_fit`'s degenerate branch uses `metrics.is_some()` as
+    /// a gate rather than passing the caller's already-computed tuple
+    /// through.
+    #[test]
+    fn poly_fit_degenerate_group_with_inject_metrics_emits_null_not_garbage() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 2.0, 3.0, 4.0, // "a": 5 points, cubic-recoverable
+                    0.0, 1.0,                // "b": 2 points, rank-deficient for degree=3
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 1.0, 8.0, 27.0, 64.0, // "a": y = x^3
+                    0.0, 1.0,                  // "b"
+                ])),
+                Arc::new(arrow::array::StringArray::from(vec!["a", "a", "a", "a", "a", "b", "b"])),
+            ],
+        ).unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Poly { degree: 3 },
+            ci: None,
+            bandwidth: 0.75, degree: 3, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: true, x_range: None,
+            groupby: vec!["g".into()], name: None,
+        };
+        let out = apply(&spec, &batch)
+            .expect("a groupby group too sparse for degree=3 must degrade, not refuse the whole fit");
+        assert_eq!(out.num_rows(), 10, "2 groups × 5 grid points");
+        let metrics_text = out
+            .column(out.schema().index_of("_metrics_text").unwrap())
+            .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        // Group 'a' (rows 0..5): a real cubic fit -> the anchor row (the
+        // group's LAST row) holds a finite, non-garbage metrics value.
+        assert!(!metrics_text.is_null(4), "group 'a' anchor row _metrics_text should be present");
+        // Group 'b' (rows 5..10): rank-deficient poly_ols (n=2 < p=4) ->
+        // null, not the (r2=1, rmse=0, mae=0) garbage an unconditional
+        // pass-through of the caller's already-computed `metrics` tuple
+        // would have produced.
+        for i in 5..10 {
+            assert!(metrics_text.is_null(i), "group 'b' row {i} _metrics_text must be null, not a garbage anchor");
+        }
     }
 }
