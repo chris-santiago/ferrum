@@ -534,6 +534,7 @@ def transform_window(
     sort: Sequence[str] | None = None,
     groupby: Sequence[str] | None = None,
     frame: tuple[int | None, int | None] | None = None,
+    ignore_peers: bool = False,
 ) -> dict:
     """Window transform (ranking, lag/lead, rolling aggregates).
 
@@ -544,11 +545,21 @@ def transform_window(
         and optionally ``field`` and ``param``
         (e.g. ``{"op": "row_number", "as": "rank"}``).
     sort : list of str, optional
-        Sort fields for the window.
+        Sort fields for the window. ``rank`` and ``dense_rank`` written
+        without a ``field`` take their ties from these columns: rows equal on
+        every sort column draw the same rank (``1, 1, 3`` for ``rank``,
+        ``1, 1, 2`` for ``dense_rank``).
     groupby : list of str, optional
         Partition-by columns.
     frame : tuple of (int or None, int or None), optional
         Window frame bounds: (preceding, following). None means unbounded.
+    ignore_peers : bool, default False
+        Whether a rolling frame ignores *peers* — rows tied on every ``sort``
+        column. Left ``False`` (Vega's default), a frame expands to whole peer
+        groups, so tied rows share one frame and therefore one aggregate
+        value. Set ``True`` for frames defined by row offsets alone. Only
+        rolling aggregates with an explicit ``frame`` over a tied sort key are
+        affected.
 
     Returns
     -------
@@ -572,6 +583,10 @@ def transform_window(
         spec["groupby"] = list(groupby)
     if frame is not None:
         spec["frame"] = list(frame)
+    # Omitted at the default so specs built before this parameter existed
+    # serialize byte-identically.
+    if ignore_peers:
+        spec["ignore_peers"] = True
     return spec
 
 

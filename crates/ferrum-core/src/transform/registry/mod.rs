@@ -505,7 +505,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
                 "sum", "mean", "count", "min", "max",
             ],
             outputs: vec![],
-            params: vec!["ops", "sort", "groupby", "frame", "name"],
+            params: vec!["ops", "sort", "groupby", "frame", "ignore_peers", "name"],
         },
         "density_data" => TransformRegistryEntry {
             methods: vec![],

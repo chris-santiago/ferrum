@@ -877,7 +877,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         })),
         ("join_aggregate", JoinAggregate(JoinAggregateSpec { aggregates: vec![], groupby: None, name: None })),
         ("data_window", DataWindow(DataWindowSpec {
-            ops: vec![], sort: None, groupby: None, frame: None, name: None,
+            ops: vec![], sort: None, groupby: None, frame: None, ignore_peers: false, name: None,
         })),
         ("density_data", DensityData(DensityDataSpec {
             field: "v".into(), bandwidth: None, groupby: None, extent: None, steps: None,
