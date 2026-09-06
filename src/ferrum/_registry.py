@@ -93,14 +93,14 @@ def registry_secondary_columns(kind: str, key: str, names: Sequence[str]) -> dic
     ``"qq_line"``, ``"depth_3"``, ``"segments"`` -- and is itself validated,
     so a Rust-side rename of the key raises here too.
 
-    The wire name a layer's ``data_source=`` must use is NOT uniformly
-    derivable from *key*: ``letter_value`` and ``linkage`` prefix a
-    caller-supplied ``name=`` onto every key (``"lv_depth_3"``,
-    ``"row_link_segments"``), while ``qq`` publishes ``"qq_line"``
-    unprefixed whatever its spec is named. Rather than encode a rule that
-    holds for two of the three kinds, this helper stays scoped to columns
-    and each call site composes its own ``data_source`` from the key it
-    validated here.
+    The wire name a layer's ``data_source=`` must use is NOT returned by this
+    helper: a caller-supplied ``name=`` prefixes *every* declared key as
+    ``"{name}_{key}"`` -- uniformly across all three kinds since 2026-09-06,
+    when ``qq`` was corrected to follow the same rule ``letter_value``/
+    ``linkage`` already did (it previously published its reference-line
+    batch unprefixed). This helper only receives ``kind``/``key``/``names``,
+    not the spec's ``name=``, so composing the prefixed ``data_source``
+    string is left to each call site.
 
     Parameters
     ----------

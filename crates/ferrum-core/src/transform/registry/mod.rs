@@ -14,8 +14,8 @@
 //! **`kind` is the transform's *module name*** — the second column of
 //! `for_each_transform!`'s table (`"bin"`, `"bin_2d"`, `"regression_data"`,
 //! …), not necessarily the wire `"type"` tag serde derives for
-//! `TransformSpec`'s internally-tagged JSON form. **Corrected 2026-09-04**
-//! (round-2 cycle-1 review): the two do NOT agree everywhere except
+//! `TransformSpec`'s internally-tagged JSON form. **Corrected 2026-09-04:**
+//! the two do NOT agree everywhere except
 //! `TimeUnit` — the real divergence set, proven by
 //! `wire_tag_matches_registry_kind_or_named_exception` (`tests.rs`) against
 //! `TransformSpec`'s actual `Serialize` output rather than prose, is
@@ -51,9 +51,8 @@
 //!   arbitrary (unknown) pass-through columns — `DataWindow` (each
 //!   `WindowOp.as_` names its own column, from a `Vec<Op>` of caller-supplied
 //!   length) and `JoinAggregate` (same shape: each `AggSpec.as_` names its
-//!   own column). **`DataStack` corrected 2026-09-05** (round-3 cycle-2
-//!   review): it was previously grouped here under "no *stable* default name
-//!   to declare", which is false — `DataStackSpec.as_` is a single top-level
+//!   own column). **`DataStack` corrected 2026-09-05:** it was previously
+//!   grouped here under "no *stable* default name to declare", which is false — `DataStackSpec.as_` is a single top-level
 //!   `(String, String)` with a real serde default, `("y0", "y1")`
 //!   (`data_stack.rs`). The accurate reason it stays `[]` is different: its
 //!   additive pair, unlike `Swarm`/`Violin` below, is a directly
@@ -64,7 +63,7 @@
 //!   (`tests.rs`) proves for `Swarm` — a fixture this table doesn't have for
 //!   `DataStack` today. This is "not yet proven", not "structurally
 //!   undeclarable"; left open rather than reopening the accepted `[]`
-//!   decision (out of scope for this round);
+//!   decision;
 //! - variable-arity transforms (`Aggregate`, `DataAggregate`) whose column
 //!   count/names come from a `Vec<Op>` of caller-supplied length;
 //! - transforms whose sole output column name and/or dtype is driven by a
@@ -72,8 +71,8 @@
 //!   `None` meaning "derive from another required parameter" rather than a
 //!   static literal (`ReferenceLine`, `Calculate`, `TimeUnit`, `DataBin`,
 //!   `Flatten`, `Pivot`) — there is no default name/dtype to declare;
-//! - `Unpivot` and `Fold`. **Corrected 2026-09-05** (round-3 cycle-2 review):
-//!   these were previously grouped in the bullet above under "REQUIRED
+//! - `Unpivot` and `Fold`. **Corrected 2026-09-05:** these were previously
+//!   grouped in the bullet above under "REQUIRED
 //!   (no-default) user parameter", which is false for their column NAMES —
 //!   `UnpivotSpec.var_name`/`value_name` default to `"variable"`/`"value"`
 //!   and `FoldSpec.as_` defaults to `("key", "value")` (`unpivot.rs`,
@@ -99,22 +98,28 @@
 //! batches from `TransformSpec::secondary_outputs` (`core.rs`): `Qq` (the
 //! reference line), `LetterValue` (the outlier rows plus one band batch per
 //! depth), and `Linkage` (the linkage batch re-published under its own key,
-//! plus dendrogram order/coords/segments). **Declared 2026-09-06** (R1
-//! design finding (d)): those were out of the registry by contract, which
-//! left the least-guessable column names in the crate — `qq_line_x_start`,
-//! `lv_depth_{k}`, the dendrogram columns — as unchecked Python literals,
-//! i.e. the exact drift class the registry closed for primary columns.
-//! They now ride the same mold: each entry is `(key, columns)` under the
-//! kind's DEFAULT construction (`name = None`); a caller-supplied `name`
-//! prefixes every key (`"{name}_order"`, `"{name}_depth_3"`, …) the same
-//! way a caller-supplied `as_` renames primary columns, and the same
-//! "under default construction" carve-out applies. `Qq`'s entry holds for
-//! its default `emit_line=true`; at `emit_line=false` it emits no secondary
-//! batch at all. Every declared entry is proven against the real
+//! plus dendrogram order/coords/segments). **Declared 2026-09-06:** those
+//! were out of the registry by contract, which left the least-guessable
+//! column names in the crate — `qq_line_x_start`, `lv_depth_{k}`, the
+//! dendrogram columns — as unchecked Python literals, i.e. the exact drift
+//! class the registry closed for primary columns. They now ride the same
+//! mold: each entry is `(key, columns)` under the kind's DEFAULT
+//! construction (`name = None`); a caller-supplied `name` prefixes EVERY key
+//! (`"{name}_order"`, `"{name}_depth_3"`, `"{name}_qq_line"`, …) the same way
+//! a caller-supplied `as_` renames primary columns, and the same "under
+//! default construction" carve-out applies. This is a true universal across
+//! all three kinds — `Qq`'s key was unprefixed under a `name` until
+//! **2026-09-06**, when `qq::secondary_outputs` was made to prefix
+//! `QQ_LINE_KEY` exactly like `letter_value::OUTLIERS_KEY`/
+//! `linkage::LINKAGE_KEY` already did. `Qq`'s entry holds for its default
+//! `emit_line=true`; at `emit_line=false` it emits no secondary batch at
+//! all. Every declared entry is proven against the real
 //! `secondary_outputs()` output by the per-kind
 //! `*_secondary_outputs_match_actual_batches` fixtures (`tests.rs`), and
 //! `KINDS_WITH_SECONDARY_FIXTURE` there pins that coverage against "every
-//! kind with a non-empty declared `secondary_outputs`".
+//! kind with a non-empty declared `secondary_outputs`";
+//! `a_spec_name_prefixes_every_declared_secondary_key` (`tests.rs`) proves
+//! the prefixing rule itself across all three kinds directly.
 //!
 //! **`methods` convention.** Only the kind's single most prominent free-string
 //! method/kernel/distribution/operation vocabulary — the parameter most
@@ -124,17 +129,17 @@
 //! into one flat list would be ambiguous to any consumer without inventing a
 //! new registry shape — out of scope for this task (no consumer needs it
 //! yet; `parse_family`/`parse_link` in `glm.rs` remain the source of truth).
-//! **`Linkage` declared 2026-09-05** (round-3 cycle-2 review): it carries a
-//! closed 7-value `method` vocabulary (`LinkageMethod`, `linkage.rs`) behind
-//! a PyO3-constructor-time hard validation site shaped identically to
-//! `kde`/`qq`/`smooth`/`hex`/`raster` (`PyLinkage::new`, `linkage.rs`), so the
-//! rule above predicts a non-empty list for it and there is no ambiguity to
-//! carve out — it was simply missed in round 1/2, not a deliberate `[]`.
+//! **`Linkage` declared 2026-09-05:** it carries a closed 7-value `method`
+//! vocabulary (`LinkageMethod`, `linkage.rs`) behind a PyO3-constructor-time
+//! hard validation site shaped identically to `kde`/`qq`/`smooth`/`hex`/
+//! `raster` (`PyLinkage::new`, `linkage.rs`), so the rule above predicts a
+//! non-empty list for it and there is no ambiguity to carve out — it was
+//! simply missed initially, not a deliberate `[]`.
 //!
-//! **Every non-empty `methods` entry now READS its enforcement site's own
-//! const, and every one has a drift guard. Completed 2026-09-06** (R1 design
-//! finding 1). Before this round only 4 of 14 did: the other ten were
-//! hand-copied literals, seven of them with no acceptance/drift test at all,
+//! **Every non-empty `methods` entry READS its enforcement site's own const,
+//! and every one has a drift guard, completed 2026-09-06.** Before that,
+//! only 4 of 14 did: the other ten were hand-copied literals, seven of them
+//! with no acceptance/drift test at all,
 //! and several enforcement sites spelled their own vocabulary more than once
 //! (`raster` three times, `linkage` baked into an error string). Each of the
 //! ten now has a `pub(crate) const` beside its enforcement site —
@@ -147,7 +152,7 @@
 //! `methods`", so a future kind cannot join this table without one.
 //! `pivot` and `top_k` were the two kinds that genuinely could not be guarded
 //! before, because each had a silent `_ => sum()` fallback rather than a
-//! refusal site (which is also how round 1's undetected `pivot` vocabulary
+//! refusal site (which is also how the earlier undetected `pivot` vocabulary
 //! drift went unnoticed, and a latent silent-wrong-answer path in its own
 //! right); both now refuse an unrecognized op, so both are guardable and
 //! guarded.
@@ -155,14 +160,14 @@
 //! **`params`** is the spec struct's real WIRE-accepted field set — the set
 //! `params_match_spec_struct_serde_fields` (`tests.rs`) proves by mining
 //! serde's own `deny_unknown_fields` rejection, not a reading of the Rust
-//! field names. **Corrected 2026-09-05** (round-3 cycle-2 review): this is
-//! NOT "identical to the Rust field name at every site in this crate" — the
+//! field names. **Corrected 2026-09-05:** this is NOT "identical to the
+//! Rust field name at every site in this crate" — the
 //! `"bin"` entry below is the one site where they diverge: `BinSpec` carries
 //! `#[serde(into = "BinWire", from = "BinWire")]`, so the wire it actually
 //! (de)serializes through is `BinWire`'s flat `bin_count`/`bin_width` keys,
 //! not the Rust-side typed `mode: BinMode` field the struct exposes to
-//! in-crate callers (round-2's own manual audit read the Rust field name and
-//! missed this; the drift guard caught it). No other top-level spec struct in
+//! in-crate callers (a manual audit once read the Rust field name and missed
+//! this; the drift guard catches it). No other top-level spec struct in
 //! this crate carries an `into`/`from` shim — the `#[serde(rename)]`s on
 //! `aggregate.rs`/`data_window.rs`/`join_aggregate.rs` are all on NESTED
 //! op-structs, not top-level params. The declared order matches each entry's
@@ -175,8 +180,8 @@
 //! test. Dropped the "in declaration order" claim rather than build an
 //! ordered-sequence comparison, since the shared `BTreeSet`-returning helper
 //! is also relied on by two pre-existing consumers
-//! (`render::binding::theme_dict_tests`, `render::chart_config::tests`) and
-//! widening its return shape is out of this round's doc-and-test-only scope.
+//! (`render::binding::theme_dict_tests`, `render::chart_config::tests`), and
+//! widening its return shape would need to account for both.
 
 use std::sync::Arc;
 
@@ -286,7 +291,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         // typed `mode: BinMode` field the struct exposes to callers within
         // this crate. `params_match_spec_struct_serde_fields` (tests.rs)
         // deserializes `BinSpec` directly (as any real caller's `transforms_json`
-        // payload does) and caught this: round-1 cycle-1's manual param audit
+        // payload does) and caught this: an earlier manual param audit
         // read the Rust field name instead of the real wire projection.
         "bin" => TransformRegistryEntry {
             methods: vec![],
@@ -330,10 +335,9 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
         },
         // `methods` reads the SAME const the parser's pre-check and error
-        // string read (`crate::transform::smooth::METHODS`) — batch-D T9
-        // round 2 (Required Fix 2): this is what makes the drift guard
-        // structural rather than test-detected. See `METHODS`'s doc comment
-        // in `smooth.rs`.
+        // string read (`crate::transform::smooth::METHODS`), which is what
+        // makes the drift guard structural rather than test-detected. See
+        // `METHODS`'s doc comment in `smooth.rs`.
         "smooth" => TransformRegistryEntry {
             methods: crate::transform::smooth::METHODS.to_vec(),
             outputs: fit_outputs(),
@@ -451,9 +455,8 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         },
         // `method` is a closed 7-value vocabulary (`LinkageMethod`) validated
         // hard at `PyLinkage::new` (linkage.rs) — same PyO3-constructor-time
-        // shape as `kde`/`qq`/`smooth`/`hex`/`raster`. Declared 2026-09-05
-        // (round-3 cycle-2 review); see the module doc's `methods` convention
-        // note.
+        // shape as `kde`/`qq`/`smooth`/`hex`/`raster`. Declared 2026-09-05;
+        // see the module doc's `methods` convention note.
         "linkage" => TransformRegistryEntry {
             methods: crate::transform::linkage::METHODS.to_vec(),
             outputs: crate::transform::linkage::LINKAGE_COLUMNS.to_vec(),
@@ -586,11 +589,11 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             secondary_outputs: vec![],
             params: vec!["fields", "as_", "name"],
         },
-        // `pivot` was the one declared vocabulary with no drift guard until
-        // R1: `aggregate_values` (pivot.rs) had a silent
+        // `pivot` was the one declared vocabulary with no drift guard:
+        // `aggregate_values` (pivot.rs) had a silent
         // `_ => clean.iter().sum()` fallback for an unrecognized `op`, so
         // there was no real refusal site to assert a bogus value against —
-        // which is exactly where round-1's undetected vocabulary drift
+        // which is exactly where the earlier undetected vocabulary drift
         // (missing `first`/`last`) came from. That fallback is now a typed
         // refusal, so this entry reads `pivot::OPS` and
         // `pivot_methods_accepted_and_bogus_op_rejected` (`tests.rs`) guards
@@ -613,10 +616,10 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             secondary_outputs: vec![],
             params: vec!["ops", "sort", "groupby", "frame", "ignore_peers", "name"],
         },
-        // `methods` declares `kde`'s vocabulary (round 2, batch-D T11 cycle
-        // 2, per the module doc's `methods` convention above: `kernel` is
-        // the literally-named `kernel` parameter with no orthogonal-
-        // vocabulary ambiguity, so the rule predicts a non-empty list here).
+        // `methods` declares `kde`'s vocabulary, per the module doc's
+        // `methods` convention above: `kernel` is the literally-named
+        // `kernel` parameter with no orthogonal-vocabulary ambiguity, so the
+        // rule predicts a non-empty list here.
         // `density_data` has no PyO3-constructor-time acceptance/refusal
         // site (`PyDensityData::new` doesn't expose `kernel` at all —
         // `DensityDataSpec` is built directly from wire JSON by

@@ -497,12 +497,18 @@ register_layer_names(
 )
 
 
-#: ``QQ``'s secondary reference-line batch, as
-#: ``transform_registry("qq")["secondary_outputs"]`` declares it. ``qq``
-#: publishes this key unprefixed whatever its spec is named (``letter_value``
-#: and ``linkage`` prefix theirs with the spec's ``name=``), so the key is
-#: also the reference layer's ``data_source``. Validated against the registry
-#: by the ``registry_secondary_columns`` call in ``desugar_qq``.
+#: ``QQ``'s spec ``name=``, so the reference layer's ``data_source`` can be
+#: composed from it rather than repeated as a second literal.
+_QQ_TRANSFORM_NAME = "qq_main"
+
+#: ``QQ``'s secondary reference-line batch's key under DEFAULT construction,
+#: as ``transform_registry("qq")["secondary_outputs"]`` declares it -- and
+#: what ``registry_secondary_columns``'s ``key`` argument validates against
+#: below. A caller-supplied ``name=`` (here, ``_QQ_TRANSFORM_NAME``) prefixes
+#: it as ``"{name}_qq_line"`` (R3 close-remediation: `qq` now prefixes like
+#: ``letter_value``/``linkage`` already did), so the reference layer's real
+#: ``data_source`` is the composed ``f"{_QQ_TRANSFORM_NAME}_{_QQ_LINE_KEY}"``,
+#: not this bare key.
 _QQ_LINE_KEY = "qq_line"
 
 
@@ -526,8 +532,10 @@ def desugar_qq(
     and produces:
     ``[theoretical (Float64), sample (Float64)]``
 
-    When ``line=True``, ``QQ`` also emits a secondary named output
-    ``"qq_line"`` (a single-row batch) with columns:
+    When ``line=True``, ``QQ`` also emits a secondary named output, published
+    under ``"qq_main_qq_line"`` (the spec's ``name="qq_main"`` prefixes the
+    registry's default ``"qq_line"`` key, like every other named secondary
+    output), a single-row batch with columns:
     ``[qq_line_x_start, qq_line_x_end, qq_line_y_start, qq_line_y_end]``
 
     Layers emitted
@@ -535,7 +543,7 @@ def desugar_qq(
     1. ``point`` — ``x="theoretical"``, ``y="sample"`` (from ``"qq_main"``).
     2. ``rule``  — ``x="qq_line_x_start"``, ``y="qq_line_y_start"``,
        ``x2="qq_line_x_end"``, ``y2="qq_line_y_end"``
-       (from ``"qq_line"``).  Only when ``line=True``.
+       (from ``"qq_main_qq_line"``).  Only when ``line=True``.
 
     Parameters
     ----------
@@ -574,7 +582,7 @@ def desugar_qq(
             distribution=distribution,
             dequantize=dequantize,
             emit_line=line,
-            name="qq_main",
+            name=_QQ_TRANSFORM_NAME,
         )
     ]
     from ferrum.encoding import X, Y
@@ -591,16 +599,17 @@ def desugar_qq(
                 "x": X(_qq_cols["theoretical"], title="Theoretical Quantiles"),
                 "y": Y(_qq_cols["sample"], title="Sample Quantiles"),
             },
-            data_source="qq_main",
+            data_source=_QQ_TRANSFORM_NAME,
         )
     ]
     if line:
         # The reference line rides QQ's SECONDARY named batch, declared in the
         # registry since 2026-09-06 -- so its four columns check the same way
-        # the primary two above do. `qq` publishes this batch under the bare
-        # key whatever the spec is named (unlike `letter_value`/`linkage`,
-        # which prefix their spec's `name=`), so the validated key is also the
-        # layer's `data_source`.
+        # the primary two above do. `_QQ_LINE_KEY` validates the batch's
+        # DEFAULT-construction key; the real `data_source` is that key
+        # prefixed by the spec's `name=`, same as `letter_value`/`linkage`
+        # (R3 close-remediation: `qq` used to publish this batch unprefixed,
+        # the one kind of three that didn't follow the rule).
         _qq_line_cols = registry_secondary_columns(
             "qq",
             _QQ_LINE_KEY,
@@ -616,7 +625,7 @@ def desugar_qq(
                     "x2": _qq_line_cols["qq_line_x_end"],
                     "y2": _qq_line_cols["qq_line_y_end"],
                 },
-                data_source=_QQ_LINE_KEY,
+                data_source=f"{_QQ_TRANSFORM_NAME}_{_QQ_LINE_KEY}",
             )
         )
     return MarkDesugarResult(transforms=transforms, layers=layers)

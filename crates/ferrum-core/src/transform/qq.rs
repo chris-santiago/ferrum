@@ -270,9 +270,9 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
         .map_err(|e| PyValueError::new_err(format!("stat_qq: {e}")))
 }
 
-/// The key the reference-line batch is published under. `Qq` does not prefix
-/// it with the spec's `name` (unlike `linkage`/`letter_value`), so this is the
-/// key under every construction.
+/// The reference-line batch's key under default construction; a spec `name`
+/// prefixes it as `"{name}_qq_line"`, mirroring `letter_value::OUTLIERS_KEY`
+/// and `linkage::LINKAGE_KEY`'s convention.
 pub(crate) const QQ_LINE_KEY: &str = "qq_line";
 
 /// The reference-line batch's column schema — the single source of truth,
@@ -376,7 +376,11 @@ pub(crate) fn secondary_outputs(
     let line_batch = RecordBatch::try_new(line_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_qq: qq_line: {e}")))?;
 
-    Ok(vec![(QQ_LINE_KEY.to_string(), line_batch)])
+    let key = match &spec.name {
+        Some(s) => format!("{s}_{QQ_LINE_KEY}"),
+        None => QQ_LINE_KEY.to_string(),
+    };
+    Ok(vec![(key, line_batch)])
 }
 
 use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
@@ -730,6 +734,29 @@ mod tests {
         // Endpoints should span theoretical min/max.
         assert!((x_start - 0.1).abs() < 1e-12);
         assert!((x_end - 0.9).abs() < 1e-12);
+    }
+
+    /// R3 close-remediation regression: a named `QQ` must prefix the
+    /// `qq_line` secondary key exactly like `letter_value`'s `_outliers`/
+    /// `_depth_{k}` and `linkage`'s four dendrogram keys — mirrors
+    /// `letter_value::test_letter_value_named_outputs_use_name_prefix` and
+    /// `linkage`'s `named should prefix` assertion.
+    #[test]
+    fn qq_named_output_uses_name_prefix() {
+        let batch = batch_field("v", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = QQSpec {
+            field: "v".into(),
+            distribution: "uniform".into(),
+            dequantize: false,
+            emit_line: true,
+            seed: 0,
+            name: Some("qq".into()),
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &primary).unwrap();
+        assert_eq!(secs.len(), 1);
+        let (key, _) = &secs[0];
+        assert_eq!(key, "qq_qq_line", "named QQ should prefix its qq_line key: {key}");
     }
 
     #[test]

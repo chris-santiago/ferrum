@@ -660,7 +660,7 @@ Marks are constructors that accept visual property overrides as keyword argument
 
 | Mark | Stat Computed | Key Parameters |
 |---|---|---|
-| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`), `ci`, `bandwidth`, `degree`, `n` |
+| `mark_smooth(...)` | LOESS or regression fit + CI band | `method` (`"loess"`, `"lm"`, `"glm"`, `"gam"`, + aliases), `ci`, `bandwidth` (loess-only — explicit values on other methods raise, 2026-09-06), `degree`, `k` (gam-only basis dimension, 2026-09-06), `n` |
 | `mark_density(...)` | KDE | `bandwidth` (`"scott"`\|`"silverman"`\|float), `kernel`, `extent`, `cumulative`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
 | `mark_histogram(...)` | Frequency / density bins | `bin_count`, `bin_width`, `density`, `cumulative`, `right`, `multiple` (`"layer"`\|`"stack"`\|`"fill"`\|`"dodge"`, default `"layer"`) |
 | `mark_contour(...)` | 2D density contours | `bandwidth`, `thresholds`, `smooth` |

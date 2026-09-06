@@ -632,14 +632,17 @@ def lmplot(
         Aggregate the data into this many equal-width x bins before fitting,
         so the fit runs on one point per bin. Forwarded to ``mark_smooth``
         for every ``mark_smooth``-routed ``method``: the engine bins before
-        it dispatches on method, so binning is not method-specific. Ignored
-        for ``"logistic"``/``"glm"``/``"robust"``, whose transforms take no
-        binning parameters.
+        it dispatches on method, so binning is not method-specific. Not
+        supported for ``"logistic"``/``"glm"``/``"robust"``, whose transforms
+        take no binning parameters at all; passing ``x_bins=`` (or
+        ``x_estimator=``) with one of those three raises ``ValueError``.
     x_estimator : str or None, optional
         The aggregate applied within each ``x_bins`` bin (``"mean"``,
         ``"median"``, ``"sum"``, ``"min"``, ``"max"``; defaults to the
         transform's own ``"mean"``). Forwarded on the same terms as
-        ``x_bins``, and only meaningful alongside it.
+        ``x_bins``, and only meaningful alongside it. Same
+        ``"logistic"``/``"glm"``/``"robust"`` refusal as ``x_bins`` above
+        applies on its own, even without ``x_bins=`` set.
     x_jitter : float or None, optional
         When set, applies ``Jitter(axis="x", width=x_jitter)`` to the
         scatter layer.
@@ -685,6 +688,10 @@ def lmplot(
         If ``truncate=False`` with ``method="logistic"`` or ``"glm"``
         (neither transform accepts ``x_range``).
     ValueError
+        If ``x_bins`` or ``x_estimator`` is set with
+        ``method="logistic"``, ``"glm"``, or ``"robust"`` (none of the
+        three transforms accepts a binning parameter).
+    ValueError
         If an explicit ``order`` is not valid for ``method`` (e.g.
         ``method="quadratic", order=3``; ``method="log", order=2``) --
         ``mark_smooth``'s own degree-acceptance matrix, see ``order`` above.
@@ -707,6 +714,23 @@ def lmplot(
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
     validate_choice("lmplot", "method", method, _VALID_METHODS)
+
+    # x_bins/x_estimator: `Logistic`/`Glm`/`Robust` expose no binning
+    # parameters at all (`transform_registry` lists none for any of the
+    # three), so there is nothing to forward -- refuse rather than silently
+    # drop, the same "no silent parameter drop" principle `truncate=False`
+    # already enforces two methods of this same trio above. Either kwarg
+    # alone is refused: an `x_estimator=` with no `x_bins=` would otherwise
+    # be a second, quieter no-op with nothing to act on.
+    if method in _DEDICATED_FIT_METHODS and (x_bins is not None or x_estimator is not None):
+        bad = "x_bins" if x_bins is not None else "x_estimator"
+        raise ValueError(
+            f"lmplot(method={method!r}, {bad}=...) is not "
+            f"supported -- the {method!r} transform has no x_bins/x_estimator "
+            "binning parameters to pre-aggregate the fit input. Use a "
+            "mark_smooth-routed method (lm, loess, quadratic, cubic, log, "
+            "sqrt, gam) or leave x_bins=None (the default)."
+        )
 
     data = to_polars(data)
 

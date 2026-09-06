@@ -531,9 +531,9 @@ mod tests {
     /// dispatch sums raw `exp(...)` terms grid-outer/data-inner and
     /// multiplies by `norm` once — floating-point addition isn't
     /// associative, so the two loop orders differ by up to ~41 ULP / 7.0e-15
-    /// relative at n=5000 (measured by the round-1 quality review; see
-    /// `.sdd/task-11-report.md`'s corrected byte-identity note). Nothing
-    /// pinned the ACTUAL post-change values before this test — a re-inlined
+    /// relative at n=5000 (measured directly against this module's own
+    /// `apply()`, not a design estimate). Nothing pinned the ACTUAL
+    /// post-change values before this test — a re-inlined
     /// loop, a wrong normalization constant, or a reordered summation would
     /// all have passed the old `>= 0.0` assertion. These bit patterns are
     /// the adjudicated post-change baseline (dumped from this exact

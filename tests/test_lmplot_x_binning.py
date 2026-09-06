@@ -12,6 +12,13 @@ Two things are pinned per method: that a binned fit is a *different* fit
 aggregate (two estimators over the same bins disagree). Both are compared
 render against render, so a re-drop would fail rather than pass on the
 absence of an assertion.
+
+`Logistic`/`Glm`/`Robust` (the three dedicated fit methods) take no binning
+parameters at all. R2 left `x_bins=`/`x_estimator=` silently dropped for
+those three; R3 replaced the drop with a typed `ValueError`, the same
+"no silent parameter drop" principle `truncate=False` already enforces for
+two of the three. `test_the_dedicated_fit_methods_refuse_binning` pins the
+refusal, not the drop.
 """
 
 from __future__ import annotations
@@ -75,17 +82,28 @@ def test_x_estimator_picks_the_aggregate_for_every_smooth_routed_method(method):
 
 
 @pytest.mark.parametrize("method", _DEDICATED)
-def test_the_dedicated_fit_methods_still_ignore_binning(method):
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"x_bins": 4},
+        {"x_estimator": "mean"},
+        {"x_bins": 4, "x_estimator": "mean"},
+    ],
+    ids=["x_bins", "x_estimator", "both"],
+)
+def test_the_dedicated_fit_methods_refuse_binning(method, kwargs):
     """`Logistic`/`Glm`/`Robust` expose no binning parameters, so `lmplot`
-    has nothing to forward -- documented in its `x_bins` entry. Pinned so the
-    difference between the two families stays deliberate."""
+    has nothing to forward -- refused with a typed, method-naming
+    `ValueError` (R3 close-remediation), the same "no silent parameter
+    drop" principle `truncate=False` already enforces for two of these
+    three methods. Either kwarg alone refuses, since `x_estimator=` with no
+    `x_bins=` would otherwise be a second, quieter no-op."""
     frame = _frame()
     y = "g_int" if method == "logistic" else "y"
     if method == "logistic":
         frame = frame.with_columns((pl.col("x") % 2).alias("g_int"))
-    plain = fm.lmplot(frame, x="x", y=y, method=method).to_svg()
-    binned = fm.lmplot(frame, x="x", y=y, method=method, x_bins=4, x_estimator="mean").to_svg()
-    assert plain == binned
+    with pytest.raises(ValueError, match=method):
+        fm.lmplot(frame, x="x", y=y, method=method, **kwargs)
 
 
 def test_an_unknown_x_estimator_is_refused_by_the_engine():

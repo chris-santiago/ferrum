@@ -1592,10 +1592,13 @@ impl PySmooth {
         // The one tolerance mirrors `degree`'s own: an explicit value that
         // AGREES with the default is a harmless no-op, the same way
         // `method="lm", degree=1` and `method="quadratic", degree=2` are
-        // accepted above. That is what keeps `desugar_smooth`'s unconditional
-        // `bandwidth=bandwidth` forward (`marks/statistical.py`, whose own
-        // default is this same 0.75) working on every method while a real
-        // `mark_smooth(method="lm", bandwidth=0.4)` raises.
+        // accepted above. `desugar_smooth` (`marks/statistical.py`) no longer
+        // needs it -- its own `bandwidth` default moved to `None` and its
+        // forward is conditional on `bandwidth is not None`, so it never
+        // sends an explicit `0.75` in the first place. The tolerance now
+        // matters only to a caller constructing `Smooth(...)` directly with
+        // an explicit `bandwidth=0.75` on a non-loess method; `mark_smooth
+        // (method="lm", bandwidth=0.4)` still raises either way.
         if let Some(b) = bandwidth {
             if !matches!(resolved_method, SmoothMethod::Loess) && b != DEFAULT_LOESS_BANDWIDTH {
                 return Err(PyValueError::new_err(format!(
@@ -3721,9 +3724,12 @@ mod tests {
     }
 
     /// The one tolerance, matching `degree`'s: an explicit value that
-    /// AGREES with the default is a harmless no-op on any method. This is
-    /// what keeps `desugar_smooth`'s unconditional `bandwidth=0.75` forward
-    /// working, and it must construct the identical spec as omitting it.
+    /// AGREES with the default is a harmless no-op on any method. Only a
+    /// direct `Smooth(...)` caller can reach this today -- `desugar_smooth`
+    /// (`marks/statistical.py`) forwards `bandwidth` conditionally
+    /// (`if bandwidth is not None`) since its own default moved to `None` --
+    /// but the invariant must still hold: an explicit default and an omitted
+    /// value construct the identical spec.
     #[test]
     fn test_explicit_default_bandwidth_is_accepted_on_every_method() {
         pyo3::Python::initialize();

@@ -1651,30 +1651,100 @@ fn letter_value_secondary_outputs_match_actual_batches() {
 /// A spec `name` prefixes every secondary key — the declared keys are the
 /// default-construction ones, exactly as declared `outputs` names are the
 /// default-`as_` ones. Pinning the naming rule here is what makes the
-/// "prefix with `{name}_`" sentence in the module doc checkable.
+/// "prefix with `{name}_`" sentence in the module doc checkable, across
+/// EVERY kind with declared `secondary_outputs` (R3 close-remediation: this
+/// used to cover `linkage` only, which is why `qq`'s unprefixed key went
+/// unnoticed against the module doc's universal claim).
 #[test]
 fn a_spec_name_prefixes_every_declared_secondary_key() {
     pyo3::Python::initialize();
-    use crate::transform::linkage::{DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec};
-    let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
-    let spec = TransformSpec::Linkage(LinkageSpec {
-        method: LinkageMethod::Ward,
-        metric: DistanceMetric::Euclidean,
-        axis: LinkageAxis::Rows,
-        z_score: None,
-        standard_scale: None,
-        name: Some("clust".into()),
-    });
-    let primary = spec.apply(&batch).unwrap();
-    let actual: Vec<String> =
-        spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
-    let expected: Vec<String> = entry_for_kind("linkage")
-        .unwrap()
-        .secondary_outputs
-        .iter()
-        .map(|(k, _)| format!("clust_{k}"))
-        .collect();
-    assert_eq!(actual, expected);
+
+    // linkage
+    {
+        use crate::transform::linkage::{DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec};
+        let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
+        let spec = TransformSpec::Linkage(LinkageSpec {
+            method: LinkageMethod::Ward,
+            metric: DistanceMetric::Euclidean,
+            axis: LinkageAxis::Rows,
+            z_score: None,
+            standard_scale: None,
+            name: Some("clust".into()),
+        });
+        let primary = spec.apply(&batch).unwrap();
+        let actual: Vec<String> = spec
+            .secondary_outputs(&batch, &primary)
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let expected: Vec<String> = entry_for_kind("linkage")
+            .unwrap()
+            .secondary_outputs
+            .iter()
+            .map(|(k, _)| format!("clust_{k}"))
+            .collect();
+        assert_eq!(actual, expected, "linkage");
+    }
+
+    // qq
+    {
+        use crate::transform::qq::QQSpec;
+        let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
+        let spec = TransformSpec::Qq(QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: true,
+            seed: 0,
+            name: Some("qq".into()),
+        });
+        let primary = spec.apply(&batch).unwrap();
+        let actual: Vec<String> = spec
+            .secondary_outputs(&batch, &primary)
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let expected: Vec<String> = entry_for_kind("qq")
+            .unwrap()
+            .secondary_outputs
+            .iter()
+            .map(|(k, _)| format!("qq_{k}"))
+            .collect();
+        assert_eq!(actual, expected, "qq");
+    }
+
+    // letter_value
+    {
+        use crate::transform::letter_value::{KDepth, LetterValueSpec};
+        let batch = value_group_batch(
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &["a", "a", "a", "a", "a", "a", "a", "a"],
+        );
+        let spec = TransformSpec::LetterValue(LetterValueSpec {
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: Some("lv".into()),
+            sort: None,
+        });
+        let primary = spec.apply(&batch).unwrap();
+        let actual: Vec<String> = spec
+            .secondary_outputs(&batch, &primary)
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let expected: Vec<String> = entry_for_kind("letter_value")
+            .unwrap()
+            .secondary_outputs
+            .iter()
+            .map(|(k, _)| format!("lv_{k}"))
+            .collect();
+        assert_eq!(actual, expected, "letter_value");
+    }
 }
 
 #[test]
