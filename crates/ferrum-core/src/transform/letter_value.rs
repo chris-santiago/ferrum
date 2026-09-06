@@ -10,9 +10,12 @@
 //! `[group: Utf8|Null, depth: Int32, lower: Float64, upper: Float64, level: Utf8]`
 //!
 //! Secondary named outputs:
-//! - `outliers` (or `<name>_outliers`): `[group: Utf8|Null, value: Float64, is_outlier: Bool]`
-//! - `depth_1`..`depth_8` (or `<name>_depth_K`): `[group, lower, upper, level]` rows
-//!   filtered to that depth. When the actual K < 8, the unused outputs are emitted
+//! - `outliers` (or `<name>_outliers`): `[group: Utf8|Null, value: Float64, is_outlier: Bool]`,
+//!   filtered to rows where the input value falls outside the outermost letter-value
+//!   fence (the flag is therefore always `true` on emitted rows — it survives in the
+//!   schema for wire-compatibility with the pre-filter contract).
+//! - `depth_1`..`depth_12` (or `<name>_depth_K`): `[group, lower, upper, level]` rows
+//!   filtered to that depth. When the actual K < 12, the unused outputs are emitted
 //!   as zero-row batches so downstream renderers can safely consume them.
 
 use arrow::array::{
@@ -26,10 +29,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Maximum depth for per-depth named outputs.
-pub(crate) const K_MAX_NAMED: usize = 8;
+pub(crate) const K_MAX_NAMED: usize = 12;
 
-/// Letter labels by depth. depth 1 → "M" (median), 2 → "F" (fourths), etc.
-const LETTERS: [&str; 8] = ["M", "F", "E", "D", "C", "B", "A", "Z"];
+/// Letter labels by depth. depth 1 → "M" (median), 2 → "F" (fourths), ...,
+/// 8 → "Z", then the conventional Tukey letter-value continuation past Z:
+/// 9 → "Y", 10 → "X", 11 → "W", 12 → "V". Sized to `K_MAX_NAMED` so every
+/// depth the transform can emit gets a real letter — no depth ever falls
+/// back to the generic `depth_N` spelling on a user-facing axis.
+const LETTERS: [&str; K_MAX_NAMED] =
+    ["M", "F", "E", "D", "C", "B", "A", "Z", "Y", "X", "W", "V"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -263,6 +271,11 @@ fn compute_depths(spec: &LetterValueSpec, pairs: &[(Option<String>, f64)]) -> Ve
             let p = 0.5_f64.powi(depth as i32);
             let lower = quantile_sorted(vs, p);
             let upper = quantile_sorted(vs, 1.0 - p);
+            // `k` is clamped to `K_MAX_NAMED` (== `LETTERS.len()`) by
+            // `k_for_depth`, so `depth` can never exceed `LETTERS.len()` here;
+            // the `depth_{depth}` fallback is defensive only — kept so a
+            // future divergence between the two constants degrades to a
+            // readable label instead of an out-of-bounds panic.
             let letter = if depth >= 1 && depth <= LETTERS.len() {
                 LETTERS[depth - 1].to_string()
             } else {
@@ -333,7 +346,7 @@ pub(crate) fn depth_key(k: usize) -> String {
     format!("depth_{k}")
 }
 
-/// Compute the secondary named outputs: outliers + depth_1..depth_8.
+/// Compute the secondary named outputs: outliers + depth_1..depth_12.
 pub(crate) fn secondary_outputs(
     spec: &LetterValueSpec,
     input_batch: &RecordBatch,
@@ -364,10 +377,14 @@ pub(crate) fn secondary_outputs(
     // ---- outliers output ----
     // For each non-null input row: classify as outlier if value falls outside
     //   [lower_K - threshold*(upper_K - lower_K), upper_K + threshold*(upper_K - lower_K)].
+    // Only rows that ARE outliers are emitted (schema unchanged: `is_outlier`
+    // survives as a column but is always `true` on the rows that reach it) —
+    // the batch is a filtered outlier list, not a flagged copy of every input
+    // row, so a boxen chart's outlier layer draws only the points it names.
     let input_pairs = extract_values(spec, input_batch)?;
-    let mut o_groups: Vec<Option<String>> = Vec::with_capacity(input_pairs.len());
-    let mut o_vals: Vec<f64> = Vec::with_capacity(input_pairs.len());
-    let mut o_flags: Vec<bool> = Vec::with_capacity(input_pairs.len());
+    let mut o_groups: Vec<Option<String>> = Vec::new();
+    let mut o_vals: Vec<f64> = Vec::new();
+    let mut o_flags: Vec<bool> = Vec::new();
     for (g, v) in &input_pairs {
         let (lo, hi) = match tail.get(g) {
             Some((_, lo, hi)) => (*lo, *hi),
@@ -377,6 +394,9 @@ pub(crate) fn secondary_outputs(
         let low_fence = lo - spec.outlier_threshold * span;
         let high_fence = hi + spec.outlier_threshold * span;
         let is_outlier = !lo.is_nan() && !hi.is_nan() && (*v < low_fence || *v > high_fence);
+        if !is_outlier {
+            continue;
+        }
         o_groups.push(g.clone());
         o_vals.push(*v);
         o_flags.push(is_outlier);
@@ -396,7 +416,7 @@ pub(crate) fn secondary_outputs(
         ],
     ).map_err(|e| PyValueError::new_err(format!("stat_letter_value outliers: {e}")))?;
 
-    // ---- per-depth outputs (depth_1..depth_8) ----
+    // ---- per-depth outputs (depth_1..depth_12) ----
     // Each depth_K output is the primary rows filtered to depth==K, projecting only
     // [group, lower, upper, level] (no depth column — implicit in the output name).
     let depth_schema = Arc::new(Schema::new(
@@ -795,7 +815,46 @@ mod tests {
     }
 
     #[test]
-    fn test_letter_value_named_outputs_count_eight() {
+    fn test_letter_value_outliers_batch_contains_only_true_flags() {
+        // Regression for F-L03-02: the outliers batch must be a FILTERED list
+        // of outlier rows, not every input row with a flag column. n=50
+        // in-range values + 2 extremes ⇒ exactly 2 rows survive, and every
+        // surviving row's flag is true (there is no false-flag row left to
+        // find).
+        let mut vs: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        vs.push(-1000.0);
+        vs.push(1000.0);
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
+        assert_eq!(
+            outliers.1.num_rows(),
+            2,
+            "outliers batch must contain only the 2 rows that are actually outliers, not all 52 input rows"
+        );
+        let flag_col = outliers.1.column(2).as_any().downcast_ref::<BooleanArray>().unwrap();
+        for i in 0..outliers.1.num_rows() {
+            assert!(flag_col.value(i), "every surviving row must be flagged true");
+        }
+    }
+
+    #[test]
+    fn test_letter_value_named_outputs_count_twelve() {
+        // Structural check: one secondary output per declared key
+        // (outliers + depth_1..depth_K_MAX_NAMED). The behavioral pin that
+        // K_MAX_NAMED is actually 12 — i.e. that the raised cap lets
+        // `k_for_depth` produce depths beyond the old 8 — lives in
+        // `test_letter_value_k_for_depth_tukey_uses_raised_cap_at_n8192` and
+        // `test_letter_value_tukey_n8192_reaches_depth_9_with_continuation_letter`
+        // below; this test only pins that every declared key is published.
         let vs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let batch = batch1col("x", vs);
         let spec = LetterValueSpec {
@@ -807,11 +866,73 @@ mod tests {
         };
         let primary = apply(&spec, &batch).unwrap();
         let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
-        assert_eq!(secs.len(), 9);
+        assert_eq!(secs.len(), K_MAX_NAMED + 1, "expected outliers + depth_1..depth_{K_MAX_NAMED}");
         for k in 1..=K_MAX_NAMED {
             let key = format!("depth_{k}");
             assert!(secs.iter().any(|(name, _)| name == &key), "missing {key}");
         }
+    }
+
+    #[test]
+    fn test_letter_value_k_for_depth_tukey_uses_raised_cap_at_n8192() {
+        // Regression for F-L03-11: at n=8192, Tukey's raw depth is
+        // floor(log2(8192)) - 3 = 13 - 3 = 10, which is inert under the old
+        // K_MAX_NAMED=8 clamp (k_for_depth would return 8). The raised cap
+        // (12) lets the real depth through unclamped.
+        assert_eq!(k_for_depth(&KDepth::Tukey, 8192), 10);
+    }
+
+    #[test]
+    fn test_letter_value_tukey_n8192_reaches_depth_9_with_continuation_letter() {
+        // Companion to the k_for_depth pin above: proves the raised cap
+        // carries actual ROWS through `secondary_outputs`, not just keys.
+        // At n=8192 (k=10), depth_9 must be a non-empty band (it was
+        // unreachable — the key didn't even exist — under the old K_MAX_NAMED=8
+        // cap) while depth_12 (> k=10) stays a published-but-empty band, and
+        // depth_9's `level` must use the real Tukey continuation letter "Y"
+        // rather than the generic `depth_9` fallback spelling.
+        let vs: Vec<f64> = (0..8192).map(|i| i as f64).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+
+        let depth_9 = secs.iter().find(|(k, _)| k == "depth_9")
+            .unwrap_or_else(|| panic!("depth_9 output missing — K_MAX_NAMED not raised"));
+        assert_eq!(depth_9.1.num_rows(), 1, "depth_9 must carry the row a k=10 group actually produces");
+        let level_col = depth_9.1.column(3).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(level_col.value(0), "Y", "depth_9's level must be the Tukey continuation letter, not a 'depth_9' fallback spelling");
+
+        let depth_12 = secs.iter().find(|(k, _)| k == "depth_12")
+            .unwrap_or_else(|| panic!("depth_12 output missing — K_MAX_NAMED not raised to 12"));
+        assert_eq!(depth_12.1.num_rows(), 0, "depth_12 exceeds this group's actual depth (10) and must stay a published-but-empty band");
+    }
+
+    #[test]
+    fn test_letter_value_outliers_zero_when_no_outliers() {
+        // Edge case from the spec's acceptance criteria ("boxen with zero
+        // outliers"): every value sits well within the outermost letter-value
+        // fence, so the filtered outliers batch must be zero rows, not a
+        // batch of all-false-flag rows.
+        let vs: Vec<f64> = (1..=100).map(|i| i as f64).collect();
+        let batch = batch1col("x", vs);
+        let spec = LetterValueSpec {
+            value: "x".into(), group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let primary = apply(&spec, &batch).unwrap();
+        let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let outliers = secs.iter().find(|(k, _)| k == "outliers").unwrap();
+        assert_eq!(outliers.1.num_rows(), 0, "no input value falls outside the fence; the batch must be empty");
     }
 
     #[test]
