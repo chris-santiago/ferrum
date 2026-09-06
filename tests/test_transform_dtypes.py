@@ -429,6 +429,132 @@ def test_transform_flatten_carried_column_keeps_its_values():
         assert f">{name}<" in svg, f"carried column lost {name}"
 
 
+def test_transform_flatten_mark_text_emits_real_string_labels():
+    """F-L05-05: ``mark_text`` on a flattened list-of-strings column.
+
+    ``data_flatten`` extracts list elements via ``arrow::compute::take``,
+    which preserves the source element dtype exactly (see
+    ``FlattenSource::flatten``'s doc). polars hands Rust
+    ``LargeList(LargeUtf8)``, so the flattened ``tags`` column materializes as
+    ``LargeUtf8`` — a dtype that never passed through
+    ``prepare::normalize_string_views``'s once-only pre-pipeline pass, since
+    that pass runs on the raw input batch, before ``data_flatten`` exists.
+
+    Every render-layer string reader downstream is documented to assume
+    Utf8-only input as a result (see ``col_as_str``'s doc:
+    "Strings should already have been normalized to Utf8 by
+    prepare::normalize_string_views upstream"). Scale/axis consumers read
+    string columns through ``col_as_ordinal_category_str`` /
+    ``distinct_values_in_order``, which accept ``LargeUtf8`` too — so
+    ``mark_bar``/``mark_point`` on ``x='tags:N'`` show every flattened value.
+    ``mark_text``'s explicit ``text=`` channel reads through ``col_as_str``
+    instead, which rejects any non-Utf8 dtype outright and silently drops
+    every row (``.ok()`` swallows the error), so before the fix ZERO of the
+    four tag values ever reached a ``Text`` scene node.
+    """
+    dfl = pl.DataFrame(
+        {
+            "person": ["Alice", "Bob"],
+            "tags": [["python", "rust"], ["go", "python", "java"]],
+        }
+    )
+    svg = (
+        fm.Chart(dfl)
+        .transform(fm.transform_flatten(["tags"]))
+        .mark_text()
+        .encode(x="person", y="person", text="tags")
+        .to_svg()
+    )
+    labels = set(re.findall(r">(python|rust|go|java)<", svg))
+    assert labels == {"python", "rust", "go", "java"}, (
+        f"mark_text must emit all four flattened tag labels; got {labels}"
+    )
+
+
+def test_transform_flatten_then_aggregate_groupby_mark_text_emits_labels():
+    """Sibling of the mark_text repro: a downstream groupby over flattened output.
+
+    ``group_key::materialize_groupby_col`` echoes a ``LargeUtf8`` groupby
+    column's dtype exactly when reconstructing it for
+    ``aggregate``/``summary``/``box_stats``/``violin`` output. Grouping
+    ``transform_aggregate`` by the ``tags`` column ``transform_flatten`` just
+    emitted (``LargeUtf8``, per the sibling test above) reproduces the same
+    dtype-escape one layer downstream, reachable only through the composition
+    of two transforms rather than one.
+
+    ``x``/``y`` are encoded from the aggregate's quantitative ``m`` column
+    (not ``tags``) so the axis cannot leak the group labels as tick text —
+    an earlier draft of this test encoded ``x="tags:N"``, whose axis ticks
+    read through ``col_as_ordinal_category_str`` (which accepts LargeUtf8)
+    and rendered the labels regardless of whether ``mark_text`` itself
+    worked, passing vacuously even with the fix reverted.
+    """
+    dfl = pl.DataFrame(
+        {
+            "tags": [["python", "rust"], ["go", "python"]],
+            "v": [1.0, 2.0],
+        }
+    )
+    svg = (
+        fm.Chart(dfl)
+        .transform(fm.transform_flatten(["tags"]))
+        .transform(
+            fm.transform_aggregate({"field": "v", "fn": "mean", "as": "m"}, groupby=["tags"])
+        )
+        .mark_text()
+        .encode(x="m:Q", y="m:Q", text="tags")
+        .to_svg()
+    )
+    labels = set(re.findall(r">(python|rust|go)<", svg))
+    assert labels == {"python", "rust", "go"}, (
+        f"mark_text must emit every aggregated group's label; got {labels}"
+    )
+
+
+def test_transform_flatten_mark_text_faceted_emits_real_string_labels():
+    """F-L05-05: ``mark_text`` on a flattened list-of-strings column with faceting.
+
+    The fix adds a normalization pass at the faceted branch of
+    ``run_transforms_with_facet`` (the facet-branch exit of ``run_transforms_with_facet``), but that code path is only
+    exercised when ``.facet()`` is applied. This test pins the faceted exit by
+    routing a flattened list-of-strings column through the facet pipeline:
+    ``transform_flatten`` → ``.facet(col="grp", ncols=2)`` → ``mark_text``.
+
+    The faceted branch partitions the normalized input batch per grouping value,
+    runs transforms on each partition independently, then concatenates the
+    per-panel transform outputs. When a transform (like ``data_flatten``)
+    materializes a non-Utf8 string column, that column emerges from the
+    partition-specific pipeline in the same dtype, and the concatenation
+    preserves it. Without the normalization wrap at the facet-branch exit of ``run_transforms_with_facet``, those
+    concatenated outputs skip the re-normalization step that the unfaceted
+    branch applies, leaving downstream readers (``col_as_str`` in ``mark_text``)
+    to silently drop every row with a non-Utf8 string value.
+
+    Using ``.facet(col="grp", ncols=2)`` on the grouping column ensures the
+    faceted code path activates; the exact labels extracted are distinct across
+    the two panels so a regression (silent drop) is unambiguous.
+    """
+    dfl = pl.DataFrame(
+        {
+            "grp": ["A", "A", "B", "B"],
+            "y": [1.0, 2.0, 3.0, 4.0],
+            "tags": [["alice", "bob"], ["charlie"], ["diana"], ["eve", "frank"]],
+        }
+    )
+    svg = (
+        fm.Chart(dfl)
+        .transform(fm.transform_flatten(["tags"]))
+        .mark_text()
+        .encode(x="grp:N", y="y:Q", text="tags")
+        .facet(col="grp", ncols=2)
+        .to_svg()
+    )
+    labels = set(re.findall(r">(alice|bob|charlie|diana|eve|frank)<", svg))
+    assert labels == {"alice", "bob", "charlie", "diana", "eve", "frank"}, (
+        f"mark_text must emit all six flattened labels across faceted panels; got {labels}"
+    )
+
+
 def test_transform_flatten_unsupported_element_dtype_raises():
     """A list of an unflattenable element dtype names the dtype instead of nulling."""
     df = pl.DataFrame({"person": ["Alice"], "flags": [[True, False]]})

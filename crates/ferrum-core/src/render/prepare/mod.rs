@@ -289,6 +289,42 @@ fn normalize_string_views(batch: &RecordBatch) -> RecordBatch {
         .expect("normalized batch must construct: same row count + matched dtypes")
 }
 
+/// Re-apply the Utf8 string-normalization invariant to every named transform
+/// output.
+///
+/// `normalize_string_views` (above) runs once on the raw input batch, before
+/// the transform pipeline, and every render-layer string reader downstream
+/// (`col_as_str`, the mark builders) is documented to assume Utf8-only input
+/// as a result. But a transform can MATERIALIZE a new string column — not
+/// merely carry one through — at a dtype other than Utf8: `data_flatten`
+/// extracts list elements via `arrow::compute::take`, which preserves the
+/// source element dtype exactly, so flattening a polars `LargeList<LargeUtf8>`
+/// column (F-L05-05) emits a `LargeUtf8` column that never passed through the
+/// pre-pipeline normalization pass. `group_key::materialize_groupby_col`
+/// echoes a `LargeUtf8` groupby column's dtype the same way when
+/// reconstructing it for `aggregate`/`summary`/`box_stats`/`violin`/etc.
+/// output — reachable whenever one of those transforms groups by a column a
+/// prior transform (e.g. `data_flatten`) introduced. `mark_text`'s `text`
+/// channel reader (`col_as_str`) rejects any non-Utf8 dtype outright, so
+/// either gap silently dropped every row instead of rendering a label.
+///
+/// `run_transforms_with_facet` is the sole production call site: every output
+/// it returns — the unfaceted pipeline's map and the faceted (partition →
+/// per-panel transforms → concat) map alike — passes through here before
+/// `prepare_render_inputs` hands batches to scale resolution and the mark
+/// builders. Re-normalizing every entry here, rather than teaching each
+/// transform to normalize its own output, closes the gap for every current
+/// and future transform that materializes string data, not just the two
+/// found live.
+fn normalize_transform_outputs(
+    outputs: HashMap<String, RecordBatch>,
+) -> HashMap<String, RecordBatch> {
+    outputs
+        .into_iter()
+        .map(|(key, batch)| (key, normalize_string_views(&batch)))
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct PreparedInputs {
     /// All chart-level transform outputs, keyed by their `name` (when present)
@@ -925,7 +961,7 @@ fn run_transforms_with_facet(
         let mut outputs = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         apply_impute_to_final(&mut outputs, spec);
-        return Ok(outputs);
+        return Ok(normalize_transform_outputs(outputs));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1025,7 +1061,7 @@ fn run_transforms_with_facet(
             combined.insert(key, merged_batch);
         }
     }
-    Ok(combined)
+    Ok(normalize_transform_outputs(combined))
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output
