@@ -2038,14 +2038,17 @@ maps to `Shape` for `kind="scatter"` or `StrokeDash` for `kind="line"`.
 
 ```
 ferrum.lmplot(data, *, x, y, hue=None, col=None, row=None,
-              method="lm",           # "lm" | "logistic" | "glm" | "loess" | "robust"
-              ci=95, order=1, scatter=True, scatter_kws=None, line_kws=None,
-              truncate=False, x_bins=None, x_estimator=None, x_jitter=None,
-              logx=False, theme=None)
+              method="lm",           # "lm" | "loess" | "quadratic" | "cubic" | "log" | "sqrt" | "gam" | "logistic" | "glm" | "robust" (smooth-family names derive live from the registry, 2026-09-05 batch D; "glm" maps to the dedicated Glm transform; mark_smooth's alias spellings are not accepted here)
+              ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,   # order=None = the method's own default degree; an explicit order forwards into the method's degree-acceptance matrix (2026-09-05, batch D; previously order=1 and silently absorbed)
+              truncate=True, x_bins=None, x_estimator=None, x_jitter=None,
+              logx=False, show_metrics=True, theme=None)
+# 2026-09-05 (batch D): this block previously mis-documented truncate=False (the
+# shipped default has been True since the function landed) and omitted
+# show_metrics= — both corrected above to the live signature.
 
 ferrum.regplot(data, *, x, y, hue=None,
                method="lm",          # same as lmplot
-               ci=95, order=1, scatter=True, scatter_kws=None, line_kws=None,
+               ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,   # order=None = the method's own default degree; an explicit order forwards into the method's degree-acceptance matrix (2026-09-05, batch D; previously order=1 and silently absorbed)
                truncate=True, x_jitter=None, theme=None)
 
 ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
