@@ -28,6 +28,81 @@ pub(crate) enum AggFn {
     Distinct,
 }
 
+impl AggFn {
+    /// Every `AggFn` variant, in declaration order. Paired with
+    /// [`AggFn::as_str`], this is the ONE list [`AggFn::all`]/[`AggFn::parse`]
+    /// both derive from — replacing what were three independently
+    /// hand-maintained spellings (a bare string array, a separate
+    /// `&str -> AggFn` match, and the derived
+    /// `#[serde(rename_all = "lowercase")]`). `as_str`'s match has NO
+    /// wildcard arm, so the crate fails to COMPILE — not just fails a test —
+    /// if a variant is added without a matching arm there;
+    /// `agg_fn_all_fns_round_trips_through_parse_and_serde` (tests below)
+    /// additionally proves every entry here round-trips through both `parse`
+    /// and real JSON (de)serialization, so this list, `as_str`, and serde's
+    /// derived spelling cannot silently disagree. Stable Rust has no
+    /// derive-free way to prove `ALL_FNS` itself lists every `AggFn` variant
+    /// (that would need a crate like `strum`, out of scope for one private
+    /// vocabulary); `as_str`'s compiler-enforced exhaustiveness is the
+    /// strongest guard available without adding one.
+    const ALL_FNS: &'static [AggFn] = &[
+        AggFn::Mean,
+        AggFn::Sum,
+        AggFn::Count,
+        AggFn::Min,
+        AggFn::Max,
+        AggFn::Median,
+        AggFn::Variance,
+        AggFn::Stdev,
+        AggFn::Q1,
+        AggFn::Q3,
+        AggFn::Distinct,
+    ];
+
+    /// The canonical string for one variant. Exhaustive — no wildcard arm —
+    /// so adding an `AggFn` variant without adding it here fails to compile.
+    fn as_str(self) -> &'static str {
+        match self {
+            AggFn::Mean => "mean",
+            AggFn::Sum => "sum",
+            AggFn::Count => "count",
+            AggFn::Min => "min",
+            AggFn::Max => "max",
+            AggFn::Median => "median",
+            AggFn::Variance => "variance",
+            AggFn::Stdev => "stdev",
+            AggFn::Q1 => "q1",
+            AggFn::Q3 => "q3",
+            AggFn::Distinct => "distinct",
+        }
+    }
+
+    /// The canonical (non-aliased) string vocabulary for `AggFn`, derived
+    /// from [`AggFn::ALL_FNS`]/[`AggFn::as_str`] rather than a second
+    /// hand-typed list. Read by BOTH `PyAggregateOp::new`'s parser and
+    /// `Bin`'s optional `agg` parameter (batch-E T7's per-bin aggregation),
+    /// so the accepted set cannot drift between the two call sites the way
+    /// `raster`/`hex`'s `AGGREGATES` consts prevent drift for their own
+    /// vocabularies. PyO3-only aliases (`"var"` for `variance`) are resolved
+    /// by each caller-facing parser itself, not part of this canonical list.
+    pub(crate) fn all() -> Vec<&'static str> {
+        Self::ALL_FNS.iter().map(|f| f.as_str()).collect()
+    }
+
+    /// Parse one of [`AggFn::all`]'s canonical names. Returns `None` for
+    /// anything outside that set, including aliases.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        Self::ALL_FNS.iter().copied().find(|f| f.as_str() == s)
+    }
+
+    /// The `|`-joined rendering of [`AggFn::all`] used by every refusal
+    /// message built from it, so the accepted set and the error text can
+    /// never drift apart.
+    pub(crate) fn accepted_values() -> String {
+        Self::all().join("|")
+    }
+}
+
 /// An aggregate op's source column, resolved once per batch.
 ///
 /// Batch-D dtype policy (spec §4.1): a numeric op accepts every integer /
@@ -331,21 +406,16 @@ impl PyAggregateOp {
         if as_.is_empty() {
             return Err(PyValueError::new_err("AggregateOp: as_ must be non-empty"));
         }
-        let parsed = match fn_ {
-            "mean"     => AggFn::Mean,
-            "sum"      => AggFn::Sum,
-            "count"    => AggFn::Count,
-            "min"      => AggFn::Min,
-            "max"      => AggFn::Max,
-            "median"   => AggFn::Median,
-            "variance" | "var"   => AggFn::Variance,
-            "stdev"    => AggFn::Stdev,
-            "q1"       => AggFn::Q1,
-            "q3"       => AggFn::Q3,
-            "distinct" => AggFn::Distinct,
-            other => return Err(PyValueError::new_err(format!(
-                "AggregateOp: unknown fn '{other}'; expected \
-                 mean|sum|count|min|max|median|variance|stdev|q1|q3|distinct"
+        // `AggFn::parse` covers every canonical name; `"var"` is the one
+        // PyO3-only alias this constructor still resolves itself.
+        let parsed = match AggFn::parse(fn_).or(match fn_ {
+            "var" => Some(AggFn::Variance),
+            _ => None,
+        }) {
+            Some(f) => f,
+            None => return Err(PyValueError::new_err(format!(
+                "AggregateOp: unknown fn '{fn_}'; expected {}",
+                AggFn::accepted_values()
             ))),
         };
         // count() with empty field is the `count():Q` shorthand — allowed.
@@ -820,6 +890,41 @@ mod tests {
             });
             assert_eq!(parsed.fn_, fn_, "fn '{}' should round-trip to {:?}", canonical_name, fn_);
         }
+    }
+
+    // ── AggFn vocabulary exhaustiveness (cycle-2 review) ─────────────────────
+
+    /// Cross-checks the three `AggFn` spellings (`ALL_FNS`/`as_str`,
+    /// `parse`, and the derived `#[serde(rename_all = "lowercase")]`)
+    /// against each other for every entry in `ALL_FNS`. `as_str`'s own
+    /// match is exhaustive (no wildcard arm), so a variant missing an
+    /// `as_str` arm fails to COMPILE; this test is what proves `parse` and
+    /// serde's derived spelling cannot silently disagree with `as_str` for
+    /// any variant that IS listed in `ALL_FNS`. (Stable Rust has no
+    /// derive-free way to prove `ALL_FNS` itself lists every `AggFn`
+    /// variant without a crate like `strum` — out of scope for one private
+    /// vocabulary; `as_str`'s compiler-enforced exhaustiveness is the
+    /// strongest guard available without adding one, and is why a future
+    /// variant addition cannot leave `as_str` silently stale even though
+    /// `ALL_FNS` itself is still a hand-maintained list.)
+    #[test]
+    fn agg_fn_all_fns_round_trips_through_parse_and_serde() {
+        for &f in AggFn::ALL_FNS {
+            let canonical = f.as_str();
+            assert_eq!(
+                AggFn::parse(canonical), Some(f),
+                "{f:?}'s as_str() ('{canonical}') does not round-trip through AggFn::parse"
+            );
+            let json = serde_json::to_string(&f).unwrap();
+            assert_eq!(
+                json, format!("\"{canonical}\""),
+                "{f:?}'s serde spelling drifted from as_str()"
+            );
+        }
+        assert_eq!(
+            AggFn::all().len(), AggFn::ALL_FNS.len(),
+            "AggFn::all() must have exactly one entry per ALL_FNS entry"
+        );
     }
 
     // ── FA-3: integer groupby columns ─────────────────────────────────────────

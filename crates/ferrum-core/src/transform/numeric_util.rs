@@ -167,7 +167,19 @@ pub(crate) fn clean_float64_values(
     arr: &Float64Array,
     only_indices: Option<&[usize]>,
 ) -> Vec<f64> {
-    let push = |i: usize, out: &mut Vec<f64>| {
+    clean_float64_values_indexed(arr, only_indices).0
+}
+
+/// Like [`clean_float64_values`], but also returns the ORIGINAL row index of
+/// each surviving value, in the same order. Used where a caller needs to look
+/// up other columns for exactly the rows that survived a null/NaN filter —
+/// e.g. `Bin`'s optional per-bin aggregate (batch-E T7), which must aggregate
+/// `agg_field` over precisely the rows counted in each bin.
+pub(crate) fn clean_float64_values_indexed(
+    arr: &Float64Array,
+    only_indices: Option<&[usize]>,
+) -> (Vec<f64>, Vec<usize>) {
+    let push = |i: usize, vals: &mut Vec<f64>, idxs: &mut Vec<usize>| {
         if arr.is_null(i) {
             return;
         }
@@ -175,23 +187,26 @@ pub(crate) fn clean_float64_values(
         if v.is_nan() {
             return;
         }
-        out.push(v);
+        vals.push(v);
+        idxs.push(i);
     };
 
     match only_indices {
         Some(ixs) => {
-            let mut out = Vec::with_capacity(ixs.len());
+            let mut vals = Vec::with_capacity(ixs.len());
+            let mut idxs = Vec::with_capacity(ixs.len());
             for &i in ixs {
-                push(i, &mut out);
+                push(i, &mut vals, &mut idxs);
             }
-            out
+            (vals, idxs)
         }
         None => {
-            let mut out = Vec::with_capacity(arr.len());
+            let mut vals = Vec::with_capacity(arr.len());
+            let mut idxs = Vec::with_capacity(arr.len());
             for i in 0..arr.len() {
-                push(i, &mut out);
+                push(i, &mut vals, &mut idxs);
             }
-            out
+            (vals, idxs)
         }
     }
 }
@@ -353,6 +368,32 @@ mod tests {
         ]);
         let result = clean_float64_values(&arr, Some(&[0, 2, 4]));
         assert_eq!(result, vec![10.0, 30.0, 50.0]);
+    }
+
+    // ---------- clean_float64_values_indexed ----------
+
+    #[test]
+    fn clean_indexed_returns_original_row_indices() {
+        let arr = arr_from_options(vec![Some(10.0), None, Some(f64::NAN), Some(40.0)]);
+        let (vals, idxs) = clean_float64_values_indexed(&arr, None);
+        assert_eq!(vals, vec![10.0, 40.0]);
+        assert_eq!(idxs, vec![0, 3], "surviving values must carry their ORIGINAL row index");
+    }
+
+    #[test]
+    fn clean_indexed_only_indices_subset_preserves_original_indices() {
+        let arr = arr_from_options(vec![Some(1.0), Some(f64::NAN), Some(3.0), None, Some(5.0)]);
+        let (vals, idxs) = clean_float64_values_indexed(&arr, Some(&[0, 1, 2, 3, 4]));
+        assert_eq!(vals, vec![1.0, 3.0, 5.0]);
+        assert_eq!(idxs, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn clean_indexed_values_match_clean_float64_values() {
+        // clean_float64_values must stay byte-identical (it now delegates to
+        // clean_float64_values_indexed and drops the index half).
+        let arr = arr_from_options(vec![Some(1.0), None, Some(f64::NAN), Some(3.0)]);
+        assert_eq!(clean_float64_values(&arr, None), clean_float64_values_indexed(&arr, None).0);
     }
 
     #[test]

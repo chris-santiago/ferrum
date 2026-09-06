@@ -450,6 +450,8 @@ class Bin:
         cumulative: bool = False,
         shared_extent: bool = False,
         groupby: Optional[Union[str, List[str]]] = None,
+        agg_field: Optional[str] = None,
+        agg: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

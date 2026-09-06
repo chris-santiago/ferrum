@@ -199,11 +199,52 @@ fn bin_outputs_match_actual_schema() {
         cumulative: false,
         shared_extent: false,
         groupby: vec![],
+        agg_field: None,
+        agg: None,
         name: None,
     };
     let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
     let out = crate::transform::bin::apply(&spec, &batch).unwrap();
-    assert_schema_matches(out.schema().as_ref(), &entry_for_kind("bin").unwrap().outputs, &[], "bin");
+    // batch-E T7 (cycle-2 correction): the registry declares `agg_value`
+    // unconditionally (spec §6.5), but it is only PRESENT at apply-time when
+    // `agg` is set — this default (no-agg) fixture excludes it from the
+    // expected set rather than the with-agg fixture below synthesizing it,
+    // mirroring `assert_schema_matches`'s equality (not subset) check.
+    let expected: Vec<(&'static str, DataType)> = entry_for_kind("bin")
+        .unwrap()
+        .outputs
+        .into_iter()
+        .filter(|(name, _)| *name != "agg_value")
+        .collect();
+    assert_schema_matches(out.schema().as_ref(), &expected, &[], "bin");
+}
+
+/// batch-E T7's WITH-agg shape: `agg_field`/`agg` set real-applies to the
+/// registry's declared `outputs` EXACTLY (which now includes `agg_value`
+/// unconditionally, spec §6.5) — so `registry_output_columns("bin",
+/// ["agg_value"])` has a real, checked name to resolve for T12's lowering,
+/// and this test is the second half of the "both shapes drift-guarded"
+/// requirement alongside the no-agg fixture above.
+#[test]
+fn bin_outputs_match_actual_schema_with_agg() {
+    pyo3::Python::initialize();
+    use crate::transform::bin::BinSpec;
+    use crate::transform::bin_mode::BinMode;
+    let spec = BinSpec {
+        field: "v".into(),
+        mode: BinMode::Fixed { n: 4 },
+        extent: None,
+        nice: false,
+        cumulative: false,
+        shared_extent: false,
+        groupby: vec![],
+        agg_field: Some("w".into()),
+        agg: Some("mean".into()),
+        name: None,
+    };
+    let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0]), ("w", &[10.0, 20.0, 30.0, 40.0, 50.0])]);
+    let out = crate::transform::bin::apply(&spec, &batch).unwrap();
+    assert_schema_matches(out.schema().as_ref(), &entry_for_kind("bin").unwrap().outputs, &[], "bin (with agg)");
 }
 
 #[test]
@@ -789,7 +830,8 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
     vec![
         ("bin", Bin(BinSpec {
             field: "v".into(), mode: BinMode::Fixed { n: 4 }, extent: None, nice: false,
-            cumulative: false, shared_extent: false, groupby: vec![], name: None,
+            cumulative: false, shared_extent: false, groupby: vec![],
+            agg_field: None, agg: None, name: None,
         })),
         ("bin_2d", Bin2D(Bin2DSpec {
             x: "x".into(), y: "y".into(), bins_x: BinMode::Fixed { n: 3 },
@@ -1079,6 +1121,29 @@ fn params_match_spec_struct_serde_fields() {
 // the real parser without a matching registry entry (or vice versa) fails
 // here instead of leaving Python's derived validator silently stale.
 
+/// batch-E T7: `Bin`'s optional `agg` names one of `AggFn::all()` — the same
+/// vocabulary `Aggregate` accepts — refused hard at `PyBin::new`. `agg_field`
+/// must accompany `agg` (any bound column name works; the constructor never
+/// touches data).
+#[test]
+fn bin_agg_methods_accepted_and_bogus_agg_rejected() {
+    attach(|py| {
+        let ty = py.get_type::<crate::transform::bin::PyBin>();
+        for &agg in &entry_for_kind("bin").unwrap().methods {
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("agg_field", "v").unwrap();
+            kwargs.set_item("agg", agg).unwrap();
+            let res = ty.call(("v",), Some(&kwargs));
+            assert!(res.is_ok(), "declared bin agg '{agg}' rejected by Bin(): {:?}", res.err());
+        }
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("agg_field", "v").unwrap();
+        kwargs.set_item("agg", "not_a_real_agg").unwrap();
+        let res = ty.call(("v",), Some(&kwargs));
+        assert!(res.is_err(), "bogus bin agg must be rejected by Bin()");
+    });
+}
+
 #[test]
 fn kde_methods_accepted_and_bogus_kernel_rejected() {
     attach(|py| {
@@ -1304,6 +1369,7 @@ fn density_data_methods_accepted_and_bogus_kernel_rejected() {
 /// Kinds with a `*_accepted_and_bogus_*_rejected` guard below. Pinned against
 /// the registry by `methods_drift_guard_covers_every_declared_vocabulary`.
 const KINDS_WITH_METHODS_GUARD: &[&str] = &[
+    "bin",
     "kde",
     "smooth",
     "error_extent",

@@ -3049,6 +3049,8 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             groupby: vec![],
+            agg_field: None,
+            agg: None,
             name: None,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &batch);
@@ -3158,6 +3160,8 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             groupby: vec![],
+            agg_field: None,
+            agg: None,
             name: None,
         };
         let kde = KdeSpec {
@@ -3218,6 +3222,8 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             groupby: vec![],
+            agg_field: None,
+            agg: None,
             name: None,
         };
         let kde_spec = KdeSpec {
@@ -4737,6 +4743,8 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             groupby: vec![],
+            agg_field: None,
+            agg: None,
             name,
         })];
         if !named {

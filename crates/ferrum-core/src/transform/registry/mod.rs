@@ -293,18 +293,37 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
         // deserializes `BinSpec` directly (as any real caller's `transforms_json`
         // payload does) and caught this: an earlier manual param audit
         // read the Rust field name instead of the real wire projection.
+        // batch-E T7 (spec §6.5, corrected in cycle-2 review): `agg_field`/
+        // `agg` are optional and unset by default, but `agg_value` is
+        // declared HERE unconditionally rather than carved out under the
+        // "default construction" convention — unlike Contour's fill=true
+        // isoband schema (a strict SUBSET of the declared isoline columns,
+        // so every column Python actually reads is already declared),
+        // `agg_value` would otherwise be the first Python-consumed bin/
+        // registry column declared NOWHERE, leaving T12's lowering no
+        // `registry_output_columns`-checked path to the name and forcing a
+        // bare string literal — the exact drift class this registry exists
+        // to close. `agg_value` is CONDITIONALLY present at apply-time (only
+        // when `agg` is set); `bin_outputs_match_actual_schema` (tests.rs)
+        // asserts the no-agg default schema by explicitly excluding it from
+        // the declared list, and `bin_outputs_match_actual_schema_with_agg`
+        // asserts the with-agg schema against the full declared list
+        // unchanged — the "conditional declared column" allowance now lives
+        // on the no-agg side instead of being synthesized on the with-agg
+        // side.
         "bin" => TransformRegistryEntry {
-            methods: vec![],
+            methods: crate::transform::aggregate::AggFn::all(),
             outputs: vec![
                 ("bin_start", DataType::Float64),
                 ("bin_end", DataType::Float64),
                 ("count", DataType::UInt64),
                 ("density", DataType::Float64),
+                ("agg_value", DataType::Float64),
             ],
             secondary_outputs: vec![],
             params: vec![
                 "field", "bin_count", "bin_width", "extent", "nice", "cumulative",
-                "shared_extent", "groupby", "name",
+                "shared_extent", "groupby", "agg_field", "agg", "name",
             ],
         },
         "bin_2d" => TransformRegistryEntry {
