@@ -6,6 +6,7 @@ These utilities are internal to the marks package and not part of the public API
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -325,6 +326,58 @@ def identity_transform(name: str):
     from ferrum._core import PyIdentity
 
     return PyIdentity(name)
+
+
+def registry_output_columns(kind: str, names: Sequence[str]) -> dict[str, str]:
+    """Validate a desugar/figure consumer's output-column names against
+    ``transform_registry(kind)["outputs"]`` and return them as a lookup.
+
+    *names* are the column names the consumer reads out of *kind*'s output
+    batch. The return is ``{name: name}`` so a call site indexes it by the
+    same name it would otherwise have written as a bare literal
+    (``_smooth_cols["ci_lower"]``). What this converts is the *shape* of the
+    reference: a bare string literal embedded directly in an
+    ``encoding=``/``mark_kwargs=``/``remap=`` dict becomes a lookup checked
+    against the registry at desugar time, so a Rust-side rename or removal of
+    a declared output column raises here -- naming the stale column --
+    instead of silently reading a column the transform no longer emits
+    (spec §4.6 / decision M6a).
+
+    Deliberately NOT a positional ``outputs[i][0]`` lookup: ``outputs``
+    carries no positional contract (the registry only promises *membership*,
+    not order), so indexing into it would encode an ordering dependency the
+    registry never guaranteed.
+
+    Parameters
+    ----------
+    kind : str
+        The transform kind name passed to ``transform_registry``.
+    names : sequence of str
+        The output-column names this consumer reads.
+
+    Returns
+    -------
+    dict of str to str
+        ``{name: name}`` for every name in *names*, in the order given, so a
+        call site that needs the roles as a sequence can iterate the lookup
+        instead of re-listing them alongside it.
+
+    Raises
+    ------
+    ValueError
+        If any name is not declared in
+        ``transform_registry(kind)["outputs"]``.
+    """
+    from ferrum._core import transform_registry
+
+    declared = {name for name, _dtype in transform_registry(kind)["outputs"]}
+    missing = sorted({name for name in names if name not in declared})
+    if missing:
+        raise ValueError(
+            f"transform_registry({kind!r})['outputs'] does not declare "
+            f"{missing}; known output columns: {sorted(declared)}"
+        )
+    return {name: name for name in names}
 
 
 def resolve_color_groupby(

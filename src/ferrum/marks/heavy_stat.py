@@ -17,10 +17,15 @@ from ferrum import (
     Swarm,
     Violin,
 )
+from ferrum._core import transform_registry
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
+from ferrum.marks._desugar_helpers import (
+    nominal_color_channel,
+    registry_output_columns,
+    resolve_color_groupby,
+)
 
 
 def desugar_contour(
@@ -134,6 +139,16 @@ def desugar_contour(
     ]
     from ferrum.encoding import X, Y
 
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of any of these columns raises here instead of
+    # silently reading a stale name.  All six are declared `contour` outputs;
+    # each branch below reads a subset (isoline branches use the segment
+    # endpoints, the isoband branch uses level_id/level_value).
+    _contour_cols = registry_output_columns(
+        "contour",
+        ["contour_x", "contour_y", "contour_x2", "contour_y2", "level_id", "level_value"],
+    )
+
     if groupby is not None:
         # Grouped contour: use isoline (segment) mode so each row is an
         # independent line segment — no polygon grouping needed, no cross-group
@@ -148,10 +163,10 @@ def desugar_contour(
                 name="segment",
                 mark="segment",
                 encoding={
-                    "x": X("contour_x", title=x_field),
-                    "y": Y("contour_y", title=y_field),
-                    "x2": "contour_x2",
-                    "y2": "contour_y2",
+                    "x": X(_contour_cols["contour_x"], title=x_field),
+                    "y": Y(_contour_cols["contour_y"], title=y_field),
+                    "x2": _contour_cols["contour_x2"],
+                    "y2": _contour_cols["contour_y2"],
                     "color": nominal_color_channel(groupby),
                 },
                 mark_kwargs=None,
@@ -162,7 +177,7 @@ def desugar_contour(
         # Isoband mode: Contour emits polygon vertex rows (x, y per vertex).
         # Use polygon mark grouped by level_id; color by level_value so each
         # density band gets a distinct fill from the sequential colormap.
-        mk = {"detail": "level_id"}
+        mk = {"detail": _contour_cols["level_id"]}
         if cmap is not None:
             mk["cmap"] = cmap
         layers = [
@@ -170,9 +185,9 @@ def desugar_contour(
                 name="polygon",
                 mark="polygon",
                 encoding={
-                    "x": X("contour_x", title=x_field),
-                    "y": Y("contour_y", title=y_field),
-                    "color": "level_value",
+                    "x": X(_contour_cols["contour_x"], title=x_field),
+                    "y": Y(_contour_cols["contour_y"], title=y_field),
+                    "color": _contour_cols["level_value"],
                 },
                 mark_kwargs=mk,
                 data_source="contour",
@@ -190,10 +205,10 @@ def desugar_contour(
                 name="segment",
                 mark="segment",
                 encoding={
-                    "x": X("contour_x", title=x_field),
-                    "y": Y("contour_y", title=y_field),
-                    "x2": "contour_x2",
-                    "y2": "contour_y2",
+                    "x": X(_contour_cols["contour_x"], title=x_field),
+                    "y": Y(_contour_cols["contour_y"], title=y_field),
+                    "x2": _contour_cols["contour_x2"],
+                    "y2": _contour_cols["contour_y2"],
                 },
                 mark_kwargs=mk if mk else None,
                 data_source="contour",
@@ -316,6 +331,10 @@ def desugar_violin(
     if x_field is None or y_field is None:
         raise ValueError("mark_violin() requires .encode(x=..., y=...)")
     validate_choice("mark_violin", "inner", inner, ("box", "quartile", "point", None))
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of either column raises here instead of silently
+    # reading a stale name.
+    _violin_cols = registry_output_columns("violin", ["violin_y", "group_id"])
 
     from ferrum.encoding import X, Y
 
@@ -355,9 +374,9 @@ def desugar_violin(
     # vertical; __pos_y_offset__ for horizontal — both are implemented; the
     # Violin transform emits __pos_y_offset__ from panel height).
     if horizontal:
-        body_encoding: dict = {"y": cat_enc, "x": X("violin_y", title=val_field)}
+        body_encoding: dict = {"y": cat_enc, "x": X(_violin_cols["violin_y"], title=val_field)}
     else:
-        body_encoding = {"x": cat_enc, "y": Y("violin_y", title=val_field)}
+        body_encoding = {"x": cat_enc, "y": Y(_violin_cols["violin_y"], title=val_field)}
     # Attach the per-hue body fill only when the hue is a distinct column from
     # the categorical axis (split_hue). When color encodes the same field as
     # cat, the color encoding is redundant with the axis, so it is suppressed to
@@ -379,7 +398,7 @@ def desugar_violin(
         name="body",
         mark="polygon",
         encoding=body_encoding,
-        mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
+        mark_kwargs={"detail": _violin_cols["group_id"], "fill_opacity": 0.5},
         data_source="violin",
     )
     if inner is None:
@@ -408,8 +427,12 @@ def desugar_violin(
     if inner == "quartile":
         transforms.append(BoxStats(field=val_field, groupby=groupby, name="quart"))
         layers = [violin_layer]
-        for col in ("q1", "median", "q3"):
-            mk = {} if col == "median" else {"stroke_dash": [2, 2]}
+        # Derived from the registry (spec §4.6 / M6a) rather than hardcoded,
+        # so a Rust-side rename of any of these columns raises here instead
+        # of silently reading a stale name.
+        _quart_cols = registry_output_columns("box_stats", ["q1", "median", "q3"])
+        for role, col in _quart_cols.items():
+            mk = {} if role == "median" else {"stroke_dash": [2, 2]}
             if horizontal:
                 quart_encoding: dict = {"y": cat_enc, "x": col}
             else:
@@ -474,14 +497,6 @@ register_layer_names(
 )
 
 
-# Mirrors `crate::transform::qq::DISTRIBUTIONS` (kde.rs's sibling constant
-# for `Qq`). Named at module scope (rather than inline in the
-# `validate_choice` call below) so `tests/test_density_kernels.py` can pin
-# it against `transform_registry("qq")["methods"]` by set equality instead
-# of trusting a hand-mirrored copy in the test file itself.
-_VALID_QQ_DISTRIBUTIONS = ("normal", "uniform", "exponential", "lognormal")
-
-
 def desugar_qq(
     field: str,
     *,
@@ -517,8 +532,11 @@ def desugar_qq(
     ----------
     field : str
         Numeric column to compute quantiles from.
-    distribution : {"normal", "uniform", "exponential", "lognormal"}, default "normal"
-        Theoretical distribution to compare against.
+    distribution : str, default "normal"
+        Theoretical distribution to compare against, validated against the
+        live ``transform_registry("qq")["methods"]`` vocabulary (spec §4.6)
+        -- currently ``"normal"``, ``"uniform"``, ``"exponential"``,
+        ``"lognormal"``.
     dequantize : bool, default False
         Whether to jitter duplicate quantile values slightly.
     line : bool, default True
@@ -540,7 +558,7 @@ def desugar_qq(
     >>> [layer.mark for layer in result.layers]
     ['point', 'rule']
     """
-    validate_choice("mark_qq", "distribution", distribution, _VALID_QQ_DISTRIBUTIONS)
+    validate_choice("mark_qq", "distribution", distribution, transform_registry("qq")["methods"])
     transforms = [
         QQ(
             field=field,
@@ -552,13 +570,20 @@ def desugar_qq(
     ]
     from ferrum.encoding import X, Y
 
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of either column raises here instead of silently
+    # reading a stale name. The secondary "qq_line" output columns below
+    # (qq_line_x_start etc.) are NOT part of this lookup -- they are not
+    # declared in transform_registry("qq")["outputs"] at all (the registry's
+    # documented convention excludes secondary named outputs).
+    _qq_cols = registry_output_columns("qq", ["theoretical", "sample"])
     layers = [
         _Layer(
             name="point",
             mark="point",
             encoding={
-                "x": X("theoretical", title="Theoretical Quantiles"),
-                "y": Y("sample", title="Sample Quantiles"),
+                "x": X(_qq_cols["theoretical"], title="Theoretical Quantiles"),
+                "y": Y(_qq_cols["sample"], title="Sample Quantiles"),
             },
             data_source="qq_main",
         )
@@ -752,9 +777,10 @@ def desugar_hex(
     bin_size : float or None, default None
         Hexagon bin radius in data units.  ``None`` auto-selects.
     aggregate : str, default "count"
-        Aggregation function applied per hex cell.  One of ``"count"``,
-        ``"mean"``, ``"sum"``, ``"min"``, ``"max"``, ``"median"``, ``"std"``,
-        or ``"var"``.
+        Aggregation function applied per hex cell, validated against the
+        live ``transform_registry("hex")["methods"]`` vocabulary (spec
+        §4.6) -- currently ``"count"``, ``"mean"``, ``"sum"``, ``"min"``,
+        ``"max"``, ``"median"``, ``"std"``, or ``"var"``.
     field : str or None, default None
         Column to aggregate for ``mean`` or ``sum``; required when
         ``aggregate`` is not ``"count"``.
@@ -793,8 +819,7 @@ def desugar_hex(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
-    _VALID_AGGREGATES = ("count", "mean", "sum", "min", "max", "median", "std", "var")
-    validate_choice("mark_hex", "aggregate", aggregate, _VALID_AGGREGATES)
+    validate_choice("mark_hex", "aggregate", aggregate, transform_registry("hex")["methods"])
     if aggregate != "count" and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
     from ferrum.encoding import X, Y
@@ -802,7 +827,12 @@ def desugar_hex(
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
-    mk: dict = {"detail": "hex_id", "opacity": 1.0}
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of any of these columns raises here instead of
+    # silently reading a stale name. "value" is Hex's aggregate output column
+    # name regardless of which `aggregate=` was requested.
+    _hex_cols = registry_output_columns("hex", ["hex_x", "hex_y", "hex_id", "value"])
+    mk: dict = {"detail": _hex_cols["hex_id"], "opacity": 1.0}
     if cmap is not None:
         mk["cmap"] = cmap
     if stroke is not None:
@@ -814,9 +844,9 @@ def desugar_hex(
             name="polygon",
             mark="polygon",
             encoding={
-                "x": X("hex_x", title=x_field),
-                "y": Y("hex_y", title=y_field),
-                "color": "value",
+                "x": X(_hex_cols["hex_x"], title=x_field),
+                "y": Y(_hex_cols["hex_y"], title=y_field),
+                "color": _hex_cols["value"],
             },
             mark_kwargs=mk,
             data_source="hex",

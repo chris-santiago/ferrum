@@ -259,11 +259,18 @@ def _resolve_layer_bins(layers: list) -> tuple[list, list]:
         # The last (or only) bin's name becomes the layer's data_source.
         final_bin_name = layer_named_transforms[-1].name
 
-        # Remap each binned channel's field to bin_start, strip bin kwarg.
+        # Remap each binned channel's field to the Bin transform's own start
+        # column, derived from the registry (spec §4.6 / M6a) rather than
+        # hardcoded: this layer's data_source IS the Bin built above, so a
+        # Rust-side rename raises here instead of leaving the layer pointed at
+        # a column its own transform no longer emits.
+        from ferrum.marks._desugar_helpers import registry_output_columns
+
+        bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
         for axis, ch in layer.encoding.items():
             if isinstance(ch, ChannelBase) and ch._kwargs.get("bin"):
                 kwargs = {k: v for k, v in ch._kwargs.items() if k != "bin"}
-                new_encoding[axis] = ch.__class__("bin_start", **kwargs)
+                new_encoding[axis] = ch.__class__(bin_start, **kwargs)
                 continue
             new_encoding[axis] = ch
 

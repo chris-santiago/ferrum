@@ -6,26 +6,14 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin, Kde, Smooth
+from ferrum._core import transform_registry
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._validate import validate_choice
+from ferrum.marks._desugar_helpers import registry_output_columns
 
 _ORIENTATIONS = ("horizontal", "vertical")
 _MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
-
-# mark_density's kernel vocabulary. Must stay set-equal to the Rust dispatch's
-# `kde::KERNELS` (queryable as `transform_registry("kde")["methods"]`) — pinned
-# by a drift guard in tests/test_density_kernels.py.
-_VALID_KERNELS = {
-    "gaussian",
-    "epanechnikov",
-    "epan",
-    "tophat",
-    "uniform",
-    "cosine",
-    "exponential",
-    "linear",
-}
 
 
 def desugar_density(
@@ -86,9 +74,10 @@ def desugar_density(
         Multiplier applied to the resolved bandwidth after rule evaluation.
         Works with all bandwidth rules (``"scott"``, ``"silverman"``, numeric).
     kernel : str, default "gaussian"
-        Kernel function, validated against ``_VALID_KERNELS`` (set-equal to
-        the Rust dispatch's ``kde::KERNELS``) and forwarded to the ``Kde``
-        transform.
+        Kernel function, validated against the live
+        ``transform_registry("kde")["methods"]`` vocabulary (the Rust
+        dispatch's ``kde::KERNELS``, queried at call time — spec §4.6) and
+        forwarded to the ``Kde`` transform.
     n : int, default 512
         Number of evaluation points.
     extent : tuple[float, float] or None, default None
@@ -164,7 +153,7 @@ def desugar_density(
             )
 
     if kernel is not None:
-        validate_choice("mark_density", "kernel", kernel, _VALID_KERNELS)
+        validate_choice("mark_density", "kernel", kernel, transform_registry("kde")["methods"])
     validate_choice("mark_density", "multiple", multiple, _MULTIPLE_MODES)
     validate_choice("mark_density", "orientation", orientation, _ORIENTATIONS)
     kde_kwargs: dict = dict(
@@ -182,10 +171,14 @@ def desugar_density(
     transforms = [Kde(field, **kde_kwargs)]
     # Kde produces columns ("value", "density") — remap both x and y.
     # With groupby, output also contains the group column for color encoding.
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of either column raises here instead of silently
+    # reading a stale name.
+    _kde_cols = registry_output_columns("kde", ["value", "density"])
     if orientation == "horizontal":
-        encoding_remap = {"y": "value", "x": "density"}
+        encoding_remap = {"y": _kde_cols["value"], "x": _kde_cols["density"]}
     else:
-        encoding_remap = {"x": "value", "y": "density"}
+        encoding_remap = {"x": _kde_cols["value"], "y": _kde_cols["density"]}
     mark = "area" if fill else "line"
 
     # multiple="stack" and "fill" use the Stack position adjuster.
@@ -321,12 +314,24 @@ def desugar_histogram(
         bin_kwargs["groupby"] = groupby
     transforms = [Bin(field, **bin_kwargs)]
     # Phase 5 Bin produces columns (bin_start, bin_end, count, density).
-    count_column = "density" if density else "count"
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of any of them raises here instead of silently
+    # remapping a channel onto a column the transform no longer emits.
+    _bin_cols = registry_output_columns("bin", ["bin_start", "bin_end", "count", "density"])
+    count_column = _bin_cols["density"] if density else _bin_cols["count"]
     if orientation == "horizontal":
         # Horizontal bars: bin extents on y-axis, count on x-axis.
-        encoding_remap = {"y": "bin_start", "y2": "bin_end", "x": count_column}
+        encoding_remap = {
+            "y": _bin_cols["bin_start"],
+            "y2": _bin_cols["bin_end"],
+            "x": count_column,
+        }
     else:
-        encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": count_column}
+        encoding_remap = {
+            "x": _bin_cols["bin_start"],
+            "x2": _bin_cols["bin_end"],
+            "y": count_column,
+        }
 
     # multiple= → position adjustment on the count/density axis.
     #
@@ -404,8 +409,10 @@ def desugar_smooth(
         Numeric response column.
     method : str, default "loess"
         Smoothing method (e.g. ``"loess"``, ``"linear"``, ``"quadratic"``,
-        ``"glm"``, ``"gam"``).  The full vocabulary is owned by the Rust
-        ``Smooth`` transform; an unknown spelling raises, naming it.
+        ``"glm"``, ``"gam"``).  Validated in Python against the live
+        ``transform_registry("smooth")["methods"]`` vocabulary (spec §4.6)
+        before the ``Smooth`` transform is constructed, so an unknown
+        spelling raises here, naming it, rather than at the Rust boundary.
     ci : float or None, default None
         Confidence interval level (e.g. ``0.95``).  ``None`` disables the
         CI band and returns a single-mark (line) result.
@@ -478,6 +485,15 @@ def desugar_smooth(
     >>> [layer.mark for layer in result_ci.layers]
     ['ribbon', 'line']
     """
+    validate_choice("mark_smooth", "method", method, transform_registry("smooth")["methods"])
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of any of these columns raises here instead of
+    # silently reading a stale name. `_metrics_y`/`_metrics_text` (below) are
+    # deliberately NOT part of this lookup: they come from Smooth's
+    # conditional `inject_metrics=True` output, which the registry does not
+    # declare as a fixed schema member (it exists only when show_metrics=True
+    # is threaded through), so there is no registry entry to validate against.
+    _smooth_cols = registry_output_columns("smooth", ["x", "y", "ci_lower", "ci_upper"])
 
     if ci is None and not show_metrics:
         # 8a-compatible single-line path: keep the single-mark result so the
@@ -501,7 +517,7 @@ def desugar_smooth(
         if x_range is not None:
             smooth_kwargs["x_range"] = x_range
         transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
-        encoding_remap = {"x": "x", "y": "y"}
+        encoding_remap = {"x": _smooth_cols["x"], "y": _smooth_cols["y"]}
         return MarkDesugarResult(mark="line", transforms=transforms, remap=encoding_remap)
 
     # Layered path: ci band and/or metrics-corner overlay. `degree` is
@@ -530,7 +546,11 @@ def desugar_smooth(
             _Layer(
                 name="ribbon",
                 mark="ribbon",
-                encoding={"x": "x", "y": "ci_lower", "y2": "ci_upper"},
+                encoding={
+                    "x": _smooth_cols["x"],
+                    "y": _smooth_cols["ci_lower"],
+                    "y2": _smooth_cols["ci_upper"],
+                },
                 mark_kwargs={"opacity": 0.3},
                 data_source="smooth",
             )
@@ -539,7 +559,7 @@ def desugar_smooth(
         _Layer(
             name="line",
             mark="line",
-            encoding={"x": "x", "y": "y"},
+            encoding={"x": _smooth_cols["x"], "y": _smooth_cols["y"]},
             data_source="smooth",
         )
     )
@@ -548,7 +568,11 @@ def desugar_smooth(
             _Layer(
                 name="metrics",
                 mark="text",
-                encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
+                encoding={
+                    "x": _smooth_cols["x"],
+                    "y": "_metrics_y",
+                    "text": "_metrics_text",
+                },
                 mark_kwargs={"align": "right", "dx": -4, "dy": 4},
                 data_source="smooth",
             )

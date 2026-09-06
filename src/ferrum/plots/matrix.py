@@ -35,7 +35,7 @@ from typing import Any
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks._desugar_helpers import nominal_color_channel, registry_output_columns
 from ferrum.plots._helpers import (
     _field_name,
     _finalize_chart,
@@ -1425,11 +1425,22 @@ def _jointplot_build(
         for k in ("bins_x", "bins_y"):
             if k in jk:
                 bin2d_kwargs[k] = jk.pop(k)
-        hist_enc: dict = {"x": "x_lo", "x2": "x_hi", "y": "y_lo", "y2": "y_hi", "color": "count"}
+        # Derived from the registry (spec §4.6 / M6a) rather than hardcoded:
+        # this encoding reads the Bin2D transform constructed three lines
+        # below, so a Rust-side rename of any bin_2d output column raises here
+        # instead of silently rendering an empty center panel.
+        _bin2d_cols = registry_output_columns("bin_2d", ["x_lo", "x_hi", "y_lo", "y_hi", "count"])
+        hist_enc: dict = {
+            "x": _bin2d_cols["x_lo"],
+            "x2": _bin2d_cols["x_hi"],
+            "y": _bin2d_cols["y_lo"],
+            "y2": _bin2d_cols["y_hi"],
+            "color": _bin2d_cols["count"],
+        }
         if xlim is not None:
-            hist_enc["x"] = _X("x_lo", scale={"domain": list(xlim)})
+            hist_enc["x"] = _X(_bin2d_cols["x_lo"], scale={"domain": list(xlim)})
         if ylim is not None:
-            hist_enc["y"] = _Y("y_lo", scale={"domain": list(ylim)})
+            hist_enc["y"] = _Y(_bin2d_cols["y_lo"], scale={"domain": list(ylim)})
         center = (
             Chart(data).transform(Bin2D(x=x, y=y, **bin2d_kwargs)).mark_rect().encode(**hist_enc)
         )

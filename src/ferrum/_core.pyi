@@ -1121,3 +1121,20 @@ def prf_at_thresholds(
     y_score: Any,
     thresholds: Any,
 ) -> Any: ...
+
+# ---------- Transform registry (Phase batch-D task 1, spec §4.6) ----------
+
+class _TransformRegistryEntry(TypedDict):
+    methods: list[str]
+    outputs: list[tuple[str, str]]
+    params: list[str]
+
+def transform_registry(kind: str) -> _TransformRegistryEntry:
+    """
+    ``ferrum._core.transform_registry(kind)`` — spec §4.6, batch-D task 1.
+
+    Returns ``{"methods": [...], "outputs": [(name, dtype), ...], "params":
+    [...]}`` for a known transform kind (module name — see the module doc);
+    raises ``ValueError`` listing every known kind otherwise.
+    """
+    ...

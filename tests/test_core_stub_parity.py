@@ -47,6 +47,7 @@ _STUB_ONLY_NAMES = frozenset(
         "DataTypeStr",
         "MarkStr",
         "_KendallResult",
+        "_TransformRegistryEntry",
     }
 )
 

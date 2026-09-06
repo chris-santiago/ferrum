@@ -1067,9 +1067,11 @@ fn params_match_spec_struct_serde_fields() {
 
 // ── `methods` drift guard (Required Fix 6, round-2 cycle-1) ────────────────
 //
-// For each spec §4.6-named vocabulary Python is deleting its own mirror of
-// (`kde` kernels / `_VALID_KERNELS`, `qq` distributions, `smooth`/lmplot
-// methods), calls through the REAL validation site — the PyO3 constructor,
+// For each spec §4.6-named vocabulary Python once hand-mirrored and now
+// (post-T12) validates via live `transform_registry(kind)` lookups (`kde`
+// kernels, `qq` distributions, `smooth` methods; lmplot keeps a pinned
+// routed-subset literal until T13 routes the rest), calls through the REAL
+// validation site — the PyO3 constructor,
 // invoked the same way a Python caller would (via the class's type object,
 // not by calling the module-private Rust `new()` directly) — for every
 // declared method, and confirms a bogus one is refused. A method added to
@@ -1178,9 +1180,11 @@ fn smooth_methods_vocabulary_matches_parser_error_message_exactly() {
 /// Required Fix 3 (round-3 cycle-2 review): extends the `methods` drift guard
 /// to `hex`. `HexSpec::new` (hex.rs) refuses a bogus `aggregate` hard, same
 /// PyO3-constructor-time shape as `kde`/`qq`/`smooth`. `hex`'s eight
-/// aggregates are also a live Python-mirror site (spec §4.6's target class):
-/// `src/ferrum/marks/heavy_stat.py`'s `_VALID_AGGREGATES` names the identical
-/// eight strings. Non-`count` aggregates require `field` to be set (checked
+/// aggregates were also a live Python-mirror site (spec §4.6's target class):
+/// `src/ferrum/marks/heavy_stat.py` used to hand-mirror the identical eight
+/// strings as `_VALID_AGGREGATES`; batch-D T12 deleted the mirror in favor of
+/// a live `transform_registry("hex")["methods"]` lookup, so the registry entry
+/// here is now the single source. Non-`count` aggregates require `field` to be set (checked
 /// before the aggregate-name check would even run for them), so the fixture
 /// supplies it for every declared value except `count`.
 #[test]

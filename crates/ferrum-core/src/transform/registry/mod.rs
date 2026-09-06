@@ -5,10 +5,11 @@
 //! names — co-located with [`super::core::for_each_transform`] so that a new
 //! transform variant is a registry decision, not an afterthought (the
 //! `scale_accepted_keys` move, applied to the transform layer). Exposed to
-//! Python as `ferrum._core.transform_registry(kind)`; later tasks (12, 13)
-//! delete Python's hand-mirrored `_VALID_KERNELS`, qq distribution lists,
-//! `lmplot`'s method set, and hardcoded fit-output-column literals in favor
-//! of lookups against this table.
+//! Python as `ferrum._core.transform_registry(kind)`. Batch-D T12 deleted
+//! Python's hand-mirrored `_VALID_KERNELS`, qq distribution lists, and
+//! hardcoded fit-output-column literals in favor of lookups against this
+//! table; `lmplot`'s method set stays a pinned routed-subset literal until
+//! T13 routes the remaining methods.
 //!
 //! **`kind` is the transform's *module name*** — the second column of
 //! `for_each_transform!`'s table (`"bin"`, `"bin_2d"`, `"regression_data"`,

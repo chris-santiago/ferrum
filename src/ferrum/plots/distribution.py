@@ -26,7 +26,7 @@ from ferrum import (
 )
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks._desugar_helpers import nominal_color_channel, registry_output_columns
 from ferrum.plots._helpers import _field_name, _finalize_chart
 
 
@@ -386,8 +386,13 @@ def _displot_build(
         chart = chart.mark_line()
         # Re-route encoding to bin output columns, preserving the original
         # variable name as the x-axis title.
-        enc["x"] = _X_ecdf("bin_start", title=_ecdf_x_name)
-        enc["y"] = "count"
+        # Derived from the registry (spec §4.6 / M6a) rather than hardcoded:
+        # these read the cumulative Bin transform chained two lines above, so
+        # a Rust-side rename of either bin output column raises here instead
+        # of silently rendering an empty step line.
+        _bin_cols = registry_output_columns("bin", ["bin_start", "count"])
+        enc["x"] = _X_ecdf(_bin_cols["bin_start"], title=_ecdf_x_name)
+        enc["y"] = _bin_cols["count"]
     elif kind == "rug":
         chart = chart.mark_tick()
 
@@ -452,11 +457,15 @@ def _displot_build(
             # Prepend the named Kde before the unnamed Bin so it reads from
             # the original (pre-Bin) data batch.
             chart._transforms = [kde_xform] + list(chart._transforms or [])
+            # Derived from the registry (spec §4.6 / M6a) rather than
+            # hardcoded, so a Rust-side rename of either Kde output column
+            # raises here instead of silently drawing an empty overlay line.
+            _kde_cols = registry_output_columns("kde", ["value", "density"])
             chart._layers.append(
                 _OverlayLayer(
                     name="kde",
                     mark="line",
-                    encoding={"x": "value", "y": "density"},
+                    encoding={"x": _kde_cols["value"], "y": _kde_cols["density"]},
                     data_source="kde_overlay",
                 )
             )

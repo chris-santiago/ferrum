@@ -33,7 +33,7 @@ from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
-from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks._desugar_helpers import nominal_color_channel, registry_output_columns
 from ferrum.plots._helpers import (
     _color_field_for,
     _compose_compare,
@@ -51,6 +51,22 @@ if TYPE_CHECKING:
     from ferrum import ConcatChart, HConcatChart, VConcatChart
 
 
+# Not a pure registry mirror (batch-D T12): the five methods here are the
+# fit branches `lmplot` actually routes to below ("lm"/"loess" via
+# `mark_smooth`'s `Smooth` transform, "logistic"/"glm"/"robust" via their own
+# transform kinds) — a routing-coupled subset, not
+# `transform_registry("smooth")["methods"]` (which lists 9 spellings,
+# including "quadratic"/"cubic"/"sqrt"/"log"/"gam" that `lmplot` has no
+# branch for). Deriving this set from the registry would either silently
+# widen accepted `method=` values past what the `elif` chain below actually
+# routes (`lmplot(method="gam")` would pass validation and then hit the
+# `# pragma: no cover — guarded above` unreachable branch) or require
+# re-listing the same routed subset by hand anyway — no net mirror-deletion
+# win. `tests/test_lmplot_valid_methods_registry_pin.py` pins the two
+# smooth-routed names against the registry and the three non-smooth names
+# against real registry kinds, so a rename on either side still fails
+# loudly. Wiring new methods (e.g. "gam") into this set is T13's job
+# (lmplot routing), not this one's.
 _VALID_METHODS = frozenset({"lm", "logistic", "glm", "loess", "robust"})
 
 
@@ -189,12 +205,18 @@ def _residuals_panel(
         return _overlay_metrics_corner(chart)
 
     if name == "qq":
+        # `sample` is the QQ transform's declared output column this panel
+        # reads back on the y channel; derived from the registry (spec §4.6 /
+        # M6a) so a Rust-side rename raises here.  The x channel names the
+        # panel's own input column, not a transform output, so it stays a
+        # plain literal.
+        _qq_cols = registry_output_columns("qq", ["sample"])
         return (
             ferrum.Chart(df)
             .mark_qq()
             .encode(
                 x=X("studentized_residual", title="Theoretical quantiles"),
-                y=Y("sample", title="Sample quantiles"),
+                y=Y(_qq_cols["sample"], title="Sample quantiles"),
             )
             .properties(title=ferrum.Title("Normal Q–Q"))
         )
@@ -814,6 +836,32 @@ def residplot(
     if label is not None:
         data = data.with_columns(pl.lit(str(label)).alias("_label"))
 
+    # `_resid_x` is a bare literal, not a registry lookup -- reverted after a
+    # quality-review mispin (spec §4.6 / M6a adjudication; same reasoning
+    # `desugar_boxen` states at `marks/composite.py:837-850` for its own
+    # dispositioned literals). `Smooth`/`Robust` in `output="residuals"` mode
+    # build this batch via `build_residuals_batch` (`smooth.rs:667`,
+    # `robust.rs:365`), which declares its own literal `x` column in Rust,
+    # uncoupled from `FIT_OUTPUT_COLUMNS` -- the `output="fitted"` schema
+    # `transform_registry("smooth"|"robust")` actually declares
+    # (`registry/mod.rs:165-167` scopes that constant to fitted mode
+    # explicitly, and both kinds route through the same shared closure, so
+    # looking up "smooth" vs "robust" here would not even diverge). Checking
+    # `_resid_x` against `FIT_OUTPUT_COLUMNS` would pass today -- both
+    # schemas happen to list `x` -- and stay silently green if the residuals
+    # batch's own `x` were ever renamed independently: a lookup against the
+    # wrong schema is worse than no lookup, since it would suppress the exact
+    # drift this pattern exists to catch, and would also raise here on an
+    # unrelated `FIT_OUTPUT_COLUMNS` rename that never touched this code
+    # path. Recorded as a dispositioned column reference in
+    # `tests/test_registry_output_column_consumers.py`'s `_DISPOSITIONED`
+    # (site: `("src/ferrum/plots/regression.py", "residplot", "x")`), which
+    # fails if this code ever stops needing the disposition. The correct end
+    # state -- Rust declaring a residuals-mode output schema so this stops
+    # being invisible to the registry by construction -- is a Rust change,
+    # tracked as a batch-close follow-up, not this task's scope.
+    _resid_x = "x"
+
     if robust:
         resid_transform = Robust(
             x=x,
@@ -836,7 +884,7 @@ def residplot(
         resid_transform = Smooth(x=x, y=y, **smooth_kwargs)
 
     chart = Chart(data).transform(resid_transform).mark_point()
-    enc: dict = {"x": "x", "y": "residual"}
+    enc: dict = {"x": _resid_x, "y": "residual"}
     if label is not None and color is None and not robust:
         enc["color"] = "_label"
     if color is not None:
@@ -868,7 +916,7 @@ def residplot(
                 _Layer(
                     name="metrics",
                     mark="text",
-                    encoding={"x": "x", "y": "_metrics_y", "text": "_metrics_text"},
+                    encoding={"x": _resid_x, "y": "_metrics_y", "text": "_metrics_text"},
                     mark_kwargs={"align": "right", "dx": -4, "dy": 4},
                 )
             )
@@ -876,18 +924,23 @@ def residplot(
             chart._transforms = [
                 resid_transform,
                 Smooth(
-                    x="x",
+                    x=_resid_x,
                     y="residual",
                     method="loess",
                     ci=None,
                     name="lowess",
                 ),
             ]
+            # Derived from the registry (spec §4.6 / M6a) rather than
+            # hardcoded: this layer reads the named `lowess` Smooth
+            # transform's fit-grid output, so a Rust-side rename raises here
+            # instead of silently drawing nothing.
+            _lowess_cols = registry_output_columns("smooth", ["x", "y"])
             internal_layers.append(
                 _Layer(
                     name="lowess",
                     mark="line",
-                    encoding={"x": "x", "y": "y"},
+                    encoding={"x": _lowess_cols["x"], "y": _lowess_cols["y"]},
                     data_source="lowess",
                 )
             )

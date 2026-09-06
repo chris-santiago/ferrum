@@ -28,7 +28,11 @@ from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.color import palette as _named_palette_colors
 from ferrum.encoding import X, Y
-from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
+from ferrum.marks._desugar_helpers import (
+    nominal_color_channel,
+    registry_output_columns,
+    resolve_color_groupby,
+)
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -237,6 +241,12 @@ def desugar_boxplot(
     # categorical channel and y_sort applies; otherwise x is categorical and
     # x_sort applies.
     cat_sort = y_sort if horizontal else x_sort
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of any of these columns raises here instead of
+    # silently reading a stale name.
+    _box_cols = registry_output_columns(
+        "box_stats", ["q1", "median", "q3", "lower_whisker", "upper_whisker"]
+    )
 
     def enc(y_col, y2_col=None, *, title=None):
         if horizontal:
@@ -261,35 +271,35 @@ def desugar_boxplot(
         _Layer(
             name="whisker",
             mark="rule",
-            encoding=enc("lower_whisker", "upper_whisker", title=val),
+            encoding=enc(_box_cols["lower_whisker"], _box_cols["upper_whisker"], title=val),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="box",
         ),
         _Layer(
             name="lower_cap",
             mark="tick",
-            encoding=enc("lower_whisker"),
+            encoding=enc(_box_cols["lower_whisker"]),
             mark_kwargs={"band_size": band, "stroke": "theme:label"},
             data_source="box",
         ),
         _Layer(
             name="upper_cap",
             mark="tick",
-            encoding=enc("upper_whisker"),
+            encoding=enc(_box_cols["upper_whisker"]),
             mark_kwargs={"band_size": band, "stroke": "theme:label"},
             data_source="box",
         ),
         _Layer(
             name="box",
             mark="rect",
-            encoding=enc("q1", "q3", title=val),
+            encoding=enc(_box_cols["q1"], _box_cols["q3"], title=val),
             mark_kwargs={"band_size": band},
             data_source="box",
         ),
         _Layer(
             name="median",
             mark="tick",
-            encoding=enc("median"),
+            encoding=enc(_box_cols["median"]),
             # tick's band_size is a full-width factor (same convention as
             # rect's), so this literally spans the box's width.
             mark_kwargs={"band_size": band, "stroke": "theme:label", "stroke_width": 2},
@@ -412,6 +422,10 @@ def desugar_errorbar(
     # error extent is computed per (x, hue) group, not pooled across hues.
     groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
     x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of either column raises here instead of silently
+    # reading a stale name.
+    _err_cols = registry_output_columns("error_extent", ["lower", "upper"])
 
     def _enc(y_col: str, y2_col: str | None = None) -> dict:
         d: dict = {"x": x_enc_val, "y": y_col}
@@ -426,7 +440,7 @@ def desugar_errorbar(
         _Layer(
             name="rule",
             mark="rule",
-            encoding=_enc("lower", "upper"),
+            encoding=_enc(_err_cols["lower"], _err_cols["upper"]),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="err",
         ),
@@ -441,14 +455,14 @@ def desugar_errorbar(
                     # (GH #85), not an un-migrated half-width 0.3 x 2:
                     # errorbar exposes no size= knob for caps to track,
                     # unlike desugar_boxplot's band-derived caps.
-                    encoding=_enc("lower"),
+                    encoding=_enc(_err_cols["lower"]),
                     mark_kwargs={"band_size": 0.6, "stroke": "theme:label"},
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_cap",
                     mark="tick",
-                    encoding=_enc("upper"),
+                    encoding=_enc(_err_cols["upper"]),
                     mark_kwargs={"band_size": 0.6, "stroke": "theme:label"},
                     data_source="err",
                 ),
@@ -548,9 +562,17 @@ def desugar_errorband(
     # Include color_field in the groupby when it is a distinct column so the
     # error extent is computed per (x, hue) group, not pooled across hues.
     groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of either column raises here instead of silently
+    # reading a stale name.
+    _err_cols = registry_output_columns("error_extent", ["lower", "upper"])
 
     def _enc_ribbon() -> dict:
-        d: dict = {"x": x_field, "y": Y("lower", title=y_field), "y2": "upper"}
+        d: dict = {
+            "x": x_field,
+            "y": Y(_err_cols["lower"], title=y_field),
+            "y2": _err_cols["upper"],
+        }
         if split_hue:
             d["color"] = nominal_color_channel(color_field)
         return d
@@ -577,13 +599,13 @@ def desugar_errorband(
                 _Layer(
                     name="lower_border",
                     mark="line",
-                    encoding=_enc_border("lower"),
+                    encoding=_enc_border(_err_cols["lower"]),
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_border",
                     mark="line",
-                    encoding=_enc_border("upper"),
+                    encoding=_enc_border(_err_cols["upper"]),
                     data_source="err",
                 ),
             ]
@@ -811,6 +833,21 @@ def desugar_boxen(
     chart-level x/y encoding still references the user's columns, so axis
     scales resolve naturally (LetterValue copies the groupby values verbatim
     into ``group``, and quantile outputs lie within the original value range).
+
+    Deliberately NOT converted to ``registry_output_columns`` (spec §4.6 /
+    M6a, unlike ``desugar_boxplot``/``desugar_errorbar``/etc.): these four
+    literals read ``lv_depth_K``/``lv_outliers``, the SECONDARY named
+    outputs documented above, not ``transform_registry("letter_value")``'s
+    *primary* declared schema. That primary schema happens to also list
+    ``"group"``/``"lower"``/``"upper"``, so validating against it here would
+    pass today and stay silently green if the secondary batch's own columns
+    were ever renamed independently of the primary schema — a lookup against
+    the wrong schema is worse than no lookup, since it would suppress the
+    exact drift this pattern exists to catch. These four are recorded as
+    dispositioned column references in
+    ``tests/test_registry_output_column_consumers.py``'s ``_DISPOSITIONED``,
+    which carries the same reasoning per site and fails if the code that
+    needed the disposition ever goes away.
 
     ``palette`` colors the depth bands directly, at opacity 1.0, replacing
     the opacity ramp. The mapping anchors on the **base band** (spec §4.4,

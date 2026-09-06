@@ -278,53 +278,46 @@ def test_mark_qq_lognormal_accepted_by_validate_choice_gate():
 
 
 # ---------------------------------------------------------------------------
-# Drift guards: both Python-side gates are hand-mirrored copies of a Rust
-# vocabulary (`kde::KERNELS`, `qq::DISTRIBUTIONS`). This batch's two bugs
-# (`exponential`/`linear` and `lognormal` all documented-but-refused) were
-# exactly this mechanism going stale once, silently. Now that Rust's
-# `transform_registry` exposes both vocabularies (and, as of the round-2
-# registry fix, `density_data`'s shared-dispatch vocabulary too), pin each
-# Python gate against its registry entry by set equality -- a membership
-# check would pass even if the two sides listed different-sized sets, and
-# would keep passing if Rust added a ninth kernel nobody taught Python
-# about.
+# Registry adoption (batch-D T12): `mark_density`'s kernel gate and
+# `mark_qq`'s distribution gate no longer hand-mirror a Rust vocabulary as a
+# second Python-side literal -- `desugar_density`/`desugar_qq` now call
+# `transform_registry("kde"/"qq")["methods"]` live, at validation time, so
+# there is nothing left to drift out of sync (the class of bug this batch's
+# `exponential`/`linear`/`lognormal` fixes came from). What remains worth
+# pinning is behavioral, not textual: every kernel/distribution the registry
+# currently declares must actually render through the real `mark_density`/
+# `mark_qq` gate, proving the live derivation is the actual accepted
+# vocabulary, not just a dict lookup that happens to type-check.
 # ---------------------------------------------------------------------------
 
 
-def test_valid_kernels_matches_kde_registry_vocabulary():
-    """`_VALID_KERNELS` (`ferrum/marks/statistical.py`, a module-level
-    constant) mirrors `crate::transform::kde::KERNELS`. Pin the mirror two
-    ways: (1) the real constant must equal the registry's declared
-    vocabulary -- a future Rust-side kernel addition changes the registry's
-    set and fails this assertion loudly, rather than surfacing only when a
-    user tries the new kernel name and gets rejected by a stale Python
-    gate; (2) every one of those kernels must actually render through the
-    real `mark_density` gate, proving the constant is the actual accepted
-    vocabulary."""
+def test_every_registry_declared_kde_kernel_renders_through_mark_density():
+    """Every kernel `transform_registry("kde")["methods"]` declares must
+    actually render through the real `mark_density` gate -- `desugar_density`
+    derives its accepted vocabulary from this same call, so this is a
+    behavioral proof of the live derivation, not a self-referential re-check
+    of the same lookup."""
     from ferrum import _core
-    from ferrum.marks.statistical import _VALID_KERNELS
 
     registry_kernels = set(_core.transform_registry("kde")["methods"])
-    assert _VALID_KERNELS == registry_kernels
 
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0]})
     for kernel in registry_kernels:
         # Must not raise -- proves mark_density's real gate accepts every
-        # kernel the registry declares, not just the mirrored literal above.
+        # kernel the registry declares.
         fm.Chart(df).mark_density(kernel=kernel).encode(x="val").to_svg()
 
 
-def test_valid_qq_distributions_matches_qq_registry_vocabulary():
-    """`desugar_qq`'s `validate_choice` gate now reads from the named
-    `_VALID_QQ_DISTRIBUTIONS` module constant (promoted out of an inline
-    tuple literal this round specifically so this test can import the real
-    value instead of re-mirroring it) and pins it, by set equality, against
-    `crate::transform::qq::DISTRIBUTIONS`'s registry vocabulary."""
+def test_every_registry_declared_qq_distribution_renders_through_mark_qq():
+    """`desugar_qq`'s `validate_choice` gate (`ferrum/marks/heavy_stat.py`)
+    now calls `transform_registry("qq")["methods"]` live (batch-D T12 --
+    the former hand-mirrored `_VALID_QQ_DISTRIBUTIONS` module constant is
+    deleted, since there is nothing left to drift). Behavioral proof: every
+    distribution the registry currently declares must actually render
+    through the real `mark_qq` gate."""
     from ferrum import _core
-    from ferrum.marks.heavy_stat import _VALID_QQ_DISTRIBUTIONS
 
     registry_distributions = set(_core.transform_registry("qq")["methods"])
-    assert set(_VALID_QQ_DISTRIBUTIONS) == registry_distributions
 
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
     for distribution in registry_distributions:

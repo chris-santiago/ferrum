@@ -105,6 +105,91 @@ def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
     return items
 
 
+def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> None:
+    """Raise ``ValueError`` if *value* is a bare string, not a sequence.
+
+    The single refusal mechanism for the class of parameter whose declared
+    type is a sequence of strings (``groupby=``, ``fields=``, ``sort=``,
+    ``keyvals=``, ``as_=``), where a bare string is not a type error but a
+    silent corruption: ``list("cat")`` is three one-character column names
+    the wrapper would happily send to Rust.
+
+    Deliberately not enumerated here. Which parameters belong to the class
+    is decided by their annotations, and
+    ``tests/test_transform_bare_string_sequence_params.py`` derives that set
+    by introspecting this module and asserts each member refuses a bare
+    string — so a newly added sequence parameter that forgets this guard
+    fails there instead of quietly re-opening the bug. An enumeration in
+    this docstring went stale twice while the fix was being written.
+
+    Parameters
+    ----------
+    value : object
+        The candidate value.
+    where : str
+        Caller name, used in the error message.
+    param : str
+        The parameter name being validated (e.g. ``"groupby"``,
+        ``"keyvals"``), used in the error message.
+    noun : str
+        Plural noun describing what the sequence's elements are (e.g.
+        ``"column names"``, ``"key values"``), used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If *value* is a ``str``.
+    """
+    if isinstance(value, str):
+        raise ValueError(
+            f"{where}: {param} must be a sequence of {noun} (list or tuple), "
+            f"got a bare string {value!r}; iterating a string yields individual characters"
+        )
+
+
+def _reject_bare_string_groupby(value: object, *, where: str) -> None:
+    """Raise ``ValueError`` if *value* is a bare string, not a sequence of
+    column names.
+
+    A thin, ``groupby``-specific wrapper over :func:`_reject_bare_string`
+    (which supplies the shared message) so call sites and tests that pass
+    only ``where=`` keep working. Every ``transform_*`` wrapper that accepts
+    ``groupby=`` routes through it — a claim proven by the introspection-derived
+    coverage in ``tests/test_transform_bare_string_sequence_params.py``, not
+    by a list of wrapper names kept in sync by hand here.
+
+    Before this helper existed, ``transform_regression``/``transform_loess``/
+    ``transform_impute`` silently accepted a bare string and char-split it
+    (``list("cat")`` -> ``['c', 'a', 't']``), sending three bogus
+    single-character group columns to Rust instead of raising —
+    ``transform_top_k`` was the only wrapper with a hand-rolled version of
+    this same guard. This is the wrapper-level typed-refusal half of the
+    two-layer groupby shape; the Rust-side pyclasses (``PyBin``, ``PyKde``,
+    ``PyKde2d``, ``PySmooth``, ``PyTopK``) separately *normalize* a bare
+    string to a single-element list via ``parse_groupby_pyany`` at their own
+    constructor boundary — the two layers intentionally differ (refuse vs.
+    normalize) because a `transform_*` wrapper builds a plain wire dict with
+    no constructor to normalize through.
+
+    Materializing the value into a list remains each call site's own job,
+    since the required-vs-optional and default-vs-explicit shapes differ
+    per wrapper.
+
+    Parameters
+    ----------
+    value : object
+        The candidate ``groupby`` value.
+    where : str
+        Caller name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If *value* is a ``str``.
+    """
+    _reject_bare_string(value, where=where, param="groupby", noun="column names")
+
+
 def _validate_as_seq(value: Sequence[str], *, where: str) -> list[str]:
     """Validate and materialize a variable-length ``as_`` argument.
 
@@ -127,8 +212,14 @@ def _validate_as_seq(value: Sequence[str], *, where: str) -> list[str]:
     Raises
     ------
     ValueError
-        If *value* is empty or contains a non-string or empty-string element.
+        If *value* is a bare string, empty, or contains a non-string or
+        empty-string element.  A bare string is refused through the same
+        :func:`_reject_bare_string` mechanism the sequence parameters use:
+        every character of ``as_="tag"`` is a non-empty string, so the
+        element checks below would otherwise accept it as three one-letter
+        output columns.
     """
+    _reject_bare_string(value, where=where, param="as_", noun="output-column names")
     try:
         items = list(value)
     except TypeError:
@@ -342,6 +433,12 @@ def transform_aggregate(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -357,6 +454,7 @@ def transform_aggregate(
         "aggregates": list(aggregates),
     }
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_aggregate")
         spec["groupby"] = list(groupby)
     return spec
 
@@ -429,6 +527,12 @@ def transform_fold(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``fields`` or ``as_`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -438,6 +542,7 @@ def transform_fold(
     >>> t["as_"]
     ['key', 'value']
     """
+    _reject_bare_string(fields, where="transform_fold", param="fields", noun="column names")
     as_list = _validate_as_pair(as_, where="transform_fold")
     return {
         "type": "fold",
@@ -474,6 +579,12 @@ def transform_pivot(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -485,6 +596,7 @@ def transform_pivot(
     """
     spec: dict = {"type": "pivot", "field": field, "value": value, "op": op}
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_pivot")
         spec["groupby"] = list(groupby)
     if limit is not None:
         spec["limit"] = limit
@@ -510,6 +622,12 @@ def transform_join_aggregate(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -525,6 +643,7 @@ def transform_join_aggregate(
         "aggregates": list(aggregates),
     }
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_join_aggregate")
         spec["groupby"] = list(groupby)
     return spec
 
@@ -566,6 +685,12 @@ def transform_window(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``sort`` or ``groupby`` is a bare string — iterating a string
+        yields individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -578,8 +703,10 @@ def transform_window(
     """
     spec: dict = {"type": "data_window", "ops": list(window_transforms)}
     if sort is not None:
+        _reject_bare_string(sort, where="transform_window", param="sort", noun="column names")
         spec["sort"] = list(sort)
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_window")
         spec["groupby"] = list(groupby)
     if frame is not None:
         spec["frame"] = list(frame)
@@ -632,6 +759,12 @@ def transform_density(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -658,6 +791,7 @@ def transform_density(
     if kernel != "gaussian":
         spec["kernel"] = kernel
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_density")
         spec["groupby"] = list(groupby)
     if extent is not None:
         spec["extent"] = list(extent)
@@ -697,6 +831,12 @@ def transform_regression(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -716,6 +856,7 @@ def transform_regression(
         "as_": as_list,
     }
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_regression")
         spec["groupby"] = list(groupby)
     return spec
 
@@ -748,6 +889,12 @@ def transform_loess(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -766,6 +913,7 @@ def transform_loess(
         "as_": as_list,
     }
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_loess")
         spec["groupby"] = list(groupby)
     return spec
 
@@ -863,6 +1011,12 @@ def transform_impute(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``groupby`` or ``keyvals`` is a bare string — iterating a
+        string yields individual characters, not column/key values.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -876,16 +1030,12 @@ def transform_impute(
     if value is not None:
         spec["value"] = value
     if groupby is not None:
+        _reject_bare_string_groupby(groupby, where="transform_impute")
         spec["groupby"] = list(groupby)
     if key is not None:
         spec["key"] = key
     if keyvals is not None:
-        if isinstance(keyvals, str):
-            raise ValueError(
-                f"transform_impute: keyvals must be a sequence of key values "
-                f"(list or tuple), got a bare string {keyvals!r}; iterating "
-                f"a string yields individual characters"
-            )
+        _reject_bare_string(keyvals, where="transform_impute", param="keyvals", noun="key values")
         spec["keyvals"] = [_normalize_keyval(v, key=key) for v in keyvals]
     return spec
 
@@ -909,6 +1059,12 @@ def transform_flatten(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``fields`` or ``as_`` is a bare string — iterating a string yields
+        individual characters, not column names.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -918,6 +1074,7 @@ def transform_flatten(
     >>> t["fields"]
     ['tags']
     """
+    _reject_bare_string(fields, where="transform_flatten", param="fields", noun="column names")
     as_list = _validate_as_seq(as_, where="transform_flatten") if as_ is not None else None
     spec: dict = {"type": "flatten", "fields": list(fields)}
     if as_list is not None:
@@ -1013,12 +1170,7 @@ def transform_top_k(
     """
     spec: dict = {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
     if groupby is not None:
-        if isinstance(groupby, str):
-            raise ValueError(
-                f"transform_top_k: groupby must be a sequence of column names "
-                f"(list or tuple), got a bare string {groupby!r}; iterating "
-                f"a string yields individual characters"
-            )
+        _reject_bare_string_groupby(groupby, where="transform_top_k")
         spec["groupby"] = list(groupby)
     return spec
 
@@ -1054,7 +1206,9 @@ def transform_stack(
     Raises
     ------
     ValueError
-        If ``offset`` is not one of ``"zero"``, ``"normalize"``, ``"center"``.
+        If ``offset`` is not one of ``"zero"``, ``"normalize"``, ``"center"``,
+        or if ``groupby`` or ``sort`` is a bare string — iterating a string
+        yields individual characters, not column names.
 
     Examples
     --------
@@ -1067,6 +1221,7 @@ def transform_stack(
     """
     _validate_stack_offset(offset, func_name="transform_stack", param="offset")
     as_list = _validate_as_pair(as_, where="transform_stack")
+    _reject_bare_string_groupby(groupby, where="transform_stack")
     spec: dict = {
         "type": "data_stack",
         "field": field,
@@ -1075,6 +1230,7 @@ def transform_stack(
         "offset": offset,
     }
     if sort is not None:
+        _reject_bare_string(sort, where="transform_stack", param="sort", noun="column names")
         spec["sort"] = list(sort)
     return spec
 
