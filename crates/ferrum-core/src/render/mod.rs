@@ -199,6 +199,18 @@ pub enum RenderError {
     /// through it, mirroring how `scale_resolve::color` quotes the same
     /// sentence for a raw-dict discretizing scale.
     InvalidScaleDomainConfig { channel: String, reason: String },
+    /// An `interpolate=` mark kwarg named a curve method outside the accepted
+    /// vocabulary (spec §6.1). `value` is the rejected string; the accepted set
+    /// in the message comes from
+    /// [`marks::curve::Interpolate::accepted_values`], the same array dispatch
+    /// runs on, so the two cannot drift.
+    ///
+    /// Refused rather than silently rendered as `linear`: before batch E,
+    /// `mark_line(interpolate="monotone")` and a typo like
+    /// `interpolate="mono"` produced the SAME straight-segment output, so a
+    /// user had no way to tell an unimplemented curve from a misspelled one.
+    /// Raised by [`draw::resolve_mark_style`], before any geometry is built.
+    UnknownInterpolate { value: String },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -255,7 +267,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::HtmlBundleAssembly(_)
         | RenderError::UnsupportedChannelCombination { .. }
         | RenderError::InvalidFormatSpec { .. }
-        | RenderError::InvalidScaleDomainConfig { .. }) => other,
+        | RenderError::InvalidScaleDomainConfig { .. }
+        | RenderError::UnknownInterpolate { .. }) => other,
     }
 }
 
@@ -386,6 +399,11 @@ impl std::fmt::Display for RenderError {
             Self::InvalidScaleDomainConfig { channel, reason } => write!(
                 f,
                 "{channel} axis scale-domain config: {reason}"
+            ),
+            Self::UnknownInterpolate { value } => write!(
+                f,
+                "interpolate='{value}' is not supported; accepted values are: {}",
+                marks::curve::Interpolate::accepted_values()
             ),
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),

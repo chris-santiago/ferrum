@@ -22,6 +22,7 @@ pub(crate) mod legend;
 pub(crate) mod strip_title;
 pub(crate) mod opacity;
 pub(crate) mod channels;
+pub(crate) mod curve;
 
 /// Test-only: the cross-mark color-dtype parity table (NF-A3). It has no home
 /// inside any single mark because the invariant — and the defect it guards —

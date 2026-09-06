@@ -20,45 +20,13 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
+use crate::render::marks::curve::{StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
 
-/// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
-/// given interpolation method. Mirrors `build_line_path` but emits structured
-/// commands instead of a `d` string.
-fn build_line_cmds(points: &[(f64, f64)], interpolate: Option<&str>) -> Vec<ferrum_scene::PathCmd> {
-    use ferrum_scene::PathCmd;
-    if points.is_empty() {
-        return Vec::new();
-    }
-    let method = interpolate.unwrap_or("linear");
-    let mut cmds = Vec::with_capacity(points.len() * 2);
-    cmds.push(PathCmd::MoveTo { x: points[0].0, y: points[0].1 });
-    for i in 1..points.len() {
-        let (px, py) = points[i - 1];
-        let (cx, cy) = points[i];
-        match method {
-            "step" => {
-                let mid_x = (px + cx) / 2.0;
-                cmds.push(PathCmd::HLineTo { x: mid_x });
-                cmds.push(PathCmd::VLineTo { y: cy });
-                cmds.push(PathCmd::HLineTo { x: cx });
-            }
-            "step-before" => {
-                cmds.push(PathCmd::VLineTo { y: cy });
-                cmds.push(PathCmd::HLineTo { x: cx });
-            }
-            "step-after" => {
-                cmds.push(PathCmd::HLineTo { x: cx });
-                cmds.push(PathCmd::VLineTo { y: cy });
-            }
-            _ => {
-                cmds.push(PathCmd::LineTo { x: cx, y: cy });
-            }
-        }
-    }
-    cmds
-}
+/// `mark_line` spells its step risers with the `HLineTo`/`VLineTo` shorthand.
+/// See [`StepSpelling`] for why the two spellings coexist.
+const LINE_STEP_SPELLING: StepSpelling = StepSpelling::Shorthand;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
@@ -153,8 +121,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         n_rows,
     );
 
-    let interpolate = ctx.mark_style.line.interpolate.as_deref();
-    let use_path = interpolate.is_some() && interpolate != Some("linear");
+    let interpolate = ctx.mark_style.line.interpolate.unwrap_or_default();
+    // A straight series stays a `Polyline` (`StrokeStyle`-shaped); anything
+    // that bends — steps and the three curves — needs a `Path`.
+    let use_path = !interpolate.is_linear();
+    // A line's points come straight from the positional encodings, so the
+    // series' own axis governs — under `CoordFlip` that is y, and a curve
+    // fitted against x there doubles back on itself.
+    let trace = Trace {
+        method: interpolate,
+        step: LINE_STEP_SPELLING,
+        axis: ctx.series_curve_axis(),
+    };
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
@@ -212,7 +190,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let stroke_color = with_opacity(stroke_color, group_opacity);
 
         let node = if use_path {
-            let cmds = build_line_cmds(&points, interpolate);
+            let cmds = trace.subpath(&points);
             // FA-11: honor the stroke_opacity and fill_opacity channels (the
             // latter was previously dropped) via the complete FillStroke builder.
             // The Path variant's stroke is not yet threaded for provenance-gated
@@ -948,61 +926,202 @@ mod tests {
             "inferred quantitative color must emit exactly 1 merged polyline over all rows, not fragment per distinct value; got {polylines}");
     }
 
-    // ── Ported from bug_hunt_marks_rendering_r2.rs (R1) ─────────────────────
-    // `build_line_cmds` command-count contracts per interpolation method,
-    // exercising the real function instead of a hand-copied formula.
+    // ── Interpolation wiring (batch E task 1) ───────────────────────────────
+    //
+    // The per-method command contracts live with the math, in
+    // `marks::curve`'s own tests (they moved there with the step logic; they
+    // came originally from `bug_hunt_marks_rendering_r2.rs`). What has to be
+    // pinned HERE is the wiring: which method `build` reads, and which step
+    // spelling `mark_line` asks for — the property that keeps every committed
+    // step golden byte-identical across the relocation.
 
+    /// Render 4 collinear-in-x points under `interpolate` and return the
+    /// single emitted node's path commands.
+    fn line_path_cmds(interpolate: &str) -> Vec<ferrum_scene::PathCmd> {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0, 1.0, 3.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { interpolate: Some(interpolate.into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        result.nodes.into_iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("non-linear interpolation must emit a Path node")
+    }
+
+    /// Byte-stability guard for the relocation: `mark_line`'s step risers stay
+    /// spelled with the `HLineTo`/`VLineTo` shorthand, which is what every
+    /// committed step golden (`H`/`V` in the `d` attribute) was blessed with.
+    /// `mark_area` deliberately spells the same geometry with explicit
+    /// `LineTo` vertices — see `area.rs`'s twin of this test.
     #[test]
-    fn build_line_cmds_step_emits_hvh_triplet_per_segment() {
-        use ferrum_scene::PathCmd;
-        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
-        let cmds = build_line_cmds(&points, Some("step"));
-        // MoveTo + 3 segments * (HLineTo, VLineTo, HLineTo) = 10 commands.
-        assert_eq!(cmds.len(), 10);
-        assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
-        for chunk in cmds[1..].chunks(3) {
-            assert!(matches!(chunk[0], PathCmd::HLineTo { .. }));
-            assert!(matches!(chunk[1], PathCmd::VLineTo { .. }));
-            assert!(matches!(chunk[2], PathCmd::HLineTo { .. }));
+    fn line_step_keeps_the_hv_shorthand_spelling() {
+        for method in ["step", "step-before", "step-after"] {
+            let cmds = line_path_cmds(method);
+            assert!(
+                cmds.iter().any(|c| matches!(c, ferrum_scene::PathCmd::HLineTo { .. }))
+                    && cmds.iter().any(|c| matches!(c, ferrum_scene::PathCmd::VLineTo { .. })),
+                "mark_line(interpolate={method:?}) must keep the H/V shorthand; got {cmds:?}"
+            );
         }
     }
 
+    /// F-L02-02: the three curve methods must compute real curves. Before this
+    /// fix `mark_line(interpolate="monotone"|"basis"|"cardinal")` fell through
+    /// to the linear arm and emitted straight `LineTo` segments under a `Path`
+    /// node, so the advertised curves were indistinguishable from `linear`.
     #[test]
-    fn build_line_cmds_step_before_emits_vh_pair_per_segment() {
-        use ferrum_scene::PathCmd;
-        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
-        let cmds = build_line_cmds(&points, Some("step-before"));
-        assert_eq!(cmds.len(), 7, "MoveTo + 3 * (VLineTo, HLineTo)");
-        for chunk in cmds[1..].chunks(2) {
-            assert!(matches!(chunk[0], PathCmd::VLineTo { .. }));
-            assert!(matches!(chunk[1], PathCmd::HLineTo { .. }));
+    fn line_curve_methods_emit_cubics_not_straight_segments() {
+        for method in ["monotone", "basis", "cardinal"] {
+            let cmds = line_path_cmds(method);
+            let cubics = cmds.iter().filter(|c| matches!(c, ferrum_scene::PathCmd::CubicTo { .. })).count();
+            assert!(
+                cubics > 0,
+                "mark_line(interpolate={method:?}) must emit CubicTo commands; got {cmds:?}"
+            );
         }
     }
 
-    #[test]
-    fn build_line_cmds_step_after_emits_hv_pair_per_segment() {
-        use ferrum_scene::PathCmd;
-        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
-        let cmds = build_line_cmds(&points, Some("step-after"));
-        assert_eq!(cmds.len(), 7, "MoveTo + 3 * (HLineTo, VLineTo)");
-        for chunk in cmds[1..].chunks(2) {
-            assert!(matches!(chunk[0], PathCmd::HLineTo { .. }));
-            assert!(matches!(chunk[1], PathCmd::VLineTo { .. }));
-        }
+    // ── CoordFlip: the series advances along y ───────────────────────────
+    //
+    // The drawer receives an encoding already in RENDERING space — by the time
+    // `build` runs, `prepare::build_layers` has applied
+    // `Encoding::flip_positional`, so a flipped chart arrives with the VALUE on
+    // x and the CATEGORY on y, while `spec.coord` still reads `Flip` (the same
+    // flag `marks::rule` reads at draw time). These fixtures are authored that
+    // way deliberately.
+
+    /// Spec + batch for a flipped series: x carries a non-monotone value,
+    /// y carries the evenly-advancing category.
+    fn flipped_line_fixture() -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        use crate::spec::encoding::DataType as SDT;
+        let mut spec = line_spec();
+        spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+        spec.encoding.x = Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() });
+        spec.encoding.y = Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            // value on x (non-monotone), category on y (steadily advancing)
+            Arc::new(Float64Array::from(vec![1.0, 4.0, 2.0, 5.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+        ]).unwrap();
+        (spec, batch)
     }
 
+    /// A flipped `monotone` line must be fitted against y, the axis its points
+    /// actually advance along. Fitted against x it doubles back on itself,
+    /// because the flipped x carries the (non-monotone) value.
+    ///
+    /// Discriminating assertion: every control point's y sits at an exact third
+    /// of its segment's y span. An x-fitted curve puts the thirds on x instead.
     #[test]
-    fn build_line_cmds_linear_default_emits_one_lineto_per_segment() {
-        use ferrum_scene::PathCmd;
-        let points = [(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
-        let unlabeled = build_line_cmds(&points, None);
-        let explicit = build_line_cmds(&points, Some("linear"));
-        for cmds in [unlabeled, explicit] {
-            assert_eq!(cmds.len(), 4, "MoveTo + 3 LineTo");
-            assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
-            for cmd in &cmds[1..] {
-                assert!(matches!(cmd, PathCmd::LineTo { .. }));
-            }
+    fn coord_flip_line_fits_curves_against_y() {
+        let (spec, batch) = flipped_line_fixture();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { interpolate: Some("monotone".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("a curved line must emit a Path");
+
+        let mut prev = match cmds[0] {
+            ferrum_scene::PathCmd::MoveTo { x, y } => (x, y),
+            ref other => panic!("expected a leading MoveTo, got {other:?}"),
+        };
+        let mut checked = 0;
+        for cmd in &cmds[1..] {
+            let ferrum_scene::PathCmd::CubicTo { c1y, c2y, x, y, .. } = *cmd else {
+                panic!("expected CubicTo, got {cmd:?}");
+            };
+            let third = (y - prev.1) / 3.0;
+            assert!(
+                (c1y - (prev.1 + third)).abs() < 1e-9 && (c2y - (y - third)).abs() < 1e-9,
+                "under CoordFlip the control points must sit on thirds of the Y span \
+                 ({}, {}), got ({c1y}, {c2y}) — an x-fitted curve puts the thirds on x",
+                prev.1 + third,
+                y - third
+            );
+            prev = (x, y);
+            checked += 1;
         }
+        assert_eq!(checked, 3, "one cubic per segment");
+    }
+
+    /// The flipped-step case (adjudicated in scope): a step's TREAD advances
+    /// the independent coordinate. Under `CoordFlip` that is y, so the tread is
+    /// a `VLineTo` and the riser an `HLineTo` — the mirror of the unflipped
+    /// spelling. Fitted against x, the treads run along the value axis and
+    /// reverse direction instead of stepping down the category axis.
+    #[test]
+    fn coord_flip_line_steps_tread_along_y() {
+        let (spec, batch) = flipped_line_fixture();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { interpolate: Some("step-after".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("a stepped line must emit a Path");
+
+        // step-after: tread first, then riser. Under flip that is V then H.
+        for pair in cmds[1..].chunks(2) {
+            assert!(
+                matches!(pair[0], ferrum_scene::PathCmd::VLineTo { .. }),
+                "flipped step-after must tread along y (VLineTo) first; got {:?}",
+                pair[0]
+            );
+            assert!(
+                matches!(pair[1], ferrum_scene::PathCmd::HLineTo { .. }),
+                "flipped step-after's riser must move x (HLineTo); got {:?}",
+                pair[1]
+            );
+        }
+        // The treads must advance monotonically down the category axis rather
+        // than reversing direction along the value axis.
+        let treads: Vec<f64> = cmds.iter().filter_map(|c| match c {
+            ferrum_scene::PathCmd::VLineTo { y } => Some(*y),
+            _ => None,
+        }).collect();
+        assert_eq!(treads.len(), 3, "one tread per segment");
+        assert!(
+            treads.windows(2).all(|w| w[1] < w[0]) || treads.windows(2).all(|w| w[1] > w[0]),
+            "treads must advance monotonically along the category axis; got {treads:?}"
+        );
+    }
+
+    /// The refusal fires at `resolve_mark_style`, before any geometry is
+    /// built, and names the accepted set. Previously an unknown value rendered
+    /// as straight segments, indistinguishable from a real `linear` chart.
+    #[test]
+    fn line_unknown_interpolate_refuses_with_the_accepted_set() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { interpolate: Some("mono".into()), ..Default::default() };
+        let err = resolve_mark_style(Some(&overrides), &theme, &Mark::Line)
+            .expect_err("an unknown interpolate value must refuse");
+        assert_eq!(
+            err,
+            crate::render::RenderError::UnknownInterpolate { value: "mono".into() }
+        );
+        let message = err.to_string();
+        assert!(message.contains("monotone") && message.contains("cardinal"),
+            "the refusal must name the accepted set; got {message}");
     }
 }

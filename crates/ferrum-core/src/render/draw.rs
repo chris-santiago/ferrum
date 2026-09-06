@@ -12,8 +12,48 @@ use ferrum_scene::{
 };
 
 use super::color::{parse_color, with_opacity, Color};
+use super::marks::curve::Interpolate;
 use super::scale_resolve::{ColorInput, ColorScale, ResolvedScales};
 use super::RenderError;
+
+impl DrawCtx<'_> {
+    /// Whether this chart's coordinate system is flipped (`fm.CoordFlip()`).
+    ///
+    /// Mirrors `marks::rule`'s read of the same flag off the same `spec`.
+    pub(crate) fn coord_flipped(&self) -> bool {
+        matches!(self.spec.coord, Some(crate::spec::coord::CoordKind::Flip))
+    }
+
+    /// Which screen coordinate a series drawn from this batch advances along —
+    /// the independent variable [`marks::curve`](super::marks::curve) fits the
+    /// dependent one against.
+    ///
+    /// Normally a series advances along x with its value on y. TWO things put
+    /// the value on x and the position/category on y instead:
+    ///
+    /// - **`CoordFlip`** — [`Encoding::flip_positional`](crate::spec::encoding::Encoding::flip_positional)
+    ///   swaps `x`/`y` on the *rendering* encoding, so the drawer receives the
+    ///   value on x and the category on y.
+    /// - **A horizontal stack** (`Stack(value_axis=X)`, or a horizontal
+    ///   composite-mark desugar) — `apply_stack` cumulates the x column and
+    ///   stamps `__stack_value_on_x__`.
+    ///
+    /// Any future producer of a horizontal series belongs HERE. Deriving this
+    /// per-mark is what went wrong once already: the first attempt enumerated
+    /// call sites, knew about the stamp, and did not know about the flip, so
+    /// every flipped curve was fitted against the wrong axis while each mark's
+    /// const asserted it could not happen.
+    ///
+    /// A mark whose points are NOT built from the positional encodings this
+    /// describes (a `y2` band, whose bottom edge rides the row's own x) must
+    /// override this — see `marks::area::BottomEdge::axis`.
+    pub(crate) fn series_curve_axis(&self) -> super::marks::curve::CurveAxis {
+        use super::marks::curve::CurveAxis;
+        let horizontal = self.coord_flipped()
+            || super::position::BatchPositionMeta::from_batch(self.batch).stack_value_on_x();
+        if horizontal { CurveAxis::Y } else { CurveAxis::X }
+    }
+}
 
 pub struct DrawCtx<'a> {
     pub spec: &'a crate::spec::chart::ChartSpec,
@@ -94,14 +134,18 @@ pub struct TextStyle {
 }
 
 /// Path-shaping overrides shared by `mark_line` and (for `interpolate`) by
-/// `mark_area`. `interpolate` controls curve interpolation; `stroke_cap` /
-/// `stroke_join` shape line endpoints/corners. Area reuses `interpolate` from
-/// this struct (the line and area renderers share the same path builder); area's
-/// own area-only overrides live in [`AreaStyle`].
+/// `mark_area` and `mark_ribbon`. `interpolate` controls curve interpolation;
+/// `stroke_cap` / `stroke_join` shape line endpoints/corners. Area and ribbon
+/// reuse `interpolate` from this struct (all three marks trace their edges
+/// through [`marks::curve`](super::marks::curve)); area's own overrides live in
+/// [`AreaStyle`].
 #[derive(Debug, Clone, Default)]
 pub struct LineStyle {
-    /// S1: interpolate (line/area).
-    pub interpolate: Option<String>,
+    /// S1: interpolate (line/area/ribbon). Parsed — and refused — once in
+    /// [`resolve_mark_style`], so every drawer downstream holds a method that
+    /// is valid by construction. `None` means the user set nothing and the
+    /// drawer applies [`Interpolate::default`] (linear).
+    pub interpolate: Option<Interpolate>,
     /// S2: stroke_cap (line).
     pub stroke_cap: Option<String>,
     /// S3: stroke_join (line/area).
@@ -354,8 +398,9 @@ pub fn resolve_mark_style(
     if let Some(ref d) = o.detail { style.group.detail = Some(d.clone()); }
     if let Some(ref c) = o.cmap { style.group.cmap = Some(c.clone()); }
 
-    // S1: interpolate
-    if let Some(ref i) = o.interpolate { style.line.interpolate = Some(i.clone()); }
+    // S1: interpolate — resolves or refuses; there is no third "unrecognized
+    // method silently renders straight" outcome (spec §7, no silent fallbacks).
+    if let Some(ref i) = o.interpolate { style.line.interpolate = Some(Interpolate::parse(i)?); }
     // S2: stroke_cap
     if let Some(ref sc) = o.stroke_cap { style.line.stroke_cap = Some(sc.clone()); }
     // S3: stroke_join

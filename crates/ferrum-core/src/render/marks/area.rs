@@ -13,46 +13,94 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::build_color_detail_groups;
+use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
-/// Build `Vec<PathCmd>` for the top-edge line using the given interpolation
-/// method. Mirrors `build_top_line_path` but emits structured commands.
-fn build_top_line_cmds(top: &[(f64, f64)], interpolate: Option<&str>) -> Vec<ferrum_scene::PathCmd> {
-    use ferrum_scene::PathCmd;
-    if top.is_empty() { return Vec::new(); }
-    let method = interpolate.unwrap_or("linear");
-    let mut cmds = Vec::with_capacity(top.len() * 2);
-    cmds.push(PathCmd::MoveTo { x: top[0].0, y: top[0].1 });
-    for i in 1..top.len() {
-        let (px, py) = top[i - 1];
-        let (cx, cy) = top[i];
-        match method {
-            "step" => {
-                let mid_x = (px + cx) / 2.0;
-                cmds.push(PathCmd::LineTo { x: mid_x, y: py });
-                cmds.push(PathCmd::LineTo { x: mid_x, y: cy });
-                cmds.push(PathCmd::LineTo { x: cx, y: cy });
-            }
-            "step-before" => {
-                cmds.push(PathCmd::LineTo { x: px, y: cy });
-                cmds.push(PathCmd::LineTo { x: cx, y: cy });
-            }
-            "step-after" => {
-                cmds.push(PathCmd::LineTo { x: cx, y: py });
-                cmds.push(PathCmd::LineTo { x: cx, y: cy });
-            }
-            _ => {
-                cmds.push(PathCmd::LineTo { x: cx, y: cy });
-            }
+/// `mark_area` spells its step risers as explicit `LineTo` vertices — the
+/// spelling its committed goldens carry. `mark_line` uses the `H`/`V`
+/// shorthand for the same geometry; see [`StepSpelling`].
+const AREA_STEP_SPELLING: StepSpelling = StepSpelling::Vertices;
+
+/// How a group's bottom edge is built.
+///
+/// The discriminant is loop-invariant, so it is resolved ONCE and then matched
+/// per row. That is not just tidier: the same value yields both the per-row
+/// bottom point and the series' [`CurveAxis`], so the geometry and its
+/// parameterization cannot disagree. They did once — the axis was read off the
+/// stack stamp while the point loop gave `y2` precedence over it, so a `y2`
+/// band under a horizontal stack was *built* x-parameterized and *fitted*
+/// y-parameterized.
+enum BottomEdge<'a> {
+    /// Bound `y2`: the bottom rides the y2 column at the row's own x. Takes
+    /// precedence over `StackBase`, which is what the pre-hoist `if let`
+    /// chain did.
+    Y2(&'a [Option<f64>]),
+    /// A stack base. `value_on_x` is the horizontal case, where the base is a
+    /// horizontal offset at the row's own y rather than a vertical one at its
+    /// own x.
+    StackBase { bases: &'a [Option<f64>], value_on_x: bool },
+    /// Neither — there is no traced bottom edge and the fill closes on the
+    /// panel baseline.
+    Baseline,
+}
+
+impl<'a> BottomEdge<'a> {
+    fn resolve(
+        y2s: Option<&'a Vec<Option<f64>>>,
+        stack_bases: Option<&'a Vec<Option<f64>>>,
+        value_on_x: bool,
+    ) -> Self {
+        match (y2s, stack_bases) {
+            (Some(y2s), _) => Self::Y2(y2s),
+            (None, Some(bases)) => Self::StackBase { bases, value_on_x },
+            (None, None) => Self::Baseline,
         }
     }
-    cmds
+
+    /// The coordinate this group's traced edges advance along.
+    ///
+    /// The rule is uniform: **every arm that builds a bottom point answers from
+    /// itself**, because the shape it builds *is* the parameterization. Only
+    /// `Baseline`, which builds no bottom edge, defers to the series.
+    fn axis(&self, ctx: &DrawCtx) -> CurveAxis {
+        match self {
+            // A `y2` band is a vertical idiom BY CONSTRUCTION: this arm builds
+            // the bottom point at the row's own `cx` (see the point loop), so
+            // both edges advance along x whatever the stack stamped or the
+            // coordinate system says.
+            Self::Y2(_) => CurveAxis::X,
+            // Same argument, one arm over: `value_on_x` is exactly the flag the
+            // point loop branches on, so it — not a second derivation — decides
+            // what the edges it builds are parameterized by. `true` builds
+            // `(base_x, cy_top)`, varying x at the row's own y; `false` builds
+            // `(cx, base_y)`, varying y at the row's own x.
+            //
+            // These disagree with `series_curve_axis()` in one combination:
+            // `CoordFlip` + an explicit `Stack(value_axis="y")`, where
+            // `resolve_stack_value_on_x` returns `false` while `coord_flipped()`
+            // returns `true`. Reading the arm is the correct answer there —
+            // that stack cumulates the RENDERING y column, which is an ordinary
+            // vertical stack in screen space and so genuinely x-parameterized.
+            Self::StackBase { value_on_x, .. } => {
+                if *value_on_x { CurveAxis::Y } else { CurveAxis::X }
+            }
+            // No bottom edge is built, so there is no construction to read the
+            // answer off; the series' own axis governs (this is the arm that
+            // carries `CoordFlip` for an unstacked area).
+            Self::Baseline => ctx.series_curve_axis(),
+        }
+    }
+}
+
+/// Trace the top edge under the given trace.
+fn build_top_line_cmds(top: &[(f64, f64)], trace: Trace) -> Vec<ferrum_scene::PathCmd> {
+    trace.subpath(top)
 }
 
 /// Build closed area path commands: top edge (with interpolation) + baseline closure.
-fn build_area_cmds(top: &[(f64, f64)], baseline: f64, interpolate: Option<&str>) -> Vec<ferrum_scene::PathCmd> {
+fn build_area_cmds(top: &[(f64, f64)], baseline: f64, trace: Trace) -> Vec<ferrum_scene::PathCmd> {
     use ferrum_scene::PathCmd;
-    let mut cmds = build_top_line_cmds(top, interpolate);
+    let mut cmds = build_top_line_cmds(top, trace);
     let last_x = top[top.len() - 1].0;
     let x0 = top[0].0;
     cmds.push(PathCmd::LineTo { x: last_x, y: baseline });
@@ -61,13 +109,18 @@ fn build_area_cmds(top: &[(f64, f64)], baseline: f64, interpolate: Option<&str>)
     cmds
 }
 
-/// Build closed stacked area path commands: top edge forward, bottom edge reversed.
-fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], interpolate: Option<&str>) -> Vec<ferrum_scene::PathCmd> {
+/// Build closed stacked/`y2` band path commands: top edge forward, bottom edge
+/// walked back to close the ring.
+///
+/// `bottom` is passed FORWARD; [`Trace::extend_reversed`] owns the reversal so
+/// the lower boundary describes the same function of the independent
+/// coordinate as the upper one. Handing it pre-reversed points and the
+/// unmirrored method — which is what this did before — silently turns
+/// `step-before` into `step-after` along the bottom edge.
+fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], trace: Trace) -> Vec<ferrum_scene::PathCmd> {
     use ferrum_scene::PathCmd;
-    let mut cmds = build_top_line_cmds(top, interpolate);
-    for &(x, y) in bottom.iter().rev() {
-        cmds.push(PathCmd::LineTo { x, y });
-    }
+    let mut cmds = build_top_line_cmds(top, trace);
+    trace.extend_reversed(&mut cmds, bottom);
     cmds.push(PathCmd::Close);
     cmds
 }
@@ -148,7 +201,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // fill_opacity → 1.0. Area does not read stroke_opacity (default unused).
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (base_opacity, 1.0, 1.0));
 
-    let interpolate = ctx.mark_style.line.interpolate.as_deref();
+    let interpolate = ctx.mark_style.line.interpolate.unwrap_or_default();
+    // Resolve the bottom-edge shape once; it decides both how each row's
+    // bottom point is built (the point loop below) and which coordinate the
+    // edges are parameterized by, so the two cannot drift apart.
+    let bottom_edge = BottomEdge::resolve(y2s_opt.as_ref(), stack_bases.as_ref(), stack_value_on_x);
+    let trace = Trace {
+        method: interpolate,
+        step: AREA_STEP_SPELLING,
+        axis: bottom_edge.axis(ctx),
+    };
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -178,29 +240,35 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let cy_top = cy + yo;
             top.push((cx, cy_top));
             row_indices.push(i);
-            if let Some(ref y2s) = y2s_opt {
-                // y2 band: bottom edge comes from the y2 column.
-                let by = y2s.get(i)
-                    .and_then(|v| *v)
-                    .filter(|v| v.is_finite())
-                    .and_then(|v| ctx.scales.y.to_pixel_f64(v))
-                    .unwrap_or(baseline_y);
-                bottom.push((cx, by + yo));
-            } else if let Some(ref bases) = stack_bases {
-                let base_v = bases.get(i).and_then(|v| *v);
-                if stack_value_on_x {
+            match bottom_edge {
+                BottomEdge::Y2(y2s) => {
+                    // y2 band: bottom edge comes from the y2 column, at the
+                    // row's OWN x — which is why this shape is always
+                    // x-parameterized (see `BottomEdge::axis`).
+                    let by = y2s.get(i)
+                        .and_then(|v| *v)
+                        .filter(|v| v.is_finite())
+                        .and_then(|v| ctx.scales.y.to_pixel_f64(v))
+                        .unwrap_or(baseline_y);
+                    bottom.push((cx, by + yo));
+                }
+                BottomEdge::StackBase { bases, value_on_x: true } => {
                     // Value lives on X: the base is a horizontal offset at
                     // the row's own y-pixel, not a vertical offset at cx.
-                    let base_x = base_v
+                    let base_x = bases.get(i)
+                        .and_then(|v| *v)
                         .and_then(|b| ctx.scales.x.to_pixel_f64(b))
                         .unwrap_or(baseline_x);
                     bottom.push((base_x + xo, cy_top));
-                } else {
-                    let base_y = base_v
+                }
+                BottomEdge::StackBase { bases, value_on_x: false } => {
+                    let base_y = bases.get(i)
+                        .and_then(|v| *v)
                         .and_then(|b| ctx.scales.y.to_pixel_f64(b))
                         .unwrap_or(baseline_y);
                     bottom.push((cx, base_y));
                 }
+                BottomEdge::Baseline => {}
             }
         }
         if top.len() < 2 { continue; }
@@ -210,9 +278,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let (effective_opacity, group_fill_opacity, _) = opacity_res.at_group_first(first);
 
         let cmds = if is_stacked || has_y2 {
-            build_stacked_area_cmds(&top, &bottom, interpolate)
+            build_stacked_area_cmds(&top, &bottom, trace)
         } else {
-            build_area_cmds(&top, baseline_y, interpolate)
+            build_area_cmds(&top, baseline_y, trace)
         };
         let fill = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => {
@@ -252,7 +320,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         // S9: line border on top of the area fill.
         if ctx.mark_style.area.line_border == Some(true) {
-            let line_cmds = build_top_line_cmds(&top, interpolate);
+            let line_cmds = build_top_line_cmds(&top, trace);
             let border_style = to_scene_fill_stroke(
                 None,
                 false,
@@ -271,7 +339,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         // S10: border lines on both top and bottom edges.
         if ctx.mark_style.area.borders == Some(true) {
-            let top_cmds = build_top_line_cmds(&top, interpolate);
+            let top_cmds = build_top_line_cmds(&top, trace);
             let sw = ctx.mark_style.paint.stroke_width.max(1.0);
             let border_style = to_scene_fill_stroke(
                 None,
@@ -290,7 +358,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
             // Bottom edge: trace the y2 edge when bound, else flat baseline.
             let bottom_cmds = if has_y2 && !bottom.is_empty() {
-                build_top_line_cmds(&bottom, interpolate)
+                build_top_line_cmds(&bottom, trace)
             } else {
                 let x0 = top[0].0;
                 let x_last = top[top.len() - 1].0;
@@ -337,6 +405,15 @@ mod tests {
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    use crate::render::marks::curve::Interpolate;
+
+    /// A vertical area's trace: the mark's own step spelling, x as the
+    /// independent coordinate. The horizontal (`CurveAxis::Y`) case has its own
+    /// tests further down.
+    fn vertical(method: Interpolate) -> Trace {
+        Trace { method, step: AREA_STEP_SPELLING, axis: CurveAxis::X }
+    }
 
     fn area_spec() -> ChartSpec {
         ChartSpec {
@@ -1253,7 +1330,7 @@ mod tests {
     fn build_area_cmds_closes_top_line_plus_baseline() {
         use ferrum_scene::PathCmd;
         let top: Vec<(f64, f64)> = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)];
-        let cmds = build_area_cmds(&top, 100.0, None);
+        let cmds = build_area_cmds(&top, 100.0, vertical(Interpolate::Linear));
         // top: MoveTo + 4 LineTo = 5, + 2 baseline LineTo + Close = 8.
         assert_eq!(cmds.len(), 8);
         assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
@@ -1273,7 +1350,7 @@ mod tests {
         use ferrum_scene::PathCmd;
         let top: Vec<(f64, f64)> = vec![(0.0, 10.0), (1.0, 20.0), (2.0, 15.0)];
         let bottom: Vec<(f64, f64)> = vec![(0.0, 5.0), (1.0, 8.0), (2.0, 6.0)];
-        let cmds = build_stacked_area_cmds(&top, &bottom, None);
+        let cmds = build_stacked_area_cmds(&top, &bottom, vertical(Interpolate::Linear));
         // top: MoveTo + 2 LineTo = 3, + 3 bottom LineTo (reversed) + Close = 7.
         assert_eq!(cmds.len(), 7);
         assert!(matches!(cmds.last(), Some(PathCmd::Close)));
@@ -1285,5 +1362,533 @@ mod tests {
             }
             other => panic!("expected first bottom LineTo to be bottom[last], got {other:?}"),
         }
+    }
+
+    // ── Interpolation wiring (batch E task 1) ───────────────────────────────
+    //
+    // The per-method command contracts live with the math in `marks::curve`.
+    // Pinned here: which spelling `mark_area` asks for, and that both edges of
+    // a band follow the same method.
+
+    /// Byte-stability guard for the relocation: `mark_area`'s step risers stay
+    /// spelled as explicit `LineTo` vertices — never the `H`/`V` shorthand
+    /// `mark_line` uses for the identical geometry. Every committed area
+    /// golden's `d` attribute was blessed with the `L` spelling.
+    #[test]
+    fn area_step_keeps_the_explicit_lineto_spelling() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 0.0), (10.0, 10.0), (20.0, 5.0)];
+        for method in [Interpolate::Step, Interpolate::StepBefore, Interpolate::StepAfter] {
+            let cmds = build_top_line_cmds(&top, vertical(method));
+            assert!(
+                !cmds.iter().any(|c| matches!(
+                    c,
+                    PathCmd::HLineTo { .. } | PathCmd::VLineTo { .. }
+                )),
+                "mark_area({method:?}) must not emit H/V shorthand; got {cmds:?}"
+            );
+            assert!(
+                cmds[1..].iter().all(|c| matches!(c, PathCmd::LineTo { .. })),
+                "mark_area({method:?}) spells steps as explicit vertices; got {cmds:?}"
+            );
+        }
+    }
+
+    /// F-L02-02: `mark_area(interpolate="monotone"|"basis"|"cardinal")` must
+    /// compute real curves. Before this fix every non-step value fell through
+    /// to the linear arm and the "curved" area was bounded by straight
+    /// segments.
+    #[test]
+    fn area_curve_methods_emit_cubics_on_the_top_edge() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 0.0), (10.0, 10.0), (20.0, 5.0), (30.0, 15.0)];
+        for method in [Interpolate::Monotone, Interpolate::Basis, Interpolate::Cardinal] {
+            let cmds = build_area_cmds(&top, 100.0, vertical(method));
+            assert!(
+                cmds.iter().any(|c| matches!(c, PathCmd::CubicTo { .. })),
+                "area({method:?}) must curve its top edge; got {cmds:?}"
+            );
+            assert!(matches!(cmds.last(), Some(PathCmd::Close)), "area path stays closed");
+        }
+    }
+
+    /// A stacked/y2 band's BOTH edges follow the interpolation method — a
+    /// curved top over a straight bottom would leave the band's two boundaries
+    /// describing different functions of x.
+    #[test]
+    fn stacked_area_curves_the_bottom_edge_too() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 10.0), (10.0, 30.0), (20.0, 15.0), (30.0, 35.0)];
+        let bottom: Vec<(f64, f64)> = vec![(0.0, 5.0), (10.0, 8.0), (20.0, 6.0), (30.0, 9.0)];
+        let cmds = build_stacked_area_cmds(&top, &bottom, vertical(Interpolate::Monotone));
+        let cubics = cmds.iter().filter(|c| matches!(c, PathCmd::CubicTo { .. })).count();
+        assert_eq!(
+            cubics, 6,
+            "3 cubics for the top edge + 3 for the reversed bottom; got {cmds:?}"
+        );
+        // The bottom edge JOINS the ring: exactly one LineTo (the join) and no
+        // second MoveTo.
+        assert_eq!(
+            cmds.iter().filter(|c| matches!(c, PathCmd::MoveTo { .. })).count(),
+            1,
+            "the band is one subpath, not two"
+        );
+        match &cmds[4] {
+            PathCmd::LineTo { x, y } => {
+                assert!((x - bottom[3].0).abs() < 1e-9 && (y - bottom[3].1).abs() < 1e-9,
+                    "the join drops to the bottom edge's LAST point (walked in reverse)");
+            }
+            other => panic!("expected the ring join to be a LineTo, got {other:?}"),
+        }
+    }
+
+    /// A band's LOWER boundary must be the same function of x as a forward
+    /// trace of the bottom points — the whole point of the adjudicated
+    /// "step both edges" change. `step-before` and `step-after` are
+    /// direction-dependent (each becomes the other when the sequence is walked
+    /// backwards), so reversing the points and reusing the same method leaves
+    /// the two boundaries describing different step functions of x.
+    ///
+    /// Direction-shaped assertion: walking the emitted bottom edge
+    /// back-to-front must reproduce the forward trace's vertices exactly. It
+    /// deliberately does not count commands — the buggy and correct shapes have
+    /// identical command counts, differing only in WHICH corner each vertex
+    /// names.
+    #[test]
+    fn band_bottom_edge_is_the_same_step_function_of_x_as_a_forward_trace() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 10.0), (10.0, 30.0), (20.0, 15.0)];
+        let bottom: Vec<(f64, f64)> = vec![(0.0, 5.0), (10.0, 8.0), (20.0, 6.0)];
+
+        fn vertices(cmds: &[PathCmd]) -> Vec<(f64, f64)> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => Some((*x, *y)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        for method in [Interpolate::StepBefore, Interpolate::StepAfter, Interpolate::Step] {
+            let cmds = build_stacked_area_cmds(&top, &bottom, vertical(method));
+            let all = vertices(&cmds);
+            // The top edge contributes the leading vertices; the bottom edge is
+            // everything from the ring's turn onward.
+            let top_len = vertices(&build_top_line_cmds(&top, vertical(method))).len();
+            let mut emitted_bottom = all[top_len..].to_vec();
+            emitted_bottom.reverse();
+
+            let forward_bottom = vertices(&build_top_line_cmds(&bottom, vertical(method)));
+            assert_eq!(
+                emitted_bottom, forward_bottom,
+                "{method:?}: the band's lower boundary, read back-to-front, must equal a \
+                 forward trace of the same points — otherwise the band's two edges are \
+                 different step functions of x"
+            );
+        }
+    }
+
+    /// The S10 bottom BORDER (traced forward) and the fill's lower boundary
+    /// (traced backwards to close the ring) are two renderings of one edge in
+    /// the same mark. They must describe the same step function of x, or a
+    /// `borders=True` band shows its outline and its fill disagreeing over
+    /// every interval.
+    ///
+    /// Driven through `build`, not the helpers, so it pins what the mark
+    /// actually emits.
+    #[test]
+    fn s10_bottom_border_and_fill_lower_boundary_agree_under_step() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use ferrum_scene::PathCmd;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("lo", DataType::Float64, false),
+            Field::new("hi", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 2.0, 4.0])),
+            Arc::new(Float64Array::from(vec![5.0, 7.0, 6.0, 8.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+
+        for method in ["step-after", "step-before", "step"] {
+            let overrides = MarkKwargsSpec {
+                borders: Some(true),
+                interpolate: Some(method.into()),
+                ..Default::default()
+            };
+            let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let result = super::build(&ctx);
+
+            fn vertices(cmds: &[PathCmd]) -> Vec<(f64, f64)> {
+                cmds.iter()
+                    .filter_map(|c| match c {
+                        PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .collect()
+            }
+
+            // Nodes: [fill (closed), top border, bottom border].
+            let paths: Vec<&Vec<PathCmd>> = result.nodes.iter().filter_map(|n| {
+                if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+            }).collect();
+            assert_eq!(paths.len(), 3, "{method}: fill + top border + bottom border");
+
+            let border_bottom = vertices(paths[2]);
+            let fill = vertices(paths[0]);
+            // The fill's lower boundary is everything after the top edge; the
+            // top edge is as long as the top border's own trace.
+            let top_len = vertices(paths[1]).len();
+            let mut fill_bottom = fill[top_len..].to_vec();
+            fill_bottom.reverse();
+
+            assert_eq!(
+                fill_bottom, border_bottom,
+                "{method}: the fill's lower boundary and the drawn bottom border must be \
+                 the same step function of x within one mark"
+            );
+        }
+    }
+
+    /// A HORIZONTAL stack (`Stack(value_axis=X)`: the cumulated value lands on
+    /// x, the category runs down y) is parameterized by y, so its curves must
+    /// be fitted against y. Fitting against x divides by a value difference and
+    /// yields a shape that is not a function of the axis it is drawn against.
+    ///
+    /// Discriminating assertion: every control point's y must sit a third of
+    /// the way into its segment's y span. An x-fitted curve puts the thirds on
+    /// x and fails this; merely asserting "cubics were emitted" would pass
+    /// either way.
+    #[test]
+    fn horizontal_stack_fits_curves_against_y() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use ferrum_scene::PathCmd;
+        use std::collections::HashMap;
+
+        // `BatchPositionMeta::stack_value_on_x()` reads the presence of this
+        // schema-metadata key, stamped by `apply_stack` when the cumulated
+        // value column landed on X.
+        let mut metadata = HashMap::new();
+        metadata.insert("__stack_value_on_x__".to_string(), "1".to_string());
+        let schema = Arc::new(
+            Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("__stack_y_base__", DataType::Float64, false),
+            ])
+            .with_metadata(metadata),
+        );
+        // y advances steadily (the category axis); x carries a non-monotone value.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![2.0, 8.0, 4.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, 0.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { interpolate: Some("monotone".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        // Premise: this batch really does take the horizontal branch.
+        assert!(
+            crate::render::position::BatchPositionMeta::from_batch(&batch).stack_value_on_x(),
+            "test premise: the batch must be stamped as a horizontal (value-on-x) stack"
+        );
+
+        let result = super::build(&ctx);
+        let cmds = result.nodes.iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands.clone()) } else { None }
+        }).expect("a horizontal stacked area must emit a closed Path");
+
+        // The top edge's cubics come first; check each against its own segment.
+        let mut prev = match cmds[0] {
+            PathCmd::MoveTo { x, y } => (x, y),
+            ref other => panic!("expected a leading MoveTo, got {other:?}"),
+        };
+        let mut checked = 0;
+        for cmd in &cmds[1..] {
+            let PathCmd::CubicTo { c1y, c2y, x, y, .. } = *cmd else { break };
+            let third = (y - prev.1) / 3.0;
+            assert!(
+                (c1y - (prev.1 + third)).abs() < 1e-9,
+                "control point y must sit one third along the segment's Y span \
+                 ({}), got {c1y} — an x-fitted curve puts the thirds on x instead",
+                prev.1 + third
+            );
+            assert!(
+                (c2y - (y - third)).abs() < 1e-9,
+                "control point y must sit two thirds along the segment's Y span ({}), got {c2y}",
+                y - third
+            );
+            prev = (x, y);
+            checked += 1;
+        }
+        assert!(checked >= 3, "expected the top edge's cubics; checked {checked}");
+    }
+
+    /// Assert every cubic in `cmds` has its control points on exact thirds of
+    /// its segment's span along `axis` (0 = x, 1 = y) — the signature of a
+    /// monotone fit against that coordinate. Returns how many it checked.
+    fn assert_thirds_on(cmds: &[ferrum_scene::PathCmd], axis: usize, context: &str) -> usize {
+        use ferrum_scene::PathCmd;
+        let mut prev = match cmds[0] {
+            PathCmd::MoveTo { x, y } => (x, y),
+            ref other => panic!("{context}: expected a leading MoveTo, got {other:?}"),
+        };
+        let mut checked = 0;
+        for cmd in &cmds[1..] {
+            let PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } = *cmd else { break };
+            let (start, end, c1, c2) = if axis == 0 {
+                (prev.0, x, c1x, c2x)
+            } else {
+                (prev.1, y, c1y, c2y)
+            };
+            let third = (end - start) / 3.0;
+            assert!(
+                (c1 - (start + third)).abs() < 1e-9 && (c2 - (end - third)).abs() < 1e-9,
+                "{context}: control points must sit on thirds of the {} span ({}, {}), got ({c1}, {c2})",
+                if axis == 0 { "X" } else { "Y" },
+                start + third,
+                end - third
+            );
+            prev = (x, y);
+            checked += 1;
+        }
+        checked
+    }
+
+    /// A flipped `monotone` area must be fitted against y — the axis its points
+    /// advance along once `flip_positional` has put the value on x. See the
+    /// note on `line.rs`'s flip fixtures: the drawer receives RENDERING-space
+    /// encodings with `spec.coord` still reading `Flip`.
+    #[test]
+    fn coord_flip_area_fits_curves_against_y() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 4.0, 2.0, 5.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { interpolate: Some("monotone".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("a curved area must emit a Path");
+
+        let checked = assert_thirds_on(&cmds, 1, "flipped area");
+        assert_eq!(checked, 3, "the top edge's cubics, one per segment");
+    }
+
+    /// Spec-review cycle 2: the point loop gives `y2` PRECEDENCE over the stack
+    /// bases, so a `y2` band builds both edges at the row's own x and is
+    /// x-parameterized whatever the stack stamped. Reading the axis off the
+    /// stamp alone fitted this shape against y.
+    ///
+    /// Same stamped batch as `horizontal_stack_fits_curves_against_y`, plus a
+    /// bound `y2` — so the two tests differ only in the discriminant that is
+    /// supposed to decide the axis.
+    #[test]
+    fn horizontal_stack_with_y2_stays_x_parameterized() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use std::collections::HashMap;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("__stack_value_on_x__".to_string(), "1".to_string());
+        let schema = Arc::new(
+            Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("hi", DataType::Float64, false),
+                Field::new("__stack_y_base__", DataType::Float64, false),
+            ])
+            .with_metadata(metadata),
+        );
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![2.0, 8.0, 4.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![6.0, 12.0, 8.0, 14.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, 0.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+
+        // Premise: the batch really is stamped horizontal AND binds y2, so the
+        // two discriminants disagree — which is the whole point.
+        assert!(
+            crate::render::position::BatchPositionMeta::from_batch(&batch).stack_value_on_x(),
+            "test premise: the batch must be stamped as a horizontal stack"
+        );
+        assert!(spec.encoding.y2.is_some(), "test premise: y2 must be bound");
+
+        let overrides = MarkKwargsSpec { interpolate: Some("monotone".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+            if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("a y2 band must emit a closed Path");
+
+        let checked = assert_thirds_on(&cmds, 0, "y2 band under a horizontal stack");
+        assert_eq!(checked, 3, "the top edge's cubics, one per segment");
+    }
+
+    /// Every `BottomEdge` arm that BUILDS a bottom point answers `axis()` from
+    /// its own construction; only `Baseline` defers to the series.
+    ///
+    /// Checked against a ctx whose `series_curve_axis()` is the OPPOSITE of
+    /// each self-answering arm's expected reply, so a regression to
+    /// "delegate everything to the series" fails here. That is the latent seam
+    /// the spec reviewer flagged: under `CoordFlip` + an explicit
+    /// `Stack(value_axis="y")` the stamp says vertical while the flip says
+    /// horizontal, and the arm is the one that matches the points being built.
+    #[test]
+    fn every_point_building_bottom_edge_arm_answers_from_its_own_construction() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 4.0, 2.0, 5.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            // Flipped, so the series axis is Y and disagrees with the two
+            // x-parameterized arms below.
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        // Premise: the series axis really is the opposite of what the two
+        // x-parameterized arms must answer.
+        assert_eq!(ctx.series_curve_axis(), CurveAxis::Y, "test premise: flipped ctx");
+
+        let column = vec![Some(0.0), Some(1.0)];
+        assert_eq!(
+            BottomEdge::Y2(&column).axis(&ctx),
+            CurveAxis::X,
+            "a y2 band builds its bottom at the row's own x — x-parameterized regardless of the flip"
+        );
+        assert_eq!(
+            BottomEdge::StackBase { bases: &column, value_on_x: false }.axis(&ctx),
+            CurveAxis::X,
+            "a vertical stack builds `(cx, base_y)` — x-parameterized even under CoordFlip, \
+             where `series_curve_axis()` would wrongly say Y"
+        );
+        assert_eq!(
+            BottomEdge::StackBase { bases: &column, value_on_x: true }.axis(&ctx),
+            CurveAxis::Y,
+            "a horizontal stack builds `(base_x, cy_top)` — y-parameterized"
+        );
+        assert_eq!(
+            BottomEdge::Baseline.axis(&ctx),
+            CurveAxis::Y,
+            "no bottom edge is built, so the series governs — here the flip makes it Y"
+        );
+    }
+
+    /// Byte-identity guard: with `linear` the relocated builders emit exactly
+    /// the commands the pre-change hand-rolled loops did.
+    #[test]
+    fn linear_stacked_area_is_byte_identical_to_the_pre_change_shape() {
+        use ferrum_scene::PathCmd;
+        let top: Vec<(f64, f64)> = vec![(0.0, 10.0), (1.0, 20.0), (2.0, 15.0)];
+        let bottom: Vec<(f64, f64)> = vec![(0.0, 5.0), (1.0, 8.0), (2.0, 6.0)];
+        let expected = vec![
+            PathCmd::MoveTo { x: 0.0, y: 10.0 },
+            PathCmd::LineTo { x: 1.0, y: 20.0 },
+            PathCmd::LineTo { x: 2.0, y: 15.0 },
+            PathCmd::LineTo { x: 2.0, y: 6.0 },
+            PathCmd::LineTo { x: 1.0, y: 8.0 },
+            PathCmd::LineTo { x: 0.0, y: 5.0 },
+            PathCmd::Close,
+        ];
+        assert_eq!(build_stacked_area_cmds(&top, &bottom, vertical(Interpolate::Linear)), expected);
     }
 }

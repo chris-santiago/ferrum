@@ -43,9 +43,13 @@ pub struct MarkKwargsSpec {
     /// when `color` encoding maps to a quantitative column. Defaults to `viridis`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cmap: Option<String>,
-    // ── S1: interpolate (line/area) ──────────────────────────────────────────
+    // ── S1: interpolate (line/area/ribbon) ───────────────────────────────────
     /// Path interpolation method. Supported: "linear" (default), "step",
-    /// "step-before", "step-after". Others fall back to linear.
+    /// "step-before", "step-after", "monotone", "basis", "cardinal" — the
+    /// vocabulary owned by [`render::marks::curve::Interpolate`](crate::render::marks::curve::Interpolate),
+    /// which is also the single source for the refusal message. An
+    /// unrecognized value is REFUSED (`RenderError::UnknownInterpolate`) at
+    /// `render::draw::resolve_mark_style`; it does not fall back to linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interpolate: Option<String>,
     // ── S2: stroke_cap (line) ────────────────────────────────────────────────

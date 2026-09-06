@@ -787,6 +787,115 @@ mod tests {
             );
         }
     }
+
+    // ── Batch E: curve interpolation reaches the GPU path ────────────────
+
+    /// The exact commands `ferrum-core`'s `render::marks::curve::subpath`
+    /// emits for `interpolate="monotone"` over the points
+    /// `[(0,0), (10,30), (20,10), (30,40)]`.
+    ///
+    /// `ferrum-wasm` builds for `wasm32-unknown-unknown` and `ferrum-core`
+    /// links pyo3, so this crate cannot call the producer directly; the list
+    /// is pinned instead, and
+    /// `ferrum_core::render::marks::curve::tests::wasm_parity_fixture_matches_real_monotone_output`
+    /// asserts the producer still emits exactly these commands. KEEP THE TWO
+    /// IN SYNC.
+    fn monotone_curve_fixture() -> Vec<PathCmd> {
+        vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::CubicTo {
+                c1x: 3.3333333333333335,
+                c1y: 10.0,
+                c2x: 6.666666666666666,
+                c2y: 30.0,
+                x: 10.0,
+                y: 30.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 13.333333333333334,
+                c1y: 30.0,
+                c2x: 16.666666666666668,
+                c2y: 10.0,
+                x: 20.0,
+                y: 10.0,
+            },
+            PathCmd::CubicTo {
+                c1x: 23.333333333333332,
+                c1y: 10.0,
+                c2x: 26.666666666666668,
+                c2y: 30.0,
+                x: 30.0,
+                y: 40.0,
+            },
+        ]
+    }
+
+    /// WASM parity (spec §7): a curve-interpolated line must render through
+    /// the GPU path, not just the SVG walker. `CubicTo` reaches lyon's
+    /// `cubic_bezier_to`, so the stroked mesh follows the flattened curve —
+    /// which means its vertices must leave the straight chord between the
+    /// data points that a `linear` trace of the same points would hug.
+    #[test]
+    fn curve_cubics_from_ferrum_core_tessellate() {
+        let commands = monotone_curve_fixture();
+        let mut style = make_fill_stroke_style(1.0, 1.0, 1.0);
+        style.fill = None;
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_path(&commands, &style, false, None, None, &mut buffers);
+
+        assert!(
+            !buffers.vertices.is_empty(),
+            "a CubicTo path must tessellate into vertices"
+        );
+        assert!(
+            buffers.vertices.iter().all(|v| v.position[0].is_finite() && v.position[1].is_finite()),
+            "every tessellated vertex must be finite"
+        );
+
+        // The straight chord from (10,30) to (20,10) is `y = 50 - 2x`. The
+        // monotone curve flattens the crossing of that span, so at least one
+        // tessellated vertex must sit measurably off the chord.
+        let max_deviation = buffers
+            .vertices
+            .iter()
+            .filter(|v| v.position[0] > 10.0 && v.position[0] < 20.0)
+            .map(|v| (v.position[1] - (50.0 - 2.0 * v.position[0])).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_deviation > 1.0,
+            "the tessellated mesh must follow the CURVE, not the chord \
+             (max deviation {max_deviation} px); a straight-segment path would be ~0"
+        );
+    }
+
+    /// Guard for the claim above: the SAME data points traced linearly stay on
+    /// the chord, so the deviation the curve test measures comes from the
+    /// cubics and not from stroke width or join geometry.
+    #[test]
+    fn linear_path_over_the_same_points_stays_on_the_chord() {
+        let commands = vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 10.0, y: 30.0 },
+            PathCmd::LineTo { x: 20.0, y: 10.0 },
+            PathCmd::LineTo { x: 30.0, y: 40.0 },
+        ];
+        let mut style = make_fill_stroke_style(1.0, 1.0, 1.0);
+        style.fill = None;
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_path(&commands, &style, false, None, None, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty());
+        let max_deviation = buffers
+            .vertices
+            .iter()
+            .filter(|v| v.position[0] > 10.0 && v.position[0] < 20.0)
+            .map(|v| (v.position[1] - (50.0 - 2.0 * v.position[0])).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_deviation < 0.1,
+            "a linear trace of the same points must hug the chord; got {max_deviation}"
+        );
+    }
 }
 
 fn apply_cap_join(opts: &mut StrokeOptions, cap: Option<StrokeCap>, join: Option<StrokeJoin>) {

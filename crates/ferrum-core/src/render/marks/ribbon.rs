@@ -10,7 +10,10 @@
 //!     Z
 //!
 //! Walks x ascending on the top edge (y), then x descending on the bottom edge
-//! (y2) to close the polygon. When a color encoding is bound, rows are first
+//! (y2) to close the polygon. Both edges trace under the mark's `interpolate=`
+//! method via [`marks::curve`](super::curve), so the `L` runs above become
+//! step or cubic commands when a non-linear method is set (spec §6.1); the
+//! shape shown is the `linear` case. When a color encoding is bound, rows are first
 //! partitioned by color category and each group emits its own closed polygon
 //! (mirroring `line.rs`); otherwise all rows form one polygon. Without
 //! per-color grouping, multi-series CI bands (e.g. train vs test learning
@@ -21,7 +24,28 @@
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, resolve_row_stroke_dash, stroke_dash_column_loader};
+use crate::render::marks::curve::{CurveAxis, StepSpelling, Trace};
 use crate::render::scale_resolve::{ColorInput, ScaleKind};
+
+/// `mark_ribbon` spells its step risers as explicit `LineTo` vertices, like
+/// its closest sibling `mark_area` (both are filled bands). See
+/// [`StepSpelling`].
+const RIBBON_STEP_SPELLING: StepSpelling = StepSpelling::Vertices;
+
+/// A ribbon's band spans `y`..`y2` at a SHARED x, and its vertices are sorted
+/// by x-pixel before tracing — so x is the independent coordinate for the same
+/// structural reason `mark_area`'s `BottomEdge::Y2` arm is x-parameterized: a
+/// `y2` band is a vertical idiom by construction.
+///
+/// This does NOT rest on "no producer emits a horizontal ribbon" — that
+/// premise is what went wrong in cycle 2. It rests on the channel pair that
+/// forms the band, read a few lines below as `spec.encoding.y2`. `CoordFlip`
+/// cannot reach here: `flip_positional` moves the user's `y2` to `x2`, which
+/// leaves `encoding.y2` unbound and makes `build` return empty (pinned by
+/// `ribbon_under_coord_flip_emits_nothing`). Whoever teaches ribbon to read
+/// `x2` is adding a band on the OTHER axis and must pick the axis where they
+/// read that channel.
+const RIBBON_CURVE_AXIS: CurveAxis = CurveAxis::X;
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
     // For ordinal x scales, stringify the column (works for Utf8 and integer
@@ -142,6 +166,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let has_color_groups = color_values.is_some() && ctx.scales.color.is_some();
 
+    // F-L02-03: ribbon honors `interpolate=` like line and area do. Until
+    // batch E it read the setting not at all and always traced straight
+    // edges, which is why the Python desugar refused every non-linear value.
+    let interpolate = ctx.mark_style.line.interpolate.unwrap_or_default();
+    let trace = Trace {
+        method: interpolate,
+        step: RIBBON_STEP_SPELLING,
+        axis: RIBBON_CURVE_AXIS,
+    };
+
     let meta = MetadataColumns::from_ctx(ctx);
 
     // One closed polygon per color group, attached to the group's representative
@@ -193,16 +227,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             continue;
         }
 
-        // Build closed path commands: top edge x ascending, bottom edge x descending, Close.
-        let mut cmds = Vec::with_capacity(pixels.len() * 2 + 2);
-        let (x0, y0, _) = pixels[0];
-        cmds.push(PathCmd::MoveTo { x: x0, y: y0 });
-        for &(x, y, _) in &pixels[1..] {
-            cmds.push(PathCmd::LineTo { x, y });
-        }
-        for &(x, _, y2) in pixels.iter().rev() {
-            cmds.push(PathCmd::LineTo { x, y: y2 });
-        }
+        // Build closed path commands: top edge x ascending, bottom edge x
+        // descending, Close. Both edges describe the SAME function of x under
+        // the mark's interpolation method (spec §6.1), so a curved band is
+        // bounded by two curves and a stepped one by two matching step
+        // functions. Both edges are collected in FORWARD (x-ascending) order:
+        // `extend_reversed` owns walking the bottom back and mirroring
+        // `step-before`/`step-after`, which are direction-dependent.
+        let top_edge: Vec<(f64, f64)> = pixels.iter().map(|&(x, y, _)| (x, y)).collect();
+        let bottom_edge: Vec<(f64, f64)> = pixels.iter().map(|&(x, _, y2)| (x, y2)).collect();
+        let mut cmds = trace.subpath(&top_edge);
+        trace.extend_reversed(&mut cmds, &bottom_edge);
         cmds.push(PathCmd::Close);
 
         // Color resolution — mirrors draw().
@@ -288,6 +323,7 @@ mod tests {
     use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
+    use ferrum_scene::PathCmd;
     use std::sync::Arc;
 
     fn ribbon_spec(with_y2: bool) -> ChartSpec {
@@ -825,5 +861,173 @@ mod tests {
         let result = render(&spec, &batch);
         assert!(result.nodes.iter().all(|n| !matches!(n, ferrum_scene::SceneNode::Path { .. })),
             "no path should be emitted without y2");
+    }
+
+    // ── Interpolation wiring (F-L02-03, batch E task 1) ──────────────────
+    //
+    // Exercised at the Rust level: `mark_ribbon`'s Python desugar still
+    // refuses every non-linear `interpolate=` value (a later batch-E task
+    // lifts that), so these drive `build` through `resolve_mark_style`
+    // directly rather than through the public mark API.
+
+    /// A four-point band's path commands under the given interpolation method.
+    fn ribbon_cmds(interpolate: Option<&str>) -> Vec<PathCmd> {
+        let spec = ribbon_spec(true);
+        let batch = three_col_batch(
+            vec![0.0, 1.0, 2.0, 3.0],
+            vec![0.0, 2.0, 1.0, 3.0],
+            vec![4.0, 6.0, 5.0, 7.0],
+        );
+        let overrides = interpolate.map(|value| crate::spec::mark_style::MarkKwargsSpec {
+            interpolate: Some(value.into()),
+            ..Default::default()
+        });
+        let result = render_with_overrides(&spec, &batch, overrides.as_ref());
+        result.nodes.into_iter().find_map(|n| {
+            if let ferrum_scene::SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+        }).expect("a y2-bound ribbon must emit a closed Path")
+    }
+
+    /// F-L02-03 headline: before batch E, ribbon read `interpolate` not at all,
+    /// so EVERY value produced the same all-`LineTo` polygon. The three curve
+    /// methods must now emit cubics on both edges of the band.
+    #[test]
+    fn ribbon_curve_methods_curve_both_edges() {
+        for method in ["monotone", "basis", "cardinal"] {
+            let cmds = ribbon_cmds(Some(method));
+            let cubics = cmds.iter().filter(|c| matches!(c, PathCmd::CubicTo { .. })).count();
+            assert!(
+                cubics >= 6,
+                "ribbon({method:?}) must curve the top edge AND the reversed bottom edge \
+                 (>= 3 cubics each); got {cubics} in {cmds:?}"
+            );
+            assert_eq!(
+                cmds.iter().filter(|c| matches!(c, PathCmd::MoveTo { .. })).count(),
+                1,
+                "the band stays ONE closed subpath"
+            );
+            assert!(matches!(cmds.last(), Some(PathCmd::Close)), "the ring is closed");
+        }
+    }
+
+    /// Step methods reach ribbon too, spelled with explicit `LineTo` vertices
+    /// like `mark_area`'s (never `mark_line`'s `H`/`V` shorthand).
+    #[test]
+    fn ribbon_step_uses_the_explicit_lineto_spelling() {
+        let cmds = ribbon_cmds(Some("step"));
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PathCmd::HLineTo { .. } | PathCmd::VLineTo { .. })),
+            "ribbon must not emit H/V shorthand; got {cmds:?}"
+        );
+        assert!(
+            cmds.len() > ribbon_cmds(None).len(),
+            "a stepped band has more vertices than a linear one"
+        );
+    }
+
+    /// Byte-identity guard: with `interpolate` unset — every chart that exists
+    /// today, since the Python desugar refuses anything else — ribbon emits
+    /// exactly the commands it emitted before the curve module landed.
+    #[test]
+    fn ribbon_linear_output_is_byte_identical_to_pre_change() {
+        let spec = ribbon_spec(true);
+        let batch = three_col_batch(vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 1.0], vec![4.0, 6.0, 5.0]);
+        let result = render(&spec, &batch);
+        let cmds = result.nodes.iter().find_map(|n| {
+            if let ferrum_scene::SceneNode::Path { commands, .. } = n { Some(commands.clone()) } else { None }
+        }).expect("a y2-bound ribbon must emit a closed Path");
+
+        // MoveTo + 2 top LineTo + 3 reversed-bottom LineTo + Close.
+        assert_eq!(cmds.len(), 7, "got {cmds:?}");
+        assert!(matches!(cmds[0], PathCmd::MoveTo { .. }));
+        assert!(cmds[1..6].iter().all(|c| matches!(c, PathCmd::LineTo { .. })),
+            "the linear band is all straight segments; got {cmds:?}");
+        assert!(matches!(cmds[6], PathCmd::Close));
+        // The bottom edge is walked in reverse: cmds[3] rejoins at the LAST x.
+        let (last_top_x, first_bottom_x) = match (&cmds[2], &cmds[3]) {
+            (PathCmd::LineTo { x: a, .. }, PathCmd::LineTo { x: b, .. }) => (*a, *b),
+            other => panic!("expected LineTo pair at the turn, got {other:?}"),
+        };
+        assert!((last_top_x - first_bottom_x).abs() < 1e-9,
+            "the ring turns at the same x it reached; got {last_top_x} then {first_bottom_x}");
+    }
+
+    /// Pins the premise `RIBBON_CURVE_AXIS`'s disposition rests on: `CoordFlip`
+    /// cannot produce a horizontal ribbon, because `flip_positional` moves the
+    /// user's `y2` to `x2` and ribbon requires `encoding.y2`. If ribbon ever
+    /// learns to read `x2`, this test fails and whoever taught it must choose
+    /// the curve axis at that read — rather than inheriting an x-parameterized
+    /// const that silently stops being true.
+    #[test]
+    fn ribbon_under_coord_flip_emits_nothing() {
+        // A faithful POST-FLIP rendering spec. The user wrote
+        // `.encode(x=cat, y=lo, y2=hi).coord(CoordFlip())`; `flip_positional`
+        // swaps x<->y and x2<->y2, so the drawer receives:
+        //   x  = lo   (lower bound, now on the value axis)
+        //   x2 = hi   (upper bound — the band the flip MOVED here)
+        //   y  = cat  (category)
+        //   y2 = unbound
+        //
+        // Binding `x2` is what makes this a tripwire rather than a restatement
+        // of "no y2 emits nothing" (already covered by
+        // `ribbon_no_y2_silently_skips`): the band IS present in the spec, on
+        // the channel a flipped ribbon would have to read. The assertion is
+        // therefore "ribbon does not consume the post-flip x2 band", and it
+        // goes RED the day ribbon learns to — which is the day
+        // `RIBBON_CURVE_AXIS = CurveAxis::X` stops being true.
+        // The category column spans the band's value range, so the band's
+        // endpoints are INSIDE the y-scale domain. That matters: with a
+        // narrower category range every band row would be dropped as
+        // out-of-domain, and the test would pass for that reason instead of
+        // the one it is asserting — silently ceasing to be a tripwire. The
+        // premise assertion below is what pins that.
+        let batch = three_col_batch(
+            vec![0.0, 2.0, 4.0, 7.0], // "x" column — the category, post-flip on y
+            vec![0.0, 2.0, 1.0, 3.0], // "y" column — lower bound, post-flip on x
+            vec![4.0, 6.0, 5.0, 7.0], // "y2" column — upper bound, post-flip on x2
+        );
+
+        let mut spec = ribbon_spec(false);
+        spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+        spec.encoding.x = Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() });
+        spec.encoding.x2 = Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() });
+        spec.encoding.y = Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
+        assert!(spec.encoding.y2.is_none(), "test premise: the flip left y2 unbound");
+        assert!(spec.encoding.x2.is_some(), "test premise: the band sits on x2");
+
+        // Premise: this data IS renderable as a band. Bind the same columns on
+        // `y`/`y2` and the mark emits a path — so when the flipped spec below
+        // emits nothing, it is because ribbon does not READ x2, not because the
+        // values were dropped. Without this the tripwire can pass vacuously.
+        let mut renderable = ribbon_spec(true);
+        renderable.encoding.x = Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() });
+        renderable.encoding.y = Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
+        renderable.encoding.y2 = Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() });
+        assert!(
+            !render(&renderable, &batch).nodes.is_empty(),
+            "test premise: these columns must render as a band when bound to y/y2, \
+             otherwise the flipped assertion below proves nothing"
+        );
+
+        let result = render(&spec, &batch);
+        assert!(
+            result.nodes.is_empty(),
+            "a flipped ribbon's band sits on x2, which ribbon does not read, so it must \
+             emit nothing; got {} node(s) — if this now renders, RIBBON_CURVE_AXIS needs \
+             revisiting (a band across x is y-parameterized)",
+            result.nodes.len()
+        );
+    }
+
+    /// The refusal reaches ribbon through the same chokepoint as line and area.
+    #[test]
+    fn ribbon_unknown_interpolate_refuses() {
+        let overrides = crate::spec::mark_style::MarkKwargsSpec {
+            interpolate: Some("smooth".into()),
+            ..Default::default()
+        };
+        let err = resolve_mark_style(Some(&overrides), &ThemeInputs::default(), &Mark::Ribbon)
+            .expect_err("an unknown interpolate value must refuse");
+        assert_eq!(err, crate::render::RenderError::UnknownInterpolate { value: "smooth".into() });
     }
 }
