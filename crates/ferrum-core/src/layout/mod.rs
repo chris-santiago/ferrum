@@ -1587,6 +1587,18 @@ fn split_panels(
     (panel_rects, warnings)
 }
 
+/// Formats facet strip text: `"{title}: {value}"` when a dimension title is
+/// set, bare `"{value}"` otherwise (spec §6.2). Shared by the column-strip and
+/// row-strip builders below so the two dimensions' prefix behavior cannot
+/// drift apart. `title` absent (the default) reproduces the pre-existing bare
+/// value, keeping untitled facets byte-identical.
+fn facet_strip_text(title: Option<&str>, value: &str) -> String {
+    match title {
+        Some(t) => format!("{t}: {value}"),
+        None => value.to_string(),
+    }
+}
+
 /// 400 stage 5 — lay out each panel: clamp degenerate rects, reserve column /
 /// row-header strips, apply CoordFixed aspect correction, and build the per-axis
 /// layouts (with facet title suppression on non-edge panels). Returns the panels,
@@ -1668,8 +1680,9 @@ fn layout_panel_axes(
                     h: (rect.h - strip_band_height).max(0.0),
                 };
                 rect = new_panel_rect;
+                let title = spec.facet.as_ref().and_then(|f| f.column_strip_title());
                 Some(StripTitleLayout {
-                    text: key.value.clone(),
+                    text: facet_strip_text(title, &key.value),
                     anchor: (
                         strip_rect.x + strip_rect.w / 2.0,
                         strip_rect.y + theme.padding.strip_padding + theme.sizes.strip_text_size,
@@ -1700,8 +1713,9 @@ fn layout_panel_axes(
                 // centered within the reserved band.
                 let strip_center_x = rect.x + rect.w + row_strip_band_width / 2.0;
                 let strip_center_y = rect.y + rect.h / 2.0;
+                let row_title = spec.facet.as_ref().and_then(|f| f.row_strip_title());
                 Some(StripTitleLayout {
-                    text: rk.value.clone(),
+                    text: facet_strip_text(row_title, &rk.value),
                     anchor: (strip_center_x, strip_center_y),
                     align: TextAnchor::Middle,
                     font_size: theme.sizes.strip_text_size,
@@ -2261,6 +2275,19 @@ mod tests {
         theme.padding.strip_padding = 6.0;
         // line_height(12) = 12 * 1.2 = 14.4; + 2 * 6 = 26.4.
         assert!((strip_band_size(&theme, &m) - (12.0 * 1.2 + 2.0 * 6.0)).abs() < 1e-9);
+    }
+
+    /// F-L01-04: no dimension title -> bare value, byte-identical to the
+    /// pre-fix hardwired `key.value.clone()`.
+    #[test]
+    fn facet_strip_text_is_bare_when_title_absent() {
+        assert_eq!(facet_strip_text(None, "setosa"), "setosa");
+    }
+
+    /// F-L01-04: a dimension title set -> `"{title}: {value}"` (spec §6.2).
+    #[test]
+    fn facet_strip_text_is_prefixed_when_title_set() {
+        assert_eq!(facet_strip_text(Some("Species"), "setosa"), "Species: setosa");
     }
 
     fn minimal_chart_spec() -> ChartSpec {
@@ -3781,6 +3808,8 @@ mod tests {
         s.facet = Some(FacetSpec {
             field: "species".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3845,6 +3874,8 @@ mod tests {
         spec.facet = Some(FacetSpec {
             field: "species".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Grid { nrows: 1, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3904,10 +3935,90 @@ mod tests {
             let strip = panel.strip_title.as_ref()
                 .unwrap_or_else(|| panic!("panel {i} missing strip_title"));
             assert!(!strip.text.is_empty());
+            // F-L01-04: no `title` set on the FacetSpec -> bare value, no
+            // "{title}: " prefix. This is the byte-identical-when-absent claim.
+            let expected = &panel.facet_key.as_ref().unwrap().value;
+            assert_eq!(&strip.text, expected, "absent title must not prefix strip text");
             // Themes-T4: strip_text_size default flipped 13.0 → 12.0.
             assert_eq!(strip.font_size, 12.0);
             assert!(strip.anchor.0 >= panel.plot_area.x);
             assert!(strip.anchor.0 <= panel.plot_area.x + panel.plot_area.w);
+        }
+    }
+
+    /// F-L01-04: `FacetSpec.title` set -> every column strip renders
+    /// `"{title}: {value}"` instead of the bare value.
+    #[test]
+    fn compute_layout_facet_title_set_prefixes_column_strip_text() {
+        let mut spec = faceted_spec(3);
+        spec.facet.as_mut().unwrap().title = Some("Species".into());
+        let groups = three_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        ).unwrap();
+
+        assert_eq!(result.panels.len(), 3);
+        for panel in &result.panels {
+            let strip = panel.strip_title.as_ref().unwrap();
+            let value = &panel.facet_key.as_ref().unwrap().value;
+            assert_eq!(strip.text, format!("Species: {value}"));
+        }
+    }
+
+    /// F-L01-04 wrap-row trap: `row_title` set on a Wrap-mode spec (which is
+    /// exactly what `Chart.facet(row=X)` alone lowers to — `row` left unset,
+    /// `field: X`) must be a pure no-op. There is no row-header strip in
+    /// wrap mode (no group carries a `row_key`), so `row_title` cannot reach
+    /// any strip; a row-only facet's title MUST ride `title` instead (pinned
+    /// above by `compute_layout_facet_title_set_prefixes_column_strip_text`).
+    /// This is the negative half of that contract: setting the wrong field
+    /// changes nothing observable, rather than silently misrouting.
+    #[test]
+    fn compute_layout_facet_row_title_is_inert_in_wrap_mode() {
+        let mut spec = faceted_spec(3);
+        spec.facet.as_mut().unwrap().row_title = Some("Region".into());
+        let groups = three_groups(); // wrap-mode groups: row_key is None on all.
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        ).unwrap();
+
+        assert_eq!(result.panels.len(), 3);
+        for panel in &result.panels {
+            // No row-header strip exists at all in wrap mode.
+            assert!(panel.row_strip_title.is_none(), "wrap mode must never emit a row-header strip");
+            // The column strip is untouched by row_title — still bare,
+            // because `title` (the field wrap mode actually reads) is unset.
+            let strip = panel.strip_title.as_ref().unwrap();
+            let value = &panel.facet_key.as_ref().unwrap().value;
+            assert_eq!(&strip.text, value, "row_title must not leak into the column/wrap strip");
         }
     }
 
@@ -3945,6 +4056,8 @@ mod tests {
         spec.facet = Some(FacetSpec {
             field: "group".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -4248,6 +4361,8 @@ mod tests {
         s.facet = Some(FacetSpec {
             field: "col_cat".into(),
             row: Some("row_cat".into()),
+            title: None,
+            row_title: None,
             mode: FacetMode::Grid { nrows, ncols },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -4444,6 +4559,8 @@ mod tests {
         s.facet = Some(FacetSpec {
             field: "col_cat".into(),
             row: Some("row_cat".into()),
+            title: None,
+            row_title: None,
             mode: FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -4606,5 +4723,50 @@ mod tests {
             .collect();
         assert!(row_strip_texts.contains(&"High"), "expected 'High' row strip");
         assert!(row_strip_texts.contains(&"Low"), "expected 'Low' row strip");
+    }
+
+    /// F-L01-04: `FacetSpec.row_title` set -> row-header strips render
+    /// `"{row_title}: {value}"`, independently of `title` (column strips stay
+    /// bare when `title` is unset — the two dimensions cannot leak into each
+    /// other's prefix).
+    #[test]
+    fn compute_layout_facet_row_title_prefixes_row_strip_only() {
+        let mut spec = two_way_grid_spec();
+        spec.facet.as_mut().unwrap().row_title = Some("Region".into());
+        let groups = two_way_2x2_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 600.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+            CompositeLayoutSeam::default(),
+        )
+        .unwrap();
+
+        let row_strip_texts: Vec<&str> = result
+            .panels
+            .iter()
+            .filter_map(|p| p.row_strip_title.as_ref())
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(row_strip_texts.contains(&"Region: High"), "expected 'Region: High'; got {row_strip_texts:?}");
+        assert!(row_strip_texts.contains(&"Region: Low"), "expected 'Region: Low'; got {row_strip_texts:?}");
+
+        // Column strips are unaffected — `title` is still unset on this spec.
+        for panel in &result.panels {
+            let strip = panel.strip_title.as_ref().unwrap();
+            let value = &panel.facet_key.as_ref().unwrap().value;
+            assert_eq!(&strip.text, value, "column strip must stay bare when title is unset");
+        }
     }
 }

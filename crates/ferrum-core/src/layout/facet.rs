@@ -59,6 +59,29 @@ pub struct FacetSpec {
     /// the renderer distributes panels by `mode.nrows`/`mode.ncols` independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<String>,
+    /// Display title for whichever dimension the column/wrap strip renders.
+    /// When set, that strip's text renders `"{title}: {value}"` instead of
+    /// the bare value. Absent by default so existing facet specs deserialize
+    /// and re-serialize byte-identically.
+    ///
+    /// **This is the field a single-dimension facet's title always goes in,
+    /// including a row-only facet.** `Chart.facet(row=X)` alone lowers to
+    /// `FacetMode::Wrap { field: X, .. }` with `row` left unset — there is no
+    /// grid, so the column/wrap strip is the ONLY strip that renders, and it
+    /// reads `title`. `row_title` (below) only ever has an effect once `row`
+    /// is *also* set (two-way `Grid` mode). Use
+    /// [`FacetSpec::column_strip_title`] / [`FacetSpec::row_strip_title`]
+    /// rather than reading these fields directly, so this mode rule lives in
+    /// one place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Display title for the row dimension. Has an effect ONLY in grid mode
+    /// (`row` set) — the row-header strip is never emitted otherwise, so
+    /// setting this on a wrap-mode (including row-only-wrap) spec is a
+    /// silent no-op by construction, not a bug: read it via
+    /// [`FacetSpec::row_strip_title`], never directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_title: Option<String>,
     pub mode: FacetMode,
     /// If set, overrides `theme.column_padding` / `theme.row_padding` symmetrically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +91,26 @@ pub struct FacetSpec {
     /// Set `{"y": "independent"}` to give each panel its own y-axis domain.
     #[serde(default, skip_serializing_if = "FacetResolve::is_all_shared")]
     pub resolve: FacetResolve,
+}
+
+impl FacetSpec {
+    /// The title for the column/wrap-dimension strip — the strip emitted
+    /// whenever a panel has a `facet_key` at all, which is every faceted
+    /// panel regardless of `mode`. This is the accessor a row-only facet
+    /// (`Chart.facet(row=X)`, which lowers to `Wrap { field: X }`) must use:
+    /// its title belongs in `title`, never `row_title`, because in that
+    /// lowering there is no row-header strip to read `row_title` from.
+    pub fn column_strip_title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// The title for the row-header strip — has an observable effect only
+    /// when `row` is set (`FacetMode::Grid` with a row dimension), since the
+    /// row-header strip is built only from a group's `row_key`, which is
+    /// `None` unless `row` was set (see `FacetGroup::row_key`).
+    pub fn row_strip_title(&self) -> Option<&str> {
+        self.row_title.as_deref()
+    }
 }
 
 impl FacetResolve {
@@ -221,6 +264,8 @@ mod tests {
         let s = FacetSpec {
             field: "species".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -239,6 +284,8 @@ mod tests {
         let s = FacetSpec {
             field: "year".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Grid { nrows: 2, ncols: 3 },
             spacing: Some(12.0),
             resolve: FacetResolve::default(),
@@ -254,6 +301,8 @@ mod tests {
         let s = FacetSpec {
             field: "f".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -267,6 +316,8 @@ mod tests {
         let s = FacetSpec {
             field: "g".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve {
@@ -287,6 +338,8 @@ mod tests {
         let s = FacetSpec {
             field: "g".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve {
@@ -296,6 +349,46 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("resolve"), "all-shared resolve must be omitted: {json}");
+    }
+
+    /// F-L01-04: `title`/`row_title` absent (the default) must not appear on
+    /// the wire at all, so a pre-existing facet dict without either key
+    /// deserializes and re-serializes byte-identically.
+    #[test]
+    fn facet_spec_omits_title_and_row_title_when_absent() {
+        let s = FacetSpec {
+            field: "species".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            mode: FacetMode::Wrap { ncols: 3 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("title"), "absent title/row_title must be omitted: {json}");
+        let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, s);
+    }
+
+    /// F-L01-04: `title` (column/wrap dimension) and `row_title` (grid row
+    /// dimension) round-trip independently through the wire when set.
+    #[test]
+    fn facet_spec_title_and_row_title_round_trip_when_set() {
+        let s = FacetSpec {
+            field: "col_cat".into(),
+            row: Some("row_cat".into()),
+            title: Some("Species".into()),
+            row_title: Some("Region".into()),
+            mode: FacetMode::Grid { nrows: 2, ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""title":"Species""#), "title must serialize: {json}");
+        assert!(json.contains(r#""row_title":"Region""#), "row_title must serialize: {json}");
+        let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, s);
     }
 
     #[test]

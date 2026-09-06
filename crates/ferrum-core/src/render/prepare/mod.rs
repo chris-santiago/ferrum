@@ -3807,6 +3807,8 @@ mod tests {
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
+                title: None,
+                row_title: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -4024,6 +4026,8 @@ mod tests {
         faceted_spec.facet = Some(crate::layout::FacetSpec {
             field: "p".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 1 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -4188,6 +4192,8 @@ mod tests {
         let facet = crate::layout::FacetSpec {
             field: "sp".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -4406,6 +4412,8 @@ mod tests {
         let facet = crate::layout::FacetSpec {
             field: "sp".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
@@ -4446,6 +4454,8 @@ mod tests {
         let facet = crate::layout::FacetSpec {
             field: "sp".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: crate::layout::FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),

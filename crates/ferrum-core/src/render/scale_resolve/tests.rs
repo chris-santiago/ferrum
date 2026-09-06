@@ -2594,6 +2594,8 @@ fn faceted_xy_spec(
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: x_resolve, y: y_resolve },
@@ -2824,6 +2826,8 @@ fn t4_shared_facet_categorical_x_unions_global_categories() {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Shared, y: ResolveMode::Shared },
@@ -2902,6 +2906,8 @@ fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
@@ -3010,6 +3016,8 @@ fn faceted_nominal_sort_spec(
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: x_resolve, y: crate::layout::facet::ResolveMode::Shared },
@@ -3191,6 +3199,8 @@ fn faceted_size_spec() -> ChartSpec {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3232,6 +3242,8 @@ fn faceted_continuous_color_spec() -> ChartSpec {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3273,6 +3285,8 @@ fn faceted_opacity_spec() -> ChartSpec {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3711,6 +3725,8 @@ fn faceted_categorical_color_spec() -> ChartSpec {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -3906,6 +3922,8 @@ fn faceted_shape_spec() -> ChartSpec {
         facet: Some(FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve::default(),
@@ -6363,6 +6381,8 @@ fn shared_facet_fill_opacity_unions_the_global_domain() {
     spec.facet = Some(FacetSpec {
         field: "panel".into(),
         row: None,
+        title: None,
+        row_title: None,
         mode: FacetMode::Wrap { ncols: 2 },
         spacing: None,
         resolve: FacetResolve::default(),

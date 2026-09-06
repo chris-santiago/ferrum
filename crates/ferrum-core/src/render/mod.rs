@@ -2643,6 +2643,8 @@ mod orchestration_tests {
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
+                title: None,
+                row_title: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),
@@ -2670,6 +2672,74 @@ mod orchestration_tests {
         assert!(svg.contains(">a<") || svg.contains(">a</text>"));
         assert!(svg.contains(">b<") || svg.contains(">b</text>"));
         assert!(svg.contains(">c<") || svg.contains(">c</text>"));
+    }
+
+    /// F-L01-04 render-boundary proof: `FacetSpec.title` set must reach the
+    /// rendered SVG as `"{title}: {value}"`, not just the `layout`-level
+    /// `StripTitleLayout.text`. This is the walker-parity positive case the
+    /// spec requires by test (design doc §7: "facet strip prefixes must
+    /// render through the WASM path ... parity asserted by test") — SVG and
+    /// WASM both consume `StripTitleLayout.text` through the same
+    /// `SceneNode::Text` content, so proving it here is the shared-node half
+    /// of that guarantee that doesn't require building the WASM crate.
+    #[test]
+    fn render_svg_faceted_with_title_prefixes_strip_text() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "c", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "species".into(),
+                row: None,
+                title: Some("Species".into()),
+                row_title: None,
+                mode: crate::layout::FacetMode::Wrap { ncols: 3 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            layers: None,
+            coord: None,
+            mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+        };
+        let result = render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            Viewport { width: 800.0, height: 400.0 },
+            &config::RenderConfig::default(),
+            &ChartConfig::default(),
+        )
+        .unwrap();
+        let svg = result.bytes;
+        assert!(svg.contains("Species: a"), "expected 'Species: a' strip text in SVG:\n{svg}");
+        assert!(svg.contains("Species: b"), "expected 'Species: b' strip text in SVG:\n{svg}");
+        assert!(svg.contains("Species: c"), "expected 'Species: c' strip text in SVG:\n{svg}");
     }
 
     #[test]
@@ -3477,6 +3547,8 @@ mod golden_tests {
             facet: Some(crate::layout::FacetSpec {
                 field: "species".into(),
                 row: None,
+                title: None,
+                row_title: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
                 resolve: crate::layout::facet::FacetResolve::default(),

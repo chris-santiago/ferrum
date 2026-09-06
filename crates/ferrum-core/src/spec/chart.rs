@@ -834,6 +834,8 @@ mod tests {
         spec.facet = Some(FacetSpec {
             field: "species".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
             resolve: crate::layout::facet::FacetResolve::default(),

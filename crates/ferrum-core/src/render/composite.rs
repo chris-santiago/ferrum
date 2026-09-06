@@ -1631,6 +1631,8 @@ mod tests {
         let facet = FacetSpec {
             field: "panel".into(),
             row: None,
+            title: None,
+            row_title: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
             resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
