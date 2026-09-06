@@ -288,6 +288,17 @@ use pyo3::prelude::*;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyErrorExtent(pub(crate) crate::transform::core::TransformSpec);
 
+/// The single source of truth for `ErrorExtent`'s free-string `method`
+/// vocabulary — read by [`PyErrorExtent::new`]'s error message and by
+/// `registry::entry_for_kind("error_extent")`'s `methods` list, mirroring the
+/// `smooth::METHODS` / `kde::KERNELS` / `qq::DISTRIBUTIONS` precedent (R1
+/// design finding 1: this entry was a hand-copied literal in the registry
+/// with no guard). The match arms below are the enforcement site; a value
+/// here without an arm is caught by
+/// `error_extent_methods_accepted_and_bogus_method_rejected`
+/// (`registry/tests.rs`), which calls through the real PyO3 constructor.
+pub(crate) const METHODS: &[&str] = &["ci", "stderr", "stdev", "iqr"];
+
 #[pymethods]
 impl PyErrorExtent {
     #[new]
@@ -310,7 +321,8 @@ impl PyErrorExtent {
             "iqr" => ErrorMethod::Iqr,
             other => {
                 return Err(PyValueError::new_err(format!(
-                    "ErrorExtent: unknown method '{other}'; expected ci|stderr|stdev|iqr"
+                    "ErrorExtent: unknown method '{other}'; expected {}",
+                    METHODS.join("|"),
                 )))
             }
         };

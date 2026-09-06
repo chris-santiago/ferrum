@@ -3,8 +3,10 @@
 Spec §4.6 / decision M6a require that the output-column names a Python
 desugar/figure consumer reads out of a transform's output batch derive from
 ``ferrum._core.transform_registry`` instead of being embedded as bare string
-literals. ``ferrum.marks._desugar_helpers.registry_output_columns`` is the
-conversion point; this module is the proof that the conversion is complete.
+literals. ``ferrum._registry`` holds the two conversion points --
+``registry_output_columns`` for a kind's primary batch and
+``registry_secondary_columns`` for one of its named secondary batches -- and
+this module is the proof that the conversion is complete.
 
 Why the *boundary* is computed, not stated
 ------------------------------------------
@@ -21,12 +23,20 @@ that person's attention span.
 So the population is enumerated by the machine, from the outside in:
 
 **The outer bound.** Every ``ast.Constant`` string in ``src/ferrum/**.py``
-whose value equals an output-column name that some registry kind declares
+whose value equals an output-column name that some registry kind declares --
+in its primary ``outputs`` or in any of its ``secondary_outputs`` batches
 (:func:`_outer_bound`). Both halves are derived: the names come from the live
 registry, the occurrences from parsing the package. Nothing about ferrum's
 shapes, conventions or call sites narrows it. It is the widest set that could
 possibly contain an unconverted consumer, because an unconverted consumer *is*
 a string literal equal to a declared output name.
+
+The secondary half only became visible on 2026-09-06, when Rust started
+declaring those batches. Before that the sweep could not see
+``qq_line_x_start`` or the dendrogram segment columns at all -- they were
+outside the bound by construction, and the six consumer sites reading them
+carried ``_DISPOSITIONED`` entries saying so. Those entries are gone: the
+sites are converted.
 
 **The accounting.** Every member of that outer bound is assigned exactly one
 label by :func:`_classify_module`, from the ordered rule table
@@ -40,9 +50,10 @@ Two labels mean "this is a real reference to a transform's output column":
 
 ``converted-argument`` / ``converted-lookup-read``
     The literal is an argument of a ``registry_output_columns(kind, [...])``
-    call, or the key a call site reads back out of one. This is the M6a
-    conversion: the helper checks the name against the live registry, so a
-    Rust-side rename raises at desugar time naming the stale column.
+    or ``registry_secondary_columns(kind, key, [...])`` call, or the key a
+    call site reads back out of one. This is the M6a conversion: the helper
+    checks the name against the live registry, so a Rust-side rename raises
+    at desugar time naming the stale column.
 
 ``column-reference``
     The literal sits in a *channel position* -- somewhere a column name is what
@@ -96,7 +107,12 @@ from ferrum.encoding.base import ChannelBase
 
 _SRC = pathlib.Path(__file__).parent.parent / "src" / "ferrum"
 
-_LOOKUP_HELPER = "registry_output_columns"
+#: The two conversion points, both in ``ferrum._registry``. The primary helper
+#: takes ``(kind, names)``; the secondary one takes ``(kind, key, names)`` --
+#: the names list is the last positional argument of either.
+_PRIMARY_LOOKUP = "registry_output_columns"
+_SECONDARY_LOOKUP = "registry_secondary_columns"
+_LOOKUP_HELPERS = frozenset({_PRIMARY_LOOKUP, _SECONDARY_LOOKUP})
 
 #: Keyword arguments whose value is a *container* of channel bindings rather
 #: than a single one. A dict here is keyed by channel name; a call here builds
@@ -132,10 +148,21 @@ def _registry_kinds() -> list[str]:
 
 
 def _declared_output_names() -> set[str]:
-    """Union of every output column name any registry kind declares."""
+    """Union of every output column name any registry kind declares.
+
+    Both halves count: a kind's primary ``outputs`` and the columns of every
+    named batch in its ``secondary_outputs``. The secondary half joined the
+    registry on 2026-09-06; before that, the least-guessable names in the
+    crate (``qq_line_x_start``, the dendrogram ``x2``/``y2``, ``lv_depth_3``'s
+    ``lower``/``upper``) were invisible to this sweep by construction, so the
+    boundary claim below silently excluded them.
+    """
     names: set[str] = set()
     for kind in _registry_kinds():
-        names |= {name for name, _dtype in _core.transform_registry(kind)["outputs"]}
+        entry = _core.transform_registry(kind)
+        names |= {name for name, _dtype in entry["outputs"]}
+        for _key, columns in entry["secondary_outputs"]:
+            names |= {name for name, _dtype in columns}
     return names
 
 
@@ -251,7 +278,7 @@ def _index(path: pathlib.Path) -> _ModuleIndex:
 
     def bind(scope: ast.AST | None, name: str, value: ast.expr) -> None:
         bindings[(scope, name)] = value
-        if isinstance(value, ast.Call) and _callee_name(value) == _LOOKUP_HELPER:
+        if isinstance(value, ast.Call) and _callee_name(value) in _LOOKUP_HELPERS:
             lookup_names.add(name)
 
     for node in ast.walk(tree):
@@ -293,6 +320,29 @@ def _index(path: pathlib.Path) -> _ModuleIndex:
     )
 
 
+def _static_str(node: ast.expr, index: _ModuleIndex, owner: ast.AST | None) -> str | None:
+    """*node*'s string value if it is statically knowable, else ``None``.
+
+    A string literal, or a name bound to one anywhere in the enclosing scope
+    chain (``_QQ_LINE_KEY = "qq_line"`` at module level, ``_segments_key =
+    "segments"`` in the enclosing function). Used to read the ``kind`` and
+    ``key`` arguments of a lookup call, which call sites bind to a named
+    constant when the same string also has to build a ``data_source``.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.Name):
+        scope = owner
+        while True:
+            bound = index.bindings.get((scope, node.id))
+            if bound is not None:
+                return _static_str(bound, index, owner) if bound is not node else None
+            if scope is None:
+                return None
+            scope = index.enclosing.get(scope)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # The two rules that say "this literal names a transform output column"
 # ---------------------------------------------------------------------------
@@ -301,10 +351,13 @@ def _index(path: pathlib.Path) -> _ModuleIndex:
 def _converted_nodes(index: _ModuleIndex) -> tuple[set[int], set[int]]:
     """(argument nodes, lookup-read nodes) of the M6a conversion.
 
-    An *argument* node is a name inside ``registry_output_columns(kind, [...])``
-    -- the point where the registry check happens. A *lookup-read* node is the
-    key a call site reads back, either out of a local bound to that call
-    (``_bin_cols["bin_start"]``) or straight off it
+    An *argument* node is a name inside a lookup call's names list --
+    ``registry_output_columns(kind, [...])`` or
+    ``registry_secondary_columns(kind, key, [...])``, the point where the
+    registry check happens. The names list is the last positional argument of
+    either helper. A *lookup-read* node is the key a call site reads back,
+    either out of a local bound to that call (``_bin_cols["bin_start"]``) or
+    straight off it
     (``registry_output_columns("bin", ["bin_start"])["bin_start"]``).
 
     Recognising the reads is load-bearing, not decorative: without it every one
@@ -314,15 +367,15 @@ def _converted_nodes(index: _ModuleIndex) -> tuple[set[int], set[int]]:
     arguments: set[int] = set()
     reads: set[int] = set()
     for node in ast.walk(index.tree):
-        if isinstance(node, ast.Call) and _callee_name(node) == _LOOKUP_HELPER:
-            if len(node.args) == 2:
-                for elt in getattr(node.args[1], "elts", []):
+        if isinstance(node, ast.Call) and _callee_name(node) in _LOOKUP_HELPERS:
+            if node.args:
+                for elt in getattr(node.args[-1], "elts", []):
                     if isinstance(elt, ast.Constant):
                         arguments.add(id(elt))
         elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
             base = node.value
             from_name = isinstance(base, ast.Name) and base.id in index.lookup_names
-            from_call = isinstance(base, ast.Call) and _callee_name(base) == _LOOKUP_HELPER
+            from_call = isinstance(base, ast.Call) and _callee_name(base) in _LOOKUP_HELPERS
             if from_name or from_call:
                 reads.add(id(node.slice))
     return arguments, reads
@@ -448,9 +501,11 @@ def _column_reference_nodes(index: _ModuleIndex) -> set[int]:
 _ACCOUNTING: tuple[tuple[str, str], ...] = (
     (
         "converted-argument",
-        "A name passed to registry_output_columns(kind, [...]), which checks it "
-        "against transform_registry(kind)['outputs'] at call time. This is the "
-        "M6a conversion itself.",
+        "A name passed to registry_output_columns(kind, [...]) or to "
+        "registry_secondary_columns(kind, key, [...]), which checks it against "
+        "transform_registry(kind)['outputs'] -- or against that kind's declared "
+        "schema for the named secondary batch -- at call time. This is the M6a "
+        "conversion itself.",
     ),
     (
         "converted-lookup-read",
@@ -625,18 +680,6 @@ _COLUMN_REFERENCES = [o for o in _OUTER_BOUND if o.label == "column-reference"]
 # outlive the code that needed it.
 # ---------------------------------------------------------------------------
 
-_BOXEN = (
-    "desugar_boxen's layers read the SECONDARY letter_value batches "
-    "(`lv_depth_{k}` / `lv_outliers`), which the registry deliberately does not "
-    "declare; the primary letter_value schema is group/depth/lower/upper/level. "
-    "Checking these against the primary schema would pin a schema this code path "
-    "never reads -- `value` is not even a member of it."
-)
-_DENDROGRAM = (
-    "Dendrogram link segments read the `linkage` transform's SECONDARY named "
-    "batch (`*_link_segments`), whose x/y/x2/y2 columns the registry does not "
-    "declare; `linkage`'s declared outputs are node_id/left/right/distance/n_obs."
-)
 _UNPIVOT_VALUE = (
     'The column is named by the `Unpivot(value_name="value")` built a few lines '
     "above, so Python chose it; `unpivot` declares no outputs at all. It collides "
@@ -659,15 +702,13 @@ _RESIDPLOT_X = (
     "construction; declaring one is the batch-close follow-up, not this task."
 )
 
+#: The letter_value and linkage secondary batches (`lv_depth_{k}` /
+#: `lv_outliers`, `*_link_segments` / `*_link_order`) were dispositioned here
+#: until 2026-09-06 on the grounds that the registry declared no schema to
+#: check them against. It declares one now (`secondary_outputs`), so those six
+#: sites are converted through `registry_secondary_columns` instead of
+#: excused -- which is why no entry below names them.
 _DISPOSITIONED: dict[tuple[str, str, str], str] = {
-    # --- letter_value secondary batches -----------------------------------
-    ("src/ferrum/marks/composite.py", "desugar_boxen", "group"): _BOXEN,
-    ("src/ferrum/marks/composite.py", "desugar_boxen", "lower"): _BOXEN,
-    ("src/ferrum/marks/composite.py", "desugar_boxen", "upper"): _BOXEN,
-    ("src/ferrum/marks/composite.py", "desugar_boxen", "value"): _BOXEN,
-    # --- linkage secondary batches ----------------------------------------
-    ("src/ferrum/plots/matrix.py", "_clustermap_build", "x"): _DENDROGRAM,
-    ("src/ferrum/plots/matrix.py", "_clustermap_build", "y"): _DENDROGRAM,
     # --- a column Python itself materialised, colliding with a declared one -
     ("src/ferrum/marks/heavy_stat.py", "desugar_function", "x"): (
         "desugar_function's single-mark result carries `data=` -- a synthetic "
@@ -707,9 +748,17 @@ _DISPOSITIONED: dict[tuple[str, str, str], str] = {
     ("src/ferrum/marks/diagnostic/_clustering.py", "desugar_decision_boundary", "x"): (
         "The decision-boundary mark's documented data contract: a pre-computed "
         "grid with x/x2/y/y2 cell bounds and z, produced by the chart builder in "
-        "Python. Collides with smooth's declared x/y."
+        "Python. Collides with smooth's declared x/y, and (since the secondary "
+        "batches joined the registry) with linkage's dendrogram segments too."
     ),
     ("src/ferrum/marks/diagnostic/_clustering.py", "desugar_decision_boundary", "y"): (
+        "See the desugar_decision_boundary x entry above."
+    ),
+    ("src/ferrum/marks/diagnostic/_clustering.py", "desugar_decision_boundary", "x2"): (
+        "See the desugar_decision_boundary x entry above -- the same Python-built "
+        "grid's far cell bound."
+    ),
+    ("src/ferrum/marks/diagnostic/_clustering.py", "desugar_decision_boundary", "y2"): (
         "See the desugar_decision_boundary x entry above."
     ),
     ("src/ferrum/marks/diagnostic/_ranking.py", "desugar_parallel_coordinates", "value"): (
@@ -781,9 +830,10 @@ def _undispositioned() -> list[_Occurrence]:
 def test_the_outer_bound_is_wide_and_real():
     """A vacuous outer bound would make every test below pass for free.
 
-    The floors are deliberately far below the observed values (774 occurrences
-    of 40 distinct declared names across 59 files at the time of writing): they
-    catch a parse that silently found nothing, not a refactor.
+    The floors are deliberately far below the observed values (877 occurrences
+    of 47 distinct declared names across 59 files once the secondary batches
+    joined the registry, up from 774 / 40 / 59): they catch a parse that
+    silently found nothing, not a refactor.
     """
     assert len(_OUTER_BOUND) > 300, len(_OUTER_BOUND)
     assert len({o.literal for o in _OUTER_BOUND}) > 20
@@ -917,7 +967,8 @@ def test_no_column_reference_is_a_bare_literal():
     assert not offenders, "\n".join(
         f"{o.path}:{o.lineno} [{o.function}] {o.literal!r} in a channel position "
         f"-- a registry-declared output column embedded as a bare literal; read it "
-        f"through {_LOOKUP_HELPER}(kind, [...]) or add a reasoned entry to "
+        f"through {_PRIMARY_LOOKUP}(kind, [...]) (or {_SECONDARY_LOOKUP}(kind, key, "
+        f"[...]) for a named secondary batch), or add a reasoned entry to "
         f"_DISPOSITIONED keyed {o.site!r}"
         for o in offenders
     )
@@ -926,10 +977,11 @@ def test_no_column_reference_is_a_bare_literal():
 def test_every_disposition_is_still_live():
     """A disposition that no longer matches a column-reference hit is stale.
 
-    This doubles as the coverage floor for the classifier itself: 29
-    dispositions across 10 files must each still be *recognised* as a channel
+    This doubles as the coverage floor for the classifier itself: 25
+    dispositions across 9 files must each still be *recognised* as a channel
     position, so a predicate that quietly stopped matching consumer code fails
-    here in bulk instead of letting the gate above pass vacuously.
+    here in bulk instead of letting the gate above pass vacuously. (Was 29
+    across 10 before the six letter_value/linkage secondary sites converted.)
     """
     live = {o.site for o in _COLUMN_REFERENCES}
     stale = sorted(key for key in _DISPOSITIONED if key not in live)
@@ -963,7 +1015,9 @@ from dataclasses import replace
 from ferrum._layer import _Layer, MarkDesugarResult
 from ferrum.encoding import X, Y
 from ferrum.encoding import X as _X_ecdf
-from ferrum.marks._desugar_helpers import registry_output_columns
+from ferrum._registry import registry_output_columns, registry_secondary_columns
+
+_SEGMENTS_KEY = "segments"
 
 def inline_dict():
     """marks/composite.py desugar_boxplot, pre-conversion."""
@@ -1011,6 +1065,16 @@ def chart_level_encode(chart):
 def converted_argument_and_read():
     cols = registry_output_columns("smooth", ["ci_upper"])
     return _Layer(mark="line", encoding={"y": cols["ci_upper"]}, data_source="smooth")
+
+def converted_secondary_argument_and_read(name):
+    """plots/matrix.py's dendrogram layers: a named SECONDARY batch, whose
+    key is a module constant because it also builds the data_source."""
+    cols = registry_secondary_columns("linkage", _SEGMENTS_KEY, ["x2"])
+    return _Layer(
+        mark="segment",
+        encoding={"x2": cols["x2"]},
+        data_source=f"{name}_{_SEGMENTS_KEY}",
+    )
 
 def tuple_unpacked():
     """Round-5: a same-arity tuple unpack feeding a channel position."""
@@ -1068,8 +1132,14 @@ def controls(other, axis):
         "loop_target:median",
         "loop_target:q3",
     }
-    assert by_label["converted-argument"] == {"converted_argument_and_read:ci_upper"}
-    assert by_label["converted-lookup-read"] == {"converted_argument_and_read:ci_upper"}
+    assert by_label["converted-argument"] == {
+        "converted_argument_and_read:ci_upper",
+        "converted_secondary_argument_and_read:x2",
+    }
+    assert by_label["converted-lookup-read"] == {
+        "converted_argument_and_read:ci_upper",
+        "converted_secondary_argument_and_read:x2",
+    }
     # The controls land in the non-column bucket that describes them. (These
     # are subset assertions because the module's own channel keys -- the "x"
     # and "y" of every encoding dict above -- are themselves declared output
@@ -1087,34 +1157,59 @@ def controls(other, axis):
 # ---------------------------------------------------------------------------
 
 
-def _converted_columns() -> dict[str, set[str]]:
-    """kind -> every column name a ``registry_output_columns`` call site in
-    ``src/ferrum`` asks for, collected from the source rather than mirrored in
-    a table here."""
-    consumed: dict[str, set[str]] = {}
+def _converted_columns() -> tuple[dict[str, set[str]], dict[tuple[str, str], set[str]]]:
+    """The two conversion inventories, collected from the source.
+
+    Returns ``(primary, secondary)``: ``kind -> names`` for every
+    ``registry_output_columns(kind, [...])`` call site, and
+    ``(kind, key) -> names`` for every
+    ``registry_secondary_columns(kind, key, [...])`` one. Both are derived by
+    parsing ``src/ferrum`` rather than mirrored in a table here.
+
+    A kind or key argument is read through :func:`_static_str`, which sees a
+    literal or a name bound to one (``_QQ_LINE_KEY``, ``_segments_key``); a
+    call whose kind or key is neither is skipped -- there is one such site,
+    ``marks/_fit_layers.build_fit_layers``' ``kind`` parameter, whose four
+    possible arguments (the fit family) are pinned by
+    ``tests/test_lmplot_valid_methods_registry_pin.py`` instead.
+    """
+    primary: dict[str, set[str]] = {}
+    secondary: dict[tuple[str, str], set[str]] = {}
     for path in sorted(_SRC.rglob("*.py")):
-        tree = _parse(path)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or _callee_name(node) != _LOOKUP_HELPER:
+        index = _index(path)
+        for node in ast.walk(index.tree):
+            if not isinstance(node, ast.Call):
                 continue
-            if len(node.args) != 2 or not isinstance(node.args[0], ast.Constant):
+            callee = _callee_name(node)
+            if callee not in _LOOKUP_HELPERS:
+                continue
+            arity = 2 if callee == _PRIMARY_LOOKUP else 3
+            if len(node.args) != arity:
+                continue
+            owner = index.enclosing.get(node)
+            leading = [_static_str(arg, index, owner) for arg in node.args[:-1]]
+            if any(value is None for value in leading):
                 continue
             names = {
                 elt.value
-                for elt in getattr(node.args[1], "elts", [])
+                for elt in getattr(node.args[-1], "elts", [])
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
             }
-            consumed.setdefault(node.args[0].value, set()).update(names)
-    return consumed
+            if callee == _PRIMARY_LOOKUP:
+                primary.setdefault(leading[0], set()).update(names)
+            else:
+                secondary.setdefault((leading[0], leading[1]), set()).update(names)
+    return primary, secondary
 
 
-_CONVERTED = _converted_columns()
+_CONVERTED, _CONVERTED_SECONDARY = _converted_columns()
 
 
 def test_conversion_sites_were_found():
-    """The drift guard below is derived from call sites; an empty derivation
-    would make it pass vacuously."""
+    """The drift guards below are derived from call sites; an empty derivation
+    would make them pass vacuously."""
     assert len(_CONVERTED) >= 10, _CONVERTED
+    assert len(_CONVERTED_SECONDARY) >= 3, _CONVERTED_SECONDARY
 
 
 @pytest.mark.parametrize("kind", sorted(_CONVERTED))
@@ -1127,6 +1222,27 @@ def test_every_consumed_column_is_a_real_registry_output(kind):
     assert not missing, (
         f"{kind}: Python reads column(s) {missing} that "
         f"transform_registry({kind!r})['outputs'] does not declare ({sorted(declared)})"
+    )
+
+
+@pytest.mark.parametrize("site", sorted(_CONVERTED_SECONDARY))
+def test_every_consumed_secondary_column_is_a_real_registry_output(site):
+    """The same mirror for the secondary batches: every ``(kind, key)`` a
+    consumer names is declared, and every column it reads out of that batch
+    is in that batch's schema -- on every code path, not just the executed
+    ones."""
+    kind, key = site
+    batches = dict(_core.transform_registry(kind)["secondary_outputs"])
+    assert key in batches, (
+        f"{kind}: Python reads a secondary batch {key!r} that "
+        f"transform_registry({kind!r})['secondary_outputs'] does not declare "
+        f"({sorted(batches)})"
+    )
+    declared = {name for name, _dtype in batches[key]}
+    missing = sorted(_CONVERTED_SECONDARY[site] - declared)
+    assert not missing, (
+        f"{kind}/{key}: Python reads column(s) {missing} that the declared "
+        f"schema does not carry ({sorted(declared)})"
     )
 
 

@@ -270,6 +270,22 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
         .map_err(|e| PyValueError::new_err(format!("stat_qq: {e}")))
 }
 
+/// The key the reference-line batch is published under. `Qq` does not prefix
+/// it with the spec's `name` (unlike `linkage`/`letter_value`), so this is the
+/// key under every construction.
+pub(crate) const QQ_LINE_KEY: &str = "qq_line";
+
+/// The reference-line batch's column schema — the single source of truth,
+/// read by both [`secondary_outputs`]'s schema builder below and
+/// `registry::entry_for_kind("qq")`'s `secondary_outputs` list (R1 design
+/// finding (d): these four names were unchecked Python literals before).
+pub(crate) const QQ_LINE_COLUMNS: &[(&str, DataType)] = &[
+    ("qq_line_x_start", DataType::Float64),
+    ("qq_line_x_end", DataType::Float64),
+    ("qq_line_y_start", DataType::Float64),
+    ("qq_line_y_end", DataType::Float64),
+];
+
 /// Compute the secondary `qq_line` named output from the primary points batch.
 ///
 /// Returns `vec![("qq_line", line_batch)]` when `emit_line=true`, else empty.
@@ -345,12 +361,12 @@ pub(crate) fn secondary_outputs(
     let y_min = slope * theo_min + intercept;
     let y_max = slope * theo_max + intercept;
 
-    let line_schema = Arc::new(Schema::new(vec![
-        Field::new("qq_line_x_start", DataType::Float64, false),
-        Field::new("qq_line_x_end", DataType::Float64, false),
-        Field::new("qq_line_y_start", DataType::Float64, false),
-        Field::new("qq_line_y_end", DataType::Float64, false),
-    ]));
+    let line_schema = Arc::new(Schema::new(
+        QQ_LINE_COLUMNS
+            .iter()
+            .map(|(name, dt)| Field::new(*name, dt.clone(), false))
+            .collect::<Vec<_>>(),
+    ));
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(vec![theo_min])),
         Arc::new(Float64Array::from(vec![theo_max])),
@@ -360,7 +376,7 @@ pub(crate) fn secondary_outputs(
     let line_batch = RecordBatch::try_new(line_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_qq: qq_line: {e}")))?;
 
-    Ok(vec![("qq_line".to_string(), line_batch)])
+    Ok(vec![(QQ_LINE_KEY.to_string(), line_batch)])
 }
 
 use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};

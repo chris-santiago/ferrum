@@ -37,6 +37,12 @@ pub(crate) struct PivotSpec {
     pub name: Option<String>,
 }
 
+/// The single source of truth for `Pivot`'s free-string `op` vocabulary.
+/// Read by [`aggregate_values`] (the enforcement site), its error message,
+/// and `registry::entry_for_kind("pivot")`'s `methods` list — R1 design
+/// finding 1, mirroring the `smooth::METHODS` precedent.
+pub(crate) const OPS: &[&str] = &["sum", "mean", "count", "min", "max", "first", "last"];
+
 fn default_op() -> String {
     "sum".into()
 }
@@ -171,7 +177,7 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
         group_key_vecs.push(key.clone());
         for (pi, pv) in pivot_values.iter().enumerate() {
             let agg_val = match pivot_map.get(pv) {
-                Some(vals) => aggregate_values(vals, &spec.op),
+                Some(vals) => aggregate_values(vals, &spec.op)?,
                 None => f64::NAN,
             };
             pivot_data[pi].push(agg_val);
@@ -196,12 +202,21 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
         .map_err(|e| PyValueError::new_err(format!("data_pivot: {e}")))
 }
 
-fn aggregate_values(vals: &[f64], op: &str) -> f64 {
+/// Aggregate one cell's values under `op`.
+///
+/// R1 design finding 1: the unknown-`op` arm used to fall back to `sum`
+/// silently, which made this the one declared vocabulary in the registry with
+/// no refusal site to guard it — and, worse, meant a typo'd `op` rendered a
+/// plausible-looking wrong number with no diagnostic. It now refuses, which
+/// is both the honest answer and what lets
+/// `pivot_methods_accepted_and_bogus_op_rejected` (`registry/tests.rs`) hold
+/// the registry entry to [`OPS`].
+fn aggregate_values(vals: &[f64], op: &str) -> PyResult<f64> {
     let clean: Vec<f64> = vals.iter().copied().filter(|v| !v.is_nan()).collect();
     if clean.is_empty() {
-        return f64::NAN;
+        return Ok(f64::NAN);
     }
-    match op {
+    Ok(match op {
         "sum" => clean.iter().sum(),
         "mean" => clean.iter().sum::<f64>() / clean.len() as f64,
         "count" => clean.len() as f64,
@@ -209,8 +224,13 @@ fn aggregate_values(vals: &[f64], op: &str) -> f64 {
         "max" => clean.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
         "first" => clean[0],
         "last" => *clean.last().unwrap(),
-        _ => clean.iter().sum(), // Default to sum.
-    }
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "data_pivot: unknown op '{other}'; expected {}",
+                OPS.join("|"),
+            )))
+        }
+    })
 }
 
 // No PyO3 wrapper: `DataPivot` is constructed only via the dict-emitting

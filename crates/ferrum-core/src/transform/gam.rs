@@ -27,11 +27,16 @@
 //!
 //! ## Documented defaults
 //!
-//! - **Basis dimension** `k = clamp(distinct_x, 4, 10)` — 10 is mgcv's own
-//!   default basis dimension for a single smooth, and the lower bound is
-//!   `SPLINE_DEGREE + 1`, the smallest basis that spans a single cubic
-//!   segment. Capping at the number of *distinct* x values keeps the basis
-//!   from carrying more segments than the data can place.
+//! - **Basis dimension** `clamp(k, 4, distinct_x)`, where `k` is the
+//!   caller's requested dimension and defaults to [`DEFAULT_BASIS_DIM`] —
+//!   10, mgcv's own default basis dimension for a single smooth. The lower
+//!   bound is `SPLINE_DEGREE + 1` ([`MIN_BASIS_DIM`]), the smallest basis
+//!   that spans a single cubic segment; the upper bound is the number of
+//!   *distinct* x values, which keeps the basis from carrying more segments
+//!   than the data can place. `Smooth(method="gam", k=…)` is what reaches
+//!   this parameter: a larger `k` buys the penalty more basis functions to
+//!   work with, which is the escape hatch for data whose signal turns more
+//!   often than the default basis can follow.
 //! - **Knots**: `k − 3` equal-width segments spanning `[min(x), max(x)]`,
 //!   extended uniformly by three spacings on each side (the standard
 //!   P-spline knot vector). Uniform spacing is what makes the difference
@@ -82,16 +87,21 @@
 //! turns `None` into the same all-NaN grid every other method's degenerate
 //! branch emits. **gam adds no whole-frame refusal**: the polynomial
 //! methods refuse a rank-deficient whole-frame fit because the *caller's*
-//! `degree` is what makes the design undeterminable, and gam has no such
-//! parameter — its basis dimension is derived from the data, so every gam
-//! degeneracy is data degeneracy, which this file's siblings degrade on
-//! rather than refuse. See `smooth.rs`'s "Degenerate-input policy".
+//! `degree` is what makes the design undeterminable, and gam's `k` cannot
+//! play that role — it is clamped down to the number of distinct x values
+//! before it reaches the design, so an over-large `k` can never make the
+//! basis rank-deficient the way an over-large `degree` makes a Vandermonde
+//! design rank-deficient. Every gam degeneracy is therefore data
+//! degeneracy, which this file's siblings degrade on rather than refuse.
+//! (`k` itself is still validated as a *value* at the PyO3 boundary: `k < 4`
+//! cannot span a cubic segment and refuses there. See `smooth.rs`'s
+//! "Degenerate-input policy".)
 //!
 //! ## Determinism
 //!
 //! No RNG, no iteration to a tolerance, no parallel reduction: the fit is a
 //! fixed 33-candidate scan of closed-form solves, every sum accumulated in
-//! a fixed order over `dim ≤ 10` sized problems. Two runs on the same input
+//! a fixed order over `dim`-sized problems. Two runs on the same input
 //! are byte-identical, which the CLAUDE.md byte-deterministic-render
 //! constraint requires and `fit_is_byte_deterministic_across_runs` pins.
 
@@ -103,11 +113,15 @@ use crate::transform::linalg::invert_spd;
 const SPLINE_DEGREE: usize = 3;
 /// Number of non-zero basis functions at any x (`SPLINE_DEGREE + 1`).
 const SPAN: usize = SPLINE_DEGREE + 1;
-/// Largest basis dimension, matching mgcv's default `k = 10` for a single
-/// smooth term. The penalty, not the basis size, controls smoothness.
-const MAX_BASIS_DIM: usize = 10;
-/// Smallest basis dimension: one cubic segment.
-const MIN_BASIS_DIM: usize = SPAN;
+/// Default basis dimension when the caller does not ask for one, matching
+/// mgcv's default `k = 10` for a single smooth term. The penalty, not the
+/// basis size, controls smoothness — which is why this is a *default* rather
+/// than a cap: raising it does not un-smooth the fit, it only widens the
+/// space the GCV-chosen penalty selects within.
+pub(crate) const DEFAULT_BASIS_DIM: usize = 10;
+/// Smallest basis dimension: one cubic segment. `Smooth`'s PyO3 constructor
+/// refuses a `k` below this, since no smaller basis exists.
+pub(crate) const MIN_BASIS_DIM: usize = SPAN;
 /// Difference-penalty order. See the module doc's null-space note.
 const PENALTY_ORDER: usize = 2;
 /// GCV λ grid: `λ_scale · 10^e` for `e` from this exponent, in
@@ -238,12 +252,15 @@ struct GcvCandidate {
     residual_dof: f64,
 }
 
-/// Fit a penalized cubic B-spline to `(xs, ys)`.
+/// Fit a penalized cubic B-spline to `(xs, ys)` with a requested basis
+/// dimension `k` (see the module doc's "Documented defaults";
+/// [`DEFAULT_BASIS_DIM`] is what `Smooth` passes when the caller says
+/// nothing).
 ///
 /// Returns `None` for degenerate input rather than an error — see the
 /// module doc's "Degenerate input" section for the exhaustive list and for
 /// why gam contributes no whole-frame refusal of its own.
-pub(crate) fn fit(xs: &[f64], ys: &[f64]) -> Option<GamFit> {
+pub(crate) fn fit(xs: &[f64], ys: &[f64], k: usize) -> Option<GamFit> {
     let pairs: Vec<(f64, f64)> = xs
         .iter()
         .zip(ys.iter())
@@ -270,7 +287,9 @@ pub(crate) fn fit(xs: &[f64], ys: &[f64]) -> Option<GamFit> {
         return None;
     }
 
-    let dim = distinct.len().min(MAX_BASIS_DIM);
+    // `distinct.len() >= MIN_BASIS_DIM` was just checked, so the clamp's
+    // bounds are ordered and `clamp` cannot panic.
+    let dim = k.clamp(MIN_BASIS_DIM, distinct.len());
     let basis = SplineBasis::new(x_min, x_max, dim);
     let rows: Vec<(usize, [f64; SPAN])> = pairs.iter().map(|&(x, _)| basis.row(x)).collect();
     let (btb, bty) = normal_equations(&rows, &pairs, dim);
@@ -424,6 +443,83 @@ fn residual_sum_of_squares(
 mod tests {
     use super::*;
 
+    /// The pinned fixture the exact-value assertions below measure against.
+    ///
+    /// Deliberately **transcendental-free**: `x` is an exact binary multiple
+    /// and `y` is a polynomial plus a fixed period-3 zigzag, so every input
+    /// value is bit-reproducible on any IEEE-754 platform (a `sin`-generated
+    /// fixture would not be — libm's last ULP is not specified). The zigzag
+    /// is what gives GCV something to trade off: a pure polynomial in the
+    /// basis's span would be fit exactly at every λ and pin nothing.
+    fn pinned_fixture() -> (Vec<f64>, Vec<f64>) {
+        let xs: Vec<f64> = (0..48).map(|i| i as f64 * 0.25).collect();
+        let ys: Vec<f64> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let wobble = match i % 3 {
+                    0 => 0.75,
+                    1 => -0.5,
+                    _ => 0.125,
+                };
+                0.3 * x * x - 1.75 * x + 2.0 + wobble
+            })
+            .collect();
+        (xs, ys)
+    }
+
+    /// **Exact-value pin (mutation gate).** `edf` and `std_error` on
+    /// [`pinned_fixture`], measured from this implementation and asserted to
+    /// a relative tolerance far tighter than any behavior change but loose
+    /// enough for the one non-IEEE-specified operation in the fit path
+    /// (`10f64.powf` when building the λ grid).
+    ///
+    /// This is the test the closing-round mutation sweep asked for. Three
+    /// survivors of the property-based tests above die here, because each
+    /// moves these numbers far outside the tolerance while leaving every
+    /// inequality (`edf > 2.5`, `wiggly > straight`, `noisy se > quiet se`)
+    /// satisfied:
+    /// 1. `gcv = n·rss / (residual_dof * residual_dof)` → `/ residual_dof`.
+    ///    An unsquared denominator under-penalizes df, so GCV selects a
+    ///    different λ: `edf` 5.117 → 6.051.
+    /// 2. `cov = inverse * sigma2` → `* sigma2.sqrt()`. The posterior
+    ///    covariance is a variance, not a standard deviation; the swap
+    ///    rescales every `std_error` by `σ̂^(-1/2)`: `se(1.0)` 0.1756 → 0.2364.
+    /// 3. `LAMBDA_LOG10_STEP: 0.5` → `0.25`. The grid keeps its 33 points and
+    ///    its lower end but loses the top half of its span (`e ≤ 0` instead
+    ///    of `e ≤ 8`) while densifying the rest, so a different λ wins:
+    ///    `edf` 5.117 → 5.576.
+    ///
+    /// Regenerating these constants is only ever correct when the *fit* is
+    /// deliberately changing; a diff that moves them without saying why in
+    /// the same commit is the regression this pin exists to catch.
+    #[test]
+    fn pinned_edf_and_standard_errors_on_a_fixed_input() {
+        let (xs, ys) = pinned_fixture();
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("the pinned fixture must fit");
+        let edf = xs.len() as f64 - fit.residual_dof();
+
+        /// Relative tolerance: eight orders of magnitude below the smallest
+        /// deviation any of the three pinned mutations produces (9%, on
+        /// `edf` under mutation 3), and comfortably above the only
+        /// non-IEEE-specified operation in the path (`powf`).
+        const REL_TOL: f64 = 1e-9;
+        fn assert_pinned(actual: f64, expected: f64, what: &str) {
+            let tol = expected.abs() * REL_TOL;
+            assert!(
+                (actual - expected).abs() <= tol,
+                "{what}: {actual:.17e} drifted from the pinned {expected:.17e} \
+                 (tolerance {tol:.3e})"
+            );
+        }
+        assert_pinned(edf, 5.117_209_665_597_862_1, "gam edf on the pinned fixture");
+        // Three x's: inside the left third, the middle, and the right edge.
+        assert_pinned(fit.std_error(1.0), 0.175_607_983_050_285_44, "se(1.0)");
+        assert_pinned(fit.std_error(5.75), 0.157_147_455_097_472_63, "se(5.75)");
+        assert_pinned(fit.std_error(11.75), 0.308_778_040_674_222_27, "se(11.75)");
+        assert_pinned(fit.predict(5.75), 1.962_760_038_092_168_6, "f̂(5.75)");
+    }
+
     /// Every B-spline basis is a partition of unity — the single property
     /// that makes `Σ β_j B_j(x)` an interpolation rather than an arbitrary
     /// weighted sum. Closed-form, exact.
@@ -470,7 +566,7 @@ mod tests {
     fn fit_reproduces_an_exactly_linear_function() {
         let xs: Vec<f64> = (0..25).map(|i| i as f64 * 0.4).collect();
         let ys: Vec<f64> = xs.iter().map(|x| 3.0 - 2.0 * x).collect();
-        let fit = fit(&xs, &ys).expect("linear data must fit");
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("linear data must fit");
         for i in 0..=50 {
             let x = 9.6 * i as f64 / 50.0;
             let expected = 3.0 - 2.0 * x;
@@ -487,7 +583,7 @@ mod tests {
     fn fit_reproduces_a_constant() {
         let xs: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let ys = vec![4.25; 12];
-        let fit = fit(&xs, &ys).expect("constant data must fit");
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("constant data must fit");
         for i in 0..=20 {
             let x = 11.0 * i as f64 / 20.0;
             assert!((fit.predict(x) - 4.25).abs() < 1e-9, "f({x}) = {}", fit.predict(x));
@@ -518,7 +614,7 @@ mod tests {
         let intercept = mean_y - slope * mean_x;
 
         // Build the design through the production helper, then force a huge λ.
-        let dim = MAX_BASIS_DIM;
+        let dim = DEFAULT_BASIS_DIM;
         let basis = SplineBasis::new(0.0, 7.25, dim);
         let pairs: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
         let rows: Vec<(usize, [f64; SPAN])> = xs.iter().map(|&x| basis.row(x)).collect();
@@ -554,7 +650,7 @@ mod tests {
     fn smaller_lambda_tracks_the_data_more_closely() {
         let xs: Vec<f64> = (0..40).map(|i| i as f64 * 0.2).collect();
         let ys: Vec<f64> = xs.iter().map(|x| (x * 1.1).sin() * 3.0).collect();
-        let dim = MAX_BASIS_DIM;
+        let dim = DEFAULT_BASIS_DIM;
         let basis = SplineBasis::new(0.0, 7.8, dim);
         let rows: Vec<(usize, [f64; SPAN])> = xs.iter().map(|&x| basis.row(x)).collect();
         let pairs: Vec<(f64, f64)> = xs.iter().copied().zip(ys.iter().copied()).collect();
@@ -586,14 +682,14 @@ mod tests {
     fn gcv_selects_effective_df_between_a_line_and_an_interpolation() {
         let xs: Vec<f64> = (0..60).map(|i| i as f64 * 0.15).collect();
         let ys: Vec<f64> = xs.iter().map(|x| (x * 1.2).sin() * 5.0).collect();
-        let fit = fit(&xs, &ys).expect("curved data must fit");
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("curved data must fit");
         let edf = xs.len() as f64 - fit.residual_dof();
         assert!(
             edf > 2.5,
             "GCV should spend more than a straight line's 2 df on curved data; edf = {edf}"
         );
         assert!(
-            edf <= MAX_BASIS_DIM as f64 + 1e-9,
+            edf <= DEFAULT_BASIS_DIM as f64 + 1e-9,
             "edf {edf} cannot exceed the basis dimension"
         );
     }
@@ -606,8 +702,8 @@ mod tests {
         let xs: Vec<f64> = (0..60).map(|i| i as f64 * 0.15).collect();
         let straight: Vec<f64> = xs.iter().map(|x| 2.0 + 0.5 * x).collect();
         let wiggly: Vec<f64> = xs.iter().map(|x| (x * 2.2).sin() * 5.0).collect();
-        let straight_fit = fit(&xs, &straight).expect("linear fit");
-        let wiggly_fit = fit(&xs, &wiggly).expect("wiggly fit");
+        let straight_fit = fit(&xs, &straight, DEFAULT_BASIS_DIM).expect("linear fit");
+        let wiggly_fit = fit(&xs, &wiggly, DEFAULT_BASIS_DIM).expect("wiggly fit");
         let straight_edf = xs.len() as f64 - straight_fit.residual_dof();
         let wiggly_edf = xs.len() as f64 - wiggly_fit.residual_dof();
         assert!(
@@ -620,21 +716,21 @@ mod tests {
     fn fewer_than_four_distinct_x_returns_none() {
         let xs = vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0];
         let ys = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        assert!(fit(&xs, &ys).is_none(), "3 distinct x cannot support a cubic basis");
+        assert!(fit(&xs, &ys, DEFAULT_BASIS_DIM).is_none(), "3 distinct x cannot support a cubic basis");
     }
 
     #[test]
     fn constant_x_returns_none() {
         let xs = vec![5.0; 10];
         let ys: Vec<f64> = (0..10).map(|i| i as f64).collect();
-        assert!(fit(&xs, &ys).is_none());
+        assert!(fit(&xs, &ys, DEFAULT_BASIS_DIM).is_none());
     }
 
     #[test]
     fn too_few_points_returns_none() {
         let xs = vec![0.0, 1.0, 2.0];
         let ys = vec![0.0, 1.0, 4.0];
-        assert!(fit(&xs, &ys).is_none());
+        assert!(fit(&xs, &ys, DEFAULT_BASIS_DIM).is_none());
     }
 
     #[test]
@@ -643,7 +739,7 @@ mod tests {
         let mut ys: Vec<f64> = xs.iter().map(|x| x * 2.0).collect();
         xs.push(f64::INFINITY);
         ys.push(1.0);
-        let fit = fit(&xs, &ys).expect("the finite majority must still fit");
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("the finite majority must still fit");
         assert!(fit.predict(10.0).is_finite(), "an infinite x must not poison the fit");
         assert!((fit.predict(10.0) - 20.0).abs() < 1e-8);
     }
@@ -654,7 +750,7 @@ mod tests {
     fn evaluation_outside_the_data_range_holds_the_boundary_value() {
         let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let ys: Vec<f64> = xs.iter().map(|x| 1.0 + 3.0 * x).collect();
-        let fit = fit(&xs, &ys).expect("fit");
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("fit");
         let at_low = fit.predict(0.0);
         let at_high = fit.predict(19.0);
         assert!((fit.predict(-50.0) - at_low).abs() < 1e-9, "left of the data must hold f(x_min)");
@@ -678,8 +774,8 @@ mod tests {
             .enumerate()
             .map(|(i, x)| 2.0 * x + if i % 2 == 0 { 2.5 } else { -2.5 })
             .collect();
-        let quiet_fit = fit(&xs, &quiet).expect("quiet fit");
-        let noisy_fit = fit(&xs, &noisy).expect("noisy fit");
+        let quiet_fit = fit(&xs, &quiet, DEFAULT_BASIS_DIM).expect("quiet fit");
+        let noisy_fit = fit(&xs, &noisy, DEFAULT_BASIS_DIM).expect("noisy fit");
         let x = 5.0;
         assert!(
             noisy_fit.std_error(x) > quiet_fit.std_error(x) * 5.0,
@@ -696,8 +792,8 @@ mod tests {
     fn fit_is_byte_deterministic_across_runs() {
         let xs: Vec<f64> = (0..50).map(|i| i as f64 * 0.17).collect();
         let ys: Vec<f64> = xs.iter().map(|x| (x * 1.7).sin() * 3.0 + x * 0.4).collect();
-        let a = fit(&xs, &ys).expect("fit a");
-        let b = fit(&xs, &ys).expect("fit b");
+        let a = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("fit a");
+        let b = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("fit b");
         assert_eq!(a.residual_dof().to_bits(), b.residual_dof().to_bits());
         for i in 0..=100 {
             let x = 8.33 * i as f64 / 100.0;
@@ -716,7 +812,7 @@ mod tests {
     fn fit_tracks_a_multi_turn_curve() {
         let xs: Vec<f64> = (0..80).map(|i| i as f64 * 0.1).collect();
         let ys: Vec<f64> = xs.iter().map(|x| (x * 1.5).sin() * 4.0).collect();
-        let fit = fit(&xs, &ys).expect("fit");
+        let fit = fit(&xs, &ys, DEFAULT_BASIS_DIM).expect("fit");
         let max_error = xs
             .iter()
             .zip(ys.iter())

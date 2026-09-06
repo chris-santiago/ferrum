@@ -26,11 +26,11 @@ from typing import Any, Optional, Sequence
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum.color import palette as _named_palette_colors
 from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
-    registry_output_columns,
     resolve_color_groupby,
 )
 from ferrum.marks._mark_kwargs import (
@@ -49,6 +49,35 @@ _MISSING = object()
 # and the ``register_layer_names("boxen", ...)`` call that declares their names,
 # so the two cannot drift apart.
 _BOXEN_K_MAX = 6
+
+#: The ``name=`` ``desugar_boxen`` gives its ``LetterValue`` transform.
+#: ``letter_value`` prefixes every secondary batch key with it
+#: (``"lv_depth_3"``, ``"lv_outliers"``), so this constant is what turns a
+#: registry-declared key into the wire name a layer's ``data_source`` uses.
+_LV_TRANSFORM_NAME = "lv"
+
+#: ``letter_value``'s declared secondary key for the outlier rows.
+_LV_OUTLIERS_KEY = "outliers"
+
+#: ``letter_value``'s declared secondary key for the innermost depth band.
+#: Spelled as a literal (rather than ``_lv_depth_key(1)``) because it is the
+#: key ``desugar_boxen`` hands ``registry_secondary_columns``, and the static
+#: sweep in ``tests/test_registry_output_column_consumers.py`` reads that
+#: argument from the source. ``tests/test_boxen_secondary_outputs.py`` pins it
+#: equal to ``_lv_depth_key(1)``.
+_LV_DEPTH_1_KEY = "depth_1"
+
+
+def _lv_depth_key(k: int) -> str:
+    """``letter_value``'s declared secondary key for depth band *k*.
+
+    Mirrors ``letter_value::depth_key`` on the Rust side. Every ``k`` this
+    mark builds a layer for is pinned against the registry's declared keys by
+    ``tests/test_boxen_secondary_outputs.py``, so a Rust-side change to the
+    key shape fails there rather than yielding a layer silently bound to a
+    batch nothing publishes.
+    """
+    return f"depth_{k}"
 
 
 def _resolve_deprecated_extent(
@@ -834,20 +863,14 @@ def desugar_boxen(
     scales resolve naturally (LetterValue copies the groupby values verbatim
     into ``group``, and quantile outputs lie within the original value range).
 
-    Deliberately NOT converted to ``registry_output_columns`` (spec §4.6 /
-    M6a, unlike ``desugar_boxplot``/``desugar_errorbar``/etc.): these four
-    literals read ``lv_depth_K``/``lv_outliers``, the SECONDARY named
-    outputs documented above, not ``transform_registry("letter_value")``'s
-    *primary* declared schema. That primary schema happens to also list
-    ``"group"``/``"lower"``/``"upper"``, so validating against it here would
-    pass today and stay silently green if the secondary batch's own columns
-    were ever renamed independently of the primary schema — a lookup against
-    the wrong schema is worse than no lookup, since it would suppress the
-    exact drift this pattern exists to catch. These four are recorded as
-    dispositioned column references in
-    ``tests/test_registry_output_column_consumers.py``'s ``_DISPOSITIONED``,
-    which carries the same reasoning per site and fails if the code that
-    needed the disposition ever goes away.
+    Those two schemas are read through ``registry_secondary_columns``, not
+    ``registry_output_columns`` (spec §4.6 / M6a): they are ``letter_value``'s
+    SECONDARY batches, and its *primary* schema happens to also list
+    ``"group"``/``"lower"``/``"upper"``, so checking them against the primary
+    would pass today and stay silently green if a secondary batch's own
+    columns were renamed independently — a lookup against the wrong schema is
+    worse than no lookup. The registry declares the secondary batches since
+    2026-09-06, so the right schema is now available to check against.
 
     ``palette`` colors the depth bands directly, at opacity 1.0, replacing
     the opacity ramp. The mapping anchors on the **base band** (spec §4.4,
@@ -908,10 +931,27 @@ def desugar_boxen(
     # to the renamed "group" encoding in the layers.
     if boxen_agg_sort is not None:
         cat_sort = None
+
+    # `LetterValue`'s SECONDARY batches (spec §4.6 / M6a), declared in the
+    # registry since 2026-09-06 and read through the secondary lookup rather
+    # than the primary one -- see this function's docstring for why the
+    # primary schema is the wrong thing to check these against. Every
+    # `depth_{k}` batch carries the same schema, so one lookup covers all
+    # `_BOXEN_K_MAX` band layers; that the registry declares a batch for each
+    # k this mark builds is pinned by
+    # `tests/test_boxen_secondary_outputs.py`.
+    depth_cols = registry_secondary_columns(
+        "letter_value", _LV_DEPTH_1_KEY, ["group", "lower", "upper"]
+    )
+    outlier_cols = registry_secondary_columns("letter_value", _LV_OUTLIERS_KEY, ["group", "value"])
+
     # The LetterValue transform renames the groupby column to "group" in its
     # output, so sort must be applied to the "group" encoding in the layers.
-    group_enc_x = X("group", sort=cat_sort) if cat_sort is not None else "group"
-    group_enc_y = Y("group", sort=cat_sort) if cat_sort is not None else "group"
+    # Both secondary schemas declare it -- the lookups above check both, and
+    # the band layers and the outlier layer must agree on the name.
+    group_col = depth_cols["group"]
+    group_enc_x = X(group_col, sort=cat_sort) if cat_sort is not None else group_col
+    group_enc_y = Y(group_col, sort=cat_sort) if cat_sort is not None else group_col
 
     transforms = [
         LetterValue(
@@ -920,7 +960,7 @@ def desugar_boxen(
             k_depth=k_depth,
             k_proportion=k_proportion,
             outlier_threshold=outlier_threshold,
-            name="lv",
+            name=_LV_TRANSFORM_NAME,
             sort=boxen_agg_sort,
         ),
     ]
@@ -951,9 +991,9 @@ def desugar_boxen(
             opacity = 0.85 - (0.55 * (k - 1) / max(_BOXEN_K_MAX - 1, 1))
             depth_kwargs = {"opacity": opacity}
         enc = (
-            {"x": "lower", "x2": "upper", "y": group_enc_y}
+            {"x": depth_cols["lower"], "x2": depth_cols["upper"], "y": group_enc_y}
             if horizontal
-            else {"x": group_enc_x, "y": "lower", "y2": "upper"}
+            else {"x": group_enc_x, "y": depth_cols["lower"], "y2": depth_cols["upper"]}
         )
         layers.append(
             _Layer(
@@ -961,7 +1001,7 @@ def desugar_boxen(
                 mark="rect",
                 encoding=enc,
                 mark_kwargs=depth_kwargs,
-                data_source=f"lv_depth_{k}",
+                data_source=f"{_LV_TRANSFORM_NAME}_{_lv_depth_key(k)}",
             )
         )
 
@@ -971,23 +1011,26 @@ def desugar_boxen(
             name="median",
             mark="rule",
             encoding=(
-                {"x": "lower", "y": group_enc_y} if horizontal else {"x": group_enc_x, "y": "lower"}
+                {"x": depth_cols["lower"], "y": group_enc_y}
+                if horizontal
+                else {"x": group_enc_x, "y": depth_cols["lower"]}
             ),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
-            data_source="lv_depth_1",
+            data_source=f"{_LV_TRANSFORM_NAME}_{_lv_depth_key(1)}",
         )
     )
 
-    # Outliers: point layer reading from the dedicated outliers output. Schema:
-    # [group, value, is_outlier].
+    # Outliers: point layer reading from the dedicated outliers output.
     layers.append(
         _Layer(
             name="outlier",
             mark="point",
             encoding=(
-                {"x": "value", "y": group_enc_y} if horizontal else {"x": group_enc_x, "y": "value"}
+                {"x": outlier_cols["value"], "y": group_enc_y}
+                if horizontal
+                else {"x": group_enc_x, "y": outlier_cols["value"]}
             ),
-            data_source="lv_outliers",
+            data_source=f"{_LV_TRANSFORM_NAME}_{_LV_OUTLIERS_KEY}",
         )
     )
 

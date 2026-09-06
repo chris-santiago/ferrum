@@ -264,7 +264,7 @@ def _resolve_layer_bins(layers: list) -> tuple[list, list]:
         # hardcoded: this layer's data_source IS the Bin built above, so a
         # Rust-side rename raises here instead of leaving the layer pointed at
         # a column its own transform no longer emits.
-        from ferrum.marks._desugar_helpers import registry_output_columns
+        from ferrum._registry import registry_output_columns
 
         bin_start = registry_output_columns("bin", ["bin_start"])["bin_start"]
         for axis, ch in layer.encoding.items():

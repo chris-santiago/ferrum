@@ -34,8 +34,9 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
+from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import nominal_color_channel, registry_output_columns
+from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.plots._helpers import (
     _field_name,
     _finalize_chart,
@@ -1095,14 +1096,18 @@ def _clustermap_build(
     )
 
     # Linkage transforms (rows + columns) with explicit names so we can route
-    # their `segments` named outputs to the dendrogram layers.
+    # their `segments` named outputs to the dendrogram layers. `linkage`
+    # prefixes every secondary batch key with the spec's own `name=`, so
+    # `{name}_{key}` is the wire name each consumer must ask for.
+    row_link_name = "row_link"
+    col_link_name = "col_link"
     row_link = Linkage(
         method=method,
         metric=metric,
         axis="rows",
         z_score=z_score,
         standard_scale=standard_scale,
-        name="row_link",
+        name=row_link_name,
     )
     col_link = Linkage(
         method=method,
@@ -1110,8 +1115,20 @@ def _clustermap_build(
         axis="columns",
         z_score=z_score,
         standard_scale=standard_scale,
-        name="col_link",
+        name=col_link_name,
     )
+
+    # The dendrogram panels and the row/column `Reorder`s all read `linkage`'s
+    # SECONDARY batches (spec §4.6 / M6a), whose schemas the registry declares
+    # since 2026-09-06 -- `segments` is [x, y, x2, y2] and `order` is
+    # [original_idx, new_idx]. `linkage`'s PRIMARY schema is
+    # node_id/left/right/distance/n_obs, so these must be checked against the
+    # secondary lookup: validating them against the primary would pin a schema
+    # this code path never reads.
+    _segments_key = "segments"
+    _order_key = "order"
+    _segment_cols = registry_secondary_columns("linkage", _segments_key, ["x", "y", "x2", "y2"])
+    _order_cols = registry_secondary_columns("linkage", _order_key, ["original_idx"])
 
     # Center heatmap: reorder rows + columns then unpivot.
     unpivot = Unpivot(
@@ -1148,7 +1165,11 @@ def _clustermap_build(
         .transform(
             row_link,
             col_link,
-            Reorder(by="original_idx", from_="row_link_order", drop_index=False),
+            Reorder(
+                by=_order_cols["original_idx"],
+                from_=f"{row_link_name}_{_order_key}",
+                drop_index=False,
+            ),
             unpivot,
         )
         .mark_rect()
@@ -1166,8 +1187,13 @@ def _clustermap_build(
     col_dendro_layer = _Layer(
         name="col_dendrogram",
         mark="segment",
-        encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
-        data_source="col_link_segments",
+        encoding={
+            "x": _segment_cols["x"],
+            "y": _segment_cols["y"],
+            "x2": _segment_cols["x2"],
+            "y2": _segment_cols["y2"],
+        },
+        data_source=f"{col_link_name}_{_segments_key}",
     )
     col_dendro = Chart(data).transform(col_link)
     col_dendro._mark = None
@@ -1180,8 +1206,13 @@ def _clustermap_build(
     row_dendro_layer = _Layer(
         name="row_dendrogram",
         mark="segment",
-        encoding={"x": "x", "y": "y", "x2": "x2", "y2": "y2"},
-        data_source="row_link_segments",
+        encoding={
+            "x": _segment_cols["x"],
+            "y": _segment_cols["y"],
+            "x2": _segment_cols["x2"],
+            "y2": _segment_cols["y2"],
+        },
+        data_source=f"{row_link_name}_{_segments_key}",
     )
     row_dendro = Chart(data).transform(row_link)
     row_dendro._mark = None

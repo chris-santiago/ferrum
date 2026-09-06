@@ -10,9 +10,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::group_key::{
-    group_partition_multi, groupby_field_nullable, materialize_groupby_col, KeyValue,
-};
+use crate::transform::group_key::grouped_two_column_fit;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -31,6 +29,14 @@ pub(crate) struct RegressionDataSpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
+
+/// The single source of truth for `RegressionData`'s free-string `method`
+/// vocabulary. Read by [`apply_one_group`]'s enforcement match, its error
+/// message, and `registry::entry_for_kind("regression_data")`'s `methods`
+/// list — R1 design finding 1, mirroring the `smooth::METHODS` precedent.
+/// `"linear"` and `"poly"` share a fit (a degree-`order` polynomial; `order`
+/// defaults to 1), so both name the same arm below.
+pub(crate) const METHODS: &[&str] = &["linear", "poly", "exp", "log", "pow"];
 
 fn default_method() -> String {
     "linear".into()
@@ -76,7 +82,8 @@ fn apply_one_group(
         "pow" => fit_power(&xs, &ys)?,
         other => {
             return Err(PyValueError::new_err(format!(
-                "data_regression: unknown method '{other}'"
+                "data_regression: unknown method '{other}'; expected {}",
+                METHODS.join("|"),
             )));
         }
     };
@@ -108,11 +115,11 @@ fn apply_one_group(
         .map_err(|e| PyValueError::new_err(format!("data_regression: {e}")))
 }
 
-/// Partition `batch` by `group_cols`, fit each partition independently via
-/// [`apply_one_group`], then stack the per-group grids into one batch with
-/// the group columns appended at their original dtype (XFORM-03) as
-/// additional fields — the `smooth.rs:186-275` multi-column grouped template
-/// (spec §4.3 / decision-doc M3a).
+/// Fit each partition independently via [`apply_one_group`] and stack the
+/// per-group grids through the shared [`grouped_two_column_fit`] template
+/// (spec §4.3 / decision-doc M3a), which owns the partitioning, the column
+/// stacking, and the group-column re-materialization for both this transform
+/// and `loess_data`.
 ///
 /// Each group's output grid spans that group's OWN x range (`x_min`/`x_max`
 /// derived from its own rows inside `apply_one_group`), not a range shared
@@ -134,50 +141,9 @@ fn apply_grouped(
     batch: &RecordBatch,
     group_cols: &[String],
 ) -> PyResult<RecordBatch> {
-    let (group_order, group_idx_map, gtypes) =
-        group_partition_multi(batch, group_cols, "data_regression")?;
-
-    let mut all_x: Vec<f64> = Vec::new();
-    let mut all_y: Vec<f64> = Vec::new();
-    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
-
-    for g in &group_order {
-        let ixs = group_idx_map.get(g).ok_or_else(|| {
-            PyValueError::new_err(format!("data_regression: missing group key {g:?} in index map"))
-        })?;
-        let out = apply_one_group(spec, batch, Some(ixs))?;
-        let out_x = out.column(0).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-            PyValueError::new_err("data_regression: expected Float64Array in grouped output")
-        })?;
-        let out_y = out.column(1).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
-            PyValueError::new_err("data_regression: expected Float64Array in grouped output")
-        })?;
-        for i in 0..out.num_rows() {
-            all_x.push(out_x.value(i));
-            all_y.push(out_y.value(i));
-            group_keys_out.push(g.clone());
-        }
-    }
-
-    let mut out_fields = vec![
-        Field::new(&spec.as_.0, DataType::Float64, false),
-        Field::new(&spec.as_.1, DataType::Float64, false),
-    ];
-    let mut out_cols: Vec<ArrayRef> = vec![
-        Arc::new(Float64Array::from(all_x)),
-        Arc::new(Float64Array::from(all_y)),
-    ];
-
-    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
-        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
-        let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
-            .map_err(PyValueError::new_err)?;
-        out_cols.push(group_col_arr);
-    }
-
-    let out_schema = Arc::new(Schema::new(out_fields));
-    RecordBatch::try_new(out_schema, out_cols)
-        .map_err(|e| PyValueError::new_err(format!("data_regression: {e}")))
+    grouped_two_column_fit(batch, group_cols, "data_regression", &spec.as_, |ixs| {
+        apply_one_group(spec, batch, Some(ixs))
+    })
 }
 
 /// Below-fit-threshold (`xs.len() < 2`) output: mirrors

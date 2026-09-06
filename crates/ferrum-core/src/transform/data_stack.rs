@@ -39,6 +39,12 @@ pub(crate) struct DataStackSpec {
 fn default_stack_as() -> (String, String) {
     ("y0".into(), "y1".into())
 }
+/// The single source of truth for `DataStack`'s free-string `offset`
+/// vocabulary. Read by [`apply`]'s enforcement match, its error message, and
+/// `registry::entry_for_kind("data_stack")`'s `methods` list — R1 design
+/// finding 1, mirroring the `smooth::METHODS` precedent.
+pub(crate) const OFFSETS: &[&str] = &["zero", "normalize", "center"];
+
 fn default_offset() -> String {
     "zero".into()
 }
@@ -146,8 +152,9 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
             // with a bad offset string fails loudly rather than silently using zero.
             _ => {
                 return Err(PyValueError::new_err(format!(
-                    "data_stack: unknown offset {:?}; expected one of \"zero\", \"normalize\", \"center\"",
-                    spec.offset
+                    "data_stack: unknown offset {:?}; expected one of {}",
+                    spec.offset,
+                    OFFSETS.iter().map(|o| format!("{o:?}")).collect::<Vec<_>>().join(", "),
                 )));
             }
         }

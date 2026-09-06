@@ -355,6 +355,75 @@ pub(crate) fn group_partition_multi(
     Ok((group_order, group_idx_map, group_dtypes))
 }
 
+/// Partition `batch` by `group_cols`, run `fit_group` on each partition's row
+/// indices, and stack the resulting two-column Float64 grids into one batch
+/// with the group columns appended at their original dtype (XFORM-03).
+///
+/// This is the grouped-execution template `RegressionData` and `LoessData`
+/// share (R1 design finding 2: the two `apply_grouped` bodies were 49 lines
+/// differing in six tokens — the spec type and five error-message prefixes).
+/// `label` supplies the transform's error voice; `as_` names the two output
+/// columns; `fit_group` is the per-group fit, which must return a batch whose
+/// first two columns are Float64 (each transform's own `apply_one_group`,
+/// including its below-threshold NaN grid).
+///
+/// A group's own degenerate output still contributes its rows and its key, so
+/// the group stays in the output schema, the color-scale domain, and the
+/// legend rather than silently vanishing — see each caller's `all_nan_output`
+/// doc for why that is the right disposition.
+pub(crate) fn grouped_two_column_fit(
+    batch: &RecordBatch,
+    group_cols: &[String],
+    label: &str,
+    as_: &(String, String),
+    fit_group: impl Fn(&[usize]) -> PyResult<RecordBatch>,
+) -> PyResult<RecordBatch> {
+    use arrow::datatypes::{Field, Schema};
+
+    let (group_order, group_idx_map, gtypes) = group_partition_multi(batch, group_cols, label)?;
+
+    let mut all_x: Vec<f64> = Vec::new();
+    let mut all_y: Vec<f64> = Vec::new();
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
+
+    for g in &group_order {
+        let ixs = group_idx_map.get(g).ok_or_else(|| {
+            PyValueError::new_err(format!("{label}: missing group key {g:?} in index map"))
+        })?;
+        let out = fit_group(ixs)?;
+        let out_x = out.column(0).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+            PyValueError::new_err(format!("{label}: expected Float64Array in grouped output"))
+        })?;
+        let out_y = out.column(1).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+            PyValueError::new_err(format!("{label}: expected Float64Array in grouped output"))
+        })?;
+        for i in 0..out.num_rows() {
+            all_x.push(out_x.value(i));
+            all_y.push(out_y.value(i));
+            group_keys_out.push(g.clone());
+        }
+    }
+
+    let mut out_fields = vec![
+        Field::new(&as_.0, DataType::Float64, false),
+        Field::new(&as_.1, DataType::Float64, false),
+    ];
+    let mut out_cols: Vec<ArrayRef> = vec![
+        Arc::new(Float64Array::from(all_x)),
+        Arc::new(Float64Array::from(all_y)),
+    ];
+
+    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
+        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
+        let group_col_arr =
+            materialize_groupby_col(&group_keys_out, gi, dtype).map_err(PyValueError::new_err)?;
+        out_cols.push(group_col_arr);
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_cols)
+        .map_err(|e| PyValueError::new_err(format!("{label}: {e}")))
+}
+
 /// Serde deserializer that accepts `null`, a bare JSON string, or a JSON array
 /// of strings, normalising all three to `Vec<String>`:
 ///   - `null`      → `[]`  (ungrouped)

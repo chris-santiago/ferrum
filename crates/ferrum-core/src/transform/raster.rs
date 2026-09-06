@@ -25,8 +25,26 @@ use std::sync::Arc;
 use crate::transform::context::TransformContext;
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
+/// The single source of truth for `Raster`'s free-string `aggregate`
+/// vocabulary. Read by BOTH enforcement sites (`apply`'s validation and
+/// [`PyRaster::new`]'s), both of their error messages, and
+/// `registry::entry_for_kind("raster")`'s `methods` list — R1 design finding
+/// 1 collapsed three separate spellings of these five names (a doc comment on
+/// `RasterSpec.aggregate`, the `apply` check, the constructor check) onto this
+/// one const, mirroring the `smooth::METHODS` precedent.
+pub(crate) const AGGREGATES: &[&str] = &["count", "density", "mean", "sum", "any"];
+
+/// Aggregates that need a `field` to aggregate; the rest count rows.
+const AGGREGATES_NEEDING_FIELD: &[&str] = &["mean", "sum"];
+
 fn default_aggregate() -> String {
     "count".into()
+}
+
+/// The `'a' | 'b' | ...` rendering of [`AGGREGATES`] used by both refusal
+/// messages, so neither can drift from the vocabulary it enforces.
+fn aggregates_expected() -> String {
+    AGGREGATES.iter().map(|a| format!("'{a}'")).collect::<Vec<_>>().join(" | ")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -52,7 +70,8 @@ pub(crate) struct RasterSpec {
     pub x: String,
     pub y: String,
     #[serde(default = "default_aggregate")]
-    pub aggregate: String, // "count" | "density" | "mean" | "sum" | "any"
+    /// One of [`AGGREGATES`], which both enforcement sites validate against.
+    pub aggregate: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
     #[serde(default)]
@@ -134,13 +153,14 @@ pub(crate) fn apply_with_context(
 
     // 2. Validate aggregate.
     let agg = spec.aggregate.as_str();
-    if !matches!(agg, "count" | "density" | "mean" | "sum" | "any") {
+    if !AGGREGATES.contains(&agg) {
         return Err(PyValueError::new_err(format!(
-            "stat_raster: unknown aggregate '{}'; expected 'count' | 'density' | 'mean' | 'sum' | 'any'",
-            agg
+            "stat_raster: unknown aggregate '{}'; expected {}",
+            agg,
+            aggregates_expected(),
         )));
     }
-    let needs_field = matches!(agg, "mean" | "sum");
+    let needs_field = AGGREGATES_NEEDING_FIELD.contains(&agg);
     if needs_field && spec.field.is_none() {
         return Err(PyValueError::new_err(format!(
             "stat_raster: aggregate='{}' requires `field`",
@@ -515,12 +535,13 @@ impl PyRaster {
         if y.is_empty() {
             return Err(PyValueError::new_err("Raster: y must be non-empty"));
         }
-        if !matches!(aggregate, "count" | "density" | "mean" | "sum" | "any") {
+        if !AGGREGATES.contains(&aggregate) {
             return Err(PyValueError::new_err(format!(
-                "Raster: unknown aggregate '{aggregate}'; expected 'count' | 'density' | 'mean' | 'sum' | 'any'"
+                "Raster: unknown aggregate '{aggregate}'; expected {}",
+                aggregates_expected(),
             )));
         }
-        if matches!(aggregate, "mean" | "sum") && field.is_none() {
+        if AGGREGATES_NEEDING_FIELD.contains(&aggregate) && field.is_none() {
             return Err(PyValueError::new_err(format!(
                 "Raster: aggregate='{aggregate}' requires `field`"
             )));

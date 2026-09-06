@@ -242,9 +242,24 @@ class StatisticalMarksMixin:
             - ``"loess"`` -- the local-fit degree, ``1`` or ``2``.
             - ``"log"``/``"sqrt"``/``"glm"``/``"gam"`` -- no degree concept;
               passing any value raises. (``"gam"``'s spline degree is fixed
-              at 3; its smoothness comes from the GCV-chosen penalty.)
+              at 3; its smoothness comes from the GCV-chosen penalty --
+              ``k`` is its knob, see below.)
+        k : int, optional
+            ``method="gam"``'s spline basis dimension: the number of
+            B-spline basis functions the penalized fit may spend, i.e. the
+            ceiling on how wiggly the curve can get before the GCV-chosen
+            penalty pulls it back. Default is ``10``; the effective value is
+            ``clamp(k, 4, distinct_x)``, so a ``k`` above the number of
+            distinct x values is capped there. ``k < 4`` raises (no smaller
+            cubic basis exists), and so does ``k`` on any method other than
+            ``"gam"`` -- raise it when the default under-smooths a signal
+            with many turning points.
         bandwidth : float, optional
-            LOESS bandwidth fraction in ``(0, 1]``.  Default is ``0.75``.
+            LOESS span (the fraction of points in each local neighbourhood),
+            in ``(0, 1]``.  Default is ``0.75``.  Applies to
+            ``method="loess"`` only: it is the LOESS knob and no other
+            method reads it, so an explicit value elsewhere raises rather
+            than silently doing nothing.
         n : int, optional
             Number of evaluation points along the x range.  Default is ``200``.
         ci : float or None, optional

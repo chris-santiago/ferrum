@@ -82,6 +82,12 @@ pub(crate) struct ImputeSpec {
     pub name: Option<String>,
 }
 
+/// The single source of truth for `Impute`'s free-string `method`
+/// vocabulary. Read by [`validate_method`] (the enforcement site), its error
+/// message, and `registry::entry_for_kind("impute")`'s `methods` list — R1
+/// design finding 1, mirroring the `smooth::METHODS` precedent.
+pub(crate) const METHODS: &[&str] = &["value", "mean", "median", "min", "max"];
+
 fn default_method() -> String {
     "value".into()
 }
@@ -263,12 +269,13 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
 }
 
 fn validate_method(method: &str) -> PyResult<()> {
-    match method {
-        "value" | "mean" | "median" | "min" | "max" => Ok(()),
-        other => Err(PyValueError::new_err(format!(
-            "data_impute: unknown method '{other}'; expected value|mean|median|min|max"
-        ))),
+    if METHODS.contains(&method) {
+        return Ok(());
     }
+    Err(PyValueError::new_err(format!(
+        "data_impute: unknown method '{method}'; expected {}",
+        METHODS.join("|"),
+    )))
 }
 
 /// The fill value for one method, restricted to `rows` when given (a group's

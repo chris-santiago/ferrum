@@ -4,6 +4,7 @@
 
 pub(crate) mod core;
 pub(crate) mod registry;
+pub(crate) mod concat;
 pub(crate) mod group_key;
 pub(crate) mod bin;
 pub(crate) mod bin_2d;

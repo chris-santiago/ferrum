@@ -524,8 +524,9 @@ class Smooth:
         *,
         method: str = "loess",
         ci: Optional[float] = 0.95,
-        bandwidth: float = 0.75,
+        bandwidth: Optional[float] = None,
         degree: Optional[int] = None,
+        k: Optional[int] = None,
         n: int = 200,
         seed: int = 0,
         x_bins: Optional[int] = None,
@@ -1127,14 +1128,22 @@ def prf_at_thresholds(
 class _TransformRegistryEntry(TypedDict):
     methods: list[str]
     outputs: list[tuple[str, str]]
+    secondary_outputs: list[tuple[str, list[tuple[str, str]]]]
     params: list[str]
 
 def transform_registry(kind: str) -> _TransformRegistryEntry:
     """
     ``ferrum._core.transform_registry(kind)`` — spec §4.6, batch-D task 1.
 
-    Returns ``{"methods": [...], "outputs": [(name, dtype), ...], "params":
-    [...]}`` for a known transform kind (module name — see the module doc);
-    raises ``ValueError`` listing every known kind otherwise.
+    Returns ``{"methods": [...], "outputs": [(name, dtype), ...],
+    "secondary_outputs": [(key, [(name, dtype), ...]), ...], "params": [...]}``
+    for a known transform kind (module name — see the module doc); raises
+    ``ValueError`` listing every known kind otherwise.
+
+    ``secondary_outputs`` (2026-09-06) declares the additional NAMED batches a
+    kind publishes alongside its primary rows — ``qq``'s reference line,
+    ``letter_value``'s outliers and per-depth bands, ``linkage``'s dendrogram
+    order/coords/segments. Keys are the ones used under default construction
+    (no ``name=``); a spec ``name`` prefixes each as ``"{name}_{key}"``.
     """
     ...

@@ -376,13 +376,7 @@ pub(crate) fn apply(spec: &LinkageSpec, batch: &RecordBatch) -> PyResult<RecordB
         n_obss.push(step.size as i64);
     }
 
-    let linkage_schema = Arc::new(Schema::new(vec![
-        Field::new("node_id", DataType::Int64, false),
-        Field::new("left", DataType::Int64, false),
-        Field::new("right", DataType::Int64, false),
-        Field::new("distance", DataType::Float64, false),
-        Field::new("n_obs", DataType::Int64, false),
-    ]));
+    let linkage_schema = schema_from(LINKAGE_COLUMNS);
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(node_ids)),
         Arc::new(Int64Array::from(lefts)),
@@ -392,6 +386,50 @@ pub(crate) fn apply(spec: &LinkageSpec, batch: &RecordBatch) -> PyResult<RecordB
     ];
     RecordBatch::try_new(linkage_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("linkage: {e}")))
+}
+
+/// Keys the four secondary batches are published under, under default
+/// construction; a spec `name` prefixes each as `"{name}_{key}"`. The first
+/// re-publishes the primary linkage batch itself so a named transform has a
+/// stable key alongside the three derived outputs.
+pub(crate) const LINKAGE_KEY: &str = "linkage";
+pub(crate) const ORDER_KEY: &str = "order";
+pub(crate) const COORDS_KEY: &str = "coords";
+pub(crate) const SEGMENTS_KEY: &str = "segments";
+
+/// Column schemas for this transform's batches — the single source of truth,
+/// read by [`apply`]'s and [`secondary_outputs`]'s schema builders and by
+/// `registry::entry_for_kind("linkage")` (R1 design finding (d): the
+/// dendrogram column names were unchecked Python literals before).
+///
+/// [`LINKAGE_COLUMNS`] is the PRIMARY batch's schema, which the secondary
+/// output under [`LINKAGE_KEY`] re-publishes unchanged.
+pub(crate) const LINKAGE_COLUMNS: &[(&str, DataType)] = &[
+    ("node_id", DataType::Int64),
+    ("left", DataType::Int64),
+    ("right", DataType::Int64),
+    ("distance", DataType::Float64),
+    ("n_obs", DataType::Int64),
+];
+pub(crate) const ORDER_COLUMNS: &[(&str, DataType)] =
+    &[("original_idx", DataType::Int64), ("new_idx", DataType::Int64)];
+pub(crate) const COORDS_COLUMNS: &[(&str, DataType)] = &[
+    ("node_id", DataType::Int64),
+    ("x", DataType::Float64),
+    ("y", DataType::Float64),
+];
+pub(crate) const SEGMENTS_COLUMNS: &[(&str, DataType)] = &[
+    ("x", DataType::Float64),
+    ("y", DataType::Float64),
+    ("x2", DataType::Float64),
+    ("y2", DataType::Float64),
+];
+
+/// Build a non-nullable schema from one of the column tables above.
+fn schema_from(columns: &[(&str, DataType)]) -> Arc<Schema> {
+    Arc::new(Schema::new(
+        columns.iter().map(|(name, dt)| Field::new(*name, dt.clone(), false)).collect::<Vec<_>>(),
+    ))
 }
 
 /// Compute the three secondary named outputs (order, coords, segments).
@@ -447,10 +485,7 @@ pub(crate) fn secondary_outputs(
         orig_idxs.push(orig as i64);
         new_idxs.push(pos as i64);
     }
-    let order_schema = Arc::new(Schema::new(vec![
-        Field::new("original_idx", DataType::Int64, false),
-        Field::new("new_idx", DataType::Int64, false),
-    ]));
+    let order_schema = schema_from(ORDER_COLUMNS);
     let order_batch = RecordBatch::try_new(
         order_schema,
         vec![
@@ -493,11 +528,7 @@ pub(crate) fn secondary_outputs(
         coord_xs.push(node_x[node]);
         coord_ys.push(node_y[node]);
     }
-    let coords_schema = Arc::new(Schema::new(vec![
-        Field::new("node_id", DataType::Int64, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-    ]));
+    let coords_schema = schema_from(COORDS_COLUMNS);
     let coords_batch = RecordBatch::try_new(
         coords_schema,
         vec![
@@ -548,12 +579,7 @@ pub(crate) fn secondary_outputs(
         seg_y2.push(y_r);
     }
 
-    let segments_schema = Arc::new(Schema::new(vec![
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("x2", DataType::Float64, false),
-        Field::new("y2", DataType::Float64, false),
-    ]));
+    let segments_schema = schema_from(SEGMENTS_COLUMNS);
     let segments_batch = RecordBatch::try_new(
         segments_schema,
         vec![
@@ -568,16 +594,16 @@ pub(crate) fn secondary_outputs(
     // Build output keys based on the naming convention.
     let (key_linkage, key_order, key_coords, key_segments) = match &spec.name {
         Some(s) => (
-            format!("{s}_linkage"),
-            format!("{s}_order"),
-            format!("{s}_coords"),
-            format!("{s}_segments"),
+            format!("{s}_{LINKAGE_KEY}"),
+            format!("{s}_{ORDER_KEY}"),
+            format!("{s}_{COORDS_KEY}"),
+            format!("{s}_{SEGMENTS_KEY}"),
         ),
         None => (
-            "linkage".to_string(),
-            "order".to_string(),
-            "coords".to_string(),
-            "segments".to_string(),
+            LINKAGE_KEY.to_string(),
+            ORDER_KEY.to_string(),
+            COORDS_KEY.to_string(),
+            SEGMENTS_KEY.to_string(),
         ),
     };
 
@@ -596,6 +622,15 @@ pub(crate) fn secondary_outputs(
 use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
+
+/// The single source of truth for `Linkage`'s free-string `method`
+/// vocabulary — read by [`PyLinkage::new`]'s error message and by
+/// `registry::entry_for_kind("linkage")`'s `methods` list, mirroring the
+/// `smooth::METHODS` precedent (R1 design finding 1: the registry entry was a
+/// hand-copied literal and the enforcement site baked the same seven names
+/// into an error string).
+pub(crate) const METHODS: &[&str] =
+    &["single", "complete", "average", "weighted", "centroid", "median", "ward"];
 
 /// Hierarchical clustering linkage for clustermap row/column ordering.
 ///
@@ -668,7 +703,8 @@ impl PyLinkage {
             "ward" => LinkageMethod::Ward,
             _ => {
                 return Err(PyValueError::new_err(format!(
-                    "Linkage: unknown method '{method}'; expected single|complete|average|weighted|centroid|median|ward"
+                    "Linkage: unknown method '{method}'; expected {}",
+                    METHODS.join("|"),
                 )))
             }
         };

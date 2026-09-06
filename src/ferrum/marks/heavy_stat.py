@@ -20,10 +20,10 @@ from ferrum import (
 from ferrum._core import transform_registry
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import (
     nominal_color_channel,
-    registry_output_columns,
     resolve_color_groupby,
 )
 
@@ -497,6 +497,15 @@ register_layer_names(
 )
 
 
+#: ``QQ``'s secondary reference-line batch, as
+#: ``transform_registry("qq")["secondary_outputs"]`` declares it. ``qq``
+#: publishes this key unprefixed whatever its spec is named (``letter_value``
+#: and ``linkage`` prefix theirs with the spec's ``name=``), so the key is
+#: also the reference layer's ``data_source``. Validated against the registry
+#: by the ``registry_secondary_columns`` call in ``desugar_qq``.
+_QQ_LINE_KEY = "qq_line"
+
+
 def desugar_qq(
     field: str,
     *,
@@ -572,10 +581,7 @@ def desugar_qq(
 
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of either column raises here instead of silently
-    # reading a stale name. The secondary "qq_line" output columns below
-    # (qq_line_x_start etc.) are NOT part of this lookup -- they are not
-    # declared in transform_registry("qq")["outputs"] at all (the registry's
-    # documented convention excludes secondary named outputs).
+    # reading a stale name.
     _qq_cols = registry_output_columns("qq", ["theoretical", "sample"])
     layers = [
         _Layer(
@@ -589,17 +595,28 @@ def desugar_qq(
         )
     ]
     if line:
+        # The reference line rides QQ's SECONDARY named batch, declared in the
+        # registry since 2026-09-06 -- so its four columns check the same way
+        # the primary two above do. `qq` publishes this batch under the bare
+        # key whatever the spec is named (unlike `letter_value`/`linkage`,
+        # which prefix their spec's `name=`), so the validated key is also the
+        # layer's `data_source`.
+        _qq_line_cols = registry_secondary_columns(
+            "qq",
+            _QQ_LINE_KEY,
+            ["qq_line_x_start", "qq_line_y_start", "qq_line_x_end", "qq_line_y_end"],
+        )
         layers.append(
             _Layer(
                 name="reference",
                 mark="rule",
                 encoding={
-                    "x": "qq_line_x_start",
-                    "y": "qq_line_y_start",
-                    "x2": "qq_line_x_end",
-                    "y2": "qq_line_y_end",
+                    "x": _qq_line_cols["qq_line_x_start"],
+                    "y": _qq_line_cols["qq_line_y_start"],
+                    "x2": _qq_line_cols["qq_line_x_end"],
+                    "y2": _qq_line_cols["qq_line_y_end"],
                 },
-                data_source="qq_line",
+                data_source=_QQ_LINE_KEY,
             )
         )
     return MarkDesugarResult(transforms=transforms, layers=layers)

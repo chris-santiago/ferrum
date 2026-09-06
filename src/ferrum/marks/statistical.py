@@ -9,8 +9,9 @@ from ferrum import Bin, Kde, Smooth
 from ferrum._core import transform_registry
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import registry_output_columns
+from ferrum.marks._fit_layers import build_fit_layers
 
 _ORIENTATIONS = ("horizontal", "vertical")
 _MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
@@ -366,8 +367,9 @@ def desugar_smooth(
     *,
     method: str = "loess",
     ci: float | None = None,
-    bandwidth: float = 0.75,
+    bandwidth: float | None = None,
     degree: int | None = None,
+    k: int | None = None,
     n: int = 200,
     seed: int = 0,
     x_bins: Any = None,
@@ -416,8 +418,14 @@ def desugar_smooth(
     ci : float or None, default None
         Confidence interval level (e.g. ``0.95``).  ``None`` disables the
         CI band and returns a single-mark (line) result.
-    bandwidth : float, default 0.75
-        Smoothing bandwidth fraction (LOESS).
+    bandwidth : float or None, default None
+        LOESS span, the fraction of points in each local neighbourhood.
+        ``None`` (the default) forwards nothing, so ``Smooth``'s own default
+        (``0.75``) applies. Forwarded only when explicitly set, exactly as
+        ``degree`` is: ``bandwidth`` is the LOESS knob and no other method
+        reads it, so an explicit value on a non-loess method raises rather
+        than silently doing nothing (``method="gam"`` takes ``k=``,
+        ``"lm"``/``"linear"`` take ``degree=``).
     degree : int or None, default None
         Polynomial degree passed through to the ``Smooth`` transform.
         Acceptance depends on ``method``:
@@ -443,6 +451,19 @@ def desugar_smooth(
           B-spline whose degree is fixed at 3 and whose smoothness is set
           by a GCV-chosen penalty, so there is nothing a ``degree`` could
           mean for it.
+    k : int or None, default None
+        ``method="gam"``'s spline basis dimension -- the number of B-spline
+        basis functions the penalized fit may spend, i.e. the *ceiling* on
+        how wiggly the curve can get before the GCV-chosen penalty pulls it
+        back. ``None`` (the default) forwards nothing, so ``Smooth``'s own
+        default of ``10`` applies. The effective dimension is
+        ``clamp(k, 4, distinct_x)``: a ``k`` above the number of distinct x
+        values is capped there (no basis can outrun its data), and ``k < 4``
+        raises, since no smaller cubic basis exists. Raise it when the
+        default under-smooths a signal with many turning points. Raises for
+        any method other than ``"gam"`` -- the other methods have their own
+        knobs (``degree=`` for ``"lm"``/``"linear"``, ``bandwidth=`` for
+        ``"loess"``) and would otherwise ignore it silently.
     n : int, default 200
         Number of evaluation points in the output.
     seed : int, default 0
@@ -488,24 +509,31 @@ def desugar_smooth(
     validate_choice("mark_smooth", "method", method, transform_registry("smooth")["methods"])
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
     # Rust-side rename of any of these columns raises here instead of
-    # silently reading a stale name. `_metrics_y`/`_metrics_text` (below) are
-    # deliberately NOT part of this lookup: they come from Smooth's
-    # conditional `inject_metrics=True` output, which the registry does not
-    # declare as a fixed schema member (it exists only when show_metrics=True
-    # is threaded through), so there is no registry entry to validate against.
-    _smooth_cols = registry_output_columns("smooth", ["x", "y", "ci_lower", "ci_upper"])
+    # silently reading a stale name. Only the single-mark path below reads
+    # this lookup; the layered path gets its channels from
+    # `build_fit_layers`, which performs the same lookup for the whole
+    # fit family.
+    _smooth_cols = registry_output_columns("smooth", ["x", "y"])
 
     if ci is None and not show_metrics:
         # 8a-compatible single-line path: keep the single-mark result so the
         # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator/
-        # degree when explicitly set; otherwise omit so Rust's own
+        # degree/bandwidth/k when explicitly set; otherwise omit so Rust's own
         # per-method default applies (batch-D T9: forwarding an
         # always-2 `degree` here would silently promote every bare
         # `method="lm"` call to a quadratic fit once "lm"+degree>=2
-        # routes to a polynomial).
-        smooth_kwargs: dict = dict(method=method, ci=None, bandwidth=bandwidth, n=n)
+        # routes to a polynomial). `bandwidth` joined that rule in R2:
+        # forwarding it unconditionally meant every method got an explicit
+        # LOESS span it does not read, which only worked because `PySmooth`
+        # tolerates an explicit value equal to its own default. Omitting it
+        # makes that tolerance matter to direct `Smooth(...)` callers alone.
+        smooth_kwargs: dict = dict(method=method, ci=None, n=n)
+        if bandwidth is not None:
+            smooth_kwargs["bandwidth"] = bandwidth
         if degree is not None:
             smooth_kwargs["degree"] = degree
+        if k is not None:
+            smooth_kwargs["k"] = k
         if x_bins is not None:
             smooth_kwargs["x_bins"] = x_bins
         if x_estimator is not None:
@@ -520,11 +548,16 @@ def desugar_smooth(
         encoding_remap = {"x": _smooth_cols["x"], "y": _smooth_cols["y"]}
         return MarkDesugarResult(mark="line", transforms=transforms, remap=encoding_remap)
 
-    # Layered path: ci band and/or metrics-corner overlay. `degree` is
-    # forwarded only when explicit — see the no-CI path above for why.
-    smooth_kwargs = dict(method=method, ci=ci, bandwidth=bandwidth, n=n, seed=seed, name="smooth")
+    # Layered path: ci band and/or metrics-corner overlay. `bandwidth`,
+    # `degree` and `k` are forwarded only when explicit — see the no-CI path
+    # above for why.
+    smooth_kwargs = dict(method=method, ci=ci, n=n, seed=seed, name="smooth")
+    if bandwidth is not None:
+        smooth_kwargs["bandwidth"] = bandwidth
     if degree is not None:
         smooth_kwargs["degree"] = degree
+    if k is not None:
+        smooth_kwargs["k"] = k
     if x_bins is not None:
         smooth_kwargs["x_bins"] = x_bins
     if x_estimator is not None:
@@ -540,43 +573,7 @@ def desugar_smooth(
         # OLS duplication.
         smooth_kwargs["inject_metrics"] = True
     transforms = [Smooth(x_field, y_field, **smooth_kwargs)]
-    layers = []
-    if ci is not None:
-        layers.append(
-            _Layer(
-                name="ribbon",
-                mark="ribbon",
-                encoding={
-                    "x": _smooth_cols["x"],
-                    "y": _smooth_cols["ci_lower"],
-                    "y2": _smooth_cols["ci_upper"],
-                },
-                mark_kwargs={"opacity": 0.3},
-                data_source="smooth",
-            )
-        )
-    layers.append(
-        _Layer(
-            name="line",
-            mark="line",
-            encoding={"x": _smooth_cols["x"], "y": _smooth_cols["y"]},
-            data_source="smooth",
-        )
-    )
-    if show_metrics:
-        layers.append(
-            _Layer(
-                name="metrics",
-                mark="text",
-                encoding={
-                    "x": _smooth_cols["x"],
-                    "y": "_metrics_y",
-                    "text": "_metrics_text",
-                },
-                mark_kwargs={"align": "right", "dx": -4, "dy": 4},
-                data_source="smooth",
-            )
-        )
+    layers = build_fit_layers("smooth", data_source="smooth", ci=ci, metrics=show_metrics)
     return MarkDesugarResult(transforms=transforms, layers=layers)
 
 

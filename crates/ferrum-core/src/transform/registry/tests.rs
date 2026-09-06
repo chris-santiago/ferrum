@@ -258,6 +258,7 @@ fn smooth_fitted_outputs_match_shared_fit_schema() {
         ci: None,
         bandwidth: 0.75,
         degree: 1,
+        k: crate::transform::gam::DEFAULT_BASIS_DIM,
         n: 5,
         seed: 0,
         x_bins: None,
@@ -802,7 +803,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         })),
         ("smooth", Smooth(SmoothSpec {
             x: "x".into(), y: "y".into(), method: SmoothMethod::Lm, ci: None, bandwidth: 0.75,
-            degree: 1, n: 5, seed: 0, x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            degree: 1, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 5, seed: 0, x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, groupby: vec![], name: None, x_range: None,
         })),
         ("aggregate", Aggregate(AggregateSpec { ops: vec![], groupby: vec![], name: None })),
@@ -1287,4 +1288,419 @@ fn density_data_methods_accepted_and_bogus_kernel_rejected() {
     }
     let res = crate::transform::density_data::apply(&spec_with_kernel("not_a_real_kernel"), &batch);
     assert!(res.is_err(), "bogus density_data kernel must be rejected by apply()");
+}
+
+// ── R1 design finding 1: every non-empty `methods` entry has a guard ───────
+//
+// Before this round only kde/qq/smooth/hex/raster/linkage/density_data did;
+// the other seven declared vocabularies had none. Each guard below calls the
+// kind's REAL enforcement site — the PyO3 constructor where one exists, the
+// `apply()`-time validation where it doesn't — for every declared value, and
+// confirms a bogus one is refused.
+// [`KINDS_WITH_METHODS_GUARD`] pins the set against "every kind with a
+// non-empty declared `methods`", so a new kind cannot join this table without
+// one.
+
+/// Kinds with a `*_accepted_and_bogus_*_rejected` guard below. Pinned against
+/// the registry by `methods_drift_guard_covers_every_declared_vocabulary`.
+const KINDS_WITH_METHODS_GUARD: &[&str] = &[
+    "kde",
+    "smooth",
+    "error_extent",
+    "linkage",
+    "raster",
+    "hex",
+    "qq",
+    "pivot",
+    "data_window",
+    "density_data",
+    "regression_data",
+    "impute",
+    "top_k",
+    "data_stack",
+];
+
+#[test]
+fn methods_drift_guard_covers_every_declared_vocabulary() {
+    let declared_nonempty: std::collections::BTreeSet<&str> = all_transform_kinds()
+        .into_iter()
+        .filter(|k| !entry_for_kind(k).unwrap().methods.is_empty())
+        .collect();
+    let guarded: std::collections::BTreeSet<&str> =
+        KINDS_WITH_METHODS_GUARD.iter().copied().collect();
+    assert_eq!(
+        guarded, declared_nonempty,
+        "KINDS_WITH_METHODS_GUARD drifted from the kinds with a non-empty declared `methods`.\n\
+         has a guard but declared `methods` is now empty (stale entry): {:?}\n\
+         has a non-empty `methods` but no drift guard: {:?}",
+        guarded.difference(&declared_nonempty).collect::<Vec<_>>(),
+        declared_nonempty.difference(&guarded).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn error_extent_methods_accepted_and_bogus_method_rejected() {
+    attach(|py| {
+        let ty = py.get_type::<crate::transform::error_extent::PyErrorExtent>();
+        for &method in &entry_for_kind("error_extent").unwrap().methods {
+            let kwargs = pyo3::types::PyDict::new(py);
+            kwargs.set_item("method", method).unwrap();
+            let res = ty.call(("v",), Some(&kwargs));
+            assert!(
+                res.is_ok(),
+                "declared error_extent method '{method}' rejected by ErrorExtent(): {:?}",
+                res.err()
+            );
+        }
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("method", "not_a_real_method").unwrap();
+        assert!(
+            ty.call(("v",), Some(&kwargs)).is_err(),
+            "bogus error_extent method must be rejected by ErrorExtent()"
+        );
+    });
+}
+
+/// `impute`'s refusal lives at `apply()` (`validate_method`), not at
+/// `PyImpute::new`, so this guard asserts against `apply` directly — the
+/// `density_data` shape.
+#[test]
+fn impute_methods_accepted_and_bogus_method_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::impute::ImputeSpec;
+    let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0])]);
+    let spec_with = |method: &str| ImputeSpec {
+        field: "v".into(),
+        method: method.to_string(),
+        value: Some(0.0),
+        groupby: None,
+        key: None,
+        keyvals: None,
+        name: None,
+    };
+    for &method in &entry_for_kind("impute").unwrap().methods {
+        let res = crate::transform::impute::apply(&spec_with(method), &batch);
+        assert!(res.is_ok(), "declared impute method {method:?} rejected by apply(): {:?}", res.err());
+    }
+    assert!(
+        crate::transform::impute::apply(&spec_with("not_a_real_method"), &batch).is_err(),
+        "bogus impute method must be rejected by apply()"
+    );
+}
+
+/// `regression_data`'s refusal is at `apply()`; `"exp"`/`"log"`/`"pow"` need
+/// strictly positive data to fit, which this fixture supplies.
+#[test]
+fn regression_data_methods_accepted_and_bogus_method_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::regression_data::RegressionDataSpec;
+    let batch = f64_batch(&[("x", &[1.0, 2.0, 3.0, 4.0]), ("y", &[2.0, 3.5, 5.0, 7.5])]);
+    let spec_with = |method: &str| RegressionDataSpec {
+        x: "x".into(),
+        y: "y".into(),
+        method: method.to_string(),
+        order: 1,
+        groupby: None,
+        as_: ("x".into(), "y".into()),
+        name: None,
+    };
+    for &method in &entry_for_kind("regression_data").unwrap().methods {
+        let res = crate::transform::regression_data::apply(&spec_with(method), &batch);
+        assert!(
+            res.is_ok(),
+            "declared regression_data method {method:?} rejected by apply(): {:?}",
+            res.err()
+        );
+    }
+    assert!(
+        crate::transform::regression_data::apply(&spec_with("not_a_real_method"), &batch).is_err(),
+        "bogus regression_data method must be rejected by apply()"
+    );
+}
+
+/// `data_stack`'s refusal is at `apply()`'s offset match.
+#[test]
+fn data_stack_methods_accepted_and_bogus_offset_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::data_stack::DataStackSpec;
+    let batch = value_group_batch(&[1.0, 2.0, 3.0], &["a", "a", "b"]);
+    let spec_with = |offset: &str| DataStackSpec {
+        field: "v".into(),
+        groupby: vec!["g".into()],
+        sort: None,
+        as_: ("y0".into(), "y1".into()),
+        offset: offset.to_string(),
+        name: None,
+    };
+    for &offset in &entry_for_kind("data_stack").unwrap().methods {
+        let res = crate::transform::data_stack::apply(&spec_with(offset), &batch);
+        assert!(res.is_ok(), "declared data_stack offset {offset:?} rejected by apply(): {:?}", res.err());
+    }
+    assert!(
+        crate::transform::data_stack::apply(&spec_with("not_a_real_offset"), &batch).is_err(),
+        "bogus data_stack offset must be rejected by apply()"
+    );
+}
+
+/// `pivot`'s refusal is at `apply()`'s `aggregate_values` — a site that did
+/// not exist before R1 (its `_ => sum()` fallback is what left this the one
+/// declared vocabulary with no guard, and what silently returned a plausible
+/// wrong number for a typo'd `op`).
+#[test]
+fn pivot_methods_accepted_and_bogus_op_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::pivot::PivotSpec;
+    let batch = value_group_batch(&[1.0, 2.0, 3.0], &["a", "a", "b"]);
+    let spec_with = |op: &str| PivotSpec {
+        field: "g".into(),
+        value: "v".into(),
+        groupby: None,
+        limit: None,
+        op: op.to_string(),
+        name: None,
+    };
+    for &op in &entry_for_kind("pivot").unwrap().methods {
+        let res = crate::transform::pivot::apply(&spec_with(op), &batch);
+        assert!(res.is_ok(), "declared pivot op {op:?} rejected by apply(): {:?}", res.err());
+    }
+    assert!(
+        crate::transform::pivot::apply(&spec_with("not_a_real_op"), &batch).is_err(),
+        "bogus pivot op must be rejected by apply()"
+    );
+}
+
+/// `top_k`'s refusal is at `apply()`'s `compute_agg` — the second site R1
+/// converted from a silent `_ => sum()` fallback.
+#[test]
+fn top_k_methods_accepted_and_bogus_op_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::top_k::TopKSpec;
+    let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0])]);
+    let spec_with = |op: &str| TopKSpec {
+        n: 2,
+        field: "v".into(),
+        op: op.to_string(),
+        sort: "descending".into(),
+        groupby: None,
+        name: None,
+    };
+    for &op in &entry_for_kind("top_k").unwrap().methods {
+        let res = crate::transform::top_k::apply(&spec_with(op), &batch);
+        assert!(res.is_ok(), "declared top_k op {op:?} rejected by apply(): {:?}", res.err());
+    }
+    assert!(
+        crate::transform::top_k::apply(&spec_with("not_a_real_op"), &batch).is_err(),
+        "bogus top_k op must be rejected by apply()"
+    );
+}
+
+/// `data_window`'s refusal is `compute_window_op`'s `other` arm. Every op is
+/// exercised against a real two-column fixture; `lag`/`lead` and the rolling
+/// aggregates need a numeric `field`, the rank/row-number family does not.
+#[test]
+fn data_window_methods_accepted_and_bogus_op_rejected() {
+    pyo3::Python::initialize();
+    use crate::transform::data_window::{DataWindowSpec, WindowOp};
+    let batch = f64_batch(&[("v", &[3.0, 1.0, 2.0, 4.0])]);
+    let field_less: &[&str] = &["row_number", "rank", "dense_rank"];
+    let spec_with = |op: &str| DataWindowSpec {
+        ops: vec![WindowOp {
+            op: op.to_string(),
+            field: (!field_less.contains(&op)).then(|| "v".to_string()),
+            as_: "out".into(),
+            param: None,
+        }],
+        sort: None,
+        groupby: None,
+        frame: None,
+        ignore_peers: false,
+        name: None,
+    };
+    for &op in &entry_for_kind("data_window").unwrap().methods {
+        let res = crate::transform::data_window::apply(&spec_with(op), &batch);
+        assert!(res.is_ok(), "declared data_window op {op:?} rejected by apply(): {:?}", res.err());
+    }
+    assert!(
+        crate::transform::data_window::apply(&spec_with("not_a_real_op"), &batch).is_err(),
+        "bogus data_window op must be rejected by apply()"
+    );
+}
+
+// ── R1 design finding (d): `secondary_outputs` rides the `outputs` mold ────
+//
+// Same shape as the per-kind `*_outputs_match_actual_schema` fixtures above:
+// build a real `*Spec` under DEFAULT construction, call the real
+// `TransformSpec::secondary_outputs` (not the module function directly — the
+// dispatch table is part of what this proves), and compare the emitted keys
+// and per-key schemas against the declared entry by EQUALITY. Under-declaring
+// a key or a column fails here just as an under-declared `outputs` does.
+
+/// Kinds with a secondary-output fixture below. Pinned against the registry by
+/// `secondary_fixture_coverage_matches_kinds_with_declared_secondary_outputs`.
+const KINDS_WITH_SECONDARY_FIXTURE: &[&str] = &["qq", "linkage", "letter_value"];
+
+#[test]
+fn secondary_fixture_coverage_matches_kinds_with_declared_secondary_outputs() {
+    let declared_nonempty: std::collections::BTreeSet<&str> = all_transform_kinds()
+        .into_iter()
+        .filter(|k| !entry_for_kind(k).unwrap().secondary_outputs.is_empty())
+        .collect();
+    let fixtures: std::collections::BTreeSet<&str> =
+        KINDS_WITH_SECONDARY_FIXTURE.iter().copied().collect();
+    assert_eq!(
+        fixtures, declared_nonempty,
+        "KINDS_WITH_SECONDARY_FIXTURE drifted from the kinds with non-empty declared \
+         `secondary_outputs`.\nhas a fixture but declares none (stale entry): {:?}\n\
+         declares secondary outputs but has no fixture: {:?}",
+        fixtures.difference(&declared_nonempty).collect::<Vec<_>>(),
+        declared_nonempty.difference(&fixtures).collect::<Vec<_>>(),
+    );
+}
+
+/// Assert the real `(key, batch)` pairs a spec publishes equal the kind's
+/// declared `secondary_outputs`: same keys in the same order, and each key's
+/// batch schema exactly the declared columns and dtypes.
+fn assert_secondary_outputs_match(
+    kind: &str,
+    spec: TransformSpec,
+    input: &RecordBatch,
+) {
+    let primary = spec.apply(input).unwrap_or_else(|e| panic!("{kind}: apply failed: {e}"));
+    let actual = spec
+        .secondary_outputs(input, &primary)
+        .unwrap_or_else(|e| panic!("{kind}: secondary_outputs failed: {e}"));
+    let declared = entry_for_kind(kind).unwrap().secondary_outputs;
+
+    let actual_keys: Vec<&str> = actual.iter().map(|(k, _)| k.as_str()).collect();
+    let declared_keys: Vec<&str> = declared.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        actual_keys, declared_keys,
+        "{kind}: registry `secondary_outputs` keys drifted from the real published keys"
+    );
+
+    for ((key, batch), (_, columns)) in actual.iter().zip(declared.iter()) {
+        assert_schema_matches(
+            batch.schema().as_ref(),
+            columns,
+            &[],
+            &format!("{kind} secondary output '{key}'"),
+        );
+    }
+}
+
+#[test]
+fn qq_secondary_outputs_match_actual_batches() {
+    pyo3::Python::initialize();
+    use crate::transform::qq::QQSpec;
+    let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
+    assert_secondary_outputs_match(
+        "qq",
+        TransformSpec::Qq(QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: true,
+            seed: 0,
+            name: None,
+        }),
+        &batch,
+    );
+}
+
+#[test]
+fn linkage_secondary_outputs_match_actual_batches() {
+    pyo3::Python::initialize();
+    use crate::transform::linkage::{DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec};
+    let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
+    assert_secondary_outputs_match(
+        "linkage",
+        TransformSpec::Linkage(LinkageSpec {
+            method: LinkageMethod::Ward,
+            metric: DistanceMetric::Euclidean,
+            axis: LinkageAxis::Rows,
+            z_score: None,
+            standard_scale: None,
+            name: None,
+        }),
+        &batch,
+    );
+}
+
+#[test]
+fn letter_value_secondary_outputs_match_actual_batches() {
+    pyo3::Python::initialize();
+    use crate::transform::letter_value::{KDepth, LetterValueSpec};
+    let batch = value_group_batch(
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        &["a", "a", "a", "a", "a", "a", "a", "a"],
+    );
+    assert_secondary_outputs_match(
+        "letter_value",
+        TransformSpec::LetterValue(LetterValueSpec {
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        }),
+        &batch,
+    );
+}
+
+/// A spec `name` prefixes every secondary key — the declared keys are the
+/// default-construction ones, exactly as declared `outputs` names are the
+/// default-`as_` ones. Pinning the naming rule here is what makes the
+/// "prefix with `{name}_`" sentence in the module doc checkable.
+#[test]
+fn a_spec_name_prefixes_every_declared_secondary_key() {
+    pyo3::Python::initialize();
+    use crate::transform::linkage::{DistanceMetric, LinkageAxis, LinkageMethod, LinkageSpec};
+    let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
+    let spec = TransformSpec::Linkage(LinkageSpec {
+        method: LinkageMethod::Ward,
+        metric: DistanceMetric::Euclidean,
+        axis: LinkageAxis::Rows,
+        z_score: None,
+        standard_scale: None,
+        name: Some("clust".into()),
+    });
+    let primary = spec.apply(&batch).unwrap();
+    let actual: Vec<String> =
+        spec.secondary_outputs(&batch, &primary).unwrap().into_iter().map(|(k, _)| k).collect();
+    let expected: Vec<String> = entry_for_kind("linkage")
+        .unwrap()
+        .secondary_outputs
+        .iter()
+        .map(|(k, _)| format!("clust_{k}"))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn transform_registry_exposes_secondary_outputs_to_python() {
+    attach(|py| {
+        let dict = transform_registry(py, "qq").unwrap();
+        let dict = dict.bind(py);
+        let secondary: Vec<(String, Vec<(String, String)>)> =
+            dict.get_item("secondary_outputs").unwrap().unwrap().extract().unwrap();
+        assert_eq!(secondary.len(), 1);
+        assert_eq!(secondary[0].0, "qq_line");
+        assert_eq!(
+            secondary[0].1,
+            vec![
+                ("qq_line_x_start".to_string(), "Float64".to_string()),
+                ("qq_line_x_end".to_string(), "Float64".to_string()),
+                ("qq_line_y_start".to_string(), "Float64".to_string()),
+                ("qq_line_y_end".to_string(), "Float64".to_string()),
+            ]
+        );
+
+        // A kind with no secondary batches reports an empty list, not a
+        // missing key — the same shape `outputs: []` kinds report.
+        let dict = transform_registry(py, "bin").unwrap();
+        let secondary: Vec<(String, Vec<(String, String)>)> =
+            dict.bind(py).get_item("secondary_outputs").unwrap().unwrap().extract().unwrap();
+        assert!(secondary.is_empty());
+    });
 }

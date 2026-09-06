@@ -6,7 +6,7 @@ Arrow integer / unsigned / float dtype by coercing to Float64 through
 ``ValueError`` naming the transform, the column, and the actual dtype.  No
 transform emits silent nulls, NaNs, or fallback values for an unhandled dtype.
 
-Five things are pinned here, all through the production ``to_svg`` entry point:
+Six things are pinned here, all through the production ``to_svg`` entry point:
 
 1. **The sweep matrix.**  Every transform touched by the ``_sweep_cases()``
    value-column matrix renders *byte-identically* from an ``Int64`` /
@@ -32,6 +32,12 @@ Five things are pinned here, all through the production ``to_svg`` entry point:
    (``timeunit::extract_millis``, previously ``Timestamp``/``Float64``/
    ``Int64`` only).  Neither fits ``_sweep_cases()``'s ``sweep_frame`` builder
    shape, so each is pinned by a standalone regression test instead.
+6. **No Python-side pre-cast survives in the figure layer.**  ``lmplot``,
+   ``residplot`` and ``displot(kde=True)`` each carried an inline
+   ``_INT_DTYPES`` -> ``cast(pl.Float64)`` copy of the deleted
+   ``_desugar.cast_columns_to_float64`` mirror.  With those gone (2026-09-06),
+   an integer column reaching each of them renders byte-identically to the
+   same data pre-cast, which is what makes the engine the only coercion site.
 
 Per the project's test-file convention this module carries net-new feature
 coverage for the dtype policy as a whole, not one findings ID.
@@ -869,3 +875,60 @@ def test_clustermap_int64_feature_columns_render_byte_identically_to_float64():
     baseline = fm.clustermap(df.with_columns(pl.col("A", "B").cast(pl.Float64))).to_svg()
     assert baseline, "clustermap Float64 baseline rendered nothing"
     assert fm.clustermap(df).to_svg() == baseline
+
+
+# ---------------------------------------------------------------------------
+# 8. The figure layer keeps no Python-side pre-cast of its own
+# ---------------------------------------------------------------------------
+#
+# `_desugar.cast_columns_to_float64` -- the Python mirror of the engine's dtype
+# policy -- was deleted in batch D, but three inline copies of the same
+# `_INT_DTYPES` -> `cast(pl.Float64)` block survived in the figure layer
+# (`lmplot`, `residplot`, `displot(kde=True)`), one still carrying the
+# now-false comment "Rust Smooth/Robust transforms require Float64 columns".
+# Deleting them (R2) leaves the coercion to `numeric_util::coerce_to_float64`
+# alone. These three pins are what makes that deletion safe to keep: an
+# integer column must reach every one of those figure functions and render
+# byte-identically to the same data pre-cast in Python.
+
+
+@pytest.mark.parametrize("dtype", NUMERIC_DTYPES, ids=lambda d: str(d))
+@pytest.mark.parametrize("method", ["lm", "loess", "quadratic", "gam"])
+def test_lmplot_smooth_routed_numeric_dtype_renders_byte_identically(method, dtype):
+    """The fit-family half of this is `_FIT_CASES` above; this is the
+    `mark_smooth`-routed half, which the fit-family sweep does not reach."""
+    df = pl.DataFrame({"x": _XS, "y": _VALUES})
+
+    def build(frame):
+        return fm.lmplot(frame, x="x", y="y", method=method).to_svg()
+
+    baseline = build(df.with_columns(pl.col("x", "y").cast(pl.Float64)))
+    assert baseline, "lmplot Float64 baseline rendered nothing"
+    assert build(df.with_columns(pl.col("x", "y").cast(dtype))) == baseline
+
+
+@pytest.mark.parametrize("dtype", NUMERIC_DTYPES, ids=lambda d: str(d))
+@pytest.mark.parametrize("robust", [False, True], ids=["ols", "robust"])
+def test_residplot_numeric_dtype_renders_byte_identically(robust, dtype):
+    df = pl.DataFrame({"x": _XS, "y": _VALUES})
+
+    def build(frame):
+        return fm.residplot(frame, x="x", y="y", robust=robust).to_svg()
+
+    baseline = build(df.with_columns(pl.col("x", "y").cast(pl.Float64)))
+    assert baseline, "residplot Float64 baseline rendered nothing"
+    assert build(df.with_columns(pl.col("x", "y").cast(dtype))) == baseline
+
+
+@pytest.mark.parametrize("dtype", NUMERIC_DTYPES, ids=lambda d: str(d))
+def test_displot_kde_overlay_numeric_dtype_renders_byte_identically(dtype):
+    """The KDE overlay is the third deleted pre-cast: `displot(kde=True)`
+    prepends a named `Kde` transform reading the raw x column."""
+    df = pl.DataFrame({"x": _VALUES})
+
+    def build(frame):
+        return fm.displot(frame, x="x", kde=True).to_svg()
+
+    baseline = build(df.with_columns(pl.col("x").cast(pl.Float64)))
+    assert baseline, "displot Float64 baseline rendered nothing"
+    assert build(df.with_columns(pl.col("x").cast(dtype))) == baseline

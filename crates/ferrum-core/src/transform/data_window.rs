@@ -39,10 +39,31 @@ use std::sync::Arc;
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype};
 
+/// The single source of truth for `DataWindow`'s free-string `op`
+/// vocabulary. Read by [`compute_window_op`]'s unknown-op error message and
+/// by `registry::entry_for_kind("data_window")`'s `methods` list — R1 design
+/// finding 1, mirroring the `smooth::METHODS` precedent. Order matches
+/// `compute_window_op`'s match arms: the four positional ops, the two
+/// offset ops, the two edge ops, then the five rolling aggregates.
+pub(crate) const OPS: &[&str] = &[
+    "row_number",
+    "rank",
+    "dense_rank",
+    "lag",
+    "lead",
+    "first_value",
+    "last_value",
+    "sum",
+    "mean",
+    "count",
+    "min",
+    "max",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WindowOp {
-    /// Window operation name.
+    /// One of [`OPS`]; `compute_window_op` refuses anything else.
     pub op: String,
     /// Input field (for aggregates and lag/lead).
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -656,7 +677,8 @@ fn compute_window_op(
         }
         other => {
             return Err(PyValueError::new_err(format!(
-                "data_window: unknown window op '{other}'"
+                "data_window: unknown window op '{other}'; expected {}",
+                OPS.join("|"),
             )));
         }
     }

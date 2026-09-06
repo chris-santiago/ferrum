@@ -1066,66 +1066,19 @@ fn run_transforms_with_facet(
 
 /// Concatenate `batches` — all outputs published under the same named-output
 /// `key` across facet panels — into one batch, tolerating schema divergence
-/// between panels. The reference schema is the UNION of every batch's fields,
-/// in first-appearance order (batch-D T9 round 4: not the single WIDEST
-/// schema, which can arbitrarily drop a field that only a narrower batch
-/// carries when two batches tie on field count). Each field is read from
-/// every batch BY NAME; a batch missing a field is padded with a null array
-/// of that field's own dtype (`arrow::array::new_null_array`) rather than
-/// erroring or (Arrow's default `concat_batches`) silently misaligning
-/// columns by position. Dtype-generic via `arrow::compute::concat` — the
-/// same widen-with-nulls shape already used for a name-miss at
-/// `transform::impute` (`concat` + `new_null_array`) and earlier in this
-/// file's own `inject_facet_column` padding — rather than hand-rolling
-/// per-dtype (`Float64`/`Utf8`-only) reconciliation a second time; any field
-/// present in at least one batch can be padded, not just those two dtypes.
-/// Every field in the union has its output nullability forced to `true`, even
-/// if every batch that carries it declared it non-nullable, since a batch
-/// missing any field is padded with nulls. The common case — every batch
-/// already sharing one schema — takes Arrow's own `concat_batches` unchanged,
-/// so a chart with no schema divergence across its facet panels renders
-/// byte-identically.
+/// between panels.
+///
+/// The reconciliation itself lives in [`crate::transform::concat::concat_by_name`],
+/// which this thin wrapper only supplies the error voice for (R1 design
+/// finding 3 hoisted it there so `transform::smooth::apply_grouped` could stop
+/// carrying a weaker second implementation). See that function for the
+/// union-of-fields algorithm and its guarantees.
 fn concat_batches_by_name(key: &str, batches: Vec<RecordBatch>) -> Result<RecordBatch, RenderError> {
-    let same_schema = batches.windows(2).all(|w| w[0].schema() == w[1].schema());
-    if same_schema {
-        let schema = batches[0].schema();
-        return arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
-            RenderError::TransformFailed(format!("concat facet partitions for key '{key}': {e}"))
-        });
-    }
-
-    let mut out_fields: Vec<Field> = Vec::new();
-    for b in &batches {
-        for field in b.schema().fields().iter() {
-            if !out_fields.iter().any(|f| f.name() == field.name()) {
-                out_fields.push(Field::new(field.name(), field.data_type().clone(), true));
-            }
-        }
-    }
-
-    let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(out_fields.len());
-    for field in &out_fields {
-        let mut parts: Vec<ArrayRef> = Vec::with_capacity(batches.len());
-        for b in &batches {
-            match b.schema().index_of(field.name()) {
-                Ok(fi) => parts.push(Arc::clone(b.column(fi))),
-                Err(_) => parts.push(arrow::array::new_null_array(field.data_type(), b.num_rows())),
-            }
-        }
-        let refs: Vec<&dyn Array> = parts.iter().map(|a| a.as_ref()).collect();
-        let combined = arrow::compute::concat(&refs).map_err(|e| {
-            RenderError::TransformFailed(format!(
-                "concat facet partitions for key '{key}': column '{}': {e}",
-                field.name(),
-            ))
-        })?;
-        out_cols.push(combined);
-    }
-
-    let schema = Arc::new(Schema::new(out_fields));
-    RecordBatch::try_new(schema, out_cols).map_err(|e| {
-        RenderError::TransformFailed(format!("concat facet partitions for key '{key}': {e}"))
-    })
+    crate::transform::concat::concat_by_name(
+        &format!("concat facet partitions for key '{key}'"),
+        batches,
+    )
+    .map_err(RenderError::TransformFailed)
 }
 
 /// Apply the D10 impute step in place on the pipeline's `FINAL_OUTPUT_KEY`
@@ -4183,7 +4136,7 @@ mod tests {
         spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 3 },
-            ci: None, bandwidth: 0.75, degree: 3, n: 5, seed: 0,
+            ci: None, bandwidth: 0.75, degree: 3, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false,
             groupby,
@@ -4406,7 +4359,7 @@ mod tests {
         spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
-            ci: None, bandwidth: 0.75, degree: 1, n: 3, seed: 0,
+            ci: None, bandwidth: 0.75, degree: 1, k: crate::transform::gam::DEFAULT_BASIS_DIM, n: 3, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: true,
             groupby,

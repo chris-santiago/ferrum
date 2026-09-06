@@ -29,6 +29,17 @@ use std::sync::Arc;
 
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
+/// The single source of truth for `Hex`'s free-string `aggregate`
+/// vocabulary. Read by BOTH enforcement sites (`apply`'s validation and
+/// [`PyHex::new`]'s), both of their error messages, and
+/// `registry::entry_for_kind("hex")`'s `methods` list — R1 design finding 1,
+/// mirroring the `smooth::METHODS` precedent.
+pub(crate) const AGGREGATES: &[&str] =
+    &["count", "mean", "sum", "min", "max", "median", "std", "var"];
+
+/// The one aggregate that needs no `field`: it counts rows.
+const AGGREGATE_WITHOUT_FIELD: &str = "count";
+
 fn default_aggregate() -> String {
     "count".into()
 }
@@ -41,7 +52,8 @@ pub(crate) struct HexSpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub bin_size: Option<f64>,
     #[serde(default = "default_aggregate")]
-    pub aggregate: String, // "count" | "mean" | "sum"
+    /// One of [`AGGREGATES`], which both enforcement sites validate against.
+    pub aggregate: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -112,13 +124,14 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
 
     // Validate aggregate.
     let agg = spec.aggregate.as_str();
-    if !matches!(agg, "count" | "mean" | "sum" | "min" | "max" | "median" | "std" | "var") {
+    if !AGGREGATES.contains(&agg) {
         return Err(PyValueError::new_err(format!(
-            "stat_hex: unknown aggregate '{}'; expected one of count/mean/sum/min/max/median/std/var",
-            agg
+            "stat_hex: unknown aggregate '{}'; expected one of {}",
+            agg,
+            AGGREGATES.join("/"),
         )));
     }
-    let needs_field = !matches!(agg, "count");
+    let needs_field = agg != AGGREGATE_WITHOUT_FIELD;
     if needs_field && spec.field.is_none() {
         return Err(PyValueError::new_err(format!(
             "stat_hex: aggregate='{}' requires `field`",
@@ -434,20 +447,16 @@ impl PyHex {
                 "Hex: x and y fields must be non-empty",
             ));
         }
-        match aggregate {
-            "count" => {}
-            "mean" | "sum" | "min" | "max" | "median" | "std" | "var" => {
-                if field.is_none() {
-                    return Err(PyValueError::new_err(format!(
-                        "Hex: aggregate='{aggregate}' requires field"
-                    )));
-                }
-            }
-            other => {
-                return Err(PyValueError::new_err(format!(
-                    "Hex: unknown aggregate '{other}'; expected count|mean|sum|min|max|median|std|var"
-                )))
-            }
+        if !AGGREGATES.contains(&aggregate) {
+            return Err(PyValueError::new_err(format!(
+                "Hex: unknown aggregate '{aggregate}'; expected {}",
+                AGGREGATES.join("|"),
+            )));
+        }
+        if aggregate != AGGREGATE_WITHOUT_FIELD && field.is_none() {
+            return Err(PyValueError::new_err(format!(
+                "Hex: aggregate='{aggregate}' requires field"
+            )));
         }
         if let Some(bs) = bin_size {
             if !bs.is_finite() || bs <= 0.0 {

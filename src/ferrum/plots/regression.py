@@ -17,6 +17,7 @@ _prediction_error_chart_from_source.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -31,11 +32,15 @@ from ferrum import (
 )
 from ferrum._coerce import to_polars
 from ferrum._core import transform_registry
+from ferrum._desugar import _propagate_layer_scale
 from ferrum._layer import _Layer
+from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
-from ferrum.marks._desugar_helpers import nominal_color_channel, registry_output_columns
+from ferrum.encoding._aliases import resolve_color_alias
+from ferrum.marks._desugar_helpers import nominal_color_channel
+from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.plots._helpers import (
     _color_field_for,
     _compose_compare,
@@ -53,33 +58,25 @@ if TYPE_CHECKING:
     from ferrum import ConcatChart, HConcatChart, VConcatChart
 
 
-# Batch-D T13: closes the T12 spec-review obligation that `_VALID_METHODS`'
-# relationship to the registry stay honest (`.sdd/task-12-spec-reviewer.md`
-# cycle 5's carried ⚠️). `_SMOOTH_ROUTED_METHODS` is DERIVED from
-# `transform_registry("smooth")["methods"]` -- every registry smooth
-# spelling routes through `mark_smooth` below except "linear" (the same
-# method as "lm", just a second registry alias lmplot doesn't separately
-# expose) and "glm" (kept out of the derived set on purpose: see
-# `_DEDICATED_FIT_METHODS` below). `_DEDICATED_FIT_METHODS` are the three
-# methods with their own fit-family transform (`Logistic`/`Glm`/`Robust`),
-# all sharing the `x, y, ci_lower, ci_upper` registry output schema (spec
-# §4.7/M6c). "glm" is a name both sets could plausibly claim -- lmplot keeps
-# it mapped to the standalone `Glm` transform (its own `family=`/`link=`
-# surface, matching the top-level `glm()`/`Glm` API) rather than
-# `Smooth(method="glm")`'s grid-only surface; T9 hoisted the shared
-# `wald_band` helper so the two implementations' CI math cannot drift apart,
-# so this is a choice of which surface owns the name, not a divergent
-# implementation. `test_lmplot_valid_methods_registry_pin.py` pins both
-# halves against the registry, so a rename or a new registry smooth method
-# is caught rather than silently under/over-widening `_VALID_METHODS`.
+# `_SMOOTH_ROUTED_METHODS` is DERIVED from
+# `transform_registry("smooth")["methods"]`, not hand-listed: every registry
+# smooth spelling routes through `mark_smooth` below except two.
+# "linear" is the same method as "lm" -- a second registry alias `lmplot`
+# does not separately expose. "glm" is a name both sets could plausibly
+# claim, and `lmplot` keeps it mapped to the standalone `Glm` transform
+# (with its own `family=`/`link=` surface, matching the top-level
+# `glm()`/`Glm` API) rather than `Smooth(method="glm")`'s grid-only one;
+# both share the hoisted `wald_band` helper in Rust, so this is a choice of
+# which surface owns the name, not a divergent implementation.
+# `_DEDICATED_FIT_METHODS` are the three methods with their own fit-family
+# transform (`Logistic`/`Glm`/`Robust`), all sharing the
+# `x, y, ci_lower, ci_upper` registry output schema (spec §4.7/M6c).
+# `test_lmplot_valid_methods_registry_pin.py` pins both halves against the
+# registry, so a rename or a new registry smooth method is caught rather
+# than silently under/over-widening `_VALID_METHODS`.
 _SMOOTH_ROUTED_METHODS = frozenset(transform_registry("smooth")["methods"]) - {"linear", "glm"}
 _DEDICATED_FIT_METHODS = frozenset({"logistic", "glm", "robust"})
 _VALID_METHODS = _SMOOTH_ROUTED_METHODS | _DEDICATED_FIT_METHODS
-
-# batch-D T13 round-3 (`.sdd/task-13-python-quality-reviewer.md` cycle-2
-# finding 2): `order=` forwarding is now ONE rule applied uniformly to every
-# `_SMOOTH_ROUTED_METHODS` member, not a per-method carve-out -- see
-# `_smooth_degree_kwargs`.
 
 
 def _smooth_degree_kwargs(method: str, order: int | None, func_name: str = "lmplot") -> dict:
@@ -117,19 +114,12 @@ def _smooth_degree_kwargs(method: str, order: int | None, func_name: str = "lmpl
     reach the Rust boundary) when ``order`` is a negative int: the Rust
     ``degree`` parameter is unsigned, so a negative Python int fails the
     PyO3 conversion with an untyped ``OverflowError`` instead of a
-    diagnosable message (batch-D T13 round-4 spec-review ⚠️).
+    diagnosable message.
 
-    History: prior rounds used ``order == 1`` (``lmplot``'s then-default) as
-    the "no explicit degree" sentinel, which made ``order=1`` structurally
-    unable to mean "forward degree=1" for *any* method -- silently wrong for
-    ``"loess"``, whose own local-fit degree=1 is a real, different fit from
-    its degree=2 default (round-4 spec-review finding: the docstring claimed
-    ``order=1`` was a harmless loess no-op, which was false). Round 4 moves
-    the sentinel to ``lmplot``'s ``order=None`` default instead, so
-    "explicit value present" and "value equals 1" are no longer conflated
-    -- every explicit value, including 1, now reaches ``Smooth``'s own
-    degree-acceptance matrix uniformly, and a bare call (``order`` omitted)
-    is the only shape that forwards nothing.
+    The "no explicit degree" sentinel is ``order is None``, never a
+    particular value: ``order=1`` has to stay distinguishable from an
+    omitted ``order``, because for ``"loess"`` the linear local fit is a
+    real, different fit from its degree-2 default rather than a no-op.
     """
     if order is None:
         return {}
@@ -426,92 +416,65 @@ def _fit_chart_from_named_transform(
     kind: str,
     ci: float | None,
     line_kwargs: dict,
+    chart_x: Any,
     neutral_stroke: bool = False,
     metrics: bool = False,
 ) -> Chart:
-    """Build a ribbon(optional)+line(+metrics, optional) layered ``Chart``
-    reading a named fit-family transform's output via the registry
-    (spec §4.7/M6c).
+    """Build a layered ``Chart`` around a named fit-family transform.
 
-    Mirrors the ribbon+line shape ``desugar_smooth`` (``marks/statistical.py``)
-    builds for ``mark_smooth``, applied here for the ``logistic``/``glm``/
-    ``robust`` transforms that ``lmplot`` constructs directly rather than
-    through ``mark_smooth``'s own ``_PendingMark`` desugar. ``kind`` doubles
-    as the transform's own ``name=`` (both call sites below pass the same
-    string for both), so the layers' ``data_source`` can reference it without
-    a separate name parameter.
+    The layers are ``marks/_fit_layers.build_fit_layers``' -- the one
+    ribbon+line(+metrics) shape of the fit family, shared with
+    ``desugar_smooth`` so the CI band's opacity and the metrics offsets
+    cannot drift between the two paths. This function's own job is the chart:
+    the ``logistic``/``glm``/``robust`` transforms are constructed directly by
+    ``lmplot`` rather than through ``mark_smooth``'s ``_PendingMark`` desugar,
+    so the chart has to be assembled here.
 
-    Fixes the T9-found bug: the transform's real fitted-curve schema is
-    ``x, y, ci_lower, ci_upper`` (``FIT_OUTPUT_COLUMNS``, shared with
-    ``Smooth``), not ``fitted`` -- encoding against the stale column name
-    made every ``logistic``/``glm``/``robust`` ``lmplot`` call raise
-    ``unknown column 'fitted' referenced by an encoding``.
+    ``kind`` doubles as the transform's own ``name=`` (both call sites below
+    pass the same string for both), hence one parameter for the registry kind
+    and the layers' ``data_source``.
 
-    ``neutral_stroke`` (batch-D T13 round 2, gate widened rounds 3-4):
-    ``Logistic``/``Glm``/``Robust`` have no ``groupby``, so they always
-    produce one POOLED fit. When the caller has ANY channel that resolves to
-    ``color`` active on the sibling scatter layer -- ``hue=``, or any of
-    ``color=``/``fill=``/``stroke=`` (keyword or ``encode=`` dict form) --
-    (``lmplot``'s ``color_active``, resolved once via
-    ``ferrum.encoding._aliases.resolve_color_alias`` over the merged
-    effective encoding, so a future alias needs no change here) -- that
-    pooled fit must not visually impersonate one color level -- so the
-    ribbon's fill and the line's stroke are pinned to the ``"theme:label"``
-    sentinel,
-    the same internal token ``marks/composite.py``'s boxplot whisker/median
-    layers use to stay a neutral color under an unrelated ``color=``
-    encoding (`resolve_paint_color` in
-    ``crates/ferrum-core/src/render/draw.rs`` resolves it to the theme's
-    label color -- never a scale/palette lookup, so it can't collide with a
-    color level by coincidence the way the theme's default accent can). A
-    caller-supplied ``line_kwargs["stroke"]`` still wins (``setdefault``).
+    ``neutral_stroke``: ``Logistic``/``Glm``/``Robust`` have no ``groupby``,
+    so they always produce one POOLED fit. When any channel that resolves to
+    ``color`` is active on the sibling scatter layer -- ``hue=``, or any of
+    ``color=``/``fill=``/``stroke=`` in keyword or ``encode=`` dict form,
+    resolved once as ``lmplot``'s ``color_active`` through
+    ``ferrum.encoding._aliases.resolve_color_alias`` so a future alias needs
+    no change here -- that pooled fit must not visually impersonate one color
+    level, so its band and line take the neutral theme token instead. See
+    ``build_fit_layers``.
 
-    ``metrics`` appends the same ``"metrics"`` text layer ``desugar_smooth``
-    builds when ``show_metrics=True`` -- only meaningful when ``transform``
-    was itself built with its own ``inject_metrics=True`` (only ``Robust``
-    of the three dedicated fit transforms supports it; see ``lmplot``'s
-    ``metrics_applied`` computation).
+    ``metrics`` appends the corner-statistics text layer, only meaningful
+    when ``transform`` was itself built with ``inject_metrics=True`` (only
+    ``Robust`` of the three dedicated fit transforms supports it; see
+    ``lmplot``'s ``metrics_applied`` computation).
+
+    ``chart_x`` is the chart-level x channel the caller would have encoded.
+    The layers below read the transform's own output columns, so an explicit
+    ``scale=`` on that channel (``lmplot(logx=True)``) has to be propagated
+    onto them -- the step ``_resolve_pending_impl`` performs automatically for
+    a chart built through the desugar path. Doing it here, at construction,
+    is what keeps ``logx`` ONE mechanism: the alternative was a second
+    implementation in ``lmplot``, re-running the propagation by hand for
+    charts this function had left in a state the desugar pipeline never
+    blessed, and a third for whatever chart-level feature came next.
+    ``_propagate_layer_scale`` returns each layer unchanged when the channel
+    carries no explicit scale, so the ordinary case is a no-op rather than a
+    branch.
     """
-    cols = registry_output_columns(kind, ["x", "y", "ci_lower", "ci_upper"])
-    fit_layers: list = []
-    if ci is not None:
-        ribbon_kwargs: dict = {"opacity": 0.3}
-        if neutral_stroke:
-            ribbon_kwargs["fill"] = "theme:label"
-        fit_layers.append(
-            _Layer(
-                name="ribbon",
-                mark="ribbon",
-                encoding={"x": cols["x"], "y": cols["ci_lower"], "y2": cols["ci_upper"]},
-                mark_kwargs=ribbon_kwargs,
-                data_source=kind,
-            )
-        )
-    line_kwargs_resolved = dict(line_kwargs) if line_kwargs else {}
-    if neutral_stroke:
-        line_kwargs_resolved.setdefault("stroke", "theme:label")
-    fit_layers.append(
-        _Layer(
-            name="line",
-            mark="line",
-            encoding={"x": cols["x"], "y": cols["y"]},
-            mark_kwargs=line_kwargs_resolved or None,
-            data_source=kind,
-        )
-    )
-    if metrics:
-        fit_layers.append(
-            _Layer(
-                name="metrics",
-                mark="text",
-                encoding={"x": cols["x"], "y": "_metrics_y", "text": "_metrics_text"},
-                mark_kwargs={"align": "right", "dx": -4, "dy": 4},
-                data_source=kind,
-            )
-        )
     chart = Chart(data)._clone()
     chart._transforms = [transform]
-    chart._layers = fit_layers
+    chart._layers = [
+        _propagate_layer_scale({"x": chart_x}, layer)
+        for layer in build_fit_layers(
+            kind,
+            data_source=kind,
+            ci=ci,
+            line_kwargs=line_kwargs,
+            neutral_stroke=neutral_stroke,
+            metrics=metrics,
+        )
+    ]
     chart._mark = None
     return chart
 
@@ -553,15 +516,11 @@ def lmplot(
     Builds a layered chart with an optional scatter (``mark_point``) and a
     regression fit line, dispatching to the appropriate transform:
 
-    * ``"lm"`` -- ``mark_smooth(method="lm")`` (polynomial degree
-      controlled by ``order``).
-    * ``"loess"``, ``"quadratic"``, ``"cubic"``, ``"log"``, ``"sqrt"``,
-      ``"gam"`` -- ``mark_smooth(method=<method>)`` (batch-D T13: every
-      ``transform_registry("smooth")["methods"]`` spelling except "linear"
-      -- ``"lm"`` already covers it -- and "glm", reserved below). Every one
-      of these accepts an explicit ``order=`` (forwarded uniformly as
-      ``degree=``, see ``order`` below); a bare call (``order`` left at its
-      ``None`` default) uses each method's own default degree concept.
+    * Every ``mark_smooth``-routed method (see ``method`` below for the
+      list) -- ``mark_smooth(method=<method>)``. All of them accept an
+      explicit ``order=`` (forwarded uniformly as ``degree=``, see ``order``
+      below); a bare call (``order`` left at its ``None`` default) uses each
+      method's own default degree concept.
     * ``"logistic"`` -- ``Logistic`` transform + pooled fit line + CI band.
     * ``"glm"``      -- ``Glm`` transform + pooled fit line + CI band.
     * ``"robust"``   -- ``Robust`` transform + pooled fit line + CI band.
@@ -583,9 +542,8 @@ def lmplot(
     y : str
         Column name for the vertical (response) axis (required).
     hue : str or encoding, optional
-        Column name to map to color. For ``method`` values routed through
-        ``mark_smooth`` (``"lm"``, ``"loess"``, and the rest of
-        ``_SMOOTH_ROUTED_METHODS``), the fit is refit per hue level via
+        Column name to map to color. For every ``mark_smooth``-routed
+        ``method`` (see ``method`` below), the fit is refit per hue level via
         ``groupby``, so each level gets its own fit line and CI band in that
         level's scatter color. For ``"logistic"``, ``"glm"``, ``"robust"``
         (no ``groupby`` on those transforms), the scatter is colored per hue
@@ -605,10 +563,16 @@ def lmplot(
     row : str, optional
         Column name for faceting across rows.
     method : str, default "lm"
-        Fitting method. ``"lm"``, ``"loess"``, ``"quadratic"``, ``"cubic"``,
-        ``"log"``, ``"sqrt"``, ``"gam"`` route through ``mark_smooth``;
-        ``"logistic"``, ``"glm"``, ``"robust"`` route through their own
-        dedicated fit-family transform. The accepted set is
+        Fitting method. THE list of accepted values -- every other entry
+        below refers here rather than repeating it, and
+        ``tests/test_lmplot_valid_methods_registry_pin.py`` fails if this
+        enumeration and the derived ``_VALID_METHODS`` disagree, so a new
+        registry smooth method cannot land undocumented.
+
+        ``"lm"``, ``"loess"``, ``"quadratic"``, ``"cubic"``, ``"log"``,
+        ``"sqrt"``, ``"gam"`` route through ``mark_smooth``; ``"logistic"``,
+        ``"glm"``, ``"robust"`` route through their own dedicated fit-family
+        transform. The accepted set is derived, not hand-held:
         ``transform_registry("smooth")["methods"] - {"linear", "glm"}``
         plus ``{"logistic", "glm", "robust"}``.
     ci : int or None, default 95
@@ -619,10 +583,9 @@ def lmplot(
         own default degree concept" -- forwards nothing, so a bare call is
         unaffected by which method it lands on. Any explicit int, including
         ``1``, is forwarded to ``mark_smooth`` as ``degree=order``
-        uniformly for every ``method`` routed through ``mark_smooth``
-        (``"lm"``, ``"loess"``, ``"quadratic"``, ``"cubic"``, ``"log"``,
-        ``"sqrt"``, ``"gam"``) -- one forwarding rule, not a per-method
-        carve-out; see ``_smooth_degree_kwargs``. What a forwarded value
+        uniformly for every ``mark_smooth``-routed ``method`` -- one
+        forwarding rule, not a per-method carve-out; see
+        ``_smooth_degree_kwargs``. What a forwarded value
         means then depends on ``mark_smooth``'s own degree-acceptance matrix
         for that method:
 
@@ -661,30 +624,33 @@ def lmplot(
         range (min to max of ``x``). When ``False``, extends the fit line
         across the axis-domain extent (the data range padded 5% on each
         side) via the transform's ``x_range`` support (spec §4 WI-7) --
-        supported for every ``mark_smooth``-routed method (``"lm"``,
-        ``"loess"``, and the rest of ``_SMOOTH_ROUTED_METHODS``) and for
+        supported for every ``mark_smooth``-routed method and for
         ``method="robust"``. Not supported for ``method="logistic"`` or
         ``"glm"`` (neither transform accepts ``x_range``); passing
         ``truncate=False`` with either raises ``ValueError``.
-    x_bins : any, optional
-        Forwarded as ``x_bins`` to ``mark_smooth`` for binning the
-        x-axis before fitting (``method="lm"`` only).
-    x_estimator : any, optional
-        Forwarded as ``x_estimator`` to ``mark_smooth`` (``method="lm"``
-        only).
+    x_bins : int or None, optional
+        Aggregate the data into this many equal-width x bins before fitting,
+        so the fit runs on one point per bin. Forwarded to ``mark_smooth``
+        for every ``mark_smooth``-routed ``method``: the engine bins before
+        it dispatches on method, so binning is not method-specific. Ignored
+        for ``"logistic"``/``"glm"``/``"robust"``, whose transforms take no
+        binning parameters.
+    x_estimator : str or None, optional
+        The aggregate applied within each ``x_bins`` bin (``"mean"``,
+        ``"median"``, ``"sum"``, ``"min"``, ``"max"``; defaults to the
+        transform's own ``"mean"``). Forwarded on the same terms as
+        ``x_bins``, and only meaningful alongside it.
     x_jitter : float or None, optional
         When set, applies ``Jitter(axis="x", width=x_jitter)`` to the
         scatter layer.
     logx : bool, default False
         Apply a ``log`` scale to the x-axis on both scatter and fit layers.
     show_metrics : bool, default True
-        Schwabish SB-followup (2026-05-12): overlay a top-right corner
-        annotation with ``R^2`` / ``RMSE`` / ``MAE`` computed from the fit.
-        ``inject_metrics`` is a generic ``Smooth``/``Robust`` transform
-        kwarg (computed against the raw input regardless of fit shape), so
-        this applies to every ``mark_smooth``-routed method (``"lm"``,
-        ``"loess"``, ``"quadratic"``, ``"cubic"``, ``"log"``, ``"sqrt"``,
-        ``"gam"``) and to ``method="robust"``. Not supported for
+        Overlay a top-right corner annotation with ``R^2`` / ``RMSE`` /
+        ``MAE`` computed from the fit. ``inject_metrics`` is a generic
+        ``Smooth``/``Robust`` transform kwarg (computed against the raw
+        input regardless of fit shape), so this applies to every
+        ``mark_smooth``-routed method and to ``method="robust"``. Not supported for
         ``method="logistic"``/``"glm"`` (neither transform exposes
         ``inject_metrics``) -- skipped for those two regardless of this
         flag. Also skipped whenever ``hue`` is set, for every method
@@ -742,26 +708,7 @@ def lmplot(
     """
     validate_choice("lmplot", "method", method, _VALID_METHODS)
 
-    # Rust Smooth/Robust transforms require Float64 columns. Auto-cast
-    # integer columns to Float64, matching catplot's pattern (chart.py).
-    _INT_DTYPES = (
-        pl.Int8,
-        pl.Int16,
-        pl.Int32,
-        pl.Int64,
-        pl.UInt8,
-        pl.UInt16,
-        pl.UInt32,
-        pl.UInt64,
-    )
     data = to_polars(data)
-    casts = []
-    for fld in (x, y):
-        col_name = _field_name(fld)
-        if col_name in data.columns and data[col_name].dtype in _INT_DTYPES:
-            casts.append(pl.col(col_name).cast(pl.Float64))
-    if casts:
-        data = data.with_columns(casts)
 
     # Normalize CI: spec accepts ci=95 (percent) or ci=None.
     ci_frac = (ci / 100.0) if ci is not None else None
@@ -790,8 +737,8 @@ def lmplot(
     # accept no x_range at all (transform_registry confirms neither lists
     # it), so extending their fit line past the data range isn't possible
     # without a Rust-side transform change — truncate=False refuses for
-    # those two rather than silently clipping anyway (no silent parameter
-    # drop; batch-D T13 round-2 spec-review finding 3).
+    # those two rather than silently clipping anyway -- no silent parameter
+    # drop.
     # The x_range is resolved from the chart's x column min/max at Python
     # desugar time; the Rust transform uses it as the evaluation domain.
     # When truncate=True (default) x_range stays None → clips to observed data.
@@ -836,34 +783,33 @@ def lmplot(
     # chart; typing only the fit half would ask that one scale to be Continuous
     # and Nominal at once. See `nominal_color_channel` for the rule.
     hue_ch = nominal_color_channel(hue)
-    enc: dict = {"x": x, "y": y}
+
+    # `logx` is part of the x channel every layer is built with, not a
+    # post-hoc fixup applied to finished charts: resolving it once here means
+    # the scatter, the `mark_smooth`-routed fit and the dedicated-transform
+    # fit all take the same channel object. (It used to be two
+    # implementations at the bottom of this function, chosen on whether the
+    # fit chart happened to have `_layers` yet.)
+    x_enc = X(x, scale={"type": "log"}) if logx else x
+
+    enc: dict = {"x": x_enc, "y": y}
     if hue is not None:
         enc["color"] = hue_ch
     enc.update(encode_kwargs)
 
-    # batch-D T13 round-4 (`.sdd/task-13-python-quality-reviewer.md`
-    # cycle-3 finding 1): a pooled dedicated-fit-method (logistic/glm/
-    # robust) impersonating a color-level color reaches this chart through
-    # every channel the repo's own alias policy resolves onto `color` --
-    # not just the three spellings round 3 enumerated (`hue=`, `color=`,
-    # `encode={"color": ...}`). `ferrum.encoding._aliases._ENCODING_ALIASES`
-    # is the codebase's single table of which channels drive `color`
-    # (`fill` -- keep_target, `stroke` -- warn_drop); `fill=`/`stroke=`
-    # reach this chart the same two ways `color=` does (a bare keyword via
-    # `**encode_kwargs`, merged into `enc` above, or `encode={"fill": ...}`/
-    # `encode={"stroke": ...}`, a separate `encode=` dict `_finalize_chart`
-    # applies later). Round 3's `"color" in enc or "color" in (encode or
-    # {})` tested two literal keys and stayed blind to both alias doors --
-    # the same enumeration failure shape recurring a third time. Resolving
-    # through `resolve_color_alias` (the same alias table, already used
-    # read-only for exactly this "what would color resolve to" question by
-    # `composition.py`'s layer-color promotion) over the merged effective
-    # encoding -- `enc` (which already carries `hue`'s `enc["color"]`
-    # assignment and every `**encode_kwargs` channel) plus the separate
-    # `encode=` dict -- means a future alias added to that table is covered
-    # here automatically, with no enumeration to maintain or fall behind.
-    from ferrum.encoding._aliases import resolve_color_alias
-
+    # A pooled dedicated-fit method (logistic/glm/robust) can impersonate a
+    # color level through every channel the repo's own alias policy resolves
+    # onto `color`, not just the literal `color=` spelling:
+    # `ferrum.encoding._aliases._ENCODING_ALIASES` is the single table of
+    # which channels drive `color` (`fill` -- keep_target, `stroke` --
+    # warn_drop), and `hue=`/`color=`/`fill=`/`stroke=` each reach this chart
+    # two ways (a bare keyword via `**encode_kwargs`, merged into `enc`
+    # above, or the separate `encode=` dict `_finalize_chart` applies later).
+    # Resolving through `resolve_color_alias` over the merged effective
+    # encoding -- the same alias table, already read for exactly this "what
+    # would color resolve to" question by `composition.py`'s layer-color
+    # promotion -- covers a future alias automatically, with no enumeration
+    # here to fall behind.
     color_active = resolve_color_alias({**enc, **(encode or {})}) is not None
 
     # ---- Scatter layer (optional) --------------------------------------
@@ -881,77 +827,35 @@ def lmplot(
     # ---- Fit layer (per method) ----------------------------------------
     lkw = dict(line_kws) if line_kws else {}
 
-    # When hue is set and the method is Smooth-routed (lm, loess, and the
-    # rest of `_SMOOTH_ROUTED_METHODS`), use Smooth's groupby support to fit
-    # per-group smoothing in one pass. Only "lm" forwards `x_bins`/
-    # `x_estimator` -- "loess" and the widened batch-D T13 set (quadratic/
-    # cubic/log/sqrt/gam) don't accept binning the way "lm" does (see the
-    # non-hue branch below for why), so this generalizes "loess"'s existing
-    # shape rather than "lm"'s. `order` is forwarded as `degree=` via
-    # `_smooth_degree_kwargs` uniformly for every `_SMOOTH_ROUTED_METHODS`
-    # member -- see that helper's docstring for the one rule.
-    if hue is not None and method in _SMOOTH_ROUTED_METHODS:
-        hue_col = _field_name(hue)
-        if method == "lm":
-            fit = (
-                Chart(data)
-                .mark_smooth(
-                    method="lm",
-                    ci=ci_frac,
-                    x_bins=x_bins,
-                    x_estimator=x_estimator,
-                    groupby=hue_col,
-                    **_smooth_degree_kwargs(method, order, "lmplot"),
-                    **({"x_range": x_range} if x_range is not None else {}),
-                )
-                .encode(x=x, y=y, color=hue_ch)
-            )
-        else:
-            fit = (
-                Chart(data)
-                .mark_smooth(
-                    method=method,
-                    ci=ci_frac,
-                    groupby=hue_col,
-                    **_smooth_degree_kwargs(method, order, "lmplot"),
-                    **({"x_range": x_range} if x_range is not None else {}),
-                )
-                .encode(x=x, y=y, color=hue_ch)
-            )
-    elif method == "lm":
-        fit = (
-            Chart(data)
-            .mark_smooth(
-                method="lm",
-                ci=ci_frac,
-                x_bins=x_bins,
-                x_estimator=x_estimator,
-                show_metrics=metrics_applied,
-                **_smooth_degree_kwargs(method, order, "lmplot"),
-                **({"x_range": x_range} if x_range is not None else {}),
-            )
-            .encode(x=x, y=y)
+    # Every `_SMOOTH_ROUTED_METHODS` member takes ONE call: the parameters
+    # that vary do so with the *arguments*, not with the method.
+    #
+    # - `x_bins`/`x_estimator` forward for every method. The engine bins
+    #   method-agnostically -- `smooth.rs`'s `apply_one_group` aggregates the
+    #   x bins BEFORE it dispatches on method -- so the pre-R2 "only lm
+    #   forwards binning" carve-out dropped both parameters silently for nine
+    #   of lmplot's ten methods, which is the shape this function refuses
+    #   everywhere else (`truncate=False` and an inapplicable `order` both
+    #   raise). Same rule as `order`: forward what the caller passed and let
+    #   the engine decide.
+    # - `order` forwards as `degree=` via `_smooth_degree_kwargs`, whose
+    #   docstring holds the per-method acceptance matrix.
+    # - `groupby=hue` fits per hue level and colors each fit by it.
+    # - `show_metrics` needs no gate here: `metrics_applied` is already False
+    #   whenever `hue` is set (and for logistic/glm), computed above.
+    if method in _SMOOTH_ROUTED_METHODS:
+        fit = Chart(data).mark_smooth(
+            method=method,
+            ci=ci_frac,
+            x_bins=x_bins,
+            x_estimator=x_estimator,
+            show_metrics=metrics_applied,
+            **({"groupby": _field_name(hue)} if hue is not None else {}),
+            **_smooth_degree_kwargs(method, order, "lmplot"),
+            **({"x_range": x_range} if x_range is not None else {}),
         )
-    elif method in _SMOOTH_ROUTED_METHODS:
-        # "loess" and the batch-D T13 widened registry set (quadratic/cubic/
-        # log/sqrt/gam): `order=` forwards as `degree=` uniformly via
-        # `_smooth_degree_kwargs` (batch-D T13 round 3) -- for "quadratic"/
-        # "cubic" a matching value is a no-op and a conflicting one raises;
-        # for "loess" a forwarded value changes the local-fit degree (or
-        # raises outside {1, 2}); for "log"/"sqrt"/"gam" (no degree concept
-        # at all) any forwarded value raises. `show_metrics` forwards
-        # unconditionally (`metrics_applied` already gates on hue=None and
-        # excludes logistic/glm upstream).
         fit = (
-            Chart(data)
-            .mark_smooth(
-                method=method,
-                ci=ci_frac,
-                show_metrics=metrics_applied,
-                **_smooth_degree_kwargs(method, order, "lmplot"),
-                **({"x_range": x_range} if x_range is not None else {}),
-            )
-            .encode(x=x, y=y)
+            fit.encode(x=x_enc, y=y, color=hue_ch) if hue is not None else fit.encode(x=x_enc, y=y)
         )
     elif method == "logistic":
         fit = _fit_chart_from_named_transform(
@@ -960,6 +864,7 @@ def lmplot(
             kind="logistic",
             ci=ci_frac,
             line_kwargs=lkw,
+            chart_x=x_enc,
             neutral_stroke=color_active,
         )
     elif method == "glm":
@@ -969,6 +874,7 @@ def lmplot(
             kind="glm",
             ci=ci_frac,
             line_kwargs=lkw,
+            chart_x=x_enc,
             neutral_stroke=color_active,
         )
     elif method == "robust":
@@ -986,6 +892,7 @@ def lmplot(
             kind="robust",
             ci=ci_frac,
             line_kwargs=lkw,
+            chart_x=x_enc,
             neutral_stroke=color_active,
             metrics=metrics_applied,
         )
@@ -994,49 +901,13 @@ def lmplot(
 
     # `_DEDICATED_FIT_METHODS` (logistic/glm/robust) have no `groupby` on
     # their Rust transform, so exactly one pooled fit is produced regardless
-    # of whether a color encoding is active. This used to re-apply
-    # `color=hue_ch` to that pooled fit, painting it in the first color
-    # level's palette color beside a full legend -- a materially wrong
-    # statistical chart, drawn silently (the same failure class
-    # `nominal_color_channel` above names for a mistyped hue column;
-    # batch-D T13 round-2 spec-review finding). Round 2's fix gated the
-    # replacement on `hue is not None`, which closed only the `hue=` door --
-    # a bare `color=` keyword or `encode={"color": ...}` still reached this
-    # branch with an active color encoding and an unfixed impersonation
-    # (round-3 finding). The `neutral_stroke=color_active` argument passed
-    # to `_fit_chart_from_named_transform` above closes all six doors with
-    # one gate (see `color_active`'s definition above, which resolves through
-    # `resolve_color_alias` over {color, fill, stroke} channels x {keyword,
-    # encode={...}} doors): the pooled line and its CI ribbon render with
-    # the `"theme:label"` sentinel instead, the same internal token
-    # `marks/composite.py`'s boxplot whisker/median layers use to stay a
-    # neutral color under an unrelated `color=` encoding, so the pooled fit
-    # can never visually collide with a color-level palette color.
-    # Per-group fits for these three methods need `groupby` added to the
-    # `Logistic`/`Glm`/`Robust` Rust transforms -- tracked as a batch-close
-    # follow-up, not this task.
-
-    # logx → log scale on x.
-    if logx:
-        if fit._layers is not None:
-            # The dedicated-transform fit-family branches (logistic/glm/
-            # robust, batch-D T13) build `_layers` directly rather than
-            # through the `_PendingMark`/desugar path, so they never run
-            # `_resolve_pending_impl`'s scale-through-desugar propagation
-            # (`ferrum._desugar._propagate_layer_scale`, design spec §6 /
-            # GH #45 prerequisite) that lets a chart-level `.encode(x=...)`
-            # reach each layer's own x encoding. Apply the same propagation
-            # directly since these layers already exist.
-            from ferrum._desugar import _propagate_layer_scale
-
-            _log_chart_enc = {"x": X(x, scale={"type": "log"})}
-            new_fit = fit._clone()
-            new_fit._layers = [_propagate_layer_scale(_log_chart_enc, lyr) for lyr in fit._layers]
-            fit = new_fit
-        else:
-            fit = fit.encode(x=X(x, scale={"type": "log"}))
-        if scatter_layer is not None:
-            scatter_layer = scatter_layer.encode(x=X(x, scale={"type": "log"}))
+    # of whether a color encoding is active. `neutral_stroke=color_active`
+    # above is what stops that pooled fit from rendering in a color level's
+    # palette color beside a full legend -- a materially wrong statistical
+    # chart, drawn silently, and the same failure class `nominal_color_channel`
+    # names for a mistyped hue column. Per-group fits for these three methods
+    # need `groupby` added to the `Logistic`/`Glm`/`Robust` Rust transforms --
+    # tracked as a batch-close follow-up.
 
     # Compose scatter + fit. (When ``metrics_applied``, the fit chart
     # already carries the metrics-text layer reading the Smooth output.)
@@ -1045,16 +916,13 @@ def lmplot(
     else:
         out = _merge_layers(scatter_layer, fit, scatter_name="scatter", fit_name="fit")
 
-    # Apply line_kws to Smooth-routed methods (lm, loess, and the rest of
-    # `_SMOOTH_ROUTED_METHODS`) where line_kws can't be passed through
-    # mark_smooth directly. The dedicated fit-family methods (logistic, glm,
-    # robust) already applied lkw as the line layer's mark_kwargs inside
-    # `_fit_chart_from_named_transform`.
+    # Apply line_kws to the `mark_smooth`-routed methods, where it cannot be
+    # passed through `mark_smooth` directly (its mark kwargs reach every
+    # emitted layer, band included). The dedicated fit-family methods already
+    # applied it as the line layer's own mark_kwargs, in `build_fit_layers`.
     if lkw and method in _SMOOTH_ROUTED_METHODS and out._layers:
-        from dataclasses import replace as _dc_replace
-
         out._layers = [
-            _dc_replace(layer, mark_kwargs={**(layer.mark_kwargs or {}), **lkw})
+            replace(layer, mark_kwargs={**(layer.mark_kwargs or {}), **lkw})
             if getattr(layer, "mark", None) == "line"
             else layer
             for layer in out._layers
@@ -1172,25 +1040,6 @@ def residplot(
     if dropna:
         data = data.drop_nulls(subset=[x, y])
 
-    # Rust Smooth/Robust transforms require Float64 columns.  Auto-cast
-    # integer columns, matching lmplot and catplot.
-    _INT_DTYPES = (
-        pl.Int8,
-        pl.Int16,
-        pl.Int32,
-        pl.Int64,
-        pl.UInt8,
-        pl.UInt16,
-        pl.UInt32,
-        pl.UInt64,
-    )
-    casts = []
-    for fld in (x, y):
-        if fld in data.columns and data[fld].dtype in _INT_DTYPES:
-            casts.append(pl.col(fld).cast(pl.Float64))
-    if casts:
-        data = data.with_columns(casts)
-
     # The Rust Smooth/Robust transforms inject ``_ref_zero``,
     # ``_metrics_text``, and ``_metrics_y`` columns when the corresponding
     # ``inject_*`` kwargs are set — single source of truth for residual
@@ -1204,38 +1053,30 @@ def residplot(
     if label is not None:
         data = data.with_columns(pl.lit(str(label)).alias("_label"))
 
-    # Validate `order` via the same typed refusal `lmplot` uses for
-    # `_SMOOTH_ROUTED_METHODS` members (batch-D T13 round-4 micro-round:
-    # residplot's direct `degree=order` bypass needs the same negative-int
-    # guard that `lmplot` applies via `_smooth_degree_kwargs`). The Robust
-    # path doesn't use `order` so no validation is needed there.
+    # `residplot` passes `degree=order` straight to `Smooth` below, so it
+    # needs the same typed refusal `lmplot` gets from `_smooth_degree_kwargs`
+    # -- called for the raise, since the kwargs it builds are not the ones
+    # used here. The `Robust` path takes no `order`, so nothing to validate.
     if not robust:
         _smooth_degree_kwargs("lm", order, "residplot")
 
-    # `_resid_x` is a bare literal, not a registry lookup -- reverted after a
-    # quality-review mispin (spec §4.6 / M6a adjudication; same reasoning
-    # `desugar_boxen` states at `marks/composite.py:837-850` for its own
-    # dispositioned literals). `Smooth`/`Robust` in `output="residuals"` mode
-    # build this batch via `build_residuals_batch` (`smooth.rs:667`,
-    # `robust.rs:365`), which declares its own literal `x` column in Rust,
-    # uncoupled from `FIT_OUTPUT_COLUMNS` -- the `output="fitted"` schema
-    # `transform_registry("smooth"|"robust")` actually declares
-    # (`registry/mod.rs:165-167` scopes that constant to fitted mode
-    # explicitly, and both kinds route through the same shared closure, so
-    # looking up "smooth" vs "robust" here would not even diverge). Checking
-    # `_resid_x` against `FIT_OUTPUT_COLUMNS` would pass today -- both
-    # schemas happen to list `x` -- and stay silently green if the residuals
-    # batch's own `x` were ever renamed independently: a lookup against the
-    # wrong schema is worse than no lookup, since it would suppress the exact
-    # drift this pattern exists to catch, and would also raise here on an
-    # unrelated `FIT_OUTPUT_COLUMNS` rename that never touched this code
-    # path. Recorded as a dispositioned column reference in
+    # `_resid_x` is a bare literal, deliberately NOT a registry lookup
+    # (spec §4.6 / M6a). `Smooth`/`Robust` in `output="residuals"` mode build
+    # their batch via `build_residuals_batch` (`smooth.rs`, `robust.rs`),
+    # which declares its own `x` column uncoupled from `FIT_OUTPUT_COLUMNS`
+    # -- the `output="fitted"` schema `transform_registry("smooth"|"robust")`
+    # actually declares. Checking `_resid_x` against that schema would pass
+    # today (both happen to list `x`) and stay silently green if the
+    # residuals batch's own `x` were renamed independently, while raising
+    # here on an unrelated `FIT_OUTPUT_COLUMNS` rename that never touched
+    # this path: a lookup against the wrong schema is worse than no lookup.
+    # Recorded as a dispositioned column reference in
     # `tests/test_registry_output_column_consumers.py`'s `_DISPOSITIONED`
     # (site: `("src/ferrum/plots/regression.py", "residplot", "x")`), which
-    # fails if this code ever stops needing the disposition. The correct end
-    # state -- Rust declaring a residuals-mode output schema so this stops
-    # being invisible to the registry by construction -- is a Rust change,
-    # tracked as a batch-close follow-up, not this task's scope.
+    # fails if this code ever stops needing the disposition. The end state --
+    # Rust declaring a residuals-mode output schema, the way it now declares
+    # the secondary batches -- is a Rust change, tracked as a batch-close
+    # follow-up.
     _resid_x = "x"
 
     if robust:

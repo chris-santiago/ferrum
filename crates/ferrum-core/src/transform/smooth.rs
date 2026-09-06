@@ -101,6 +101,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
+use crate::transform::gam;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, KeyValue,
@@ -151,6 +152,16 @@ pub(crate) enum SmoothOutput {
 
 pub(crate) fn default_smooth_output() -> SmoothOutput { SmoothOutput::Fitted }
 
+/// LOESS span used when the caller does not ask for one. Non-loess methods
+/// store this same value as an inert placeholder (nothing reads it), which is
+/// why an EXPLICIT `bandwidth=` equal to it is tolerated on those methods
+/// while any other explicit value refuses — see `PySmooth::new`.
+pub(crate) const DEFAULT_LOESS_BANDWIDTH: f64 = 0.75;
+
+fn default_gam_k() -> usize { gam::DEFAULT_BASIS_DIM }
+
+fn is_default_gam_k(k: &usize) -> bool { *k == gam::DEFAULT_BASIS_DIM }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SmoothSpec {
@@ -161,6 +172,15 @@ pub(crate) struct SmoothSpec {
     pub ci: Option<f64>,
     pub bandwidth: f64,
     pub degree: u8,
+    /// Requested spline basis dimension for `method="gam"` — the parameter
+    /// mgcv calls `k`. Defaults to [`gam::DEFAULT_BASIS_DIM`]
+    /// and is omitted from the wire at that default, so every spec written
+    /// before this field existed round-trips byte-identically and every
+    /// non-gam method serializes exactly as it did. `gam::fit` clamps it into
+    /// `4..=distinct_x`; `PySmooth::new` refuses a value below 4 and refuses
+    /// the parameter entirely on a method that has no basis to size.
+    #[serde(default = "default_gam_k", skip_serializing_if = "is_default_gam_k")]
+    pub k: usize,
     pub n: usize,
     #[serde(default)]
     pub seed: u64,
@@ -354,7 +374,7 @@ fn apply_one_group(
         SmoothMethod::LogX => log_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::SqrtX => sqrt_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::Glm => glm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
-        SmoothMethod::Gam => gam_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
+        SmoothMethod::Gam => gam_fit(&xs, &ys, &grid, spec.ci, spec.n, spec.k, metrics),
     }
 }
 
@@ -367,8 +387,6 @@ fn apply_grouped(
     group_cols: &[String],
     is_partition: bool,
 ) -> PyResult<RecordBatch> {
-    use arrow::array::StringArray;
-
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
     let (group_order, group_idx_map, gtypes) =
         group_partition_multi(batch, group_cols, "stat_smooth")?;
@@ -397,88 +415,30 @@ fn apply_grouped(
         return apply_one_group(spec, batch, None, is_partition);
     }
 
-    // Build the concatenated output dynamically based on the WIDEST per-group
-    // output schema. Batch-D T9 round 2 (Required Fix 6, rust-quality
-    // verdict finding 5): a degenerate fit (rank-deficient/non-convergent
-    // design, zero-variance x, too few points) for one group's own slice
-    // emitted the CORE 4-column `[x, y, ci_lower, ci_upper]` batch even when
-    // `inject_metrics` was set — a divergence fixed in round 4 by routing all
-    // degenerate branches through `build_degenerate_smooth_batch`, which now
-    // emits null metrics columns when requested. Pinning the reference schema
-    // to `per_group_batches[0]` — and then indexing every OTHER group
-    // positionally against it — was wrong in both directions: a degenerate
-    // FIRST group silently dropped every later group's real metrics columns,
-    // and a degenerate LATER group under a non-degenerate first group panicked
-    // (`b.column(fi)` indexed past that group's own narrower schema — the live
-    // `PanicException` the verdict reproduced through `Chart.to_svg()` on
-    // grouped `glm`/`lm` + `inject_metrics`). The reference schema is now the
-    // WIDEST one across all groups, and each group's own batch is read by
-    // FIELD NAME rather than positional index — a name miss pads that group's
-    // rows with null/NaN instead of panicking. This is a belt-and-braces
-    // safety net now that the source divergence is closed.
-    let ref_schema = per_group_batches
-        .iter()
-        .map(|(_, b)| b.schema())
-        .max_by_key(|s| s.fields().len())
-        .expect("per_group_batches is non-empty (checked above)");
+    // Reconcile the per-group fit batches through the ONE shared algorithm
+    // (`transform::concat::concat_by_name`), which every schema-divergent
+    // stack in the crate now uses — see its module doc for why two copies
+    // existed and which one survived (R1 design finding 3).
+    //
+    // Why divergence is possible at all: a degenerate fit (rank-deficient/
+    // non-convergent design, zero-variance x, too few points) for one group's
+    // own slice used to emit the CORE 4-column `[x, y, ci_lower, ci_upper]`
+    // batch even when `inject_metrics` was set. Batch-D T9 round 4 closed that
+    // at the source by routing every degenerate branch through
+    // `build_degenerate_smooth_batch`, which emits null metrics columns when
+    // requested — so this is a belt-and-braces net, not a live path. The net
+    // still matters because the failure mode it replaced was a live
+    // `PanicException` through `Chart.to_svg()`: the original code pinned the
+    // reference schema to `per_group_batches[0]` and indexed every other group
+    // POSITIONALLY against it, so a degenerate first group silently dropped
+    // later groups' real metrics columns and a degenerate later group indexed
+    // past its own narrower schema.
     let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
-
-    // For each field in the reference (widest) output schema, collect values
-    // across all groups, looking each group's column up by NAME.
-    let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(ref_schema.fields().len() + group_cols.len());
-    let mut out_fields: Vec<Field> = Vec::with_capacity(ref_schema.fields().len() + group_cols.len());
-
-    for field in ref_schema.fields().iter() {
-        out_fields.push(field.as_ref().clone());
-        match field.data_type() {
-            DataType::Float64 => {
-                let mut vals = Vec::with_capacity(total_rows);
-                for (_, b) in &per_group_batches {
-                    match b.schema().index_of(field.name()) {
-                        Ok(fi) => {
-                            let arr = b.column(fi).as_any().downcast_ref::<Float64Array>()
-                                .ok_or_else(|| PyValueError::new_err("stat_smooth: expected Float64Array in grouped output"))?;
-                            for i in 0..arr.len() {
-                                if arr.is_null(i) { vals.push(f64::NAN); } else { vals.push(arr.value(i)); }
-                            }
-                        }
-                        Err(_) => {
-                            // This group's own fit hit a degenerate branch
-                            // that skipped this column (e.g. metrics);
-                            // pad with NaN so its rows still line up
-                            // positionally with every other field's column.
-                            for _ in 0..b.num_rows() { vals.push(f64::NAN); }
-                        }
-                    }
-                }
-                out_cols.push(Arc::new(Float64Array::from(vals)));
-            }
-            DataType::Utf8 => {
-                let mut vals: Vec<Option<String>> = Vec::with_capacity(total_rows);
-                for (_, b) in &per_group_batches {
-                    match b.schema().index_of(field.name()) {
-                        Ok(fi) => {
-                            let arr = b.column(fi).as_any().downcast_ref::<StringArray>()
-                                .ok_or_else(|| PyValueError::new_err("stat_smooth: expected StringArray in grouped output"))?;
-                            for i in 0..arr.len() {
-                                if arr.is_null(i) { vals.push(None); } else { vals.push(Some(arr.value(i).to_string())); }
-                            }
-                        }
-                        Err(_) => {
-                            for _ in 0..b.num_rows() { vals.push(None); }
-                        }
-                    }
-                }
-                out_cols.push(Arc::new(StringArray::from(
-                    vals.iter().map(|v| v.as_deref()).collect::<Vec<_>>()
-                )));
-            }
-            dt => {
-                return Err(PyValueError::new_err(format!(
-                    "stat_smooth: unsupported column dtype {:?} in grouped output", dt)));
-            }
-        }
-    }
+    let stacked = crate::transform::concat::concat_by_name(
+        "stat_smooth",
+        per_group_batches.iter().map(|(_, b)| b.clone()).collect(),
+    )
+    .map_err(PyValueError::new_err)?;
 
     // Append the group columns, preserving their ORIGINAL dtypes (XFORM-03): one
     // KeyValue tuple per output row, materialized via the shared group_key helper so
@@ -489,6 +449,9 @@ fn apply_grouped(
             group_keys_out.push(g.clone());
         }
     }
+    let mut out_fields: Vec<Field> =
+        stacked.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut out_cols: Vec<ArrayRef> = stacked.columns().to_vec();
     for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
         out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
         let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
@@ -636,7 +599,7 @@ fn build_predictor(spec: &SmoothSpec, xs_fit: &[f64], ys_fit: &[f64]) -> Box<dyn
                 Err(_) => Box::new(|_| f64::NAN),
             }
         }
-        SmoothMethod::Gam => match crate::transform::gam::fit(xs_fit, ys_fit) {
+        SmoothMethod::Gam => match gam::fit(xs_fit, ys_fit, spec.k) {
             Some(fit) => Box::new(move |x: f64| fit.predict(x)),
             None => Box::new(|_| f64::NAN),
         },
@@ -1102,14 +1065,16 @@ fn glm_fit(
 /// A fit `gam` cannot compute (fewer than 4 distinct x values, zero x
 /// variance, no λ leaving usable residual degrees of freedom) degrades to
 /// an all-NaN grid like every other degenerate branch in this file. `gam`
-/// adds no refusal of its own — it has no caller-supplied parameter that
-/// could make the design absurd, which is the only thing the polynomial
-/// path's whole-frame refusal exists to catch.
+/// adds no refusal of its own at *fit* time — its one caller-supplied
+/// parameter, `k`, is clamped down to the number of distinct x values before
+/// it reaches the design, so it cannot make the design absurd the way an
+/// over-large `degree` makes a Vandermonde design rank-deficient (an
+/// unusable `k` VALUE, `k < 4`, is refused at `PySmooth::new` instead).
 fn gam_fit(
-    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize,
+    xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize, k: usize,
     metrics: Option<(f64, f64, f64)>,
 ) -> PyResult<RecordBatch> {
-    let fit = match crate::transform::gam::fit(xs, ys) {
+    let fit = match gam::fit(xs, ys, k) {
         Some(f) => f,
         None => return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()),
     };
@@ -1428,9 +1393,14 @@ use crate::transform::core::TransformSpec;
 /// ci : float or None, default 0.95
 ///     Confidence level in (0, 1) for the confidence band. Set to
 ///     ``None`` to suppress the band.
-/// bandwidth : float, default 0.75
+/// bandwidth : float, optional
 ///     LOESS span in (0, 1]; fraction of data used in each local fit.
-///     Ignored for every other method.
+///     Defaults to ``0.75`` when omitted. Passing it with any other method
+///     raises, since no other fit path reads it — the one tolerance is an
+///     explicit ``bandwidth=0.75`` (the default value itself), accepted as a
+///     harmless no-op exactly as ``method="lm", degree=1`` is. To make a
+///     ``"gam"`` fit follow the data more closely, raise ``k``; for
+///     ``"lm"``/``"linear"``, raise ``degree``.
 /// degree : int, optional
 ///     For ``method="lm"``/``"linear"``: promotes the fit to a polynomial
 ///     of this degree (``Poly{degree}``) when ``>= 2``; ``1`` (or omitting
@@ -1445,7 +1415,18 @@ use crate::transform::core::TransformSpec;
 ///     ``degree`` with ``method="log"``/``"sqrt"``/``"glm"``/``"gam"``
 ///     raises, since those methods have no degree concept to apply it to
 ///     (``"gam"``'s spline degree is fixed at 3; its smoothness comes from
-///     the GCV-chosen penalty, not from a degree).
+///     the GCV-chosen penalty and from ``k``, not from a degree).
+/// k : int, optional
+///     For ``method="gam"``: the spline basis dimension (mgcv's ``k``),
+///     default ``10``. This is gam's smoothness knob — the penalty chooses
+///     how much of the basis to spend, so a larger ``k`` widens what the fit
+///     *can* follow rather than forcing it to wiggle. Raise it when a
+///     high-frequency signal is visibly under-smoothed at the default.
+///     Clamped down to the number of distinct x values (a basis cannot carry
+///     more segments than the data can place), so an over-large ``k`` is
+///     harmless rather than rank-deficient. Values below ``4`` raise (no
+///     smaller cubic basis exists), as does passing ``k`` with any method
+///     other than ``"gam"``.
 /// n : int, default 200
 ///     Number of grid points to evaluate. Must be > 0.
 /// seed : int, default 0
@@ -1477,13 +1458,14 @@ pub(crate) struct PySmooth(pub(crate) TransformSpec);
 #[pymethods]
 impl PySmooth {
     #[new]
-    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = 0.75, degree = None, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None))]
+    #[pyo3(signature = (x, y, *, method = "loess", ci = Some(0.95), bandwidth = None, degree = None, k = None, n = 200, seed = 0, x_bins = None, x_estimator = None, output = "fitted", inject_zero_ref = false, inject_metrics = false, groupby = None, name = None, x_range = None))]
     fn new(
         x: &str, y: &str,
         method: &str,
         ci: Option<f64>,
-        bandwidth: f64,
+        bandwidth: Option<f64>,
         degree: Option<u8>,
+        k: Option<usize>,
         n: usize,
         seed: u64,
         x_bins: Option<usize>,
@@ -1597,6 +1579,55 @@ impl PySmooth {
                  'quadratic', or 'cubic'"
             )));
         }
+        // R1 design finding 6: `bandwidth` used to be a plain `f64` with an
+        // inline `0.75` default, so an explicit value on a non-loess method
+        // was indistinguishable from the default and every fit path except
+        // LOESS silently ignored it — a user watching `method="gam"`
+        // under-smooth had one knob that refused (`degree`) and one that
+        // no-opped. `Option<f64>` makes explicit-vs-default distinguishable
+        // at this boundary (the `degree: Option<u8>` precedent above), and an
+        // explicit non-loess `bandwidth` now refuses in exactly the shape
+        // `degree` does.
+        //
+        // The one tolerance mirrors `degree`'s own: an explicit value that
+        // AGREES with the default is a harmless no-op, the same way
+        // `method="lm", degree=1` and `method="quadratic", degree=2` are
+        // accepted above. That is what keeps `desugar_smooth`'s unconditional
+        // `bandwidth=bandwidth` forward (`marks/statistical.py`, whose own
+        // default is this same 0.75) working on every method while a real
+        // `mark_smooth(method="lm", bandwidth=0.4)` raises.
+        if let Some(b) = bandwidth {
+            if !matches!(resolved_method, SmoothMethod::Loess) && b != DEFAULT_LOESS_BANDWIDTH {
+                return Err(PyValueError::new_err(format!(
+                    "Smooth: bandwidth={b} is not valid for method='{method}'; bandwidth is \
+                     the LOESS span and only applies to method='loess'. For a smoother \
+                     '{method}' fit, use the knob that method actually has (method='gam' \
+                     takes k=, the spline basis dimension; 'lm'/'linear' take degree=)"
+                )));
+            }
+        }
+        let bandwidth = bandwidth.unwrap_or(DEFAULT_LOESS_BANDWIDTH);
+        // `k` is gam's basis dimension and gam's alone, refused on every other
+        // method under the same asymmetry rule `degree` and `bandwidth` follow.
+        // No agrees-with-the-default tolerance here: nothing forwards `k`
+        // unconditionally, so `Some(_)` on a non-gam method is always a
+        // misunderstanding worth naming.
+        if let Some(kv) = k {
+            if !matches!(resolved_method, SmoothMethod::Gam) {
+                return Err(PyValueError::new_err(format!(
+                    "Smooth: k={kv} is not valid for method='{method}'; k is the spline \
+                     basis dimension and only applies to method='gam'"
+                )));
+            }
+            if kv < gam::MIN_BASIS_DIM {
+                return Err(PyValueError::new_err(format!(
+                    "Smooth: k={kv} is below the smallest cubic spline basis ({}); a basis \
+                     this small cannot span even one cubic segment",
+                    gam::MIN_BASIS_DIM,
+                )));
+            }
+        }
+        let k = k.unwrap_or(gam::DEFAULT_BASIS_DIM);
         if matches!(resolved_method, SmoothMethod::Loess) {
             if !bandwidth.is_finite() || bandwidth <= 0.0 || bandwidth > 1.0 {
                 return Err(PyValueError::new_err(
@@ -1657,7 +1688,7 @@ impl PySmooth {
         let groupby = parse_groupby_pyany(groupby)?;
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
-            method, ci, bandwidth, degree: degree_for_spec, n, seed,
+            method, ci, bandwidth, degree: degree_for_spec, k, n, seed,
             x_bins,
             x_estimator: x_estimator_parsed,
             output: output_parsed,
@@ -1672,8 +1703,8 @@ impl PySmooth {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Smooth(s) => format!(
-                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?})",
-                s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.n, s.seed,
+                "Smooth(x='{}', y='{}', method={:?}, ci={:?}, bandwidth={}, degree={}, k={}, n={}, seed={}, x_bins={:?}, x_estimator={:?}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?})",
+                s.x, s.y, s.method, s.ci, s.bandwidth, s.degree, s.k, s.n, s.seed,
                 s.x_bins, s.x_estimator, s.output,
                 s.inject_zero_ref, s.inject_metrics, s.groupby, s.name,
             ),
@@ -1744,7 +1775,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -1773,7 +1804,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: Some(0.95),
-            bandwidth: 0.0, degree: 1, n: 51, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 51, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -1802,7 +1833,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: Some(0.95),
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -1822,7 +1853,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -1841,7 +1872,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: Some(0.95),
-            bandwidth: 0.5, degree: 2, n: 100, seed: 42,
+            bandwidth: 0.5, degree: 2, k: gam::DEFAULT_BASIS_DIM, n: 100, seed: 42,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -1873,7 +1904,7 @@ mod tests {
             let spec = SmoothSpec {
                 x: "x".into(), y: "y".into(),
                 method: SmoothMethod::Loess, ci: None,
-                bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+                bandwidth: case.bandwidth, degree: case.degree, k: gam::DEFAULT_BASIS_DIM, n: case.n, seed: 0,
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 inject_zero_ref: false,
                 inject_metrics: false,
@@ -1910,7 +1941,7 @@ mod tests {
             let spec = SmoothSpec {
                 x: "x".into(), y: "y".into(),
                 method: SmoothMethod::Loess, ci: None,
-                bandwidth: case.bandwidth, degree: case.degree, n: case.n, seed: 0,
+                bandwidth: case.bandwidth, degree: case.degree, k: gam::DEFAULT_BASIS_DIM, n: case.n, seed: 0,
                 x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
                 inject_zero_ref: false,
                 inject_metrics: false,
@@ -1941,7 +1972,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Loess, ci: None,
             bandwidth: 0.1,  // bw * n = 0.3, floored to k = degree + 1 = 3
-            degree: 2, n: 5, seed: 0,
+            degree: 2, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -1975,7 +2006,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Loess,
             ci: Some(0.95),
-            bandwidth: 0.5, degree: 1, n: 20, seed: 42,
+            bandwidth: 0.5, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 20, seed: 42,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -2004,7 +2035,7 @@ mod tests {
         let spec = SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm, ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: Some(10),
             x_estimator: Some(crate::transform::aggregate::AggFn::Mean),
             output: SmoothOutput::Fitted,
@@ -2031,7 +2062,7 @@ mod tests {
         let spec = SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm, ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None,
             output: SmoothOutput::Residuals,
             inject_zero_ref: false,
@@ -2058,7 +2089,7 @@ mod tests {
         let spec = SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm, ci: Some(0.95),
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None,
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
@@ -2081,7 +2112,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -2113,7 +2144,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 7, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 7, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
@@ -2143,7 +2174,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: Some(0.95),
-            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 10, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2174,7 +2205,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 2 },
             ci: None,
-            bandwidth: 0.75, degree: 2, n: 5, seed: 0,
+            bandwidth: 0.75, degree: 2, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2203,7 +2234,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 3 },
             ci: None,
-            bandwidth: 0.75, degree: 1, n: 7, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 7, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2231,7 +2262,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::LogX,
             ci: None,
-            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 10, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2259,7 +2290,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::SqrtX,
             ci: None,
-            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 10, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2286,7 +2317,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::LogX,
             ci: None,
-            bandwidth: 0.75, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false,
             // Force x_range to include x=0 to probe the NaN path.
@@ -2322,7 +2353,7 @@ mod tests {
             let result = PySmooth::new(
                 "x", "y",
                 method,
-                None, 0.75, None, 200, 0,
+                None, None, None, None, 200, 0,
                 None, None, "fitted",
                 false, false, None, None, None,
             );
@@ -2354,7 +2385,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2395,7 +2426,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2466,7 +2497,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec!["g".into()],
@@ -2539,7 +2570,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 4, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 4, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec!["g".into()],
@@ -2599,7 +2630,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.0, degree: 1, n: 4, seed: 0,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 4, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec!["g".into()],
@@ -2623,7 +2654,7 @@ mod tests {
         pyo3::Python::initialize();
         let result = PySmooth::new(
             "x", "y", "polynomial",
-            None, 0.75, None, 200, 0,
+            None, None, None, None, 200, 0,
             None, None, "fitted",
             false, false, None, None, None,
         );
@@ -2652,7 +2683,7 @@ mod tests {
         let batch = xy_batch(xs, ys);
         let ctor = PySmooth::new(
             "x", "y", "glm",
-            None, 0.75, None, 10, 0,
+            None, None, None, None, 10, 0,
             None, None, "fitted",
             false, false, None, None, None,
         ).expect("PySmooth::new(method='glm') must be accepted by the string parser");
@@ -2680,7 +2711,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: None,
-            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 10, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2713,7 +2744,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
             ci: Some(0.95),
-            bandwidth: 0.75, degree: 1, n: 10, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 10, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2745,7 +2776,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 2 },
             ci: None,
-            bandwidth: 0.75, degree: 2, n: 15, seed: 0,
+            bandwidth: 0.75, degree: 2, k: gam::DEFAULT_BASIS_DIM, n: 15, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2754,11 +2785,11 @@ mod tests {
         // resolution — not just the shared enum — treats them identically.
         pyo3::Python::initialize();
         let lm_ctor = PySmooth::new(
-            "x", "y", "lm", None, 0.75, Some(2), 15, 0, None, None, "fitted",
+            "x", "y", "lm", None, None, Some(2), None, 15, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         let quad_ctor = PySmooth::new(
-            "x", "y", "quadratic", None, 0.75, None, 15, 0, None, None, "fitted",
+            "x", "y", "quadratic", None, None, None, None, 15, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         assert_eq!(lm_ctor.0, quad_ctor.0, "method='lm', degree=2 must construct the identical spec as method='quadratic'");
@@ -2780,11 +2811,11 @@ mod tests {
     fn test_lm_no_degree_and_degree_1_both_stay_linear() {
         pyo3::Python::initialize();
         let implicit = PySmooth::new(
-            "x", "y", "lm", None, 0.75, None, 200, 0, None, None, "fitted",
+            "x", "y", "lm", None, None, None, None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         let explicit_one = PySmooth::new(
-            "x", "y", "lm", None, 0.75, Some(1), 200, 0, None, None, "fitted",
+            "x", "y", "lm", None, None, Some(1), None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         assert_eq!(implicit.0, explicit_one.0, "degree omitted vs degree=1 must construct the same spec");
@@ -2800,7 +2831,7 @@ mod tests {
     fn test_lm_degree_zero_refuses() {
         pyo3::Python::initialize();
         let result = PySmooth::new(
-            "x", "y", "lm", None, 0.75, Some(0), 200, 0, None, None, "fitted",
+            "x", "y", "lm", None, None, Some(0), None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         );
         assert!(result.is_err(), "degree=0 with method='lm' must be refused");
@@ -2816,7 +2847,7 @@ mod tests {
         pyo3::Python::initialize();
         for method in &["log", "sqrt", "glm", "gam"] {
             let result = PySmooth::new(
-                "x", "y", method, None, 0.75, Some(2), 200, 0, None, None, "fitted",
+                "x", "y", method, None, None, Some(2), None, 200, 0, None, None, "fitted",
                 false, false, None, None, None,
             );
             assert!(result.is_err(), "degree=2 with method={method:?} must be refused");
@@ -2833,11 +2864,11 @@ mod tests {
     fn test_quadratic_matching_degree_is_accepted_noop() {
         pyo3::Python::initialize();
         let implicit = PySmooth::new(
-            "x", "y", "quadratic", None, 0.75, None, 200, 0, None, None, "fitted",
+            "x", "y", "quadratic", None, None, None, None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         let explicit = PySmooth::new(
-            "x", "y", "quadratic", None, 0.75, Some(2), 200, 0, None, None, "fitted",
+            "x", "y", "quadratic", None, None, Some(2), None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         assert_eq!(implicit.0, explicit.0, "degree omitted vs degree=2 must construct the same spec for 'quadratic'");
@@ -2849,11 +2880,11 @@ mod tests {
     fn test_cubic_matching_degree_is_accepted_noop() {
         pyo3::Python::initialize();
         let implicit = PySmooth::new(
-            "x", "y", "cubic", None, 0.75, None, 200, 0, None, None, "fitted",
+            "x", "y", "cubic", None, None, None, None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         let explicit = PySmooth::new(
-            "x", "y", "cubic", None, 0.75, Some(3), 200, 0, None, None, "fitted",
+            "x", "y", "cubic", None, None, Some(3), None, 200, 0, None, None, "fitted",
             false, false, None, None, None,
         ).unwrap();
         assert_eq!(implicit.0, explicit.0, "degree omitted vs degree=3 must construct the same spec for 'cubic'");
@@ -2868,7 +2899,7 @@ mod tests {
         pyo3::Python::initialize();
         for bad_degree in [1u8, 3, 5] {
             let result = PySmooth::new(
-                "x", "y", "quadratic", None, 0.75, Some(bad_degree), 200, 0, None, None, "fitted",
+                "x", "y", "quadratic", None, None, Some(bad_degree), None, 200, 0, None, None, "fitted",
                 false, false, None, None, None,
             );
             assert!(result.is_err(), "degree={bad_degree} conflicting with method='quadratic' must be refused");
@@ -2885,7 +2916,7 @@ mod tests {
         pyo3::Python::initialize();
         for bad_degree in [1u8, 2, 4] {
             let result = PySmooth::new(
-                "x", "y", "cubic", None, 0.75, Some(bad_degree), 200, 0, None, None, "fitted",
+                "x", "y", "cubic", None, None, Some(bad_degree), None, 200, 0, None, None, "fitted",
                 false, false, None, None, None,
             );
             assert!(result.is_err(), "degree={bad_degree} conflicting with method='cubic' must be refused");
@@ -2910,7 +2941,7 @@ mod tests {
         let batch = xy_batch(xs, ys);
         for degree in [20u8, 21, 25] {
             let ctor = PySmooth::new(
-                "x", "y", "lm", None, 0.75, Some(degree), 5, 0, None, None, "fitted",
+                "x", "y", "lm", None, None, Some(degree), None, 5, 0, None, None, "fitted",
                 false, false, None, None, None,
             ).unwrap();
             let spec = match ctor.0 {
@@ -2936,7 +2967,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 19 },
             ci: None,
-            bandwidth: 0.75, degree: 19, n: 5, seed: 0,
+            bandwidth: 0.75, degree: 19, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -2978,7 +3009,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 19 },
             ci: None,
-            bandwidth: 0.75, degree: 19, n: 5, seed: 0,
+            bandwidth: 0.75, degree: 19, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec!["g".into()], name: None,
@@ -3022,7 +3053,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Glm,
             ci: None,
-            bandwidth: 0.75, degree: 1, n: 5, seed: 0,
+            bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: true, x_range: None,
             groupby: vec!["g".into()], name: None,
@@ -3109,7 +3140,7 @@ mod tests {
         let spec = SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Lm,
-            ci: None, bandwidth: 0.75, degree: 1, n: 4, seed: 0,
+            ci: None, bandwidth: 0.75, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 4, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: true, x_range: None,
             groupby: vec![], name: None,
@@ -3158,7 +3189,7 @@ mod tests {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Poly { degree: 3 },
             ci: None,
-            bandwidth: 0.75, degree: 3, n: 5, seed: 0,
+            bandwidth: 0.75, degree: 3, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: true, x_range: None,
             groupby: vec!["g".into()], name: None,
@@ -3193,11 +3224,15 @@ mod tests {
     }
 
     fn gam_spec(ci: Option<f64>, n: usize) -> SmoothSpec {
+        gam_spec_with_k(ci, n, gam::DEFAULT_BASIS_DIM)
+    }
+
+    fn gam_spec_with_k(ci: Option<f64>, n: usize, k: usize) -> SmoothSpec {
         SmoothSpec {
             x: "x".into(), y: "y".into(),
             method: SmoothMethod::Gam,
             ci,
-            bandwidth: 0.75, degree: 1, n, seed: 0,
+            bandwidth: 0.75, degree: 1, k, n, seed: 0,
             x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
             inject_zero_ref: false, inject_metrics: false, x_range: None,
             groupby: vec![], name: None,
@@ -3224,7 +3259,7 @@ mod tests {
         let batch = xy_batch(xs, ys);
         let ctor = PySmooth::new(
             "x", "y", "gam",
-            None, 0.75, None, 25, 0,
+            None, None, None, None, 25, 0,
             None, None, "fitted",
             false, false, None, None, None,
         ).expect("PySmooth::new(method='gam') must be accepted by the string parser");
@@ -3500,5 +3535,213 @@ mod tests {
             .as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert!((0..out.num_rows()).all(|i| metrics_text.is_null(i)),
             "a degenerate gam fit must emit present-but-null metrics columns");
+    }
+
+    // ── R1 design finding 6 + (a): gam's smoothness knob, and the
+    //    refusal symmetry across degree / bandwidth / k ──────────────────
+
+    /// A high-frequency fixture the DEFAULT basis (k = 10) provably cannot
+    /// follow: six full sine periods over the x span. This is the measured
+    /// under-smoothing symptom `k=` exists to fix.
+    fn high_frequency_xy() -> (Vec<f64>, Vec<f64>) {
+        let xs: Vec<f64> = (0..120).map(|i| i as f64 * 0.1).collect();
+        let ys: Vec<f64> = xs.iter().map(|x| (x * 3.2).sin() * 4.0).collect();
+        (xs, ys)
+    }
+
+    /// The discriminator for exposing `k`: on data that turns more often
+    /// than a 10-function basis can follow, `k=20` tracks the signal and
+    /// `k=10` does not. Both halves are asserted — a `k` that were silently
+    /// ignored (the shape this parameter exists to avoid becoming) would
+    /// produce IDENTICAL output, which the final bit-comparison rejects.
+    #[test]
+    fn test_gam_k_20_follows_a_signal_the_default_basis_under_smooths() {
+        let (xs, ys) = high_frequency_xy();
+        let n_grid = xs.len();
+        let batch = xy_batch(xs, ys.clone());
+
+        let rmse = |fit: &[f64]| -> f64 {
+            (fit.iter().zip(ys.iter()).map(|(f, y)| (f - y) * (f - y)).sum::<f64>()
+                / ys.len() as f64).sqrt()
+        };
+        let default_out = apply(&gam_spec(None, n_grid), &batch).unwrap();
+        let wide_out = apply(&gam_spec_with_k(None, n_grid, 20), &batch).unwrap();
+        let default_y = col(&default_out, "y");
+        let wide_y = col(&wide_out, "y");
+
+        let y_range = ys.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            - ys.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        // The symptom: the default basis cannot resolve six periods.
+        assert!(
+            rmse(&default_y) > 0.15 * y_range,
+            "fixture is not under-smoothed at the default k — it cannot demonstrate \
+             what k= fixes; default RMSE {} vs y range {y_range}",
+            rmse(&default_y),
+        );
+        // The fix: a wider basis resolves it.
+        assert!(
+            rmse(&wide_y) * 3.0 < rmse(&default_y),
+            "k=20 RMSE {} should be far below k=10 RMSE {}",
+            rmse(&wide_y),
+            rmse(&default_y),
+        );
+        assert!(
+            turning_points(&wide_y) > turning_points(&default_y),
+            "k=20 must render more turning points ({}) than k=10 ({})",
+            turning_points(&wide_y),
+            turning_points(&default_y),
+        );
+        assert!(
+            default_y.iter().zip(wide_y.iter()).any(|(a, b)| a.to_bits() != b.to_bits()),
+            "k= must reach the fit — identical output would mean it is being ignored"
+        );
+    }
+
+    /// `k` is clamped UP to the smallest cubic basis and DOWN to the number
+    /// of distinct x values, so neither extreme can produce a degenerate
+    /// design — the reason gam adds no whole-frame refusal of its own.
+    #[test]
+    fn test_gam_k_is_clamped_to_the_distinct_x_count() {
+        let (xs, ys) = curved_xy();
+        let distinct = xs.len(); // the fixture's x values are all distinct
+        let batch = xy_batch(xs, ys);
+        let huge = apply(&gam_spec_with_k(None, 20, distinct * 4), &batch)
+            .expect("an over-large k must clamp, not fail");
+        let at_cap = apply(&gam_spec_with_k(None, 20, distinct), &batch).unwrap();
+        for (a, b) in col(&huge, "y").iter().zip(col(&at_cap, "y").iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "k above distinct_x must clamp to distinct_x");
+        }
+    }
+
+    /// `k` omitted must equal `k` at its documented default — the wire and
+    /// the fit both have to agree that 10 is the default, or a spec written
+    /// without `k` would render differently from one written with `k=10`.
+    #[test]
+    fn test_gam_default_k_matches_an_explicit_ten() {
+        pyo3::Python::initialize();
+        let make = |k: Option<usize>| {
+            let ctor = PySmooth::new(
+                "x", "y", "gam", None, None, None, k, 20, 0,
+                None, None, "fitted", false, false, None, None, None,
+            ).expect("gam spec must construct");
+            match ctor.0 {
+                TransformSpec::Smooth(s) => s,
+                _ => panic!("expected Smooth spec"),
+            }
+        };
+        assert_eq!(make(None), make(Some(gam::DEFAULT_BASIS_DIM)));
+        assert_eq!(make(None).k, gam::DEFAULT_BASIS_DIM);
+    }
+
+    /// `k` is omitted from the wire at its default, so every `Smooth` spec
+    /// written before this field existed round-trips byte-identically —
+    /// and a non-default `k` does ride the wire.
+    #[test]
+    fn test_gam_k_is_omitted_from_the_wire_at_its_default() {
+        let default_json = serde_json::to_string(&gam_spec(None, 20)).unwrap();
+        assert!(
+            !default_json.contains("\"k\""),
+            "a default k must not appear on the wire: {default_json}"
+        );
+        let wide_json = serde_json::to_string(&gam_spec_with_k(None, 20, 20)).unwrap();
+        assert!(wide_json.contains("\"k\":20"), "a non-default k must ride the wire: {wide_json}");
+        let round_tripped: SmoothSpec = serde_json::from_str(&default_json).unwrap();
+        assert_eq!(round_tripped, gam_spec(None, 20));
+    }
+
+    /// The asymmetry finding, closed on gam's side: `k` is refused on every
+    /// method that has no spline basis to size, exactly as `degree` is
+    /// refused on every method that has no degree.
+    #[test]
+    fn test_k_on_a_non_gam_method_refuses() {
+        pyo3::Python::initialize();
+        for method in ["lm", "linear", "loess", "quadratic", "cubic", "log", "sqrt", "glm"] {
+            let result = PySmooth::new(
+                "x", "y", method, None, None, None, Some(12), 200, 0,
+                None, None, "fitted", false, false, None, None, None,
+            );
+            assert!(result.is_err(), "k=12 with method={method:?} must be refused");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains('k') && msg.contains(method),
+                "error should name k and the method for {method:?}: {msg}"
+            );
+        }
+    }
+
+    /// A `k` below the smallest cubic basis is a value error, not something
+    /// to silently clamp — clamping it would render a basis the caller did
+    /// not ask for with no diagnostic.
+    #[test]
+    fn test_k_below_the_minimum_basis_refuses() {
+        pyo3::Python::initialize();
+        for bad_k in [0usize, 1, 2, 3] {
+            let result = PySmooth::new(
+                "x", "y", "gam", None, None, None, Some(bad_k), 200, 0,
+                None, None, "fitted", false, false, None, None, None,
+            );
+            assert!(result.is_err(), "k={bad_k} must be refused");
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains('k'), "error should mention k for k={bad_k}: {msg}");
+        }
+        assert!(
+            PySmooth::new(
+                "x", "y", "gam", None, None, None, Some(gam::MIN_BASIS_DIM), 200, 0,
+                None, None, "fitted", false, false, None, None, None,
+            ).is_ok(),
+            "k at exactly the minimum basis dimension must be accepted"
+        );
+    }
+
+    /// The other half of design finding 6: an explicit non-default
+    /// `bandwidth` on a method that never reads it now refuses instead of
+    /// silently no-opping, mirroring `degree`'s policy.
+    #[test]
+    fn test_non_default_bandwidth_on_a_non_loess_method_refuses() {
+        pyo3::Python::initialize();
+        for method in ["lm", "linear", "quadratic", "cubic", "log", "sqrt", "glm", "gam"] {
+            let result = PySmooth::new(
+                "x", "y", method, None, Some(0.4), None, None, 200, 0,
+                None, None, "fitted", false, false, None, None, None,
+            );
+            assert!(result.is_err(), "bandwidth=0.4 with method={method:?} must be refused");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("bandwidth") && msg.contains(method),
+                "error should name bandwidth and the method for {method:?}: {msg}"
+            );
+        }
+        assert!(
+            PySmooth::new(
+                "x", "y", "loess", None, Some(0.4), None, None, 200, 0,
+                None, None, "fitted", false, false, None, None, None,
+            ).is_ok(),
+            "loess is the method bandwidth belongs to"
+        );
+    }
+
+    /// The one tolerance, matching `degree`'s: an explicit value that
+    /// AGREES with the default is a harmless no-op on any method. This is
+    /// what keeps `desugar_smooth`'s unconditional `bandwidth=0.75` forward
+    /// working, and it must construct the identical spec as omitting it.
+    #[test]
+    fn test_explicit_default_bandwidth_is_accepted_on_every_method() {
+        pyo3::Python::initialize();
+        let make = |method: &str, bandwidth: Option<f64>| {
+            PySmooth::new(
+                "x", "y", method, None, bandwidth, None, None, 200, 0,
+                None, None, "fitted", false, false, None, None, None,
+            )
+        };
+        for method in ["lm", "linear", "loess", "quadratic", "cubic", "log", "sqrt", "glm", "gam"] {
+            let explicit = make(method, Some(DEFAULT_LOESS_BANDWIDTH))
+                .unwrap_or_else(|e| panic!("explicit default bandwidth rejected for {method:?}: {e}"));
+            let omitted = make(method, None).unwrap();
+            assert_eq!(
+                explicit.0, omitted.0,
+                "bandwidth omitted vs bandwidth={DEFAULT_LOESS_BANDWIDTH} must construct the \
+                 same spec for method={method:?}"
+            );
+        }
     }
 }

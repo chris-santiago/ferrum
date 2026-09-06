@@ -304,6 +304,35 @@ fn build_primary_batch(rows: &[DepthRow]) -> PyResult<RecordBatch> {
         .map_err(|e| PyValueError::new_err(format!("stat_letter_value: {e}")))
 }
 
+/// The outlier batch's key under default construction; a spec `name` prefixes
+/// it as `"{name}_outliers"`.
+pub(crate) const OUTLIERS_KEY: &str = "outliers";
+
+/// The outlier batch's column schema — read by [`secondary_outputs`]'s schema
+/// builder and by `registry::entry_for_kind("letter_value")` (R1 design
+/// finding (d)).
+pub(crate) const OUTLIERS_COLUMNS: &[(&str, DataType)] = &[
+    ("group", DataType::Utf8),
+    ("value", DataType::Float64),
+    ("is_outlier", DataType::Boolean),
+];
+
+/// Every per-depth band batch's column schema. `depth` itself is implicit in
+/// the output's key, so it is not a column here.
+pub(crate) const DEPTH_COLUMNS: &[(&str, DataType)] = &[
+    ("group", DataType::Utf8),
+    ("lower", DataType::Float64),
+    ("upper", DataType::Float64),
+    ("level", DataType::Utf8),
+];
+
+/// The key of the depth-`k` band batch under default construction; a spec
+/// `name` prefixes it as `"{name}_depth_{k}"`. One key per `k` in
+/// `1..=K_MAX_NAMED` is always published, empty when that depth has no rows.
+pub(crate) fn depth_key(k: usize) -> String {
+    format!("depth_{k}")
+}
+
 /// Compute the secondary named outputs: outliers + depth_1..depth_8.
 pub(crate) fn secondary_outputs(
     spec: &LetterValueSpec,
@@ -352,11 +381,12 @@ pub(crate) fn secondary_outputs(
         o_vals.push(*v);
         o_flags.push(is_outlier);
     }
-    let outliers_schema = Arc::new(Schema::new(vec![
-        Field::new("group", DataType::Utf8, true),
-        Field::new("value", DataType::Float64, false),
-        Field::new("is_outlier", DataType::Boolean, false),
-    ]));
+    let outliers_schema = Arc::new(Schema::new(
+        OUTLIERS_COLUMNS
+            .iter()
+            .map(|(name, dt)| Field::new(*name, dt.clone(), *name == "group"))
+            .collect::<Vec<_>>(),
+    ));
     let outliers_batch = RecordBatch::try_new(
         outliers_schema,
         vec![
@@ -369,12 +399,12 @@ pub(crate) fn secondary_outputs(
     // ---- per-depth outputs (depth_1..depth_8) ----
     // Each depth_K output is the primary rows filtered to depth==K, projecting only
     // [group, lower, upper, level] (no depth column — implicit in the output name).
-    let depth_schema = Arc::new(Schema::new(vec![
-        Field::new("group", DataType::Utf8, true),
-        Field::new("lower", DataType::Float64, false),
-        Field::new("upper", DataType::Float64, false),
-        Field::new("level", DataType::Utf8, false),
-    ]));
+    let depth_schema = Arc::new(Schema::new(
+        DEPTH_COLUMNS
+            .iter()
+            .map(|(name, dt)| Field::new(*name, dt.clone(), *name == "group"))
+            .collect::<Vec<_>>(),
+    ));
     let level_col = primary_batch.column(4).as_any().downcast_ref::<StringArray>()
         .ok_or_else(|| PyValueError::new_err("stat_letter_value: expected StringArray for 'level' column"))?;
     let mut by_depth: BTreeMap<i32, (Vec<Option<String>>, Vec<f64>, Vec<f64>, Vec<String>)> = BTreeMap::new();
@@ -395,8 +425,8 @@ pub(crate) fn secondary_outputs(
             (format!("{s}_outliers"), fmt)
         }
         None => {
-            let fmt: Box<dyn Fn(usize) -> String> = Box::new(|k: usize| format!("depth_{k}"));
-            ("outliers".to_string(), fmt)
+            let fmt: Box<dyn Fn(usize) -> String> = Box::new(depth_key);
+            (OUTLIERS_KEY.to_string(), fmt)
         }
     };
 

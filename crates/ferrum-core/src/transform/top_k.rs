@@ -39,6 +39,12 @@ pub(crate) struct TopKSpec {
     pub name: Option<String>,
 }
 
+/// The single source of truth for `TopK`'s free-string `op` vocabulary.
+/// Read by [`compute_agg`] (the enforcement site), its error message, and
+/// `registry::entry_for_kind("top_k")`'s `methods` list — R1 design finding
+/// 1, mirroring the `smooth::METHODS` precedent.
+pub(crate) const OPS: &[&str] = &["sum", "mean", "count", "min", "max"];
+
 fn default_op() -> String {
     "sum".into()
 }
@@ -184,16 +190,16 @@ fn apply_ungrouped(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatch
                             if v.is_nan() { None } else { Some(v) }
                         })
                         .collect();
-                    compute_agg(&col_vals, &spec.op)
+                    compute_agg(&col_vals, &spec.op)?
                 }
                 None => {
                     // Non-numeric column: fall back to count.
                     rows.len() as f64
                 }
             };
-            (key.clone(), agg_val)
+            Ok((key.clone(), agg_val))
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     // Sort by aggregate.
     if spec.sort == "ascending" {
@@ -288,16 +294,16 @@ fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) ->
                             if v.is_nan() { None } else { Some(v) }
                         })
                         .collect();
-                    compute_agg(&col_vals, &spec.op)
+                    compute_agg(&col_vals, &spec.op)?
                 }
                 None => {
                     // Non-numeric field: fall back to count.
                     rows.len() as f64
                 }
             };
-            (g.clone(), agg_val)
+            Ok((g.clone(), agg_val))
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
 
     // Sort by aggregate.
     if spec.sort == "ascending" {
@@ -330,18 +336,31 @@ fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) ->
         .map_err(|e| PyValueError::new_err(format!("data_top_k: {e}")))
 }
 
-fn compute_agg(vals: &[f64], op: &str) -> f64 {
+/// Rank one group under `op`.
+///
+/// R1 design finding 1: the unknown-`op` arm used to fall back to `sum`
+/// silently — a typo'd `op` returned a different top-k with no diagnostic,
+/// and the silent fallback left this declared vocabulary with no refusal
+/// site to guard. It now refuses, which is what
+/// `top_k_methods_accepted_and_bogus_op_rejected` (`registry/tests.rs`) holds
+/// the registry entry to [`OPS`] with.
+fn compute_agg(vals: &[f64], op: &str) -> PyResult<f64> {
     if vals.is_empty() {
-        return f64::NEG_INFINITY;
+        return Ok(f64::NEG_INFINITY);
     }
-    match op {
+    Ok(match op {
         "sum" => vals.iter().sum(),
         "mean" => vals.iter().sum::<f64>() / vals.len() as f64,
         "count" => vals.len() as f64,
         "min" => vals.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
         "max" => vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)),
-        _ => vals.iter().sum(),
-    }
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "data_top_k: unknown op '{other}'; expected {}",
+                OPS.join("|"),
+            )))
+        }
+    })
 }
 
 // ─── PyO3 wrapper ──────────────────────────────────────────────────────────
@@ -585,8 +604,8 @@ mod tests {
     #[test]
     fn compute_agg_empty_group_uses_neg_infinity_sentinel() {
         let empty: [f64; 0] = [];
-        assert_eq!(compute_agg(&empty, "sum"), f64::NEG_INFINITY);
-        assert_eq!(compute_agg(&empty, "max"), f64::NEG_INFINITY);
+        assert_eq!(compute_agg(&empty, "sum").unwrap(), f64::NEG_INFINITY);
+        assert_eq!(compute_agg(&empty, "max").unwrap(), f64::NEG_INFINITY);
 
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
         let batch = RecordBatch::try_new(
