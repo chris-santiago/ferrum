@@ -11,6 +11,20 @@ use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 
+/// Rug tick length policy (spec §6 item 8): `band_size` set ⇒ scale by the
+/// caller-supplied cross-axis extent (panel width for a y-rug, panel height
+/// for an x-rug — the dimension perpendicular to the rug's own data axis);
+/// unset ⇒ the historic fixed length. This is the ONLY place that decision
+/// lives — both rug call sites route through it so "unset rug is
+/// deliberately NOT the ordinal branches' 0.6 default" cannot drift between
+/// two copies.
+fn rug_tick_len(ctx: &DrawCtx, cross_extent: f64) -> f64 {
+    match ctx.mark_style.misc.band_size {
+        Some(bs) => bs * cross_extent,
+        None => ctx.theme.sizes.tick_size * 2.0,
+    }
+}
+
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{MarkBuildResult, to_scene_stroke, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
@@ -121,7 +135,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }
 
             // Quantitative y only → y-rug: horizontal ticks at left axis edge.
-            let tick_len = ctx.theme.sizes.tick_size * 2.0;
+            // This branch is reached only when x is entirely unencoded
+            // (`xf_opt.is_none()`, checked above), so it is unconditionally
+            // the true rug shape — safe to scale by `band_size` via
+            // `rug_tick_len` (cross extent = panel width, since these
+            // horizontal ticks run perpendicular to the y data axis).
+            let tick_len = rug_tick_len(ctx, panel.w);
             let ys = match col_as_f64(ctx.batch, yf) {
                 Ok(v) => v,
                 Err(_) => return empty(),
@@ -328,7 +347,44 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     }
 
     // Quantitative x → rug-style vertical tick at panel baseline.
-    let tick_len = ctx.theme.sizes.tick_size * 2.0;
+    //
+    // This is ALSO the fallthrough for any tick whose x resolves to a
+    // quantitative scale even when y is separately encoded — e.g. a
+    // composite tick layer (boxplot cap/median, errorbar cap) whose
+    // "categorical" grouping column happens to resolve to a quantitative
+    // scale (numeric category) instead of ordinal. That numeric-category
+    // dispatch is a pre-existing sibling defect (tracked separately, not
+    // this task's scope) and this fix must not amplify it: those composite
+    // layers set `band_size` on themselves unconditionally, so scaling by
+    // `band_size` here would turn their small fixed-length caps into
+    // panel-height bars on charts where the caller passed no `band_size` at
+    // all. Only the TRUE rug shape — no y field encoded whatsoever — may
+    // have `band_size` scale its length; a tick that reaches here WITH an
+    // encoded y keeps the exact pre-fix fixed length unconditionally.
+    //
+    // `y_field(ctx, spec)` reads `ctx.spec.encoding.y`, which — for a
+    // layered tick — is `build_panel_mark_batches`'s DrawCtx-local
+    // `layer_spec_encoding`, not the raw chart/layer merge. That function's
+    // own-span-axis normalization (`scene_build.rs`, extended to
+    // `Mark::Tick` in the batch-E task-3 review-gate cycle 3) clears this
+    // channel back to `None` whenever the layer declared only `x` itself and
+    // the chart's own `y` was purely inherited via `Encoding::inherit_from`.
+    // So this check is a property of what the layer ACTUALLY DECLARED, not
+    // of the assembly path that built it: a bare rug layered under a sibling
+    // that supplies `y` (`fm.layer(scatter, mark_tick(band_size=...)
+    // .encode(x=...))`) sees `None` here in both the static composite tree
+    // AND the interactive merged-flat chart, because both routes call
+    // `build_panel_mark_batches`, and a composite tick layer that declares
+    // its OWN `y` (boxplot/errorbar) keeps seeing `Some` in both, for the
+    // same reason. A standalone (non-layered) `mark_tick()` chart has no
+    // inheritance step at all, so its `encoding.y` is trivially its own
+    // declaration already.
+    let is_true_rug = y_field(ctx, spec).is_none();
+    let tick_len = if is_true_rug {
+        rug_tick_len(ctx, panel.h)
+    } else {
+        ctx.theme.sizes.tick_size * 2.0
+    };
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
     let baseline_y = panel.y + panel.h;
     let mut acc = MarkNodes::with_capacity(xs.len());
@@ -345,7 +401,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             style: row_stroke(i),
         }, i);
     }
-    let _ = y_field(ctx, spec);
 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
@@ -1197,6 +1252,229 @@ mod tests {
                  input (tick_full_raw = x*0.6) must be bit-identical to old clamp_width \
                  input (tick_half_raw*2.0 = (x*0.3)*2.0)"
             );
+        }
+    }
+
+    // ── Rug band_size (F-L02-05, spec §6 item 8) ─────────────────────────────
+    //
+    // Both quantitative-only rug branches (x-rug, y-rug) previously hardcoded
+    // `tick_size * 2.0` regardless of `band_size`. Now: set ⇒ tick length =
+    // `band_size * panel cross-axis extent` (height for x-rug, width for
+    // y-rug, since the rug's tick runs perpendicular to its own data axis);
+    // unset ⇒ unchanged fixed length — deliberately NOT the ordinal
+    // branches' 0.6 default, so an unset rug never becomes a barcode.
+
+    fn quant_x_rug_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        }
+    }
+
+    fn quant_y_rug_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        }
+    }
+
+    fn single_col_batch(name: &str, values: Vec<f64>) -> arrow::record_batch::RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Float64, false)]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    #[test]
+    fn tick_quant_x_rug_band_size_scales_by_cross_axis_extent() {
+        // Cross-axis extent for an x-rug is panel HEIGHT (h) — the ticks are
+        // vertical, running perpendicular to the x data axis. panel.h = 200,
+        // band_size = 0.5 ⇒ tick length = 100.0.
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = quant_x_rug_spec();
+        let batch = single_col_batch("x", vec![10.0, 50.0]);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 200.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { band_size: Some(0.5), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
+        }).collect();
+        assert_eq!(lengths.len(), 2, "expected 2 x-rug ticks");
+        for len in lengths {
+            assert!((len - 100.0).abs() < 1e-9, "band_size=0.5 x-rug tick length must be 0.5*panel.h=100.0, got {len}");
+        }
+    }
+
+    #[test]
+    fn tick_quant_y_rug_band_size_scales_by_cross_axis_extent() {
+        // Cross-axis extent for a y-rug is panel WIDTH (w) — the ticks are
+        // horizontal, running perpendicular to the y data axis. panel.w =
+        // 300, band_size = 0.4 ⇒ tick length = 120.0.
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = quant_y_rug_spec();
+        let batch = single_col_batch("y", vec![10.0, 50.0]);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { band_size: Some(0.4), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
+        }).collect();
+        assert_eq!(lengths.len(), 2, "expected 2 y-rug ticks");
+        for len in lengths {
+            assert!((len - 120.0).abs() < 1e-9, "band_size=0.4 y-rug tick length must be 0.4*panel.w=120.0, got {len}");
+        }
+    }
+
+    #[test]
+    fn tick_quant_x_rug_unset_band_size_is_byte_identical_to_fixed_tick_size() {
+        // Unset band_size must reproduce today's exact fixed length
+        // (theme.sizes.tick_size * 2.0), bit-for-bit — NOT the ordinal
+        // branches' 0.6-of-band default.
+        let spec = quant_x_rug_spec();
+        let batch = single_col_batch("x", vec![10.0, 50.0]);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 200.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+        let expected = theme.sizes.tick_size * 2.0;
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
+        }).collect();
+        assert_eq!(lengths.len(), 2);
+        for len in lengths {
+            assert_eq!(len.to_bits(), expected.to_bits(),
+                "unset band_size must keep the x-rug tick bit-identical to theme.sizes.tick_size*2.0");
+        }
+    }
+
+    #[test]
+    fn tick_quant_y_rug_unset_band_size_is_byte_identical_to_fixed_tick_size() {
+        // y-rug twin of the above.
+        let spec = quant_y_rug_spec();
+        let batch = single_col_batch("y", vec![10.0, 50.0]);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+        let expected = theme.sizes.tick_size * 2.0;
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
+        }).collect();
+        assert_eq!(lengths.len(), 2);
+        for len in lengths {
+            assert_eq!(len.to_bits(), expected.to_bits(),
+                "unset band_size must keep the y-rug tick bit-identical to theme.sizes.tick_size*2.0");
+        }
+    }
+
+    fn quant_x_and_y_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        }
+    }
+
+    /// Quality/spec review gate (cycle 2, restated in cycle 3 per the
+    /// quality reviewer's Required Fix 3): a tick spec that declares BOTH x
+    /// and y AS ITS OWN encoding — no `layers`, so there is no
+    /// chart/layer-inheritance step and `y` cannot be anything other than
+    /// this tick's own declaration — falls through to the x-rug arm. This is
+    /// exactly the shape a composite tick layer (boxplot median/caps,
+    /// errorbar caps) has: `desugar_boxplot`/`desugar_errorbar` set the
+    /// tick's `x` AND `y` explicitly on the layer itself and set `band_size`
+    /// on themselves unconditionally. If this arm scaled length by
+    /// `band_size` whenever it's set, a `mark_boxplot().encode(x="cyl",
+    /// y="mpg")` call with no `band_size` passed by the user would jump its
+    /// cap/median ticks from a fixed 8px stub to ~243px (`0.6 * panel.h`) —
+    /// reproduced by both reviewers pre-cycle-2-fix.
+    ///
+    /// Cycle 3 distinguishes this OWN-both-channels shape from the sibling
+    /// case a layered BARE rug can fall into: `fm.layer(scatter,
+    /// mark_tick(band_size=...).encode(x=...))`'s tick layer declares only
+    /// `x` itself, but `Encoding::inherit_from` fills its merged `y` from
+    /// the scatter sibling in the interactive flat-chart assembly. That case
+    /// is NOT this one — see `tick_layer_declaring_only_x_honors_band_size_
+    /// under_inherited_y` in `scene_build.rs`'s test module, which pins that
+    /// a layer's OWN `x`-only declaration still triggers rug scaling even
+    /// though the merged encoding it lands in carries a `y`. The
+    /// numeric-category-resolves-to-quantitative dispatch that routes real
+    /// composite tick layers here is a pre-existing sibling defect, out of
+    /// this task's scope; this test pins that the rug fix does not amplify
+    /// it: a tick that itself declares y must ignore `band_size` entirely
+    /// and keep the exact pre-fix fixed length, bit-for-bit.
+    #[test]
+    fn tick_own_x_and_own_y_with_band_size_set_keeps_fixed_length_unscaled() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = quant_x_and_y_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0])),
+            Arc::new(Float64Array::from(vec![1.0_f64, 2.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 400.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 400.0), &theme).unwrap();
+        // band_size = 0.6, mirroring desugar_boxplot's cap/median tick layers.
+        let overrides = MarkKwargsSpec { band_size: Some(0.6), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
+        let expected = theme.sizes.tick_size * 2.0;
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
+        }).collect();
+        assert_eq!(lengths.len(), 2, "expected 2 ticks (x and y both quantitative, fallthrough arm)");
+        for len in &lengths {
+            assert_eq!(len.to_bits(), expected.to_bits(),
+                "a tick with an encoded y must ignore band_size entirely and keep the \
+                 fixed tick_size*2.0 length bit-for-bit — this is the boxplot/errorbar \
+                 numeric-category-x shape both reviewers measured jumping from 8px to 243px");
         }
     }
 }

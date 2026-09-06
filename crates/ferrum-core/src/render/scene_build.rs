@@ -1312,30 +1312,48 @@ fn build_panel_mark_batches(
                 layer_spec_encoding.color = None;
             }
         }
-        // Own-span-axis normalization for rule (spec §4.4, batch-A Task 13
-        // spec c3, 2026-09-01). A reference-line layer declares the axis it
-        // belongs to by declaring exactly one positional channel — the
-        // diagnostic desugars all do this (`{"x": "_ref_zero"}` for a vertical
-        // zero line, `{"y": "_ref_zero"}` for a horizontal one). When the
-        // chart ALSO sets a chart-level `x`/`y`, `Encoding::inherit_from`
-        // fills in the opposite channel, and rule's shape derivation would
-        // then see a two-channel pattern that is not the layer's own shape:
-        // `shap_chart(kind="beeswarm")`'s vertical zero line inherited the
-        // chart's ordinal `y="feature"` and rendered as one full-width
-        // HORIZONTAL span per row; `alpha_selection_chart`'s and
-        // `pca_scree_chart`'s vertical markers did the same. Clearing the
-        // inherited-only channel on this DrawCtx-LOCAL copy (never on
-        // `layer.encoding`, exactly as the own-color exemption above) keeps
-        // every other consumer — scale domains, axis chrome, position
-        // grouping, the legend — reading the merged encoding unchanged, while
-        // the geometry sees the shape the layer actually declared.
+        // Own-span-axis normalization for rule and tick (spec §4.4, batch-A
+        // Task 13 spec c3, 2026-09-01; extended to tick in the batch-E task-3
+        // review-gate cycle 3, 2026-09-06). A reference-line layer, or a rug
+        // tick, declares the axis it belongs to by declaring exactly one
+        // positional channel — the diagnostic desugars all do this (`{"x":
+        // "_ref_zero"}` for a vertical zero line, `{"y": "_ref_zero"}` for a
+        // horizontal one; a bare `mark_tick().encode(x=...)` rug the same
+        // way). When the chart ALSO sets a chart-level `x`/`y`,
+        // `Encoding::inherit_from` fills in the opposite channel, and the
+        // mark's shape derivation would then see a two-channel pattern that
+        // is not the layer's own shape: `shap_chart(kind="beeswarm")`'s
+        // vertical zero line inherited the chart's ordinal `y="feature"` and
+        // rendered as one full-width HORIZONTAL span per row;
+        // `alpha_selection_chart`'s and `pca_scree_chart`'s vertical markers
+        // did the same; a rug tick layered under a scatter (`fm.layer(scatter,
+        // mark_tick(band_size=...).encode(x=...))`) inherited the scatter's
+        // `y` and could no longer tell, from its own DrawCtx, that it was a
+        // bare rug rather than a composite tick layer that declares its own
+        // `y` — silently dropping `band_size` in the interactive merged-flat
+        // assembly while the static composite path (no cross-layer
+        // inheritance there) rendered it correctly, a static-vs-interactive
+        // divergence on the SAME spec. Clearing the inherited-only channel on
+        // this DrawCtx-LOCAL copy (never on `layer.encoding`, exactly as the
+        // own-color exemption above) keeps every other consumer — scale
+        // domains, axis chrome, position grouping, the legend — reading the
+        // merged encoding unchanged, while the geometry sees the shape the
+        // layer actually declared, in EVERY assembly path that routes through
+        // this function (both the static composite leaves and the interactive
+        // merged-flat chart share it).
         //
         // Deliberately narrow: only when the layer declared exactly one of
         // `x`/`y` and the merged encoding binds neither `x2` nor `y2`. A rule
         // whose ranged/diagonal shape is assembled partly from inherited
         // channels keeps assembling it, and a layer that declares both
-        // channels itself keeps `RuleShape::resolve`'s documented tie-break.
-        if layer.mark == crate::spec::mark::Mark::Rule
+        // channels itself — including a composite tick layer such as a
+        // boxplot median/whisker-cap or errorbar cap, which sets its own `x`
+        // AND `y` explicitly in its desugar — keeps its own shape (and, for
+        // tick, `tick::build`'s fallthrough arm keeps reading that OWN `y` as
+        // present, so those composite ticks are unaffected by this
+        // normalization and keep the fixed `tick_size*2.0` length regardless
+        // of the `band_size` they set on themselves).
+        if matches!(layer.mark, crate::spec::mark::Mark::Rule | crate::spec::mark::Mark::Tick)
             && layer_spec_encoding.x2.is_none()
             && layer_spec_encoding.y2.is_none()
         {
@@ -1362,9 +1380,11 @@ fn build_panel_mark_batches(
         // Validate the encoding the mark builder will actually see — the
         // DrawCtx-local copy, not the pre-normalization merge — so the refusal
         // gate and the geometry can never disagree about a layer's shape
-        // (batch-A Task 13 spec c3). Only rule's own-span-axis normalization
-        // above touches a positional channel, so every other mark's gate
-        // decision is unchanged.
+        // (batch-A Task 13 spec c3). Only rule's and tick's own-span-axis
+        // normalization above touches a positional channel (tick has no
+        // channel-combination refusal to trip either way — see
+        // `validate_mark_encoding`'s `_ => Ok(())` fallthrough), so every
+        // other mark's gate decision is unchanged.
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, prep.coord_flipped)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
 
@@ -6461,6 +6481,168 @@ mod tests {
         let plot = panel.plot_area;
         assert!((x1 - plot.x).abs() < 1e-9 && (x2 - (plot.x + plot.w)).abs() < 1e-9,
             "the span must run the full panel width ({}..{}); got {x1}..{x2}", plot.x, plot.x + plot.w);
+    }
+
+    // ── Batch-E task-3, cycle 3 (quality-review gate): tick's own-span-axis
+    // normalization is a path-stable property, not a merged-encoding read ──
+    //
+    // Same mechanism as the rule tests above, extended to `Mark::Tick`
+    // (`scene_build.rs`'s `build_panel_mark_batches`, 2026-09-06). A rug tick
+    // layered under a sibling that supplies `y` — `fm.layer(scatter,
+    // mark_tick(band_size=...).encode(x=...))`, the canonical F-L02-05 shape
+    // — must honor `band_size` identically whether it is assembled through
+    // the static composite-overlay tree (each leaf independent, no
+    // cross-layer inheritance) or the interactive merged-flat chart (which
+    // DOES run `Encoding::inherit_from` across layers, `LayerChart.
+    // _render_interactive`'s documented exception). Before this fix, only
+    // the static path saw the tick's true one-channel shape; the merged-flat
+    // path saw an inherited `y` and silently kept the fixed length — a
+    // static-vs-interactive divergence measured by both cycle-2 reviewers on
+    // the SAME spec-shape (8.0 vs 202.48). This test builds the merged-flat
+    // shape directly (a `spec.layers` two-layer chart with a chart-level
+    // `x`/`y`, mirroring `beeswarm_shaped_zero_line_spec`'s fixture pattern)
+    // — the shape the interactive path actually constructs — and proves the
+    // one shared mechanism now answers it the same way the (already-correct)
+    // static composite path does.
+
+    /// A two-layer chart mirroring `fm.layer(scatter_xy, fm.Chart(df)
+    /// .mark_tick(band_size=...).encode(x="a"))`: chart-level (and point
+    /// layer's own) encoding binds both `x="a"`/`y="b"`; the tick layer
+    /// declares ONLY `x="a"` itself, with `band_size` set on its own
+    /// `mark_style` (mirroring a real `mark_tick(band_size=...)` call). This
+    /// is the shape `Encoding::inherit_from` fills `y` into for the tick
+    /// layer at merge time — exactly the ambiguity the own-span-axis
+    /// normalization must resolve.
+    fn layered_rug_tick_spec(band_size: f64) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let point_layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), mark_style: None,
+            data_source: None, position: None, blend: None, name: Some("scatter".into()),
+            independent_y: false,
+        };
+        let tick_layer = Layer {
+            mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: Some(MarkKwargsSpec { band_size: Some(band_size), ..Default::default() }),
+            data_source: None, position: None, blend: None, name: Some("rug".into()),
+            independent_y: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None,
+            layers: Some(vec![point_layer, tick_layer]),
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 90.0])),
+            Arc::new(Float64Array::from(vec![1.0_f64, 5.0])),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// The path-agreement pin (quality-review cycle-2 Required Fix 2): a
+    /// tick layer declaring only its OWN `x`, under a sibling that supplies
+    /// `y`, must honor `band_size` — scaling its length by the panel's
+    /// cross-axis extent — via the SAME merged-flat assembly the interactive
+    /// path uses. Before the cycle-3 fix, `tick::build`'s fallthrough arm
+    /// read the merged encoding's `y` (inherited, so `Some`) and kept the
+    /// fixed `tick_size*2.0` length regardless of `band_size` — silently
+    /// dropping the feature specifically in this assembly shape while the
+    /// static composite tree (no cross-layer inheritance) rendered it
+    /// correctly, which is the static-vs-interactive divergence both
+    /// reviewers measured (8.0 vs 202.48 on the live extension).
+    #[test]
+    fn tick_layer_declaring_only_x_honors_band_size_under_inherited_y() {
+        let (spec, batch) = layered_rug_tick_spec(0.5);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let tick_batch = panel.marks.iter()
+            .find(|m| m.kind == ferrum_scene::MarkBatchKind::Tick)
+            .expect("the rug layer must emit a tick mark batch");
+        let lines = line_endpoints(tick_batch);
+        assert_eq!(lines.len(), 2, "expected 2 rug ticks (one per row)");
+
+        let plot = panel.plot_area;
+        let expected_len = 0.5 * plot.h;
+        let fixed_len = ThemeInputs::default().sizes.tick_size * 2.0;
+        assert!((expected_len - fixed_len).abs() > 1.0,
+            "fixture sanity: band_size-scaled length must be measurably different \
+             from the fixed length, or this test cannot discriminate the bug");
+
+        for (x1, y1, x2, y2) in &lines {
+            assert_eq!(x1, x2, "a rug tick under a chart-level x/y merge must stay vertical (x-rug)");
+            let len = (y1 - y2).abs();
+            assert!((len - expected_len).abs() < 1e-6,
+                "a tick layer declaring only its own x must honor band_size (0.5 * panel.h = \
+                 {expected_len}) even though the merged encoding inherits a y from its sibling \
+                 layer; got length {len} (fixed tick_size*2.0 = {fixed_len} would mean the \
+                 own-span-axis normalization did not reach Mark::Tick)");
+        }
+    }
+
+    /// Negative control, same fixture family: a tick layer that declares its
+    /// OWN `y` (not inherited) — the composite-tick-layer shape (boxplot
+    /// median/caps, errorbar caps) — must keep ignoring `band_size` even
+    /// under the SAME two-layer merged assembly the positive test above
+    /// uses. Proves the normalization's `(true, true) => {}` arm: declaring
+    /// both channels yourself is preserved, not cleared.
+    #[test]
+    fn tick_layer_declaring_own_x_and_own_y_ignores_band_size_even_when_layered() {
+        let (mut spec, batch) = layered_rug_tick_spec(0.5);
+        {
+            let layers = spec.layers.as_mut().expect("fixture always sets layers");
+            layers[1].encoding.y = Some(crate::spec::encoding::EncodingSpec {
+                field: "b".into(),
+                ..Default::default()
+            });
+        }
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        let tick_batch = panel.marks.iter()
+            .find(|m| m.kind == ferrum_scene::MarkBatchKind::Tick)
+            .expect("the tick layer must emit a tick mark batch");
+        let lines = line_endpoints(tick_batch);
+        assert_eq!(lines.len(), 2, "expected 2 ticks (one per row)");
+
+        let fixed_len = ThemeInputs::default().sizes.tick_size * 2.0;
+        for (_, y1, _, y2) in &lines {
+            let len = (y1 - y2).abs();
+            assert_eq!(len, fixed_len,
+                "a tick layer declaring its OWN x AND y must keep the fixed tick_size*2.0 \
+                 length regardless of band_size, even when layered alongside a sibling — \
+                 this is the boxplot/errorbar composite-tick shape, unaffected by the rug fix");
+        }
     }
 
     // ── Task 13 spec c4 (spec §4.4, "Extended 2026-09-02"): the positional
