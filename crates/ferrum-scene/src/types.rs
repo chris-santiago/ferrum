@@ -176,10 +176,87 @@ pub struct MarkBatch {
     /// guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polar_spans: Option<Vec<(f64, f64)>>,
+    /// Whether this batch is clipped to the panel's plot area (batch E Task
+    /// 9, `mark_function(clip=False)`). `true` (the byte-stable default,
+    /// skipped from JSON so every existing batch is untouched) means the
+    /// batch renders inside the panel clip region, same as before this field
+    /// existed. `false` is a per-batch escape: both walkers place the batch
+    /// OUTSIDE the panel clip — `walk_svg` mirrors the existing Text/Label
+    /// placement precedent (rendered after the clip closes, ahead of
+    /// `chrome_above`/`annotations`). The WASM loader (`scene_load.rs`'s
+    /// `load_scene_with_packed`) exempts the batch from its scissor via two
+    /// different shapes depending on GPU draw path: instanced draw commands
+    /// (packed circle/rect batches, and any circle/rect nodes found inside a
+    /// mesh batch) get `plot_area: None` — the literal "no scissor"
+    /// pass-default `render.rs`'s `ensure_scissor!` reads, with no
+    /// float-scale truncation risk; the mesh path's `MarkMeshPanel::plot_area`
+    /// has no `Option` to fall back to, so it substitutes the full scene
+    /// extent instead, which still scales to the entire render target and is
+    /// functionally equivalent to "no scissor". Either way the batch still
+    /// tracks pan/zoom but is never cut at the panel boundary. Producer:
+    /// `mark_function(clip=False)`'s synthesized line layer (T11, Python);
+    /// no Rust producer sets `false` in this batch.
+    ///
+    /// **Documented static/interactive z-order divergence (quality review
+    /// RF3, batch E Task 9):** `walk_svg` HOISTS every `clip == false` batch
+    /// to paint after every `clip == true` batch in the same panel (see
+    /// `render/svg_walk.rs`'s `clip_exempt_batch_paints_after_clipped_marks_and_before_chrome_annotations_and_text`
+    /// test for the exact pin). The WASM loader does **not** perform the
+    /// same hoist — it only swaps the scissor shape per batch (`None` or the
+    /// full-scene rect, per the two paths above), leaving each batch's
+    /// relative paint position within its existing WASM draw category
+    /// unchanged. WASM's per-category split is itself pre-existing and
+    /// unrelated to clip: `render.rs`'s render loop draws every mesh-kind
+    /// mark batch (lines/areas/paths, via `mark_mesh_panels`) before every
+    /// instanced circle/rect mark batch (via `draw_commands`) — see that
+    /// file's draw-order comment (step 2 vs. step 4) — so `panel.marks`
+    /// index order is only a paint-order proxy *within* one of those two
+    /// categories, never across both. For a scene where a `clip == false`
+    /// batch is NOT already last among its panel's same-category marks,
+    /// static (SVG, which interleaves every kind in one order) and
+    /// interactive (WASM, which paints all mesh before all instanced) can
+    /// therefore already paint marks in a different relative z-order for
+    /// reasons independent of this field; the clip escape adds a second,
+    /// analogous divergence within each category rather than a new kind of
+    /// mismatch. This was evaluated and deliberately deferred
+    /// rather than fixed in Task 9: `panel.marks` index order is an
+    /// implicit "paint order" invariant relied on independently by
+    /// `hit_test.rs` (topmost-first `.rev()` scan), `spatial_index.rs`
+    /// (`entries_for_panel`), and `scene_load.rs`'s `batch_instance_spans`
+    /// (consumed by `conditional.rs` crossfilter dimming and
+    /// `transition.rs` keyed-transition pairing, both of which must stay in
+    /// lock-step with the flat circle/rect instance array's actual layout).
+    /// Reordering `load_scene_with_packed`'s collection order to match the
+    /// SVG hoist would require re-deriving all of those independently, with
+    /// no existing test coverage guarding against a silent mismatch (wrong
+    /// topmost hit, wrong crossfilter target, wrong transition pairing) —
+    /// a materially larger and riskier change than this field's own
+    /// scissor escape. T11 (Python, not yet dispatched as of this field's
+    /// introduction) is expected to append `mark_function`'s synthesized
+    /// clip-exempt line as the last layer in its panel, which if true would
+    /// mask this divergence in the primary intended use case — but that is
+    /// an expectation to re-verify once T11 actually lands, not a fact
+    /// established by anything in this crate today. A future task should
+    /// either re-derive the four order-dependent walks together or accept
+    /// this as a permanent, documented divergence.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub clip: bool,
 }
 
 pub(crate) fn is_zero_usize(v: &usize) -> bool {
     *v == 0
+}
+
+/// Shared `serde(default = "...")` value for a bool field whose byte-stable
+/// default is `true` (first use: `MarkBatch::clip`, batch E Task 9).
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+/// `skip_serializing_if` companion to [`default_true`]: omit the field from
+/// JSON when it holds its default `true` value.
+pub(crate) fn is_true(v: &bool) -> bool {
+    *v
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

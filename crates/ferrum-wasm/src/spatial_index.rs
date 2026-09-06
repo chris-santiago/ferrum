@@ -659,6 +659,7 @@ mod tests {
 
     fn point_batch(nodes: Vec<SceneNode>, data_indices: Option<Vec<usize>>) -> MarkBatch {
         MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Point,
             nodes,
@@ -677,6 +678,7 @@ mod tests {
 
     fn bar_batch(nodes: Vec<SceneNode>, data_indices: Option<Vec<usize>>) -> MarkBatch {
         MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Bar,
             nodes,
@@ -695,6 +697,7 @@ mod tests {
 
     fn rect_batch(nodes: Vec<SceneNode>, data_indices: Option<Vec<usize>>) -> MarkBatch {
         MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Rect,
             nodes,
@@ -1187,6 +1190,7 @@ mod tests {
             stroke_join: None,
         };
         let line_batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Line,
             nodes: vec![SceneNode::Line {

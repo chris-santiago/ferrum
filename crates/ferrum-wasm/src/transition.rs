@@ -1078,6 +1078,7 @@ mod keyed_pairing_tests {
     /// the right quantity.
     fn circle_batch(n: usize, keys: Option<&[&str]>) -> MarkBatch {
         MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Point,
             nodes: (0..n).map(|_| circle_node()).collect(),

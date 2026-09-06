@@ -191,6 +191,11 @@ pub struct MiscStyle {
     /// `mark_image` URL-tile width/height (px).
     pub width: Option<f64>,
     pub height: Option<f64>,
+    /// Batch E Task 9: `Some(false)` clip-escapes the batch out of the
+    /// panel's clip region. `None` resolves to `true` (clipped) at the
+    /// `MarkBatch` construction site, matching every mark before this field
+    /// existed.
+    pub clip: Option<bool>,
 }
 
 /// Per-mark resolved style. Fields are populated from theme defaults (mark-aware)
@@ -422,6 +427,8 @@ pub fn resolve_mark_style(
     if let Some(h) = o.height { style.misc.height = Some(h); }
     // S11: leader_line (label)
     if let Some(ll) = o.leader_line { style.text.leader_line = Some(ll); }
+    // Batch E Task 9: clip escape
+    if let Some(c) = o.clip { style.misc.clip = Some(c); }
 
     Ok(style)
 }
@@ -1983,5 +1990,34 @@ mod tests {
         assert_eq!(parse_stroke_join("arcs"),  None);
         assert_eq!(parse_stroke_join(""),       None);
         assert_eq!(parse_stroke_join("Miter"), None, "matching must be case-sensitive");
+    }
+
+    // ── Batch E Task 9: clip escape (`mark_function(clip=False)`) ──────────
+
+    /// No `clip` override leaves `misc.clip` at its `None` baseline — the
+    /// byte-stable default every layer resolves before this field existed.
+    /// The `MarkBatch` construction site (`scene_build.rs`) treats `None` as
+    /// `true` (clipped).
+    #[test]
+    fn resolve_mark_style_with_no_clip_override_leaves_misc_clip_none() {
+        let theme = ThemeInputs::default();
+        let style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        assert_eq!(style.misc.clip, None);
+    }
+
+    #[test]
+    fn resolve_mark_style_clip_override_false_sets_misc_clip() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { clip: Some(false), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        assert_eq!(style.misc.clip, Some(false));
+    }
+
+    #[test]
+    fn resolve_mark_style_clip_override_true_sets_misc_clip() {
+        let theme = ThemeInputs::default();
+        let overrides = MarkKwargsSpec { clip: Some(true), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        assert_eq!(style.misc.clip, Some(true));
     }
 }

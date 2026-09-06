@@ -1194,6 +1194,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch

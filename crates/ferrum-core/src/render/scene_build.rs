@@ -1452,6 +1452,11 @@ fn build_panel_mark_batches(
             // (possibly single-slot, self-describing) clone's `y_slots`.
             y_slot: layer_slot_idx,
             polar_spans: result.polar_spans,
+            // Batch E Task 9: clip escape. `None` (the overwhelming majority
+            // of layers) resolves to `true` — byte-stable, matching every
+            // batch before this field existed. `mark_function(clip=False)`
+            // (T11, Python) is the only producer that sets `false`.
+            clip: mark_style.misc.clip.unwrap_or(true),
         });
     }
 

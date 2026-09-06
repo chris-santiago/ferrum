@@ -671,6 +671,7 @@ mod bug_hunt_interactive_slots {
 
     fn slot_batch(nodes: Vec<SceneNode>, y_slot: usize, tip: TooltipContent) -> MarkBatch {
         MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Point,
             data_indices: Some((0..nodes.len()).collect()),
@@ -1216,6 +1217,7 @@ mod bug_hunt_tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
@@ -1492,6 +1494,7 @@ mod bug_hunt_tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
@@ -1541,6 +1544,7 @@ mod bug_hunt_tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
@@ -1695,6 +1699,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Tick,
             nodes: vec![SceneNode::Line {
@@ -1794,6 +1799,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Text,
             nodes: vec![SceneNode::Text {
@@ -1928,6 +1934,7 @@ mod bug_hunt_tests {
             ferrum_scene::PathCmd::Close,
         ];
         let batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Ribbon,
             nodes: vec![SceneNode::Path {
@@ -2010,6 +2017,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Segment,
             nodes: vec![SceneNode::Line {
@@ -2122,6 +2130,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Image,
             nodes: vec![SceneNode::Image {
@@ -2218,6 +2227,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(cx, cy, r)],
@@ -2313,6 +2323,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![circle_node(350.0, 250.0, 10.0)],
@@ -2556,6 +2567,7 @@ mod tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            clip: true,
             polar_spans: None,
             kind: MarkBatchKind::Label,
             nodes: vec![SceneNode::Text {
@@ -2614,6 +2626,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(50.0, 50.0, 5.0)],
@@ -2741,6 +2754,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(3.0, 4.0, 2.0)],
@@ -2956,6 +2970,7 @@ mod tests {
     /// to exercise the "no carried data" fallback.
     fn spans_batch(n: usize, spans: Option<Vec<(f64, f64)>>) -> MarkBatch {
         MarkBatch {
+            clip: true,
             kind: MarkBatchKind::Arc,
             nodes: (0..n).map(|_| dummy_wedge_node()).collect(),
             data_indices: Some((0..n).collect()),

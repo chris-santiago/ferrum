@@ -82,95 +82,43 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
         svg.clip_open(&clip_id, clip_rect);
         svg.use_clip_open(&clip_id);
 
-        // Marks (non-text/label first, inside clip)
+        // Marks (non-text/label first, inside clip). A clip-exempt batch
+        // (`MarkBatch::clip == false`, batch E Task 9) is skipped here — it
+        // does NOT keep its relative position among non-exempt marks; every
+        // clip-exempt batch is deferred to the separate pass below, which
+        // paints ALL of them above ALL clipped batches (see that pass's
+        // comment for the full order and the test pinning it).
         for batch in &panel.marks {
             if matches!(
                 batch.kind,
                 ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
-            ) {
+            ) || !batch.clip
+            {
                 continue;
             }
-            // Additive blend: wrap batch in <g style="mix-blend-mode:screen">.
-            let blend_wrap = matches!(batch.blend, ferrum_scene::BlendMode::Additive);
-            if blend_wrap {
-                svg.raw("<g style=\"mix-blend-mode:screen\">");
-            }
-            // Wrap batch in <g stroke-linecap/stroke-linejoin> when present,
-            // matching the old draw() pattern.
-            let cap_join_wrap = if batch.stroke_cap.is_some() || batch.stroke_join.is_some() {
-                let mut g_attrs = String::new();
-                if let Some(ref cap) = batch.stroke_cap {
-                    let s = match cap {
-                        ferrum_scene::StrokeCap::Butt => "butt",
-                        ferrum_scene::StrokeCap::Round => "round",
-                        ferrum_scene::StrokeCap::Square => "square",
-                    };
-                    g_attrs.push_str(&format!(" stroke-linecap=\"{}\"", s));
-                }
-                if let Some(ref join) = batch.stroke_join {
-                    let s = match join {
-                        ferrum_scene::StrokeJoin::Miter => "miter",
-                        ferrum_scene::StrokeJoin::Round => "round",
-                        ferrum_scene::StrokeJoin::Bevel => "bevel",
-                    };
-                    g_attrs.push_str(&format!(" stroke-linejoin=\"{}\"", s));
-                }
-                Some(g_attrs)
-            } else {
-                None
-            };
-            if let Some(ref attrs) = cap_join_wrap {
-                svg.raw(&format!("<g{}>", attrs));
-            }
-            for (i, node) in batch.nodes.iter().enumerate() {
-                let href = batch
-                    .hrefs
-                    .as_ref()
-                    .and_then(|h| h.get(i).and_then(|o| o.as_deref()));
-                let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
-                let desc = batch
-                    .descriptions
-                    .as_ref()
-                    .and_then(|d| d.get(i).and_then(|o| o.as_deref()));
-                let needs_wrap = href.is_some() || tooltip.is_some() || desc.is_some();
-
-                if needs_wrap {
-                    if let Some(url) = href {
-                        svg.a_open(url);
-                    }
-                    svg.g_open(None);
-                    if let Some(tt) = tooltip {
-                        let text: String = tt
-                            .fields
-                            .iter()
-                            .map(|f| format!("{}: {}", f.name, f.value))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        if !text.is_empty() {
-                            svg.title_elem(&text);
-                        }
-                    }
-                    if let Some(d) = desc {
-                        svg.desc_elem(d);
-                    }
-                    emit_node(&mut svg, node);
-                    svg.g_close();
-                    if href.is_some() {
-                        svg.a_close();
-                    }
-                } else {
-                    emit_node(&mut svg, node);
-                }
-            }
-            if cap_join_wrap.is_some() {
-                svg.g_close();
-            }
-            if blend_wrap {
-                svg.raw("</g>");
-            }
+            emit_mark_batch(&mut svg, batch);
         }
 
         svg.use_clip_close();
+
+        // Clip-exempt marks (batch E Task 9, `mark_function(clip=False)`):
+        // rendered OUTSIDE the panel clip region, mirroring the existing
+        // Text/Label placement precedent below. Painted immediately after ALL
+        // clipped marks close and before `chrome_above`, `annotations`, and
+        // Text/Label batches — above every clipped data batch, below
+        // annotation/text chrome, a defined order pinned by
+        // `clip_exempt_batch_paints_after_clipped_marks_and_before_chrome_annotations_and_text`
+        // (svg_walk.rs test module).
+        for batch in &panel.marks {
+            if matches!(
+                batch.kind,
+                ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label
+            ) || batch.clip
+            {
+                continue;
+            }
+            emit_mark_batch(&mut svg, batch);
+        }
 
         // Above-marks axis/grid chrome (GH #89B): nodes from an axis or its
         // gridlines whose effective `zindex >= 1`. A typed sibling of
@@ -256,6 +204,92 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
     }
 
     svg.finish()
+}
+
+/// Emit one non-text/label mark batch: the additive-blend wrapper, the
+/// stroke-cap/stroke-join wrapper, and each node's href/tooltip/description
+/// wrap. Shared by the clipped-marks pass and the clip-exempt escape pass
+/// (`MarkBatch::clip == false`, batch E Task 9) in `walk_svg` — both need
+/// byte-identical wrapping; only their clip-group placement differs.
+fn emit_mark_batch(svg: &mut SvgBuffer, batch: &ferrum_scene::MarkBatch) {
+    // Additive blend: wrap batch in <g style="mix-blend-mode:screen">.
+    let blend_wrap = matches!(batch.blend, ferrum_scene::BlendMode::Additive);
+    if blend_wrap {
+        svg.raw("<g style=\"mix-blend-mode:screen\">");
+    }
+    // Wrap batch in <g stroke-linecap/stroke-linejoin> when present,
+    // matching the old draw() pattern.
+    let cap_join_wrap = if batch.stroke_cap.is_some() || batch.stroke_join.is_some() {
+        let mut g_attrs = String::new();
+        if let Some(ref cap) = batch.stroke_cap {
+            let s = match cap {
+                ferrum_scene::StrokeCap::Butt => "butt",
+                ferrum_scene::StrokeCap::Round => "round",
+                ferrum_scene::StrokeCap::Square => "square",
+            };
+            g_attrs.push_str(&format!(" stroke-linecap=\"{}\"", s));
+        }
+        if let Some(ref join) = batch.stroke_join {
+            let s = match join {
+                ferrum_scene::StrokeJoin::Miter => "miter",
+                ferrum_scene::StrokeJoin::Round => "round",
+                ferrum_scene::StrokeJoin::Bevel => "bevel",
+            };
+            g_attrs.push_str(&format!(" stroke-linejoin=\"{}\"", s));
+        }
+        Some(g_attrs)
+    } else {
+        None
+    };
+    if let Some(ref attrs) = cap_join_wrap {
+        svg.raw(&format!("<g{}>", attrs));
+    }
+    for (i, node) in batch.nodes.iter().enumerate() {
+        let href = batch
+            .hrefs
+            .as_ref()
+            .and_then(|h| h.get(i).and_then(|o| o.as_deref()));
+        let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
+        let desc = batch
+            .descriptions
+            .as_ref()
+            .and_then(|d| d.get(i).and_then(|o| o.as_deref()));
+        let needs_wrap = href.is_some() || tooltip.is_some() || desc.is_some();
+
+        if needs_wrap {
+            if let Some(url) = href {
+                svg.a_open(url);
+            }
+            svg.g_open(None);
+            if let Some(tt) = tooltip {
+                let text: String = tt
+                    .fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.name, f.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !text.is_empty() {
+                    svg.title_elem(&text);
+                }
+            }
+            if let Some(d) = desc {
+                svg.desc_elem(d);
+            }
+            emit_node(svg, node);
+            svg.g_close();
+            if href.is_some() {
+                svg.a_close();
+            }
+        } else {
+            emit_node(svg, node);
+        }
+    }
+    if cap_join_wrap.is_some() {
+        svg.g_close();
+    }
+    if blend_wrap {
+        svg.raw("</g>");
+    }
 }
 
 fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
@@ -515,6 +549,7 @@ mod tests {
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     polar_spans: None,
+                    clip: true,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,
@@ -762,6 +797,147 @@ mod tests {
             chrome_pos < annotation_pos,
             "chrome_above must appear before annotations (z-order refinement): \
              chrome_above at {chrome_pos}, annotations at {annotation_pos}"
+        );
+    }
+
+    // ── MarkBatch::clip escape paint order (batch E Task 9, quality review RF1) ──
+
+    /// Full order-pin fixture: one panel carrying the baseline clip=true
+    /// Point batch (from `minimal_scene`), a clip=false Rect batch (the
+    /// escape under test, distinctive magenta fill), a `chrome_above` Line
+    /// (green), an annotation Line (`annotation_line()`, red), and a
+    /// Text-kind mark batch (distinctive content) — the four buckets whose
+    /// relative order after the clip closes is the actual open design
+    /// choice this test pins.
+    fn scene_with_clip_escape_order_fixture() -> SceneGraph {
+        let mut scene = minimal_scene(vec![annotation_line()]);
+        scene.panels[0].chrome_above = vec![SceneNode::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 0.0,
+            style: StrokeStyle {
+                color: Color::rgb(0, 255, 0),
+                width: 1.0,
+                opacity: 1.0,
+                dash: None,
+                stroke_cap: None,
+                stroke_join: None,
+                stroke_opacity: 1.0,
+            },
+        }];
+        scene.panels[0].marks.push(MarkBatch {
+            polar_spans: None,
+            clip: false,
+            kind: MarkBatchKind::Rect,
+            nodes: vec![SceneNode::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 5.0,
+                h: 5.0,
+                style: FillStroke {
+                    fill: Some(Color::rgb(255, 0, 255)),
+                    stroke: None,
+                    stroke_width: 0.0,
+                    opacity: 1.0,
+                    stroke_dash: None,
+                    stroke_opacity: 1.0,
+                    fill_opacity: 1.0,
+                    angle: 0.0,
+                },
+                corner_radius: 0.0,
+            }],
+            data_indices: None,
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+        });
+        scene.panels[0].marks.push(MarkBatch {
+            polar_spans: None,
+            clip: true,
+            kind: MarkBatchKind::Text,
+            nodes: vec![SceneNode::Text {
+                x: 1.0,
+                y: 1.0,
+                content: "TEXTLABELXYZ".to_string(),
+                slot: None,
+                style: ferrum_scene::TextStyle {
+                    font_size: 12.0,
+                    font_weight: ferrum_scene::FontWeight::Normal,
+                    anchor: ferrum_scene::TextAnchor::Middle,
+                    baseline: ferrum_scene::TextBaseline::Alphabetic,
+                    angle: 0.0,
+                    color: Color::rgb(80, 80, 80),
+                    opacity: 1.0,
+                    font_family: "sans-serif".to_string(),
+                },
+            }],
+            data_indices: None,
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+        });
+        scene
+    }
+
+    /// The real order pin the brief required: a `clip=false` batch must
+    /// paint AFTER the panel clip group closes AND before `chrome_above`,
+    /// `annotations`, and Text/Label batches — not merely "somewhere after
+    /// the clip closes" (which the two `render_svg_clip_false_*` tests in
+    /// `render/mod.rs` already covered and which relocating this loop to
+    /// the very end of `walk_svg` would still satisfy). Moving the
+    /// clip-exempt loop to after `chrome_above`/`annotations`/Text-Label
+    /// must fail this test.
+    #[test]
+    fn clip_exempt_batch_paints_after_clipped_marks_and_before_chrome_annotations_and_text() {
+        let scene = scene_with_clip_escape_order_fixture();
+        let svg = walk_svg(&scene, false);
+
+        let clip_open = svg.find("<g clip-path=").expect("clip group must be present");
+        let clip_close = svg[clip_open..]
+            .find("</g>")
+            .map(|i| i + clip_open)
+            .expect("clip group must close");
+
+        let exempt_pos = svg.find("ff00ff").expect("clip-exempt rect fill not found in SVG");
+        let chrome_pos = svg.find("00ff00").expect("chrome_above marker not found in SVG");
+        let annotation_pos = svg
+            .find("ff0000")
+            .or_else(|| svg.find("255,0,0"))
+            .expect("annotation marker not found in SVG");
+        let text_pos = svg.find("TEXTLABELXYZ").expect("text/label marker not found in SVG");
+
+        assert!(
+            exempt_pos > clip_close,
+            "clip-exempt batch must paint after the panel clip group closes: \
+             exempt at {exempt_pos}, clip group closes at {clip_close}"
+        );
+        assert!(
+            exempt_pos < chrome_pos,
+            "clip-exempt batch must paint before chrome_above: \
+             exempt at {exempt_pos}, chrome_above at {chrome_pos}"
+        );
+        assert!(
+            exempt_pos < annotation_pos,
+            "clip-exempt batch must paint before annotations: \
+             exempt at {exempt_pos}, annotation at {annotation_pos}"
+        );
+        assert!(
+            exempt_pos < text_pos,
+            "clip-exempt batch must paint before Text/Label batches: \
+             exempt at {exempt_pos}, text at {text_pos}"
         );
     }
 

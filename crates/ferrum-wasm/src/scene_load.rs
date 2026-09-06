@@ -1050,6 +1050,13 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     // Title: non-mark → static mesh
     collector.collect_static(&scene.title, None, None);
 
+    // Batch E Task 9: the clip-escape rect substituted for a
+    // `MarkBatch::clip == false` batch's scissor/clip. The full scene extent
+    // (not a panel-specific bound) covers the entire render target, which
+    // `render.rs`'s `ensure_scissor!` treats identically to "no scissor" —
+    // the same effect `walk_svg`'s clip-group placement achieves for SVG.
+    let scene_full_extent = [0.0f32, 0.0f32, scene.width as f32, scene.height as f32];
+
     for (panel_idx, panel) in scene.panels.iter().enumerate() {
         // Ratio-fitted cells (JointChart/ClusterMap marginals) carry a
         // non-identity `layout_scale`. `walk_svg` applies it as a `<g
@@ -1123,10 +1130,43 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             effective_plot_area.w as f32,
             effective_plot_area.h as f32,
         ];
-        let panel_plot_area = Some(panel_plot_area_arr);
 
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let additive = batch_uses_additive_blend(batch.blend);
+
+            // Batch E Task 9: a clip-exempt batch (`MarkBatch::clip ==
+            // false`) still tracks pan/zoom (`is_mark: true`, unchanged) but
+            // is exempted from the panel-boundary scissor. Two different
+            // exemption shapes, per quality review's scissor-equivalence
+            // nit:
+            //   - Instanced draw commands (packed circle/rect batches, and
+            //     any circle/rect nodes `collect_mark` finds inside a mesh
+            //     batch) use `plot_area: None` — `render.rs`'s
+            //     `ensure_scissor!` treats `None` as the literal "no
+            //     scissor" pass-default, with no float-scale truncation
+            //     risk. `Some(full_scene_rect)` would force a real scissor
+            //     rect that can lose up to 1px at the far edge after
+            //     `(pa[2] * scale_x) as u32` truncation on a
+            //     non-exactly-representable surface/scene ratio.
+            //   - The mesh path's `MarkMeshPanel::plot_area` field is a
+            //     plain `[f32; 4]` (no `Option`), so it genuinely needs a
+            //     rect: the full scene extent, which still scales to the
+            //     entire render target and is functionally equivalent to
+            //     "no scissor" (see `scene_full_extent`'s doc comment).
+            // Every batch before this field existed has `clip == true` and
+            // resolves to the exact values this loop always used
+            // (`Some(panel_plot_area_arr)` / `panel_plot_area_arr`), so this
+            // is byte-identical for the default path.
+            let batch_draw_plot_area = if batch.clip {
+                Some(panel_plot_area_arr)
+            } else {
+                None
+            };
+            let batch_mesh_plot_area_arr = if batch.clip {
+                panel_plot_area_arr
+            } else {
+                scene_full_extent
+            };
 
             // If this batch has packed binary instances, emit a draw command
             // from the packed metadata (the instances were already added by
@@ -1141,7 +1181,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     instance_count: meta.instance_count as u32,
                     additive,
                     is_mark: true,
-                    plot_area: panel_plot_area,
+                    plot_area: batch_draw_plot_area,
                     panel_id: panel_idx,
                     y_slot: batch.y_slot,
                 });
@@ -1156,7 +1196,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 collector.collect_mark(
                     &scaled_nodes,
                     additive,
-                    panel_plot_area,
+                    batch_draw_plot_area,
                     panel_idx,
                     batch.stroke_cap,
                     batch.stroke_join,
@@ -1166,7 +1206,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 collector.record_mark_mesh_panel(
                     mesh_start,
                     mesh_end,
-                    panel_plot_area_arr,
+                    batch_mesh_plot_area_arr,
                     panel_idx,
                     batch.y_slot,
                 );
@@ -2469,6 +2509,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![node],
@@ -2580,6 +2621,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Bar,
                     nodes: vec![node],
@@ -2708,6 +2750,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![node],
@@ -2787,6 +2830,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Polygon,
                     nodes,
@@ -3087,6 +3131,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind,
                     nodes,
@@ -3764,6 +3809,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle],
@@ -3779,6 +3825,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Bar,
                         nodes: vec![rect],
@@ -3794,6 +3841,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line],
@@ -3809,6 +3857,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Area,
                         nodes: vec![path],
@@ -3824,6 +3873,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Polygon,
                         nodes: vec![polygon],
@@ -3839,6 +3889,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Line,
                         nodes: vec![polyline],
@@ -4082,6 +4133,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
@@ -5124,6 +5176,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_a],
@@ -5139,6 +5192,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_b, circle_c],
@@ -5327,6 +5381,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Bar,
                     nodes: vec![rect_node],
@@ -5579,6 +5634,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_node],
@@ -5594,6 +5650,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Bar,
                         nodes: vec![rect_node],
@@ -5609,6 +5666,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Area,
                         nodes: vec![path_node],
@@ -5773,6 +5831,7 @@ mod tests {
                 },
                 grid: vec![grid_line],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Rule,
                     nodes: vec![],
@@ -6156,6 +6215,95 @@ mod tests {
         assert!((panel.plot_area[3] - 350.0).abs() < 1e-3, "plot_area h");
     }
 
+    // ── Batch E Task 9: MarkBatch clip escape (`mark_function(clip=False)`) ──
+
+    /// A `MarkBatch::clip == false` mesh batch (Rule/Line tessellate to mesh,
+    /// not instances) must scissor against the FULL SCENE extent
+    /// (`[0, 0, scene.width, scene.height]`) rather than its panel's
+    /// `plot_area` — the WASM half of the clip escape (mirrors `walk_svg`'s
+    /// clip-group placement for SVG). `render.rs`'s `ensure_scissor!` treats
+    /// a rect spanning the whole render target identically to "no scissor".
+    #[test]
+    fn clip_false_mesh_batch_scissors_to_full_scene_extent_not_panel_plot_area() {
+        let nodes = vec![SceneNode::Line {
+            x1: 50.0,
+            y1: 50.0,
+            x2: 300.0,
+            y2: 200.0,
+            style: default_stroke_style(),
+        }];
+        let mut scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
+        scene.panels[0].marks[0].clip = false;
+        let data = load_scene(&scene);
+
+        assert_eq!(data.mark_mesh_panels.len(), 1);
+        let panel = &data.mark_mesh_panels[0];
+        assert_eq!(
+            panel.plot_area,
+            [0.0, 0.0, scene.width as f32, scene.height as f32],
+            "clip=false mesh batch must scissor to the full scene extent, not the panel's plot_area"
+        );
+    }
+
+    /// The clip-true default (every batch before this field existed) is
+    /// unaffected: `single_panel_mesh_scene_produces_one_mark_mesh_panel`
+    /// above already pins `plot_area == panel.plot_area` for the default.
+    /// This test pins the complementary packed-instance (Circle/Rect) path:
+    /// a `clip == false` batch's `DrawCommand::plot_area` is `None` — the
+    /// literal "no scissor" pass-default `render.rs`'s `ensure_scissor!`
+    /// reads (quality review's scissor-equivalence nit: a `Some(full_scene_rect)`
+    /// here would force a real scissor rect that can truncate up to 1px at
+    /// the far edge after float-scale `as u32` conversion; `None` has no
+    /// such risk). The mesh path (see the sibling test above) keeps a real
+    /// rect, since `MarkMeshPanel::plot_area` has no `Option` to fall back to.
+    #[test]
+    fn clip_false_instanced_batch_draw_command_uses_no_scissor() {
+        let nodes = vec![SceneNode::Circle {
+            cx: 100.0,
+            cy: 100.0,
+            r: 5.0,
+            style: default_fill_stroke(),
+        }];
+        let mut scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
+        scene.panels[0].marks[0].clip = false;
+        let data = load_scene(&scene);
+
+        let mark_cmd = data
+            .draw_commands
+            .iter()
+            .find(|c| c.is_mark)
+            .expect("the circle batch must emit a mark draw command");
+        assert_eq!(
+            mark_cmd.plot_area, None,
+            "clip=false instanced batch must have plot_area: None (no scissor), not the panel's plot_area"
+        );
+    }
+
+    /// The clip-true default's instanced path is unaffected: `plot_area` is
+    /// still `Some(panel.plot_area)`, exactly as before this field existed.
+    #[test]
+    fn clip_true_default_instanced_batch_draw_command_uses_panel_plot_area() {
+        let nodes = vec![SceneNode::Circle {
+            cx: 100.0,
+            cy: 100.0,
+            r: 5.0,
+            style: default_fill_stroke(),
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
+        let data = load_scene(&scene);
+
+        let mark_cmd = data
+            .draw_commands
+            .iter()
+            .find(|c| c.is_mark)
+            .expect("the circle batch must emit a mark draw command");
+        assert_eq!(
+            mark_cmd.plot_area,
+            Some([50.0, 10.0, 400.0, 350.0]),
+            "clip=true (default) instanced batch must keep scissoring to the panel's plot_area"
+        );
+    }
+
     /// A two-panel scene each with mesh marks must produce two `MarkMeshPanel`
     /// entries whose index ranges are contiguous, non-overlapping, and together
     /// cover the entire mark mesh index buffer.
@@ -6201,6 +6349,7 @@ mod tests {
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line_node()],
@@ -6245,6 +6394,7 @@ mod tests {
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
+                        clip: true,
                         polar_spans: None,
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line_node()],
@@ -6432,6 +6582,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Line,
                 nodes: vec![
@@ -7108,6 +7259,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
@@ -7274,6 +7426,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
@@ -7439,6 +7592,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
@@ -7624,6 +7778,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                clip: true,
                 polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
@@ -8167,6 +8322,7 @@ mod bug_hunt_tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
                     polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
@@ -8707,6 +8863,7 @@ mod bug_hunt_interactive_slots {
 
     fn batch(kind: MarkBatchKind, nodes: Vec<SceneNode>, y_slot: usize) -> MarkBatch {
         MarkBatch {
+            clip: true,
             polar_spans: None,
             kind,
             nodes,

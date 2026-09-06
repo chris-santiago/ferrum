@@ -102,6 +102,13 @@ pub struct MarkKwargsSpec {
     /// per-row by a `height` column in the data. Defaults to 32.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<f64>,
+    // ── batch E Task 9: clip escape (mark_function) ──────────────────────────
+    /// When `false`, the batch renders outside the panel's clip region
+    /// instead of being confined to it (`MarkBatch::clip`, spec §6.3).
+    /// `None`/unset resolves to the theme default `true` (clipped) —
+    /// byte-stable, matching every mark before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<bool>,
 }
 
 impl MarkKwargsSpec {
@@ -188,6 +195,28 @@ mod tests {
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains(r#""stroke_dash":[5.0,3.0]"#));
+        let parsed: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    // ── Batch E Task 9: clip escape (`mark_function(clip=False)`) ──────────
+
+    #[test]
+    fn mark_kwargs_default_clip_is_none_and_omitted() {
+        // Covered by `mark_kwargs_default_omits_all_fields` too, but this
+        // pins the specific field so a future refactor of that test can't
+        // silently stop covering `clip`.
+        let m = MarkKwargsSpec::default();
+        assert_eq!(m.clip, None);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("clip"), "unset clip must be omitted: {json}");
+    }
+
+    #[test]
+    fn mark_kwargs_round_trip_with_clip_false() {
+        let m = MarkKwargsSpec { clip: Some(false), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"clip":false}"#);
         let parsed: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, m);
     }

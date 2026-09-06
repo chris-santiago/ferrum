@@ -3196,6 +3196,83 @@ mod orchestration_tests {
             result.warnings
         );
     }
+
+    // ── Batch E Task 9: MarkBatch clip escape (`mark_function(clip=False)`) ──
+
+    /// A `Mark::Line` chart, with `mark_style.clip` set to `clip` (or unset
+    /// when `None`). Reuses `scatter_3`'s 3-point x/y data — the geometry
+    /// itself is irrelevant to these tests; only the SVG's clip-group
+    /// PLACEMENT of the resulting `<path>` is under test.
+    fn line_chart_with_clip(clip: Option<bool>) -> (ChartSpec, RecordBatch) {
+        let (mut spec, batch) = scatter_3();
+        spec.mark = Mark::Line;
+        spec.mark_style = clip.map(|c| crate::spec::mark_style::MarkKwargsSpec {
+            clip: Some(c),
+            ..Default::default()
+        });
+        (spec, batch)
+    }
+
+    fn render_line_svg(clip: Option<bool>) -> String {
+        let (spec, batch) = line_chart_with_clip(clip);
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let config = config::RenderConfig::default();
+        render_svg(&spec, &batch, &theme, viewport, &config, &ChartConfig::default())
+            .unwrap()
+            .bytes
+    }
+
+    /// The panel's clip-group span: `(open_idx, close_idx)` bracketing the
+    /// `<g clip-path="...">...</g>` this chart's single panel opens. Assumes
+    /// no nested `<g>` inside (true for this fixture: no stroke_cap/join,
+    /// normal blend, no per-node metadata wraps), so the first `</g>` after
+    /// the open is its own matching close.
+    fn clip_group_span(svg: &str) -> (usize, usize) {
+        let open = svg.find("<g clip-path=").expect("clip group must be present");
+        let close = svg[open..]
+            .find("</g>")
+            .map(|i| i + open)
+            .expect("clip group must close");
+        (open, close)
+    }
+
+    /// Default (`mark_style` unset, matching every mark before this field
+    /// existed): the line's `<polyline>` (linear interpolate — the default —
+    /// emits `Polyline`, not `Path`; see `render/marks/line.rs`) renders
+    /// INSIDE the panel clip group.
+    #[test]
+    fn render_svg_clip_unset_line_renders_inside_panel_clip_group() {
+        let svg = render_line_svg(None);
+        let (open, close) = clip_group_span(&svg);
+        let line_pos = svg.find("<polyline").expect("line polyline must be present");
+        assert!(
+            line_pos > open && line_pos < close,
+            "default (clip unset) line must render INSIDE the panel clip group: \
+             polyline at {line_pos}, clip group [{open}, {close})\n{svg}"
+        );
+    }
+
+    /// `mark_function(clip=False)`'s wire shape (`mark_style.clip = Some(false)`):
+    /// the line's `<polyline>` renders OUTSIDE (after) the panel clip group closes.
+    #[test]
+    fn render_svg_clip_false_line_renders_outside_panel_clip_group() {
+        let svg = render_line_svg(Some(false));
+        let (_, close) = clip_group_span(&svg);
+        let line_pos = svg.find("<polyline").expect("line polyline must be present");
+        assert!(
+            line_pos > close,
+            "clip=false line must render OUTSIDE (after) the panel clip group: \
+             polyline at {line_pos}, clip group closes at {close}\n{svg}"
+        );
+    }
+
+    /// Explicit `clip=True` must resolve identically to leaving `mark_style`
+    /// unset — the byte-stability contract for the theme-default value.
+    #[test]
+    fn render_svg_explicit_clip_true_is_byte_identical_to_unset() {
+        assert_eq!(render_line_svg(None), render_line_svg(Some(true)));
+    }
 }
 
 #[cfg(test)]

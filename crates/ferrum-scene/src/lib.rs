@@ -121,6 +121,8 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    clip: true,
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![
                         SceneNode::Circle {
@@ -479,5 +481,80 @@ mod tests {
         assert_eq!(deserialized.below_marks, vec![below_marks_node]);
         assert_eq!(deserialized.chrome_above, vec![chrome_above_node]);
         assert_eq!(panel, deserialized);
+    }
+
+    // ── MarkBatch::clip (batch E Task 9 clip escape) ────────────────────────
+
+    /// Minimal `MarkBatch` fixture for the `clip` serde tests below. Every
+    /// field but `clip` is held at its own byte-stable default so the tests
+    /// isolate `clip`'s serde behavior the same way
+    /// `below_marks_and_chrome_above_empty_are_not_serialized` isolates
+    /// those two fields.
+    fn minimal_mark_batch(clip: bool) -> MarkBatch {
+        MarkBatch {
+            kind: MarkBatchKind::Point,
+            nodes: vec![],
+            data_indices: None,
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            clip,
+        }
+    }
+
+    /// `clip == true` (the byte-stable default) must be omitted from
+    /// serialized JSON, matching the `layout_scale`/`below_marks` precedent
+    /// above — every batch before this field existed serializes identically.
+    #[test]
+    fn mark_batch_default_clip_true_is_not_serialized() {
+        let json = serde_json::to_string(&minimal_mark_batch(true)).expect("serialize");
+        assert!(
+            !json.contains("\"clip\""),
+            "default clip=true must be omitted from serialized JSON, got: {json}"
+        );
+    }
+
+    /// `clip == false` must be serialized (the skip only applies at the
+    /// default), and must round-trip.
+    #[test]
+    fn mark_batch_clip_false_is_serialized_and_round_trips() {
+        let batch = minimal_mark_batch(false);
+        let json = serde_json::to_string(&batch).expect("serialize");
+        assert!(
+            json.contains(r#""clip":false"#),
+            "clip=false must be serialized explicitly, got: {json}"
+        );
+        let deserialized: MarkBatch = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized, batch);
+    }
+
+    /// A `MarkBatch` JSON payload without a `clip` key (every batch
+    /// serialized before this field existed) must deserialize with
+    /// `clip == true` — the serde back-compat contract (`#[serde(default =
+    /// "default_true")]`).
+    #[test]
+    fn mark_batch_without_clip_field_defaults_to_true() {
+        let json = r#"{
+            "kind": "point",
+            "nodes": [],
+            "data_indices": null,
+            "tooltips": null,
+            "hrefs": null,
+            "descriptions": null,
+            "keys": null,
+            "blend": "normal",
+            "stroke_cap": null,
+            "stroke_join": null,
+            "y_slot": 0
+        }"#;
+        let batch: MarkBatch = serde_json::from_str(json).expect("deserialize");
+        assert!(batch.clip, "missing clip field must default to true");
     }
 }
