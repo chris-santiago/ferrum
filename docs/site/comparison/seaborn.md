@@ -10,7 +10,7 @@ The differences are structural: Ferrum returns chart objects you compose with gr
 |---|---|---|
 | `sns.displot(df, x=, kind=)` | [`fm.displot(df, x=, kind=)`][ferrum.displot] | Same signature. `kind` ∈ `"hist"`, `"kde"`, `"ecdf"`. |
 | `sns.catplot(df, x=, y=, kind=)` | [`fm.catplot(df, x=, y=, kind=)`][ferrum.catplot] | Same `kind` values: `"strip"`, `"box"`, `"violin"`, `"swarm"`, `"bar"`, `"point"`, `"boxen"`, `"count"`. |
-| `sns.lmplot(df, x=, y=)` | [`fm.lmplot(df, x=, y=)`][ferrum.lmplot] | `order=` works as in seaborn (polynomial degree); `method=` additionally selects the fit family (`"lm"`, `"loess"`). |
+| `sns.lmplot(df, x=, y=)` | [`fm.lmplot(df, x=, y=)`][ferrum.lmplot] | `method=` selects the fit family from ten spellings: `"lm"`, `"loess"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`, `"gam"`, `"logistic"`, `"glm"`, `"robust"` (seaborn only offers `order=`/`logistic=`/`lowess=`/`robust=` flags on one `lm` core). `order=` defaults to `None` ("the method's own default degree") rather than seaborn's `1`; passing it forwards into the method's own degree-acceptance matrix. `"logistic"`/`"glm"`/`"robust"` fit one pooled curve across every color group, unlike seaborn's per-group fits. |
 | `sns.residplot(df, x=, y=)` | [`fm.residplot(df, x=, y=)`][ferrum.residplot] | Same interface. |
 | `sns.pairplot(df)` | [`fm.pairplot(df)`][ferrum.pairplot] | `vars=`, `hue=`, `corner=`, `diag_kind=` all supported. |
 | `sns.jointplot(df, x=, y=)` | [`fm.jointplot(df, x=, y=)`][ferrum.jointplot] | `kind=`, `marginal_kind=` match seaborn. |

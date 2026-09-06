@@ -349,6 +349,17 @@ def transform_filter(predicate: "str | dict | Parameter") -> dict:
         all rows while the WASM runtime crossfilters live against the linked
         parameter.
 
+        Expression strings support: field access (``datum.field``, bracket
+        access ``datum["field with spaces"]``), arithmetic (``+ - * / %``),
+        comparison and logical operators (``&& || !``), ternary
+        (``cond ? a : b``), string/boolean/null literals (``'x'``, ``true``,
+        ``false``, ``null``), scientific notation (``1e10``), array literals
+        (``[1, 2, 3]``), and one builtin call, ``indexof(array, value)``
+        (returns the index of the first match, or ``-1``) — the full table
+        lives in the data-transforms guide's "Expression syntax" section.
+        A dict predicate's list/tuple values (``{"field": [1, 2, 3]}``)
+        compile to exactly this ``indexof([...], datum.field) >= 0`` form.
+
     Returns
     -------
     dict
@@ -360,6 +371,10 @@ def transform_filter(predicate: "str | dict | Parameter") -> dict:
     >>> t = fm.transform_filter("datum.age >= 18")
     >>> t["type"]
     'filter'
+
+    >>> t = fm.transform_filter("indexof([1, 3, 5], datum.id) >= 0")
+    >>> t["predicate"]
+    'indexof([1, 3, 5], datum.id) >= 0'
 
     >>> brush = fm.selection_interval(name="brush")
     >>> fm.transform_filter(brush)
@@ -394,7 +409,13 @@ def transform_calculate(as_: str, expr: str) -> dict:
     as_ : str
         Name of the output column.
     expr : str
-        Expression string (e.g. ``"datum.x * 2 + datum.y"``).
+        Expression string (e.g. ``"datum.x * 2 + datum.y"``). Supports the
+        same grammar as ``transform_filter``'s expression-string form
+        (arithmetic, comparisons, ternary, literals, ``indexof(...)``) — see
+        the data-transforms guide's "Expression syntax" section. An
+        expression whose *overall* result is an array (rather than a
+        number, string, or boolean) raises ``ValueError``; arrays are only
+        valid as an ``indexof(...)`` argument, not as a column value.
 
     Returns
     -------
@@ -674,11 +695,17 @@ def transform_window(
         Window frame bounds: (preceding, following). None means unbounded.
     ignore_peers : bool, default False
         Whether a rolling frame ignores *peers* — rows tied on every ``sort``
-        column. Left ``False`` (Vega's default), a frame expands to whole peer
-        groups, so tied rows share one frame and therefore one aggregate
-        value. Set ``True`` for frames defined by row offsets alone. Only
-        rolling aggregates with an explicit ``frame`` over a tied sort key are
-        affected.
+        column. Left ``False`` (the same default *setting* Vega chose), a
+        frame expands to whole peer groups, so tied rows share one frame and
+        therefore one aggregate value. Note the peer-aware frame semantics
+        themselves deliberately diverge from Vega's: both expand a frame's
+        ends outward to whole peer groups, but ferrum *anchors* the frame on
+        the peer run's own bounds where Vega anchors on the current row, so
+        ferrum guarantees tied rows share one frame and one value while
+        Vega's need not (see the guide's window-functions section for a
+        worked example). Set ``True`` for
+        frames defined by row offsets alone. Only rolling aggregates with an
+        explicit ``frame`` over a tied sort key are affected.
 
     Returns
     -------
@@ -983,7 +1010,11 @@ def transform_impute(
         Constant value for method="value".
     groupby : list of str, optional
         Impute within groups: the fill value (per ``method``) is computed
-        separately for each group, not once across the whole column.
+        separately for each group, not once across the whole column. A
+        group with no non-null values of its own to compute a statistic
+        from falls back to the whole column's statistic, rather than
+        degrading to ``0.0`` or an infinite fill value (unless the column
+        as a whole has no usable values either).
     key : str, optional
         Key column. Within each group (or, with no ``groupby``, the whole
         batch as one implicit group — Vega's "no groupby means one group"

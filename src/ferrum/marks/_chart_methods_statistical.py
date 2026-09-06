@@ -82,9 +82,11 @@ class StatisticalMarksMixin:
             KDE bandwidth.  ``"scott"`` and ``"silverman"`` use the
             corresponding rule-of-thumb estimates.  Default is ``"scott"``.
         kernel : str, optional
-            Kernel type: ``"gaussian"``, ``"tophat"``, ``"epanechnikov"``,
-            ``"exponential"``, ``"linear"``, ``"cosine"``.  Default is
-            ``"gaussian"``.
+            Kernel type: ``"gaussian"``, ``"epanechnikov"`` (alias
+            ``"epan"``), ``"tophat"``, ``"uniform"``, ``"cosine"``,
+            ``"exponential"``, ``"linear"`` — validated against the live
+            ``transform_registry("kde")["methods"]`` vocabulary.  Default
+            is ``"gaussian"``.
         extent : list of float or None, optional
             ``[min, max]`` evaluation range.  Defaults to data extent.
         cumulative : bool, optional
@@ -181,7 +183,7 @@ class StatisticalMarksMixin:
         >>> import polars as pl
         >>> df = pl.DataFrame({"val": [1.0, 1.2, 2.3, 3.1, 2.8, 1.5]})
         >>> fm.Chart(df).mark_histogram(bin_count=5).encode(x="val")
-        Chart(mark='bar', encoding=['x', 'x2', 'y'])
+        Chart(mark='bar', encoding=['x'])
         """
         # Normalize orient= → orientation= so the desugar's existing param name
         # is used.  orient= wins over orientation= when both are present.
@@ -354,7 +356,7 @@ class StatisticalMarksMixin:
         >>> import polars as pl
         >>> df = pl.DataFrame({"species": ["a"]*5 + ["b"]*5, "val": [1,2,3,2,1,4,5,4,5,6]})
         >>> fm.Chart(df).mark_boxplot().encode(x="species", y="val")
-        Chart(mark='point', encoding=[])
+        Chart(mark='point', encoding=['x', 'y'])
         """
         from ferrum.marks.composite import desugar_boxplot, _resolve_deprecated_extent
 
@@ -480,7 +482,7 @@ class StatisticalMarksMixin:
         >>> df = pl.DataFrame({"group": ["a"]*20 + ["b"]*20,
         ...                    "val": list(range(20)) + list(range(10, 30))})
         >>> fm.Chart(df).mark_boxen().encode(x="group", y="val")
-        Chart(mark='point', encoding=[])
+        Chart(mark='point', encoding=['x', 'y'])
         """
         from ferrum.marks.composite import desugar_boxen
 
@@ -545,7 +547,7 @@ class StatisticalMarksMixin:
         >>> df = pl.DataFrame({"group": ["a"]*10 + ["b"]*10,
         ...                    "val": list(range(10)) + list(range(5, 15))})
         >>> fm.Chart(df).mark_errorbar(method="stdev").encode(x="group", y="val")
-        Chart(mark='point', encoding=[])
+        Chart(mark='point', encoding=['x', 'y'])
         """
         from ferrum.marks.composite import desugar_errorbar, _resolve_deprecated_extent
 
@@ -605,7 +607,7 @@ class StatisticalMarksMixin:
         >>> import polars as pl
         >>> df = pl.DataFrame({"x": list(range(10)), "y": [float(i) for i in range(10)]})
         >>> fm.Chart(df).mark_errorband(method="ci", borders=True).encode(x="x", y="y")
-        Chart(mark='point', encoding=[])
+        Chart(mark='point', encoding=['x', 'y'])
         """
         from ferrum.marks.composite import desugar_errorband, _resolve_deprecated_extent
 
@@ -925,8 +927,13 @@ class StatisticalMarksMixin:
         cmap : str or None, optional
             Back-compat alias for ``scheme``.  Pass at most one of the two.
         resolution : "screen" or int, optional
-            Pixel grid resolution.  ``"screen"`` (default) matches the rendered
-            chart dimensions; pass an integer to set an explicit grid width.
+            Pixel grid resolution.  ``"screen"`` (default) genuinely responds
+            to the chart's actual dimensions — the grid scales up as the
+            panel grows — using a pre-layout size estimate (it excludes
+            axis/legend/facet-strip gutters, which aren't known until
+            layout runs, so it's a close approximation, not the exact
+            rendered plot area).  Pass an integer, or a ``(nx, ny)`` tuple,
+            for an explicit grid size unaffected by chart dimensions.
         blend : str, optional
             Alpha-compositing blend mode.  Default is ``"alpha"``.
         min_count : int or None, optional
@@ -1074,7 +1081,15 @@ class StatisticalMarksMixin:
         Parameters
         ----------
         size : float, optional
-            Point diameter in pixels.  Default is ``4``.
+            Point diameter in pixels.  Default is ``4``.  The rendered
+            *spread* of point centers along the cross-axis (not this
+            diameter itself) responds to the chart's *value-axis* panel
+            dimension using a pre-layout size estimate — panel height for
+            the default vertical orientation, panel width for
+            ``orient="horizontal"`` — and inversely: a longer value axis
+            needs less cross-axis displacement to avoid collisions, so it
+            produces a *smaller* pixel spread at the same ``size=``.  The
+            cross-axis dimension has no effect.
         orient : {"vertical", "horizontal"} or None, optional
             Canonical orientation control.  ``"vertical"`` (default) spreads
             points along x; ``"horizontal"`` spreads along y.  When both
@@ -1085,7 +1100,8 @@ class StatisticalMarksMixin:
             prefer ``orient`` in new code.
         spacing : float, optional
             Minimum spacing between point centres as a fraction of ``size``.
-            Default is ``1.0``.
+            Default is ``1.0``.  Subject to the same value-axis-dependent
+            spread as ``size`` above.
         side : {"both", "left", "right"}, default "both"
             Side of the axis on which points can be placed.
         dodge : str or None, optional

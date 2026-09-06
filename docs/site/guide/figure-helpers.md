@@ -100,7 +100,7 @@ chart
 
 ## Regression: `lmplot`, `regplot`, and `residplot`
 
-[`lmplot`][ferrum.lmplot] produces a faceted regression scatter with a fit overlay. The fit is configurable through `method=` (`"lm"`, `"loess"`, `"logistic"`, polynomial order) and `ci=` for the confidence band. It supports `col=` and `row=` for faceting. Returns a [`Chart`][ferrum.Chart] with the scatter and the fit as layers.
+[`lmplot`][ferrum.lmplot] produces a faceted regression scatter with a fit overlay. `method=` accepts ten spellings: `"lm"` (OLS, `order=` picks the polynomial degree), `"loess"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`, `"gam"` (these seven route through `mark_smooth`), plus `"logistic"`, `"glm"`, and `"robust"` (dedicated transforms, fit pooled across any color grouping rather than per group). `order=None` (the default) means "the method's own default degree"; an explicit `order=` forwards into the method's degree-acceptance matrix, so `order=1` is not silently absorbed the way it once was. `ci=` sets the confidence band. It supports `col=` and `row=` for faceting. Returns a [`Chart`][ferrum.Chart] with the scatter and the fit as layers.
 
 ```python
 import ferrum as fm

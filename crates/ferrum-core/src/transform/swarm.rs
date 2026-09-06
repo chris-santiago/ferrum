@@ -448,9 +448,10 @@ use crate::transform::core::TransformSpec;
 /// value : str
 ///     Numeric column whose values are spread along the value axis.
 /// point_size : float, default 5.0
-///     Diameter of each point in data units. Must be > 0.
+///     Diameter of each point in pixels (converted to data units internally
+///     via the pre-layout panel-size estimate). Must be > 0.
 /// spacing : float, default 1.0
-///     Minimum gap between point edges. Must be ≥ 0.
+///     Minimum gap between point edges, in pixels. Must be ≥ 0.
 /// side : {"both", "left", "right"}, default "both"
 ///     Which side of the category centre to place displaced points.
 /// name : str, optional

@@ -664,8 +664,12 @@ def desugar_raster(
     cmap : str or None, default None
         Colormap applied to the image layer.  ``None`` defers to the theme's
         sequential scheme.
-    resolution : int or "screen", default "screen"
-        Pixel grid resolution.  ``"screen"`` infers from chart dimensions.
+    resolution : int, tuple of (int, int), or "screen", default "screen"
+        Pixel grid resolution.  An int sets a square grid; a ``(nx, ny)``
+        tuple sets width and height independently.  ``"screen"`` genuinely
+        scales with a pre-layout estimate of the chart's dimensions (not an
+        exact match for the rendered plot area — see ``mark_raster``'s
+        docstring).
     blend : {"alpha", "additive"}, default "alpha"
         Pixel-level blending mode.  ``"additive"`` renders with
         ``mix-blend-mode:screen`` in the SVG output.
@@ -912,11 +916,19 @@ def desugar_swarm(
     y_field : str or None
         Field name on the y axis (value when vertical). Required.
     size : int, default 4
-        Point radius in pixels.
+        Point diameter in pixels (the transform's placement radius is
+        ``size / 2``).  The rendered pixel *spread* along the cross-axis
+        (not this diameter) responds to a pre-layout estimate of the
+        chart's *value-axis* panel dimension (height when vertical, width
+        when ``orient="horizontal"``), inversely: a longer value axis
+        needs less displacement to avoid collisions and produces a smaller
+        spread at the same ``size``.  The cross-axis dimension has no
+        effect.
     orient : {"vertical", "horizontal"}, default "vertical"
         Swarm orientation.  ``"vertical"`` means the value axis is y.
     spacing : float, default 1.0
-        Minimum spacing multiplier between adjacent points.
+        Minimum spacing multiplier between adjacent points.  Subject to the
+        same value-axis-dependent spread as ``size`` above.
     side : {"both", "left", "right"}, default "both"
         Which side(s) of the category axis to spread points onto.
     dodge : str or None, default None

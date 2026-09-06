@@ -297,12 +297,28 @@ Window operations include:
 | Operation | Description |
 |---|---|
 | `"row_number"` | Row index within the window |
-| `"rank"` | Rank with ties |
-| `"dense_rank"` | Rank without gaps |
+| `"rank"` | Competition rank, tie-aware (`1, 1, 3`) |
+| `"dense_rank"` | Dense rank, tie-aware, no gaps (`1, 1, 2`) |
 | `"lag"` | Previous row value (use `param` for offset) |
 | `"lead"` | Next row value (use `param` for offset) |
 | `"sum"`, `"mean"`, `"min"`, `"max"` | Rolling aggregates |
 | `"first_value"`, `"last_value"` | Frame boundary values |
+
+### Tie-aware ranks
+
+`rank` and `dense_rank` written without a `field` (the common case) derive their ties from the `sort` columns: rows equal on **every** sort column, post-coercion, share a rank — competition-style for `rank` (`1, 1, 3`) and dense-style for `dense_rank` (`1, 1, 2`), matching SQL and Vega. An explicit `field=` keeps its own field-keyed ranking behavior, unaffected. A spec with no `sort=` at all has no key to tie on, so both ops fall back to plain row order.
+
+```python
+df = pl.DataFrame({"score": [90, 90, 85, 80, 80, 80]})
+
+fm.transform_window({"op": "rank", "as": "r"}, sort=["score"])
+# ranks (ascending by score): 80→1, 80→1, 80→1, 85→4, 90→5, 90→5
+
+fm.transform_window({"op": "dense_rank", "as": "dr"}, sort=["score"])
+# dense ranks: 80→1, 80→1, 80→1, 85→2, 90→3, 90→3
+```
+
+### Peer-aware rolling frames and `ignore_peers`
 
 The `frame` parameter specifies `(preceding, following)` bounds. Use `None` for unbounded:
 
@@ -321,6 +337,27 @@ fm.transform_window(
     groupby=["department"],
 )
 ```
+
+By default (`ignore_peers=False`), a rolling frame treats rows tied on the `sort` key as one unit: the frame is anchored on the tied run's own bounds and then *both* ends independently expand outward to whole peer groups, so every tied row shares one frame and therefore one aggregate value, and a frame boundary never splits a peer group. Pass `ignore_peers=True` to get plain row-offset frames instead, where each row's frame is computed from its own position regardless of ties.
+
+```python
+df = pl.DataFrame({"t": [1, 1, 2, 3, 3], "x": [10.0, 20.0, 30.0, 40.0, 50.0]})
+
+fm.transform_window(
+    {"op": "sum", "field": "x", "as": "s"},
+    sort=["t"], frame=(-1, 0),
+)
+# peer-aware (default): [30, 30, 60, 120, 120] — the two t=1 rows share one
+# frame/value, and so do the two t=3 rows.
+
+fm.transform_window(
+    {"op": "sum", "field": "x", "as": "s"},
+    sort=["t"], frame=(-1, 0), ignore_peers=True,
+)
+# row-offset frames: [10, 30, 50, 70, 90] — no peer grouping.
+```
+
+**This is deliberately not Vega's `ignorePeers: false` semantics.** Vega's default also expands both ends of a frame outward to peer-group boundaries, but anchors the *un-expanded* frame on the current row rather than on the peer run's own bounds — so Vega does not guarantee that every tied row ends up sharing the same value. On the fixture above, Vega's `ignorePeers: false` output is `[30, 30, 60, 120, 90]`: only the last row differs, because Vega's trailing `t=3` row anchors its own frame at position 3, not the peer run's start at position 2. Ferrum's peer-anchored rule guarantees tied rows always share one value; treat this as a documented, intentional divergence from Vega, not a bug to reconcile. `ignore_peers=True` sidesteps the difference entirely (both engines produce the same row-offset output), and any sort key with no actual ties is unaffected either way.
 
 ## Statistical transforms
 
@@ -385,6 +422,14 @@ chart = (
 
 Methods: `"linear"`, `"poly"` (set `order=` for degree), `"exp"`, `"log"`, `"pow"`.
 
+Use `groupby=` to fit an independent curve per group, with the group column appended to the output at its original dtype so a `color=` encoding maps to it:
+
+```python
+fm.transform_regression("x", "y", method="linear", groupby=["g"])
+```
+
+Each group's output grid spans that group's own x-range (not the whole dataset's), matching `mark_smooth`'s grouped behavior.
+
 !!! note "mark_smooth method aliases"
     `mark_smooth(method=)` accepts several friendly aliases in addition to the primary names. `"linear"`, `"quadratic"`, and `"cubic"` map to OLS polynomial fits of degree 1, 2, and 3 respectively; `"log"` and `"sqrt"` fit log and square-root curves. `"lm"` is the primary name for linear fits (pass `degree=` for higher-order polynomials); `"loess"` is the name for locally weighted regression; `"glm"` fits a generalized linear model (Gaussian/Identity); `"gam"` fits a generalized additive model — a penalized cubic B-spline with a GCV-chosen smoothing parameter, deterministic and unaffected by `seed=`. All of the following are valid: `method="lm"`, `method="linear"`, `method="loess"`, `method="quadratic"`, `method="cubic"`, `method="log"`, `method="sqrt"`, `method="glm"`, `method="gam"`.
 
@@ -409,7 +454,7 @@ chart = (
 )
 ```
 
-The `bandwidth` parameter controls smoothness — smaller values follow the data more closely; larger values produce smoother curves.
+The `bandwidth` parameter controls smoothness — smaller values follow the data more closely; larger values produce smoother curves. Like `transform_regression`, `groupby=` fits an independent curve per group, each spanning that group's own x-range, with the group column preserved in the output.
 
 ## Utilities
 
@@ -459,7 +504,30 @@ chart = (
 )
 ```
 
-Methods: `"value"` (constant, set `value=`), `"mean"`, `"median"`, `"min"`, `"max"`. Use `groupby` to impute within groups.
+Methods: `"value"` (constant, set `value=`), `"mean"`, `"median"`, `"min"`, `"max"`. `groupby=` computes each group's fill value from that group's own rows (not the whole column), and fills only that group's null/NaN rows.
+
+If a group has *no* non-null values to compute a statistic from, it falls back to the whole column's statistic instead of degrading to `0.0` (which would silently distort the domain) or `±inf` (which would drop the group's rows from the render entirely).
+
+#### `key=` / `keyvals=` — filling in missing rows, not just missing values
+
+`transform_impute` can also *add* rows, following Vega's `impute` semantics. `key=` names a column whose values define a "should exist" universe within each group; any `(group, key)` combination missing from the data gets one row appended, with the key's own column filled to the missing value and every other non-group column set to null:
+
+```python
+df = pl.DataFrame({
+    "region": ["East", "East", "West"],
+    "month": [1, 2, 1],
+    "sales": [100.0, 120.0, 80.0],
+})
+
+fm.transform_impute(
+    "sales", method="mean",
+    groupby=["region"], key="month", keyvals=[1, 2, 3],
+)
+# East already has months 1 and 2; month 3 is appended with sales = East's
+# own mean. West only has month 1; months 2 and 3 are appended the same way.
+```
+
+The key universe is `keyvals=` when given, else the distinct values of `key` observed across the whole batch. `keyvals=` requires `key=` — passing it alone raises, since a key universe is meaningless without a key column. Appended rows use the same per-group fill value (including the whole-column fallback above, for a group with no data of its own) as the ordinary null-filling path.
 
 ### `transform_stack` — stacking positions
 
@@ -513,13 +581,20 @@ Transform expressions (used in `transform_filter` and `transform_calculate`) fol
 | Field access | `datum.field_name` |
 | Bracket access | `datum["field with spaces"]` |
 | Arithmetic | `datum.x * 2 + datum.y` |
+| Modulo | `datum.x % 2 == 0` |
 | Comparison | `datum.age >= 18` |
 | Logical AND | `datum.x > 0 && datum.y > 0` |
 | Logical OR | `datum.x < 0 \|\| datum.x > 100` |
 | Logical NOT | `!datum.active` |
 | Ternary | `datum.x > 0 ? 'positive' : 'non-positive'` |
 | String literals | `datum.status == 'active'` |
+| Boolean / null literals | `datum.active == true`, `datum.x != null` |
+| Scientific notation | `datum.x < 1e1`, `datum.y > 2.5e-3` |
+| Array literals | `[1, 2, 3]`, `['US', 'DE', 'JP']` |
+| Function calls | `indexof(array, value)` |
 | Membership | `indexof([1, 2, 3], datum.id) >= 0` |
+
+`indexof(array, value)` is the one builtin function today (the grammar's call syntax and array literals are general enough to add more without a new syntax); it returns the index of the first array element equal to `value`, or `-1` when not found. Calling an unregistered function name raises a `ValueError` naming the function and the supported set.
 
 ## Chaining transforms
 
