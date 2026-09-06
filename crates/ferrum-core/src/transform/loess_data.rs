@@ -337,11 +337,16 @@ mod tests {
         let out = apply(&spec, &batch).unwrap();
 
         assert_eq!(out.num_columns(), 3);
+        // Mutation gate: field names must match the spec's as_ tuple (not positions).
+        // If grouped_two_column_fit swaps the output columns, these assertions die.
+        assert_eq!(out.schema().field(0).name(), "lx", "first output column must be named 'lx'");
+        assert_eq!(out.schema().field(1).name(), "ly", "second output column must be named 'ly'");
         assert_eq!(out.schema().field(2).name(), "g");
         assert_eq!(out.schema().field(2).data_type(), &DataType::Utf8);
         // 200 grid points per group (n_out), first-appearance order (A, B).
         assert_eq!(out.num_rows(), 400);
 
+        let _lx = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let ly = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         let g = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
 

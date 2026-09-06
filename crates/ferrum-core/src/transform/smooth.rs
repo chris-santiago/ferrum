@@ -3750,4 +3750,95 @@ mod tests {
             );
         }
     }
+
+    /// **Mutation gate: wire-path k below MIN_BASIS_DIM renders without panic.**
+    /// This catches the mutation `k.clamp(MIN_BASIS_DIM, ...)` → `k.min(...)`
+    /// via the deserialization path: a SmoothSpec with `k: 2` (below the
+    /// minimum) must deserialize and render without panic, producing the same
+    /// output as the clamped equivalent (`k: MIN_BASIS_DIM`).
+    ///
+    /// When `k` is omitted or set to its default, serde uses the default
+    /// function. But an explicit `"k": 2` in JSON bypasses the Python PySmooth
+    /// validation (which rejects k < 4), so the Rust clamp at `gam::fit` is
+    /// the only defense against the panic at line 156 (`dim - SPLINE_DEGREE`
+    /// underflow). Without the clamp, dim would be 2, and `2 - 3` panics.
+    #[test]
+    fn test_gam_k_below_min_basis_dim_via_json_deserialization() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys);
+
+        // Build a spec with k=2 (below the minimum of 4) directly.
+        // This bypasses Python validation, simulating what happens when a
+        // ChartSpec JSON with explicit "k": 2 deserializes in Rust.
+        let spec_low = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Gam,
+            ci: None,
+            bandwidth: 0.75, degree: 1, k: 2, n: 200, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+
+        // Apply the spec with k=2 — it must render without panic.
+        let result_low = apply(&spec_low, &batch).expect(
+            "k=2 must render without panic; gam::fit clamps it to MIN_BASIS_DIM"
+        );
+
+        // Build the same spec with k=4 (the minimum).
+        let spec_min = gam_spec_with_k(None, 200, gam::MIN_BASIS_DIM);
+        let result_min = apply(&spec_min, &batch).expect("k=4 must render");
+
+        // Both outputs must be byte-identical.
+        let col_low = col(&result_low, "y");
+        let col_min = col(&result_min, "y");
+        assert_eq!(col_low.len(), col_min.len(), "both outputs must have the same length");
+        for (a, b) in col_low.iter().zip(col_min.iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "k=2 (clamped) and k=4 must produce identical fitted values"
+            );
+        }
+    }
+
+    /// **Mutation gate: zero k also renders.** Boundary case:
+    /// a SmoothSpec with `k: 0` (far below the minimum) must render without
+    /// panic and match the k=4 output.
+    #[test]
+    fn test_gam_k_zero_via_json_deserialization() {
+        let (xs, ys) = curved_xy();
+        let batch = xy_batch(xs, ys);
+
+        // Build a spec with k=0.
+        let spec_zero = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Gam,
+            ci: None,
+            bandwidth: 0.75, degree: 1, k: 0, n: 200, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+
+        // Apply the spec with k=0 — must not panic.
+        let result_zero = apply(&spec_zero, &batch).expect(
+            "k=0 must render without panic; gam::fit clamps it to MIN_BASIS_DIM"
+        );
+
+        // Build the same spec with k=4 (the minimum).
+        let spec_min = gam_spec_with_k(None, 200, gam::MIN_BASIS_DIM);
+        let result_min = apply(&spec_min, &batch).expect("k=4 must render");
+
+        // Both outputs must be byte-identical.
+        let col_zero = col(&result_zero, "y");
+        let col_min = col(&result_min, "y");
+        for (a, b) in col_zero.iter().zip(col_min.iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "k=0 (clamped) and k=4 must produce identical fitted values"
+            );
+        }
+    }
 }

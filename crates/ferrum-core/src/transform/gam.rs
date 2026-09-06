@@ -820,4 +820,58 @@ mod tests {
             .fold(0.0_f64, f64::max);
         assert!(max_error < 0.5, "max |f̂ − y| = {max_error} on a smooth sine");
     }
+
+    /// **Mutation gate: the lower clamp is load-bearing.** Mutation:
+    /// `k.clamp(MIN_BASIS_DIM, ...)` → `k.min(...)` causes a panic at line 156
+    /// (unsigned underflow: `dim - SPLINE_DEGREE` when `dim < 4`). This test
+    /// asserts that `fit()` with `k < MIN_BASIS_DIM` produces the same fit as
+    /// `fit(..., MIN_BASIS_DIM)` — the clamp's job stated positively.
+    ///
+    /// When the clamp is present, k=2 gets clamped to 4, which is the minimum
+    /// basis dimension for a cubic spline (SPLINE_DEGREE + 1). When mutated to
+    /// `k.min(distinct.len())`, if distinct.len() > 2, the min would return 2,
+    /// and `SplineBasis::new(..., 2)` would compute `n_segments = 2 - 3 = -1`
+    /// (underflow) and panic.
+    #[test]
+    fn fit_with_k_below_min_basis_dim_is_clamped_to_min() {
+        let (xs, ys) = pinned_fixture();
+        let fit_low = fit(&xs, &ys, 2).expect("k=2 must clamp to MIN_BASIS_DIM=4");
+        let fit_min = fit(&xs, &ys, MIN_BASIS_DIM).expect("k=MIN_BASIS_DIM must fit");
+        // Both fits use the same basis dimension (4), so they must be bit-identical.
+        let n_evals = 20;
+        for i in 0..=n_evals {
+            let x = 11.75 * i as f64 / n_evals as f64;
+            assert_eq!(
+                fit_low.predict(x).to_bits(),
+                fit_min.predict(x).to_bits(),
+                "k=2 and k=MIN_BASIS_DIM must produce identical predictions at x={x}"
+            );
+            assert_eq!(
+                fit_low.std_error(x).to_bits(),
+                fit_min.std_error(x).to_bits(),
+                "k=2 and k=MIN_BASIS_DIM must produce identical std_errors at x={x}"
+            );
+        }
+        assert_eq!(
+            fit_low.residual_dof().to_bits(),
+            fit_min.residual_dof().to_bits(),
+            "k=2 and k=MIN_BASIS_DIM must have identical residual_dof"
+        );
+    }
+
+    /// **Mutation gate: zero k is also clamped.** Boundary case of the above:
+    /// `k=0` gets clamped to `MIN_BASIS_DIM`, producing the same fit as
+    /// `k=MIN_BASIS_DIM`. This catches mutations that remove the *entire*
+    /// clamp operation.
+    #[test]
+    fn fit_with_k_zero_is_clamped_to_min() {
+        let (xs, ys) = pinned_fixture();
+        let fit_zero = fit(&xs, &ys, 0).expect("k=0 must clamp to MIN_BASIS_DIM=4");
+        let fit_min = fit(&xs, &ys, MIN_BASIS_DIM).expect("k=MIN_BASIS_DIM must fit");
+        assert_eq!(
+            fit_zero.predict(5.75).to_bits(),
+            fit_min.predict(5.75).to_bits(),
+            "k=0 and k=MIN_BASIS_DIM must produce identical predictions"
+        );
+    }
 }

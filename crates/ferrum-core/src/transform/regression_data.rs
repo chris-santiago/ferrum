@@ -456,6 +456,10 @@ mod tests {
 
         // Schema: rx, ry, g (group column appended, XFORM-03 dtype-preserved).
         assert_eq!(out.num_columns(), 3);
+        // Mutation gate: field names must match the spec's as_ tuple (not positions).
+        // If grouped_two_column_fit swaps the output columns, these assertions die.
+        assert_eq!(out.schema().field(0).name(), "rx", "first output column must be named 'rx'");
+        assert_eq!(out.schema().field(1).name(), "ry", "second output column must be named 'ry'");
         assert_eq!(out.schema().field(2).name(), "g");
         assert_eq!(out.schema().field(2).data_type(), &DataType::Utf8);
         // 100 grid points per group, first-appearance order (A, B).
