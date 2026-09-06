@@ -238,6 +238,13 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // would return full per-row vectors indexed 0..n_rows, misaligning node j
     // with row j whenever any row is skipped (#6 defect class).
     let mut acc = MarkNodes::with_capacity(angle_strs.len());
+    // Ground truth for hit-testing (cycle 5, batch E Task 2) — pushed in the
+    // same lockstep as `acc.push` below. See `arc::build`'s identical
+    // comment and `MarkBatch::polar_spans`'s doc comment: a stacked segment
+    // with `base == top` (a zero-valued category) is a zero-thickness wedge,
+    // geometrically indistinguishable from a full circle by any predicate
+    // over its emitted `PathCmd`s alone.
+    let mut spans: Vec<(f64, f64)> = Vec::with_capacity(angle_strs.len());
 
     for i in 0..angle_strs.len() {
         let cat = match &angle_strs[i] { Some(s) => s.as_str(), None => continue };
@@ -273,8 +280,12 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             &base_style, fill_opacity, stroke_opacity, i,
         );
 
-        let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
+        let commands = wedge_path(
+            geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end,
+            ctx.mark_style.paint.corner_radius,
+        );
         acc.push(SceneNode::Path { commands, style, closed: true }, i);
+        spans.push((angle_start, angle_end));
     }
 
     let (nodes, data_indices) = acc.finalize();
@@ -287,6 +298,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: Some(spans),
     }
 }
 
@@ -428,6 +440,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: None,
     }
 }
 
@@ -592,6 +605,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: None,
     }
 }
 
@@ -774,6 +788,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: None,
     }
 }
 
@@ -898,6 +913,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: None,
     }
 }
 
@@ -2282,6 +2298,89 @@ mod tests {
             "node 1 tooltip must be row 2's ('tip_b'), not row 1's ('tip_null'); got '{t1}'");
     }
 
+    /// Producer-side `polar_spans` alignment for `build_polar` (cycle 6 /
+    /// quality-review finding 8) — the fourth of the four `MarkBatchKind::Arc`
+    /// producers, mirroring `polar_skipped_null_category_tooltip_aligned`
+    /// immediately above. 4 categories `A, B, C, D`; `B`'s category is null
+    /// (skipped) and `C`'s value is `0.0` — unstacked, so its base is also
+    /// `0.0`, making it a zero-radial-thickness wedge at `r=0` (kept, not
+    /// skipped). 3 distinct categories survive in `cat_index` (`A, C, D` —
+    /// `B` is null and never enters it), so `band = tau/3` and the kept
+    /// rows' spans are exactly `(0, tau/3)`, `(tau/3, 2*tau/3)`,
+    /// `(2*tau/3, tau)`.
+    #[test]
+    fn polar_bar_polar_spans_aligned_through_null_skip_and_zero_value() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+        use ferrum_scene::PolarDirection;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: Some(100.0),
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec![Some("A"), None, Some("C"), Some("D")])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 999.0, 0.0, 30.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 30.0], vec![300.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
+        let ctx = crate::render::draw::DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "expected 3 wedges (null category B skipped)");
+        let spans = result.polar_spans.expect("build_polar must always emit polar_spans for an Arc batch");
+        assert_eq!(spans.len(), 3, "polar_spans must have exactly one entry per kept node");
+        assert_eq!(
+            result.data_indices.as_deref(),
+            Some(&[0usize, 2, 3][..]),
+            "kept rows must be 0 (A), 2 (C, zero-value/zero-thickness), 3 (D) — row 1 (null B) skipped"
+        );
+
+        let tau = std::f64::consts::TAU;
+        let tol = 1e-9;
+        let expected = [(0.0, tau / 3.0), (tau / 3.0, 2.0 * tau / 3.0), (2.0 * tau / 3.0, tau)];
+        for (i, (exp_start, exp_end)) in expected.iter().enumerate() {
+            let (start, end) = spans[i];
+            assert!((start - exp_start).abs() < tol && (end - exp_end).abs() < tol,
+                "node {i}'s span must be ({exp_start}, {exp_end}); got ({start}, {end})");
+        }
+    }
+
     /// Stability: `build_ordinal` with NO skipped rows produces tooltips in original
     /// row order — `build_metadata_for_indices` with a full-range index must equal
     /// `build_metadata` for a complete dataset. Backward-compat guard.
@@ -3476,6 +3575,87 @@ mod tests {
             let expected_width = scales.x.to_pixel_f64(v).unwrap();
             assert!((x - 0.0).abs() < 1e-9, "rect[{i}].x = {x}, expected baseline 0.0 — stamp-less base must be ignored");
             assert!((*w - expected_width).abs() < 1e-9, "rect[{i}].w = {w}, expected {expected_width} (baseline→value span, not base=500→value)");
+        }
+    }
+
+    /// Task 2 (batch E, F-L02-06): polar `mark_bar` shares `wedge_path` with
+    /// `mark_arc`, so `corner_radius` must round polar-bar wedges the same
+    /// way `arc.rs`'s own unit tests prove for pie wedges — this is the
+    /// "polar-bar coverage via shared path" half of the fix; the geometry
+    /// itself (fillet clamp, sweep/large-arc derivation) is proven exhaustively
+    /// in `arc.rs`'s `wedge_path`/`rounded_wedge_path` tests, not re-derived
+    /// here. Two categories, base=0 (no stacking) so each wedge is a solid
+    /// (`inner_r == 0`) sector: rounding adds two small-radius corner-fillet
+    /// `ArcTo` commands around the single sharp-geometry `ArcTo`, mirroring
+    /// `bar_corner_radius_emitted_when_theme_sets_it`'s rect-path fixture but
+    /// reading the resolved style through `theme.sizes.bar_corner_radius`
+    /// (Bar's mark-style arm, not an explicit per-mark override) since that is
+    /// how polar bars normally acquire a corner radius today.
+    #[test]
+    fn polar_bar_corner_radius_rounds_wedges() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+        use ferrum_scene::{PathCmd, PolarDirection};
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "dir".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: Some(100.0),
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("dir", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["N", "S"])),
+            Arc::new(Float64Array::from(vec![10.0, 10.0])),
+        ]).unwrap();
+        let mut theme = ThemeInputs::default();
+        theme.sizes.bar_corner_radius = 8.0;
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![300.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar).unwrap();
+        assert_eq!(mark_style.paint.corner_radius, 8.0, "fixture sanity: theme corner radius must reach the resolved style");
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let paths: Vec<&SceneNode> = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).collect();
+        assert_eq!(paths.len(), 2, "expected one wedge per category");
+        for n in &paths {
+            let cmds = if let SceneNode::Path { commands, .. } = n { commands } else { unreachable!() };
+            let arc_radii: Vec<f64> = cmds.iter().filter_map(|c| {
+                if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+            }).collect();
+            assert_eq!(arc_radii.len(), 3,
+                "rounded solid wedge (inner_r=0) must emit 1 main arc + 2 corner fillets; got {arc_radii:?}");
+            let fillets: Vec<f64> = arc_radii.iter().copied().filter(|r| (*r - 8.0).abs() < 1e-6).collect();
+            assert_eq!(fillets.len(), 2,
+                "both outer corners must fillet at the resolved 8.0 corner radius; got {arc_radii:?}");
         }
     }
 }

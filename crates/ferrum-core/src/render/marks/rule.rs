@@ -273,6 +273,7 @@ fn finalize_rule_build(
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Rule,
         nodes,
         data_indices: Some(data_indices),

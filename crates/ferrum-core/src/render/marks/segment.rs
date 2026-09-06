@@ -102,6 +102,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     Ok(MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Segment,
         nodes,
         data_indices: Some(data_indices),

@@ -158,6 +158,24 @@ pub struct MarkBatch {
     /// own per-slot rescale affine with the panel zoom/pan affine.
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub y_slot: usize,
+    /// Per-node `(angle_start, angle_end)` in radians for a polar wedge
+    /// (`mark_arc` / polar `mark_bar`, `MarkBatchKind::Arc` only) — ground
+    /// truth carried straight from the wedge's own construction (batch E
+    /// Task 2, cycle 5), aligned by node index like `tooltips`/`hrefs`/
+    /// `descriptions`. Exists because a wedge's own emitted path geometry
+    /// cannot always be inverted back into its true angular span: a
+    /// zero-radial-thickness wedge (`inner_r == outer_r`, e.g. a `y=0`
+    /// category under `CoordPolar`) is geometrically indistinguishable from
+    /// a genuine full circle by *any* predicate over its `PathCmd`s alone
+    /// (both have every point on one ring), and a corner-rounded wedge's
+    /// main-arc endpoints are trimmed inward from its true `angle_start`/
+    /// `angle_end` by each fillet's own angular width. `None` for every
+    /// non-`Arc` batch and for any `Arc` batch built before this field
+    /// existed — the byte-stable default; the interactive hit-test reader
+    /// treats a missing entry as "no span, skip this node" rather than
+    /// guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polar_spans: Option<Vec<(f64, f64)>>,
 }
 
 pub(crate) fn is_zero_usize(v: &usize) -> bool {

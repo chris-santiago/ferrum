@@ -630,6 +630,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind,
                     nodes,
                     data_indices,

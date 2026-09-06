@@ -382,6 +382,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Area,
         nodes,
         data_indices: Some(data_indices),

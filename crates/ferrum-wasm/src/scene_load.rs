@@ -2469,6 +2469,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![node],
                     data_indices: None,
@@ -2579,6 +2580,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Bar,
                     nodes: vec![node],
                     data_indices: None,
@@ -2706,6 +2708,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![node],
                     data_indices: None,
@@ -2784,6 +2787,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Polygon,
                     nodes,
                     data_indices: None,
@@ -3083,6 +3087,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind,
                     nodes,
                     data_indices: None,
@@ -3759,6 +3764,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle],
                         data_indices: None,
@@ -3773,6 +3779,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Bar,
                         nodes: vec![rect],
                         data_indices: None,
@@ -3787,6 +3794,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line],
                         data_indices: None,
@@ -3801,6 +3809,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Area,
                         nodes: vec![path],
                         data_indices: None,
@@ -3815,6 +3824,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Polygon,
                         nodes: vec![polygon],
                         data_indices: None,
@@ -3829,6 +3839,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Line,
                         nodes: vec![polyline],
                         data_indices: None,
@@ -4071,6 +4082,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -5112,6 +5124,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_a],
                         data_indices: None,
@@ -5126,6 +5139,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_b, circle_c],
                         data_indices: None,
@@ -5313,6 +5327,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Bar,
                     nodes: vec![rect_node],
                     data_indices: None,
@@ -5564,6 +5579,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_node],
                         data_indices: None,
@@ -5578,6 +5594,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Bar,
                         nodes: vec![rect_node],
                         data_indices: None,
@@ -5592,6 +5609,7 @@ mod tests {
                         y_slot: 0,
                     },
                     MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Area,
                         nodes: vec![path_node],
                         data_indices: None,
@@ -5755,6 +5773,7 @@ mod tests {
                 },
                 grid: vec![grid_line],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Rule,
                     nodes: vec![],
                     data_indices: None,
@@ -6182,6 +6201,7 @@ mod tests {
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line_node()],
                         data_indices: None,
@@ -6225,6 +6245,7 @@ mod tests {
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
+                        polar_spans: None,
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line_node()],
                         data_indices: None,
@@ -6411,6 +6432,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Line,
                 nodes: vec![
                     SceneNode::Line {
@@ -7086,6 +7108,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -7251,6 +7274,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 3.0,
@@ -7415,6 +7439,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 3.0,
@@ -7599,6 +7624,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 3.0,
@@ -8141,6 +8167,7 @@ mod bug_hunt_tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -8680,6 +8707,7 @@ mod bug_hunt_interactive_slots {
 
     fn batch(kind: MarkBatchKind, nodes: Vec<SceneNode>, y_slot: usize) -> MarkBatch {
         MarkBatch {
+            polar_spans: None,
             kind,
             nodes,
             data_indices: None,

@@ -161,6 +161,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
         data_indices: Some(data_indices),
@@ -417,6 +418,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
         data_indices: Some(data_indices),
@@ -595,6 +597,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
         data_indices: Some(data_indices),

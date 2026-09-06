@@ -567,11 +567,16 @@ pub struct MarkBuildResult {
     pub tooltips: Option<Vec<FsTooltipContent>>,
     pub hrefs: Option<Vec<Option<String>>>,
     pub descriptions: Option<Vec<Option<String>>>,
+    /// Per-node `(angle_start, angle_end)` ground truth for a polar wedge
+    /// (`MarkBatchKind::Arc` only — `arc.rs`/`bar.rs::build_polar`), threaded
+    /// straight onto `MarkBatch::polar_spans` (batch E Task 2, cycle 5).
+    /// `None` for every other mark.
+    pub polar_spans: Option<Vec<(f64, f64)>>,
 }
 
 impl MarkBuildResult {
     pub fn empty(kind: MarkBatchKind) -> Self {
-        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None }
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None }
     }
 }
 

@@ -514,6 +514,7 @@ mod tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,

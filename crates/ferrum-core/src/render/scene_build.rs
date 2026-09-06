@@ -1387,13 +1387,15 @@ fn build_panel_mark_batches(
 
         let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
         // #6 alignment guard (spec §7): each present per-node vector must
-        // have exactly one entry per node. All five channels — tooltips,
-        // hrefs, descriptions, data_indices, and keys — are independent and
-        // checked independently so any misaligned channel trips the guard
-        // under a debug build. data_indices and keys are the alignment
-        // vector and key channel; covering them here catches builders (like
-        // the pre-fix label.rs) that diverge data_indices while leaving
-        // metadata None (which the three-channel guard could not detect).
+        // have exactly one entry per node. All six channels — tooltips,
+        // hrefs, descriptions, data_indices, keys, and polar_spans — are
+        // independent and checked independently so any misaligned channel
+        // trips the guard under a debug build. data_indices and keys are the
+        // alignment vector and key channel; covering them here catches
+        // builders (like the pre-fix label.rs) that diverge data_indices
+        // while leaving metadata None (which the three-channel guard could
+        // not detect). polar_spans (batch E Task 2, cycle 6) is the same
+        // shape again, populated only by arc.rs/bar.rs::build_polar.
         crate::render::mark_nodes::debug_assert_nodes_metadata_aligned(
             result.nodes.len(),
             result.tooltips.as_ref().map(|t| t.len()),
@@ -1401,6 +1403,7 @@ fn build_panel_mark_batches(
             result.descriptions.as_ref().map(|d| d.len()),
             result.data_indices.as_ref().map(|d| d.len()),
             keys.as_ref().map(|k| k.len()),
+            result.polar_spans.as_ref().map(|s| s.len()),
         );
         mark_batches.push(MarkBatch {
             kind: result.kind,
@@ -1428,6 +1431,7 @@ fn build_panel_mark_batches(
             // Uses `layer_slot_idx` (captured pre-shadow above), not the
             // (possibly single-slot, self-describing) clone's `y_slots`.
             y_slot: layer_slot_idx,
+            polar_spans: result.polar_spans,
         });
     }
 

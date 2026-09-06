@@ -217,6 +217,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Label,
         nodes,
         data_indices: Some(data_indices),

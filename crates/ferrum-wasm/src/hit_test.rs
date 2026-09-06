@@ -361,7 +361,7 @@ fn hit_test_batch(batch: &MarkBatch, panel: &ferrum_scene::Panel, x: f64, y: f64
         // Geoshape polygons: use existing polygon point-in-polygon test.
         MarkBatchKind::Polygon => hit_test_lines(&batch.nodes, x, y),
         // Arc wedges (polar pie/donut): polar coordinate hit-test.
-        MarkBatchKind::Arc => hit_test_polar_arcs(&batch.nodes, panel, x, y),
+        MarkBatchKind::Arc => hit_test_polar_arcs(batch, panel, x, y),
         // Short line segments (rug ticks, boxplot caps, etc.) — emit Line nodes.
         MarkBatchKind::Tick => hit_test_lines(&batch.nodes, x, y),
         // Text and Label marks — point proximity using font_size as tolerance.
@@ -499,10 +499,31 @@ fn hit_test_images(nodes: &[SceneNode], x: f64, y: f64) -> Option<usize> {
     None
 }
 
-/// Hit-test polar arc wedge nodes by converting pixel coords to (θ, r) and checking
-/// each wedge's angular range (extracted from the first MoveTo/ArcTo commands).
+/// Hit-test polar arc wedge nodes by converting pixel coords to (θ, r) and
+/// checking each wedge's angular range.
+///
+/// The angular range comes from `MarkBatch::polar_spans` — ground truth
+/// carried straight from the wedge's own construction in `ferrum-core`
+/// (`arc.rs`/`bar.rs::build_polar`, batch E Task 2, cycle 5) — NOT inferred
+/// from the wedge's own emitted `PathCmd` geometry. Three successive cycles
+/// (2, 3, 4) each shipped a geometry-based classifier that a *different*
+/// degenerate wedge shape then falsified: an unrounded full-circle annular
+/// wedge's span collapsing to a point on floating-point noise; an inner
+/// fillet's radius coincidentally matching the outer radius at an extreme
+/// `corner_radius`; and, decisively, a zero-radial-thickness wedge
+/// (`inner_r == outer_r`, e.g. a `y == 0` category under `CoordPolar`) being
+/// geometrically **indistinguishable from a genuine full circle** by any
+/// predicate over its `PathCmd`s alone — both shapes have every point on
+/// exactly one ring. No shape-specific predicate can close that gap, because
+/// the ambiguity is in the geometry itself, not in how it's classified.
+/// Carrying the true `(angle_start, angle_end)` as data sidesteps the whole
+/// problem: nothing is inferred, so nothing can be misinferred.
+///
+/// A batch built before this field existed (or a non-Arc-kind batch reaching
+/// this function some other way) has `polar_spans: None` and matches no
+/// node — a missing span means "no data," never a guess.
 fn hit_test_polar_arcs(
-    nodes: &[SceneNode],
+    batch: &MarkBatch,
     panel: &ferrum_scene::Panel,
     x: f64,
     y: f64,
@@ -529,43 +550,39 @@ fn hit_test_polar_arcs(
         theta += TAU;
     }
 
-    for (i, node) in nodes.iter().enumerate().rev() {
-        let SceneNode::Path { commands, .. } = node else {
+    let spans = batch.polar_spans.as_ref()?;
+    let wrap = |t: f64| {
+        let w = t % TAU;
+        if w < 0.0 { w + TAU } else { w }
+    };
+
+    for (i, node) in batch.nodes.iter().enumerate().rev() {
+        if !matches!(node, SceneNode::Path { .. }) {
+            continue;
+        }
+        let Some(&(raw_start, raw_end)) = spans.get(i) else {
             continue;
         };
-        // Extract start angle from first MoveTo, end angle from first ArcTo.
-        let mut start_theta: Option<f64> = None;
-        let mut end_theta: Option<f64> = None;
-        for cmd in commands {
-            match cmd {
-                ferrum_scene::PathCmd::MoveTo { x: mx, y: my } if start_theta.is_none() => {
-                    let mut t = (*mx - cx).atan2(-(*my - cy));
-                    if t < 0.0 {
-                        t += TAU;
-                    }
-                    start_theta = Some(t);
-                }
-                ferrum_scene::PathCmd::ArcTo { x: ax, y: ay, .. } if end_theta.is_none() => {
-                    let mut t = (*ax - cx).atan2(-(*ay - cy));
-                    if t < 0.0 {
-                        t += TAU;
-                    }
-                    end_theta = Some(t);
-                    break;
-                }
-                _ => {}
-            }
+        // A genuine full circle (`|sweep| >= TAU`, matching `ferrum-core`'s
+        // own `wedge_path` full-circle threshold exactly) hits everywhere,
+        // checked directly on the RAW (unwrapped) span rather than the
+        // wrapped `t0`/`t1` — wrapping `angle_start` and `angle_start + TAU`
+        // both land on the same wrapped value, which the `t1 >= t0` branch
+        // below would otherwise read as a zero-width (single-point) band,
+        // not a full circle.
+        if (raw_end - raw_start).abs() >= TAU - 1e-9 {
+            return Some(i);
         }
-        if let (Some(t0), Some(t1)) = (start_theta, end_theta) {
-            let inside = if t1 >= t0 {
-                theta >= t0 && theta <= t1
-            } else {
-                // Wedge wraps around 0 (e.g. last slice covers 330°–360°+0°–30°)
-                theta >= t0 || theta <= t1
-            };
-            if inside {
-                return Some(i);
-            }
+        let t0 = wrap(raw_start);
+        let t1 = wrap(raw_end);
+        let inside = if t1 >= t0 {
+            theta >= t0 && theta <= t1
+        } else {
+            // Wedge wraps around 0 (e.g. last slice covers 330°–360°+0°–30°)
+            theta >= t0 || theta <= t1
+        };
+        if inside {
+            return Some(i);
         }
     }
     None
@@ -654,6 +671,7 @@ mod bug_hunt_interactive_slots {
 
     fn slot_batch(nodes: Vec<SceneNode>, y_slot: usize, tip: TooltipContent) -> MarkBatch {
         MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Point,
             data_indices: Some((0..nodes.len()).collect()),
             tooltips: Some(vec![tip; nodes.len()]),
@@ -1198,6 +1216,7 @@ mod bug_hunt_tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1473,6 +1492,7 @@ mod bug_hunt_tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,
@@ -1521,6 +1541,7 @@ mod bug_hunt_tests {
                 strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 350.0,
@@ -1674,6 +1695,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Tick,
             nodes: vec![SceneNode::Line {
                 x1: 50.0,
@@ -1772,6 +1794,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Text,
             nodes: vec![SceneNode::Text {
                 x: 100.0,
@@ -1905,6 +1928,7 @@ mod bug_hunt_tests {
             ferrum_scene::PathCmd::Close,
         ];
         let batch = MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Ribbon,
             nodes: vec![SceneNode::Path {
                 commands,
@@ -1986,6 +2010,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Segment,
             nodes: vec![SceneNode::Line {
                 x1: 10.0,
@@ -2097,6 +2122,7 @@ mod bug_hunt_tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Image,
             nodes: vec![SceneNode::Image {
                 x: 50.0,
@@ -2133,7 +2159,9 @@ mod bug_hunt_tests {
 mod tests {
     use super::*;
     use crate::zoom_pan::{Affine2, ZoomPanState};
-    use ferrum_scene::{CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
+    use ferrum_scene::{
+        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+    };
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -2190,6 +2218,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(cx, cy, r)],
                 data_indices: Some(vec![0]),
@@ -2284,6 +2313,7 @@ mod tests {
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![circle_node(350.0, 250.0, 10.0)],
                     data_indices: Some(vec![42]),
@@ -2526,6 +2556,7 @@ mod tests {
             chrome_above: Vec::new(),
         };
         let batch = MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Label,
             nodes: vec![SceneNode::Text {
                 x: 100.0,
@@ -2583,6 +2614,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(50.0, 50.0, 5.0)],
                 data_indices,
@@ -2709,6 +2741,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![circle_node(3.0, 4.0, 2.0)],
                 data_indices: Some(vec![7]),
@@ -2860,5 +2893,267 @@ mod tests {
             .is_none(),
             "click at zoom_affine(layout_scale(baked_position)) (double-bake) must miss"
         );
+    }
+
+    // ── Cycle 5 (spec-reviewer recurrence note, adjudicated) ────────────────
+    //
+    // Three successive cycles (2, 3, 4) each shipped a geometry-based
+    // classifier for a wedge's angular span, and each was falsified by a
+    // *different* degenerate wedge shape the previous fix didn't anticipate:
+    // an unrounded full-circle annular wedge collapsing to a point on
+    // floating-point noise (cycle 2); an inner fillet's radius coincidentally
+    // matching the outer radius at an extreme `corner_radius` (cycle 3); and,
+    // decisively, a zero-radial-thickness wedge (`inner_r == outer_r`) being
+    // geometrically indistinguishable from a genuine full circle by ANY
+    // predicate over its `PathCmd`s alone (cycle 4) — both shapes have every
+    // point on exactly one ring. The mechanism fix: `MarkBatch::polar_spans`
+    // now carries the wedge's true `(angle_start, angle_end)` straight from
+    // `ferrum-core`'s own construction, so `hit_test_polar_arcs` never
+    // inspects path geometry to determine a wedge's angle — nothing is
+    // inferred, so nothing can be misinferred. These tests build minimal
+    // fixtures (the `PathCmd` content is irrelevant to hit-testing now; only
+    // `polar_spans` and the cursor radius against the panel's coord matter)
+    // and pin the carrier directly, including the zero-thickness case that
+    // falsified every prior geometry-based predicate.
+
+    fn polar_panel() -> Panel {
+        Panel {
+            id: 0,
+            plot_area: Rect { x: -100.0, y: -100.0, w: 200.0, h: 200.0 },
+            clip: Rect { x: -100.0, y: -100.0, w: 200.0, h: 200.0 },
+            coord: CoordKind::Polar {
+                theta: ferrum_scene::PolarThetaChannel::X,
+                start_angle: 0.0,
+                direction: ferrum_scene::PolarDirection::Clockwise,
+                inner_radius: 0.0,
+                outer_radius: 100.0,
+            },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
+            below_marks: Vec::new(),
+            chrome_above: Vec::new(),
+        }
+    }
+
+    /// A trivial `Path` node — its geometry is never read by
+    /// `hit_test_polar_arcs` now, only its presence as a `SceneNode::Path`
+    /// (to be counted/indexed) and its panel-relative radius range (checked
+    /// once, panel-wide, before any per-node span lookup).
+    fn dummy_wedge_node() -> SceneNode {
+        SceneNode::Path {
+            commands: vec![ferrum_scene::PathCmd::MoveTo { x: 0.0, y: 0.0 }, ferrum_scene::PathCmd::Close],
+            style: default_style(),
+            closed: true,
+        }
+    }
+
+    /// A batch of `n` trivial wedge nodes carrying the given `spans` as
+    /// ground truth (`polar_spans`) — `None` when a test specifically wants
+    /// to exercise the "no carried data" fallback.
+    fn spans_batch(n: usize, spans: Option<Vec<(f64, f64)>>) -> MarkBatch {
+        MarkBatch {
+            kind: MarkBatchKind::Arc,
+            nodes: (0..n).map(|_| dummy_wedge_node()).collect(),
+            data_indices: Some((0..n).collect()),
+            tooltips: None,
+            hrefs: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: spans,
+        }
+    }
+
+    fn point_at(theta: f64, r: f64) -> (f64, f64) {
+        (r * theta.sin(), -r * theta.cos())
+    }
+
+    /// A partial (unrounded or rounded — the distinction no longer matters
+    /// to hit-testing) wedge spanning `[0, π/2]` hits inside its own carried
+    /// span and misses outside it.
+    #[test]
+    fn partial_wedge_hits_within_and_misses_outside_its_carried_span() {
+        let panel = polar_panel();
+        let batch = spans_batch(1, Some(vec![(0.0, std::f64::consts::FRAC_PI_2)]));
+
+        let (x_in, y_in) = point_at(0.05, 50.0); // just inside angle_start, deep within [0, π/2]
+        assert!(hit_test_batch(&batch, &panel, x_in, y_in).is_some(), "must hit inside its carried [0, π/2] span");
+
+        let (x_out, y_out) = point_at(-0.2, 50.0);
+        assert!(hit_test_batch(&batch, &panel, x_out, y_out).is_none(), "must miss outside its carried span");
+    }
+
+    /// A wedge with `polar_spans: None` (no carried data — a batch built
+    /// before this field existed, or by some other path) never hits, per the
+    /// doc comment's "missing span means no data, never a guess" contract.
+    #[test]
+    fn missing_polar_spans_never_hits() {
+        let panel = polar_panel();
+        let batch = spans_batch(1, None);
+        let (x, y) = point_at(0.05, 50.0);
+        assert!(hit_test_batch(&batch, &panel, x, y).is_none(), "a batch with no carried spans must never hit");
+    }
+
+    /// A genuine full-circle SOLID wedge (`(angle_start, angle_start + TAU)`)
+    /// hits at every sampled angle around the ring — including the pre-
+    /// existing half-span limitation cycle 3 incidentally fixed for the
+    /// geometry-based detector, now trivially correct because the carried
+    /// span's own magnitude (`|end - start| >= TAU`) is checked directly.
+    #[test]
+    fn full_circle_solid_wedge_hits_everywhere() {
+        let panel = polar_panel();
+        let start = 0.0_f64;
+        let batch = spans_batch(1, Some(vec![(start, start + std::f64::consts::TAU)]));
+        for theta in [0.0_f64, std::f64::consts::FRAC_PI_2, std::f64::consts::PI, 4.5] {
+            let (x, y) = point_at(theta, 50.0);
+            assert!(hit_test_batch(&batch, &panel, x, y).is_some(), "full-circle solid wedge must hit at theta={theta}");
+        }
+    }
+
+    /// A genuine full-circle ANNULAR wedge hits everywhere too, checked at
+    /// TWO different `start_angle` values — the cycle-3 conflict was
+    /// specifically about whether this held generally or only at
+    /// `start_angle=0.0` (it did not, under the old geometry-based
+    /// classifier); the carried-span mechanism has no `start_angle`
+    /// dependence at all, so both must pass identically.
+    #[test]
+    fn full_circle_annular_wedge_hits_everywhere_at_multiple_start_angles() {
+        let mut panel = polar_panel();
+        panel.coord = CoordKind::Polar {
+            theta: ferrum_scene::PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: ferrum_scene::PolarDirection::Clockwise,
+            inner_radius: 60.0,
+            outer_radius: 100.0,
+        };
+        for start in [0.0_f64, 1.0, -0.5, std::f64::consts::PI] {
+            let batch = spans_batch(1, Some(vec![(start, start + std::f64::consts::TAU)]));
+            for theta in [0.0_f64, std::f64::consts::FRAC_PI_2, std::f64::consts::PI, 4.5] {
+                let (x, y) = point_at(theta, 80.0); // midway between inner_r=60 and outer_r=100
+                assert!(
+                    hit_test_batch(&batch, &panel, x, y).is_some(),
+                    "full-circle annular wedge (start_angle={start}) must hit at theta={theta}"
+                );
+            }
+        }
+    }
+
+    /// Rounded-vs-unrounded is no longer a distinct code path in
+    /// `hit_test_polar_arcs` at all (both read the same carried span), so one
+    /// test now covers what cycles 2 and 3 each needed a dedicated
+    /// hand-traced fixture for: a wedge spanning `[0, π/2]` on an annular
+    /// ring hits inside and misses outside, regardless of whether
+    /// `ferrum-core` rounded its corners to produce this span.
+    #[test]
+    fn annular_wedge_hits_within_and_misses_outside_its_carried_span() {
+        let panel = polar_panel();
+        let batch = spans_batch(1, Some(vec![(0.0, std::f64::consts::FRAC_PI_2)]));
+
+        let (x_in, y_in) = point_at(0.05, 70.0);
+        assert!(hit_test_batch(&batch, &panel, x_in, y_in).is_some(), "must hit inside its carried span");
+
+        let (x_out, y_out) = point_at(-0.2, 70.0);
+        assert!(hit_test_batch(&batch, &panel, x_out, y_out).is_none(), "must miss outside its carried span");
+    }
+
+    /// The spec review's decisive falsifying case: a zero-radial-thickness
+    /// wedge (`inner_r == outer_r`), reachable via an ordinary `y == 0`
+    /// category under `CoordPolar` — real repro:
+    /// `fr.Chart(df).mark_arc().encode(x="c:N", y="v:Q").coord(fr.CoordPolar(
+    /// theta="x", inner_radius=60.0))` with `v = [10.0, 0.0, 25.0, 35.0]`.
+    /// Four equal `π/2`-wide bands; the zero-valued category (`b`, index 1)
+    /// gets the pre-cycle-3 correct band `(π/2, π)` — its own true span, not
+    /// `(0, TAU)` (a genuine full circle) and not a single point. Every
+    /// geometry-based classifier from cycles 2–4 could not tell this shape
+    /// from a full circle because BOTH have every point on exactly one ring;
+    /// the carried span sidesteps that ambiguity entirely by not inspecting
+    /// geometry at all.
+    #[test]
+    fn zero_thickness_wedge_gets_its_own_band_not_a_phantom_full_circle() {
+        let mut panel = polar_panel();
+        panel.coord = CoordKind::Polar {
+            theta: ferrum_scene::PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: ferrum_scene::PolarDirection::Clockwise,
+            inner_radius: 60.0,
+            outer_radius: 100.0,
+        };
+        let frac_pi_2 = std::f64::consts::FRAC_PI_2;
+        let pi = std::f64::consts::PI;
+        // a: [0, π/2], b (zero-valued, zero-thickness): [π/2, π], c: [π, 3π/2], d: [3π/2, 2π].
+        let batch = spans_batch(4, Some(vec![
+            (0.0, frac_pi_2),
+            (frac_pi_2, pi),
+            (pi, pi + frac_pi_2),
+            (pi + frac_pi_2, pi + pi),
+        ]));
+
+        // A point in `a`'s own region must resolve to node 0, not be stolen
+        // by a phantom full-circle `b`.
+        let (xa, ya) = point_at(0.1, 80.0);
+        assert_eq!(hit_test_batch(&batch, &panel, xa, ya), Some(0), "a point in slice a's region must hit node 0");
+
+        // A point in `b`'s own true band (π/2, π) must resolve to node 1 —
+        // `b` still occupies its own real band, it just doesn't claim
+        // anything beyond it.
+        let (xb, yb) = point_at(frac_pi_2 + 0.1, 80.0);
+        assert_eq!(hit_test_batch(&batch, &panel, xb, yb), Some(1), "a point in slice b's own band must hit node 1");
+
+        // A point in `c`'s region must resolve to node 2 — NOT node 1. This
+        // is the exact regression the review measured: a phantom
+        // full-circle `b` (span `(0, TAU)`) would steal this hit because
+        // `hit_test_polar_arcs` iterates nodes in reverse and checks `d`,
+        // `c`, `b`, `a` in that order, so a phantom-full-circle `b` would
+        // match before the loop ever reaches the correct answer for a point
+        // actually in `c`.
+        let (xc, yc) = point_at(pi + 0.1, 80.0);
+        assert_eq!(hit_test_batch(&batch, &panel, xc, yc), Some(2), "a point in slice c's region must hit node 2, not the zero-thickness b");
+
+        // A point in `d`'s region must resolve to node 3.
+        let (xd, yd) = point_at(pi + frac_pi_2 + 0.1, 80.0);
+        assert_eq!(hit_test_batch(&batch, &panel, xd, yd), Some(3), "a point in slice d's region must hit node 3");
+    }
+
+    /// The spec review's collision-locus fixture (inner fillet radius
+    /// coincidentally equal to the outer radius at `inner_r/outer_r =
+    /// (√48−6)/6`, an extreme `corner_radius=5000` on a 349°/11° two-slice
+    /// pie) stays as a regression fixture, but now proves the CARRIER, not a
+    /// geometry predicate: given the correct carried span directly (no
+    /// detection of any kind), the 349° wedge must hit its own dominant
+    /// region and miss the other slice's narrow region — trivially true once
+    /// nothing is inferred from the coincidentally-matching fillet radii,
+    /// which this test still names so a future reader knows why this
+    /// specific locus is pinned here at all.
+    #[test]
+    fn near_full_circle_collision_locus_hits_only_its_own_span() {
+        let mut panel = polar_panel();
+        panel.coord = CoordKind::Polar {
+            theta: ferrum_scene::PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: ferrum_scene::PolarDirection::Clockwise,
+            inner_radius: 31.323765011030833,
+            outer_radius: 202.48,
+        };
+        let dominant_end = 0.97 * std::f64::consts::TAU; // 349°, matching the reviewer's real render
+        let batch = spans_batch(2, Some(vec![
+            (0.0, dominant_end),
+            (dominant_end, std::f64::consts::TAU),
+        ]));
+
+        // Inside the other (11°) slice's own region: must hit node 1, not node 0.
+        let (x_other, y_other) = point_at(6.2, 100.0); // inside [dominant_end, TAU) ≈ [6.0912, 6.2832)
+        assert_eq!(hit_test_batch(&batch, &panel, x_other, y_other), Some(1), "must hit the 11° slice, not the 349° one");
+
+        // Inside the 349° slice's own dominant span: must hit node 0.
+        let (x_own, y_own) = point_at(std::f64::consts::PI, 100.0);
+        assert_eq!(hit_test_batch(&batch, &panel, x_own, y_own), Some(0), "must hit the 349° slice within its own span");
     }
 }

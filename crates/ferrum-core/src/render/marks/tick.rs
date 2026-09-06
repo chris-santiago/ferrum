@@ -114,6 +114,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 let (nodes, data_indices) = acc.finalize();
                 let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
                 return MarkBuildResult {
+                    polar_spans: None,
                     kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                     tooltips, hrefs, descriptions,
                 };
@@ -141,6 +142,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
+                polar_spans: None,
                 kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                 tooltips, hrefs, descriptions,
             };
@@ -204,6 +206,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
+                polar_spans: None,
                 kind: MarkBatchKind::Tick,
                 nodes,
                 data_indices: Some(data_indices),
@@ -258,6 +261,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
+                polar_spans: None,
                 kind: MarkBatchKind::Tick,
                 nodes,
                 data_indices: Some(data_indices),
@@ -317,6 +321,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let (nodes, data_indices) = acc.finalize();
         let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
         return MarkBuildResult {
+            polar_spans: None,
             kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
             tooltips, hrefs, descriptions,
         };
@@ -346,6 +351,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Tick,
         nodes,
         data_indices: Some(data_indices),

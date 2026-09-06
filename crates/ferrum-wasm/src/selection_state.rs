@@ -874,6 +874,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![ferrum_scene::SceneNode::Circle {
                     cx: 100.0,
@@ -1618,6 +1619,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![ferrum_scene::SceneNode::Circle {
                     cx: 100.0,
@@ -1759,6 +1761,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     ferrum_scene::SceneNode::Circle {
@@ -1928,6 +1931,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     ferrum_scene::SceneNode::Circle {

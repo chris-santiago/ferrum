@@ -626,6 +626,7 @@ fn panel_one_pixel_plot_area_round_trips() {
         },
         grid: vec![],
         marks: vec![MarkBatch {
+            polar_spans: None,
             kind: MarkBatchKind::Point,
             nodes: vec![SceneNode::Circle {
                 cx: 0.5,
@@ -662,6 +663,7 @@ fn panel_one_pixel_plot_area_round_trips() {
 #[test]
 fn mark_batch_tooltips_without_nodes_round_trips() {
     let batch = MarkBatch {
+        polar_spans: None,
         kind: MarkBatchKind::Point,
         nodes: vec![],
         data_indices: Some(vec![]),
@@ -986,6 +988,7 @@ fn panel_zero_marks_round_trips() {
 #[test]
 fn mark_batch_empty_nodes_round_trips() {
     let batch = MarkBatch {
+        polar_spans: None,
         kind: MarkBatchKind::Point,
         nodes: vec![],
         data_indices: Some(vec![]),

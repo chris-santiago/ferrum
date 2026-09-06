@@ -171,6 +171,14 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let meta = MetadataColumns::from_ctx(ctx);
 
     let mut acc = MarkNodes::with_capacity(values.len());
+    // Ground truth for hit-testing (cycle 5): `(angle_start, angle_end)` per
+    // KEPT node, pushed in the same lockstep as `acc.push` below so this
+    // vec is already "kept nodes only, in node order" with no separate
+    // gather step needed — see `MarkBatch::polar_spans`'s doc comment for
+    // why a wedge's own emitted path geometry cannot always be inverted
+    // back into this value (a rounded or zero-thickness wedge's endpoints
+    // don't determine it uniquely).
+    let mut spans: Vec<(f64, f64)> = Vec::with_capacity(values.len());
     let mut cum_angle = start_angle;
     let tau = std::f64::consts::TAU;
 
@@ -203,7 +211,10 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
-        let commands = wedge_path(cx, cy, inner_radius, outer_radius, angle_start, angle_end);
+        let commands = wedge_path(
+            cx, cy, inner_radius, outer_radius, angle_start, angle_end,
+            ctx.mark_style.paint.corner_radius,
+        );
         acc.push(SceneNode::Path {
             commands,
             style: to_scene_fill_stroke(
@@ -217,6 +228,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             ),
             closed: true,
         }, i);
+        spans.push((angle_start, angle_end));
     }
 
     // Build tooltip/href/description aligned to KEPT nodes only. Some rows are
@@ -234,6 +246,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: Some(spans),
     }
 }
 
@@ -299,6 +312,12 @@ fn build_nominal_theta(
     let meta = MetadataColumns::from_ctx(ctx);
 
     let mut acc = MarkNodes::with_capacity(angle_strs.len());
+    // Ground truth for hit-testing (cycle 5) — see `build`'s identical comment.
+    // This is the path a `y == 0` category takes: its `outer_r` resolves to
+    // exactly `geom.inner_radius` (a zero-thickness wedge), geometrically
+    // indistinguishable from a full circle by any predicate over its emitted
+    // `PathCmd`s alone — the reason this value must be carried, not inferred.
+    let mut spans: Vec<(f64, f64)> = Vec::with_capacity(angle_strs.len());
 
     for (i, cat_opt) in angle_strs.iter().enumerate() {
         let cat = match cat_opt { Some(s) => s.as_str(), None => continue };
@@ -332,6 +351,7 @@ fn build_nominal_theta(
 
         let commands = wedge_path(
             geom.cx, geom.cy, geom.inner_radius, outer_r, angle_start, angle_end,
+            ctx.mark_style.paint.corner_radius,
         );
         acc.push(SceneNode::Path {
             commands,
@@ -346,6 +366,7 @@ fn build_nominal_theta(
             ),
             closed: true,
         }, i);
+        spans.push((angle_start, angle_end));
     }
 
     // Metadata must be aligned to the KEPT nodes, not all rows. Some rows are
@@ -363,6 +384,7 @@ fn build_nominal_theta(
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: Some(spans),
     }
 }
 
@@ -407,6 +429,8 @@ fn build_annular(
     let meta = MetadataColumns::from_ctx(ctx);
 
     let mut acc = MarkNodes::with_capacity(theta.len());
+    // Ground truth for hit-testing (cycle 5) — see `build`'s identical comment.
+    let mut spans: Vec<(f64, f64)> = Vec::with_capacity(theta.len());
 
     for (i, t0_opt) in theta.iter().enumerate() {
         let Some(t0) = t0_opt.filter(|v| v.is_finite()) else { continue };
@@ -446,7 +470,10 @@ fn build_annular(
             resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
-        let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
+        let commands = wedge_path(
+            geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end,
+            ctx.mark_style.paint.corner_radius,
+        );
         acc.push(SceneNode::Path {
             commands,
             style: to_scene_fill_stroke(
@@ -460,6 +487,7 @@ fn build_annular(
             ),
             closed: true,
         }, i);
+        spans.push((angle_start, angle_end));
     }
 
     // Metadata must be aligned to the KEPT nodes, not all rows. Some rows are
@@ -477,6 +505,7 @@ fn build_annular(
         tooltips,
         hrefs,
         descriptions,
+        polar_spans: Some(spans),
     }
 }
 
@@ -484,6 +513,19 @@ fn build_annular(
 ///
 /// Angles are measured clockwise from 12 o'clock (north):
 /// `x = cx + r·sin(θ)`, `y = cy − r·cos(θ)`.
+///
+/// `corner_radius` rounds the wedge's corners (spec §6.9) via the exact
+/// tangent-circle construction d3-shape's `arc().cornerRadius()` uses
+/// (`cornerTangents` in its source) — NOT the rounded-rectangle
+/// approximation that treats the arc edge as locally straight near the
+/// corner (that approximation shipped in cycle 1 and was found, in review,
+/// to bulge the filleted boundary outside `outer_r` at ordinary radii; see
+/// `rounded_wedge_path`'s doc comment for the closed-form fix). `0`/unset
+/// and a full circle (no discrete corners to round) both fall through to
+/// the unrounded geometry unchanged — byte-identical to pre-fillet output.
+/// A zero inner radius rounds only the two outer corners; the center apex
+/// (formed by two radial edges of possibly-unequal angle) stays sharp,
+/// mirroring d3's own convention for `innerRadius = 0`.
 pub(crate) fn wedge_path(
     cx: f64,
     cy: f64,
@@ -491,10 +533,20 @@ pub(crate) fn wedge_path(
     outer_r: f64,
     angle_start: f64,
     angle_end: f64,
+    corner_radius: f64,
 ) -> Vec<PathCmd> {
-    let mut cmds = Vec::new();
     let sweep = angle_end - angle_start;
     let full_circle = sweep.abs() >= std::f64::consts::TAU - 1e-9;
+
+    if corner_radius > 0.0 && !full_circle {
+        if let Some(cmds) =
+            rounded_wedge_path(cx, cy, inner_r, outer_r, angle_start, angle_end, corner_radius)
+        {
+            return cmds;
+        }
+    }
+
+    let mut cmds = Vec::new();
     let large_arc = sweep.abs() > std::f64::consts::PI;
 
     let ox0 = cx + outer_r * angle_start.sin();
@@ -535,6 +587,226 @@ pub(crate) fn wedge_path(
 
     cmds.push(PathCmd::Close);
     cmds
+}
+
+/// Build a corner-filleted wedge path, or `None` when the wedge is too thin
+/// for any positive clamped radius on either ring (the caller then falls
+/// back to the unrounded geometry).
+///
+/// ## Geometry: exact tangent circles, not a rounded-rectangle approximation
+///
+/// Cycle 1 shipped a rounded-rectangle-style approximation — trim the arc
+/// edge by `cr/r` radians and the radial edge to radius `r ∓ cr`, then join
+/// with an `ArcTo` of radius `cr` — reasoning that since a circle's tangent
+/// is perpendicular to its radius, the two edges meet at a right angle just
+/// like a rectangle's corner. That reasoning is only valid in the limit
+/// `cr/r → 0`: the arc edge is genuinely curved, not straight, so treating
+/// it as locally straight makes the trimmed points **not actually tangent**
+/// to either edge, and at the clamp's own boundary the resulting fillet
+/// visibly bulges outside `outer_r` (measured in review: a fillet radius
+/// clamped to `radial_thickness/2` on a thin ring pushed the boundary ~11.5
+/// px past `outer_r` on a `100`-radius wedge). This function instead solves
+/// the two tangency conditions exactly, for a fillet of radius `cr` tangent
+/// to BOTH a radial line through the wedge's own center AND the ring's own
+/// circle (internally, for the outer ring; externally, for the inner one):
+///
+/// - `ρ = outer_r − cr` (outer) or `ρ = inner_r + cr` (inner) — the required
+///   distance from the wedge's center to the fillet's own center, `O_f`,
+///   for `O_f`'s circle of radius `cr` to be tangent to the ring.
+/// - `Δ = asin(cr / ρ)` — `O_f` sits at angular offset `Δ` from the radial
+///   edge (into the wedge's interior), which is also the correct trim on
+///   the arc-edge side: the arc's own tangent point is colinear with the
+///   wedge center and `O_f`, at radius `outer_r`/`inner_r`, i.e. at
+///   `angle_edge ± Δ` — not `± cr/r`.
+/// - `τ = sqrt(ρ² − cr²)` (equivalently `sqrt(r·(r∓2·cr))` — expand
+///   `(r∓cr)² − cr²`) — the trim point's radius along the radial edge,
+///   the foot of the perpendicular from `O_f` onto that line — not `r ∓ cr`.
+///
+/// With this construction the fillet circle is exactly internally tangent
+/// to the outer ring (farthest point from the wedge's center is exactly
+/// `ρ + cr = outer_r`, never more) and exactly externally tangent to the
+/// inner ring (nearest point is exactly `ρ − cr = inner_r`, never less) —
+/// the boundary-overshoot defect is structurally impossible, not merely
+/// clamped smaller. Both `Δ`/`τ` reduce to the cycle-1 approximation's
+/// `cr/r`/`r∓cr` as `cr/ρ → 0`, so this is a strict correction, not a
+/// behavior change at realistic (small relative to the ring) radii.
+///
+/// The corner-turn direction (incoming edge → outgoing edge) has the same
+/// rotational handedness at all four corners (`outer-start`, `outer-end`,
+/// `inner-end`, `inner-start`), so every fillet `ArcTo` uses the same
+/// `large_arc: false, sweep: true` regardless of which corner it is —
+/// verified algebraically, not per corner (see the cycle-1 doc history in
+/// git blame for the derivation of the shared cross-product sign).
+///
+/// ## Clamp
+///
+/// Per spec §6.9 each corner's radius is independently clamped to
+/// `min(requested, radial_leg, angular_leg)`, where both legs are the exact
+/// closed-form inverse of this construction's excursion functions (not the
+/// spec's literal `radial_thickness/2` / `r·sweep/2`, which assumed the
+/// rejected approximation and would under-clamp here — see each leg's own
+/// comment below for the derivation). Both legs converge to the spec's
+/// literal formulas as `cr/r → 0`. A corner whose own clamp resolves to `0`
+/// keeps its original sharp point while its neighbors still round; per the
+/// guards enforced by every `wedge_path` call site (a positive sweep, since
+/// `angle_end` exceeds `angle_start`) and by this function's own positive-
+/// radial-thickness bailout, both `outer_r` and (whenever `has_inner`)
+/// `inner_r` are always strictly positive once we reach the clamp math
+/// below, and both `cr_outer` and (whenever `has_inner`) `cr_inner` are
+/// therefore provably strictly positive too — asserted via `debug_assert!`,
+/// not branched on, since the sharp-corner fallback the branch would guard
+/// is unreachable given those invariants.
+fn rounded_wedge_path(
+    cx: f64,
+    cy: f64,
+    inner_r: f64,
+    outer_r: f64,
+    angle_start: f64,
+    angle_end: f64,
+    corner_radius: f64,
+) -> Option<Vec<PathCmd>> {
+    let sweep = angle_end - angle_start;
+    let has_inner = inner_r > 0.0;
+    let radial_thickness = outer_r - inner_r.max(0.0);
+    if radial_thickness <= 0.0 {
+        return None;
+    }
+    let half_thickness = radial_thickness / 2.0;
+    let half_sweep = sweep / 2.0;
+    let sin_half_sweep = half_sweep.sin();
+
+    // Radial leg: solve `outer_r − sqrt(outer_r·(outer_r − 2·cr)) ==
+    // half_thickness` for `cr` (the outer fillet's excursion past
+    // `outer_r − half_thickness` — the ring's midline — must not exceed
+    // `half_thickness`, else it crosses into the inner fillet's own half).
+    // A difference-of-squares simplification of that equation gives this
+    // closed form directly (no iteration).
+    let cr_limit_radial_outer =
+        half_thickness * (2.0 * outer_r - half_thickness) / (2.0 * outer_r);
+    // Angular leg: solve `asin(cr / ρ) == sweep / 2` for `cr`, where `ρ =
+    // outer_r − cr` (outer) or `ρ = inner_r + cr` (inner) — each corner's
+    // angular trim `Δ = asin(cr / ρ)` must not exceed half the ring's own
+    // sweep, else the two corners on that ring overlap.
+    //
+    // Validity domain (cycle 3, recurrence of the cycle-1 failure class:
+    // cycle 1 applied a small-angle approximation outside the small-angle
+    // regime; cycle 2's `asin`-inverting closed form below is likewise only
+    // the correct inverse on `asin`'s own range, `Δ ∈ [0, π/2]`, i.e. for
+    // `sweep / 2 <= π/2` (`sweep <= π`). Since `Δ <= π/2` *always* holds by
+    // construction (it's an `asin` output), the constraint `Δ <= sweep/2` is
+    // satisfied **unconditionally, for every `cr`**, the moment `sweep/2 >=
+    // π/2` — the leg is non-binding (`INFINITY`), not the `sin`-inverted
+    // formula, which past that threshold folds and *shrinks* as the wedge
+    // widens instead of relaxing. This is stated once, at `half_sweep`, and
+    // enforced identically for both legs below — not patched into one leg's
+    // `sweep == π` edge case, which is only the boundary of a domain that
+    // starts at `sweep == π`, not the whole of it.
+    let angular_leg_binds = half_sweep < std::f64::consts::FRAC_PI_2; // sweep < π
+    let cr_limit_angular_outer = if angular_leg_binds {
+        outer_r * sin_half_sweep / (1.0 + sin_half_sweep)
+    } else {
+        f64::INFINITY
+    };
+    let cr_outer = corner_radius.min(cr_limit_radial_outer).min(cr_limit_angular_outer);
+    debug_assert!(cr_outer > 0.0, "unreachable given radial_thickness > 0, outer_r > 0, sweep > 0, corner_radius > 0");
+
+    let cr_inner = if has_inner {
+        // Mirror image of the outer legs (external, not internal, tangency):
+        // `sqrt(inner_r·(inner_r + 2·cr)) − inner_r == half_thickness`, and
+        // `asin(cr / (inner_r + cr)) == sweep / 2`, same validity domain
+        // (`sweep < π`) as the outer leg above — `1.0 - sin_half_sweep` is
+        // therefore always `> 0` on this branch (it only vanishes at
+        // `sin_half_sweep == 1`, i.e. `sweep == π` exactly, which the same
+        // `angular_leg_binds` guard already routes to `INFINITY`).
+        let cr_limit_radial_inner =
+            half_thickness * (2.0 * inner_r + half_thickness) / (2.0 * inner_r);
+        let cr_limit_angular_inner = if angular_leg_binds {
+            inner_r * sin_half_sweep / (1.0 - sin_half_sweep)
+        } else {
+            f64::INFINITY
+        };
+        let cr = corner_radius.min(cr_limit_radial_inner).min(cr_limit_angular_inner);
+        debug_assert!(cr > 0.0, "unreachable given radial_thickness > 0, inner_r > 0, sweep > 0, corner_radius > 0");
+        cr
+    } else {
+        0.0
+    };
+
+    // Point on the wedge's own circle of radius `r` at angle `theta`.
+    let pt = |r: f64, theta: f64| (cx + r * theta.sin(), cy - r * theta.cos());
+
+    // Outer corner geometry (internal tangency): ρ = outer_r − cr_outer.
+    let outer_rho = outer_r - cr_outer;
+    let outer_delta = (cr_outer / outer_rho).asin();
+    let outer_tau = (outer_rho * outer_rho - cr_outer * cr_outer).max(0.0).sqrt();
+
+    let large_arc_outer = (sweep - 2.0 * outer_delta).abs() > std::f64::consts::PI;
+
+    let mut cmds = Vec::new();
+
+    // Outer arc, trimmed at both ends by the outer corners' fillets.
+    let (ax, ay) = pt(outer_r, angle_start + outer_delta);
+    let (bx, by) = pt(outer_r, angle_end - outer_delta);
+    cmds.push(PathCmd::MoveTo { x: ax, y: ay });
+    cmds.push(PathCmd::ArcTo {
+        rx: outer_r, ry: outer_r, rotation: 0.0, large_arc: large_arc_outer, sweep: true, x: bx, y: by,
+    });
+
+    // Outer-end corner: fillet from the outer arc onto the θ1 radial edge.
+    let (bpx, bpy) = pt(outer_tau, angle_end);
+    cmds.push(PathCmd::ArcTo {
+        rx: cr_outer, ry: cr_outer, rotation: 0.0, large_arc: false, sweep: true, x: bpx, y: bpy,
+    });
+
+    if has_inner {
+        // Inner corner geometry (external tangency): ρ = inner_r + cr_inner.
+        let inner_rho = inner_r + cr_inner;
+        let inner_delta = (cr_inner / inner_rho).asin();
+        let inner_tau = (inner_rho * inner_rho - cr_inner * cr_inner).max(0.0).sqrt();
+        let large_arc_inner = (sweep - 2.0 * inner_delta).abs() > std::f64::consts::PI;
+
+        // θ1 radial edge, trimmed at the inner end by the inner-end fillet.
+        let (cpx, cpy) = pt(inner_tau, angle_end);
+        cmds.push(PathCmd::LineTo { x: cpx, y: cpy });
+
+        // Inner-end corner: fillet from the radial edge onto the inner arc.
+        let (dx, dy) = pt(inner_r, angle_end - inner_delta);
+        cmds.push(PathCmd::ArcTo {
+            rx: cr_inner, ry: cr_inner, rotation: 0.0, large_arc: false, sweep: true, x: dx, y: dy,
+        });
+
+        // Inner arc, traveling from θ1 back to θ0 (decreasing angle).
+        let (ex, ey) = pt(inner_r, angle_start + inner_delta);
+        cmds.push(PathCmd::ArcTo {
+            rx: inner_r, ry: inner_r, rotation: 0.0, large_arc: large_arc_inner, sweep: false, x: ex, y: ey,
+        });
+
+        // Inner-start corner: fillet from the inner arc onto the θ0 radial edge.
+        let (fpx, fpy) = pt(inner_tau, angle_start);
+        cmds.push(PathCmd::ArcTo {
+            rx: cr_inner, ry: cr_inner, rotation: 0.0, large_arc: false, sweep: true, x: fpx, y: fpy,
+        });
+
+        // θ0 radial edge, back out to the outer-start fillet's trim point.
+        let (apx, apy) = pt(outer_tau, angle_start);
+        cmds.push(PathCmd::LineTo { x: apx, y: apy });
+    } else {
+        // No inner ring: the θ1 edge runs straight to the center apex (left
+        // sharp, per the doc comment above) and back out along θ0.
+        cmds.push(PathCmd::LineTo { x: cx, y: cy });
+        let (apx, apy) = pt(outer_tau, angle_start);
+        cmds.push(PathCmd::LineTo { x: apx, y: apy });
+    }
+
+    // Outer-start corner: fillet from the θ0 radial edge back onto the outer
+    // arc, closing exactly at the path's start point (`Close` becomes a
+    // zero-length no-op).
+    cmds.push(PathCmd::ArcTo {
+        rx: cr_outer, ry: cr_outer, rotation: 0.0, large_arc: false, sweep: true, x: ax, y: ay,
+    });
+
+    cmds.push(PathCmd::Close);
+    Some(cmds)
 }
 
 #[cfg(test)]
@@ -900,6 +1172,56 @@ mod tests {
             "node 1 href must be row 2's href (not row 1's 'http://b'); got {:?}", hrefs[1]);
     }
 
+    /// Producer-side alignment for `polar_spans` (batch E Task 2, cycle 6 /
+    /// quality-review finding 8), mirroring `pie_skipped_null_href_stays_aligned`
+    /// immediately above: `polar_spans` is the sixth per-node channel
+    /// (`mark_nodes.rs`'s alignment guard now checks it too, finding 7), and
+    /// until this test nothing in the tree asserted that `build()` actually
+    /// emits it aligned to its kept nodes — only that the guard would panic
+    /// if it didn't.
+    ///
+    /// 5 rows, values `[10.0, null, 20.0, 0.0, 30.0]`. Both the null (row 1)
+    /// and the zero value (row 3) are skipped by the same `Some(v) if
+    /// v.is_finite() && *v > 0.0` guard — `total` (used for each kept row's
+    /// sweep) only ever sums the three kept values, `10 + 20 + 30 = 60`.
+    /// Kept rows are 0, 2, 4; their cumulative sweeps are exactly `tau/6`,
+    /// `tau/3`, `tau/2` (`10/60`, `20/60`, `30/60` of a full turn), so the
+    /// expected spans are `(0, tau/6)`, `(tau/6, tau/2)`, `(tau/2, tau)` —
+    /// hand-computed from the `total`/`sweep` formula `build()` itself uses,
+    /// not read off a Rust run.
+    #[test]
+    fn build_polar_spans_aligned_through_null_and_zero_skips() {
+        let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, true)]));
+        let val_array = Float64Array::from(vec![Some(10.0_f64), None, Some(20.0), Some(0.0), Some(30.0)]);
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![Arc::new(val_array)]).unwrap();
+
+        let spec = polar_spec(false);
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "expected 3 kept nodes (null row 1 and zero row 3 skipped)");
+        let spans = result.polar_spans.expect("build() must always emit polar_spans for an Arc batch");
+        assert_eq!(spans.len(), 3, "polar_spans must have exactly one entry per kept node");
+        assert_eq!(
+            result.data_indices.as_deref(),
+            Some(&[0usize, 2, 4][..]),
+            "kept rows must be 0 (val=10), 2 (val=20), 4 (val=30)"
+        );
+
+        let tau = std::f64::consts::TAU;
+        let tol = 1e-9;
+        let expected = [(0.0, tau / 6.0), (tau / 6.0, tau / 2.0), (tau / 2.0, tau)];
+        for (i, (exp_start, exp_end)) in expected.iter().enumerate() {
+            let (start, end) = spans[i];
+            assert!((start - exp_start).abs() < tol && (end - exp_end).abs() < tol,
+                "node {i}'s span must be ({exp_start}, {exp_end}); got ({start}, {end})");
+        }
+    }
+
     /// Regression: nominal-theta arc with a null category (skipped wedge) + tooltip
     /// and href encoding must keep metadata aligned to kept nodes.
     ///
@@ -995,6 +1317,93 @@ mod tests {
             "node 1 tooltip must be row 2's (not row 1's 'tip_b_skipped'); got '{tip1}'");
     }
 
+    /// Producer-side `polar_spans` alignment for `build_nominal_theta`
+    /// (cycle 6 / quality-review finding 8) — the exact code path the
+    /// reviewer's decisive zero-thickness finding travels
+    /// (`fr.Chart(df).mark_arc().encode(x="c:N", y="v:Q").coord(fr.CoordPolar(
+    /// inner_radius=60.0))`). 5 categories `a, b, c, d, e`; `b`'s category is
+    /// null (the explicit `None => continue` skip branch) and `d`'s radius
+    /// value is `0.0` (a zero-thickness wedge — kept, NOT skipped, since a
+    /// zero *radius* is a different condition from a null *category*; this
+    /// is the shape that made every geometry-based hit-test classifier in
+    /// cycles 2–4 fail). 4 distinct categories survive in `cat_index`
+    /// (`a, c, d, e` — `b` is null and never enters it), so `band = tau/4 =
+    /// π/2` and the kept rows' spans are exactly `(0, π/2)`, `(π/2, π)`,
+    /// `(π, 3π/2)`, `(3π/2, tau)` regardless of `d`'s degenerate radius.
+    #[test]
+    fn build_nominal_theta_polar_spans_aligned_through_null_skip_and_zero_radius() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("r", DataType::Float64, true),
+        ]));
+        let cat_array = StringArray::from(vec![Some("a"), None, Some("c"), Some("d"), Some("e")]);
+        let r_array = Float64Array::from(vec![Some(10.0_f64), Some(999.0), Some(25.0), Some(0.0), Some(35.0)]);
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(cat_array),
+            Arc::new(r_array),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "r".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 60.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 35.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, fill_opacity: None, stroke_opacity: None, stroke_dash: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 4, "expected 4 kept nodes (only the null category, row 1, is skipped)");
+        let spans = result.polar_spans.expect("build_nominal_theta must always emit polar_spans for an Arc batch");
+        assert_eq!(spans.len(), 4, "polar_spans must have exactly one entry per kept node");
+        assert_eq!(
+            result.data_indices.as_deref(),
+            Some(&[0usize, 2, 3, 4][..]),
+            "kept rows must be 0 (a), 2 (c), 3 (d, zero radius), 4 (e) — row 1 (null category b) skipped"
+        );
+
+        let frac_pi_2 = std::f64::consts::FRAC_PI_2;
+        let pi = std::f64::consts::PI;
+        let tau = std::f64::consts::TAU;
+        let expected = [(0.0, frac_pi_2), (frac_pi_2, pi), (pi, pi + frac_pi_2), (pi + frac_pi_2, tau)];
+        let tol = 1e-9;
+        for (i, (exp_start, exp_end)) in expected.iter().enumerate() {
+            let (start, end) = spans[i];
+            assert!((start - exp_start).abs() < tol && (end - exp_end).abs() < tol,
+                "node {i}'s span must be ({exp_start}, {exp_end}); got ({start}, {end})");
+        }
+    }
+
     /// Regression: annular arc with a skipped row (null theta2 → no span) + href
     /// encoding must keep metadata aligned to kept nodes.
     ///
@@ -1085,6 +1494,99 @@ mod tests {
             "node 1 href must be row 2's href (not row 1's 'http://b_skipped'); got {:?}", hrefs[1]);
     }
 
+    /// Producer-side `polar_spans` alignment for `build_annular` (cycle 6 /
+    /// quality-review finding 8). 4 rows: row 1 has a null `t1` (the explicit
+    /// skip branch — no angular span); row 2 has `r0 == r1` (a
+    /// zero-radial-thickness wedge — kept, not skipped, the same degenerate
+    /// shape that decided cycle 4). `build_annular`'s
+    /// `angle_start`/`angle_end` are exactly `start_angle + t0 ± pad/2`, so
+    /// with `pad_angle = 0` the expected spans are literally each kept row's
+    /// own `(t0, t1)` pair.
+    #[test]
+    fn build_annular_polar_spans_aligned_through_null_skip_and_zero_thickness() {
+        let tau = std::f64::consts::TAU;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t0", DataType::Float64, false),
+            Field::new("t1", DataType::Float64, true),
+            Field::new("r0", DataType::Float64, false),
+            Field::new("r1", DataType::Float64, false),
+        ]));
+        let t0_arr = Float64Array::from(vec![0.0_f64, tau / 4.0, tau / 2.0, 3.0 * tau / 4.0]);
+        let t1_arr = Float64Array::from(vec![Some(tau / 4.0), None, Some(3.0 * tau / 4.0), Some(tau)]);
+        let r0_arr = Float64Array::from(vec![0.0_f64, 0.0, 40.0, 0.0]);
+        let r1_arr = Float64Array::from(vec![80.0_f64, 80.0, 40.0, 80.0]); // row 2: r0 == r1 (zero thickness)
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(t0_arr),
+            Arc::new(t1_arr),
+            Arc::new(r0_arr),
+            Arc::new(r1_arr),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "t0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "t1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "r0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "r1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, tau], vec![0.0, 200.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 80.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
+            x2: Some("t1".into()), y2: Some("r1".into()),
+            y_slots: Default::default(),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "expected 3 kept nodes (row 1's null t1 skipped)");
+        let spans = result.polar_spans.expect("build_annular must always emit polar_spans for an Arc batch");
+        assert_eq!(spans.len(), 3, "polar_spans must have exactly one entry per kept node");
+        assert_eq!(
+            result.data_indices.as_deref(),
+            Some(&[0usize, 2, 3][..]),
+            "kept rows must be 0, 2 (zero-thickness, r0==r1==40), 3 — row 1 (null t1) skipped"
+        );
+
+        let tol = 1e-9;
+        let expected = [(0.0, tau / 4.0), (tau / 2.0, 3.0 * tau / 4.0), (3.0 * tau / 4.0, tau)];
+        for (i, (exp_start, exp_end)) in expected.iter().enumerate() {
+            let (start, end) = spans[i];
+            assert!((start - exp_start).abs() < tol && (end - exp_end).abs() < tol,
+                "node {i}'s span must be ({exp_start}, {exp_end}); got ({start}, {end})");
+        }
+    }
+
     /// Stability: arcs with NO skipped wedges (all rows valid) must produce
     /// hrefs in the original row order — `build_metadata_for_indices` with
     /// a full-range index must equal `build_metadata` for a complete dataset.
@@ -1156,7 +1658,7 @@ mod tests {
     /// one full-sweep `ArcTo`. All emitted coordinates must stay finite.
     #[test]
     fn wedge_path_full_circle_sweep_produces_finite_coords() {
-        let cmds = wedge_path(100.0, 100.0, 0.0, 50.0, 0.0, std::f64::consts::TAU - 1e-10);
+        let cmds = wedge_path(100.0, 100.0, 0.0, 50.0, 0.0, std::f64::consts::TAU - 1e-10, 0.0);
         assert!(matches!(cmds.first(), Some(PathCmd::MoveTo { .. })));
         assert!(matches!(cmds.last(), Some(PathCmd::Close)));
         let arc_count = cmds.iter().filter(|c| matches!(c, PathCmd::ArcTo { .. })).count();
@@ -1187,7 +1689,7 @@ mod tests {
     #[test]
     fn wedge_path_inner_radius_equals_outer_radius_collapses_to_zero_width() {
         let r = 50.0;
-        let cmds = wedge_path(100.0, 100.0, r, r, 0.0, std::f64::consts::FRAC_PI_2);
+        let cmds = wedge_path(100.0, 100.0, r, r, 0.0, std::f64::consts::FRAC_PI_2, 0.0);
         assert_eq!(cmds.len(), 5, "MoveTo + outer ArcTo + inner LineTo + inner ArcTo + Close");
 
         let (ox0, oy0) = match cmds[0] { PathCmd::MoveTo { x, y } => (x, y), ref c => panic!("expected MoveTo, got {c:?}") };
@@ -1229,7 +1731,7 @@ mod tests {
     fn wedge_path_very_large_start_angle_matches_hand_computed_geometry() {
         let sweep = std::f64::consts::FRAC_PI_4;
         let start = 100.0 * std::f64::consts::TAU;
-        let cmds = wedge_path(100.0, 100.0, 0.0, 50.0, start, start + sweep);
+        let cmds = wedge_path(100.0, 100.0, 0.0, 50.0, start, start + sweep, 0.0);
         assert_eq!(cmds.len(), 4, "MoveTo + outer ArcTo + LineTo(cx,cy) + Close (inner_r <= 0.0)");
 
         let tol = 1e-6;
@@ -1384,5 +1886,544 @@ mod tests {
              Utf8 twin does; got {int64:?}. Three identical fills here is the \
              col_as_str drop."
         );
+    }
+
+    // ── Task 2 (batch E, F-L02-06): corner_radius fillets ───────────────────
+    //
+    // `wedge_path` gained a 7th `corner_radius` parameter (spec §6.9). These
+    // tests prove: (1) `0.0` reproduces the pre-fix sharp geometry exactly
+    // (byte-stability contract), (2) a positive radius actually rounds (adds
+    // small-radius fillet `ArcTo` commands distinct from the main-radius
+    // arc), (3) the per-corner clamp binds on whichever of
+    // `radial_thickness/2` or the angular arc half-length is smaller, on
+    // both the outer and inner ring, and (4) a full-circle sweep and a
+    // zero-thickness ring both refuse to round rather than emitting
+    // self-intersecting geometry.
+
+    /// `corner_radius = 0.0` must produce the exact same 4-command sharp
+    /// geometry the pre-fix `wedge_path` always emitted for a solid
+    /// (`inner_r == 0`) quarter-wedge — pinned to hand-computed coordinates,
+    /// not a self-comparison, so a regression that quietly rounds at 0.0
+    /// cannot hide behind an unchanged command count.
+    #[test]
+    fn wedge_path_zero_corner_radius_matches_sharp_geometry() {
+        let cmds = wedge_path(0.0, 0.0, 0.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        assert_eq!(cmds.len(), 4, "MoveTo + outer ArcTo + LineTo(center) + Close");
+        match cmds[0] {
+            PathCmd::MoveTo { x, y } => assert!((x - 0.0).abs() < 1e-9 && (y - -100.0).abs() < 1e-9,
+                "MoveTo must land at (0, -100); got ({x}, {y})"),
+            ref c => panic!("expected MoveTo, got {c:?}"),
+        }
+        match cmds[1] {
+            PathCmd::ArcTo { rx, ry, large_arc, sweep, x, y, .. } => {
+                assert_eq!(rx, 100.0);
+                assert_eq!(ry, 100.0);
+                assert!(!large_arc, "a PI/2 sweep is not a large arc");
+                assert!(sweep, "increasing-angle sweep must set sweep=true");
+                assert!((x - 100.0).abs() < 1e-9 && (y - 0.0).abs() < 1e-9,
+                    "outer ArcTo endpoint must land at (100, 0); got ({x}, {y})");
+            }
+            ref c => panic!("expected outer ArcTo, got {c:?}"),
+        }
+        assert!(matches!(cmds[2], PathCmd::LineTo { x, y } if (x - 0.0).abs() < 1e-9 && (y - 0.0).abs() < 1e-9));
+        assert!(matches!(cmds[3], PathCmd::Close));
+    }
+
+    /// A positive `corner_radius` on the same solid quarter-wedge must round:
+    /// the sharp corner-count (4 commands, 1 arc) grows to 7 commands with 3
+    /// arcs — the original outer sweep plus two small-radius fillets at the
+    /// resolved (unclamped, since 10.0 is well under both clamp limits here)
+    /// corner radius.
+    #[test]
+    fn wedge_path_positive_corner_radius_rounds_and_differs_from_sharp() {
+        let sharp = wedge_path(0.0, 0.0, 0.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        let rounded = wedge_path(0.0, 0.0, 0.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 10.0);
+        assert_ne!(sharp.len(), rounded.len(), "rounding must change the command shape");
+        assert_eq!(rounded.len(), 7, "MoveTo + outer ArcTo + fillet ArcTo + LineTo(center) + LineTo + fillet ArcTo + Close");
+
+        let arc_radii: Vec<f64> = rounded.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        assert_eq!(arc_radii.len(), 3, "expected 1 main arc + 2 corner fillets; got {arc_radii:?}");
+        let fillets = arc_radii.iter().filter(|r| (**r - 10.0).abs() < 1e-9).count();
+        let mains = arc_radii.iter().filter(|r| (**r - 100.0).abs() < 1e-9).count();
+        assert_eq!(fillets, 2, "both outer corners must fillet at the unclamped 10.0 radius; got {arc_radii:?}");
+        assert_eq!(mains, 1, "the outer sweep itself must keep radius 100.0; got {arc_radii:?}");
+
+        for cmd in &rounded {
+            if let PathCmd::ArcTo { rx, ry, x, y, .. } = cmd {
+                assert!(rx.is_finite() && ry.is_finite() && x.is_finite() && y.is_finite());
+            }
+        }
+        // The path must still close back to its own MoveTo point exactly.
+        let (mx, my) = match rounded[0] { PathCmd::MoveTo { x, y } => (x, y), _ => unreachable!() };
+        let (lx, ly) = match rounded[5] { PathCmd::ArcTo { x, y, .. } => (x, y), ref c => panic!("expected closing fillet ArcTo, got {c:?}") };
+        assert!((mx - lx).abs() < 1e-9 && (my - ly).abs() < 1e-9,
+            "the final fillet must land exactly back on the MoveTo point; ({mx},{my}) vs ({lx},{ly})");
+    }
+
+    /// An annular wedge (`inner_r > 0`) rounds all four corners: the sharp
+    /// 5-command geometry (`MoveTo, ArcTo, LineTo, ArcTo, Close`) grows to 10
+    /// commands with 6 arcs (2 main rings + 4 fillets), and — the discriminating
+    /// assertion — both inner corners fillet too, not just the outer ones.
+    #[test]
+    fn wedge_path_annular_rounds_all_four_corners() {
+        let rounded = wedge_path(0.0, 0.0, 40.0, 60.0, 0.0, std::f64::consts::FRAC_PI_2, 5.0);
+        assert_eq!(rounded.len(), 10,
+            "MoveTo + outer ArcTo + fillet + LineTo + fillet + inner ArcTo + fillet + LineTo + fillet + Close");
+        let arc_radii: Vec<f64> = rounded.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        assert_eq!(arc_radii.len(), 6, "expected 2 main arcs + 4 corner fillets; got {arc_radii:?}");
+        let fillets = arc_radii.iter().filter(|r| (**r - 5.0).abs() < 1e-9).count();
+        assert_eq!(fillets, 4, "all four corners (outer x2, inner x2) must fillet; got {arc_radii:?}");
+        assert!(arc_radii.iter().any(|r| (*r - 60.0).abs() < 1e-9), "outer main arc radius must survive; got {arc_radii:?}");
+        assert!(arc_radii.iter().any(|r| (*r - 40.0).abs() < 1e-9), "inner main arc radius must survive; got {arc_radii:?}");
+    }
+
+    /// Cycle 2 (Required Fix 1, spec-reviewer + rust-quality-reviewer):
+    /// the fillet must be the exact tangent-circle construction (matching
+    /// d3-shape's `cornerTangents`), not the rounded-rectangle approximation
+    /// that treats the arc edge as locally straight. For an outer corner
+    /// with fillet radius `cr` at radius `outer_r`: `ρ = outer_r − cr`,
+    /// `Δ = asin(cr/ρ)` (the angular trim on the arc side), `τ = sqrt(ρ² −
+    /// cr²)` (the radius of the trim point on the radial edge — NOT `outer_r
+    /// − cr`, which is the rejected approximation). This test pins both
+    /// trim points of the outer-end corner and the outer-start corner
+    /// against values computed independently (a standalone Python script,
+    /// not read off a Rust run) for `outer_r=100, inner_r=0, angle_start=0,
+    /// angle_end=π/2, cr=20` (well under both clamp limits, so `cr_outer ==
+    /// 20` exactly): `ρ=80`, `Δ=asin(0.25)≈0.25268025514207865`,
+    /// `τ=sqrt(6000)≈77.45966692414834`.
+    #[test]
+    fn wedge_path_outer_fillet_matches_exact_tangent_construction() {
+        let cmds = wedge_path(0.0, 0.0, 0.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 20.0);
+        // [MoveTo(A), ArcTo(B), ArcTo(B'), LineTo(center), LineTo(A'), ArcTo(A), Close]
+        assert_eq!(cmds.len(), 7);
+        let tol = 1e-9;
+
+        // A = outer arc tangent point at angle_start+Δ = pt(100, 0.25268025514207865).
+        match cmds[0] {
+            PathCmd::MoveTo { x, y } => assert!((x - 25.0).abs() < tol && (y - -96.82458365518542).abs() < tol,
+                "outer-start arc tangent point A must be (25.0, -96.82458365518542) — the EXACT tangent point at angle_start+asin(0.25), not the rounded-rectangle approximation's pt(100, cr/outer_r); got ({x}, {y})"),
+            ref c => panic!("expected MoveTo, got {c:?}"),
+        }
+        // B' = outer-end radial-edge tangent point at radius τ, angle_end (π/2).
+        match cmds[2] {
+            PathCmd::ArcTo { x, y, .. } => assert!((x - 77.45966692414834).abs() < tol && y.abs() < 1e-6,
+                "outer-end radial tangent point B' must be (77.45966692414834, ~0.0) at radius τ=sqrt(6000), not outer_r-cr=80.0 (the rejected approximation); got ({x}, {y})"),
+            ref c => panic!("expected outer-end fillet ArcTo, got {c:?}"),
+        }
+        // A' = outer-start radial-edge tangent point at radius τ, angle_start (0).
+        match cmds[4] {
+            PathCmd::LineTo { x, y } => assert!(x.abs() < 1e-6 && (y - -77.45966692414834).abs() < tol,
+                "outer-start radial tangent point A' must be (~0.0, -77.45966692414834) at radius τ, not outer_r-cr=80.0; got ({x}, {y})"),
+            ref c => panic!("expected LineTo(A'), got {c:?}"),
+        }
+    }
+
+    /// Same as above but for an inner corner (external tangency to the inner
+    /// ring, rather than internal tangency to the outer ring): `inner_r=40,
+    /// outer_r=100, angle_start=0, angle_end=π/2, cr=15` (unclamped: radial
+    /// limit ≈41.25, angular limit ≈96.57, both ≫15). `ρ = inner_r+cr = 55`,
+    /// `Δ = asin(15/55) ≈ 0.27622663076359155`, `τ = sqrt(55²−15²) =
+    /// sqrt(2800) ≈ 52.91502622129181`. Values hand-computed independently.
+    #[test]
+    fn wedge_path_inner_fillet_matches_exact_tangent_construction() {
+        let cmds = wedge_path(0.0, 0.0, 40.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 15.0);
+        // [MoveTo(A), ArcTo(B), ArcTo(B'), LineTo(C'), ArcTo(D), ArcTo(E), ArcTo(F'), LineTo(A'), ArcTo(A), Close]
+        assert_eq!(cmds.len(), 10);
+        let tol = 1e-9;
+
+        // D = inner-end arc tangent point at angle_end-Δ = pt(40, π/2 - 0.27622663076359155).
+        match cmds[4] {
+            PathCmd::ArcTo { x, y, .. } => assert!((x - 38.48365543366677).abs() < tol && (y - -10.909090909090907).abs() < tol,
+                "inner-end arc tangent point D must be (38.48365543366677, -10.909090909090907) — the EXACT tangent point, not the rounded-rectangle approximation's pt(40, angle_end - cr/inner_r); got ({x}, {y})"),
+            ref c => panic!("expected inner-end fillet ArcTo, got {c:?}"),
+        }
+        // C' = inner-end radial-edge tangent point at radius τ, angle_end (π/2).
+        match cmds[3] {
+            PathCmd::LineTo { x, y } => assert!((x - 52.91502622129181).abs() < tol && y.abs() < 1e-6,
+                "inner-end radial tangent point C' must be (52.91502622129181, ~0.0) at radius τ=sqrt(2800), not inner_r+cr=55.0 (the rejected approximation); got ({x}, {y})"),
+            ref c => panic!("expected LineTo(C'), got {c:?}"),
+        }
+        // E = inner-start arc tangent point at angle_start+Δ = pt(40, 0.27622663076359155).
+        match cmds[5] {
+            PathCmd::ArcTo { x, y, .. } => assert!((x - 10.909090909090908).abs() < tol && (y - -38.48365543366677).abs() < tol,
+                "inner-start arc tangent point E must be (10.909090909090908, -38.48365543366677); got ({x}, {y})"),
+            ref c => panic!("expected inner main ArcTo, got {c:?}"),
+        }
+        // F' = inner-start radial-edge tangent point at radius τ, angle_start (0).
+        match cmds[6] {
+            PathCmd::ArcTo { x, y, .. } => assert!(x.abs() < 1e-6 && (y - -52.91502622129181).abs() < tol,
+                "inner-start radial tangent point F' must be (~0.0, -52.91502622129181) at radius τ, not inner_r+cr=55.0; got ({x}, {y})"),
+            ref c => panic!("expected inner-start fillet ArcTo, got {c:?}"),
+        }
+    }
+
+    /// Reconstruct an SVG circular arc's own center from its two endpoints,
+    /// radius, and `sweep` flag (this codebase never emits `rotation != 0`
+    /// or `rx != ry`, so the general elliptical-arc endpoint parameterization
+    /// collapses to the standard "circle through two points with a given
+    /// radius" construction). Used by the containment test below to check
+    /// the *whole fillet circle* against the ring bounds, not just its two
+    /// listed endpoints — a curve can bulge outside `[inner_r, outer_r]`
+    /// between its endpoints even when both endpoints are in bounds, which
+    /// is exactly how the rejected rounded-rectangle approximation escaped
+    /// the outer ring (cycle 2, Required Fix 1).
+    /// Cycle 3 correction: a prior version of this helper picked between the
+    /// two candidate centers using only `sweep` (a cross-product-sign
+    /// convention derived from this file's `large_arc: false` fillet arcs),
+    /// which is exactly the SVG endpoint-parameterization's `large_arc: true`
+    /// case wrong — the standard requires BOTH flags together (`sign = -1`
+    /// iff `large_arc == sweep`), and the wide-sweep tests below (cycle 3,
+    /// `sweep > π`) exercise a `large_arc: true` main arc for the first time,
+    /// which caught it (a spuriously "bulging" 596 px reconstruction of an
+    /// otherwise-correct 202 px arc). Implements the standard SVG
+    /// elliptical-arc endpoint→center formula directly (rx = ry = r,
+    /// rotation = 0 collapses it to this), rather than a derived heuristic.
+    fn arc_center(p0: (f64, f64), p1: (f64, f64), r: f64, large_arc: bool, sweep: bool) -> (f64, f64) {
+        let x1p = (p0.0 - p1.0) / 2.0;
+        let y1p = (p0.1 - p1.1) / 2.0;
+        let d2 = x1p * x1p + y1p * y1p;
+        if d2 < 1e-24 {
+            return p0;
+        }
+        let sign = if large_arc == sweep { -1.0 } else { 1.0 };
+        let ratio = ((r * r - d2) / d2).max(0.0);
+        let co = sign * ratio.sqrt();
+        let cxp = co * y1p;
+        let cyp = -co * x1p;
+        (cxp + (p0.0 + p1.0) / 2.0, cyp + (p0.1 + p1.1) / 2.0)
+    }
+
+    /// Containment: no point on ANY emitted arc's curve (not just its listed
+    /// endpoints) may lie outside `[inner_r, outer_r]` — the exact defect
+    /// the rust-quality-reviewer measured (`mark_arc(corner_radius=150)` on
+    /// a 3-slice pie visibly crossing the polar frame: the rounded-rectangle
+    /// approximation's fillet endpoints were both in bounds, but the curve
+    /// between them bulged past `outer_r`). For every `ArcTo`, reconstructs
+    /// the arc's own center via [`arc_center`] and asserts the *whole
+    /// circle* — `|center| ± rx` — stays within `[inner_r, outer_r]`; this
+    /// is what the exact tangent construction guarantees by design (an
+    /// outer fillet's circle is internally tangent to the outer ring, so its
+    /// farthest point from the wedge's own center is exactly `outer_r`,
+    /// never more) and what the approximation violated. Swept across solid
+    /// and annular wedges and a range of requested radii including ones far
+    /// past what any clamp leg alone would suggest is safe.
+    #[test]
+    fn wedge_path_fillet_never_exceeds_ring_bounds() {
+        let cases: &[(f64, f64, f64, f64, f64)] = &[
+            // (inner_r, outer_r, angle_start, angle_end, requested corner_radius)
+            (0.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 20.0),
+            (0.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 49.0), // near the solid clamp ceiling
+            (0.0, 202.0, 0.0, 2.0 * std::f64::consts::PI / 3.0, 150.0), // the reviewer's mark_arc(corner_radius=150) case, scaled to a 120° slice
+            (40.0, 100.0, 0.0, std::f64::consts::FRAC_PI_2, 15.0),
+            (40.0, 41.0, 0.0, std::f64::consts::FRAC_PI_2, 1000.0), // thin-ring clamp case
+            // Cycle 3 (spec-reviewer Issue 1 / quality-reviewer F5): wide
+            // sweeps (> π), where the angular leg is non-binding — re-verify
+            // containment still holds now that those legs return INFINITY
+            // instead of a folded, incorrectly-small limit.
+            (0.0, 202.48, 0.0, 0.97 * std::f64::consts::TAU, 25.0), // the reviewer's [97,3] pie's dominant slice
+            (0.0, 100.0, 0.0, 6.0, 1000.0),
+            (40.0, 100.0, 0.0, 6.0, 1000.0),
+            (40.0, 100.0, 0.0, std::f64::consts::TAU - 0.01, 1000.0), // near-full-circle, not quite
+        ];
+        for &(inner_r, outer_r, angle_start, angle_end, cr) in cases {
+            let cmds = wedge_path(0.0, 0.0, inner_r, outer_r, angle_start, angle_end, cr);
+            let has_inner = inner_r > 0.0;
+            // `rounded_wedge_path`'s emission order (verified directly by
+            // the coordinate-pin tests above) puts exactly 3 outer-side arcs
+            // first/second/last and, when annular, exactly 3 inner-side arcs
+            // in between: [outer_main, outer_end_fillet, (inner_end_fillet,
+            // inner_main, inner_start_fillet), outer_start_fillet]. Only the
+            // *meaningful* bound is checked per side: an outer arc's full
+            // circle can legitimately dip toward the far side of its own
+            // circle well below `inner_r` without the actually-drawn ~90°
+            // sub-arc ever going there (and symmetrically for an inner arc's
+            // far side vs `outer_r`) — checking the "wrong" bound on the
+            // whole reconstructed circle is over-conservative and produces
+            // false failures on thin rings, not a real defect.
+            let total_arcs = cmds.iter().filter(|c| matches!(c, PathCmd::ArcTo { .. })).count();
+            let mut arc_idx = 0usize;
+            let mut cur = (0.0, 0.0);
+            for cmd in &cmds {
+                match cmd {
+                    PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => {
+                        let r = (x * x + y * y).sqrt();
+                        assert!(r <= outer_r + 1e-6 && r >= inner_r - 1e-6,
+                            "vertex ({x}, {y}) at radius {r} outside [{inner_r}, {outer_r}] for case {inner_r},{outer_r},{angle_start},{angle_end},{cr}");
+                        cur = (*x, *y);
+                    }
+                    PathCmd::ArcTo { rx, x, y, large_arc, sweep, .. } => {
+                        let is_outer_side = !has_inner || arc_idx == 0 || arc_idx == 1 || arc_idx == total_arcs - 1;
+                        let center = arc_center(cur, (*x, *y), *rx, *large_arc, *sweep);
+                        let dist_from_origin = (center.0 * center.0 + center.1 * center.1).sqrt();
+                        if is_outer_side {
+                            let farthest = dist_from_origin + rx;
+                            assert!(farthest <= outer_r + 1e-6,
+                                "arc to ({x}, {y}) with rx={rx} bulges to radius {farthest} > outer_r={outer_r} for case {inner_r},{outer_r},{angle_start},{angle_end},{cr}");
+                        } else {
+                            let nearest = (dist_from_origin - rx).abs();
+                            assert!(nearest >= inner_r - 1e-6,
+                                "arc to ({x}, {y}) with rx={rx} dips to radius {nearest} < inner_r={inner_r} for case {inner_r},{outer_r},{angle_start},{angle_end},{cr}");
+                        }
+                        cur = (*x, *y);
+                        arc_idx += 1;
+                    }
+                    PathCmd::Close => {}
+                    other => panic!("unexpected PathCmd in wedge_path output: {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Tangency, verified geometrically rather than by re-deriving
+    /// `rounded_wedge_path`'s own formula: for the outer-end corner of an
+    /// unclamped fillet, the fillet's center `O_f` is independently
+    /// computable from just the arc-side trim point, `cr`, and `outer_r`
+    /// (`O_f` lies on the ray from the wedge center through the arc trim
+    /// point, at distance `outer_r − cr`). A true tangent fillet requires
+    /// BOTH `|O_f − line_pt| == cr` AND `(line_pt − O_f)` perpendicular to
+    /// the radial edge's own direction — the second condition is what a
+    /// merely-equal-distance-by-coincidence construction would fail.
+    #[test]
+    fn wedge_path_outer_fillet_is_tangent_to_both_edges() {
+        let outer_r = 100.0_f64;
+        let angle_end = std::f64::consts::FRAC_PI_2;
+        let cr = 20.0_f64;
+        let cmds = wedge_path(0.0, 0.0, 0.0, outer_r, 0.0, angle_end, cr);
+        let (arc_x, arc_y) = match cmds[1] { PathCmd::ArcTo { x, y, .. } => (x, y), ref c => panic!("expected main outer ArcTo, got {c:?}") };
+        let (line_x, line_y) = match cmds[2] { PathCmd::ArcTo { x, y, .. } => (x, y), ref c => panic!("expected outer-end fillet ArcTo, got {c:?}") };
+
+        // O_f: on the ray from (0,0) through (arc_x, arc_y), at distance outer_r - cr.
+        let rho = outer_r - cr;
+        let ofx = arc_x * rho / outer_r;
+        let ofy = arc_y * rho / outer_r;
+
+        let dist_to_arc_trim = ((arc_x - ofx).powi(2) + (arc_y - ofy).powi(2)).sqrt();
+        assert!((dist_to_arc_trim - cr).abs() < 1e-9,
+            "O_f must be exactly cr={cr} from the arc-side trim point; got {dist_to_arc_trim}");
+
+        let dist_to_line_trim = ((line_x - ofx).powi(2) + (line_y - ofy).powi(2)).sqrt();
+        assert!((dist_to_line_trim - cr).abs() < 1e-9,
+            "the fillet must be exactly cr={cr} from the radial-edge trim point (tangent radius), not merely close; got {dist_to_line_trim}");
+
+        // Perpendicularity: the radial edge at angle_end has direction u(angle_end)
+        // = (sin(angle_end), -cos(angle_end)); (line_pt - O_f) must be parallel to
+        // this direction (a chord tangent to the line at line_pt lies ALONG the
+        // line, and O_f - line_pt must be perpendicular to it — equivalently,
+        // line_pt itself must lie on the radial line, i.e. atan2 must recover
+        // angle_end exactly).
+        let mut line_theta = line_x.atan2(-line_y);
+        if line_theta < 0.0 { line_theta += std::f64::consts::TAU; }
+        assert!((line_theta - angle_end).abs() < 1e-9,
+            "the radial-edge trim point must lie exactly on the angle_end radial line, not merely cr from O_f in some other direction; got theta={line_theta}, expected {angle_end}");
+    }
+
+    /// A thin annulus (`radial_thickness = 1.0`) with a very large requested
+    /// `corner_radius` must clamp near `radial_thickness / 2`, not the
+    /// requested value — otherwise the fillet geometry would eat past the
+    /// opposite ring and self-intersect.
+    ///
+    /// The exact clamp is the closed-form inverse of the *exact* tangent
+    /// construction's excursion function (cycle 2, Required Fix 1), not the
+    /// literal `radial_thickness / 2`: excursion(cr) = `r − sqrt(r·(r−2·cr))`
+    /// for an outer corner, `sqrt(r·(r+2·cr)) − r` for an inner one. Solving
+    /// each for `excursion = h` (`h = radial_thickness / 2`) gives
+    /// `cr_limit_radial_outer = h·(2·outer_r−h) / (2·outer_r)` and
+    /// `cr_limit_radial_inner = h·(2·inner_r+h) / (2·inner_r)` — both
+    /// converge to `h` as `h → 0` (matching the naive formula to first
+    /// order) but are strictly smaller for any positive `h`, which is what
+    /// actually prevents the two fillets from crossing under exact tangency.
+    /// Values below hand-computed independently (not read off a Rust run).
+    #[test]
+    fn wedge_path_clamps_to_half_radial_thickness_on_thin_ring() {
+        let cmds = wedge_path(0.0, 0.0, 40.0, 41.0, 0.0, std::f64::consts::FRAC_PI_2, 1000.0);
+        let arc_radii: Vec<f64> = cmds.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        let fillets: Vec<f64> = arc_radii.iter().copied().filter(|r| *r < 5.0).collect();
+        assert_eq!(fillets.len(), 4, "expected 4 corner fillets on an annular wedge; got {arc_radii:?}");
+        let outer_fillets = fillets.iter().filter(|r| (**r - 0.4969512195121951).abs() < 1e-9).count();
+        let inner_fillets = fillets.iter().filter(|r| (**r - 0.503125).abs() < 1e-9).count();
+        assert_eq!(outer_fillets, 2,
+            "outer corners must clamp to the exact radial limit 0.4969512195121951 (not the naive 0.5), not the requested 1000.0; got {fillets:?}");
+        assert_eq!(inner_fillets, 2,
+            "inner corners must clamp to the exact radial limit 0.503125 (not the naive 0.5), not the requested 1000.0; got {fillets:?}");
+        for cmd in &cmds {
+            if let PathCmd::ArcTo { x, y, .. } | PathCmd::LineTo { x, y } | PathCmd::MoveTo { x, y } = cmd {
+                assert!(x.is_finite() && y.is_finite(), "clamped geometry must stay finite");
+            }
+        }
+    }
+
+    /// A very narrow angular sweep with a moderate `corner_radius` request
+    /// must clamp to the *angular* limit even though the radial thickness
+    /// alone would permit a much larger radius — the two clamp legs bind
+    /// independently.
+    ///
+    /// The exact angular limit (cycle 2, Required Fix 1) solves
+    /// `asin(cr / (outer_r − cr)) = sweep / 2` for `cr`, giving
+    /// `cr_limit_angular_outer = outer_r·sin(sweep/2) / (1 + sin(sweep/2))`
+    /// — not the naive `outer_r · sweep / 2`, though the two agree to first
+    /// order for small `sweep`. Value hand-computed independently.
+    #[test]
+    fn wedge_path_clamps_to_angular_half_length_on_narrow_sweep() {
+        let sweep = 0.01; // ~0.57 degrees
+        let cmds = wedge_path(0.0, 0.0, 0.0, 100.0, 0.0, sweep, 50.0);
+        let arc_radii: Vec<f64> = cmds.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        // radial_thickness/2 = 50.0 (no bind); angular limit binds instead.
+        let fillets: Vec<f64> = arc_radii.iter().copied().filter(|r| (*r - 100.0).abs() > 1e-6).collect();
+        assert_eq!(fillets.len(), 2, "expected 2 outer fillets on a solid narrow wedge; got {arc_radii:?}");
+        for r in fillets {
+            assert!((r - 0.49751037515826596).abs() < 1e-9,
+                "corner radius must clamp to the exact angular limit 0.49751037515826596 (not the naive 0.5), not the requested 50.0; got {r}");
+        }
+    }
+
+    /// Cycle 3 (spec-reviewer Issue 1 + rust-quality-reviewer F5): a wide
+    /// sweep (`> π`) must let the radial leg govern alone — the angular
+    /// leg's `asin`-inverting closed form is only the correct inverse of
+    /// `Δ = asin(cr/ρ) <= sweep/2` on `asin`'s own range, `Δ ∈ [0, π/2]`,
+    /// i.e. for `sweep <= π`. Since `Δ` can never exceed `π/2` by
+    /// construction, `Δ <= sweep/2` holds unconditionally for every `cr`
+    /// once `sweep >= π`; applying the closed form past that point folds it
+    /// (`sin` decreasing back toward `0` as `sweep/2` moves past `π/2`) and
+    /// silently *shrinks* the limit as the wedge gets wider, the opposite of
+    /// the truth. This mirrors the real end-to-end defect measured against
+    /// this exact code: a 342°-sweep pie slice at `corner_radius=30` was
+    /// clamped to `~8` px by the old formula.
+    ///
+    /// `outer_r=100, inner_r=0` (solid, so the radial leg's own exact limit
+    /// is `h·(2·outer_r−h)/(2·outer_r) = 37.5` for `h = 50`), `sweep=6.0`
+    /// rad (`≈343.8°`, `> π`), request `30.0` (`< 37.5`, so the radial leg
+    /// alone should pass it through unclamped). The pre-fix angular formula
+    /// would give `100·sin(3.0)/(1+sin(3.0)) ≈ 12.37`, well below `30.0`.
+    #[test]
+    fn wedge_path_wide_sweep_angular_leg_is_non_binding() {
+        let cmds = wedge_path(0.0, 0.0, 0.0, 100.0, 0.0, 6.0, 30.0);
+        let arc_radii: Vec<f64> = cmds.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        let fillets: Vec<f64> = arc_radii.iter().copied().filter(|r| (*r - 100.0).abs() > 1e-6).collect();
+        assert_eq!(fillets.len(), 2, "expected 2 outer fillets on a wide-sweep solid wedge; got {arc_radii:?}");
+        for r in fillets {
+            assert!((r - 30.0).abs() < 1e-9,
+                "corner radius must pass through unclamped at 30.0 (the angular leg is non-binding for sweep > π \
+                 and the radial leg's own exact limit is 37.5) — a folded angular leg would incorrectly clamp to ~12.37; got {r}");
+        }
+    }
+
+    /// The same wide-sweep non-binding behavior on the INNER angular leg —
+    /// an annular wedge whose inner corners would, under the folded formula,
+    /// clamp far below what the radial leg alone permits.
+    ///
+    /// `inner_r=40, outer_r=100` (radial leg's exact limits: outer `25.5`,
+    /// inner `41.25`, for `h = 30`), `sweep=6.0` rad, request `20.0` (under
+    /// both radial limits, so BOTH the outer and inner corners pass through
+    /// unclamped — this test's request is deliberately chosen so neither
+    /// radial leg binds, isolating the angular-leg fix on both corners at
+    /// once). The pre-fix inner formula would give `40·sin(3.0)/(1−
+    /// sin(3.0)) ≈ 6.57`; the pre-fix outer formula would give `≈12.37`
+    /// (same as the solid case above) — both well below `20.0`.
+    #[test]
+    fn wedge_path_wide_sweep_inner_angular_leg_is_non_binding() {
+        let cmds = wedge_path(0.0, 0.0, 40.0, 100.0, 0.0, 6.0, 20.0);
+        let arc_radii: Vec<f64> = cmds.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        let unclamped = arc_radii.iter().filter(|r| (**r - 20.0).abs() < 1e-9).count();
+        assert_eq!(unclamped, 4, "both outer and inner corners must pass through unclamped at 20.0 (radial legs \
+             permit 25.5 outer / 41.25 inner, angular legs are non-binding for sweep > π); got {arc_radii:?}");
+    }
+
+    /// Boundary: at `sweep == π` exactly, the angular leg must already be
+    /// non-binding (`Δ` maxes out at exactly `π/2` there too) — this is the
+    /// single point cycle-2's fix folded into the inner leg alone (`1.0 -
+    /// sin_half_sweep` guarded near zero); cycle 3 generalizes the guard to
+    /// the whole `sweep >= π` domain on both legs, and this test pins the
+    /// boundary itself stays covered.
+    #[test]
+    fn wedge_path_exactly_semicircle_sweep_angular_leg_non_binding() {
+        let cmds = wedge_path(0.0, 0.0, 40.0, 100.0, 0.0, std::f64::consts::PI, 25.0);
+        let arc_radii: Vec<f64> = cmds.iter().filter_map(|c| {
+            if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+        }).collect();
+        // radial_thickness/2 = 30.0; request 25.0 < 30.0, so every corner
+        // (outer and inner) must pass through unclamped at exactly π sweep.
+        let unclamped = arc_radii.iter().filter(|r| (**r - 25.0).abs() < 1e-9).count();
+        assert_eq!(unclamped, 4, "all four corners must clamp at 25.0 (unclamped) at exactly sweep=π; got {arc_radii:?}");
+    }
+
+    /// A full-circle sweep has no discrete start/end corners to round — the
+    /// fillet path must never engage, regardless of `corner_radius`, and the
+    /// output must be byte-identical to the `corner_radius = 0.0` case.
+    #[test]
+    fn wedge_path_full_circle_ignores_corner_radius() {
+        let sweep_full = std::f64::consts::TAU - 1e-10;
+        let unrounded = wedge_path(100.0, 100.0, 0.0, 50.0, 0.0, sweep_full, 0.0);
+        let requested_round = wedge_path(100.0, 100.0, 0.0, 50.0, 0.0, sweep_full, 25.0);
+        assert_eq!(unrounded.len(), requested_round.len());
+        for (a, b) in unrounded.iter().zip(requested_round.iter()) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"),
+                "a full-circle wedge must ignore corner_radius entirely");
+        }
+        let arc_count = requested_round.iter().filter(|c| matches!(c, PathCmd::ArcTo { .. })).count();
+        assert_eq!(arc_count, 2, "full-circle geometry (2 half-arcs) must be unaffected by corner_radius");
+    }
+
+    /// A zero-thickness ring (`inner_r == outer_r`) has no radial edge to
+    /// trim (`radial_thickness / 2 == 0`) — rounding must refuse (fall back
+    /// to the unrounded, already-degenerate geometry) rather than emitting
+    /// negative-radius or self-intersecting fillets.
+    #[test]
+    fn wedge_path_zero_thickness_ring_does_not_round() {
+        let r = 50.0;
+        let unrounded = wedge_path(100.0, 100.0, r, r, 0.0, std::f64::consts::FRAC_PI_2, 0.0);
+        let requested_round = wedge_path(100.0, 100.0, r, r, 0.0, std::f64::consts::FRAC_PI_2, 25.0);
+        assert_eq!(unrounded.len(), requested_round.len());
+        for (a, b) in unrounded.iter().zip(requested_round.iter()) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"),
+                "a zero-thickness ring has no radial edge to round and must fall back unchanged");
+        }
+    }
+
+    /// End-to-end wiring: `mark_arc(corner_radius=)` reaches `build()` via
+    /// `ctx.mark_style.paint.corner_radius` (populated by the generic
+    /// override applier, `draw.rs:367`) and actually rounds every emitted
+    /// slice — not just the standalone `wedge_path` unit. A 3-slice pie
+    /// (weights 10/30/60, all solid `inner_r == 0` sectors) must show 3 arcs
+    /// per path (1 main + 2 fillets) once `corner_radius` is set, vs. 1 arc
+    /// per path at the theme baseline (unset ⇒ 0.0).
+    #[test]
+    fn build_arc_corner_radius_override_rounds_every_slice() {
+        let spec = polar_spec(false);
+        let batch = make_batch(false);
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+
+        let baseline_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+        assert_eq!(baseline_style.paint.corner_radius, 0.0, "fixture sanity: Arc's baseline corner radius is 0.0");
+        let baseline_ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &baseline_style };
+        let baseline = build(&baseline_ctx);
+
+        let overrides = crate::spec::mark_style::MarkKwargsSpec { corner_radius: Some(8.0), ..Default::default() };
+        let rounded_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Arc).unwrap();
+        assert_eq!(rounded_style.paint.corner_radius, 8.0);
+        let rounded_ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &rounded_style };
+        let rounded = build(&rounded_ctx);
+
+        assert_eq!(baseline.nodes.len(), 3);
+        assert_eq!(rounded.nodes.len(), 3);
+        for (base_n, round_n) in baseline.nodes.iter().zip(rounded.nodes.iter()) {
+            let base_arcs = arc_count(base_n);
+            let round_arcs = arc_count(round_n);
+            assert_eq!(base_arcs, 1, "baseline (corner_radius unset) slice must be a single sharp arc");
+            assert_eq!(round_arcs, 3, "rounded slice must be 1 main arc + 2 corner fillets; got {round_arcs}");
+        }
     }
 }

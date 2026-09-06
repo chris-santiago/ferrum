@@ -620,6 +620,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx,
@@ -749,6 +750,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 50.0,
@@ -926,6 +928,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1106,6 +1109,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1250,6 +1254,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1437,6 +1442,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1798,6 +1804,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 50.0,
@@ -1914,6 +1921,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 50.0,
@@ -2285,6 +2293,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Rect {
                     x: 90.0,
@@ -2397,6 +2406,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -2526,6 +2536,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,
@@ -2690,6 +2701,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Bar,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,
@@ -2842,6 +2854,7 @@ mod tests {
             marks: vec![
                 // Batch 0: packed (empty nodes).
                 MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -2857,6 +2870,7 @@ mod tests {
                 },
                 // Batch 1: non-packed (1 circle in nodes).
                 MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 200.0,
@@ -3043,6 +3057,7 @@ mod tests {
             marks: vec![
                 // Batch 0 (scene order 0): non-packed, 1 circle.
                 MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,
@@ -3063,6 +3078,7 @@ mod tests {
                 },
                 // Batch 1 (scene order 1): packed, 3 circles.
                 MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![], // empty — packed
                     data_indices: None,
@@ -3227,6 +3243,7 @@ mod tests {
             marks: vec![
                 // Batch 0 (scene order): non-packed, 1 circle at (400, 50).
                 MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 400.0,
@@ -3247,6 +3264,7 @@ mod tests {
                 },
                 // Batch 1 (scene order): packed, 3 circles.
                 MarkBatch {
+                    polar_spans: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -3388,6 +3406,7 @@ mod tests {
             },
             grid: vec![],
             marks: vec![MarkBatch {
+                polar_spans: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,

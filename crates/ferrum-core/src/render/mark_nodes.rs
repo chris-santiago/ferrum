@@ -34,7 +34,7 @@
 //! }
 //! let (nodes, data_indices) = acc.finalize();
 //! let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-//! MarkBuildResult { kind, nodes, data_indices: Some(data_indices), tooltips, hrefs, descriptions }
+//! MarkBuildResult { kind, nodes, data_indices: Some(data_indices), tooltips, hrefs, descriptions, polar_spans: None }
 //! ```
 
 use ferrum_scene::SceneNode;
@@ -130,16 +130,23 @@ impl MarkNodes {
 /// one entry per node. A builder whose node count diverges from any vector's
 /// length (the #6 defect class) trips this immediately under a debug build.
 ///
-/// The five channels — tooltips, hrefs, descriptions, data_indices, and keys —
-/// are populated **independently**. A chart with href but no tooltip produces
-/// `tooltips == None` while `hrefs == Some(full_row_vec)`. Checking only
-/// `tooltips` would leave that case silent. This function therefore takes the
-/// length of each present vector as a separate `Option<usize>` and asserts each
-/// one independently, so any misaligned channel trips the guard.
+/// The six channels — tooltips, hrefs, descriptions, data_indices, keys, and
+/// polar_spans — are populated **independently**. A chart with href but no
+/// tooltip produces `tooltips == None` while `hrefs == Some(full_row_vec)`.
+/// Checking only `tooltips` would leave that case silent. This function
+/// therefore takes the length of each present vector as a separate
+/// `Option<usize>` and asserts each one independently, so any misaligned
+/// channel trips the guard.
 ///
 /// `data_indices` and `keys` are the alignment vector and the key channel
 /// respectively; they carry one entry per emitted node (not per input row) and
-/// must equal `nodes.len()` exactly like the metadata channels.
+/// must equal `nodes.len()` exactly like the metadata channels. `polar_spans`
+/// (batch E Task 2, cycle 5) is the same shape again — one `(angle_start,
+/// angle_end)` per emitted wedge node, populated only by `arc.rs`'s three
+/// builders and `bar.rs::build_polar` — and a misaligned `polar_spans` is
+/// worse than a misaligned tooltip: it makes hit-testing itself resolve node
+/// `j`'s hover to node `k`'s span, so the tooltip, selection, and emitted
+/// `data_index` all report a different row's data, silently.
 ///
 /// Each parameter is `Some(n)` when the corresponding vector is present (its
 /// length), or `None` when that channel is absent for this batch.
@@ -153,6 +160,7 @@ pub(crate) fn debug_assert_nodes_metadata_aligned(
     descriptions_len: Option<usize>,
     data_indices_len: Option<usize>,
     keys_len: Option<usize>,
+    polar_spans_len: Option<usize>,
 ) {
     if let Some(meta_len) = tooltips_len {
         debug_assert_eq!(
@@ -194,6 +202,16 @@ pub(crate) fn debug_assert_nodes_metadata_aligned(
              (archaeology bug #6 defect class)",
         );
     }
+    if let Some(ps_len) = polar_spans_len {
+        debug_assert_eq!(
+            nodes_len, ps_len,
+            "mark batch node count ({nodes_len}) must equal polar_spans length \
+             ({ps_len}); a builder emitted polar_spans out of lockstep with its nodes \
+             (archaeology bug #6 defect class — a misaligned polar_spans makes \
+             hit-testing resolve one node's hover to a different node's angular \
+             span, silently)",
+        );
+    }
 }
 
 /// The packed-path sibling of [`debug_assert_nodes_metadata_aligned`] (spec
@@ -223,12 +241,13 @@ pub(crate) fn debug_assert_packed_keys_aligned(instance_count: usize, keys_len: 
 /// Returns `Ok(())` when the node count agrees with every present per-node
 /// vector (or when a channel is absent), and `Err((channel, nodes_len,
 /// vec_len))` on the first misaligned channel. `channel` is one of
-/// `"tooltip"`, `"href"`, `"description"`, `"data_indices"`, or `"keys"`.
+/// `"tooltip"`, `"href"`, `"description"`, `"data_indices"`, `"keys"`, or
+/// `"polar_spans"`.
 ///
 /// This lets tests exercise the invariant on a release build without relying
 /// on `debug_assert` being compiled in. The production seam uses
 /// [`debug_assert_nodes_metadata_aligned`] (see `scene_build.rs`); this mirrors
-/// its predicate exactly, checking all five independent channels.
+/// its predicate exactly, checking all six independent channels.
 #[cfg(test)]
 pub(crate) fn check_nodes_metadata_aligned(
     nodes_len: usize,
@@ -237,6 +256,7 @@ pub(crate) fn check_nodes_metadata_aligned(
     descriptions_len: Option<usize>,
     data_indices_len: Option<usize>,
     keys_len: Option<usize>,
+    polar_spans_len: Option<usize>,
 ) -> Result<(), (&'static str, usize, usize)> {
     if let Some(meta_len) = tooltips_len {
         if meta_len != nodes_len {
@@ -261,6 +281,11 @@ pub(crate) fn check_nodes_metadata_aligned(
     if let Some(k_len) = keys_len {
         if k_len != nodes_len {
             return Err(("keys", nodes_len, k_len));
+        }
+    }
+    if let Some(ps_len) = polar_spans_len {
+        if ps_len != nodes_len {
+            return Err(("polar_spans", nodes_len, ps_len));
         }
     }
     Ok(())
@@ -366,8 +391,8 @@ mod tests {
 
     // ── Alignment guard ──────────────────────────────────────────────────────
 
-    /// Helper to call `check_nodes_metadata_aligned` with all five channels,
-    /// passing `None` for the two new channels when not needed by a test case.
+    /// Helper to call `check_nodes_metadata_aligned` with all six channels,
+    /// passing `None` for `polar_spans` when not needed by a test case.
     fn check(
         nodes: usize,
         tooltips: Option<usize>,
@@ -376,7 +401,7 @@ mod tests {
         data_indices: Option<usize>,
         keys: Option<usize>,
     ) -> Result<(), (&'static str, usize, usize)> {
-        check_nodes_metadata_aligned(nodes, tooltips, hrefs, descs, data_indices, keys)
+        check_nodes_metadata_aligned(nodes, tooltips, hrefs, descs, data_indices, keys, None)
     }
 
     /// The checked guard accepts aligned node/metadata lengths and the
@@ -417,7 +442,16 @@ mod tests {
         );
         // Misaligned keys: 3 nodes but 2 keys entries.
         assert_eq!(check(3, None, None, None, None, Some(2)), Err(("keys", 3, 2)));
-        // All five aligned — guard is silent.
+        // Misaligned polar_spans: 3 nodes but 2 polar_spans entries — the
+        // sixth channel (cycle 6 / quality-review finding 7), called through
+        // `check_nodes_metadata_aligned` directly since `check()` fixes it to
+        // `None`.
+        assert_eq!(
+            check_nodes_metadata_aligned(3, None, None, None, None, None, Some(2)),
+            Err(("polar_spans", 3, 2))
+        );
+        // All five of `check()`'s explicit channels aligned (polar_spans
+        // fixed to `None` by the helper) — guard is silent.
         assert!(check(4, Some(4), Some(4), Some(4), Some(4), Some(4)).is_ok());
         // data_indices aligned, keys aligned, metadata absent.
         assert!(check(4, None, None, None, Some(4), Some(4)).is_ok());
@@ -431,7 +465,7 @@ mod tests {
     #[should_panic(expected = "node count")]
     fn debug_assert_guard_trips_on_misaligned_tooltip() {
         // 2 nodes but 3 tooltip metadata entries — the #6 defect class shape.
-        debug_assert_nodes_metadata_aligned(2, Some(3), None, None, None, None);
+        debug_assert_nodes_metadata_aligned(2, Some(3), None, None, None, None, None);
     }
 
     /// The debug assertion trips when the href channel is misaligned and
@@ -444,7 +478,7 @@ mod tests {
     fn debug_assert_guard_trips_on_href_only_misalignment() {
         // href-without-tooltip: 2 nodes, no tooltips, 5 href entries.
         // The old guard would short-circuit here because tooltips is None.
-        debug_assert_nodes_metadata_aligned(2, None, Some(5), None, None, None);
+        debug_assert_nodes_metadata_aligned(2, None, Some(5), None, None, None, None);
     }
 
     /// The debug assertion trips when the description channel is misaligned
@@ -453,7 +487,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "description metadata length")]
     fn debug_assert_guard_trips_on_description_only_misalignment() {
-        debug_assert_nodes_metadata_aligned(2, None, None, Some(4), None, None);
+        debug_assert_nodes_metadata_aligned(2, None, None, Some(4), None, None, None);
     }
 
     /// The debug assertion trips when data_indices is misaligned and all
@@ -467,7 +501,7 @@ mod tests {
     fn debug_assert_guard_trips_on_data_indices_misalignment() {
         // 2 nodes per row, 3 rows = 6 nodes; but only 3 data_indices entries (one per row).
         // Represents the pre-fix label.rs leader-line shape: 2N nodes, N data_indices.
-        debug_assert_nodes_metadata_aligned(6, None, None, None, Some(3), None);
+        debug_assert_nodes_metadata_aligned(6, None, None, None, Some(3), None, None);
     }
 
     /// The debug assertion trips when keys is misaligned while all other
@@ -477,7 +511,20 @@ mod tests {
     #[should_panic(expected = "keys length")]
     fn debug_assert_guard_trips_on_keys_misalignment() {
         // 4 nodes but only 2 keys entries.
-        debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(2));
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(2), None);
+    }
+
+    /// The debug assertion trips when `polar_spans` is misaligned while all
+    /// other channels are absent — the sixth channel (batch E Task 2, cycle
+    /// 6 / quality-review finding 7), mirroring the `keys` test above. A
+    /// misaligned `polar_spans` is the shape that makes hit-testing resolve
+    /// one wedge's hover to a different wedge's angular span, silently.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "polar_spans length")]
+    fn debug_assert_guard_trips_on_polar_spans_misalignment() {
+        // 4 nodes (wedges) but only 2 polar_spans entries.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, None, Some(2));
     }
 
     // ── Packed-path keys guard (spec §4.3 / GH #93) ─────────────────────────
@@ -506,21 +553,27 @@ mod tests {
     /// aligned or when no channels are present (the no-metadata batch case).
     #[test]
     fn debug_assert_guard_silent_when_aligned_or_no_metadata() {
-        // All five aligned.
-        debug_assert_nodes_metadata_aligned(4, Some(4), Some(4), Some(4), Some(4), Some(4));
+        // All six aligned.
+        debug_assert_nodes_metadata_aligned(4, Some(4), Some(4), Some(4), Some(4), Some(4), Some(4));
         // Tooltips aligned, no other channels.
-        debug_assert_nodes_metadata_aligned(4, Some(4), None, None, None, None);
+        debug_assert_nodes_metadata_aligned(4, Some(4), None, None, None, None, None);
         // href only, aligned.
-        debug_assert_nodes_metadata_aligned(4, None, Some(4), None, None, None);
+        debug_assert_nodes_metadata_aligned(4, None, Some(4), None, None, None, None);
         // desc only, aligned.
-        debug_assert_nodes_metadata_aligned(4, None, None, Some(4), None, None);
+        debug_assert_nodes_metadata_aligned(4, None, None, Some(4), None, None, None);
         // data_indices only, aligned.
-        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), None);
+        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), None, None);
         // keys only, aligned.
-        debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(4));
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(4), None);
+        // polar_spans only, aligned.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, None, Some(4));
         // data_indices + keys, aligned, metadata absent.
-        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), Some(4));
+        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), Some(4), None);
+        // data_indices + polar_spans, aligned, metadata and keys absent — the
+        // real shape of an Arc-kind batch (`arc.rs`/`bar.rs::build_polar`
+        // populate both, no `keys` unless an explicit `key=` encoding).
+        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), None, Some(4));
         // No channels at all.
-        debug_assert_nodes_metadata_aligned(4, None, None, None, None, None);
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, None, None);
     }
 }

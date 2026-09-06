@@ -157,6 +157,7 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Image,
         nodes,
         data_indices: Some(data_indices),
@@ -288,6 +289,7 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&raster_indices);
 
     MarkBuildResult {
+        polar_spans: None,
         kind: MarkBatchKind::Image,
         nodes: vec![SceneNode::Image {
             x: svg_x,
