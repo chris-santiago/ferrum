@@ -1738,6 +1738,29 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         ));
     }
 
+    // Arc's geometry (wedge angle + radius) only means anything under
+    // CoordPolar (spec §6.4, batch E). Refuse HERE, before the single-axis
+    // eligibility check below falls through to the generic x/y
+    // `EncodingTypeMismatch` — that generic error names a missing 'y'
+    // encoding, which is the wrong diagnosis for "no CoordPolar at all"
+    // (proven at scale_resolve/tests.rs, pre-fix: `mark_arc` under the
+    // default coord surfaced "encoding 'y' expected EncodingSpec, got
+    // None"). This is the single scale-resolution chokepoint every STANDALONE
+    // and composite-leaf render path shares, so raising it here covers all of
+    // them ahead of the generic error. It does NOT cover a merged-flat layer
+    // path (a `LayerChart` whose OTHER layer's mark drives scale resolution,
+    // e.g. `resolve={"y": "independent"}` or `.interactive()`'s single-panel
+    // layout) — `marks::arc::build`'s own `requires_polar_coord()` arm is the
+    // backstop for that case, so the refusal is total regardless of which
+    // path reaches the Arc mark. Both call the SAME constructor
+    // (`marks::arc::requires_polar_coord`) so the two chokepoints can never
+    // disagree on wording.
+    if matches!(spec.mark, crate::spec::mark::Mark::Arc)
+        && !matches!(spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
+    {
+        return Err(crate::render::marks::arc::requires_polar_coord());
+    }
+
     // Tick, Rule, and Arc marks support single-axis mode: only x or only y is
     // encoded, and the mark builder can proceed using just the present
     // channel.

@@ -211,6 +211,43 @@ pub enum RenderError {
     /// user had no way to tell an unimplemented curve from a misspelled one.
     /// Raised by [`draw::resolve_mark_style`], before any geometry is built.
     UnknownInterpolate { value: String },
+    /// A mark whose geometry only makes sense under one specific coordinate
+    /// system was asked to render under a different one (batch E, spec §6.4).
+    /// `mark` names the mark (e.g. `"mark_geoshape"`, `"mark_arc"`);
+    /// `required` names the coord kind it needs (`"Geo"`, `"Polar"`); `hint`
+    /// is the actionable `.coord(...)` call that fixes it.
+    ///
+    /// Two marks refuse this way, each refusing something that previously
+    /// degraded silently or misleadingly:
+    /// - `marks::geoshape::build`: a non-`Geo` coord with `__geometry__` data
+    ///   actually present in the batch (an empty/no-geometry batch still
+    ///   returns a legitimately empty result — this is not "any non-Geo
+    ///   geoshape refuses", only "non-Geo geoshape WITH geometry refuses").
+    ///   Before this, `mark_geoshape` under the default Cartesian coord
+    ///   silently rendered nothing, with no error and no warning. One
+    ///   producer: geoshape only ever builds through this one mark builder.
+    /// - `Mark::Arc` under any non-`Polar` coord: raised from TWO producers
+    ///   that share one constructor (`marks::arc::requires_polar_coord`), so
+    ///   the wording can never drift between them —
+    ///   `scale_resolve::resolve_scales_with_leaf_context` raises it first,
+    ///   ahead of the generic `EncodingTypeMismatch` fallthrough (`mark_arc`
+    ///   without `.coord(fm.CoordPolar(...))` used to surface `encoding 'y'
+    ///   expected EncodingSpec, got None`, which names the wrong problem),
+    ///   and `marks::arc::build`'s own non-Polar arm raises it again as a
+    ///   path-independent backstop — a merged-flat `LayerChart` layer (e.g.
+    ///   `LayerChart(bar, arc).interactive()`, or
+    ///   `resolve={"y": "independent"}`) resolves scales against the OTHER
+    ///   layer's mark, so the scale-resolution guard never runs for the arc
+    ///   layer there, and without the builder's own guard it silently
+    ///   rendered nothing.
+    ///
+    /// `mark_image`'s documented empty-scene behavior under Polar/Geo is
+    /// deliberately untouched (#118 owns the general policy).
+    MarkRequiresCoord {
+        mark: &'static str,
+        required: &'static str,
+        hint: &'static str,
+    },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -268,7 +305,8 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::UnsupportedChannelCombination { .. }
         | RenderError::InvalidFormatSpec { .. }
         | RenderError::InvalidScaleDomainConfig { .. }
-        | RenderError::UnknownInterpolate { .. }) => other,
+        | RenderError::UnknownInterpolate { .. }
+        | RenderError::MarkRequiresCoord { .. }) => other,
     }
 }
 
@@ -407,6 +445,8 @@ impl std::fmt::Display for RenderError {
             ),
             Self::InvalidFormatSpec { spec, reason } =>
                 write!(f, "invalid format spec {spec:?}: {reason}"),
+            Self::MarkRequiresCoord { mark, required, hint } =>
+                write!(f, "{mark} requires a {required} coord; {hint}"),
         }
     }
 }

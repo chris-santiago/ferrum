@@ -10,6 +10,7 @@
 //! - `LineString` / `MultiLineString` → `SceneNode::Polyline` (no fill).
 //! - `GeometryCollection` → recursively handled.
 
+use arrow::array::Array;
 use ferrum_scene::{MarkBatchKind, SceneNode};
 use geojson::{Geometry, Value as GeoValue};
 
@@ -17,6 +18,7 @@ use crate::render::arrow_cast::col_as_str;
 use crate::render::color::with_opacity;
 use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::RenderError;
 use crate::spec::coord::CoordKind as SpecCoord;
 
 const GEOMETRY_COL: &str = "__geometry__";
@@ -38,14 +40,38 @@ struct RowGeometry {
     lines: Vec<Vec<[f64; 2]>>,
 }
 
-pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
+pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let projection = match &ctx.spec.coord {
         Some(SpecCoord::Geo { projection }) => *projection,
-        _ => return MarkBuildResult::empty(MarkBatchKind::Polygon),
+        _ => {
+            // Non-Geo coord: only refuse when geometry data is actually
+            // present. A batch with no `__geometry__` column, or one whose
+            // column is entirely null, still produces a legitimately empty
+            // result — refusing THAT would turn an unrelated empty-data
+            // chart into an error, so the rule is "refuse only when there is
+            // real geometry to project" (spec §6.4's own wording is "with
+            // geometry present"; the discriminator here just answers that
+            // presence question). `null_count() < len()` reads the raw
+            // column directly — no dtype assumption (a mis-typed
+            // `__geometry__` column is a different, unrelated failure mode
+            // this check does not need to adjudicate) and no per-row
+            // materialization of a possibly-large GeoJSON string column.
+            let has_geometry = ctx.batch
+                .column_by_name(GEOMETRY_COL)
+                .is_some_and(|col| col.null_count() < col.len());
+            if has_geometry {
+                return Err(RenderError::MarkRequiresCoord {
+                    mark: "mark_geoshape",
+                    required: "Geo",
+                    hint: "add .coord(fm.CoordGeo(...))",
+                });
+            }
+            return Ok(MarkBuildResult::empty(MarkBatchKind::Polygon));
+        }
     };
 
     let Ok(geom_strs) = col_as_str(ctx.batch, GEOMETRY_COL) else {
-        return MarkBuildResult::empty(MarkBatchKind::Polygon);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Polygon));
     };
 
     let fill = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
@@ -112,7 +138,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     }
 
     if rows.is_empty() || !min_x.is_finite() {
-        return MarkBuildResult::empty(MarkBatchKind::Polygon);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Polygon));
     }
 
     // ── Scaling: project-space → pixel-space, preserving aspect ratio ─
@@ -194,7 +220,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         polar_spans: None,
         kind: MarkBatchKind::Polygon,
         nodes,
@@ -202,7 +228,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -221,8 +247,10 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
-    /// Minimal geoshape spec with Mercator projection and no encodings.
-    fn geo_spec() -> ChartSpec {
+    /// Minimal geoshape spec, `coord`-parametrized — shared by `geo_spec()`
+    /// (the default Geo fixture used throughout this module) and the
+    /// coord-guard tests below (Task 6), which need every non-Geo variant.
+    fn geo_spec_with_coord(coord: Option<CoordKind>) -> ChartSpec {
         ChartSpec {
             data: DataRef::default(),
             mark: Mark::Geoshape,
@@ -230,7 +258,7 @@ mod tests {
             transforms: Vec::new(),
             facet: None,
             layers: None,
-            coord: Some(CoordKind::Geo { projection: GeoProjection::Equirectangular }),
+            coord,
             mark_style: None,
             position: None,
             title: None,
@@ -241,6 +269,11 @@ mod tests {
             chart_description: None,
             params: Vec::new(),
         }
+    }
+
+    /// Minimal geoshape spec with Mercator projection and no encodings.
+    fn geo_spec() -> ChartSpec {
+        geo_spec_with_coord(Some(CoordKind::Geo { projection: GeoProjection::Equirectangular }))
     }
 
     /// 100×100 plot panel.
@@ -313,7 +346,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         let circle_count = result
             .nodes
             .iter()
@@ -345,7 +378,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         let polyline_count = result
             .nodes
             .iter()
@@ -377,7 +410,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         // Find the first Polygon node and check its ring count.
         let ring_count = result.nodes.iter().find_map(|n| {
             if let ferrum_scene::SceneNode::Polygon { rings, .. } = n {
@@ -424,7 +457,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         let ring_count = result.nodes.iter().find_map(|n| {
             if let ferrum_scene::SceneNode::Polygon { rings, .. } = n {
                 Some(rings.len())
@@ -538,7 +571,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // Exactly two polygon nodes emitted (one per row).
         assert_eq!(result.nodes.len(), 2, "expected 2 polygon nodes, got {}", result.nodes.len());
@@ -578,7 +611,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // Two Polygon nodes from one MultiPolygon row.
         assert_eq!(result.nodes.len(), 2,
@@ -627,7 +660,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2);
         let hrefs = result.hrefs.as_ref().expect("hrefs must be Some when href encoding is set");
@@ -660,12 +693,132 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 1, "must emit exactly one polygon node");
         assert!(result.tooltips.is_none(), "tooltips must be None when no tooltip encoding");
         assert!(result.hrefs.is_none(), "hrefs must be None when no href encoding");
         assert!(result.descriptions.is_none(), "descriptions must be None when no description encoding");
+    }
+
+    // ── Task 6 (batch E): coord guard — geoshape requires CoordGeo ────────
+
+    /// Shared assertion for the non-Geo-coord-with-geometry refusal tests
+    /// below — mirrors the Arc guard's shared helper in
+    /// `scale_resolve/tests.rs::assert_arc_requires_polar` (only `coord`
+    /// varies between call sites).
+    fn assert_geoshape_requires_geo(coord: Option<CoordKind>) {
+        let geojson = r#"{"type":"Point","coordinates":[-87.65,41.85]}"#;
+        let spec = geo_spec_with_coord(coord);
+        let batch = batch_with_geometry(geojson);
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = dummy_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        // `MarkBuildResult` (the `Ok` type) carries no `Debug` impl, so
+        // `expect_err`/`unwrap_err` (which require `T: Debug` for their
+        // panic message) can't be used here — match explicitly instead.
+        let err = match build(&ctx) {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "mark_geoshape with geometry present under a non-Geo coord must refuse"
+            ),
+        };
+        match &err {
+            RenderError::MarkRequiresCoord { mark, required, .. } => {
+                assert_eq!(*mark, "mark_geoshape");
+                assert_eq!(*required, "Geo");
+            }
+            other => panic!("expected MarkRequiresCoord, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "mark_geoshape requires a Geo coord; add .coord(fm.CoordGeo(...))"
+        );
+    }
+
+    /// No coord at all (defaults to Cartesian downstream) must refuse.
+    #[test]
+    fn geoshape_no_coord_with_geometry_refuses() {
+        assert_geoshape_requires_geo(None);
+    }
+
+    /// Explicit Cartesian coord must refuse.
+    #[test]
+    fn geoshape_cartesian_coord_with_geometry_refuses() {
+        assert_geoshape_requires_geo(Some(CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        }));
+    }
+
+    /// CoordFlip must refuse (flip is not geo).
+    #[test]
+    fn geoshape_flip_coord_with_geometry_refuses() {
+        assert_geoshape_requires_geo(Some(CoordKind::Flip));
+    }
+
+    /// The crosswise case — CoordPolar (the OTHER coord-requiring mark's own
+    /// requirement) must refuse for geoshape exactly like any other non-Geo
+    /// coord.
+    #[test]
+    fn geoshape_polar_coord_with_geometry_refuses() {
+        use ferrum_scene::{PolarDirection, PolarThetaChannel};
+        assert_geoshape_requires_geo(Some(CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }));
+    }
+
+    /// An empty/no-geometry batch under a non-Geo coord must NOT error — it
+    /// is a legitimately empty result (spec §6.4: "an empty/no-geometry
+    /// batch may still produce a legitimately empty result"). This is the
+    /// discriminator between "wrong coord" and "wrong coord AND nothing to
+    /// render anyway" — only the former refuses.
+    #[test]
+    fn geoshape_non_geo_coord_no_geometry_stays_empty() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("__geometry__", DataType::Utf8, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec![None::<&str>]))],
+        )
+        .unwrap();
+        let spec = geo_spec_with_coord(Some(CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        }));
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = dummy_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape).unwrap();
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = build(&ctx).expect("no-geometry batch under a non-Geo coord must not error");
+        assert_eq!(result.nodes.len(), 0);
     }
 }
 

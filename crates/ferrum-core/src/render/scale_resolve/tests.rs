@@ -4647,6 +4647,142 @@ fn arc_missing_theta_still_errors() {
     }
 }
 
+// --- Batch E (Task 6): Arc requires CoordPolar (MarkRequiresCoord) --------
+
+use crate::spec::coord::CoordKind;
+
+/// Shared builder for the four non-Polar-coord refusal tests below — the
+/// only thing that varies between them is `coord`, so a full `ChartSpec`
+/// literal per test would be near-verbatim duplication of the fixture used
+/// throughout this file (operating principle 11).
+fn arc_spec_with_coord(coord: Option<CoordKind>) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Arc,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            y: None,
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Asserts `mark_arc` under `coord` refuses with the typed
+/// `MarkRequiresCoord` error, BEFORE the generic `EncodingTypeMismatch`
+/// fallthrough can fire (pre-fix RED: `mark_arc` under any of these coords
+/// surfaced "encoding 'y' expected EncodingSpec, got None" instead — proven
+/// at `missing_y_encoding_names_y_when_not_flipped` above, which pins that
+/// exact string for the ordinary (non-Arc) case this guard must not touch).
+fn assert_arc_requires_polar(coord: Option<CoordKind>) {
+    let spec = arc_spec_with_coord(coord);
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .expect_err("mark_arc under a non-Polar coord must refuse");
+    match &err {
+        RenderError::MarkRequiresCoord { mark, required, .. } => {
+            assert_eq!(*mark, "mark_arc");
+            assert_eq!(*required, "Polar");
+        }
+        other => panic!("expected MarkRequiresCoord, got {other:?}"),
+    }
+    assert_eq!(
+        format!("{err}"),
+        "mark_arc requires a Polar coord; add .coord(fm.CoordPolar(...))"
+    );
+}
+
+/// No coord at all (defaults to Cartesian downstream) must refuse.
+#[test]
+fn arc_no_coord_refuses_mark_requires_coord() {
+    assert_arc_requires_polar(None);
+}
+
+/// Explicit Cartesian coord must refuse.
+#[test]
+fn arc_cartesian_coord_refuses_mark_requires_coord() {
+    assert_arc_requires_polar(Some(CoordKind::Cartesian {
+        x_domain: None,
+        y_domain: None,
+        expand: true,
+        clip: true,
+    }));
+}
+
+/// CoordFlip must refuse (flip is not polar).
+#[test]
+fn arc_flip_coord_refuses_mark_requires_coord() {
+    assert_arc_requires_polar(Some(CoordKind::Flip));
+}
+
+/// The crosswise case — CoordGeo (the OTHER coord-requiring mark's own
+/// requirement) must refuse for Arc exactly like any other non-Polar coord.
+#[test]
+fn arc_geo_coord_refuses_mark_requires_coord() {
+    use crate::spec::coord::GeoProjection;
+    assert_arc_requires_polar(Some(CoordKind::Geo { projection: GeoProjection::Mercator }));
+}
+
+/// Arc with BOTH `x` and `y` bound under a non-Polar coord. Every test above
+/// uses an x-only encoding — exactly the shape that pre-fix tripped the
+/// misleading `EncodingTypeMismatch` on the missing `y`, so those tests pin
+/// only the error-ORDERING half of the finding. With `y` also bound, scale
+/// resolution pre-fix had nothing missing to complain about and resolved
+/// cleanly, so this branch used to reach `marks::arc::build`'s own non-Polar
+/// arm and silently render nothing — the OTHER half of the finding (quality
+/// review round 1, Required Fix 2). Must still refuse with
+/// `MarkRequiresCoord`, proving the refusal is the coord check itself, not a
+/// missing-channel fallthrough that happens to look the same.
+#[test]
+fn arc_both_x_and_y_bound_under_non_polar_coord_refuses() {
+    use crate::spec::encoding::{DataType, EncodingSpec};
+
+    let mut spec = arc_spec_with_coord(Some(CoordKind::Cartesian {
+        x_domain: None,
+        y_domain: None,
+        expand: true,
+        clip: true,
+    }));
+    spec.encoding.y = Some(EncodingSpec {
+        field: "y".into(),
+        type_: Some(DataType::Quantitative),
+        ..Default::default()
+    });
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).expect_err(
+        "mark_arc with both x and y bound under a non-Polar coord must still refuse",
+    );
+    match &err {
+        RenderError::MarkRequiresCoord { mark, required, .. } => {
+            assert_eq!(*mark, "mark_arc");
+            assert_eq!(*required, "Polar");
+        }
+        other => panic!("expected MarkRequiresCoord, got {other:?}"),
+    }
+}
+
 // --- R3: user-facing channel names under CoordFlip ------------------------
 
 /// A bare (non-Tick/Rule/Arc) mark missing its y encoding, unflipped, must

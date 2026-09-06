@@ -8,8 +8,33 @@ use crate::render::draw::{
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::color_column_loader;
 use crate::render::marks::opacity::resolve_scaled_opacity;
+use crate::render::RenderError;
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 use crate::spec::encoding::DataType as SpecDataType;
+
+/// The typed refusal for `mark_arc` under a non-`Polar` coord (spec §6.4,
+/// batch E). Two producers share this one definition so the wording cannot
+/// drift between them:
+///
+/// - `scale_resolve::resolve_scales_with_leaf_context` raises it FIRST, at
+///   the single scale-resolution chokepoint every render path shares, so it
+///   preempts the generic `EncodingTypeMismatch` fallthrough that used to
+///   surface the misleading "encoding 'y' expected EncodingSpec, got None".
+/// - This module's own [`build`] raises it too, from the same non-Polar arm
+///   that used to return a silent empty result — the path-independent
+///   backstop for a caller that reaches this mark builder WITHOUT going
+///   through the standalone/composite-leaf scale resolution above (a
+///   merged-flat layer's per-mark dispatch — e.g.
+///   `LayerChart(bar, arc).interactive()`'s single-panel path, or
+///   `resolve={"y": "independent"}` — resolves scales against the OTHER
+///   layer's mark, so `Mark::Arc`'s own guard never runs there).
+pub(crate) fn requires_polar_coord() -> RenderError {
+    RenderError::MarkRequiresCoord {
+        mark: "mark_arc",
+        required: "Polar",
+        hint: "add .coord(fm.CoordPolar(...))",
+    }
+}
 
 /// Resolved polar geometry shared by the pie/donut and annular-wedge paths.
 pub(crate) struct PolarGeom {
@@ -85,13 +110,13 @@ pub(crate) fn radius_to_pixel(
 ///   proportional to its value in the theta-mapped field, swept from a fixed
 ///   inner radius to a fixed outer radius. This path is byte-stable with the
 ///   pre-D7 implementation.
-pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
+pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let theta_ch = match &ctx.spec.coord {
         Some(SpecCoord::Polar { theta, .. }) => *theta,
-        _ => return MarkBuildResult::empty(MarkBatchKind::Arc),
+        _ => return Err(requires_polar_coord()),
     };
     let Some(geom) = polar_geom(ctx) else {
-        return MarkBuildResult::empty(MarkBatchKind::Arc);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
     };
 
     // Channel assignment under the Python polar remapping (shared resolver, C9):
@@ -119,13 +144,13 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     // `tests/test_finding_p8.py`). So the annular-mode gate below is on *2
     // channels only.
     if theta2_field.is_some() || radius2_field.is_some() {
-        return build_annular(
+        return Ok(build_annular(
             ctx, &geom, theta_field, theta2_field, radius_field, radius2_field, radius_scale,
-        );
+        ));
     }
 
     let Some(field) = theta_field else {
-        return MarkBuildResult::empty(MarkBatchKind::Arc);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
     };
 
     // Detect nominal/ordinal theta: use equal-band layout where each category
@@ -140,11 +165,11 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         matches!(e.type_, Some(SpecDataType::Nominal) | Some(SpecDataType::Ordinal))
     });
     if theta_is_categorical {
-        return build_nominal_theta(ctx, &geom, field, radius_field, radius_scale);
+        return Ok(build_nominal_theta(ctx, &geom, field, radius_field, radius_scale));
     }
 
     let Ok(values) = col_as_f64(ctx.batch, field) else {
-        return MarkBuildResult::empty(MarkBatchKind::Arc);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
     };
 
     let (cx, cy, inner_radius, outer_radius, start_angle, pad_angle) = (
@@ -156,7 +181,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         .filter(|v| v.is_finite() && *v > 0.0)
         .sum();
     if total <= 0.0 {
-        return MarkBuildResult::empty(MarkBatchKind::Arc);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
     }
 
     // Per-slice color: read color encoding field and look up in the color scale.
@@ -239,7 +264,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
@@ -247,7 +272,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         hrefs,
         descriptions,
         polar_spans: Some(spans),
-    }
+    })
 }
 
 /// Build arc wedges for a nominal/ordinal theta channel.
@@ -922,9 +947,58 @@ mod tests {
         let scales = make_scales(false);
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         let paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count();
         assert_eq!(paths, 3, "expected 3 arc Path nodes, got {paths}");
+    }
+
+    /// `build`'s OWN non-Polar guard (the merged-flat backstop, quality
+    /// review round 1 / Required Fix 1) — called directly, bypassing scale
+    /// resolution entirely, so this pins THIS function's arm specifically
+    /// rather than the `scale_resolve` chokepoint pinned in
+    /// `scale_resolve::tests`. Both `x` AND `y` are bound (mirroring
+    /// `arc_both_x_and_y_bound_under_non_polar_coord_refuses`): pre-fix this
+    /// exact shape reached this function's body with nothing missing to
+    /// short-circuit on, and fell through to a silent empty result — the
+    /// branch a merged-flat `LayerChart` layer takes, since it never goes
+    /// through `resolve_scales_with_leaf_context` for the arc layer's own
+    /// mark.
+    #[test]
+    fn build_own_guard_refuses_non_polar_coord_with_both_x_and_y() {
+        let mut spec = polar_spec(false);
+        spec.coord = Some(SpecCoord::Cartesian {
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+        });
+        spec.encoding.y = Some(EncodingSpec {
+            field: "val".into(),
+            type_: Some(SDT::Quantitative),
+            ..Default::default()
+        });
+        let batch = make_batch(false);
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        // `MarkBuildResult` (the `Ok` type) carries no `Debug` impl, so
+        // `expect_err` (which requires `T: Debug` for its panic message)
+        // can't be used here — match explicitly instead.
+        let err = match build(&ctx) {
+            Err(e) => e,
+            Ok(_) => panic!(
+                "mark_arc's own build() must refuse a non-Polar coord even with both x and y bound"
+            ),
+        };
+        match &err {
+            RenderError::MarkRequiresCoord { mark, required, .. } => {
+                assert_eq!(*mark, "mark_arc");
+                assert_eq!(*required, "Polar");
+            }
+            other => panic!("expected MarkRequiresCoord, got {other:?}"),
+        }
     }
 
     /// W18: When an opacity encoding is present, arc slices must have different
@@ -938,7 +1012,7 @@ mod tests {
         let scales = make_scales(true);
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         let paths: Vec<_> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Path { style, .. } = n { Some(style.clone()) } else { None }
@@ -1066,7 +1140,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         let paths: Vec<&SceneNode> = result.nodes.iter()
             .filter(|n| matches!(n, SceneNode::Path { .. }))
@@ -1158,7 +1232,7 @@ mod tests {
         let scales = make_scales(false);
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // Exactly 2 wedges survive (null value is skipped).
         assert_eq!(result.nodes.len(), 2, "expected 2 nodes after null skip; got {}", result.nodes.len());
@@ -1201,7 +1275,7 @@ mod tests {
         let scales = make_scales(false);
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 3, "expected 3 kept nodes (null row 1 and zero row 3 skipped)");
         let spans = result.polar_spans.expect("build() must always emit polar_spans for an Arc batch");
@@ -1292,7 +1366,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // 2 nodes survive (null category row is skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -1381,7 +1455,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 4, "expected 4 kept nodes (only the null category, row 1, is skipped)");
         let spans = result.polar_spans.expect("build_nominal_theta must always emit polar_spans for an Arc batch");
@@ -1480,7 +1554,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // 2 nodes survive (row 1 has null t1 → skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -1567,7 +1641,7 @@ mod tests {
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 3, "expected 3 kept nodes (row 1's null t1 skipped)");
         let spans = result.polar_spans.expect("build_annular must always emit polar_spans for an Arc batch");
@@ -1637,7 +1711,7 @@ mod tests {
         let scales = make_scales(false);
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // All 3 rows are valid → 3 nodes, hrefs in original order.
         assert_eq!(result.nodes.len(), 3, "expected 3 nodes; got {}", result.nodes.len());
@@ -1804,7 +1878,7 @@ mod tests {
         let scales = make_scales(false);
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         let paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count();
         assert_eq!(paths, 2, "the pad-exceeds-sweep row must be skipped, leaving 2 wedges");
@@ -1859,7 +1933,7 @@ mod tests {
             assert!(scales.color.is_some(), "fixture must resolve a color scale");
             let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-            build(&ctx).nodes.iter().filter_map(|n| match n {
+            build(&ctx).unwrap().nodes.iter().filter_map(|n| match n {
                 SceneNode::Path { style, .. } => style.fill.map(|c| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)),
                 _ => None,
             }).collect()
@@ -2409,13 +2483,13 @@ mod tests {
         let baseline_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         assert_eq!(baseline_style.paint.corner_radius, 0.0, "fixture sanity: Arc's baseline corner radius is 0.0");
         let baseline_ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &baseline_style };
-        let baseline = build(&baseline_ctx);
+        let baseline = build(&baseline_ctx).unwrap();
 
         let overrides = crate::spec::mark_style::MarkKwargsSpec { corner_radius: Some(8.0), ..Default::default() };
         let rounded_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Arc).unwrap();
         assert_eq!(rounded_style.paint.corner_radius, 8.0);
         let rounded_ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &rounded_style };
-        let rounded = build(&rounded_ctx);
+        let rounded = build(&rounded_ctx).unwrap();
 
         assert_eq!(baseline.nodes.len(), 3);
         assert_eq!(rounded.nodes.len(), 3);

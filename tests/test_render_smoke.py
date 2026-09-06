@@ -386,7 +386,9 @@ _case(
     "arc/theta",
     lambda: fm.Chart(_NQ).mark_arc().encode(x="cat:N"),
     xfail=True,
-    reason="mark_arc not yet implemented (deferred)",
+    reason="mark_arc requires .coord(fm.CoordPolar(...)); this case sets none "
+    "(batch E Task 6 coord guard — was 'not yet implemented' pre-guard, when "
+    "the same missing .coord() silently rendered nothing instead of refusing)",
 )
 _case("label/xy", lambda: fm.Chart(_TEXT_DF).mark_label().encode(x="x:Q", y="y:Q", text="label"))
 _case(
