@@ -32,6 +32,16 @@
 //!   - Per-cell polygons (not ring assembly) for isoband mode (Sutherland-Hodgman clipping).
 //!   - `smooth=true` applies a 3×3 Gaussian kernel (center=4, edges=2, corners=1, /16)
 //!     to interior grid cells; border cells are copied unchanged.
+//!
+//! (E9, 2026-09-06) Smoothing runs BEFORE threshold-level computation, so
+//! `thresholds` evenly-spaces `t` levels across the surface actually being
+//! contoured (not the raw grid `smooth=true` later replaces). Fill mode
+//! (isobands) emits exactly `t` bands: `t-1` interior bands between
+//! consecutive levels, plus a top band `[levels[t-1], dmax]` — so the
+//! density maximum is always enclosed by some band (previously it was a
+//! permanent, unfillable hole) and `thresholds=1` yields one meaningful
+//! band instead of none. `smooth=false` is unaffected by the reorder,
+//! since there is no smoothing step to move.
 
 use arrow::array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -175,19 +185,12 @@ fn contour_one_surface(
     nx: usize,
     ny: usize,
 ) -> Option<SurfaceOutput> {
-    // Compute thresholds: t evenly-spaced interior levels.
-    let dmin = density.iter().copied().fold(f64::INFINITY, f64::min);
-    let dmax = density.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if !dmin.is_finite() || !dmax.is_finite() || dmax <= dmin {
-        return None;
-    }
-    let t = spec.thresholds;
-    let levels: Vec<f64> = (1..=t)
-        .map(|i| dmin + (dmax - dmin) * (i as f64) / ((t + 1) as f64))
-        .collect();
-
-    // R1: Gaussian smoothing. Apply a 3×3 kernel (center=4, edges=2, corners=1, /16)
-    // to all interior cells. Border cells are copied unchanged.
+    // R1: Gaussian smoothing runs BEFORE level computation (E9), so levels
+    // are derived from the surface actually being contoured. Apply a 3×3
+    // kernel (center=4, edges=2, corners=1, /16) to all interior cells;
+    // border cells are copied unchanged. `smooth=false` skips this entirely,
+    // so dmin/dmax/levels below are computed on the untouched raw grid —
+    // the reorder is a no-op in that case.
     let density: Vec<f64> = if spec.smooth && nx >= 3 && ny >= 3 {
         let mut smoothed = density.to_vec();
         for gy in 1..(ny - 1) {
@@ -210,6 +213,18 @@ fn contour_one_surface(
     } else {
         density.to_vec()
     };
+
+    // Compute thresholds: t evenly-spaced interior levels, derived from the
+    // surface actually contoured (post-smoothing when smooth=true).
+    let dmin = density.iter().copied().fold(f64::INFINITY, f64::min);
+    let dmax = density.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if !dmin.is_finite() || !dmax.is_finite() || dmax <= dmin {
+        return None;
+    }
+    let t = spec.thresholds;
+    let levels: Vec<f64> = (1..=t)
+        .map(|i| dmin + (dmax - dmin) * (i as f64) / ((t + 1) as f64))
+        .collect();
 
     let mut level_ids: Vec<u32> = Vec::new();
     let mut level_vals: Vec<f64> = Vec::new();
@@ -331,9 +346,10 @@ fn contour_one_surface(
         })
     } else {
         // ---------- Isoband mode (Sutherland-Hodgman polygon clipping) ----------
-        if levels.len() < 2 {
-            return None;
-        }
+        // `t` levels always yield `t` bands: `t-1` interior bands between
+        // consecutive levels, plus the top band [levels[t-1], dmax] (E9),
+        // so the density maximum is never left uncovered. thresholds=1
+        // therefore yields exactly one band: [levels[0], dmax].
 
         #[derive(Clone, Copy)]
         struct Vtx {
@@ -371,9 +387,11 @@ fn contour_one_surface(
             out
         }
 
-        for bi in 0..(levels.len() - 1) {
+        for bi in 0..levels.len() {
             let lo = levels[bi];
-            let hi = levels[bi + 1];
+            // Interior bands clip to the next level; the top band (bi ==
+            // t-1) clips to dmax so the density maximum is enclosed.
+            let hi = levels.get(bi + 1).copied().unwrap_or(dmax);
             let mut cell_idx: u32 = 0;
             for gy in 0..(ny - 1) {
                 for gx in 0..(nx - 1) {
@@ -655,7 +673,9 @@ fn build_output(
 /// Reads a single-row batch in the ``Kde2D`` output schema (fields
 /// ``grid_x``, ``grid_y``, ``density``, ``nx``, ``ny``, ``extent``) and
 /// emits contour line segments or filled polygons at evenly-spaced density
-/// levels using the Marching Squares algorithm.
+/// levels using the Marching Squares algorithm. When ``smooth`` is True
+/// (the default), smoothing is applied before the levels are computed, so
+/// the levels reflect the surface actually contoured.
 ///
 /// Output columns: ``level_id`` (UInt32), ``level_value`` (Float64),
 /// ``contour_x`` (Float64), ``contour_y`` (Float64). Each row is one
@@ -666,14 +686,23 @@ fn build_output(
 /// ----------
 /// thresholds : int, default 6
 ///     Number of equally-spaced density levels to compute contours for.
-///     Must be > 0.
+///     Must be > 0. With ``fill=True``, this yields exactly ``thresholds``
+///     filled bands: ``thresholds - 1`` interior bands between consecutive
+///     levels, plus a top band spanning ``[levels[-1], density.max()]`` so
+///     the density maximum (the KDE peak) is always covered by a band
+///     rather than left as an unfilled gap. ``thresholds=1`` therefore
+///     still yields one meaningful band.
 /// fill : bool, default False
 ///     When False, emit isolines (line segments); when True, emit filled
-///     isoband polygons between adjacent threshold levels.
+///     isoband polygons as described under ``thresholds``.
 /// smooth : bool, default True
 ///     When True, applies a 3x3 Gaussian kernel pass (center=4, edges=2,
-///     corners=1, /16) to interior density cells before contouring.
-///     Reduces jagged contour edges at the cost of slight blurring.
+///     corners=1, /16) to interior density cells before the threshold
+///     levels are computed and before contouring. Reduces jagged contour
+///     edges at the cost of slight blurring; also shifts isoline/isoband
+///     positions slightly relative to ``smooth=False`` since the levels
+///     are computed from the smoothed surface. ``smooth=False`` computes
+///     levels directly from the raw grid, unaffected by this ordering.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -1028,7 +1057,8 @@ mod tests {
             }
         }
         let b = make_kde2d_batch(grid_x, grid_y, density);
-        // thresholds=3 → 3 levels → 2 bands.
+        // thresholds=3 → 3 levels → 3 bands: 2 interior bands plus the top
+        // band [levels[2], dmax] (E9: fill now emits t bands, not t-1).
         let spec = ContourSpec {
             thresholds: 3,
             fill: true,
@@ -1043,11 +1073,12 @@ mod tests {
             .unwrap();
         let mut found_band0 = false;
         let mut found_band1 = false;
+        let mut found_band2 = false;
         for i in 0..id.len() {
             let v = id.value(i);
             let band = v >> 16;
             let cell = v & 0xFFFF;
-            assert!(band <= 1, "band index out of expected range: {band}");
+            assert!(band <= 2, "band index out of expected range: {band}");
             assert!(cell <= 0xFFFF, "cell index overflow");
             if band == 0 {
                 found_band0 = true;
@@ -1058,10 +1089,190 @@ mod tests {
                     v >= 0x10000 && v <= 0x1FFFF,
                     "band 1 ids must lie in [0x10000, 0x1FFFF]; got {v:#x}"
                 );
+            } else if band == 2 {
+                found_band2 = true;
+                assert!(
+                    v >= 0x20000 && v <= 0x2FFFF,
+                    "band 2 ids must lie in [0x20000, 0x2FFFF]; got {v:#x}"
+                );
             }
         }
         assert!(found_band0, "expected at least one band 0 polygon");
         assert!(found_band1, "expected at least one band 1 polygon");
+        assert!(
+            found_band2,
+            "expected a top band (band 2) covering [levels[2], dmax] — E9 fix"
+        );
+    }
+
+    #[test]
+    fn contour_isoband_band_count_equals_thresholds() {
+        // F-L03-09 (E9): fill must emit exactly `t` bands (t-1 interior +
+        // the top band [levels[t-1], dmax]), not t-1. Distinct band indices
+        // observed in level_id must equal thresholds exactly, for several t.
+        pyo3::Python::initialize();
+        let n = 8usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; n * n];
+        for gy in 0..n {
+            for gx in 0..n {
+                let dx = (gx as f64) - 3.5;
+                let dy = (gy as f64) - 3.5;
+                density[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+            }
+        }
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+        for &t in &[2u32, 4, 6] {
+            let spec = ContourSpec { thresholds: t, fill: true, smooth: false, name: None };
+            let out = apply(&spec, &b).unwrap();
+            let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+            let distinct_bands: std::collections::BTreeSet<u32> =
+                (0..id_col.len()).map(|i| id_col.value(i) >> 16).collect();
+            assert_eq!(
+                distinct_bands.len(),
+                t as usize,
+                "thresholds={t}: expected {t} distinct bands, got {distinct_bands:?}"
+            );
+            assert_eq!(
+                *distinct_bands.iter().max().unwrap(),
+                t - 1,
+                "thresholds={t}: top band index must be t-1"
+            );
+        }
+    }
+
+    #[test]
+    fn contour_isoband_thresholds_one_yields_single_nonempty_band() {
+        // F-L03-09 (E9): thresholds=1 + fill=true previously emitted ZERO
+        // bands (the old `bi in 0..(levels.len()-1)` loop with levels.len()==1
+        // never ran). It must now emit exactly one meaningful band covering
+        // [levels[0], dmax].
+        pyo3::Python::initialize();
+        let n = 6usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; n * n];
+        for gy in 0..n {
+            for gx in 0..n {
+                let dx = (gx as f64) - 2.5;
+                let dy = (gy as f64) - 2.5;
+                density[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+            }
+        }
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+        let spec = ContourSpec { thresholds: 1, fill: true, smooth: false, name: None };
+        let out = apply(&spec, &b).unwrap();
+        assert!(
+            out.num_rows() > 0,
+            "thresholds=1 + fill=true must emit a non-empty band (was empty pre-fix)"
+        );
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        for i in 0..id_col.len() {
+            assert_eq!(id_col.value(i) >> 16, 0, "thresholds=1 must produce only band 0");
+        }
+    }
+
+    #[test]
+    fn contour_isoband_top_band_covers_peak_no_hole() {
+        // F-L03-09 (E9): the density-maximum cell must be enclosed by SOME
+        // band. Pre-fix, the region [levels[t-1], dmax] belonged to no band
+        // at all, leaving a permanent hole at the KDE peak. Post-fix, the
+        // top band's polygons must reach all the way to the peak coordinate.
+        pyo3::Python::initialize();
+        let n = 7usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; n * n];
+        let (peak_x, peak_y) = (3.0_f64, 3.0_f64);
+        for gy in 0..n {
+            for gx in 0..n {
+                let dx = (gx as f64) - peak_x;
+                let dy = (gy as f64) - peak_y;
+                density[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+            }
+        }
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+        let t = 4u32;
+        let spec = ContourSpec { thresholds: t, fill: true, smooth: false, name: None };
+        let out = apply(&spec, &b).unwrap();
+
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let cx_col = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let cy_col = out.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+
+        let top_band = t - 1;
+        let mut min_dist_to_peak = f64::INFINITY;
+        for i in 0..id_col.len() {
+            if (id_col.value(i) >> 16) == top_band {
+                let dx = cx_col.value(i) - peak_x;
+                let dy = cy_col.value(i) - peak_y;
+                min_dist_to_peak = min_dist_to_peak.min((dx * dx + dy * dy).sqrt());
+            }
+        }
+        assert!(
+            min_dist_to_peak.is_finite(),
+            "expected the top band ({top_band}) to have polygons at all — peak hole regression"
+        );
+        assert!(
+            min_dist_to_peak < 1.0,
+            "top band must reach the peak cell (dist={min_dist_to_peak}); peak left as a hole"
+        );
+    }
+
+    #[test]
+    fn contour_grouped_isoband_top_band_ids_globally_unique() {
+        // FA-8 + E9 combined: adding the top band per surface must not break
+        // level_id global uniqueness across grouped surfaces.
+        pyo3::Python::initialize();
+        let n = 5usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let make_density = |cx: f64, cy: f64| -> Vec<f64> {
+            let mut d = vec![0.0f64; n * n];
+            for gy in 0..n {
+                for gx in 0..n {
+                    let dx = (gx as f64) - cx;
+                    let dy = (gy as f64) - cy;
+                    d[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+                }
+            }
+            d
+        };
+        let rows = vec![
+            (grid_x.clone(), grid_y.clone(), make_density(1.0, 1.0)),
+            (grid_x.clone(), grid_y.clone(), make_density(3.0, 3.0)),
+        ];
+        let b = make_grouped_kde2d_batch(rows, "grp", vec!["A", "B"]);
+        let spec = ContourSpec { thresholds: 3, fill: true, smooth: false, name: None };
+        let out = apply(&spec, &b).unwrap();
+
+        // Isoband rows repeat a polygon's level_id across its vertices (incl.
+        // the closing vertex), so uniqueness is checked per DISTINCT id, not
+        // per row: no id observed under group "A" may also appear under "B".
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let grp_col = out.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+        let mut ids_a: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        let mut ids_b: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for i in 0..id_col.len() {
+            match grp_col.value(i) {
+                "A" => {
+                    ids_a.insert(id_col.value(i));
+                }
+                "B" => {
+                    ids_b.insert(id_col.value(i));
+                }
+                other => panic!("unexpected group tag: {other}"),
+            }
+        }
+        assert!(!ids_a.is_empty(), "group A must contribute polygons");
+        assert!(!ids_b.is_empty(), "group B must contribute polygons");
+        let overlap: Vec<u32> = ids_a.intersection(&ids_b).copied().collect();
+        assert!(
+            overlap.is_empty(),
+            "level_ids (incl. top band) must stay globally unique across grouped surfaces; \
+             overlap={overlap:?}"
+        );
     }
 
     /// Build a 2-row grouped Kde2D-shaped batch (mimics kde_2d grouped output).
@@ -1339,5 +1550,106 @@ mod tests {
         let any_diff = (0..min_rows).any(|i| (xs_raw.value(i) - xs_smooth.value(i)).abs() > 1e-12)
             || xs_raw.len() != xs_smooth.len();
         assert!(any_diff, "smooth=true must change contour geometry vs smooth=false");
+    }
+
+    #[test]
+    fn contour_isoband_levels_derive_from_smoothed_surface() {
+        // E9: smoothing must run BEFORE level computation, so a threshold's
+        // levels (and thus the top band's ceiling) reflect the surface
+        // actually contoured. Pre-fix, levels were always derived from the
+        // raw grid regardless of `smooth`, so this narrow single-peak grid's
+        // top-band level would exactly equal the raw-grid-derived value.
+        // Post-fix, the 3x3 blur lowers the smoothed max, so the two must
+        // differ.
+        pyo3::Python::initialize();
+        let n = 6usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; n * n];
+        for gy in 0..n {
+            for gx in 0..n {
+                let dx = (gx as f64) - 3.0;
+                let dy = (gy as f64) - 3.0;
+                density[gy * n + gx] = (-3.0 * (dx * dx + dy * dy)).exp();
+            }
+        }
+        let raw_dmax = density.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let raw_dmin = density.iter().copied().fold(f64::INFINITY, f64::min);
+
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+        let t = 3u32;
+        let spec = ContourSpec { thresholds: t, fill: true, smooth: true, name: None };
+        let out = apply(&spec, &b).unwrap();
+
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let lv_col = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let top_band = t - 1;
+        let mut observed_top_level: Option<f64> = None;
+        for i in 0..id_col.len() {
+            if (id_col.value(i) >> 16) == top_band {
+                observed_top_level = Some(lv_col.value(i));
+                break;
+            }
+        }
+        let observed_top_level =
+            observed_top_level.expect("top band must be present for a well-formed peak");
+
+        // What levels[t-1] would be if computed from the RAW (unsmoothed) grid.
+        let raw_top_level = raw_dmin + (raw_dmax - raw_dmin) * (t as f64) / ((t + 1) as f64);
+
+        assert!(
+            (observed_top_level - raw_top_level).abs() > 1e-9,
+            "smooth=true must compute levels from the SMOOTHED surface, not the raw grid \
+             (observed={observed_top_level}, raw-derived={raw_top_level})"
+        );
+    }
+
+    #[test]
+    fn contour_isoband_smooth_false_ordering_is_inert() {
+        // E9 constraint: "smooth=false byte-identical" scopes specifically
+        // to the smoothing-before-levels REORDER — with no smoothing to
+        // reorder, dmin/dmax/levels for every band (interior AND the new
+        // top band) must equal the closed-form values computed directly
+        // from the raw input grid. This is NOT a claim that fill=true row
+        // output is unchanged from pre-fix: the missing-top-band bug is
+        // fixed unconditionally (see contour_isoband_band_count_equals_
+        // thresholds), so row count legitimately grows even at smooth=false.
+        pyo3::Python::initialize();
+        let n = 5usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; n * n];
+        for gy in 0..n {
+            for gx in 0..n {
+                let dx = (gx as f64) - 2.0;
+                let dy = (gy as f64) - 2.0;
+                density[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+            }
+        }
+        let dmin = density.iter().copied().fold(f64::INFINITY, f64::min);
+        let dmax = density.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+        let t = 3u32;
+        let spec = ContourSpec { thresholds: t, fill: true, smooth: false, name: None };
+        let out = apply(&spec, &b).unwrap();
+        assert!(out.num_rows() > 0);
+
+        let id_col = out.column(0).as_any().downcast_ref::<UInt32Array>().unwrap();
+        let lv_col = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let levels: Vec<f64> = (1..=t)
+            .map(|i| dmin + (dmax - dmin) * (i as f64) / ((t + 1) as f64))
+            .collect();
+
+        for i in 0..out.num_rows() {
+            let band = id_col.value(i) >> 16;
+            let expected_level_value = levels[band as usize];
+            assert!(
+                (lv_col.value(i) - expected_level_value).abs() < 1e-12,
+                "row {i}: level_value {} != raw-grid-derived {expected_level_value} for band {band} \
+                 (reordering must be a no-op when smooth=false)",
+                lv_col.value(i)
+            );
+        }
     }
 }
