@@ -2,28 +2,40 @@
 
 Flexibility-audit silent-wrong-output bug: a layer built with
 ``encode(x=X("v", bin=True))`` was silently incorrect when layered with
-another chart. The single-chart path resolves the encoding bin kwarg into a
-top-level ``Bin`` transform (via ``_resolve_pending_bins``) and leaves the
-encoding field intact; the layered path either dropped the Bin from
-consideration or put it in the unnamed chain where it corrupted the shared
-current batch for all layers, causing named aggregate transforms to fail with
-"groupby column not found" (because the Bin transform replaced the original
-column schema).
+another chart. The layered path either dropped the Bin from consideration or
+put it in the unnamed chain where it corrupted the shared current batch for
+all layers, causing named aggregate transforms to fail with "groupby column
+not found" (because the Bin transform replaced the original column schema).
 
 The renderer never executes per-layer ``transforms`` standalone — a layer
 reads its input batch from a *named* chart-level transform via ``data_source``.
 So the fix routes each binning layer through its own named ``Bin`` transform
-and points the layer's ``data_source`` at it.  The layer encoding's field is
-remapped to ``bin_start`` (the Bin output column) and the ``bin`` kwarg is
-stripped.
+and points the layer's ``data_source`` at it.  The layer encoding is
+re-pointed at the Bin's own output columns and the ``bin`` kwarg is stripped.
 
 Two binning layers therefore bin independently and never interfere with each
 other or with the shared unnamed chain.
 
+**Dated note (2026-09-06, batch-E T12 / spec §6.6).** FA-4 fixed the layered
+path only, and this file used to record the single-chart path as deliberately
+untouched ("byte-stable with pre-FA4 behavior"). That was wrong on the facts:
+pre-FA4 behavior for the single-chart path was already broken, so *every*
+standalone ``bin=`` idiom raised at render time (F-L01-01) while this file's
+own docstring below claimed the standard histogram pattern "produces valid
+output". Both paths now share one lowering
+(``_layer_transforms._lower_bin_encoding``), so this suite covers the layered
+half and ``tests/test_encode_bin_lowering.py`` covers the single-chart half.
+Two behavior changes land here, both disclosed: a binning layer's encoding
+gains the ``x2``/``y2`` span bound to ``bin_end`` (so layered bin bars span
+their bin instead of collapsing to a default width) and its binned axis
+recovers the user's column name as its title instead of reading
+``"bin_start"``; and ``bin=`` + ``aggregate=`` on the same layer no longer
+raises -- the aggregate folds into that layer's own ``Bin``.
+
 These tests pin the fix at the spec level (each binning layer routes to its
-own named ``Bin`` transform, encoding field remapped) and behaviorally (the
-chart renders without error), plus back-compat (no-bin layered charts and
-standalone single-chart bins unchanged).
+own named ``Bin`` transform, encoding re-pointed) and behaviorally (the
+chart renders without error), plus back-compat (no-bin layered charts
+unchanged).
 """
 
 from __future__ import annotations
@@ -78,6 +90,32 @@ def test_binning_layer_routes_to_named_bin_transform():
     # Raw layer untouched: no data_source, field stays v.
     assert layers[1].get("data_source") is None
     assert layers[1]["encoding"]["x"]["field"] == "v"
+    assert "x2" not in layers[1]["encoding"]
+
+
+def test_binning_layer_gains_the_bin_end_span():
+    """Disclosed behavior change (2026-09-06, spec §6.6): a binning layer's
+    encoding gains the span channel bound to ``bin_end``, so its bars span
+    their bin instead of collapsing to a default width -- and its binned axis
+    recovers the user's own column name as the title."""
+    df = _multi_row_df()
+    binned = fm.Chart(df).mark_bar().encode(x=fm.X("v", bin=True), y="count")
+    raw = fm.Chart(df).mark_point().encode(x="v", y="v")
+
+    enc = json.loads((binned + raw).to_spec().to_json())["layers"][0]["encoding"]
+    assert enc["x2"]["field"] == "bin_end"
+    assert enc["x"]["title"] == "v"
+
+
+def test_horizontal_binning_layer_gains_the_y2_span():
+    df = _multi_row_df()
+    binned = fm.Chart(df).mark_bar().encode(y=fm.Y("v", bin=True), x="count")
+    raw = fm.Chart(df).mark_point().encode(x="v", y="v")
+
+    enc = json.loads((binned + raw).to_spec().to_json())["layers"][0]["encoding"]
+    assert enc["y"]["field"] == "bin_start"
+    assert enc["y2"]["field"] == "bin_end"
+    assert "x2" not in enc
 
 
 def test_two_binning_layers_route_independently():
@@ -218,12 +256,14 @@ def test_no_bin_layered_chart_unchanged():
         assert layer.get("data_source") is None
 
 
-def test_standalone_single_chart_bin_unchanged():
-    """Back-compat: the single-chart bin path is unaffected.
+def test_standalone_single_chart_bin_stays_unnamed():
+    """The single-chart bin's TRANSFORM shape is unchanged by FA-4 and by T12.
 
-    A plain ``Chart().encode(x=X('v', bin=True))`` must produce an unnamed
-    (chain-advancing) ``Bin`` transform in the spec's top-level ``transforms``
-    list, identical to the pre-FA4 behavior.
+    A plain ``Chart().encode(x=X('v', bin=True))`` must still produce an
+    unnamed (chain-advancing) ``Bin`` in the spec's top-level ``transforms``
+    list -- only named per-layer bins fan out.  The single-chart ENCODING is
+    no longer left alone (spec §6.6); that half is covered by
+    ``tests/test_encode_bin_lowering.py``.
     """
     df = _multi_row_df()
     d = json.loads(fm.Chart(df).mark_bar().encode(x=fm.X("v", bin=True)).to_spec().to_json())
@@ -293,37 +333,51 @@ def test_bin_dict_single_chart_preserves_bin_count():
 
 
 # ---------------------------------------------------------------------------
-# BUG 2 — bin= + aggregate= on the same layer must raise, not silently clobber
+# BUG 2 — bin= + aggregate= on the same layer folds into that layer's own Bin
 # ---------------------------------------------------------------------------
 
 
-def test_bin_and_aggregate_on_same_layer_raises_when_layered():
-    """BUG 2: bin= + aggregate= on the same layer in a layered chart raises ValueError.
+def test_bin_and_aggregate_on_same_layer_folds_into_one_named_bin():
+    """Disclosed change (2026-09-06, spec §6.6): the same-layer refusal lifts.
 
-    Chosen semantics: combining bin= and aggregate= on the same layer of a
-    *layered* chart is ill-defined in the named-transform architecture (named
-    transforms all read from the same unnamed-chain tail; there is no
-    named→named chaining).  Rather than silently producing wrong output, we
-    raise a clear ValueError at to_spec() time.
-
-    Pre-fix: _resolve_layer_aggregates sets data_source=_layer_agg_N, then
-    _resolve_layer_bins unconditionally overwrites data_source=_layer_bin_N.
-    The Bin reads the original input, but encoding y was already remapped to
-    'mean_v' (which does not exist in the original input).  The renderer
-    silently references a nonexistent column.
-
-    Note: the single-chart path (no layering) with bin= on x and aggregate= on y
-    chains the unnamed Bin and Aggregate transforms in the correct order and
-    produces valid output — this is the standard histogram pattern and is NOT
-    an error.
+    The refusal this replaced was a consequence of a Bin that could not
+    aggregate: ``_resolve_layer_aggregates`` built a named Aggregate, then
+    ``_resolve_layer_bins`` overwrote the layer's ``data_source`` with the named
+    Bin, leaving encoding y pointed at an aggregate column the Bin's output
+    never held.  Now the aggregate folds INTO the layer's own Bin
+    (``agg_field``/``agg``), so there is one named transform, no named->named
+    chaining, and the layer reads a column that really exists.
     """
     df = _multi_row_df()
     raw = fm.Chart(df).mark_point().encode(x="v", y="v")
     binned_agg = (
         fm.Chart(df).mark_bar().encode(x=fm.X("v", bin=True), y=fm.Y("v", aggregate="mean"))
     )
-    with pytest.raises(ValueError, match="bin.*aggregate|aggregate.*bin"):
-        (raw + binned_agg).to_spec()
+
+    d = json.loads((raw + binned_agg).to_spec().to_json())
+    layer = d["layers"][1]
+    bin_xform = _layer_bin(d, layer)
+    assert bin_xform["agg_field"] == "v"
+    assert bin_xform["agg"] == "mean"
+    # Exactly one named transform for that layer: no separate Aggregate.
+    assert not [t for t in (d.get("transforms") or []) if t.get("type") == "aggregate"]
+    assert layer["encoding"]["y"]["field"] == "agg_value"
+    assert layer["encoding"]["y"]["title"] == "v"
+    assert (raw + binned_agg).to_svg().lstrip().startswith("<")
+
+
+def test_bin_and_count_shorthand_on_same_layer_reads_the_bins_count_column():
+    """The field-less ``count()`` idiom needs no fold: the Bin already emits it."""
+    df = _multi_row_df()
+    raw = fm.Chart(df).mark_point().encode(x="v", y="v")
+    binned = fm.Chart(df).mark_bar().encode(x=fm.X("v", bin=True), y="count():Q")
+
+    d = json.loads((raw + binned).to_spec().to_json())
+    layer = d["layers"][1]
+    bin_xform = _layer_bin(d, layer)
+    assert "agg" not in bin_xform
+    assert not [t for t in (d.get("transforms") or []) if t.get("type") == "aggregate"]
+    assert layer["encoding"]["y"]["field"] == "count"
 
 
 def test_bin_only_layer_and_aggregate_only_layer_compose_fine():

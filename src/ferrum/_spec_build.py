@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any
+from typing import Any, NamedTuple
 
 from ferrum._core import EncodingSpec as _EncodingSpec, scale_accepted_keys as _scale_accepted_keys
 from ferrum._facet import (
@@ -25,8 +25,24 @@ from ferrum._facet import (
 )
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._layer_transforms import _infer_agg_groupby
+from ferrum._layer_transforms import (
+    _build_bin_transform,
+    _infer_agg_groupby,
+    _lower_bin_encoding,
+)
 from ferrum._override_consume import merge_encoding_scale as _merge_encoding_scale
+
+
+class _ResolvedBins(NamedTuple):
+    """``SpecBuildMixin._resolve_pending_bins``'s two coupled outputs.
+
+    The transform list and the encoding are resolved together, not one after
+    the other: which channels point at which ``Bin`` output column depends on
+    which aggregate the Bin absorbed, and vice versa.
+    """
+
+    transforms: list
+    encoding: dict
 
 
 def _scale_type_accepts_zero(scale_type: Any) -> bool:
@@ -618,47 +634,60 @@ class SpecBuildMixin:
                 resolved_transforms.append(t)
         return resolved_transforms
 
-    def _resolve_pending_bins(self, effective_transforms: list) -> list:
-        """Resolve ``_PendingBin`` sentinels to concrete unnamed ``Bin`` objects.
+    def _resolve_pending_bins(self, effective_transforms: list, enc: dict) -> _ResolvedBins:
+        """Resolve ``_PendingBin`` sentinels and re-point the encoding at the Bin.
 
         Used by the single-chart path (``to_spec``).  Named transforms (used
         by the layered path via ``_resolve_layer_bins``) are NOT produced here;
         the single-chart path keeps the Bin unnamed so it chains through the
-        pipeline as before — byte-stable with pre-FA4 behavior.
+        pipeline as before.
+
+        The encoding rewrite is the shared :func:`~ferrum._layer_transforms.
+        _lower_bin_encoding` the layered path uses (spec §6.6): a ``Bin``
+        replaces its input batch's schema with its own columns, so the binned
+        channel, its span channel and any opposing ``aggregate=`` channel must
+        all be re-pointed at those columns — and an aggregate of a real column
+        folds INTO the Bin rather than becoming a second transform reading a
+        schema that no longer holds its source. Leaving the encoding untouched
+        here is what made every standalone ``bin=True`` idiom fail (F-L01-01).
 
         Parameters
         ----------
         effective_transforms :
             The current list of transforms, which may contain ``_PendingBin``
-            sentinels.
+            and ``_PendingAggregate`` sentinels.
+        enc :
+            The chart's encoding dict, after alias and polar remapping.  Never
+            mutated; the rewritten copy comes back on the result.
 
         Returns
         -------
-        list
-            A new list with all ``_PendingBin`` sentinels replaced by concrete
-            unnamed ``Bin`` instances.  If no sentinels are present, the input
-            list is returned unchanged.
+        _ResolvedBins
+            The transform list with every ``_PendingBin`` replaced by a concrete
+            unnamed ``Bin`` and every absorbed ``_PendingAggregate`` dropped,
+            plus the rewritten encoding.  Both come back unchanged when the
+            chart declares no bin.
         """
-        if not any(isinstance(t, _PendingBin) for t in effective_transforms):
-            return effective_transforms
+        pending_bins = [t for t in effective_transforms if isinstance(t, _PendingBin)]
+        if not pending_bins:
+            return _ResolvedBins(effective_transforms, enc)
 
-        from ferrum import Bin
+        lowering = _lower_bin_encoding(
+            enc,
+            pending_bins,
+            [t for t in effective_transforms if isinstance(t, _PendingAggregate)],
+        )
+        absorbed_ids = {id(pa) for pa in lowering.absorbed}
 
         resolved_transforms: list = []
         for t in effective_transforms:
             if isinstance(t, _PendingBin):
-                if t.bin_obj is not None:
-                    # Pre-built Bin instance — use it directly (single-chart
-                    # path always produces unnamed transforms).  The instance
-                    # already bakes in the correct field, bin_count, etc.
-                    resolved_transforms.append(t.bin_obj)
-                else:
-                    bin_kwargs = dict(t.bin_kwargs)
-                    bin_kwargs.pop("name", None)  # single-chart bins are always unnamed
-                    resolved_transforms.append(Bin(t.field, **bin_kwargs))
-            else:
+                # name=None: single-chart bins are always unnamed, so the Bin
+                # advances the pipeline's chain instead of fanning out.
+                resolved_transforms.append(_build_bin_transform(t, lowering.agg_kwargs))
+            elif id(t) not in absorbed_ids:
                 resolved_transforms.append(t)
-        return resolved_transforms
+        return _ResolvedBins(resolved_transforms, lowering.encoding)
 
     @staticmethod
     def _collect_params(resolved, enc: dict) -> list:

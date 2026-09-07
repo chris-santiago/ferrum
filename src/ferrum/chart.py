@@ -2478,20 +2478,35 @@ class Chart(
         mk = dict(resolved._mark_kwargs) if resolved._mark_kwargs else {}
         enc, mk = _apply_channel_aliases(enc, mk, resolved._mark)
 
+        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
+        enc = self._resolve_polar_remapping(resolved, enc)
+
+        # --- Resolve _PendingBin sentinels to concrete unnamed Bin objects (single-chart) ---
+        # Runs BEFORE the encoding specs are built and before the aggregate
+        # resolution: a Bin replaces the batch schema with its own columns, so
+        # the binned channel, its span channel and any opposing aggregate= must
+        # be re-pointed at those columns first — and an opposing aggregate of a
+        # real column is FOLDED INTO the Bin (spec §6.6), which means it must be
+        # taken off the transform list before _resolve_pending_aggregates would
+        # turn it into a second, unsatisfiable Aggregate.
+        # For layered charts the bin sentinels are resolved per-layer below, so
+        # this call is a no-op on that path (sentinels already stripped from
+        # top-level transforms by _expand_layers).
+        effective_transforms = list(resolved._transforms) if resolved._transforms else []
+        effective_transforms, enc = self._resolve_pending_bins(effective_transforms, enc)
+
         # --- Aggregate field remap: map original field → output_col for encoding ---
         # _PendingAggregate sentinels carry the original field name but Aggregate
         # transforms emit the output under a new column name (e.g. "mean_val").
         # Build a remap dict now so the EncodingSpec loop below uses the correct
         # post-aggregation field name. Key: original_field, Value: output_col.
+        # Read off the post-bin-lowering list so an aggregate the Bin absorbed
+        # does not also remap its channel to a column nothing emits.
         agg_field_remap: dict[str, str] = {}
-        if resolved._transforms:
-            for _t in resolved._transforms:
-                # Use "is not None" so count() (field="") is included.
-                if isinstance(_t, _PendingAggregate) and _t.field is not None:
-                    agg_field_remap[_t.field] = _t.output_col
-
-        # --- CoordPolar: remap theta/radius → x/y so Rust sees Cartesian channels ---
-        enc = self._resolve_polar_remapping(resolved, enc)
+        for _t in effective_transforms:
+            # Use "is not None" so count() (field="") is included.
+            if isinstance(_t, _PendingAggregate) and _t.field is not None:
+                agg_field_remap[_t.field] = _t.output_col
 
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
@@ -2499,14 +2514,7 @@ class Chart(
         kw.update(self._build_encoding_specs(resolved, enc, agg_field_remap, _override_encoding))
 
         # --- Resolve _PendingAggregate sentinels to concrete Aggregate objects ---
-        effective_transforms = list(resolved._transforms) if resolved._transforms else []
         effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
-
-        # --- Resolve _PendingBin sentinels to concrete unnamed Bin objects (single-chart) ---
-        # For layered charts the bin sentinels are resolved per-layer below, so
-        # this call is a no-op on that path (sentinels already stripped from
-        # top-level transforms by _expand_layers).
-        effective_transforms = self._resolve_pending_bins(effective_transforms)
 
         # --- Resolve per-layer encoding aggregates (layered charts) ---
         # Each aggregating layer becomes a NAMED chart-level Aggregate transform
