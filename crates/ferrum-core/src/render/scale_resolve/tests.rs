@@ -6522,3 +6522,54 @@ fn non_linear_opacity_scale_warns_and_falls_back_to_linear_default() {
         "must resolve via the linear default-extent path, not the log domain; got {at_min}"
     );
 }
+
+// ── to_pixel_f64_extrapolated (batch-E T13, mark_function(clip=False)) ──────
+
+/// RED-proven: an out-of-domain input must map PAST the pixel range, not
+/// drop to `None`. Domain [0,10] -> range [0,100]; x=15 is 50% past the
+/// domain's upper edge, so the extrapolated pixel must be 150 (bit-exact —
+/// this is a plain affine extension of the same formula `to_pixel_f64` uses
+/// for in-domain values).
+#[test]
+fn to_pixel_f64_extrapolated_continues_past_domain_linear() {
+    let scale = ScaleKind::Linear(LinearScale::new_internal(
+        vec![0.0, 10.0], vec![0.0, 100.0], false, false,
+    ));
+    assert_eq!(scale.to_pixel_f64(15.0), None, "the NaN-dropping sibling must still drop this");
+    let extrapolated = scale.to_pixel_f64_extrapolated(15.0)
+        .expect("extrapolated mapping must not drop an out-of-domain point");
+    assert!((extrapolated - 150.0).abs() < 1e-9, "expected 150.0, got {extrapolated}");
+
+    // Below the domain, too.
+    let below = scale.to_pixel_f64_extrapolated(-5.0)
+        .expect("extrapolated mapping must not drop a below-domain point either");
+    assert!((below - (-50.0)).abs() < 1e-9, "expected -50.0, got {below}");
+}
+
+/// In-domain inputs are byte-identical between the two methods — extrapolation
+/// only changes behavior for points the domain check would have rejected.
+#[test]
+fn to_pixel_f64_extrapolated_matches_to_pixel_f64_in_domain() {
+    let scale = ScaleKind::Linear(LinearScale::new_internal(
+        vec![0.0, 10.0], vec![0.0, 100.0], false, false,
+    ));
+    for x in [0.0, 2.5, 5.0, 7.5, 10.0] {
+        let plain = scale.to_pixel_f64(x).unwrap();
+        let extrapolated = scale.to_pixel_f64_extrapolated(x).unwrap();
+        assert_eq!(plain.to_bits(), extrapolated.to_bits(), "must be bit-identical in-domain at x={x}");
+    }
+}
+
+/// `Ordinal` has no continuous mapping to extrapolate — both methods return
+/// `None`, matching `to_pixel_f64`'s existing contract.
+#[test]
+fn to_pixel_f64_extrapolated_ordinal_returns_none() {
+    use crate::scale::discrete::DiscreteLayout;
+    use crate::scale::ordinal::OrdinalScale;
+    let scale = ScaleKind::Ordinal(OrdinalScale::new_internal(
+        vec!["a".into(), "b".into()],
+        vec![0.0, 100.0],
+        DiscreteLayout::UNPADDED,
+    ));
+    assert_eq!(scale.to_pixel_f64_extrapolated(1.0), None);
+}

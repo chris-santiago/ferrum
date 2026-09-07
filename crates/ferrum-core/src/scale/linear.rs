@@ -43,6 +43,29 @@ impl LinearScaleData {
         }
     }
 
+    /// The extrapolating twin of [`scale`](Self::scale) (batch-E T13,
+    /// `mark_function(clip=False)`'s draw-time seam): identical affine
+    /// mapping, but the out-of-domain branch that turns `mapped` into `NaN`
+    /// is removed — an out-of-domain `x` still produces the pixel coordinate
+    /// the affine formula computes (outside `range` when `x` is outside
+    /// `domain`), instead of being dropped. `clamp == true` is unaffected:
+    /// a scale's own `clamp` setting is a domain-config decision, orthogonal
+    /// to a mark's `clip` styling, so it keeps clamping here exactly as
+    /// `scale` does.
+    pub(super) fn scale_extrapolated(&self, x: f64) -> f64 {
+        if x.is_nan() { return f64::NAN; }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let t = degenerate_ratio(x - d0, d1 - d0);
+        let mapped = r0 + t * (r1 - r0);
+        if self.clamp {
+            let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
+            mapped.clamp(lo, hi)
+        } else {
+            mapped
+        }
+    }
+
     pub(super) fn invert(&self, y: f64) -> f64 {
         if y.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -147,6 +170,12 @@ impl LinearScale {
     /// Crate-internal scale call (no PyO3 boundary).
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
         self.data.scale(x)
+    }
+
+    /// Crate-internal extrapolating scale call — see
+    /// [`LinearScaleData::scale_extrapolated`].
+    pub(crate) fn scale_internal_extrapolated(&self, x: f64) -> f64 {
+        self.data.scale_extrapolated(x)
     }
 
     /// Crate-internal tick call.
@@ -391,6 +420,36 @@ mod tests {
         let s = d([0.0, 10.0], [0.0, 1.0], false);
         assert!(s.scale(-1.0).is_nan());
         assert!(s.scale(11.0).is_nan());
+    }
+
+    /// The extrapolating twin (batch-E T13, `mark_function(clip=False)`'s
+    /// draw-time seam): the SAME out-of-domain inputs `scale()` drops to
+    /// `NaN` above must instead continue the affine mapping past the domain.
+    #[test]
+    fn linear_scale_extrapolated_continues_past_domain_when_unclamped() {
+        let s = d([0.0, 10.0], [0.0, 1.0], false);
+        assert!((s.scale_extrapolated(11.0) - 1.1).abs() < 1e-12, "got {}", s.scale_extrapolated(11.0));
+        assert!((s.scale_extrapolated(-1.0) - (-0.1)).abs() < 1e-12, "got {}", s.scale_extrapolated(-1.0));
+    }
+
+    /// In-domain, `scale_extrapolated` is bit-identical to `scale` — only the
+    /// out-of-domain branch differs.
+    #[test]
+    fn linear_scale_extrapolated_matches_scale_in_domain() {
+        let s = d([0.0, 10.0], [0.0, 1.0], false);
+        for x in [0.0, 2.5, 5.0, 7.5, 10.0] {
+            assert_eq!(s.scale(x).to_bits(), s.scale_extrapolated(x).to_bits(), "mismatch at x={x}");
+        }
+    }
+
+    /// `clamp == true` is a scale-level decision, orthogonal to extrapolation:
+    /// `scale_extrapolated` must clamp identically to `scale` when the scale
+    /// itself is configured to clamp.
+    #[test]
+    fn linear_scale_extrapolated_still_clamps_when_scale_clamp_is_set() {
+        let s = d([0.0, 10.0], [0.0, 1.0], true);
+        assert_eq!(s.scale_extrapolated(-1.0), 0.0);
+        assert_eq!(s.scale_extrapolated(11.0), 1.0);
     }
 
     #[test]

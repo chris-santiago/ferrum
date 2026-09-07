@@ -814,7 +814,14 @@ class StatisticalMarksMixin:
         inner : {"box", "quartile", "point", "none"}, default "box"
             Inner mark drawn on top of each violin:
             ``"box"`` -- IQR box + median rule,
-            ``"quartile"`` -- three horizontal quartile rules,
+            ``"quartile"`` -- three confined crossbars (q1/median/q3,
+            q1/q3 dashed) sized to the violin's own body width when there
+            is no hue split. With a hue split (``color=`` distinct from the
+            categorical axis), the crossbars are NOT per-hue dodged --
+            nothing under ``inner=`` is -- so they span the shared category
+            band rather than each narrower per-hue violin body (a known
+            gap, tracked as a follow-up; the full-panel-width bug this
+            replaced is fixed in both cases),
             ``"point"`` -- individual data points (strip),
             ``"none"`` -- no inner mark.
         shared_extent : bool, default False
@@ -1207,8 +1214,13 @@ class StatisticalMarksMixin:
         n : int, optional
             Number of evaluation points.  Default is ``200``.
         clip : bool, optional
-            Whether to clip rendered line to the plot viewport.  Default is
-            ``True``.
+            Whether the rendered line is clipped to the panel's plot area.
+            Default is ``True`` (clipped, matching every other mark).
+            ``False`` lets the curve render past the panel bounds wherever
+            its evaluated geometry extends there (e.g. a steep tail near
+            the domain edge) -- ``fn`` is still evaluated over the same
+            resolved x-domain either way; ``clip`` only changes whether the
+            resulting geometry is confined at render time.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -1290,11 +1302,18 @@ class StatisticalMarksMixin:
         transforms = result.transforms
         remap = result.remap
         synthetic = result.data
+        # desugar_function computes the clip escape itself (mark_kwargs is
+        # {"clip": False} when clip=False, else None -- see its docstring);
+        # this mixin just applies whatever the desugar decided, the same way
+        # every other composite mark's style dict is applied to its layers.
+        line_mark_kwargs = result.mark_kwargs
         if self._layers is not None and self._layers:
             # Multi-layer: build a fresh single-chart with the function data and
             # compose via + so it becomes a proper layer alongside existing layers.
             fn_chart = self.__class__(synthetic)
             fn_chart._mark = mark
+            if line_mark_kwargs:
+                fn_chart._mark_kwargs = {**fn_chart._mark_kwargs, **line_mark_kwargs}
             if remap:
                 from ferrum._desugar import _apply_remap
 
@@ -1306,6 +1325,8 @@ class StatisticalMarksMixin:
         new._mark = mark
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
+        if line_mark_kwargs:
+            new._mark_kwargs = {**new._mark_kwargs, **line_mark_kwargs}
         if remap:
             from ferrum._desugar import _apply_remap
 

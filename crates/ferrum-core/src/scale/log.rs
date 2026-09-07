@@ -150,6 +150,34 @@ impl LogScaleData {
         }
     }
 
+    /// The extrapolating twin of [`scale`](Self::scale) (batch-E T13,
+    /// `mark_function(clip=False)`'s draw-time seam). The wrong-sign guard
+    /// stays — it is a mathematical necessity (`ln` of a non-positive value
+    /// under this domain's sign is undefined, not a "this value is merely
+    /// out of range" refusal that extrapolation could ever override) — but
+    /// the final magnitude-range branch that turns `mapped` into `NaN` is
+    /// removed, matching `LinearScaleData::scale_extrapolated`'s contract.
+    fn scale_extrapolated(&self, x: f64) -> f64 {
+        if x.is_nan() { return f64::NAN; }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let neg = d0 < 0.0;
+        let sign = if neg { -1.0 } else { 1.0 };
+        if (x * sign) <= 0.0 && !self.clamp { return f64::NAN; }
+        let log_base = self.base.ln();
+        let lx = (x * sign).max(f64::MIN_POSITIVE).ln() / log_base;
+        let ld0 = (d0 * sign).ln() / log_base;
+        let ld1 = (d1 * sign).ln() / log_base;
+        let t = degenerate_ratio(lx - ld0, ld1 - ld0);
+        let mapped = r0 + t * (r1 - r0);
+        if self.clamp {
+            let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
+            mapped.clamp(lo, hi)
+        } else {
+            mapped
+        }
+    }
+
     fn invert(&self, y: f64) -> f64 {
         if y.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -295,6 +323,10 @@ impl LogScale {
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
+
+    /// Crate-internal extrapolating scale call — see
+    /// [`LogScaleData::scale_extrapolated`].
+    pub(crate) fn scale_internal_extrapolated(&self, x: f64) -> f64 { self.data.scale_extrapolated(x) }
 
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.data.ticks(count) }
 
@@ -527,6 +559,30 @@ mod tests {
         assert!((s.scale(1.0) - 0.0).abs() < 1e-12);
         assert!((s.scale(10.0) - 1.0).abs() < 1e-12);
         assert!((s.scale(1000.0) - 3.0).abs() < 1e-12);
+    }
+
+    /// The extrapolating twin (batch-E T13, `mark_function(clip=False)`'s
+    /// draw-time seam): an out-of-magnitude-range input continues the
+    /// log-space affine mapping past the domain instead of dropping to `NaN`.
+    /// Domain [1,1000] maps decade-for-decade onto [0,3]; x=10000 is one more
+    /// decade past 1000, so the extrapolated value must be 4.0.
+    #[test]
+    fn log_scale_extrapolated_continues_past_domain() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert!(s.scale(10000.0).is_nan(), "the NaN-dropping sibling must still drop this");
+        let extrapolated = s.scale_extrapolated(10000.0);
+        assert!((extrapolated - 4.0).abs() < 1e-9, "expected 4.0, got {extrapolated}");
+    }
+
+    /// The wrong-sign guard is a mathematical necessity, not a "value is out
+    /// of range" refusal extrapolation could override: a positive-domain log
+    /// scale queried at a non-positive `x` must still return `NaN` under
+    /// `scale_extrapolated`, exactly as `scale` does.
+    #[test]
+    fn log_scale_extrapolated_still_refuses_wrong_sign() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        assert!(s.scale_extrapolated(0.0).is_nan());
+        assert!(s.scale_extrapolated(-5.0).is_nan());
     }
 
     #[test]

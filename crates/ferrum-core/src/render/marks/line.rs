@@ -1,7 +1,10 @@
 //! mark_line: render rows as a polyline.
 //!
 //! Two axis modes:
-//! - Quantitative x: read `x` as `f64`, project via `scales.x.to_pixel_f64`.
+//! - Quantitative x: read `x` as `f64`, project via `scales.x.to_pixel_f64`
+//!   (or its extrapolating twin `to_pixel_f64_extrapolated` when the resolved
+//!   mark style's `clip == Some(false)` — see the `build` function body;
+//!   `mark_function(clip=False)` is the one producer of that style today).
 //! - Ordinal x: read `x` as `str`, project via `scales.x.to_pixel_str`. Used
 //!   by parallel coordinates where the x axis is a sequence of feature
 //!   names. Ordinal y is symmetric (read as `str` via `to_pixel_str`).
@@ -42,6 +45,21 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         _ => return empty(),
     };
 
+    // Batch-E T13 (mark_function completeness): `clip == Some(false)` (the
+    // `mark_function(clip=False)` escape T9 added at the SVG-group level) must
+    // also stop this positional read from dropping an out-of-domain vertex —
+    // otherwise the point never reaches the node list for T9's clip escape to
+    // apply to. `to_pixel_f64_extrapolated` is the twin of `to_pixel_f64` that
+    // keeps the point (at the pixel coordinate its scale's own formula
+    // computes, however far outside `range` that lands) instead of dropping
+    // it to `None`. The default (`clip` unset or `Some(true)`) keeps calling
+    // `to_pixel_f64`, so every line's rendered output is byte-identical to
+    // before this field existed.
+    let extrapolate = ctx.mark_style.misc.clip == Some(false);
+    let project_f64 = |scale: &ScaleKind, v: f64| {
+        if extrapolate { scale.to_pixel_f64_extrapolated(v) } else { scale.to_pixel_f64(v) }
+    };
+
     let n_rows = ctx.batch.num_rows();
     let xs_pix: Vec<Option<f64>> = match &ctx.scales.x {
         ScaleKind::Ordinal(_) => {
@@ -55,7 +73,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             xs.iter()
                 .map(|opt| opt
                     .filter(|v| v.is_finite())
-                    .and_then(|v| ctx.scales.x.to_pixel_f64(v)))
+                    .and_then(|v| project_f64(&ctx.scales.x, v)))
                 .collect()
         }
     };
@@ -71,7 +89,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ys.iter()
                 .map(|opt| opt
                     .filter(|v| v.is_finite())
-                    .and_then(|v| ctx.scales.y.to_pixel_f64(v)))
+                    .and_then(|v| project_f64(&ctx.scales.y, v)))
                 .collect()
         }
     };
@@ -1124,5 +1142,134 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("monotone") && message.contains("cardinal"),
             "the refusal must name the accepted set; got {message}");
+    }
+
+    // ── clip=False extrapolation (batch-E T13, mark_function completeness) ──
+    //
+    // `mark_function` desugars to `mark_line`; `clip=False` on the resulting
+    // layer sets `mark_style.misc.clip = Some(false)`. Before this fix, an
+    // out-of-domain y (or x) vertex became `None` at the scale-mapping seam
+    // regardless of `clip`, so it never reached `points` and T9's SVG-group
+    // clip escape had nothing outside the panel to reveal. These tests build
+    // `ResolvedScales` by hand (not `resolve_scales`, which infers the domain
+    // FROM the data and would make "out of domain" unreachable) so the y
+    // scale's domain [0,10] is narrower than the batch's real y range.
+
+    fn narrow_domain_scales() -> crate::render::scale_resolve::ResolvedScales {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 100.0], false, false)),
+            color: None,
+            size: None,
+            shape: None,
+            opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
+            x2: None,
+            y2: None,
+            y_slots: Default::default(),
+        }
+    }
+
+    /// RED-proven: with the panel's y domain [0,10] (range [0,100]) and a
+    /// batch whose third row's y=20 is out of domain, `clip=Some(false)`
+    /// must keep all 3 points, with the third landing OUTSIDE the panel's
+    /// pixel range (y=200, past the [0,100] range) instead of being dropped.
+    #[test]
+    fn line_clip_false_keeps_out_of_domain_vertex_outside_panel() {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0, 5.0, 20.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = narrow_domain_scales();
+        let overrides = MarkKwargsSpec { clip: Some(false), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let polyline_ys: Vec<f64> = result.nodes.iter().find_map(|n| {
+            if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
+        }).expect("expected a Polyline node");
+        assert_eq!(polyline_ys.len(), 3, "clip=False must keep all 3 vertices, including the out-of-domain one");
+        let max_y = polyline_ys.iter().cloned().fold(f64::MIN, f64::max);
+        assert!((max_y - 200.0).abs() < 1e-9,
+            "the out-of-domain vertex must extrapolate to y=200 (outside the [0,100] panel range), got {max_y}");
+        assert!(max_y > panel.plot_area.h,
+            "clip=False must render a vertex OUTSIDE the panel rect (max_y={max_y} > panel height={})",
+            panel.plot_area.h);
+    }
+
+    /// Byte-identity guard: the default (`clip` unset) drops the same
+    /// out-of-domain vertex exactly as before this fix — 2 surviving points,
+    /// neither exceeding the panel's pixel range.
+    #[test]
+    fn line_clip_unset_drops_out_of_domain_vertex_byte_identical() {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0, 5.0, 20.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = narrow_domain_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let polyline_ys: Vec<f64> = result.nodes.iter().find_map(|n| {
+            if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
+        }).expect("expected a Polyline node");
+        assert_eq!(polyline_ys.len(), 2, "default (unset clip) must drop the out-of-domain vertex, keeping 2 points");
+        let max_y = polyline_ys.iter().cloned().fold(f64::MIN, f64::max);
+        assert!(max_y <= panel.plot_area.h,
+            "default clip must never exceed the panel's pixel range; got max_y={max_y}");
+    }
+
+    /// `clip=Some(true)` (the explicit spelling of the default) must be
+    /// bit-identical to leaving `clip` unset — extrapolation is gated
+    /// strictly on `Some(false)`, never on "clip is not false".
+    #[test]
+    fn line_clip_true_is_byte_identical_to_unset() {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0, 5.0, 20.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let scales = narrow_domain_scales();
+
+        let unset_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let overrides = MarkKwargsSpec { clip: Some(true), ..Default::default() };
+        let true_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+
+        let ctx_unset = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &unset_style };
+        let ctx_true = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &true_style };
+
+        let ys_unset: Vec<f64> = super::build(&ctx_unset).nodes.iter().find_map(|n| {
+            if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
+        }).unwrap();
+        let ys_true: Vec<f64> = super::build(&ctx_true).nodes.iter().find_map(|n| {
+            if let SceneNode::Polyline { points, .. } = n { Some(points.iter().map(|p| p.1).collect()) } else { None }
+        }).unwrap();
+        assert_eq!(ys_unset, ys_true, "clip=Some(true) must be byte-identical to clip unset");
     }
 }

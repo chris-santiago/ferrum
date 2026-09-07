@@ -5,11 +5,82 @@
 //!   ordinal y + quantitative x → vertical tick at data x position (strip plot);
 //!   ordinal y only → horizontal crossbars centered on each category band;
 //!   ordinal x only → vertical crossbars centered on each category band.
+//!
+//! # Per-row stroke property enumeration vs. `rule.rs` (batch-E T13 cycle 3)
+//!
+//! `rule.rs`'s `rule_stroke_style` is the fullest per-row stroke resolution
+//! in the crate; the spec reviewer flagged that `tick.rs` had been closing
+//! rule's per-row properties one at a time across prior cycles rather than
+//! auditing the whole set at once. This is that audit, enumerated against
+//! `rule.rs`'s actual resolution set (not the mark's own prior doc claims,
+//! which had drifted — see the `stroke_opacity` row below):
+//!
+//! | Property | rule.rs | tick.rs (this cycle) |
+//! |---|---|---|
+//! | `opacity` (encoded) | `OpacityResolver`, direct `to_scene_stroke` param | same — unchanged |
+//! | `stroke_width` (encoded) | per-row column, fallback to mark-style | same — unchanged (closed pre-cycle-3) |
+//! | `stroke_dash` (mark-style literal) | mark-style fallback | same — unchanged (closed cycle 1) |
+//! | `stroke_dash` (PER-ROW ENCODED column) | `DashColumns`/`resolve_row_stroke_dash`, categorical + numeric | **NOT carried over — see adjudication below** |
+//! | `color` (encoded, via `row_colors_from_scale`) | per-row `Color` → `resolve_stroke_color` | **CLOSED this cycle** — see `row_stroke` below |
+//! | `stroke_opacity` (encoded, distinct from `opacity`) | separate `OpacityResolver` slot, applied to `StrokeStyle.stroke_opacity` | **CLOSED this cycle** — see `row_stroke` below |
+//! | `fill_opacity` (encoded) | unused — rule has no fill | **N/A, unchanged** — tick emits only `SceneNode::Line`, which has no fill component `to_scene_stroke` could ever consume |
+//! | `stroke_cap` / `stroke_join` | mark-style only, applied at `MarkBatch` construction | **N/A to per-row resolution** — resolved once per BATCH in `scene_build.rs` (`mark_style.line.stroke_cap`/`stroke_join`), identically for every mark including rule and tick; neither builder does anything with these per row |
+//!
+//! **Adjudication: per-row encoded `stroke_dash` does NOT carry over in this
+//! cycle.** `rule.rs` (and `line.rs`/`ribbon.rs`) subdivide by a categorical
+//! `stroke_dash` field via the shared `DashColumns`/`resolve_row_stroke_dash`
+//! machinery in `channels.rs`. Cycle 1 of this batch closed tick's
+//! `stroke_dash` gap as a MARK-STYLE-LITERAL-only fix (mirroring
+//! `segment.rs`'s simpler treatment, explicitly reasoned there because tick
+//! had "no encoded `stroke_dash` channel" at the time) and that closure was
+//! accepted as complete by the dispatching review. Verifying the full
+//! enumeration against `rule.rs` here surfaces that a per-row ENCODED
+//! `stroke_dash` column would still silently have no effect on a tick chart
+//! today (the channel is generic/`RENDERER_HONORED` — see
+//! `ferrum.encoding._channel_policy`, usable on any mark). This is a real,
+//! distinct gap from the one cycle 1 closed, left OPEN and explicitly
+//! flagged here (not silently reopened, not silently left undocumented) as
+//! a follow-up outside this cycle's scope, which the dispatch scoped to
+//! color (`stroke_opacity` was found and closed alongside it as the same
+//! kind of drop).
+//!
+//! **Adjudication: `stroke_opacity` was found to be a genuine drop, closed
+//! here.** Tick's own prior doc comment (removed by this cycle) claimed
+//! "no ... stroke_opacity columns" — copied from `segment.rs`'s identical
+//! claim — but `stroke_opacity` is a generic, mark-agnostic
+//! `RENDERER_HONORED` encoding channel (`ferrum.encoding._channel_policy`)
+//! that already resolves its own `OpacityScale`
+//! (`ResolvedScales::stroke_opacity`) regardless of mark; only tick's own
+//! `OpacityResolver::at_row` consumption was discarding the third tuple
+//! element. `rule_stroke_style`'s doc says "Rule is a stroke-only mark, so
+//! the resolver's `fill_opacity` slot is unused" — i.e. `stroke_opacity` IS
+//! read there — which is the correct treatment for any stroke-only Line
+//! mark (tick and segment both draw *only* `SceneNode::Line`, no fill).
+//! `row_stroke` below fixes this by multiplying the resolved `stroke_opacity`
+//! value into `StrokeStyle.stroke_opacity` AFTER `to_scene_stroke` builds it
+//! from the (unchanged) `opacity` param — a deliberately different
+//! MECHANISM than `rule_stroke_style`'s (which bakes `opacity` into the
+//! color's alpha channel via `with_opacity` and then overwrites
+//! `.stroke_opacity` outright with the resolved value) chosen specifically
+//! so the pre-existing `opacity` channel's SVG bytes are untouched: when no
+//! `stroke_opacity` column is bound, `OpacityResolver` defaults that slot to
+//! `1.0`, and multiplying by `1.0` is an exact, bit-identical no-op — so
+//! every tick this crate already renders (with or without an `opacity`
+//! mark-style override) is byte-identical, and only a chart that newly binds
+//! a DISTINCT `stroke_opacity=` encoding observes any change. `segment.rs`
+//! carries the identical pre-existing gap (same doc claim, same discarded
+//! tuple slot) — out of THIS task's scope (tick.rs only), flagged as a
+//! follow-up, not silently left unmentioned.
 
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, x_field, y_field, DrawCtx};
+use crate::render::color::Color;
+use crate::render::draw::{
+    col_as_f64, col_as_positional_category_str, resolve_stroke_color, x_field, y_field, DrawCtx,
+};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::row_colors_from_scale;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
+use crate::render::RenderError;
 
 /// Rug tick length policy (spec §6 item 8): `band_size` set ⇒ scale by the
 /// caller-supplied cross-axis extent (panel width for a y-rug, panel height
@@ -25,7 +96,29 @@ fn rug_tick_len(ctx: &DrawCtx, cross_extent: f64) -> f64 {
     }
 }
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+/// Public entry point. Fallible for exactly one reason (batch-E T13 cycle 3):
+/// the per-row stroke-color read (`row_colors_from_scale`) propagates its
+/// typed `RenderError` instead of discarding it, mirroring `rule.rs`/
+/// `segment.rs` (NF-A3, spec §4.4) — this module's doc comment above has the
+/// full per-row property enumeration this cycle audited. Every other refusal
+/// in this builder is a presence/dtype guard that predates this fix and
+/// stays an infallible `empty()`, unchanged — see `build_geometry`'s body.
+/// Widening this signature needed exactly one downstream change:
+/// `dispatch_mark_build`'s `Mark::Tick` arm (`draw.rs`) drops its `Ok(...)`
+/// wrap, matching `Mark::Segment`/`Mark::Rule`.
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
+    let color_vals = row_colors_from_scale(ctx)?;
+    Ok(build_geometry(ctx, &color_vals))
+}
+
+/// The six-mode geometry dispatch, unchanged in shape from before cycle 3 —
+/// split out of `build` purely so the one fallible operation (the per-row
+/// color read) resolves once, up front, without threading a `Result` through
+/// every one of this function's ~10 early-return sites.
+fn build_geometry(
+    ctx: &DrawCtx,
+    color_vals: &Option<Vec<Option<Color>>>,
+) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{MarkBuildResult, to_scene_stroke, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
@@ -41,24 +134,55 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // whisker caps) must shrink to their sub-band so adjacent dodge groups don't
     // overlap. No Dodge → n_groups == 1 → byte-identical to the non-dodged tick.
     let n_groups = pos_meta.dodge_n_groups() as f64;
-    let stroke_color = ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill);
     let default_stroke_width = ctx.mark_style.paint.stroke_width.max(1.0);
 
-    // Per-row opacity via the shared OpacityResolver (C7); stroke_width stays
-    // local. Tick is a stroke-only mark (no fill / stroke_opacity columns), so
-    // only the resolver's `opacity` slot is read.
+    // Per-row opacity AND stroke_opacity via the shared OpacityResolver (C7);
+    // stroke_width stays local. `fill_opacity` is the one slot genuinely
+    // unused — tick emits only `SceneNode::Line`, which has no fill
+    // component at all (see this module's doc comment's enumeration table).
     let opacity_res =
         OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
+    // Per-row stroke color (batch-E T13 cycle 3): `color_vals` is the shared
+    // NF-A3 reader's output (`row_colors_from_scale`, resolved once in
+    // `build`); `resolve_stroke_color` applies the crate-standard precedence
+    // (explicit constant `stroke=` > per-row color encoding > theme stroke >
+    // fill), identically to `rule.rs`/`segment.rs`. With no color scale
+    // bound, `row_color` is `None` at every row and `resolve_stroke_color`
+    // reduces to exactly `stroke.unwrap_or(fill)` — the same expression this
+    // function used to compute once, outside the loop — so every unencoded
+    // tick (the overwhelming default) is byte-identical to before this fix.
+    //
+    // `stroke_dash` (batch-E T11 support, cycle 1) is the mark-style literal
+    // only — tick has no PER-ROW ENCODED `stroke_dash` channel (unlike
+    // rule/line/ribbon, which subdivide via `DashColumns`); see this module's
+    // doc comment for the explicit adjudication of that gap. Applied
+    // uniformly here because every one of tick's six dispatch modes builds
+    // its `SceneNode::Line` through this one shared closure, so
+    // `mark_tick(stroke_dash=...)` (e.g. the spec §6.11 violin quartile
+    // ticks) works in all six modes, not just one.
     let row_stroke = |i: usize| -> ferrum_scene::StrokeStyle {
-        let (opacity, _, _) = opacity_res.at_row(i);
+        let (opacity, _, stroke_opacity) = opacity_res.at_row(i);
         let width = stroke_width_values.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(default_stroke_width);
-        to_scene_stroke(stroke_color, width, opacity, None, None, None)
+        let row_color = color_vals.as_ref().and_then(|v| v.get(i).copied().flatten());
+        let color = resolve_stroke_color(ctx.mark_style, row_color);
+        let mut style = to_scene_stroke(
+            color, width, opacity, ctx.mark_style.paint.stroke_dash.as_deref(), None, None,
+        );
+        // Multiplied in (not overwritten) so a chart with no `stroke_opacity`
+        // encoding — where `OpacityResolver` defaults this slot to `1.0` —
+        // is an exact, bit-identical no-op: `x * 1.0 == x` for every finite
+        // `x`. This is the deliberate mechanism difference from
+        // `rule_stroke_style`'s (which bakes `opacity` into the color's
+        // alpha and overwrites `.stroke_opacity` outright) — see this
+        // module's doc comment for why.
+        style.stroke_opacity *= stroke_opacity;
+        style
     };
 
     let meta = MetadataColumns::from_ctx(ctx);
@@ -462,7 +586,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         // 3 horizontal ticks — one per (cat, median) row.
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 3, "expected 3 horizontal tick lines");
         // Lines are horizontal: x1 != x2 for at least one line.
@@ -505,7 +629,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 3);
     }
 
@@ -549,7 +673,7 @@ mod tests {
         // Confirm fill is NOT #aabbcc (it's still mark_color blue)
         assert_ne!(mark_style.paint.fill.red, 0xAA, "fill should not be the stroke color");
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let line = result.nodes.iter().find_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.clone()) } else { None }
         }).expect("expected at least one Line node");
@@ -596,7 +720,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let line_count = result.nodes.iter()
             .filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. }))
@@ -661,7 +785,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let line_count = result.nodes.iter()
             .filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. }))
@@ -745,7 +869,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2,
             "expected 2 tick nodes after NaN-x skip; got {}", result.nodes.len());
@@ -800,7 +924,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2,
             "expected 2 tick nodes after null-y skip; got {}", result.nodes.len());
@@ -846,7 +970,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 3, "all 3 rows must produce tick nodes");
         let tooltips = result.tooltips.expect("tooltips must be Some");
@@ -889,7 +1013,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
@@ -935,7 +1059,7 @@ mod tests {
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let default_opacity = mark_style.paint.opacity;
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
@@ -1001,7 +1125,7 @@ mod tests {
         let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1.min(*x2), x1.max(*x2))) } else { None }
         }).collect()
@@ -1115,7 +1239,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let widths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
@@ -1177,7 +1301,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
@@ -1314,7 +1438,7 @@ mod tests {
         let overrides = MarkKwargsSpec { band_size: Some(0.5), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
@@ -1340,7 +1464,7 @@ mod tests {
         let overrides = MarkKwargsSpec { band_size: Some(0.4), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
@@ -1364,7 +1488,7 @@ mod tests {
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let expected = theme.sizes.tick_size * 2.0;
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
@@ -1387,7 +1511,7 @@ mod tests {
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
         let expected = theme.sizes.tick_size * 2.0;
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
@@ -1464,7 +1588,7 @@ mod tests {
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
         let expected = theme.sizes.tick_size * 2.0;
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let lengths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
@@ -1476,5 +1600,348 @@ mod tests {
                  fixed tick_size*2.0 length bit-for-bit — this is the boxplot/errorbar \
                  numeric-category-x shape both reviewers measured jumping from 8px to 243px");
         }
+    }
+
+    // ── stroke_dash (batch-E T11 support) ───────────────────────────────────
+    //
+    // spec §6.11 requires violin quartile ticks to keep their
+    // `stroke_dash=[2,2]` styling. Before this fix, tick.rs's `row_stroke`
+    // closure hard-coded `None` for the `to_scene_stroke` dash argument, so
+    // `ctx.mark_style.paint.stroke_dash` rode the wire into `resolve_mark_style`
+    // and was silently dropped at the one call site every tick mode shares.
+
+    /// RED-proven: `mark_tick(stroke_dash=[2,2])` must produce a `Line` node
+    /// whose `StrokeStyle.dash` carries the resolved pattern. Fails on
+    /// pre-fix code (dash hard-coded to `None`).
+    #[test]
+    fn tick_stroke_dash_mark_style_applies_to_line() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { stroke_dash: Some(vec![2.0, 2.0]), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        assert_eq!(result.nodes.len(), 2, "expected 2 tick nodes (one per row)");
+        let dash = result.nodes.iter().find_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.dash.clone()) } else { None }
+        }).expect("expected at least one Line node");
+        assert_eq!(dash, Some(vec![2.0, 2.0]),
+            "tick stroke must carry the mark-style stroke_dash pattern, not silently drop it");
+    }
+
+    /// No-dash byte-identity guard: a tick with no `stroke_dash` override
+    /// must still emit `dash: None` — this fix must not introduce a dash on
+    /// ticks that never asked for one.
+    #[test]
+    fn tick_no_stroke_dash_is_byte_identical() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        assert_eq!(result.nodes.len(), 2, "expected 2 tick nodes (one per row)");
+        let dash = result.nodes.iter().find_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.dash.clone()) } else { None }
+        }).expect("expected at least one Line node");
+        assert_eq!(dash, None, "a tick with no stroke_dash override must render solid (dash: None)");
+    }
+
+    // ── Per-row color + stroke_opacity (batch-E T13 cycle 3) ────────────────
+    //
+    // The spec reviewer flagged that a hue-encoded violin's quartile ticks
+    // rendered all-theme-blue while the legend showed the real hues, because
+    // tick's stroke color was a flat `paint.stroke.unwrap_or(paint.fill)`
+    // computed once, with no per-row color-scale lookup at all — unlike
+    // rule.rs, which resolves per-row color via `row_colors_from_scale` +
+    // `resolve_stroke_color`. These tests mirror `segment.rs`'s
+    // `segment_resolves_per_row_color_encoding` / `segment_uses_explicit_
+    // stroke_color` pattern (tick's closest structural sibling: also a
+    // stroke-only, non-shape-dispatching Line mark).
+
+    /// RED-proven: a color-encoded tick chart (mirroring a hue-encoded
+    /// violin's quartile ticks) must render one distinct stroke color per
+    /// category, not the theme default for every row. Fails today (all rows
+    /// theme-blue) because `stroke_color` was computed once, outside any
+    /// per-row lookup.
+    #[test]
+    fn tick_resolves_per_row_color_encoding() {
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "hue".into(), type_: Some(crate::spec::encoding::DataType::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("hue", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0])),
+            Arc::new(StringArray::from(vec!["setosa", "versicolor"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        // Auto-resolves a Categorical color scale from the Utf8 "hue" column
+        // (nominal type), exactly as `segment_resolves_per_row_color_encoding`
+        // relies on — no manual `ColorScale` construction needed.
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            _ => None,
+        }).collect();
+        assert_eq!(colors.len(), 2, "expected 2 tick nodes, one per hue category");
+        assert_ne!(
+            (colors[0].r, colors[0].g, colors[0].b),
+            (colors[1].r, colors[1].g, colors[1].b),
+            "a color-encoded tick must render distinct per-row stroke colors, matching \
+             the legend — not the theme default for every row (the reported violin bug)"
+        );
+    }
+
+    /// An explicit constant `stroke=` mark-kwarg must still win over a color
+    /// encoding (the `stroke_is_user_set` precedence `resolve_stroke_color`
+    /// implements crate-wide) — mirrors `segment_uses_explicit_stroke_color`
+    /// combined with a color encoding present. This is the same precedence
+    /// boxplot/errorbar composite tick layers rely on to keep their neutral
+    /// gray even when the chart encodes `hue` for the point layer.
+    #[test]
+    fn tick_explicit_stroke_wins_over_color_encoding() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "hue".into(), type_: Some(crate::spec::encoding::DataType::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("hue", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0])),
+            Arc::new(StringArray::from(vec!["setosa", "versicolor"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { stroke: Some("#e4572e".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            _ => None,
+        }).collect();
+        assert_eq!(colors.len(), 2);
+        for c in &colors {
+            assert_eq!((c.r, c.g, c.b), (0xe4, 0x57, 0x2e),
+                "an explicit constant stroke= must win over a color encoding on every row");
+        }
+    }
+
+    /// Byte-identity guard: a tick with no color encoding at all must keep
+    /// resolving `paint.stroke.unwrap_or(paint.fill)` exactly as before —
+    /// `resolve_stroke_color` with `row_color: None` reduces to that same
+    /// expression, so this must hold bit-for-bit.
+    #[test]
+    fn tick_no_color_encoding_stroke_is_byte_identical() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        // theme:label-style stroke override, as composite structural ticks pass.
+        let overrides = MarkKwargsSpec { stroke: Some("#aabbcc".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Tick).unwrap();
+        let expected = mark_style.paint.stroke.unwrap_or(mark_style.paint.fill);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        for n in &result.nodes {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n {
+                assert_eq!((style.color.r, style.color.g, style.color.b),
+                    (expected.red, expected.green, expected.blue),
+                    "no color encoding must keep resolving stroke.unwrap_or(fill) unchanged");
+            }
+        }
+    }
+
+    /// RED-proven: a `stroke_opacity`-encoded tick must render a distinct
+    /// `StrokeStyle.stroke_opacity` per row. Fails today because tick's
+    /// `OpacityResolver::at_row` discarded the third (`stroke_opacity`) tuple
+    /// element entirely (`let (opacity, _, _) = ...`) — the same drop
+    /// `segment.rs` carries, but `stroke_opacity` is a generic
+    /// `RENDERER_HONORED` encoding channel usable on any mark
+    /// (`ferrum.encoding._channel_policy`), so a bound `stroke_opacity=`
+    /// column silently had no effect on a tick chart.
+    #[test]
+    fn tick_stroke_opacity_encoding_is_applied_per_row() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                stroke_opacity: Some(EncodingSpec { field: "so".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("so", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![0.2_f64, 0.5, 0.9])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        // Expected values come from the SAME shared resolver `build` consults
+        // internally — `stroke_opacity` resolves through `ResolvedScales::
+        // stroke_opacity` (a theme-band-mapped `OpacityScale`, same as
+        // `opacity`/`fill_opacity`), not a raw pass-through, so this is the
+        // authoritative expectation rather than a hand-computed guess.
+        let opacity_res = OpacityResolver::load(&ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
+        let expected: Vec<f64> = (0..3).map(|i| opacity_res.at_row(i).2).collect();
+        assert!(expected.windows(2).all(|w| w[0] < w[1]),
+            "test sanity: the resolved stroke_opacity values must be strictly increasing for rows 0..3, got {expected:?}");
+
+        let result = super::build(&ctx).unwrap();
+        let stroke_opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.stroke_opacity) } else { None }
+        }).collect();
+        assert_eq!(stroke_opacities, expected,
+            "each tick must carry its own row's resolved stroke_opacity, not the mark-style default for every row");
+    }
+
+    /// Byte-identity guard: a tick with no `stroke_opacity` encoding must
+    /// keep `StrokeStyle.stroke_opacity` exactly equal to the resolved
+    /// `opacity` value — `OpacityResolver` defaults the unbound
+    /// `stroke_opacity` slot to `1.0`, and `x * 1.0 == x` bit-for-bit, so
+    /// multiplying it in is an exact no-op for every tick this crate already
+    /// renders.
+    #[test]
+    fn tick_no_stroke_opacity_encoding_is_byte_identical() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "op".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![0.2_f64, 0.5, 0.9])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        let stroke_opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.stroke_opacity) } else { None }
+        }).collect();
+        assert_eq!(stroke_opacities, vec![0.2, 0.5, 0.9],
+            "with no stroke_opacity encoding, StrokeStyle.stroke_opacity must equal the \
+             resolved opacity value unchanged (the pre-cycle-3 behavior, bit-for-bit)");
     }
 }

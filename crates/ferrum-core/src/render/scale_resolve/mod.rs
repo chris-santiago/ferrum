@@ -135,6 +135,32 @@ impl ScaleKind {
         if p.is_finite() { Some(p) } else { None }
     }
 
+    /// The extrapolating twin of [`to_pixel_f64`](Self::to_pixel_f64)
+    /// (batch-E T13, `mark_function(clip=False)`'s draw-time seam): an
+    /// out-of-domain `x` still maps to the pixel coordinate its scale's
+    /// affine (or nonlinear, per scale kind) formula computes — outside
+    /// `range` when `x` is outside `domain` — instead of being dropped to
+    /// `None`. This is the fix for the finding that `mark_function(clip=False)`
+    /// (batch E Task 9) has no reachable producer effect: T9's clip escape
+    /// only stops the SVG group from being clipped, but a vertex the scale
+    /// had already turned into `NaN` never reaches the node list for the
+    /// clip rect to matter.
+    ///
+    /// Scoped deliberately: `mark_line` is the ONLY consumer (it is the mark
+    /// `mark_function` desugars to), gated on the resolved mark style's
+    /// `clip == Some(false)`. Every other mark builder keeps calling
+    /// `to_pixel_f64`, so introducing this method changes no other mark's
+    /// rendered output — widening every positional read in the crate to
+    /// extrapolate was considered and rejected as a far wider seam than this
+    /// finding needs (see `mark_function` batch-E T13 completeness report).
+    /// `Ordinal` scales have no continuous mapping to extrapolate, so this
+    /// still returns `None` for them, exactly as `to_pixel_f64` does.
+    pub fn to_pixel_f64_extrapolated(&self, x: f64) -> Option<f64> {
+        if matches!(self, Self::Ordinal(_)) { return None; }
+        let p = dispatch_continuous!(self, scale_internal_extrapolated, x);
+        if p.is_finite() { Some(p) } else { None }
+    }
+
     /// Map an ordinal/string value to a pixel band center.
     /// Returns `None` for non-ordinal scales or unknown categories.
     pub fn to_pixel_str(&self, value: &str) -> Option<f64> {

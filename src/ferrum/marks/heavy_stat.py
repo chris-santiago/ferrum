@@ -228,6 +228,39 @@ register_layer_names(
 )
 
 
+#: Violin quartile-tick band-size factor (spec §6.11, F-L03-04). The
+#: q1/median/q3 crossbars mirror ``desugar_boxplot``'s median-tick idiom
+#: (``mark="tick"`` + ``band_size``). The ``Violin`` transform's ``width``
+#: parameter (Rust-side default 0.4, not exposed through this Python
+#: signature) mirrors the KDE polygon to both sides of the category center,
+#: so an UNSPLIT violin body spans ``2 * 0.4 = 0.8`` of the category band
+#: (``violin.rs``: "a violin of width=0.4 (default) then spans 80% of its
+#: band") -- for that configuration this factor genuinely traces the
+#: violin's own silhouette (PNG-verified), and ``0.8`` sits strictly between
+#: ``inner="box"``'s box width (``size=0.1``) and the full category band
+#: (``1.0``), satisfying spec §6.11's bounds either way.
+#:
+#: HONEST LIMIT (spec §6.11, amended 2026-09-06 T11 review): this is a
+#: single static constant, and it is applied to the tick's ``x``/``y``
+#: encoding, which is always the bare category (``cat_enc``) -- never a
+#: per-hue offset -- regardless of ``color_field``. So when a hue split is
+#: present (``color_field`` distinct from the categorical axis), the
+#: ``Violin`` transform narrows each hue's body to a sub-band of the
+#: category, but the quartile ticks do NOT narrow or dodge to match: every
+#: hue's ticks for a category render at that category's full band position,
+#: sized at ``0.8`` of the CATEGORY band, not the (narrower) per-hue body it
+#: nominally annotates. A static Python constant computed at desugar time
+#: cannot know the per-band hue-group count the Rust transform resolves
+#: later, so this is documented as the honest current behavior rather than
+#: silently claimed correct: under a hue split, the ticks span the category
+#: band, overshooting each individual per-hue violin. Per-hue dodged inner
+#: marks (ticks that narrow and offset like the bodies do) are a real fix
+#: but a different feature -- violin has no per-hue dodge for ANY inner
+#: variant today (`box`/`point` have the same non-dodged-ness) -- filed as
+#: a follow-up (#151), not attempted here.
+_VIOLIN_QUARTILE_BAND_SIZE = 0.8
+
+
 def desugar_violin(
     x_field: str | None,
     y_field: str | None,
@@ -266,7 +299,14 @@ def desugar_violin(
     * ``inner="point"``      — raw points overlaid at the original
       ``(x_field, y_field)`` positions.
     * ``inner="quartile"``   — ``BoxStats`` transform (named ``"quart"``)
-      adds three ``rule`` layers at ``q1``, ``median``, ``q3``.
+      adds three ``tick`` layers at ``q1``, ``median``, ``q3``, confined to
+      the violin's own body width (``band_size=0.8``, see
+      ``_VIOLIN_QUARTILE_BAND_SIZE``) rather than spanning the full panel --
+      this holds when there is no hue split. With a hue split
+      (``color_field`` distinct from the categorical axis) the ticks are
+      NOT per-hue dodged (nothing in ``inner=`` is); they span the
+      category band rather than each narrower per-hue body -- see
+      ``_VIOLIN_QUARTILE_BAND_SIZE``'s comment. q1/q3 keep dashed strokes.
     * ``inner="box"`` (default) — full ``desugar_boxplot`` overlay with
       ``whisker_mult=1.5``, ``outliers=False``, ``size=0.1``.
 
@@ -432,7 +472,15 @@ def desugar_violin(
         # of silently reading a stale name.
         _quart_cols = registry_output_columns("box_stats", ["q1", "median", "q3"])
         for role, col in _quart_cols.items():
-            mk = {} if role == "median" else {"stroke_dash": [2, 2]}
+            # tick + band_size confines each crossbar to the violin's own
+            # body width (F-L03-04) instead of the old "rule" mark's
+            # full-panel-width span (rule.rs's documented ordinal-x
+            # tie-break, which is the wrong idiom for a composite-mark
+            # inner overlay). q1/q3 keep their dashed stroke; median stays
+            # solid, matching desugar_boxplot's median-tick idiom.
+            mk = {"band_size": _VIOLIN_QUARTILE_BAND_SIZE}
+            if role != "median":
+                mk["stroke_dash"] = [2, 2]
             if horizontal:
                 quart_encoding: dict = {"y": cat_enc, "x": col}
             else:
@@ -450,9 +498,9 @@ def desugar_violin(
             layers.append(
                 _Layer(
                     name=col,
-                    mark="rule",
+                    mark="tick",
                     encoding=quart_encoding,
-                    mark_kwargs=mk if mk else None,
+                    mark_kwargs=mk,
                     data_source="quart",
                 )
             )
@@ -1072,7 +1120,9 @@ def desugar_function(
     --------------
     1. ``line`` — ``x="x"``, ``y="y"`` via the encoding remap
        ``{"x": "x", "y": "y"}``.  Returned in single-mark mode (``.mark``,
-       ``.remap``, ``.data``) rather than the layered form.
+       ``.remap``, ``.data``, ``.mark_kwargs``) rather than the layered form.
+       ``.mark_kwargs`` is ``{"clip": False}`` when ``clip=False``, else
+       ``None`` (byte-identical to the pre-clip-escape wire shape).
 
     Parameters
     ----------
@@ -1088,13 +1138,22 @@ def desugar_function(
     n : int, default 200
         Number of evaluation points.
     clip : bool, default True
-        Reserved for future use (no-op today).
+        Whether the rendered line is clipped to the panel's plot area.
+        ``False`` sets ``.mark_kwargs = {"clip": False}`` on the returned
+        result, which the caller (``Chart.mark_function``) applies to the
+        synthesized line layer; the renderer honors it as a per-batch clip
+        escape (``MarkBatch.clip``, spec §6.3). ``True`` (the default) is
+        the theme default and leaves ``.mark_kwargs`` unset (``None``), so
+        output renders byte-identically to before this escape existed.
+        Clipping is a rendering property only: ``fn`` is evaluated over the
+        resolved x-domain the same way regardless of ``clip``.
 
     Returns
     -------
     MarkDesugarResult
         Single-mark mode with ``.mark="line"``, ``.remap={"x": "x", "y": "y"}``,
-        and ``.data`` set to the synthetic ``pyarrow.Table``.
+        ``.data`` set to the synthetic ``pyarrow.Table``, and ``.mark_kwargs``
+        set to ``{"clip": False}`` when ``clip=False`` (``None`` otherwise).
 
     Raises
     ------
@@ -1112,8 +1171,6 @@ def desugar_function(
     >>> result.data.num_rows
     200
     """
-    if not clip:
-        raise ValueError("mark_function(clip=False) is not supported; clipping is always enabled")
     import numpy as np
     import pyarrow as pa
 
@@ -1134,4 +1191,10 @@ def desugar_function(
         )
 
     synthetic = pa.Table.from_pydict({"x": xs, "y": ys})
-    return MarkDesugarResult(mark="line", remap={"x": "x", "y": "y"}, data=synthetic)
+    # clip=False threads onto the synthesized line layer as the
+    # MarkKwargsSpec.clip escape (spec §6.3); True is the theme default and
+    # stays unset (mark_kwargs=None) so output is byte-identical.
+    line_mark_kwargs = None if clip else {"clip": False}
+    return MarkDesugarResult(
+        mark="line", remap={"x": "x", "y": "y"}, data=synthetic, mark_kwargs=line_mark_kwargs
+    )

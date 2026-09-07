@@ -37,6 +37,25 @@ impl PowScaleData {
         }
     }
 
+    /// The extrapolating twin of [`scale`](Self::scale) (batch-E T13,
+    /// `mark_function(clip=False)`'s draw-time seam): identical power-space
+    /// mapping, but the out-of-domain branch that turns `mapped` into `NaN`
+    /// is removed, matching `LinearScaleData::scale_extrapolated`'s contract.
+    fn scale_extrapolated(&self, x: f64) -> f64 {
+        if x.is_nan() { return f64::NAN; }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let pow_fwd = |v: f64| v.signum() * v.abs().powf(self.exponent);
+        let t = degenerate_ratio(pow_fwd(x) - pow_fwd(d0), pow_fwd(d1) - pow_fwd(d0));
+        let mapped = r0 + t * (r1 - r0);
+        if self.clamp {
+            let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
+            mapped.clamp(lo, hi)
+        } else {
+            mapped
+        }
+    }
+
     fn invert(&self, y: f64) -> f64 {
         if y.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -133,6 +152,12 @@ impl PowScale {
     /// Crate-internal scale call (no PyO3 boundary).
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
         self.data.scale(x)
+    }
+
+    /// Crate-internal extrapolating scale call — see
+    /// [`PowScaleData::scale_extrapolated`].
+    pub(crate) fn scale_internal_extrapolated(&self, x: f64) -> f64 {
+        self.data.scale_extrapolated(x)
     }
 
     /// Crate-internal tick call.
@@ -549,6 +574,18 @@ mod tests {
         assert!((s.scale(100.0) - 1.0).abs() < 1e-12);
         // x=50 => 50^2=2500, t=2500/10000=0.25
         assert!((s.scale(50.0) - 0.25).abs() < 1e-12);
+    }
+
+    /// The extrapolating twin (batch-E T13, `mark_function(clip=False)`'s
+    /// draw-time seam): an out-of-domain input continues the power-space
+    /// affine mapping instead of dropping to `NaN`.
+    #[test]
+    fn pow_scale_extrapolated_continues_past_domain() {
+        let s = d([0.0, 100.0], [0.0, 1.0], 2.0, false);
+        assert!(s.scale(150.0).is_nan(), "the NaN-dropping sibling must still drop this");
+        // x=150 => 150^2=22500, t=22500/10000=2.25
+        let extrapolated = s.scale_extrapolated(150.0);
+        assert!((extrapolated - 2.25).abs() < 1e-9, "expected 2.25, got {extrapolated}");
     }
 
     #[test]

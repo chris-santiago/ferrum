@@ -261,12 +261,12 @@ def test_boxplot_and_errorbar_agree_on_color_not_equals_x():
 
 
 def test_violin_quartile_color_equals_x_full_internal_consistency():
-    """color==x → NEITHER the body polygon NOR the q1/median/q3 rule layers carry color.
+    """color==x → NEITHER the body polygon NOR the q1/median/q3 tick layers carry color.
 
-    The quartile rules read the split "quart" BoxStats output, exactly like the
+    The quartile ticks read the split "quart" BoxStats output, exactly like the
     body polygon, so both gate on split_hue. When the hue equals the categorical
     axis (split_hue=False) the per-layer color is redundant with the axis, so the
-    body and all three quartile rules must agree by suppressing it — full
+    body and all three quartile ticks must agree by suppressing it — full
     intra-violin consistency, matching the errorbar/errorband siblings.
     """
     df = _make_df()
@@ -279,11 +279,11 @@ def test_violin_quartile_color_equals_x_full_internal_consistency():
         enc = body.get("encoding", {})
         assert "color" not in enc, f"violin body kept a redundant color==x encoding; enc: {enc}"
 
-    rules = _layers_by_mark(spec, "rule")
-    assert rules, "expected q1/median/q3 quartile rule layers"
-    for rule in rules:
-        enc = rule.get("encoding", {})
-        assert "color" not in enc, f"quartile rule kept a redundant color==x encoding; enc: {enc}"
+    ticks = _layers_by_mark(spec, "tick")
+    assert ticks, "expected q1/median/q3 quartile tick layers"
+    for tick in ticks:
+        enc = tick.get("encoding", {})
+        assert "color" not in enc, f"quartile tick kept a redundant color==x encoding; enc: {enc}"
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +292,15 @@ def test_violin_quartile_color_equals_x_full_internal_consistency():
 
 
 def test_violin_hue_quartile_body_and_quartile_layers_consistent():
-    """Quartile inner: body AND quartile rule layers should both carry color."""
+    """Quartile inner: body AND quartile tick layers should both carry color.
+
+    This is a spec-JSON-only check (``"color" in encoding``); it does not
+    prove the color actually renders distinctly per hue. That render-level
+    proof lives in
+    ``tests/marks/test_heavy_stats.py::test_violin_quartile_ticks_render_per_hue_stroke_color``
+    (T11 cycle 3 review: a spec-level-only pin here previously stayed green
+    while ``tick.rs`` rendered every quartile crossbar in one flat color).
+    """
     df = _make_df()
     chart = fm.Chart(df).mark_violin(inner="quartile").encode(x="g:N", y="v:Q", color="h:N")
     spec = _spec_dict(chart)
@@ -303,9 +311,9 @@ def test_violin_hue_quartile_body_and_quartile_layers_consistent():
     body_enc = poly_layers[0].get("encoding", {})
     assert "color" in body_enc, f"violin body missing color; enc: {body_enc}"
 
-    # Rule (quartile) layers
-    rules = _layers_by_mark(spec, "rule")
-    assert rules
-    for rule in rules:
-        enc = rule.get("encoding", {})
-        assert "color" in enc, f"quartile rule missing color; enc: {enc}"
+    # Tick (quartile) layers
+    ticks = _layers_by_mark(spec, "tick")
+    assert ticks
+    for tick in ticks:
+        enc = tick.get("encoding", {})
+        assert "color" in enc, f"quartile tick missing color; enc: {enc}"

@@ -127,6 +127,14 @@ impl TimeScale {
         self.data.scale(x)
     }
 
+    /// Crate-internal extrapolating scale call — see
+    /// [`LinearScaleData::scale_extrapolated`], which `TimeScale` reuses
+    /// verbatim (this struct is backed by `LinearScaleData`, see the struct
+    /// doc above).
+    pub(crate) fn scale_internal_extrapolated(&self, x: f64) -> f64 {
+        self.data.scale_extrapolated(x)
+    }
+
     /// Crate-internal tick call (uses time-aware nice intervals).
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
         self.time_ticks(count)

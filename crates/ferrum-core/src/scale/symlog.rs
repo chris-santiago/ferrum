@@ -45,6 +45,25 @@ impl SymlogScaleData {
         }
     }
 
+    /// The extrapolating twin of [`scale`](Self::scale) (batch-E T13,
+    /// `mark_function(clip=False)`'s draw-time seam): identical symlog-space
+    /// mapping, but the out-of-domain branch that turns `mapped` into `NaN`
+    /// is removed, matching `LinearScaleData::scale_extrapolated`'s contract.
+    fn scale_extrapolated(&self, x: f64) -> f64 {
+        if x.is_nan() { return f64::NAN; }
+        let [d0, d1] = self.domain;
+        let [r0, r1] = self.range;
+        let f = |v: f64| symlog_fwd(v, self.constant);
+        let t = degenerate_ratio(f(x) - f(d0), f(d1) - f(d0));
+        let mapped = r0 + t * (r1 - r0);
+        if self.clamp {
+            let (lo, hi) = if r0 <= r1 { (r0, r1) } else { (r1, r0) };
+            mapped.clamp(lo, hi)
+        } else {
+            mapped
+        }
+    }
+
     fn invert(&self, y: f64) -> f64 {
         if y.is_nan() { return f64::NAN; }
         let [d0, d1] = self.domain;
@@ -148,6 +167,10 @@ impl SymlogScale {
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
+
+    /// Crate-internal extrapolating scale call — see
+    /// [`SymlogScaleData::scale_extrapolated`].
+    pub(crate) fn scale_internal_extrapolated(&self, x: f64) -> f64 { self.data.scale_extrapolated(x) }
 
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.data.ticks(count) }
 
@@ -357,6 +380,17 @@ mod tests {
         let y = s.scale(0.0);
         assert!(y.is_finite(), "scale(0) returned {y}");
         assert!((y - 0.5).abs() < 1e-12, "expected 0.5, got {y}");
+    }
+
+    /// The extrapolating twin (batch-E T13, `mark_function(clip=False)`'s
+    /// draw-time seam): an out-of-domain input continues the symlog-space
+    /// affine mapping instead of dropping to `NaN`.
+    #[test]
+    fn symlog_scale_extrapolated_continues_past_domain() {
+        let s = d([-100.0, 100.0], [0.0, 1.0], 1.0, false);
+        assert!(s.scale(200.0).is_nan(), "the NaN-dropping sibling must still drop this");
+        assert!(s.scale_extrapolated(200.0).is_finite(), "extrapolated mapping must not be NaN");
+        assert!(s.scale_extrapolated(200.0) > 1.0, "past the upper domain edge must map past the range's upper bound");
     }
 
     /// #99/#104 residue: a degenerate equal-endpoint domain (`d0 == d1`,

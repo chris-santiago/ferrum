@@ -999,6 +999,9 @@ pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
 /// error from the shared per-row color reader
 /// (`marks::channels::row_colors_from_scale`) rather than discarding it into a
 /// silently theme-colored render (NF-A3 sweep completion, 2026-09-02).
+/// `Mark::Tick` joined them in batch-E T13 cycle 3, fallible for the same
+/// per-row color reader — see `marks/tick.rs`'s module doc for the full
+/// per-row property enumeration that cycle audited against `rule.rs`.
 /// `Mark::Arc` and `Mark::Geoshape` are fallible too (batch E Task 6): each
 /// raises `RenderError::MarkRequiresCoord` from its own non-matching-coord
 /// arm, the path-independent backstop for a caller that reaches the mark
@@ -1011,7 +1014,7 @@ pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
 /// (`scene_build::build_panel_mark_batches`, and a `position.rs` test
 /// helper). One exhaustive match (not the shared
 /// `for_each_mark!` macro the sibling `Mark::as_str`/`FromStr` impls use)
-/// because the fallible arms have a different type than the other 13 — the
+/// because the fallible arms have a different type than the other 12 — the
 /// macro's single expansion can't express that asymmetry. Every arm is written
 /// out, and no wildcard, so a future `Mark` variant is a compile error here
 /// rather than a silent miss; the fallible arms return their `Result` directly
@@ -1026,7 +1029,7 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
         Mark::Bar => Ok(super::marks::bar::build(ctx)),
         Mark::Area => Ok(super::marks::area::build(ctx)),
         Mark::Text => Ok(super::marks::text::build(ctx)),
-        Mark::Tick => Ok(super::marks::tick::build(ctx)),
+        Mark::Tick => super::marks::tick::build(ctx),
         Mark::Rect => Ok(super::marks::rect::build(ctx)),
         Mark::Polygon => Ok(super::marks::polygon::build(ctx)),
         Mark::Image => Ok(super::marks::image::build(ctx)),
