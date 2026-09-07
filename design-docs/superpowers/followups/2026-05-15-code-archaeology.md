@@ -103,7 +103,7 @@
 |---|---|
 | `mark_histogram(multiple="stack"/"fill"/"dodge")` | ✅ Confirmed — all three modes verified in SVG output. `be32daf` fixed bin-edge alignment for stack. |
 | `mark_density(multiple="dodge")` | ✅ Confirmed — verified in SVG output |
-| `mark_ribbon(interpolate=...)` | ✅ Now rejects non-linear with `ValueError` — deliberate limitation, not a silent no-op |
+| `mark_ribbon(interpolate=...)` | ✅ Implemented (batch E, T14) — `desugar_ribbon` forwards `interpolate` into the emitted layer's mark_kwargs; the full seven-value vocabulary (`linear`/`step`/`step-before`/`step-after`/`monotone`/`basis`/`cardinal`) renders via `render::marks::curve`, matching `mark_line`/`mark_area`. An out-of-vocabulary value still refuses, now via Rust's typed `RenderError::UnknownInterpolate` rather than a Python-side single-value guard |
 | `lmplot(truncate=False)` / `regplot(truncate=False)` | ✅ Confirmed — `x_range` now forwarded to `mark_smooth()` (`91dd487`). Fit line extends to axis boundary. Verified in SVG output. |
 | `Chart(data=None)` with per-layer data | ✅ Confirmed — both layers render; verified in SVG output |
 | `Layer(data=...)` via `Chart.layer()` | ✅ Confirmed — verified in SVG output |

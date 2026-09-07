@@ -675,7 +675,8 @@ class StatisticalMarksMixin:
             Fill opacity of the ribbon.  Default is ``0.3``.
         interpolate : str, optional
             Boundary interpolation: ``"linear"``, ``"monotone"``, ``"step"``,
-            ``"basis"``, ``"cardinal"``.  Default is ``"linear"``.
+            ``"step-before"``, ``"step-after"``, ``"basis"``, ``"cardinal"``.
+            Default is ``"linear"``.
         position : Position, optional
             Position adjustment.
         **mark_kwargs

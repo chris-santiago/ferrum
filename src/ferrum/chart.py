@@ -879,7 +879,8 @@ class Chart(
             Overall opacity in ``[0, 1]``.
         interpolate : str, optional
             Area boundary interpolation: ``"linear"``, ``"monotone"``,
-            ``"step"``, ``"basis"``, ``"cardinal"``.
+            ``"step"``, ``"step-before"``, ``"step-after"``, ``"basis"``,
+            ``"cardinal"``.
         line : bool, optional
             Whether to draw the top boundary as a line.  Default is ``False``.
         position : Position, optional

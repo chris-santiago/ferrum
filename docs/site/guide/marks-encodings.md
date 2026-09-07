@@ -606,7 +606,7 @@ This section is the canonical reference for that allowlist. Docstrings across th
 
 | Kwarg | Meaning |
 |---|---|
-| `interpolate` | Curve interpolation for `mark_line`/`mark_area`: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. |
+| `interpolate` | Curve interpolation for `mark_line`/`mark_area`/`mark_ribbon`: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. |
 | `stroke_cap` | Line cap style for `mark_line`: `"butt"`, `"round"`, `"square"`. |
 | `stroke_join` | Line join style for `mark_line`/`mark_area`: `"miter"`, `"round"`, `"bevel"`. |
 | `orient` | `mark_bar`/`mark_tick`: `orient="horizontal"` flips the mark to a horizontal orientation. |

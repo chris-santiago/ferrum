@@ -157,7 +157,13 @@ def _resolved_shape(chart: fm.Chart) -> dict:
 # against the dispatch-table implementation (T4.1).  Keyed by branch name.
 _BASELINE = {
     "ribbon": {
-        "json": '{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"mark_style":{"stroke":"none","opacity":0.3},"name":"ribbon"}]}',
+        # T14 (batch E, F-L02-03): desugar_ribbon now forwards interpolate=
+        # into the emitted layer's mark_kwargs (previously discarded after
+        # validation), so the baseline mark_style gained an explicit
+        # "interpolate":"linear" key. The default renders byte-identically
+        # (see tests/marks/test_ribbon.py::test_ribbon_default_interpolate_is_byte_identical_to_pre_fix)
+        # since "linear" is also Rust's mark_style default.
+        "json": '{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"layers":[{"mark":"ribbon","encoding":{"x":{"field":"x"},"y":{"field":"y_lo"},"y2":{"field":"y_hi"}},"mark_style":{"stroke":"none","opacity":0.3,"interpolate":"linear"},"name":"ribbon"}]}',
         "shape": {
             "layers": [
                 {

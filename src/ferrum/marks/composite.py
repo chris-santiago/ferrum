@@ -683,7 +683,7 @@ def desugar_ribbon(
     Layers emitted
     --------------
     1. ``ribbon`` — ``x=x_field``, ``y=y_field``, ``y2=y2_field``,
-       ``opacity=opacity``, ``stroke="none"``.
+       ``opacity=opacity``, ``stroke="none"``, ``interpolate=interpolate``.
 
     Parameters
     ----------
@@ -697,8 +697,10 @@ def desugar_ribbon(
     opacity : float, default 0.2
         Ribbon fill opacity.
     interpolate : str, default "linear"
-        Reserved for future use (no-op today — the renderer uses linear
-        interpolation unconditionally).
+        Boundary interpolation: ``"linear"``, ``"step"``, ``"step-before"``,
+        ``"step-after"``, ``"monotone"``, ``"basis"``, ``"cardinal"``.
+        Forwarded to the emitted layer's mark style; an unrecognized value
+        is refused by the renderer.
 
     Returns
     -------
@@ -718,11 +720,6 @@ def desugar_ribbon(
     'ribbon'
     """
     user_kw = _validate("ribbon", mark_kwargs)
-    if interpolate != "linear":
-        raise ValueError(
-            f"mark_ribbon(interpolate={interpolate!r}) is not supported; "
-            "only 'linear' interpolation is available"
-        )
     if x_field is None or y_field is None:
         raise ValueError("mark_ribbon() requires .encode(x=..., y=...)")
     if y2_field is None:
@@ -734,7 +731,7 @@ def desugar_ribbon(
             name="ribbon",
             mark="ribbon",
             encoding={"x": x_field, "y": y_field, "y2": y2_field},
-            mark_kwargs={"opacity": opacity, "stroke": "none"},
+            mark_kwargs={"opacity": opacity, "stroke": "none", "interpolate": interpolate},
         ),
     ]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
