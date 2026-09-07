@@ -594,7 +594,7 @@ This section is the canonical reference for that allowlist. Docstrings across th
 | `opacity` | Overall opacity in `[0, 1]`. |
 | `stroke_width` | Stroke/outline width in pixels. |
 | `stroke_dash` | Dash pattern as alternating on/off pixel lengths, e.g. `[4, 2]`. |
-| `corner_radius` | Corner rounding in pixels (`mark_bar`, `mark_rect`). |
+| `corner_radius` | Corner rounding in pixels (`mark_bar`, `mark_rect`, `mark_arc` — per-corner tangent-circle fillets on the wedge, including a polar `mark_bar`). |
 | `font_size` | Font size in points (`mark_text`, `mark_label`). |
 | `font_weight` | CSS font-weight, e.g. `"bold"`, `400`, `700` (`mark_text`, `mark_label`). |
 | `align` | Horizontal text alignment: `"left"`, `"center"`, `"right"`. |
@@ -613,7 +613,7 @@ This section is the canonical reference for that allowlist. Docstrings across th
 | `filled` | `mark_point`: whether points are filled (default) or open outlines. |
 | `shape` | `mark_point`: point glyph name — see the [`mark_point()`][ferrum.Chart.mark_point] docstring for the full glyph list. |
 | `limit` | `mark_text`: maximum rendered width in pixels; clips overflow. |
-| `band_size` | `mark_tick`/`mark_rect`: extent of the tick/band along its cross axis. |
+| `band_size` | `mark_tick`/`mark_rect`: extent of the tick/band along its cross axis. On an ordinal `mark_tick` this is still a fraction of the category band width (default `0.6`, unchanged); on a rug `mark_tick` (a single quantitative axis, no categorical channel) it is now a fraction of the panel's cross-extent instead of being silently ignored — unset keeps the old fixed tick length. |
 | `line` | `mark_area`: whether to draw the top boundary as a line. Default `False`. |
 | `borders` | `mark_area`/`mark_errorband`: whether to draw border lines at the band edges. |
 

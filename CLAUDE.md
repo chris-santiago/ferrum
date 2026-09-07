@@ -292,7 +292,7 @@ comments for the pattern to mirror).
 
 **Read `design-docs/superpowers/followups/2026-05-15-code-archaeology.md` before working on any of the subsystems below.** It is the living tracker of unimplemented features, silently dropped parameters, dead code paths, and spec-vs-implementation gaps discovered via a full-source sweep. Many items are resolved; the remaining open items are:
 
-- **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
+- **Features:** none open — the archaeology doc's "Features that raise `ValueError` at runtime" table is now all ✅ (`mark_hex(stroke=)` fixed `b2aa797` 2026-05-30, verified live 2026-09-06; `mark_ribbon(interpolate=)` and `mark_function(clip=False)` closed in batch E, 2026-09-06).
 - **Missing spec implementations:** full palette library (`ferrum.Grid`, `SceneNode::Raw` WASM, and `compare=` diagnostic routing were resolved by the render-gaps work, compare-aggregate work, and Phase B composite unification, 2026-05/2026-07)
 - **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`
 - **Resolved (2026-05-22):** Opacity semantics (`fill_opacity`/`stroke_opacity` now applied per-channel in WASM shaders; `opacity` no longer double-applied to stroke) and annotation z-order (annotation mesh drawn after marks, not before) were fixed in the `feat/rtree-toolbar` merge.

@@ -992,6 +992,14 @@ class Chart(
     def mark_tick(self, **kwargs) -> "Chart":
         """Render data as short tick marks (rug / strip plot).
 
+        Per-row ``color``/``fill``/``stroke_opacity``/``opacity`` encodings
+        render on ticks, but precedence against a constant mark-kwarg is not
+        uniform: a constant ``stroke=`` wins over an encoded ``color=``, but
+        an encoded ``opacity=`` wins over a constant ``opacity=`` (the
+        encoded value replaces it outright). A per-row *encoded*
+        ``stroke_dash=`` is a documented, unclosed exception — it has no
+        effect on ticks at all, unlike ``mark_rule``/``mark_line``.
+
         Parameters
         ----------
         stroke : str, optional
@@ -1001,9 +1009,22 @@ class Chart(
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         band_size : float, optional
-            Full rendered tick length as a fraction of the band width
-            (0–1, default 0.6), matching ``mark_rect``'s ``band_size``
-            convention.
+            Full rendered tick length as a fraction of a reference extent,
+            matching ``mark_rect``'s ``band_size`` convention. On an
+            ordinal tick (an ordinal x or y channel present, e.g. a
+            strip plot or a boxplot median tick) the reference is that
+            channel's own category band width, default ``0.6`` — this
+            holds whether or not the *other* axis is also declared. On a
+            **rug** tick — a single quantitative axis encoded, no
+            categorical channel — the reference is the panel's cross-axis
+            extent (panel height for an x-rug, panel width for a y-rug); an
+            unset ``band_size`` keeps the fixed tick length ferrum has
+            always used for rugs (``band_size`` was silently ignored there
+            before, not defaulting to ``0.6``). A tick whose x resolves to
+            a **quantitative** scale while y is *also* separately declared
+            (not a true rug, since a rug has no y at all — this is the
+            boxplot-cap/errorbar-cap idiom) keeps a fixed length
+            unconditionally and ignores ``band_size``, by design.
         orient : str, optional
             ``"vertical"`` (default ticks perpendicular to x) or
             ``"horizontal"``.
@@ -1108,15 +1129,21 @@ class Chart(
     def mark_arc(self, **kwargs) -> "Chart":
         """Render data as arcs (pie or donut slices).
 
-        Requires ``Chart.coord(fm.CoordPolar(theta="x"))`` to be set.
-        The theta-mapped encoding channel (``x`` by default) determines
-        each slice's angular sweep proportional to its value.
+        Requires ``Chart.coord(fm.CoordPolar(theta="x"))`` to be set — any
+        other coordinate system (the default ``CoordCartesian``, or an
+        explicitly set ``CoordFlip``, ``CoordGeo``, or ``CoordFixed``) raises
+        ``ValueError`` naming the required ``.coord()`` fix; there is no
+        silent Cartesian fallback.  The theta-mapped encoding channel (``x``
+        by default) determines each slice's angular sweep proportional to
+        its value.
 
         Parameters
         ----------
         **kwargs
             Constant mark-style overrides: ``fill``, ``stroke``,
-            ``stroke_width``, ``stroke_dash``, ``opacity``, ``corner_radius``;
+            ``stroke_width``, ``stroke_dash``, ``opacity``, ``corner_radius``
+            (per-corner tangent-circle fillets on the wedge — also applies to
+            a polar ``mark_bar``);
             aliases ``color``→``fill`` and ``alpha``→``opacity``.  Unknown keys
             raise ``TypeError``.  See *Mark style kwargs* in the marks &
             encodings guide (``docs/site/guide/marks-encodings.md``) for the
@@ -1159,7 +1186,12 @@ class Chart(
         Pass a GeoJSON FeatureCollection dict to ``Chart(data)`` — ferrum
         auto-detects the format and splits properties into encoding channels
         and geometry into a ``__geometry__`` column.  Set the projection via
-        ``Chart.coord(fm.CoordGeo(projection="mercator"))``.
+        ``Chart.coord(fm.CoordGeo(projection="mercator"))``.  Rendering with a
+        ``__geometry__`` column present under any non-Geo coordinate system
+        (the default ``CoordCartesian``, or an explicitly set ``CoordFlip``,
+        ``CoordPolar``, or ``CoordFixed``) raises ``ValueError`` naming the
+        required fix; there is no silent fallback to a flat scatter or an
+        empty panel.
 
         Parameters
         ----------
@@ -2182,11 +2214,15 @@ class Chart(
     def coord(self, coord: Any) -> "Chart":
         """Set the coordinate system for this chart.
 
-        Currently only ``CoordFlip`` is supported (swaps x and y axes).
+        Accepts ``CoordFlip`` (swap x/y axes), ``CoordCartesian`` (the
+        default; also carries ``xlim``/``ylim``/``expand``/``clip``),
+        ``CoordPolar`` (pie/donut/radar, required by ``mark_arc``),
+        ``CoordGeo`` (map projections, required by ``mark_geoshape`` when
+        the data carries geometry), and ``CoordFixed`` (fixed aspect ratio).
 
         Parameters
         ----------
-        coord : CoordFlip
+        coord : CoordFlip | CoordCartesian | CoordPolar | CoordGeo | CoordFixed
             A coordinate-system object.  Pass ``fm.CoordFlip()`` to swap the
             horizontal and vertical axes.
 

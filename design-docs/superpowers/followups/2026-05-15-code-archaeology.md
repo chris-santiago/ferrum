@@ -108,7 +108,7 @@
 | `Chart(data=None)` with per-layer data | ✅ Confirmed — both layers render; verified in SVG output |
 | `Layer(data=...)` via `Chart.layer()` | ✅ Confirmed — verified in SVG output |
 | `mark_hex(stroke=..., stroke_width=...)` | ✅ Fixed `b2aa797` (2026-05-30) — `desugar_hex` passes `stroke`/`stroke_width` into the polygon layer's `mark_kwargs`; ValueError guards removed. Literal semantics: stroke color + width 0 = no visible border (no call-time auto-bump), consistent with other polygon marks. |
-| `mark_function(clip=False)` | ✅ Now rejects with `ValueError` — clipping always enabled by design |
+| `mark_function(clip=False)` | ✅ Implemented (batch E, T9/T11) — `clip=False` is a real toggle: `desugar_function` threads it onto the synthesized line layer as `MarkKwargsSpec.clip = false`, carried through the scene graph's new `MarkBatch.clip` field (spec §6.3), and both SVG (`svg_walk.rs`) and WASM walkers render that batch outside the panel's clip group, so the curve extrapolates past the panel edge for out-of-domain evaluation points. `clip=True` (the default) is byte-identical to before this escape existed. The former `NotImplementedError`/raise-on-`False` this row previously described is gone. |
 
 > **2026-05-15:** `mark_raster(blend="additive")` SVG already implemented; WASM additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` already wired. Legend kwargs fully confirmed: `orient` ✅ `title` ✅ `format` ✅ `columns` ✅ — all four verified by behavioral tests (`test_silent_drop_verification.py::TestLegendKwargsSVGPosition`). `format` and `columns` wired in `10c1931`.
 

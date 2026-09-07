@@ -34,3 +34,30 @@ def test_module_doctests_pass(module_name):
     result = doctest.testmod(module, verbose=False)
     assert result.attempted > 0, f"{module_name} has no doctests to run"
     assert result.failed == 0, f"{module_name}: {result.failed}/{result.attempted} doctests failed"
+
+
+def test_chart_module_doctest_failure_set_does_not_grow():
+    """Regression: ``ferrum.chart`` carries 14 known-bad doctests under
+    ``doctest.testmod`` (155 examples total; pre-existing failures — mostly
+    ``NameError: name 'fm' is not defined`` examples and unset-up composition
+    snippets — tracked, not batch E's). Measured A/B across batch E T15's
+    docstring-only edits (mark_geoshape's typed refusal, ``Chart.coord()``'s
+    accepted types, mark_tick's precedence): 14/155 both before and after,
+    proving those edits doctest-neutral. (The narrower
+    ``pytest --doctest-modules`` harness collects only a 39-example subset
+    with 10 failures — this test deliberately pins the wider testmod corpus.)
+    This pins the failure count at the known baseline so a NEW rotting
+    example — a future docstring edit or a behavior change without a doc
+    update — fails loudly here instead of hiding among the pre-existing
+    failures.
+    """
+    import doctest
+    import importlib
+
+    module = importlib.import_module("ferrum.chart")
+    result = doctest.testmod(module, verbose=False)
+    assert result.attempted >= 100, "ferrum.chart's doctest corpus shrank unexpectedly"
+    assert result.failed <= 14, (
+        f"ferrum.chart doctest failures grew past the known-bad baseline of 14: "
+        f"{result.failed}/{result.attempted} failed — a docstring example rotted"
+    )
