@@ -1362,11 +1362,24 @@ class Chart(
             nrows = existing.nrows if existing is not None else None
             if facet_enc is not None:
                 new._facet = _Facet(
-                    mode_kind="wrap", field=facet_enc.field, ncols=ncols, nrows=nrows
+                    mode_kind="wrap",
+                    field=facet_enc.field,
+                    ncols=ncols,
+                    nrows=nrows,
+                    title=facet_enc.option("title"),
                 )
             elif col_enc is not None and row_enc is not None:
+                # Grid mode: col drives the column/wrap strip (title), row
+                # drives the row-header strip (row_title) -- both are real,
+                # independent strips here.
                 new._facet = _Facet(
-                    mode_kind="grid", col=col_enc.field, row=row_enc.field, ncols=ncols, nrows=nrows
+                    mode_kind="grid",
+                    col=col_enc.field,
+                    row=row_enc.field,
+                    ncols=ncols,
+                    nrows=nrows,
+                    title=col_enc.option("title"),
+                    row_title=row_enc.option("title"),
                 )
             elif col_enc is not None:
                 new._facet = _Facet(
@@ -1375,14 +1388,21 @@ class Chart(
                     ncols=ncols,
                     nrows=nrows,
                     wrap_orient="col",
+                    title=col_enc.option("title"),
                 )
             elif row_enc is not None:
+                # CRITICAL: a row-only facet lowers to WRAP mode (row unset on
+                # FacetSpec), where the column/wrap strip renders and reads
+                # `title`, not `row_title` (FacetSpec::column_strip_title /
+                # row_strip_title). Routing FacetRow(title=...) to `row_title`
+                # here would silently have no effect on the rendered strip.
                 new._facet = _Facet(
                     mode_kind="wrap",
                     field=row_enc.field,
                     ncols=ncols,
                     nrows=nrows,
                     wrap_orient="row",
+                    title=row_enc.option("title"),
                 )
 
         return new
@@ -1880,6 +1900,7 @@ class Chart(
         col: Optional[str] = None,
         ncols: Optional[int] = None,
         nrows: Optional[int] = None,
+        title: Optional[str] = None,
     ) -> "Chart":
         """Facet this chart into small multiples by a field.
 
@@ -1905,6 +1926,12 @@ class Chart(
             choose.
         nrows : int or None, optional
             Maximum number of rows.  ``None`` lets the renderer choose.
+        title : str, optional
+            Title for the primary/wrap dimension's strip (the column strip in
+            grid mode; the only strip in wrap mode, including a row-only
+            facet). Strip text renders ``"{title}: {value}"`` when set, the
+            bare value otherwise. To title a grid facet's row dimension, use
+            ``encode(facet_row=fm.FacetRow(field, title=...))`` instead.
 
         Returns
         -------
@@ -1933,6 +1960,7 @@ class Chart(
                 ncols=ncols,
                 nrows=nrows,
                 wrap_orient=None,
+                title=title,
             )
         elif row is not None and col is not None:
             new._facet = _Facet(
@@ -1941,6 +1969,7 @@ class Chart(
                 col=col,
                 nrows=nrows,
                 ncols=ncols,
+                title=title,
             )
         elif col is not None:
             new._facet = _Facet(
@@ -1949,6 +1978,7 @@ class Chart(
                 ncols=ncols,
                 nrows=nrows,
                 wrap_orient="col",
+                title=title,
             )
         elif row is not None:
             new._facet = _Facet(
@@ -1957,6 +1987,7 @@ class Chart(
                 nrows=nrows,
                 ncols=ncols,
                 wrap_orient="row",
+                title=title,
             )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")

@@ -2,6 +2,7 @@
 
 import polars as pl
 
+import ferrum as fm
 from ferrum import Chart
 
 
@@ -192,6 +193,10 @@ def test_faceted_svg_contains_strip_titles():
     Note: The Rust facet renderer requires Utf8 (not LargeUtf8) string columns.
     Polars serializes strings as LargeUtf8 in Arrow; we use a pyarrow table with
     explicit pa.string() (Utf8) as the data source to satisfy Phase 7's limitation.
+
+    Extended for F-L01-04: a facet ``title=`` must reach this strip's text
+    (``"{title}: {value}"``), and leaving ``title`` unset must render
+    byte-identically to the pre-fix output (no silent behavior change).
     """
     import pyarrow as pa
     from ferrum._core import render_svg
@@ -212,3 +217,129 @@ def test_faceted_svg_contains_strip_titles():
     text_count = svg.count("<text")
     # Strip titles + axis labels: at least 3 strip title text elements
     assert text_count >= 3, f"Expected ≥3 <text elements, got {text_count}"
+
+    # F-L01-04: title= unset -> byte-identical to the untouched call above.
+    chart_no_title = Chart(df).mark_point().encode(x="a", y="b").facet(col="species", title=None)
+    svg_no_title = render_svg(chart_no_title.to_spec(), tbl, viewport=(600.0, 400.0), theme={})
+    assert svg_no_title == svg, "facet(title=None) must be byte-identical to omitting title"
+
+    # F-L01-04: title= set -> the strip renders "{title}: {value}".
+    chart_titled = Chart(df).mark_point().encode(x="a", y="b").facet(col="species", title="Group")
+    svg_titled = render_svg(chart_titled.to_spec(), tbl, viewport=(600.0, 400.0), theme={})
+    assert "Group: A" in svg_titled
+    assert "Group: A" not in svg
+
+
+def test_facet_channel_title_reaches_strip():
+    """F-L01-04 audit repro (findings/L01.md): Facet(field, title=...) must
+    reach the rendered strip, not be silently dropped.
+
+    Pinned against the exact repro in the finding text (fields x/y/cat,
+    values a/b/c, title="My Facet"): the titled chart's SVG must contain
+    "My Facet: a", the untitled chart's SVG must be byte-identical to a
+    chart built without ever touching ``title=``, and the JSON facet dict
+    must carry the title (previously: absent whether or not title was set).
+    """
+    import json
+
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4, 5, 6], "y": [4, 3, 2, 5, 1, 6], "cat": ["a", "b", "a", "b", "c", "c"]}
+    )
+
+    titled = (
+        Chart(df).mark_point().encode(x="x:Q", y="y:Q", facet=fm.Facet("cat:N", title="My Facet"))
+    )
+    untitled = Chart(df).mark_point().encode(x="x:Q", y="y:Q", facet=fm.Facet("cat:N"))
+    untitled_shorthand = Chart(df).mark_point().encode(x="x:Q", y="y:Q", facet="cat:N")
+
+    assert "My Facet: a" in titled.to_svg()
+    assert "My Facet" not in untitled.to_svg()
+    assert untitled.to_svg() == untitled_shorthand.to_svg(), (
+        "no-title facets must stay byte-identical across equivalent constructions"
+    )
+
+    titled_dict = json.loads(titled.to_json())["facet"]
+    untitled_dict = json.loads(untitled.to_json())["facet"]
+    assert titled_dict.get("title") == "My Facet"
+    assert "title" not in untitled_dict
+
+
+def test_facet_grid_row_and_col_titles_are_independent():
+    """F-L01-04: in grid mode (both facet_row and facet_col set), the column
+    strip's title and the row strip's title route to independent FacetSpec
+    keys (``title`` / ``row_title``) and neither leaks into the other."""
+    import json
+
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4],
+            "y": [4, 3, 2, 1],
+            "row": ["r1", "r1", "r2", "r2"],
+            "col": ["c1", "c2", "c1", "c2"],
+        }
+    )
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(
+            x="x:Q",
+            y="y:Q",
+            facet_col=fm.FacetCol("col:N", title="Column Title"),
+            facet_row=fm.FacetRow("row:N", title="Row Title"),
+        )
+    )
+    facet_dict = json.loads(chart.to_json())["facet"]
+    assert facet_dict["title"] == "Column Title"
+    assert facet_dict["row_title"] == "Row Title"
+
+    # Grid is the one mode where row_title is actually live -- both strips
+    # must independently reach the rendered SVG, not just the wire dict.
+    svg = chart.to_svg()
+    assert "Column Title: c1" in svg
+    assert "Row Title: r1" in svg
+
+
+def test_facet_row_only_title_routes_to_wrap_strip():
+    """CRITICAL routing rule (T8 review flag): FacetRow used ALONE lowers to
+    WRAP mode, where the column/wrap strip renders and reads ``title`` — NOT
+    ``row_title`` (which only has effect in grid mode). A FacetRow(title=...)
+    used alone must therefore route to ``title`` so it actually reaches the
+    strip, rather than silently landing in an inert ``row_title``."""
+    import json
+
+    df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "grp": ["r1", "r2"]})
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", facet_row=fm.FacetRow("grp:N", title="Row Only"))
+    )
+    facet_dict = json.loads(chart.to_json())["facet"]
+    assert facet_dict["mode"]["kind"] == "wrap"
+    assert facet_dict.get("title") == "Row Only", (
+        "wrap-row facet's title must land in the wire field the wrap strip "
+        "actually reads, not silently drop into an inert row_title"
+    )
+    assert "row_title" not in facet_dict
+
+    # And it must actually reach the rendered strip, not just the wire dict.
+    svg = chart.to_svg()
+    assert "Row Only: r1" in svg
+
+
+def test_chart_facet_method_title_kwarg():
+    """F-L01-04: Chart.facet(title=...) sets the primary/wrap dimension's
+    title -- parity with the encode(facet=...) channel path."""
+    import json
+
+    df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "grp": ["g1", "g2"]})
+
+    wrap_chart = Chart(df).mark_point().encode(x="x", y="y").facet(field="grp", title="Group")
+    assert wrap_chart._facet.title == "Group"
+    assert json.loads(wrap_chart.to_json())["facet"]["title"] == "Group"
+
+    row_only_chart = Chart(df).mark_point().encode(x="x", y="y").facet(row="grp", title="Group")
+    assert row_only_chart._facet.mode_kind == "wrap"
+    assert json.loads(row_only_chart.to_json())["facet"]["title"] == "Group"
+
+    no_title_chart = Chart(df).mark_point().encode(x="x", y="y").facet(field="grp")
+    assert "title" not in json.loads(no_title_chart.to_json())["facet"]

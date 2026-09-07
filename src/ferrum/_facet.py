@@ -103,6 +103,16 @@ class _Facet:
     nrows: Optional[int] = None
     resolve: Optional[dict] = None
     wrap_orient: Optional[WrapOrient] = None
+    # F-L01-04: title for whichever dimension the column/wrap strip renders
+    # (Rust FacetSpec.title — mirrors FacetSpec::column_strip_title's routing:
+    # in wrap mode, including a row-only facet lowered to wrap, this is the
+    # ONLY title that has any effect). row_title only has an effect once the
+    # facet is genuinely grid mode (both row and col set) — see
+    # FacetSpec::row_strip_title. Callers that synthesize a wrap-mode `_Facet`
+    # from a `FacetRow(title=...)` channel must route that title into `title`,
+    # not `row_title`, or it silently has no effect on the rendered strip.
+    title: Optional[str] = None
+    row_title: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Coerce string inputs to enums (frozen → use object.__setattr__) so the
@@ -183,23 +193,29 @@ def build_facet_dict(facet: _Facet, data: Any) -> dict:
         else:  # "row" or generic wrap
             ncols = 1
         d: dict = {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
-        if resolve_dict is not None:
-            d["resolve"] = resolve_dict
-        return d
-    # grid: col is the primary (column) field; row is the secondary (row) field.
-    field = f.col if f.col is not None else (f.field or "")
-    # Infer nrows/ncols from the data when the user did not supply them.
-    # This is the common case: facet(row="a", col="b") without explicit
-    # nrows/ncols.  Without inference the geometry defaults to 1×1, dropping
-    # all but one panel.
-    nrows = f.nrows if f.nrows is not None else infer_facet_cardinality(data, f.row)
-    ncols = f.ncols if f.ncols is not None else infer_facet_cardinality(data, f.col)
-    d = {
-        "field": field,
-        "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
-    }
-    if f.row is not None:
-        d["row"] = f.row
+    else:
+        # grid: col is the primary (column) field; row is the secondary (row) field.
+        field = f.col if f.col is not None else (f.field or "")
+        # Infer nrows/ncols from the data when the user did not supply them.
+        # This is the common case: facet(row="a", col="b") without explicit
+        # nrows/ncols.  Without inference the geometry defaults to 1×1, dropping
+        # all but one panel.
+        nrows = f.nrows if f.nrows is not None else infer_facet_cardinality(data, f.row)
+        ncols = f.ncols if f.ncols is not None else infer_facet_cardinality(data, f.col)
+        d = {
+            "field": field,
+            "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
+        }
+        if f.row is not None:
+            d["row"] = f.row
+
     if resolve_dict is not None:
         d["resolve"] = resolve_dict
+    # F-L01-04: title (column/wrap-strip) and row_title (grid row-strip) are
+    # both top-level FacetSpec keys, independent of mode.  Emitted only when
+    # set, so no-title facets stay byte-identical with pre-fix goldens.
+    if f.title is not None:
+        d["title"] = f.title
+    if f.row_title is not None:
+        d["row_title"] = f.row_title
     return d

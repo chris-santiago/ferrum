@@ -26,7 +26,9 @@ class Facet(ChannelBase):
         Data type.  Inferred from the column dtype when omitted; ``"N"`` or
         ``"O"`` are the most common choices.
     title : str, optional
-        Facet panel title override.  When omitted the field name is used.
+        Facet strip title.  When set, the strip text renders
+        ``"{title}: {value}"``; when omitted, the strip shows the bare
+        value (not the field name).
 
     Notes
     -----
@@ -60,7 +62,13 @@ class FacetRow(ChannelBase):
         Data type.  Inferred from the column dtype when omitted; ``"N"`` or
         ``"O"`` are the most common choices.
     title : str, optional
-        Row-facet title override.  When omitted the field name is used.
+        Row-strip title.  When set, the strip text renders
+        ``"{title}: {value}"``; when omitted, the strip shows the bare
+        value (not the field name). NOTE: ``FacetRow`` used alone (no
+        ``facet_col``) lowers to a wrap-mode facet where the wrap/column
+        strip is the one rendered, so ``title`` here drives THAT strip; in
+        grid mode (used together with ``facet_col``), ``title`` drives the
+        row-header strip.
 
     Examples
     --------
@@ -88,7 +96,9 @@ class FacetCol(ChannelBase):
         Data type.  Inferred from the column dtype when omitted; ``"N"`` or
         ``"O"`` are the most common choices.
     title : str, optional
-        Column-facet title override.  When omitted the field name is used.
+        Column/wrap-strip title.  When set, the strip text renders
+        ``"{title}: {value}"``; when omitted, the strip shows the bare
+        value (not the field name).
 
     Examples
     --------

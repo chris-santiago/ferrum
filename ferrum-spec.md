@@ -145,7 +145,7 @@ Chart(data=None, *, width=None, height=None, title=None, description=None)
 - `.mark_*(...)` — Shorthand: creates a single-layer chart with the given mark. Equivalent to `.layer(Layer(mark=mark_*(...)))`.
 - `.transform(*transforms)` — Add data transforms applied before any stat computation.
 - `.stat(*stats)` — Add stat transforms (computed per-layer if applied at layer level).
-- `.facet(field=None, *, row=None, col=None, ncols=None, nrows=None)` — Wrap chart in a `FacetSpec`.
+- `.facet(field=None, *, row=None, col=None, ncols=None, nrows=None, title=None)` — Wrap chart in a `FacetSpec`.
 - `.add_selection(*selections)` — Bind `Selection` objects.
 - `.conditional(selection, **true_encodings, **false_encodings)` — Conditional encoding based on selection state.
 - `.properties(**kwargs)` — Set chart-level metadata (title, width, height, description).
@@ -355,6 +355,8 @@ Encoding channels are typed objects passed as keyword arguments to `.encode()`. 
 | `Facet(field, *, type=None, sort=None, title=None)` | Single facet dimension |
 | `FacetRow(field, ...)` | Row facet dimension |
 | `FacetCol(field, ...)` | Column facet dimension |
+
+> **Dated note (2026-09-06, batch E task 13 — F-L01-04, facet `title=` wired):** `Facet`/`FacetRow`/`FacetCol`'s `title=` kwarg was in the honored-kwarg set (accepted silently) but was completely discarded before this fix — the rendered strip and the serialized `facet` dict carried no title information regardless of what was passed. It is now threaded through `Chart.encode()`'s facet synthesis and `Chart.facet(title=...)` into the Rust `FacetSpec.title`/`row_title` fields, and the strip text renders `"{title}: {value}"` when a title is set (the bare value otherwise — never the field name, correcting the three channels' prior docstring claim). `Chart.facet(title=...)` always sets the primary/wrap-dimension strip's title (the column strip in grid mode; the only strip in wrap mode). Routing note: `FacetRow(title=...)` used ALONE (no `facet_col`) lowers to **wrap mode**, where the column/wrap strip is the one that renders and reads `title` — so a standalone `FacetRow`'s title routes to `title`, not `row_title` (which has no effect outside grid mode). In grid mode (`facet_col` + `facet_row` both set), `FacetCol.title` → `title` (column strip) and `FacetRow.title` → `row_title` (row strip) are independent. No-title facets remain byte-identical (new wire keys are omitted when unset).
 
 ---
 
