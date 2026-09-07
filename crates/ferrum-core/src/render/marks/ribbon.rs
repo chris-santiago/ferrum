@@ -63,10 +63,14 @@ fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64
         }
     }
     if let Ok(xs_f) = col_as_f64(ctx.batch, xf) {
+        // `DrawCtx::to_pixel`, not `to_pixel_f64` directly, so
+        // `mark_ribbon(clip=False)` keeps its out-of-domain vertices like
+        // `mark_line` does — one meaning for one public kwarg across the whole
+        // line family. Clipped ribbons (the default) are byte-identical.
         let pixels: Vec<Option<f64>> = xs_f
             .into_iter()
             .take(n)
-            .map(|v| v.and_then(|x| ctx.scales.x.to_pixel_f64(x)))
+            .map(|v| v.and_then(|x| ctx.to_pixel(&ctx.scales.x, x)))
             .collect();
         return Some((pixels, false));
     }
@@ -216,8 +220,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 let cx = x_pixels.get(i).and_then(|v| *v)?;
                 let yv = ys[i]?;
                 let y2v = y2s[i]?;
-                let cy = ctx.scales.y.to_pixel_f64(yv)?;
-                let cy2 = ctx.scales.y.to_pixel_f64(y2v)?;
+                let cy = ctx.to_pixel(&ctx.scales.y, yv)?;
+                let cy2 = ctx.to_pixel(&ctx.scales.y, y2v)?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
                 let yo = y_offsets.get(i).copied().unwrap_or(0.0);
                 Some((cx + xo, cy + yo, cy2 + yo))

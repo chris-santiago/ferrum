@@ -588,6 +588,42 @@ mod tests {
         assert!((extrapolated - 2.25).abs() < 1e-9, "expected 2.25, got {extrapolated}");
     }
 
+    /// In-domain, `scale_extrapolated` is bit-identical to `scale` — only the
+    /// out-of-domain branch differs.
+    ///
+    /// The twin is a hand-copy of `scale` minus one branch, so the standing
+    /// risk is a fix landing on one and not the other (as happened once in
+    /// `symlog`'s `degenerate_ratio` fix). Sampled across the domain including
+    /// both endpoints, plus a fractional exponent and a domain straddling zero,
+    /// where `pow_fwd`'s `signum`/`abs` split changes arms.
+    #[test]
+    fn pow_scale_extrapolated_matches_scale_in_domain() {
+        let s = d([0.0, 100.0], [0.0, 1.0], 2.0, false);
+        for x in [0.0, 1.0, 25.0, 50.0, 99.999, 100.0] {
+            assert_eq!(
+                s.scale(x).to_bits(),
+                s.scale_extrapolated(x).to_bits(),
+                "mismatch at x={x}: {} vs {}",
+                s.scale(x),
+                s.scale_extrapolated(x)
+            );
+        }
+        let sqrt_signed = d([-50.0, 50.0], [0.0, 1.0], 0.5, false);
+        for x in [-50.0, -10.0, 0.0, 10.0, 50.0] {
+            assert_eq!(
+                sqrt_signed.scale(x).to_bits(),
+                sqrt_signed.scale_extrapolated(x).to_bits(),
+                "mismatch at x={x}"
+            );
+        }
+        let degenerate = d([5.0, 5.0], [0.0, 100.0], 2.0, false);
+        assert_eq!(
+            degenerate.scale(5.0).to_bits(),
+            degenerate.scale_extrapolated(5.0).to_bits(),
+            "the degenerate-domain midpoint must agree too"
+        );
+    }
+
     #[test]
     fn pow_scale_inversion_round_trip() {
         let s = d([0.0, 100.0], [0.0, 1.0], 2.0, false);

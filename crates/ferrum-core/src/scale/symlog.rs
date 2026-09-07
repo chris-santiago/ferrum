@@ -393,6 +393,35 @@ mod tests {
         assert!(s.scale_extrapolated(200.0) > 1.0, "past the upper domain edge must map past the range's upper bound");
     }
 
+    /// In-domain, `scale_extrapolated` is bit-identical to `scale` — only the
+    /// out-of-domain branch differs.
+    ///
+    /// This family's cautionary tale is symlog's own: the `degenerate_ratio`
+    /// fix (#99/#104, pinned directly below) is exactly the kind of change that
+    /// can land on `scale` and miss its hand-copied twin. The degenerate domain
+    /// is therefore sampled here explicitly, alongside the zero crossing where
+    /// `symlog_fwd` changes sign.
+    #[test]
+    fn symlog_scale_extrapolated_matches_scale_in_domain() {
+        let s = d([-100.0, 100.0], [0.0, 1.0], 1.0, false);
+        for x in [-100.0, -37.5, -0.5, 0.0, 0.5, 37.5, 100.0] {
+            assert_eq!(
+                s.scale(x).to_bits(),
+                s.scale_extrapolated(x).to_bits(),
+                "mismatch at x={x}: {} vs {}",
+                s.scale(x),
+                s.scale_extrapolated(x)
+            );
+        }
+        let degenerate = d([5.0, 5.0], [0.0, 100.0], 1.0, false);
+        assert_eq!(
+            degenerate.scale(5.0).to_bits(),
+            degenerate.scale_extrapolated(5.0).to_bits(),
+            "the `degenerate_ratio` midpoint must agree too — this is the exact fix that \
+             once landed on one twin and not the other"
+        );
+    }
+
     /// #99/#104 residue: a degenerate equal-endpoint domain (`d0 == d1`,
     /// e.g. a constant-valued data column) used to divide by zero
     /// (`0/0 = NaN`) in the `t` ratio. It must instead resolve to the range

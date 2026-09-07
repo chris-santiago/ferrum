@@ -232,8 +232,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 (Some(a), Some(b)) if a.is_finite() && b.is_finite() => (a, b),
                 _ => continue,
             };
-            let cx = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
-            let cy = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
+            // Every positional read in this loop goes through `DrawCtx::
+            // to_pixel`, so `mark_area(clip=False)` keeps its out-of-domain
+            // vertices instead of dropping them — the same escape `mark_line`
+            // honors, for the same public kwarg. Clipped areas (the default)
+            // are byte-identical; see `DrawCtx::to_pixel`.
+            let cx = match ctx.to_pixel(&ctx.scales.x, xv) { Some(p) => p, None => continue };
+            let cy = match ctx.to_pixel(&ctx.scales.y, yv) { Some(p) => p, None => continue };
             let xo = x_offsets.get(i).copied().unwrap_or(0.0);
             let yo = y_offsets.get(i).copied().unwrap_or(0.0);
             let cx = cx + xo;
@@ -248,7 +253,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     let by = y2s.get(i)
                         .and_then(|v| *v)
                         .filter(|v| v.is_finite())
-                        .and_then(|v| ctx.scales.y.to_pixel_f64(v))
+                        .and_then(|v| ctx.to_pixel(&ctx.scales.y, v))
                         .unwrap_or(baseline_y);
                     bottom.push((cx, by + yo));
                 }
@@ -257,14 +262,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     // the row's own y-pixel, not a vertical offset at cx.
                     let base_x = bases.get(i)
                         .and_then(|v| *v)
-                        .and_then(|b| ctx.scales.x.to_pixel_f64(b))
+                        .and_then(|b| ctx.to_pixel(&ctx.scales.x, b))
                         .unwrap_or(baseline_x);
                     bottom.push((base_x + xo, cy_top));
                 }
                 BottomEdge::StackBase { bases, value_on_x: false } => {
                     let base_y = bases.get(i)
                         .and_then(|v| *v)
-                        .and_then(|b| ctx.scales.y.to_pixel_f64(b))
+                        .and_then(|b| ctx.to_pixel(&ctx.scales.y, b))
                         .unwrap_or(baseline_y);
                     bottom.push((cx, base_y));
                 }

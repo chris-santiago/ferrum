@@ -83,11 +83,7 @@ def test_geoshape_message_names_the_fix():
 
 
 def test_geoshape_matching_coord_renders_without_error():
-    chart = (
-        fm.Chart(_BARE_POLYGON)
-        .mark_geoshape()
-        .coord(fm.CoordGeo(projection="equirectangular"))
-    )
+    chart = fm.Chart(_BARE_POLYGON).mark_geoshape().coord(fm.CoordGeo(projection="equirectangular"))
     svg = chart.to_svg()
     assert "<svg" in svg
 
@@ -112,22 +108,14 @@ def test_arc_default_coord_refuses_with_typed_message():
 
 def test_arc_explicit_cartesian_coord_refuses():
     chart = (
-        fm.Chart(_pie_df())
-        .mark_arc()
-        .encode(x="val:Q", color="cat:N")
-        .coord(fm.CoordCartesian())
+        fm.Chart(_pie_df()).mark_arc().encode(x="val:Q", color="cat:N").coord(fm.CoordCartesian())
     )
     with pytest.raises(ValueError, match=r"mark_arc requires a Polar coord"):
         chart.to_svg()
 
 
 def test_arc_flip_coord_refuses():
-    chart = (
-        fm.Chart(_pie_df())
-        .mark_arc()
-        .encode(x="val:Q", color="cat:N")
-        .coord(fm.CoordFlip())
-    )
+    chart = fm.Chart(_pie_df()).mark_arc().encode(x="val:Q", color="cat:N").coord(fm.CoordFlip())
     with pytest.raises(ValueError, match=r"mark_arc requires a Polar coord"):
         chart.to_svg()
 
@@ -215,10 +203,7 @@ def test_arc_merged_flat_layer_resolve_independent_y_static_refuses():
 def test_image_under_polar_coord_still_renders_its_documented_empty_scene():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "url": ["a", "b", "c"]})
     chart = (
-        fm.Chart(df)
-        .mark_image()
-        .encode(x="x", y="y", url="url")
-        .coord(fm.CoordPolar(theta="x"))
+        fm.Chart(df).mark_image().encode(x="x", y="y", url="url").coord(fm.CoordPolar(theta="x"))
     )
     svg = chart.to_svg()
     assert "<svg" in svg

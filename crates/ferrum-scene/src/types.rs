@@ -198,47 +198,51 @@ pub struct MarkBatch {
     /// no Rust producer sets `false` in this batch.
     ///
     /// **Documented static/interactive z-order divergence (quality review
-    /// RF3, batch E Task 9):** `walk_svg` HOISTS every `clip == false` batch
-    /// to paint after every `clip == true` batch in the same panel (see
-    /// `render/svg_walk.rs`'s `clip_exempt_batch_paints_after_clipped_marks_and_before_chrome_annotations_and_text`
-    /// test for the exact pin). The WASM loader does **not** perform the
-    /// same hoist — it only swaps the scissor shape per batch (`None` or the
-    /// full-scene rect, per the two paths above), leaving each batch's
-    /// relative paint position within its existing WASM draw category
-    /// unchanged. WASM's per-category split is itself pre-existing and
-    /// unrelated to clip: `render.rs`'s render loop draws every mesh-kind
-    /// mark batch (lines/areas/paths, via `mark_mesh_panels`) before every
-    /// instanced circle/rect mark batch (via `draw_commands`) — see that
-    /// file's draw-order comment (step 2 vs. step 4) — so `panel.marks`
-    /// index order is only a paint-order proxy *within* one of those two
-    /// categories, never across both. For a scene where a `clip == false`
-    /// batch is NOT already last among its panel's same-category marks,
-    /// static (SVG, which interleaves every kind in one order) and
-    /// interactive (WASM, which paints all mesh before all instanced) can
-    /// therefore already paint marks in a different relative z-order for
-    /// reasons independent of this field; the clip escape adds a second,
-    /// analogous divergence within each category rather than a new kind of
-    /// mismatch. This was evaluated and deliberately deferred
-    /// rather than fixed in Task 9: `panel.marks` index order is an
-    /// implicit "paint order" invariant relied on independently by
+    /// RF3, batch E Task 9).** `walk_svg` HOISTS every `clip == false` batch
+    /// to paint after every `clip == true` batch in the same panel (pinned by
+    /// `render/svg_walk.rs`'s
+    /// `clip_exempt_batch_paints_after_clipped_marks_and_before_chrome_annotations_and_text`).
+    /// The WASM loader does **not** perform that hoist — it only swaps the
+    /// scissor shape per batch (`None` or the full-scene rect, per the two
+    /// paths above), leaving each batch's relative paint position unchanged.
+    ///
+    /// The divergence model, stated as it actually is: `crates/ferrum-wasm/
+    /// src/render.rs` draws every mesh-kind mark batch (lines/areas/paths, via
+    /// `mark_mesh_panels`) BEFORE every instanced circle/rect batch (via
+    /// `draw_commands`) — its render loop's step 2 versus step 4. That split
+    /// is pre-existing and independent of this field, and it means WASM's
+    /// paint order is not a function of `panel.marks` index order across the
+    /// two categories at all. So a clip-exempt LINE over a scatter of CIRCLES
+    /// — the primary intended use case, `mark_function(clip=False)` over a
+    /// point layer — paints above the points statically and below them
+    /// interactively **whatever layer order the user writes**. Ordering the
+    /// layers differently does not change it, and neither does anything this
+    /// crate can express in a scene. Within one category (mesh-over-mesh, or
+    /// instanced-over-instanced) the two walkers agree except for the SVG
+    /// hoist itself, which moves a clip-exempt batch later than its index.
+    ///
+    /// This supersedes an earlier note here that expected T11 to mask the
+    /// divergence by appending `mark_function`'s synthesized clip-exempt line
+    /// as its panel's last layer. T11 has landed and the expectation does not
+    /// hold: the layer's position is the user's to choose, and the
+    /// mesh-before-instanced split makes the position irrelevant anyway.
+    ///
+    /// Not fixed here because the fix is not local. `panel.marks` index order
+    /// is an implicit paint-order invariant relied on independently by
     /// `hit_test.rs` (topmost-first `.rev()` scan), `spatial_index.rs`
     /// (`entries_for_panel`), and `scene_load.rs`'s `batch_instance_spans`
-    /// (consumed by `conditional.rs` crossfilter dimming and
-    /// `transition.rs` keyed-transition pairing, both of which must stay in
-    /// lock-step with the flat circle/rect instance array's actual layout).
-    /// Reordering `load_scene_with_packed`'s collection order to match the
-    /// SVG hoist would require re-deriving all of those independently, with
-    /// no existing test coverage guarding against a silent mismatch (wrong
-    /// topmost hit, wrong crossfilter target, wrong transition pairing) —
-    /// a materially larger and riskier change than this field's own
-    /// scissor escape. T11 (Python, not yet dispatched as of this field's
-    /// introduction) is expected to append `mark_function`'s synthesized
-    /// clip-exempt line as the last layer in its panel, which if true would
-    /// mask this divergence in the primary intended use case — but that is
-    /// an expectation to re-verify once T11 actually lands, not a fact
-    /// established by anything in this crate today. A future task should
-    /// either re-derive the four order-dependent walks together or accept
-    /// this as a permanent, documented divergence.
+    /// (consumed by `conditional.rs` crossfilter dimming and `transition.rs`
+    /// keyed-transition pairing, both of which must stay in lock-step with the
+    /// flat circle/rect instance array's layout). Making the WASM loader honor
+    /// the SVG hoist means re-deriving all four walks against one explicit
+    /// paint-order list, with no existing coverage guarding a silent mismatch
+    /// (wrong topmost hit, wrong crossfilter target, wrong transition
+    /// pairing).
+    ///
+    /// That work is tracked as a batch-E close follow-up issue — "unify the
+    /// four order-dependent WASM walks against one explicit paint-order list"
+    /// — not as an instruction embedded in this doc. This field's own contract
+    /// is only the scissor escape described above.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub clip: bool,
 }

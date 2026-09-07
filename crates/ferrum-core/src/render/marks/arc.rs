@@ -115,9 +115,13 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         Some(SpecCoord::Polar { theta, .. }) => *theta,
         _ => return Err(requires_polar_coord()),
     };
-    let Some(geom) = polar_geom(ctx) else {
-        return Ok(MarkBuildResult::empty(MarkBatchKind::Arc));
-    };
+    // `polar_geom` returns `None` for exactly one condition — a non-`Polar`
+    // coord — which the match above has already refused. The former
+    // `else { Ok(empty) }` arm here was therefore unreachable, and it
+    // re-instated the silent-empty behavior that refusal exists to remove; it
+    // is gone. `?` on the same refusal keeps the read total without adding an
+    // `expect`, and keeps the two chokepoints answering identically.
+    let geom = polar_geom(ctx).ok_or_else(requires_polar_coord)?;
 
     // Channel assignment under the Python polar remapping (shared resolver, C9):
     //   theta="x" → theta=x, theta2=x2, radius=y, radius2=y2

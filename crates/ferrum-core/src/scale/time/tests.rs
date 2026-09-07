@@ -43,6 +43,66 @@ fn test_time_scale_round_trip_ms() {
     assert!((back - mid).abs() < 1e-3, "round-trip failed: got {back}");
 }
 
+/// `TimeScale::scale_internal_extrapolated` (batch-E T13,
+/// `mark_function(clip=False)`'s draw-time seam) had no coverage at all: it is
+/// reachable from every dated chart through
+/// `ScaleKind::to_pixel_f64_extrapolated`'s `dispatch_continuous!`, but the
+/// batch that introduced the four extrapolating twins tested three of them.
+///
+/// A one-year domain over `[0, 1000]` px: a timestamp one further year past the
+/// upper edge must map past `1000`, not to `NaN` the way `scale_internal` does.
+#[test]
+fn test_time_scale_extrapolated_continues_past_domain() {
+    // 2026-01-01, 2027-01-01, 2028-01-01 UTC (2027 is not a leap year, so the
+    // two spans are equal-length and the extrapolated pixel is exactly 2000).
+    let (y2026, y2027, y2028) = (1_767_225_600_000.0, 1_798_761_600_000.0, 1_830_297_600_000.0);
+    let t = TimeScale::new_internal(vec![y2026, y2027], vec![0.0, 1000.0], false, false);
+
+    assert!(
+        t.scale_internal(y2028).is_nan(),
+        "the NaN-dropping sibling must still drop an out-of-domain instant"
+    );
+    let extrapolated = t.scale_internal_extrapolated(y2028);
+    assert!(
+        (extrapolated - 2000.0).abs() < 1e-6,
+        "one further year past the domain must land one further range-width past it; \
+         expected 2000.0, got {extrapolated}"
+    );
+    let before = t.scale_internal_extrapolated(y2026 - (y2027 - y2026));
+    assert!(
+        (before + 1000.0).abs() < 1e-6,
+        "a year BEFORE the domain must map below the range too; got {before}"
+    );
+}
+
+/// In-domain, `scale_internal_extrapolated` is bit-identical to
+/// `scale_internal` — the drift guard `linear.rs` has and the other three
+/// extrapolating scales lacked. `TimeScale` is backed by `LinearScaleData`, so
+/// this pins that the delegation stays pointed at the twin (a future
+/// time-specific override on one method and not the other is the drift this
+/// catches).
+#[test]
+fn test_time_scale_extrapolated_matches_scale_in_domain() {
+    let (lo, hi) = (1_767_225_600_000.0, 1_798_761_600_000.0);
+    let t = TimeScale::new_internal(vec![lo, hi], vec![0.0, 1000.0], false, false);
+    for x in [lo, lo + 1.0, (lo + hi) / 2.0, hi - 1.0, hi] {
+        assert_eq!(
+            t.scale_internal(x).to_bits(),
+            t.scale_internal_extrapolated(x).to_bits(),
+            "mismatch at t={x}: {} vs {}",
+            t.scale_internal(x),
+            t.scale_internal_extrapolated(x)
+        );
+    }
+    // A single-instant domain resolves through `degenerate_ratio` on both.
+    let instant = TimeScale::new_internal(vec![lo, lo], vec![0.0, 1000.0], false, false);
+    assert_eq!(
+        instant.scale_internal(lo).to_bits(),
+        instant.scale_internal_extrapolated(lo).to_bits(),
+        "the degenerate single-instant domain must agree too"
+    );
+}
+
 /// #99/#104 residue: `TimeScale` reuses `LinearScaleData` verbatim (see
 /// the struct doc above), so the shared degenerate-domain guard covers
 /// it for free — pinned directly here so the coverage isn't only

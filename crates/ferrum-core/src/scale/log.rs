@@ -574,6 +574,41 @@ mod tests {
         assert!((extrapolated - 4.0).abs() < 1e-9, "expected 4.0, got {extrapolated}");
     }
 
+    /// In-domain, `scale_extrapolated` is bit-identical to `scale` — only the
+    /// out-of-domain branch differs.
+    ///
+    /// The twin is a hand-copy of `scale` minus one branch, so the standing
+    /// risk is a fix landing on one and not the other. That has happened once
+    /// already in this family (`symlog`'s `degenerate_ratio` fix), and only
+    /// `linear.rs` guarded against it; this is that guard for `log`. Sampled
+    /// across the domain, including both endpoints and a degenerate domain,
+    /// since the endpoints are where the dropped branch's predicate turns over.
+    #[test]
+    fn log_scale_extrapolated_matches_scale_in_domain() {
+        let s = d([1.0, 1000.0], [0.0, 3.0], 10.0, false);
+        for x in [1.0, 2.0, 10.0, 250.0, 999.999, 1000.0] {
+            assert_eq!(
+                s.scale(x).to_bits(),
+                s.scale_extrapolated(x).to_bits(),
+                "mismatch at x={x}: {} vs {}",
+                s.scale(x),
+                s.scale_extrapolated(x)
+            );
+        }
+        // Negative domain and the degenerate equal-endpoint domain take
+        // different arms of the shared body; both must agree too.
+        let neg = d([-1000.0, -1.0], [0.0, 3.0], 10.0, false);
+        for x in [-1000.0, -100.0, -1.0] {
+            assert_eq!(neg.scale(x).to_bits(), neg.scale_extrapolated(x).to_bits(), "mismatch at x={x}");
+        }
+        let degenerate = d([5.0, 5.0], [0.0, 100.0], 10.0, false);
+        assert_eq!(
+            degenerate.scale(5.0).to_bits(),
+            degenerate.scale_extrapolated(5.0).to_bits(),
+            "the degenerate-domain midpoint must agree too"
+        );
+    }
+
     /// The wrong-sign guard is a mathematical necessity, not a "value is out
     /// of range" refusal extrapolation could override: a positive-domain log
     /// scale queried at a non-positive `x` must still return `NaN` under

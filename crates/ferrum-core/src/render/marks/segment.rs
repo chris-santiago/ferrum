@@ -32,9 +32,16 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return Ok(empty()) };
     let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return Ok(empty()) };
 
-    // Per-row opacity via the shared OpacityResolver (C7); stroke_width stays
-    // local. Segment is a stroke-only mark (no fill / stroke_opacity columns),
-    // so only the resolver's `opacity` slot is read.
+    // Per-row `opacity` AND `stroke_opacity` via the shared OpacityResolver
+    // (C7); stroke_width stays local. `fill_opacity` is the one slot genuinely
+    // unused — segment emits only `SceneNode::Line`, which has no fill
+    // component `to_scene_stroke` could ever consume. This mirrors `tick.rs`'s
+    // `row_stroke`, whose module doc carries the full enumeration against
+    // `rule.rs`: `stroke_opacity` is a generic `RENDERER_HONORED` encoding
+    // channel that resolves its own `OpacityScale` regardless of mark, so the
+    // former claim here that segment has "no stroke_opacity column" was copied
+    // from a doc that had already drifted, and the third `at_row` slot was
+    // being discarded.
     let opacity_res =
         OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
@@ -69,7 +76,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         let xo = x_offsets.get(i).copied().unwrap_or(0.0);
         let yo = y_offsets.get(i).copied().unwrap_or(0.0);
 
-        let (row_opacity, _, _) = opacity_res.at_row(i);
+        let (row_opacity, _, row_stroke_opacity) = opacity_res.at_row(i);
         let row_stroke_width = stroke_width_values.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(ctx.mark_style.paint.stroke_width);
@@ -80,7 +87,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             .as_ref()
             .and_then(|v| v.get(i).copied().flatten());
         let row_color = resolve_stroke_color(ctx.mark_style, row_color_opt);
-        let row_style = to_scene_stroke(
+        let mut row_style = to_scene_stroke(
             row_color,
             row_stroke_width,
             row_opacity,
@@ -88,6 +95,13 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             None,
             None,
         );
+        // Multiplied in (not overwritten), the same mechanism `tick.rs`'s
+        // `row_stroke` uses and for the same reason: with no `stroke_opacity`
+        // encoding bound, `OpacityResolver` defaults this slot to `1.0`, and
+        // `x * 1.0 == x` for every finite `x` — so every segment this crate
+        // already renders stays bit-identical, and only a chart that newly
+        // binds a DISTINCT `stroke_opacity=` observes any change.
+        row_style.stroke_opacity *= row_stroke_opacity;
 
         acc.push(SceneNode::Line {
             x1: p1x + xo,
@@ -563,5 +577,117 @@ mod tests {
         }).collect();
         assert_eq!(opacities, vec![0.25, 0.75],
             "each segment must carry its own row's opacity (per-row OpacityResolver sample)");
+    }
+
+    // ── Per-row stroke_opacity (batch-E close remediation) ───────────────────
+
+    /// Four rows carrying `x`/`y`/`x2`/`y2` plus one extra opacity-family
+    /// column, so the two tests below differ only in WHICH channel they bind.
+    fn opacity_channel_batch(field: &str, values: Vec<f64>) -> arrow::record_batch::RecordBatch {
+        let n = values.len();
+        let coord = |base: f64| -> Float64Array {
+            (0..n).map(|i| Some(base + i as f64 * 5.0)).collect()
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new(field, DataType::Float64, false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(coord(0.0)),
+            Arc::new(coord(0.0)),
+            Arc::new(coord(10.0)),
+            Arc::new(coord(10.0)),
+            Arc::new(Float64Array::from(values)),
+        ]).unwrap()
+    }
+
+    fn segment_spec_with(channel: &str, field: &str) -> ChartSpec {
+        let enc = |f: &str| Some(EncodingSpec { field: f.into(), type_: None, ..Default::default() });
+        let mut encoding = Encoding {
+            x: enc("x"), y: enc("y"), x2: enc("x2"), y2: enc("y2"),
+            ..Default::default()
+        };
+        match channel {
+            "opacity" => encoding.opacity = enc(field),
+            "stroke_opacity" => encoding.stroke_opacity = enc(field),
+            other => panic!("unhandled channel {other}"),
+        }
+        ChartSpec {
+            data: DataRef::default(), mark: Mark::Segment, encoding,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        }
+    }
+
+    fn segment_stroke_opacities(
+        spec: &ChartSpec,
+        batch: &arrow::record_batch::RecordBatch,
+    ) -> (Vec<f64>, OpacityResolver) {
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Segment).unwrap();
+        let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
+        let resolver = OpacityResolver::load(
+            &ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0),
+        );
+        let rendered = super::build(&ctx).unwrap().nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.stroke_opacity) } else { None }
+        }).collect();
+        (rendered, resolver)
+    }
+
+    /// RED-proven: a `stroke_opacity`-encoded segment must render a distinct
+    /// `StrokeStyle.stroke_opacity` per row. Before this fix `segment.rs`
+    /// discarded the resolver's third tuple slot (`let (row_opacity, _, _) =
+    /// …`) behind a copied-and-false comment claiming segment has no
+    /// `stroke_opacity` column — but the channel is generic and
+    /// `RENDERER_HONORED` (`ferrum.encoding._channel_policy`), resolving its
+    /// own `OpacityScale` regardless of mark, so a bound `stroke_opacity=`
+    /// silently had no effect. `tick.rs` closed the same drop one cycle
+    /// earlier and documented segment's as still open; this closes it.
+    #[test]
+    fn segment_stroke_opacity_encoding_is_applied_per_row() {
+        let spec = segment_spec_with("stroke_opacity", "so");
+        let batch = opacity_channel_batch("so", vec![0.2, 0.5, 0.9]);
+        let (rendered, resolver) = segment_stroke_opacities(&spec, &batch);
+
+        // Expected values come from the SAME shared resolver `build` consults,
+        // since `stroke_opacity` maps through a theme-band `OpacityScale`
+        // rather than passing the raw column through.
+        let expected: Vec<f64> = (0..3).map(|i| resolver.at_row(i).2).collect();
+        assert!(
+            expected.windows(2).all(|w| w[0] < w[1]),
+            "test sanity: resolved stroke_opacity must be strictly increasing across rows, got {expected:?}"
+        );
+        assert_eq!(
+            rendered, expected,
+            "each segment must carry its own row's resolved stroke_opacity, not a constant"
+        );
+    }
+
+    /// Byte-identity guard: with no `stroke_opacity` encoding bound, the
+    /// resolver defaults that slot to `1.0` and `x * 1.0 == x` bit-for-bit, so
+    /// `StrokeStyle.stroke_opacity` stays exactly what `to_scene_stroke` set it
+    /// to (it seeds the field from the `opacity` argument) — every segment this
+    /// crate already renders is unchanged, `opacity=`-encoded or not.
+    #[test]
+    fn segment_no_stroke_opacity_encoding_is_byte_identical() {
+        let spec = segment_spec_with("opacity", "op");
+        let batch = opacity_channel_batch("op", vec![0.2, 0.5, 0.9]);
+        let (rendered, _) = segment_stroke_opacities(&spec, &batch);
+
+        assert_eq!(
+            rendered,
+            vec![0.2, 0.5, 0.9],
+            "with no stroke_opacity encoding, StrokeStyle.stroke_opacity must equal the \
+             resolved opacity value unchanged (the pre-fix behavior, bit-for-bit)"
+        );
     }
 }

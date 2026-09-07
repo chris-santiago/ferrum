@@ -451,6 +451,55 @@ def test_an_unhonored_aggregate_does_not_steer_the_bin():
     assert spec["encoding"]["tooltip"]["field"] != "agg_value"
 
 
+def test_unhonored_bin_on_color_fails_with_unknown_column():
+    """The honored-kwarg gate is half-enforced (batch-E close remediation,
+    design S2): ``to_implicit_transforms()`` emits a ``_PendingBin`` for
+    ANY channel's ``bin=``, honored or not, so an unhonored ``Color(bin=True)``
+    still puts a Bin transform on the chart's pipeline and re-points the
+    color channel at the Bin's own output column (``_lower_bin_encoding``'s
+    ``bin_axes`` scan is deliberately not honored-gated either -- see its
+    docstring). The Bin then replaces the WHOLE batch schema with its own
+    columns, dropping the ``x``/``y`` columns the rest of the chart still
+    reads -- the resulting failure names the unrelated `x` column as
+    "unknown", not `color=`'s bin=, which is confusing but is documented,
+    pre-existing, current behavior (not a regression this batch introduces).
+    This pins that CURRENT failure mode so the earmarked sentinel-bypass
+    follow-up (closing the gate at ``to_implicit_transforms``) has a visible
+    blast radius to fix, rather than an invisible one."""
+    chart = fm.Chart(_df()).mark_point().encode(x="v", y="w", color=fm.Color("w", bin=True))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(ValueError, match=r"unknown column 'v'"):
+            chart.to_svg()
+
+
+def test_unhonored_aggregate_on_color_beside_a_bin_fails_with_column_not_found():
+    """The other half of the same gate asymmetry: an unhonored
+    ``Color(aggregate=...)`` beside a real ``bin=`` on x is excluded from
+    ``_lower_bin_encoding``'s fold (Color does not honor ``aggregate=``), so
+    it is never absorbed into the Bin -- but its ``_PendingAggregate``
+    sentinel still reaches the transform list unconditionally (same root
+    cause as the bin case above: ``to_implicit_transforms()`` does not
+    consult the honored set) and becomes a real ``Aggregate`` transform.
+    That Aggregate groups by the Bin's own OUTPUT columns (``v``/``count``
+    no longer exist post-Bin; the aggregate's groupby is inferred from the
+    now-rewritten encoding) and tries to read ``cnum`` from a batch the Bin
+    has already replaced, failing with a Rust-side column-not-found error
+    rather than the "not honored" message the gate is supposed to produce.
+    Pins the CURRENT failure mode (pre-existing, not worsened by this
+    batch) so the same earmarked follow-up's blast radius is visible here
+    too."""
+    chart = (
+        fm.Chart(_df())
+        .mark_point()
+        .encode(x=fm.X("v", bin=True), y="count", color=fm.Color("w", aggregate="mean"))
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        with pytest.raises(ValueError, match=r"stat_aggregate: column 'w' not found"):
+            chart.to_svg()
+
+
 def test_prebuilt_bin_instance_with_an_opposing_aggregate_refuses_and_names_the_fix():
     from ferrum._core import Bin as RustBin
 

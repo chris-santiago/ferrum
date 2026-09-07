@@ -46,8 +46,10 @@ pub struct MarkKwargsSpec {
     // ── S1: interpolate (line/area/ribbon) ───────────────────────────────────
     /// Path interpolation method. Supported: "linear" (default), "step",
     /// "step-before", "step-after", "monotone", "basis", "cardinal" — the
-    /// vocabulary owned by [`render::marks::curve::Interpolate`](crate::render::marks::curve::Interpolate),
-    /// which is also the single source for the refusal message. An
+    /// vocabulary owned by `render::marks::curve::Interpolate`, which is also
+    /// the single source for the refusal message. (Named rather than
+    /// intra-doc-linked: this struct is `pub` and that enum is `pub(crate)`, so
+    /// the link would not resolve for a reader of the public docs.) An
     /// unrecognized value is REFUSED (`RenderError::UnknownInterpolate`) at
     /// `render::draw::resolve_mark_style`; it does not fall back to linear.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1416,14 +1416,13 @@ fn build_panel_mark_batches(
         // while leaving metadata None (which the three-channel guard could
         // not detect). polar_spans (batch E Task 2, cycle 6) is the same
         // shape again, populated only by arc.rs/bar.rs::build_polar.
+        //
+        // `NodeChannelLengths::of` derives every length from the very vectors
+        // moved into the `MarkBatch` below, so this seam cannot transpose two
+        // channels — the hazard the guard's former six positional
+        // `Option<usize>` parameters carried.
         crate::render::mark_nodes::debug_assert_nodes_metadata_aligned(
-            result.nodes.len(),
-            result.tooltips.as_ref().map(|t| t.len()),
-            result.hrefs.as_ref().map(|h| h.len()),
-            result.descriptions.as_ref().map(|d| d.len()),
-            result.data_indices.as_ref().map(|d| d.len()),
-            keys.as_ref().map(|k| k.len()),
-            result.polar_spans.as_ref().map(|s| s.len()),
+            crate::render::mark_nodes::NodeChannelLengths::of(&result, keys.as_deref()),
         );
         mark_batches.push(MarkBatch {
             kind: result.kind,

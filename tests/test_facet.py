@@ -1,6 +1,7 @@
 """Tests for Chart.facet() fluent method."""
 
 import polars as pl
+import pytest
 
 import ferrum as fm
 from ferrum import Chart
@@ -324,6 +325,68 @@ def test_facet_row_only_title_routes_to_wrap_strip():
     # And it must actually reach the rendered strip, not just the wire dict.
     svg = chart.to_svg()
     assert "Row Only: r1" in svg
+
+
+def test_chart_facet_method_row_title_kwarg_grid_mode():
+    """Chart.facet(row=, col=, row_title=...) is the .facet() parity
+    counterpart to encode(facet_row=FacetRow(title=...)) in grid mode: both
+    strips end up independently titled, on the wire and in the render."""
+    import json
+
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4],
+            "y": [4, 3, 2, 1],
+            "row": ["r1", "r1", "r2", "r2"],
+            "col": ["c1", "c2", "c1", "c2"],
+        }
+    )
+    chart = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q")
+        .facet(row="row", col="col", title="Column Title", row_title="Row Title")
+    )
+    facet_dict = json.loads(chart.to_json())["facet"]
+    assert facet_dict["mode"]["kind"] == "grid"
+    assert facet_dict["title"] == "Column Title"
+    assert facet_dict["row_title"] == "Row Title"
+
+    svg = chart.to_svg()
+    assert "Column Title: c1" in svg
+    assert "Row Title: r1" in svg
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"field": "grp"},
+        {"col": "grp"},
+        {"row": "grp"},
+    ],
+)
+def test_chart_facet_method_row_title_refuses_on_wrap_lowering(kwargs):
+    """Chart.facet(row_title=...) has no rendering effect once the facet
+    lowers to wrap mode (field= alone, col= alone, or row= alone) -- a
+    row-only facet's title belongs in title=. This raises rather than
+    silently dropping row_title.
+
+    NOTE (design review cycle-2 S1): this is NOT the same failure mode as
+    the sibling encode(facet_row=fm.FacetRow(title=...)) path
+    (test_facet_row_only_title_routes_to_wrap_strip) -- the two paths are
+    NOT consistent with each other, and this test does not claim they are.
+    encode(facet_row=...) on a row-only facet SILENTLY REDIRECTS the title
+    into the field the wrap strip actually reads (`title`, not `row_title`)
+    and renders it; .facet(row=..., row_title=...) RAISES instead. Both
+    behaviors are individually defensible (different kwarg name, different
+    implied intent -- encode(facet_row=FacetRow(title=...)) only ever has
+    ONE title to place and redirects it, while .facet(row_title=...) is an
+    explicit second kwarg that has no home in wrap mode at all), but they
+    are two different failure modes, not one shared contract."""
+    df = pl.DataFrame({"x": [1, 2], "y": [3, 4], "grp": ["g1", "g2"]})
+    chart = Chart(df).mark_point().encode(x="x", y="y")
+    with pytest.raises(ValueError, match="row_title"):
+        chart.facet(row_title="Nope", **kwargs)
 
 
 def test_chart_facet_method_title_kwarg():

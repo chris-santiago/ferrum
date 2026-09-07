@@ -1,10 +1,11 @@
 //! mark_line: render rows as a polyline.
 //!
 //! Two axis modes:
-//! - Quantitative x: read `x` as `f64`, project via `scales.x.to_pixel_f64`
-//!   (or its extrapolating twin `to_pixel_f64_extrapolated` when the resolved
-//!   mark style's `clip == Some(false)` — see the `build` function body;
-//!   `mark_function(clip=False)` is the one producer of that style today).
+//! - Quantitative x: read `x` as `f64`, project via `DrawCtx::to_pixel`, which
+//!   swaps in the extrapolating scale twin when the resolved mark style's
+//!   `clip == Some(false)`. `mark_function(clip=False)` is the producer of that
+//!   style on the Python path; `area` and `ribbon` read through the same method
+//!   so the field means one thing for any spec that sets it.
 //! - Ordinal x: read `x` as `str`, project via `scales.x.to_pixel_str`. Used
 //!   by parallel coordinates where the x axis is a sequence of feature
 //!   names. Ordinal y is symmetric (read as `str` via `to_pixel_str`).
@@ -49,17 +50,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // `mark_function(clip=False)` escape T9 added at the SVG-group level) must
     // also stop this positional read from dropping an out-of-domain vertex —
     // otherwise the point never reaches the node list for T9's clip escape to
-    // apply to. `to_pixel_f64_extrapolated` is the twin of `to_pixel_f64` that
-    // keeps the point (at the pixel coordinate its scale's own formula
-    // computes, however far outside `range` that lands) instead of dropping
-    // it to `None`. The default (`clip` unset or `Some(true)`) keeps calling
-    // `to_pixel_f64`, so every line's rendered output is byte-identical to
-    // before this field existed.
-    let extrapolate = ctx.mark_style.misc.clip == Some(false);
-    let project_f64 = |scale: &ScaleKind, v: f64| {
-        if extrapolate { scale.to_pixel_f64_extrapolated(v) } else { scale.to_pixel_f64(v) }
-    };
-
+    // apply to. `DrawCtx::to_pixel` owns that decision for the whole line
+    // family (line/area/ribbon all accept `clip=`), so the kwarg means one
+    // thing everywhere; see its doc. Clipped marks are byte-identical.
     let n_rows = ctx.batch.num_rows();
     let xs_pix: Vec<Option<f64>> = match &ctx.scales.x {
         ScaleKind::Ordinal(_) => {
@@ -73,7 +66,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             xs.iter()
                 .map(|opt| opt
                     .filter(|v| v.is_finite())
-                    .and_then(|v| project_f64(&ctx.scales.x, v)))
+                    .and_then(|v| ctx.to_pixel(&ctx.scales.x, v)))
                 .collect()
         }
     };
@@ -89,7 +82,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ys.iter()
                 .map(|opt| opt
                     .filter(|v| v.is_finite())
-                    .and_then(|v| project_f64(&ctx.scales.y, v)))
+                    .and_then(|v| ctx.to_pixel(&ctx.scales.y, v)))
                 .collect()
         }
     };

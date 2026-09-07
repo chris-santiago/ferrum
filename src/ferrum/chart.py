@@ -1934,6 +1934,7 @@ class Chart(
         ncols: Optional[int] = None,
         nrows: Optional[int] = None,
         title: Optional[str] = None,
+        row_title: Optional[str] = None,
     ) -> "Chart":
         """Facet this chart into small multiples by a field.
 
@@ -1963,8 +1964,19 @@ class Chart(
             Title for the primary/wrap dimension's strip (the column strip in
             grid mode; the only strip in wrap mode, including a row-only
             facet). Strip text renders ``"{title}: {value}"`` when set, the
-            bare value otherwise. To title a grid facet's row dimension, use
-            ``encode(facet_row=fm.FacetRow(field, title=...))`` instead.
+            bare value otherwise.
+        row_title : str, optional
+            Title for the row strip in **grid** mode only (``row=`` and
+            ``col=`` both given) -- equivalent to
+            ``encode(facet_row=fm.FacetRow(field, title=...))`` alongside a
+            titled ``facet_col=``. A row-only facet (``row=`` alone) lowers
+            to wrap mode, where the column/wrap strip renders and reads
+            ``title``, not ``row_title``; passing ``row_title=`` there
+            raises rather than silently having no effect -- put the title on
+            ``title=`` instead. This is NOT equivalent to
+            ``encode(facet_row=fm.FacetRow(field, title=...))`` used alone:
+            that spelling silently redirects the title into ``title=`` and
+            renders it, it does not raise.
 
         Returns
         -------
@@ -1974,7 +1986,9 @@ class Chart(
         Raises
         ------
         ValueError
-            If neither ``field``, ``row``, nor ``col`` is provided.
+            If neither ``field``, ``row``, nor ``col`` is provided, or if
+            ``row_title=`` is given for a facet that lowers to wrap mode
+            (``field=``, ``col=`` alone, or ``row=`` alone).
 
         Examples
         --------
@@ -1985,8 +1999,20 @@ class Chart(
         >>> fm.Chart(df).mark_point().encode(x="x", y="y").facet(col="g", ncols=2)
         Chart(mark='point', encoding=['x', 'y'])
         """
+
+        def _refuse_row_title_on_wrap(wrap_lowering: str) -> None:
+            if row_title is not None:
+                raise ValueError(
+                    f"facet(row_title=...) has no effect on a facet that lowers "
+                    f"to wrap mode ({wrap_lowering}): wrap mode renders only the "
+                    "column/wrap strip, which reads `title`, not `row_title`. "
+                    "Pass the title via `title=` instead, or use both `row=` and "
+                    "`col=` for a genuine grid facet."
+                )
+
         new = self._clone()
         if field is not None:
+            _refuse_row_title_on_wrap("field=")
             new._facet = _Facet(
                 mode_kind="wrap",
                 field=field,
@@ -2003,8 +2029,10 @@ class Chart(
                 nrows=nrows,
                 ncols=ncols,
                 title=title,
+                row_title=row_title,
             )
         elif col is not None:
+            _refuse_row_title_on_wrap("col= alone")
             new._facet = _Facet(
                 mode_kind="wrap",
                 field=col,
@@ -2014,6 +2042,7 @@ class Chart(
                 title=title,
             )
         elif row is not None:
+            _refuse_row_title_on_wrap("row= alone")
             new._facet = _Facet(
                 mode_kind="wrap",
                 field=row,

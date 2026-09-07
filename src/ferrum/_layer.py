@@ -71,20 +71,36 @@ class MarkDesugarResult:
     together with ``layers`` (single-mark-only, mechanically enforced, not
     just documented).
 
-    **Consumer contract for ``mark_kwargs`` (read this before relying on it
-    in a new desugar):** it has exactly ONE live consumer today --
+    Both ``mark_kwargs`` and ``data`` are read by every single-mark consumer:
     ``Chart.mark_function`` (``marks/_chart_methods_statistical.py``), which
-    calls ``desugar_function`` directly and reads ``result.mark_kwargs``
-    itself. ``_desugar._resolve_pending_impl`` -- the dispatcher every OTHER
-    composite/diagnostic ``mark_*()`` goes through via
-    ``Chart._set_composite_mark`` -- does **not** read ``result.mark_kwargs``
-    in either of its single-mark branches (the plain single-mark path or the
-    prior-layer ``smooth_layer`` path). A future single-mark desugar that
-    sets ``mark_kwargs`` and reaches the chart through the pending dispatcher
-    (i.e. anything using ``_set_composite_mark``, not calling its desugar
-    directly the way ``mark_function`` does) will have that value silently
-    ignored. Wire it into ``_resolve_pending_impl`` first if a second
-    dispatcher-routed consumer is ever needed.
+    calls ``desugar_function`` directly, and ``_desugar._resolve_pending_impl``
+    -- the dispatcher every OTHER composite/diagnostic ``mark_*()`` goes
+    through via ``Chart._set_composite_mark``. Both merge ``mark_kwargs``
+    onto the chart's own inherited ``_mark_kwargs`` (caller's style kwargs
+    win over the desugar-computed value, which in turn wins over whatever
+    the chart already carried -- e.g. a prior ``.mark_line(stroke_width=7)``
+    survives a later dispatcher-routed desugar's own ``mark_kwargs``/style),
+    and the dispatcher applies ``data`` as the resolved chart's replacement
+    data in the plain branch; the prior-layer (``smooth_layer``) branch
+    raises rather than silently dropping ``data``, since a ``_Layer`` has no
+    per-layer raw-data slot to attach a synthetic table to without
+    corrupting the prior layer's own data (see ``_resolve_pending_impl``'s
+    comment).
+
+    **The "caller's style wins over the desugar-computed value" precedence
+    is documented but currently inert in production** (mutation-tester
+    finding, close-remediation cycle 2): exactly one desugar sets
+    ``mark_kwargs`` today (``desugar_function``), and it never reaches the
+    dispatcher -- ``Chart.mark_function`` always calls it directly, bypassing
+    ``_resolve_pending_impl`` entirely (see that function's own module for
+    why: its signature is incompatible with the dispatcher's calling
+    convention). So in shipped code the dispatcher's merge branch always
+    has ``result.mark_kwargs is None`` on one side; the precedence is
+    exercised only by a synthetic test adapter
+    (``tests/marks/test_heavy_stats.py``'s
+    ``_function_desugar_via_dispatcher``), not by any real caller. It stays
+    documented -- and mechanically correct when reached -- for the day a
+    second dispatcher-routed desugar sets ``mark_kwargs``.
 
     Attributes
     ----------

@@ -25,11 +25,7 @@ from ferrum._facet import (
 )
 from ferrum.encoding._channel_policy import _RENDERER_HONORED_CHANNELS, _SPEC_KNOWN_CHANNELS
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
-from ferrum._layer_transforms import (
-    _build_bin_transform,
-    _infer_agg_groupby,
-    _lower_bin_encoding,
-)
+from ferrum._layer_transforms import _infer_agg_groupby, _lower_bin_encoding
 from ferrum._override_consume import merge_encoding_scale as _merge_encoding_scale
 
 
@@ -677,16 +673,13 @@ class SpecBuildMixin:
             pending_bins,
             [t for t in effective_transforms if isinstance(t, _PendingAggregate)],
         )
-        absorbed_ids = {id(pa) for pa in lowering.absorbed}
-
-        resolved_transforms: list = []
-        for t in effective_transforms:
-            if isinstance(t, _PendingBin):
-                # name=None: single-chart bins are always unnamed, so the Bin
-                # advances the pipeline's chain instead of fanning out.
-                resolved_transforms.append(_build_bin_transform(t, lowering.agg_kwargs))
-            elif id(t) not in absorbed_ids:
-                resolved_transforms.append(t)
+        # name=None: single-chart bins are always unnamed, so the Bin advances
+        # the pipeline's chain instead of fanning out. `filter_transforms`
+        # drops every absorbed `_PendingAggregate` from `effective_transforms`
+        # -- see its docstring for why this is the structural enforcement of
+        # the "MUST drop them" contract.
+        bin_xform = lowering.build_bin(pending_bins[0])
+        resolved_transforms = lowering.filter_transforms(effective_transforms, bin_xform)
         return _ResolvedBins(resolved_transforms, lowering.encoding)
 
     @staticmethod

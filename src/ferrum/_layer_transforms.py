@@ -202,17 +202,71 @@ class _BinEncodingLowering(NamedTuple):
         Extra ``Bin(...)`` keyword arguments (``agg_field``/``agg``) that fold
         the opposing aggregate into the Bin, or ``{}`` when nothing folded.
     absorbed : tuple of _PendingAggregate
-        The ``_PendingAggregate`` sentinels this lowering consumed.  A caller
-        that put them on a transform list MUST drop them from it: the Bin
-        computes those values now, and a surviving ``Aggregate`` would run
-        against a schema the Bin has already replaced.  The layered caller has
-        nothing to drop (see :func:`_resolve_layer_bins`); the single-chart
-        caller does.
+        The ``_PendingAggregate`` sentinels this lowering consumed.  The Bin
+        computes those values now, so a surviving ``Aggregate`` would run
+        against a schema the Bin has already replaced -- :meth:`filter_transforms`
+        is the structural enforcement of that "a caller that put them on a
+        transform list MUST drop them" contract; callers should route through
+        it rather than filtering this field by hand.
     """
 
     encoding: dict
     agg_kwargs: dict[str, str]
     absorbed: tuple[_PendingAggregate, ...]
+
+    def build_bin(self, pending_bin: "_PendingBin", *, name: str | None = None) -> "_Bin":
+        """Build this lowering's concrete ``Bin`` from *pending_bin* and its
+        folded ``agg_kwargs``.
+
+        The one implementation of "how a lowering becomes a real ``Bin``",
+        called directly by the layered caller (:func:`_resolve_layer_bins`,
+        which has no transform list of its own to filter -- see
+        :meth:`filter_transforms`) and by the single-chart caller
+        (``SpecBuildMixin._resolve_pending_bins``) before it calls
+        :meth:`filter_transforms`.
+        """
+        return _build_bin_transform(pending_bin, self.agg_kwargs, name=name)
+
+    def filter_transforms(self, effective_transforms: list, bin_xform: "_Bin") -> list:
+        """Return a copy of *effective_transforms* with its ``_PendingBin``
+        sentinel replaced by *bin_xform* and every absorbed
+        ``_PendingAggregate`` dropped.
+
+        The single-chart caller (``SpecBuildMixin._resolve_pending_bins``)
+        routes the absorbed-aggregate drop through here, so the "a caller
+        that put them on a transform list MUST drop them" contract
+        documented on ``absorbed`` is enforced by this one function instead
+        of narrated at the call site. The layered caller never calls this --
+        a layer's aggregate sentinels never become transforms in the first
+        place (``_resolve_layer_aggregates`` skips any layer that also
+        bins), so it has no transform list of its own to filter and calls
+        only :meth:`build_bin`.
+
+        *effective_transforms* MUST contain the exact ``_PendingBin``
+        sentinel *bin_xform* was built from. Silently returning a list that
+        lacks the just-built Bin -- because no ``_PendingBin`` was found to
+        replace -- is exactly the silent-drop shape this project's
+        no-silent-fallback constraint forbids, so a list with no
+        ``_PendingBin`` at all raises rather than quietly omitting the Bin.
+        """
+        absorbed_ids = {id(pa) for pa in self.absorbed}
+        resolved: list = []
+        replaced = False
+        for t in effective_transforms:
+            if isinstance(t, _PendingBin):
+                resolved.append(bin_xform)
+                replaced = True
+            elif id(t) not in absorbed_ids:
+                resolved.append(t)
+        if not replaced:
+            raise ValueError(
+                "_BinEncodingLowering.filter_transforms: effective_transforms "
+                "contains no _PendingBin sentinel to replace with the built "
+                "Bin -- the caller's transform list and this lowering have "
+                "gone out of sync (returning a filtered list here would "
+                "silently drop the Bin from the output)."
+            )
+        return resolved
 
 
 def _build_bin_transform(
@@ -475,17 +529,16 @@ def _resolve_layer_bins(layers: list) -> tuple[list, list]:
             continue
 
         # _lower_bin_encoding refuses a layer that declares more than one bin,
-        # so exactly one sentinel survives to build the transform from.
+        # so exactly one sentinel survives to build the transform from. A
+        # layer's aggregate sentinels never become transforms in the first
+        # place (_resolve_layer_aggregates skips any layer that also bins),
+        # so there is no transform list of this layer's own to filter --
+        # only `build_bin` is needed here, not `filter_transforms` (which the
+        # single-chart caller uses, since ITS sentinels DO sit on the chart's
+        # transform list).
         lowering = _lower_bin_encoding(layer.encoding, pending, _layer_pending_aggregates(layer))
-        # `lowering.absorbed` is intentionally not consumed here, and that does
-        # not violate the "the caller MUST drop them" contract on
-        # _BinEncodingLowering: a layer's aggregate sentinels never become
-        # transforms in the first place, because _resolve_layer_aggregates skips
-        # any layer that also bins. There is nothing on a list to drop. Only the
-        # single-chart caller, whose sentinels DO sit on the chart's transform
-        # list, has to act on this field.
         bin_name = f"_layer_bin_{i}"
-        bin_xform = _build_bin_transform(pending[0], lowering.agg_kwargs, name=bin_name)
+        bin_xform = lowering.build_bin(pending[0], name=bin_name)
         named_transforms.append(_NamedTransform(bin_xform, bin_name))
 
         new_layers.append(replace(layer, encoding=lowering.encoding, data_source=bin_name))

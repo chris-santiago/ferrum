@@ -830,11 +830,59 @@ mod tests {
         ]
     }
 
+    /// Vertex count for [`monotone_curve_fixture`] stroked through
+    /// [`tessellate_path`]. A literal, because its *value* is not the point —
+    /// its *stability* is: it changes if and only if the flattened curve
+    /// changes shape, which is the drift the core/WASM fixture pairing exists
+    /// to catch.
+    ///
+    /// Deliberately NOT the only shape pin: this count moves with lyon's
+    /// flattening density as well as with the curve, so on a lyon upgrade it is
+    /// the assertion most likely to fail for a reason that is not drift. The
+    /// per-segment [`CHORD_SPANS`] band is the density-invariant half.
+    const EXPECTED_MONOTONE_VERTEX_COUNT: usize = 82;
+
+    /// One segment of [`monotone_curve_fixture`], paired with how far the
+    /// flattened curve departs from the straight chord between that segment's
+    /// own endpoints.
+    struct ChordSpan {
+        /// Open x interval of the segment.
+        x: (f32, f32),
+        /// The chord the segment's endpoints imply: `y = slope * x + intercept`.
+        slope: f32,
+        intercept: f32,
+        /// Max `|curve - chord|` over the interval, to [`DEVIATION_TOL`].
+        deviation: f32,
+    }
+
+    /// All three fixture segments. A one-sided check over segment 1 alone —
+    /// what this test carried before — cannot see a control point moved in
+    /// segment 0 or 2, and the disclosed RED for the vertex count
+    /// (`c2y: 30.0 -> 24.0`) is exactly such a perturbation: it leaves both the
+    /// bbox and segment 1's deviation untouched.
+    const CHORD_SPANS: [ChordSpan; 3] = [
+        ChordSpan { x: (0.0, 10.0), slope: 3.0, intercept: 0.0, deviation: 4.424_215_3 },
+        ChordSpan { x: (10.0, 20.0), slope: -2.0, intercept: 50.0, deviation: 1.911_701_2 },
+        ChordSpan { x: (20.0, 30.0), slope: 3.0, intercept: -50.0, deviation: 4.424_22 },
+    ];
+
+    /// Band half-width for [`CHORD_SPANS`]. Wide enough to absorb a change in
+    /// lyon's flattening density (a coarser polyline samples the extremum less
+    /// exactly), an order of magnitude tighter than the ~1.66 px shift the
+    /// disclosed RED produces.
+    const DEVIATION_TOL: f32 = 0.15;
+
+    /// Vertices sitting exactly on a segment boundary belong to both chords and
+    /// deviate from neither; skipped so a shared endpoint cannot drag a
+    /// segment's measured maximum toward zero.
+    const EDGE_MARGIN: f32 = 0.001;
+
     /// WASM parity (spec §7): a curve-interpolated line must render through
     /// the GPU path, not just the SVG walker. `CubicTo` reaches lyon's
     /// `cubic_bezier_to`, so the stroked mesh follows the flattened curve —
     /// which means its vertices must leave the straight chord between the
-    /// data points that a `linear` trace of the same points would hug.
+    /// data points that a `linear` trace of the same points would hug, span
+    /// the fixture's own extent, and flatten to a stable vertex count.
     #[test]
     fn curve_cubics_from_ferrum_core_tessellate() {
         let commands = monotone_curve_fixture();
@@ -852,19 +900,71 @@ mod tests {
             "every tessellated vertex must be finite"
         );
 
-        // The straight chord from (10,30) to (20,10) is `y = 50 - 2x`. The
-        // monotone curve flattens the crossing of that span, so at least one
-        // tessellated vertex must sit measurably off the chord.
-        let max_deviation = buffers
-            .vertices
-            .iter()
-            .filter(|v| v.position[0] > 10.0 && v.position[0] < 20.0)
-            .map(|v| (v.position[1] - (50.0 - 2.0 * v.position[0])).abs())
-            .fold(0.0_f32, f32::max);
+        // Two-sided per-segment deviation band. Each fixture segment departs
+        // from the straight chord between its own endpoints by a fixed amount
+        // that is a property of the CURVE, not of how finely lyon subdivides
+        // it — so this discriminates a moved control point while staying
+        // robust to a flattening-density change, which the vertex count below
+        // cannot. A perturbation in any one segment moves that segment's own
+        // band; a one-sided check over a single span (what this was) missed
+        // two of the three segments entirely.
+        for (i, span) in CHORD_SPANS.iter().enumerate() {
+            let observed = buffers
+                .vertices
+                .iter()
+                .filter(|v| v.position[0] > span.x.0 + EDGE_MARGIN
+                    && v.position[0] < span.x.1 - EDGE_MARGIN)
+                .map(|v| (v.position[1] - (span.slope * v.position[0] + span.intercept)).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                (observed - span.deviation).abs() < DEVIATION_TOL,
+                "segment {i}: the flattened curve must depart from its chord by \
+                 {} px (±{DEVIATION_TOL}), got {observed} — a straight-segment path \
+                 would be ~0 and a moved control point shifts this",
+                span.deviation
+            );
+        }
+
+        // Extent pin. Without the shape pins in this test the assertions pass
+        // for ANY three cubics, so the pairing with `ferrum-core`'s fixture
+        // would be inert: if the curve math changed, the core test would fail
+        // and be updated, this literal would go stale, and this test would stay
+        // green on a shape production no longer emits.
+        let (min_x, max_x, min_y, max_y) = buffers.vertices.iter().fold(
+            (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+            |(lo_x, hi_x, lo_y, hi_y), v| {
+                (
+                    lo_x.min(v.position[0]),
+                    hi_x.max(v.position[0]),
+                    lo_y.min(v.position[1]),
+                    hi_y.max(v.position[1]),
+                )
+            },
+        );
+        let bbox = (min_x, max_x, min_y, max_y);
+        let expected = (0.0_f32, 30.0_f32, 0.0_f32, 40.0_f32);
+        // Flattening tolerance, NOT a stroke allowance: `MeshVertex::position`
+        // is the CENTERLINE — stroke width rides `normal`/`half_width` and is
+        // applied in the shader — so `style.stroke_width` does not widen this
+        // bbox at all. The slack is lyon's chord error where the flattened
+        // polyline meets the fixture's extreme points.
+        let tol = 0.05_f32;
         assert!(
-            max_deviation > 1.0,
-            "the tessellated mesh must follow the CURVE, not the chord \
-             (max deviation {max_deviation} px); a straight-segment path would be ~0"
+            (bbox.0 - expected.0).abs() <= tol
+                && (bbox.1 - expected.1).abs() <= tol
+                && (bbox.2 - expected.2).abs() <= tol
+                && (bbox.3 - expected.3).abs() <= tol,
+            "the tessellated mesh must span the fixture's own extent \
+             (x {}..{}, y {}..{}); got x {}..{}, y {}..{} — the core fixture drifted",
+            expected.0, expected.1, expected.2, expected.3,
+            bbox.0, bbox.1, bbox.2, bbox.3,
+        );
+        assert_eq!(
+            buffers.vertices.len(),
+            EXPECTED_MONOTONE_VERTEX_COUNT,
+            "lyon's flattening of the pinned cubics produced a different vertex count; \
+             either the fixture drifted from `ferrum-core`'s monotone output or the \
+             tessellation tolerance changed"
         );
     }
 

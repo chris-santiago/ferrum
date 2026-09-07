@@ -307,18 +307,18 @@ impl Trace {
     /// already been emitted by the caller.
     fn push_segments(self, cmds: &mut Vec<PathCmd>, uv: &[(f64, f64)]) {
         let (points, step, axis) = (uv, self.step, self.axis);
-        let method = self.method;
-    // A curve needs a neighbourhood to shape itself against: with two points
-    // there is exactly one segment and no curvature to describe, so the three
-    // curve methods degrade to `linear` (spec §6.1). d3 degrades identically.
-    let method = match method {
-        Interpolate::Monotone | Interpolate::Basis | Interpolate::Cardinal
-            if points.len() < 3 =>
-        {
-            Interpolate::Linear
-        }
-        other => other,
-    };
+        // A curve needs a neighbourhood to shape itself against: with two
+        // points there is exactly one segment and no curvature to describe, so
+        // the three curve methods degrade to `linear` (spec §6.1). d3 degrades
+        // identically.
+        let method = match self.method {
+            Interpolate::Monotone | Interpolate::Basis | Interpolate::Cardinal
+                if points.len() < 3 =>
+            {
+                Interpolate::Linear
+            }
+            other => other,
+        };
 
         match method {
             Interpolate::Linear => {
@@ -521,6 +521,67 @@ fn push_cardinal(cmds: &mut Vec<PathCmd>, points: &[(f64, f64)], axis: CurveAxis
     }
 }
 
+/// What a traced path reveals about the axis it was ACTUALLY fitted against —
+/// read back off the emitted commands, not off what the builder declared.
+///
+/// Test-only, `pub(crate)` because the question spans marks: `line`, `area`,
+/// and `ribbon` each derive [`Trace::axis`] independently, and this module's
+/// own doc says getting it wrong is silent. See
+/// [`super::curve_axis`](super::curve_axis) for the cross-mark matrix that
+/// consumes this.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObservedTrace {
+    /// The coordinate the cubics are fitted against, or `None` when the
+    /// commands do not decide the question (see [`observe_monotone_trace`]).
+    pub(crate) axis: Option<CurveAxis>,
+    /// How many leading [`PathCmd::CubicTo`] commands were inspected.
+    pub(crate) cubics: usize,
+}
+
+/// Recover the [`CurveAxis`] a `monotone` trace was fitted against by
+/// inspecting its control points.
+///
+/// [`push_monotone`] places each cubic's control points at exactly one and two
+/// thirds of the segment's span along the INDEPENDENT coordinate (`u0 + h/3`,
+/// `u1 - h/3`), while the dependent coordinate rides the Hermite tangent and
+/// lands on a third only by coincidence. So the thirds are a signature: they
+/// hold on x for an x-parameterized fit and on y for a y-parameterized one.
+///
+/// `axis` is `None` when the commands do not discriminate — no leading cubics,
+/// or a fixture whose thirds happen to hold on both coordinates (e.g. a series
+/// with a constant dependent coordinate, where the tangent IS the secant). A
+/// `None` is a broken fixture, not a passing observation; callers assert on the
+/// axis they expect rather than on `is_some`.
+#[cfg(test)]
+pub(crate) fn observe_monotone_trace(cmds: &[PathCmd]) -> ObservedTrace {
+    const EPS: f64 = 1e-9;
+
+    let Some(&PathCmd::MoveTo { x, y }) = cmds.first() else {
+        return ObservedTrace { axis: None, cubics: 0 };
+    };
+    let (mut px, mut py) = (x, y);
+    let (mut thirds_on_x, mut thirds_on_y) = (true, true);
+    let mut cubics = 0;
+    for cmd in &cmds[1..] {
+        let PathCmd::CubicTo { c1x, c1y, c2x, c2y, x, y } = *cmd else { break };
+        let on_thirds = |start: f64, end: f64, c1: f64, c2: f64| {
+            let third = (end - start) / 3.0;
+            (c1 - (start + third)).abs() < EPS && (c2 - (end - third)).abs() < EPS
+        };
+        thirds_on_x &= on_thirds(px, x, c1x, c2x);
+        thirds_on_y &= on_thirds(py, y, c1y, c2y);
+        (px, py) = (x, y);
+        cubics += 1;
+    }
+    let axis = match (cubics > 0 && thirds_on_x, cubics > 0 && thirds_on_y) {
+        (true, false) => Some(CurveAxis::X),
+        (false, true) => Some(CurveAxis::Y),
+        _ => None,
+    };
+    ObservedTrace { axis, cubics }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +778,52 @@ mod tests {
                 *c1y <= 10.0 + 1e-9 && *c2y <= 10.0 + 1e-9,
                 "monotone must not overshoot the rise; got c1y={c1y}, c2y={c2y}"
             );
+        }
+    }
+
+    /// The Fritsch–Carlson clamp itself, exercised.
+    ///
+    /// `monotone_does_not_overshoot_a_local_extremum` above is named for this
+    /// property but never reaches the clamp: its secants are `[0, 0, 10]`, so
+    /// every interior tangent is zeroed by the separate `secants[i] == 0.0`
+    /// branch and the one non-degenerate interval lands at `radius_sq == 1`,
+    /// far under the threshold of 9. A mutation run raised the threshold to
+    /// 900 — disabling the clamp outright — and the whole crate stayed green.
+    ///
+    /// This fixture is the steep-then-shallow shape the clamp exists for: a
+    /// jump of 10 followed by a rise of 1 gives secants `[10, 1]` and an
+    /// averaged interior tangent of `5.5`, so the second interval has
+    /// `alpha = 5.5`, `beta = 1` and **`radius_sq = 31.25`**. That value is
+    /// deliberately between the two thresholds: over the real `9` (so the
+    /// clamp fires here) and under the mutant `900` (so raising the threshold
+    /// genuinely disables it, rather than leaving a still-clamped result). A
+    /// steeper fixture — `(2, 10.1)`, `radius_sq ≈ 2551` — would clamp under
+    /// BOTH thresholds and prove nothing.
+    ///
+    /// Unclamped, the `5.5` tangent carries the second segment's first control
+    /// point to `10 + 5.5/3 ≈ 11.83`, overshooting the `11` the data reaches;
+    /// clamped, every control point stays inside its segment's own value span,
+    /// which is the module header's stated contract ("passes through every
+    /// point and never overshoots between them").
+    #[test]
+    fn monotone_clamps_a_steep_then_shallow_run_inside_each_segment() {
+        let points = [(0.0, 0.0), (1.0, 10.0), (2.0, 11.0)];
+        let cmds = trace(Interpolate::Monotone, StepSpelling::Shorthand).subpath(&points);
+        assert_eq!(cubic_count(&cmds), 2, "MoveTo + 2 CubicTo; got {cmds:?}");
+
+        for (i, cmd) in cmds[1..].iter().enumerate() {
+            let PathCmd::CubicTo { c1y, c2y, .. } = *cmd else {
+                panic!("expected CubicTo, got {cmd:?}");
+            };
+            let (v0, v1) = (points[i].1, points[i + 1].1);
+            let (lo, hi) = (v0.min(v1), v0.max(v1));
+            for (name, c) in [("c1y", c1y), ("c2y", c2y)] {
+                assert!(
+                    c >= lo - 1e-9 && c <= hi + 1e-9,
+                    "segment {i}: {name} must stay inside the segment's value span \
+                     [{lo}, {hi}], got {c} — an unclamped Hermite tangent overshoots here"
+                );
+            }
         }
     }
 
@@ -1008,6 +1115,54 @@ mod tests {
                 PathCmd::HLineTo { x: 40.0 },
             ],
             "a y-parameterized step-after treads along y then risers along x"
+        );
+    }
+
+    // ── observe_monotone_trace: the cross-mark axis observer ─────────────
+
+    /// The observer must read the axis back off real traced output for BOTH
+    /// parameterizations, and must refuse to answer when the fixture cannot
+    /// discriminate. Without this, the cross-mark matrix in
+    /// [`super::super::curve_axis`] could pass on a fixture that decides
+    /// nothing.
+    #[test]
+    fn observer_recovers_the_axis_a_trace_was_actually_fitted_against() {
+        for step in [StepSpelling::Shorthand, StepSpelling::Vertices] {
+            let along_x = Trace { method: Interpolate::Monotone, step, axis: CurveAxis::X }
+                .subpath(&SAMPLE);
+            assert_eq!(
+                observe_monotone_trace(&along_x),
+                ObservedTrace { axis: Some(CurveAxis::X), cubics: 3 },
+                "an x-parameterized monotone trace puts its thirds on x"
+            );
+
+            let along_y = Trace { method: Interpolate::Monotone, step, axis: CurveAxis::Y }
+                .subpath(&transpose(&SAMPLE));
+            assert_eq!(
+                observe_monotone_trace(&along_y),
+                ObservedTrace { axis: Some(CurveAxis::Y), cubics: 3 },
+                "a y-parameterized monotone trace puts its thirds on y"
+            );
+        }
+    }
+
+    /// A non-discriminating fixture answers `None`, not an arbitrary axis: with
+    /// a constant dependent coordinate every tangent IS the secant, so the
+    /// thirds hold on both axes at once. A caller that asserted only
+    /// `is_some()` would be pinned by nothing.
+    #[test]
+    fn observer_refuses_to_answer_on_a_non_discriminating_trace() {
+        let flat = [(0.0, 5.0), (10.0, 5.0), (20.0, 5.0), (30.0, 5.0)];
+        let cmds = trace(Interpolate::Monotone, StepSpelling::Shorthand).subpath(&flat);
+        let observed = observe_monotone_trace(&cmds);
+        assert_eq!(observed.cubics, 3, "the flat run still emits three cubics");
+        assert_eq!(observed.axis, None, "thirds hold on both coordinates here");
+
+        // No cubics at all is likewise undecided, not a false positive.
+        let linear = trace(Interpolate::Linear, StepSpelling::Shorthand).subpath(&SAMPLE);
+        assert_eq!(
+            observe_monotone_trace(&linear),
+            ObservedTrace { axis: None, cubics: 0 }
         );
     }
 

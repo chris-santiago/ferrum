@@ -54,9 +54,7 @@ def test_ribbon_y2_field_propagates(df):
 def test_ribbon_interpolate_forwarded_to_mark_kwargs(df):
     """desugar_ribbon must put ``interpolate`` in the emitted layer's
     mark_kwargs, not discard it after validating."""
-    chart = fe.Chart(df).mark_ribbon(interpolate="cardinal").encode(
-        x="t", y="lo", y2="hi"
-    )
+    chart = fe.Chart(df).mark_ribbon(interpolate="cardinal").encode(x="t", y="lo", y2="hi")
     json_str = chart._build_spec().to_json()
     assert '"interpolate":"cardinal"' in json_str
 
@@ -69,10 +67,7 @@ def test_ribbon_cardinal_differs_from_linear_bytes(df):
         fe.Chart(df).mark_ribbon(interpolate="linear").encode(x="t", y="lo", y2="hi").to_svg()
     )
     cardinal_svg = (
-        fe.Chart(df)
-        .mark_ribbon(interpolate="cardinal")
-        .encode(x="t", y="lo", y2="hi")
-        .to_svg()
+        fe.Chart(df).mark_ribbon(interpolate="cardinal").encode(x="t", y="lo", y2="hi").to_svg()
     )
     assert linear_svg != cardinal_svg
 
@@ -80,12 +75,7 @@ def test_ribbon_cardinal_differs_from_linear_bytes(df):
 def test_ribbon_cardinal_emits_curve_command(df):
     """A curved ribbon boundary must emit an SVG cubic-bezier ("C") path
     command; a linear boundary uses only "M"/"L"."""
-    svg = (
-        fe.Chart(df)
-        .mark_ribbon(interpolate="cardinal")
-        .encode(x="t", y="lo", y2="hi")
-        .to_svg()
-    )
+    svg = fe.Chart(df).mark_ribbon(interpolate="cardinal").encode(x="t", y="lo", y2="hi").to_svg()
     assert " C" in svg
 
 

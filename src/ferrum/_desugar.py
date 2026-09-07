@@ -167,6 +167,21 @@ def _apply_style_to_layer(layer: _Layer, style_dict: dict) -> _Layer:
     return replace(layer, mark_kwargs=merged)
 
 
+def _merge_desugar_mark_kwargs(desugar_kwargs: dict | None, style_dict: dict) -> dict | None:
+    """Merge a desugar-computed ``mark_kwargs`` with the caller's style kwargs.
+
+    The caller's style kwargs (*style_dict*, already validated through
+    ``MarkBase``) win over any constant style the desugar itself computed
+    (e.g. ``desugar_function``'s ``clip=False`` escape) -- the same
+    precedence :func:`_apply_style_to_layer` applies in layered mode.
+    Returns ``None`` when neither side has anything to set, so output stays
+    byte-identical to before either source existed.
+    """
+    if not desugar_kwargs and not style_dict:
+        return None
+    return {**(desugar_kwargs or {}), **style_dict}
+
+
 def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
     """Apply a desugar remap to an encoding dict, preserving axis titles.
 
@@ -455,6 +470,36 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
     against a depth the chart doesn't render) through a new mechanism, on
     any chart that merely adds a cosmetic ``.encode(color=...)`` without
     ``palette=``.
+
+    The chart's facet field(s), when present (``ctx.chart._facet``), are
+    folded into :func:`_boxen_materialized_depth`'s groupby (batch-E close
+    remediation, 2026-09-07 -- see that function's ``extra_groupby_fields``
+    docstring): a faceted chart's real per-panel depth can be materially
+    shallower than the depth this desugar would estimate by pooling a
+    group's rows across every panel, which otherwise flattens the ramp
+    contrast on every panel toward whichever one pools deepest. This is a
+    disclosed byte-stability exception: a faceted ``mark_boxen()`` chart's
+    rendered SVG bytes may change from before this fix.
+
+    **Scope of the facet fix, stated exactly (cycle-2 design review S3):**
+    this only works when ``ctx.chart._facet`` is already set at the moment
+    this prep step runs, i.e. when ``.facet()`` was called BEFORE the
+    pending mark was resolved. ``_resolve_pending_impl`` runs eagerly from
+    ``Chart.__add__`` and ``Chart.layer()`` (``chart.py`` -- both call
+    ``self._resolve_pending()`` before doing their own work), so
+    ``mark_boxen() + mark_point()`` followed by ``.facet(col=...)`` resolves
+    the boxen desugar (and this prep step) BEFORE ``.facet()`` ever runs --
+    ``ctx.chart._facet`` is still ``None`` at that point, so the fix does
+    not apply and the chart still pools across panels exactly as before
+    this batch. ``mark_boxen().facet(col=...)`` (and the equivalent
+    ``encode(facet_col=...)`` / ``catplot(kind="boxen", col=...)``
+    spellings, which resolve the pending mark no earlier) ARE fixed, since
+    ``.facet()`` runs first there and ``ctx.chart._facet`` is populated by
+    the time this prep step reads it. A lifecycle re-plumb so the layered
+    path also resolves facet-aware is a filed follow-up, not attempted
+    here -- see ``tests/test_boxen_ramp_prep.py``'s
+    ``test_layered_boxen_facet_still_pools_across_panels_pending_lifecycle_fix``
+    for the pinned pooled value.
     """
     if ctx.transform_kwargs.get("palette") is not None:
         return
@@ -467,12 +512,48 @@ def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
 
     from ferrum.marks.composite import _boxen_materialized_depth
 
+    # Read k_depth/k_proportion as passed, with no re-declared default and no
+    # presence guard (design review cycle-2 S2): `Chart.mark_boxen()` always
+    # forwards both explicitly (its own signature carries the real defaults,
+    # "tukey"/0.007), so by the time a boxen reaches this prep step both keys
+    # are always present -- a THIRD copy of those literals here would only
+    # ever drift from `desugar_boxen`'s own defaults if either default
+    # changed. A future caller that reaches this prep step without either
+    # key is an impossible-today case that should raise loud (`KeyError`),
+    # not silently degrade to the full-cap fallback ramp -- this project's
+    # no-silent-fallback constraint declines the "safer to not raise" trade
+    # a membership guard would make here.
+    #
+    # Facet-scoped groupby (2026-09-07, disclosed byte-stability rider) --
+    # ONLY when `ctx.chart._facet` is already populated at this point (see
+    # this function's docstring "Scope of the facet fix" section: `+`/
+    # `.layer()` resolve the pending mark before `.facet()` can ever run, so
+    # this reads `None` and the fix is inert on that lifecycle -- pinned by
+    # `test_layered_boxen_facet_still_pools_across_panels_pending_lifecycle_fix`).
+    # When it IS populated, folding the facet field(s) into
+    # `_boxen_materialized_depth`'s groupby corrects the estimate: a faceted
+    # chart's LetterValue transform runs on each facet panel's own row
+    # subset, but this desugar runs once for the whole chart, so pooling a
+    # group's rows ACROSS panels (the pre-fix behavior) can only ever
+    # estimate a depth >= what any single panel really materializes, which
+    # flattens every panel's ramp contrast toward the panel with the
+    # deepest pooled group -- see `_boxen_materialized_depth`'s
+    # `extra_groupby_fields` docstring and `tests/test_boxen_ramp_prep.py`'s
+    # faceted case for the measured effect. `_Facet.field`/`.row`/`.col`
+    # mirrors `_spec_build.py`'s own `(resolved._facet.col, resolved._facet.row,
+    # resolved._facet.field)` sweep: wrap mode sets only `field`, grid mode
+    # sets only `row`/`col` (`_Facet.__post_init__` enforces this), so no
+    # mode branch is needed.
+    facet = ctx.chart._facet
+    facet_fields = (facet.field, facet.row, facet.col) if facet is not None else ()
+
     depth = _boxen_materialized_depth(
         ctx.chart._data,
         value_field=value_field,
         group_field=group_field,
-        k_depth=ctx.transform_kwargs.get("k_depth", "tukey"),
-        k_proportion=ctx.transform_kwargs.get("k_proportion", 0.007),
+        k_depth=ctx.transform_kwargs["k_depth"],
+        k_proportion=ctx.transform_kwargs["k_proportion"],
+        extra_groupby_fields=tuple(f for f in facet_fields if f),
     )
     if depth is not None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "materialized_depth": depth}
@@ -692,16 +773,33 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
     transforms = result.transforms
     remap = result.remap
     if _prior_layer is not None:
+        if result.data is not None:
+            # No shipped desugar produces this combination today (the only
+            # `.data`-producing desugar, `desugar_function`, never runs with a
+            # prior_mark -- `Chart.mark_function` calls it directly, bypassing
+            # this dispatcher entirely). Guarded rather than silently dropped:
+            # a `_Layer` has no per-layer raw-data slot, so there is no
+            # correct place to attach a synthetic replacement table here
+            # without silently discarding either it or the prior layer's own
+            # data -- adding that slot is required before a future desugar
+            # can combine the two.
+            raise ValueError(
+                f"{kind!r} desugar returned both `data` (a synthetic "
+                "replacement table) and ran alongside a prior primitive-mark "
+                "layer; MarkDesugarResult.data has no defined meaning in "
+                "that combination (a _Layer has no per-layer raw-data slot)."
+            )
         smooth_enc = dict(chart._encoding)
         if remap:
             _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding)
         smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)
         # Style applies to the composite's emitted smooth layer only; the prior
-        # scatter layer keeps its own mark_kwargs.
+        # scatter layer keeps its own mark_kwargs. Caller style wins over any
+        # desugar-computed mark_kwargs (e.g. desugar_function's clip=False).
         smooth_layer = _Layer(
             mark=mark,
             encoding=smooth_enc,
-            mark_kwargs=(dict(style_dict) if style_dict else None),
+            mark_kwargs=_merge_desugar_mark_kwargs(result.mark_kwargs, style_dict),
             data_source="smooth",
         )
         new._transforms = list(chart._transforms) + list(transforms)
@@ -710,10 +808,23 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         return new
     new._mark = mark
     new._transforms = list(chart._transforms) + list(transforms)
-    # Only override the cloned default when the user passed style kwargs, so
-    # output stays byte-identical when none are given.
-    if style_dict:
-        new._mark_kwargs = style_dict
+    # Merge the desugar-computed mark_kwargs (e.g. desugar_function's
+    # clip=False) with the caller's own style kwargs (caller winning), then
+    # merge THAT onto `new._mark_kwargs` -- which `_clone()` already
+    # inherited from `chart._mark_kwargs` -- rather than replacing it
+    # outright. Mirrors `Chart.mark_function`'s own direct-path merge
+    # (`{**new._mark_kwargs, **line_mark_kwargs}`,
+    # `marks/_chart_methods_statistical.py`): a chart that already carries
+    # its own mark kwargs (e.g. `.mark_line(stroke_width=7)` called before a
+    # dispatcher-routed desugar) must keep them, not lose them to whatever
+    # this desugar/caller combination computed (design review cycle-2 S2).
+    # Only touches `new._mark_kwargs` when there is something new to fold
+    # in, so output stays byte-identical when neither source has anything.
+    merged_mark_kwargs = _merge_desugar_mark_kwargs(result.mark_kwargs, style_dict)
+    if merged_mark_kwargs:
+        new._mark_kwargs = {**new._mark_kwargs, **merged_mark_kwargs}
+    if result.data is not None:
+        new._data = result.data
     if result.position is not None:
         new._position = result.position
     if remap:

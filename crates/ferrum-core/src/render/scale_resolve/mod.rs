@@ -146,13 +146,20 @@ impl ScaleKind {
     /// had already turned into `NaN` never reaches the node list for the
     /// clip rect to matter.
     ///
-    /// Scoped deliberately: `mark_line` is the ONLY consumer (it is the mark
-    /// `mark_function` desugars to), gated on the resolved mark style's
-    /// `clip == Some(false)`. Every other mark builder keeps calling
-    /// `to_pixel_f64`, so introducing this method changes no other mark's
-    /// rendered output — widening every positional read in the crate to
-    /// extrapolate was considered and rejected as a far wider seam than this
-    /// finding needs (see `mark_function` batch-E T13 completeness report).
+    /// Scoped to the line family — `mark_line`, `mark_area`, `mark_ribbon` —
+    /// all of which reach it through the single gate on
+    /// [`DrawCtx::to_pixel`](crate::render::draw::DrawCtx::to_pixel), never by
+    /// calling this method directly. `MarkKwargsSpec::clip` has no per-mark
+    /// allowlist on the Rust side, so scoping the *input* is not available;
+    /// scoping the *consumers* to one shared method is, and it is what makes
+    /// the field mean one thing across the family. (It briefly meant two: only
+    /// `mark_line` read the gate, so an `area`/`ribbon` layer carrying
+    /// `clip: false` got the SVG-group escape while still dropping the vertices
+    /// that escape existed to reveal.) Every other mark builder keeps calling
+    /// `to_pixel_f64`, so no other mark's rendered output changes — widening
+    /// every positional read in the crate to extrapolate was considered and
+    /// rejected as a far wider seam than this finding needs (see
+    /// `mark_function` batch-E T13 completeness report).
     /// `Ordinal` scales have no continuous mapping to extrapolate, so this
     /// still returns `None` for them, exactly as `to_pixel_f64` does.
     pub fn to_pixel_f64_extrapolated(&self, x: f64) -> Option<f64> {

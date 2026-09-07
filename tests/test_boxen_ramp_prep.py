@@ -281,3 +281,133 @@ def test_boxen_ramp_falls_back_to_full_cap_when_materialized_depth_is_none():
         for k in range(1, depth_count + 1)
     }
     assert opacities == expected
+
+
+# ---------------------------------------------------------------------------
+# 5. Faceted boxen: the ramp must normalize against what a SINGLE panel
+#    materializes, not against a group's rows pooled across every panel.
+# ---------------------------------------------------------------------------
+
+
+def test_boxen_materialized_depth_pools_across_panels_without_the_facet_field():
+    """Baseline confirming the hypothesis (batch-E close remediation design
+    S2/HYPOTHESIS): with no facet field passed, `_boxen_materialized_depth`
+    groups by `group_field` ALONE, so three panels' worth of the SAME
+    group's rows (60 each) pool into one group of 180 -- tukey depth 4 --
+    even though no single panel's own 60 rows would ever produce more than
+    depth 2. This is the exact inflation the `extra_groupby_fields` fix
+    below corrects."""
+    df = pl.concat(
+        [
+            pl.DataFrame({"panel": [p] * 60, "g": ["only"] * 60, "v": list(range(60))})
+            for p in ("p0", "p1", "p2")
+        ]
+    )
+    pooled = _boxen_materialized_depth(
+        df, value_field="v", group_field="g", k_depth="tukey", k_proportion=0.007
+    )
+    assert pooled == 4
+    per_panel = _boxen_materialized_depth(
+        df,
+        value_field="v",
+        group_field="g",
+        k_depth="tukey",
+        k_proportion=0.007,
+        extra_groupby_fields=("panel",),
+    )
+    assert per_panel == 2
+
+
+def test_faceted_boxen_ramp_matches_each_panels_own_depth_not_the_pooled_one():
+    """MATERIAL confirmation, through the real render: a faceted boxen chart
+    whose per-panel group is too shallow (own n=60, own depth 2) to reach
+    the depth the SAME group's rows would reach if pooled across all three
+    panels (180 rows, depth 4) must render each panel's ramp normalized
+    against its OWN depth (2 bands, opacities 0.85/0.30), not the pooled one
+    (4 bands, opacities 0.85/0.667/0.483/0.30) -- the pooled ramp is what
+    every panel rendered before this fix, flattening the contrast of a
+    2-band chart toward a 4-band chart's step size. This is the disclosed
+    byte-stability rider: a faceted `mark_boxen()` chart's rendered SVG may
+    change from before this fix."""
+    n = 60
+    df = pl.concat(
+        [
+            pl.DataFrame({"panel": [p] * n, "g": ["only"] * n, "v": list(range(n))})
+            for p in ("p0", "p1", "p2")
+        ]
+    )
+    svg = fm.Chart(df).mark_boxen().encode(x="g", y="v").facet(col="panel").to_svg()
+    opacities = _rendered_opacities(svg)
+
+    # Own-depth-2 ramp: 2 bands per panel, 3 panels. SVG fills quantize
+    # opacity to an 8-bit alpha channel (rgba round-trip), so compare with a
+    # tolerance rather than exact float equality -- ~1/255 =~ 0.004 per step.
+    assert len(opacities) == 6
+    own_denominator = max(2 - 1, 1)
+    expected_per_panel = [
+        min(max(0.85 - 0.55 * (k - 1) / own_denominator, 0.15), 0.85) for k in (1, 2)
+    ]
+    for i in range(0, 6, 2):
+        panel_opacities = opacities[i : i + 2]
+        assert panel_opacities == pytest.approx(expected_per_panel, abs=0.005), (
+            f"panel at opacities[{i}:{i + 2}] = {panel_opacities} does not match "
+            f"its own depth-2 ramp {expected_per_panel} -- looks pooled instead"
+        )
+
+    # And explicitly NOT the pooled depth-4 ramp any panel would show under
+    # the pre-fix global-pooled estimate.
+    pooled_denominator = max(4 - 1, 1)
+    pooled_k2_opacity = 0.85 - 0.55 * (2 - 1) / pooled_denominator
+    assert opacities[1] != pytest.approx(pooled_k2_opacity, abs=0.005)
+
+
+def test_layered_boxen_facet_still_pools_across_panels_pending_lifecycle_fix():
+    """Scope pin for the facet fix (close-remediation cycle-2 design review
+    S3): `Chart.__add__` and `Chart.layer()` both call `self._resolve_pending()`
+    (`chart.py`) BEFORE doing their own work, so a chart built as
+    `mark_boxen() + mark_point()` resolves the boxen desugar -- and runs
+    `_prep_boxen_ramp_depth` -- while `ctx.chart._facet` is still `None`,
+    strictly BEFORE the later `.facet(col=...)` call ever populates it. The
+    facet-aware fix in `_prep_boxen_ramp_depth`/`_boxen_materialized_depth`
+    therefore does NOT reach this lifecycle: the chart still pools every
+    panel's rows together and renders the SAME (wrong, pooled depth-4) ramp
+    on all three panels, identical to `test_faceted_boxen_ramp_matches_...`'s
+    documented pre-fix pooled values (0.851/0.667 for k=1/k=2).
+
+    This is NOT a bug this test asks to be fixed -- it pins the CURRENT,
+    known-incomplete scope so the layered-path lifecycle re-plumb (filed as
+    a follow-up, not attempted in this batch) has a visible, regression-
+    detectable blast radius rather than an invisible one, the same
+    treatment the honored-gate-asymmetry tests give that follow-up."""
+    n = 60
+    df = pl.concat(
+        [
+            pl.DataFrame({"panel": [p] * n, "g": ["only"] * n, "v": list(range(n))})
+            for p in ("p0", "p1", "p2")
+        ]
+    )
+    chart = (
+        fm.Chart(df).mark_boxen().encode(x="g", y="v")
+        + fm.Chart(df).mark_point().encode(x="g", y="v")
+    ).facet(col="panel")
+    opacities = _rendered_opacities(chart.to_svg())
+
+    # 2 boxen bands per panel, 3 panels (the point layer renders a plain
+    # hex fill, not `rgba(...)`, so it contributes nothing to this list).
+    # Pooled depth-4 ramp, identical across all three panels -- NOT each
+    # panel's own depth-2 ramp, unlike the `.facet()`-first construction
+    # order pinned above.
+    assert len(opacities) == 6
+    pooled_denominator = max(4 - 1, 1)
+    pooled_ramp = [min(max(0.85 - 0.55 * (k - 1) / pooled_denominator, 0.15), 0.85) for k in (1, 2)]
+    for i in range(0, 6, 2):
+        panel_opacities = opacities[i : i + 2]
+        assert panel_opacities == pytest.approx(pooled_ramp, abs=0.005), (
+            f"panel at opacities[{i}:{i + 2}] = {panel_opacities} does not match "
+            f"the pooled depth-4 ramp {pooled_ramp} -- the layered lifecycle fix "
+            "landed, this test needs updating rather than being deleted"
+        )
+    # Every panel renders identically (the whole point of this test): a
+    # per-panel-correct fix would make panels DIFFER, since each panel's own
+    # n=60 subset only reaches depth 2.
+    assert opacities == opacities[:2] * 3

@@ -172,3 +172,14 @@ def test_desugar_returns_mark_desugar_result(
     assert not isinstance(result, tuple), (
         f"{name} returned a tuple — regression to the old N-tuple protocol"
     )
+
+
+def test_layered_result_rejects_mark_kwargs():
+    """``MarkDesugarResult.__post_init__`` rejects ``mark_kwargs`` set
+    together with ``layers`` (single-mark-only field, mechanically enforced
+    per the class docstring's example). Mutation-tester advisory (batch-E
+    close remediation): this guard (M19) was previously killed only by the
+    `nox -s doctests` session's doctest example, with no coverage in the
+    default `pytest` run -- this closes that gap with a direct test."""
+    with pytest.raises(ValueError, match="mark_kwargs is single-mark-only"):
+        MarkDesugarResult(layers=[], mark_kwargs={"clip": False})

@@ -13,7 +13,7 @@ use ferrum_scene::{
 
 use super::color::{parse_color, with_opacity, Color};
 use super::marks::curve::Interpolate;
-use super::scale_resolve::{ColorInput, ColorScale, ResolvedScales};
+use super::scale_resolve::{ColorInput, ColorScale, ResolvedScales, ScaleKind};
 use super::RenderError;
 
 impl DrawCtx<'_> {
@@ -52,6 +52,42 @@ impl DrawCtx<'_> {
         let horizontal = self.coord_flipped()
             || super::position::BatchPositionMeta::from_batch(self.batch).stack_value_on_x();
         if horizontal { CurveAxis::Y } else { CurveAxis::X }
+    }
+
+    /// Project a quantitative value to a pixel coordinate, honoring this mark's
+    /// `clip=` — the draw-time half of the escape (batch-E T13).
+    ///
+    /// `clip=False` at the SVG-group level only stops the group from being
+    /// clipped; a vertex the scale had already turned into `None` never reaches
+    /// the node list for that escape to apply to. So an unclipped batch must
+    /// also read its positions through
+    /// [`ScaleKind::to_pixel_f64_extrapolated`], which keeps an out-of-domain
+    /// point at the pixel its scale's own formula computes rather than dropping
+    /// it. The default (`clip` unset or `Some(true)`) calls
+    /// [`ScaleKind::to_pixel_f64`], so every clipped mark is byte-identical.
+    ///
+    /// This lives on `DrawCtx` rather than in each mark because
+    /// [`MarkKwargsSpec::clip`](crate::spec::mark_style::MarkKwargsSpec) is a
+    /// general mark-style field with no per-mark allowlist on the Rust side:
+    /// any spec that sets it — including a layer's own `mark_style` on the wire
+    /// — reaches `resolve_mark_style` whatever the mark is. So every mark that
+    /// can receive it must mean the same thing by it. When only `line.rs`
+    /// carried the gate, an `area` or `ribbon` layer carrying `clip: false` got
+    /// the SVG-group escape and kept dropping the very vertices that escape
+    /// existed to reveal. (Python's own mark allowlist is narrower today —
+    /// `clip=` is surfaced through `mark_function`, which desugars to a *line*
+    /// layer — so this closes the seam ahead of the API rather than behind it.)
+    ///
+    /// A mark that reads positions through this method inherits the whole
+    /// feature; one that calls `to_pixel_f64` directly opts out, deliberately.
+    /// `ScaleKind::to_pixel_str` has no continuous mapping to extrapolate and
+    /// is unaffected either way.
+    pub(crate) fn to_pixel(&self, scale: &ScaleKind, value: f64) -> Option<f64> {
+        if self.mark_style.misc.clip == Some(false) {
+            scale.to_pixel_f64_extrapolated(value)
+        } else {
+            scale.to_pixel_f64(value)
+        }
     }
 }
 

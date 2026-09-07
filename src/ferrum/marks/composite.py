@@ -258,6 +258,17 @@ def desugar_boxplot(
         )
     ]
     if outliers:
+        # `outliers` above is already gated to exclude whisker_mult ==
+        # "min-max" (min-max whiskers extend to the data extremes by
+        # definition, so no observation lies beyond them, and Outliers'
+        # `extent` has no "min-max" spelling of its own -- unlike
+        # `_extent_to_box`, which BoxStats' `whisker_extent` does accept).
+        # The assert makes that ordering coupling explicit here rather than
+        # leaving `float(whisker_mult)` to rely silently on a gate 20 lines
+        # up never being reordered or loosened.
+        assert whisker_mult != "min-max", (
+            "the `outliers` gate above must exclude whisker_mult == 'min-max' before this line runs"
+        )
         transforms.append(
             Outliers(
                 field=val,
@@ -798,7 +809,13 @@ def _k_for_depth(k_depth: str, k_proportion: float, n: int) -> int:
 
 
 def _boxen_materialized_depth(
-    data: Any, *, value_field: str, group_field: str, k_depth: str, k_proportion: float
+    data: Any,
+    *,
+    value_field: str,
+    group_field: str,
+    k_depth: str,
+    k_proportion: float,
+    extra_groupby_fields: tuple[str, ...] = (),
 ) -> Optional[int]:
     """The deepest letter-value depth ANY group in *data* will actually
     materialize, guarded to a minimum of ``2`` (the base band always
@@ -826,6 +843,34 @@ def _boxen_materialized_depth(
     rendered value -- the actual bands, still built for every
     ``k`` in ``1..depth_count`` regardless of this estimate, read their
     real data from Rust exactly as before.
+
+    ``extra_groupby_fields`` (batch-E close remediation, 2026-09-07): a
+    faceted chart's ``LetterValue`` transform runs on a per-facet-panel
+    subset (Rust splits the bound rows by facet before running chart-level
+    transforms -- see ``test_faceted_bin_with_aggregate_computes_each_panels_own_means``
+    for the same scoping on a different transform), so the deepest band any
+    SINGLE panel actually renders is bounded by that panel's own group
+    sizes, not by pooling a group's rows across every panel together. Since
+    this one estimate is shared by every facet panel's identical, Python-
+    baked layer opacities (there is exactly one desugar call per chart,
+    never one per panel), passing the chart's facet field(s) here folds
+    them into the groupby -- ``group_by([group_field, *extra_groupby_fields])``
+    instead of ``group_by(group_field)`` -- so pooling the same categorical
+    value across panels can no longer inflate the estimate past what any
+    real panel will materialize, PROVIDED the caller actually has the facet
+    field(s) to pass. This function is caller-agnostic and does exactly
+    what it says given correct inputs; whether the fix reaches a given
+    chart depends entirely on whether its one caller,
+    ``_desugar._prep_boxen_ramp_depth``, has ``ctx.chart._facet`` populated
+    at the moment it runs -- see that function's docstring "Scope of the
+    facet fix" section for the lifecycle where it is not (``+``/``.layer()``
+    resolve the pending mark before ``.facet()`` can run), and this
+    module's ``test_layered_boxen_facet_still_pools_across_panels_pending_lifecycle_fix``
+    (in ``tests/test_boxen_ramp_prep.py``) for the pinned pooled value on
+    that lifecycle. Fields absent from *data* (e.g. an unresolved repeat
+    placeholder) are dropped rather than raising, since this remains a
+    best-effort styling estimate. Non-faceted charts pass ``()`` (the
+    default) and are unaffected.
     """
     if data is None:
         return None
@@ -848,6 +893,15 @@ def _boxen_materialized_depth(
     if value_field not in frame.columns or group_field not in frame.columns:
         return None
 
+    # De-duplicated, present-in-frame groupby columns: group_field first
+    # (existing behavior/order when there is no facet), any facet field(s)
+    # after. A facet field that collides with group_field (faceting by the
+    # same column boxen groups by) or is absent from the frame contributes
+    # nothing new.
+    group_cols = list(
+        dict.fromkeys([group_field, *(f for f in extra_groupby_fields if f in frame.columns)])
+    )
+
     # Mirror `letter_value::extract_values` exactly (quality-review S1,
     # cycle 3): Rust drops a row when its VALUE is null or NaN, but keeps a
     # null GROUP as its own group (BTreeMap keyed by `Option<String>`) --
@@ -861,9 +915,9 @@ def _boxen_materialized_depth(
         valid = valid & value_col.is_not_nan()
     try:
         sizes = (
-            frame.select([group_field, value_field])
+            frame.select([*group_cols, value_field])
             .filter(valid)
-            .group_by(group_field)
+            .group_by(group_cols)
             .len()["len"]
             .to_list()
         )

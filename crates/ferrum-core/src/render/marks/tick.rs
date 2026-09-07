@@ -6,71 +6,30 @@
 //!   ordinal y only → horizontal crossbars centered on each category band;
 //!   ordinal x only → vertical crossbars centered on each category band.
 //!
-//! # Per-row stroke property enumeration vs. `rule.rs` (batch-E T13 cycle 3)
+//! # Per-row stroke properties vs. `rule.rs`
 //!
-//! `rule.rs`'s `rule_stroke_style` is the fullest per-row stroke resolution
-//! in the crate; the spec reviewer flagged that `tick.rs` had been closing
-//! rule's per-row properties one at a time across prior cycles rather than
-//! auditing the whole set at once. This is that audit, enumerated against
-//! `rule.rs`'s actual resolution set (not the mark's own prior doc claims,
-//! which had drifted — see the `stroke_opacity` row below):
+//! `rule.rs`'s `rule_stroke_style` is the fullest per-row stroke resolution in
+//! the crate. Tick's own doc claims had drifted from it (the `stroke_opacity`
+//! row below was inherited from a copied-and-false comment), so the set is
+//! enumerated here rather than reasoned about one property at a time:
 //!
-//! | Property | rule.rs | tick.rs (this cycle) |
+//! | Property | rule.rs | tick.rs |
 //! |---|---|---|
-//! | `opacity` (encoded) | `OpacityResolver`, direct `to_scene_stroke` param | same — unchanged |
-//! | `stroke_width` (encoded) | per-row column, fallback to mark-style | same — unchanged (closed pre-cycle-3) |
-//! | `stroke_dash` (mark-style literal) | mark-style fallback | same — unchanged (closed cycle 1) |
-//! | `stroke_dash` (PER-ROW ENCODED column) | `DashColumns`/`resolve_row_stroke_dash`, categorical + numeric | **NOT carried over — see adjudication below** |
-//! | `color` (encoded, via `row_colors_from_scale`) | per-row `Color` → `resolve_stroke_color` | **CLOSED this cycle** — see `row_stroke` below |
-//! | `stroke_opacity` (encoded, distinct from `opacity`) | separate `OpacityResolver` slot, applied to `StrokeStyle.stroke_opacity` | **CLOSED this cycle** — see `row_stroke` below |
-//! | `fill_opacity` (encoded) | unused — rule has no fill | **N/A, unchanged** — tick emits only `SceneNode::Line`, which has no fill component `to_scene_stroke` could ever consume |
-//! | `stroke_cap` / `stroke_join` | mark-style only, applied at `MarkBatch` construction | **N/A to per-row resolution** — resolved once per BATCH in `scene_build.rs` (`mark_style.line.stroke_cap`/`stroke_join`), identically for every mark including rule and tick; neither builder does anything with these per row |
+//! | `opacity` (encoded) | `OpacityResolver`, direct `to_scene_stroke` param | same |
+//! | `stroke_width` (encoded) | per-row column, mark-style fallback | same |
+//! | `stroke_dash` (mark-style literal) | mark-style fallback | same |
+//! | `stroke_dash` (PER-ROW ENCODED column) | `DashColumns`/`resolve_row_stroke_dash`, categorical + numeric | **gap** — an encoded `stroke_dash` column silently has no effect on a tick |
+//! | `color` (encoded, via `row_colors_from_scale`) | per-row `Color` → `resolve_stroke_color` | same — see `row_stroke` |
+//! | `stroke_opacity` (encoded, distinct from `opacity`) | separate `OpacityResolver` slot → `StrokeStyle.stroke_opacity` | same — see `row_stroke` |
+//! | `fill_opacity` (encoded) | unused — rule has no fill | N/A: tick emits only `SceneNode::Line`, which has no fill component to consume |
+//! | `stroke_cap` / `stroke_join` | mark-style only | N/A to per-row resolution: resolved once per BATCH in `scene_build.rs`, identically for every mark |
 //!
-//! **Adjudication: per-row encoded `stroke_dash` does NOT carry over in this
-//! cycle.** `rule.rs` (and `line.rs`/`ribbon.rs`) subdivide by a categorical
-//! `stroke_dash` field via the shared `DashColumns`/`resolve_row_stroke_dash`
-//! machinery in `channels.rs`. Cycle 1 of this batch closed tick's
-//! `stroke_dash` gap as a MARK-STYLE-LITERAL-only fix (mirroring
-//! `segment.rs`'s simpler treatment, explicitly reasoned there because tick
-//! had "no encoded `stroke_dash` channel" at the time) and that closure was
-//! accepted as complete by the dispatching review. Verifying the full
-//! enumeration against `rule.rs` here surfaces that a per-row ENCODED
-//! `stroke_dash` column would still silently have no effect on a tick chart
-//! today (the channel is generic/`RENDERER_HONORED` — see
-//! `ferrum.encoding._channel_policy`, usable on any mark). This is a real,
-//! distinct gap from the one cycle 1 closed, left OPEN and explicitly
-//! flagged here (not silently reopened, not silently left undocumented) as
-//! a follow-up outside this cycle's scope, which the dispatch scoped to
-//! color (`stroke_opacity` was found and closed alongside it as the same
-//! kind of drop).
-//!
-//! **Adjudication: `stroke_opacity` was found to be a genuine drop, closed
-//! here.** Tick's own prior doc comment (removed by this cycle) claimed
-//! "no ... stroke_opacity columns" — copied from `segment.rs`'s identical
-//! claim — but `stroke_opacity` is a generic, mark-agnostic
-//! `RENDERER_HONORED` encoding channel (`ferrum.encoding._channel_policy`)
-//! that already resolves its own `OpacityScale`
-//! (`ResolvedScales::stroke_opacity`) regardless of mark; only tick's own
-//! `OpacityResolver::at_row` consumption was discarding the third tuple
-//! element. `rule_stroke_style`'s doc says "Rule is a stroke-only mark, so
-//! the resolver's `fill_opacity` slot is unused" — i.e. `stroke_opacity` IS
-//! read there — which is the correct treatment for any stroke-only Line
-//! mark (tick and segment both draw *only* `SceneNode::Line`, no fill).
-//! `row_stroke` below fixes this by multiplying the resolved `stroke_opacity`
-//! value into `StrokeStyle.stroke_opacity` AFTER `to_scene_stroke` builds it
-//! from the (unchanged) `opacity` param — a deliberately different
-//! MECHANISM than `rule_stroke_style`'s (which bakes `opacity` into the
-//! color's alpha channel via `with_opacity` and then overwrites
-//! `.stroke_opacity` outright with the resolved value) chosen specifically
-//! so the pre-existing `opacity` channel's SVG bytes are untouched: when no
-//! `stroke_opacity` column is bound, `OpacityResolver` defaults that slot to
-//! `1.0`, and multiplying by `1.0` is an exact, bit-identical no-op — so
-//! every tick this crate already renders (with or without an `opacity`
-//! mark-style override) is byte-identical, and only a chart that newly binds
-//! a DISTINCT `stroke_opacity=` encoding observes any change. `segment.rs`
-//! carries the identical pre-existing gap (same doc claim, same discarded
-//! tuple slot) — out of THIS task's scope (tick.rs only), flagged as a
-//! follow-up, not silently left unmentioned.
+//! The one open row is the per-row encoded `stroke_dash` column. It is a
+//! generic `RENDERER_HONORED` channel (`ferrum.encoding._channel_policy`), so
+//! it is bindable on a tick today and does nothing; closing it means adopting
+//! `channels.rs`'s shared `DashColumns` machinery. That, and the remaining
+//! items this module's history recorded, are tracked as issues rather than as
+//! prose here.
 
 use crate::render::color::Color;
 use crate::render::draw::{
@@ -156,10 +115,10 @@ fn build_geometry(
     // function used to compute once, outside the loop — so every unencoded
     // tick (the overwhelming default) is byte-identical to before this fix.
     //
-    // `stroke_dash` (batch-E T11 support, cycle 1) is the mark-style literal
-    // only — tick has no PER-ROW ENCODED `stroke_dash` channel (unlike
-    // rule/line/ribbon, which subdivide via `DashColumns`); see this module's
-    // doc comment for the explicit adjudication of that gap. Applied
+    // `stroke_dash` (batch-E T11 support) is the mark-style literal only —
+    // tick has no PER-ROW ENCODED `stroke_dash` channel (unlike
+    // rule/line/ribbon, which subdivide via `DashColumns`); that is the one
+    // open row in this module's enumeration table. Applied
     // uniformly here because every one of tick's six dispatch modes builds
     // its `SceneNode::Line` through this one shared closure, so
     // `mark_tick(stroke_dash=...)` (e.g. the spec §6.11 violin quartile
@@ -177,10 +136,11 @@ fn build_geometry(
         // Multiplied in (not overwritten) so a chart with no `stroke_opacity`
         // encoding — where `OpacityResolver` defaults this slot to `1.0` —
         // is an exact, bit-identical no-op: `x * 1.0 == x` for every finite
-        // `x`. This is the deliberate mechanism difference from
-        // `rule_stroke_style`'s (which bakes `opacity` into the color's
-        // alpha and overwrites `.stroke_opacity` outright) — see this
-        // module's doc comment for why.
+        // `x`. That is a deliberate mechanism difference from
+        // `rule_stroke_style`, which bakes `opacity` into the color's alpha
+        // and overwrites `.stroke_opacity` outright; the multiply is what
+        // keeps every already-rendered tick byte-identical. `segment.rs` uses
+        // the same mechanism for the same reason.
         style.stroke_opacity *= stroke_opacity;
         style
     };
@@ -294,7 +254,11 @@ fn build_geometry(
         return empty();
     }
 
-    let xf = xf_opt.expect("invariant: xf_opt is Some — None case returned above");
+    // The `None` case returned above, so this is locally provable — but a
+    // panic in the render path aborts the interpreter instead of raising to
+    // Python, and `let-else` states the same invariant with the same
+    // semantics and no panic site.
+    let Some(xf) = xf_opt else { return empty() };
 
     // Ordinal x + quantitative y → horizontal tick at data y position.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {

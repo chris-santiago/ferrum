@@ -726,6 +726,115 @@ def test_function_wrong_shape_raises():
         fe.Chart(df).mark_function(lambda x: 42, domain=(0, 5), n=50)
 
 
+def _function_desugar_via_dispatcher(x_field, y_field, *, fn, domain=None, n=200, clip=True):
+    """Adapts ``desugar_function``'s own ``(fn, parent_chart_x_data, *, domain,
+    n, clip)`` signature to ``_resolve_pending_impl``'s uniform
+    ``(x_field, y_field, **kwargs)`` calling convention.
+
+    ``Chart.mark_function`` always calls ``desugar_function`` directly and
+    never goes through the ``_pending_stat_mark`` dispatcher -- its own
+    kwargs shape (``fn`` positional, no ``x_field``/``y_field``) is
+    incompatible with the dispatcher's calling convention. This adapter
+    exists solely so the test below can drive the SAME underlying desugar
+    through ``_resolve_pending_impl`` (via ``Chart._set_composite_mark``) to
+    prove the dispatcher now honors ``result.mark_kwargs`` and ``result.data``
+    identically to ``mark_function``'s direct path (batch-E close
+    remediation, design S3).
+    """
+    from ferrum.marks.heavy_stat import desugar_function
+
+    return desugar_function(fn, domain=domain, n=n, clip=clip)
+
+
+def test_dispatcher_path_honors_desugar_function_mark_kwargs_and_data():
+    """``result.mark_kwargs`` (the ``clip=False`` escape) and ``result.data``
+    (the synthetic table) used to be read only by ``mark_function``'s direct
+    call to ``desugar_function``; ``_resolve_pending_impl``'s single-mark
+    branch silently ignored both for any OTHER caller reaching it through
+    ``Chart._set_composite_mark``. This drives the identical desugar through
+    that dispatcher path and asserts byte-identical SVG output against the
+    direct path, proving the gap is closed rather than just moved."""
+    fn = lambda x: x**2  # noqa: E731
+    domain = (0, 5)
+    n = 50
+
+    direct_svg = fe.Chart(None).mark_function(fn, domain=domain, n=n, clip=False).to_svg()
+
+    dispatched = fe.Chart(None)._set_composite_mark(
+        "function",
+        _function_desugar_via_dispatcher,
+        {"fn": fn, "domain": domain, "n": n, "clip": False},
+        placeholder="line",
+    )
+    dispatched_svg = dispatched.to_svg()
+
+    assert dispatched_svg == direct_svg
+
+
+def test_dispatcher_path_merges_onto_inherited_mark_kwargs_like_the_direct_path():
+    """Design-review cycle-2 S2: the bare parity test above builds from
+    ``fe.Chart(None)``, whose ``_mark_kwargs`` is ``{}``, so it cannot see
+    whether the dispatcher REPLACES the chart's inherited mark kwargs
+    (losing them) or MERGES onto them like the direct path does
+    (``{**new._mark_kwargs, **line_mark_kwargs}`` in
+    ``Chart.mark_function``). This chains a primitive mark's own style
+    kwarg (``stroke_width=7``) before the desugar on both sides, so a chart
+    that already carries ``_mark_kwargs`` must keep them alongside the
+    desugar's own ``clip=False`` escape on both paths."""
+    fn = lambda x: x**2  # noqa: E731
+    domain = (0, 5)
+    n = 50
+
+    direct_svg = (
+        fe.Chart(None)
+        .mark_line(stroke_width=7)
+        .mark_function(fn, domain=domain, n=n, clip=False)
+        .to_svg()
+    )
+
+    dispatched = (
+        fe.Chart(None)
+        .mark_line(stroke_width=7)
+        ._set_composite_mark(
+            "function",
+            _function_desugar_via_dispatcher,
+            {"fn": fn, "domain": domain, "n": n, "clip": False},
+            placeholder="line",
+        )
+    )
+    dispatched_svg = dispatched.to_svg()
+
+    assert dispatched_svg == direct_svg
+    # And explicitly confirm neither side dropped stroke_width -- a chart
+    # that merged {} onto {} rather than {'stroke_width': 7} onto
+    # {'clip': False} would still be byte-identical on both sides while
+    # silently losing the inherited kwarg on both, which the line above
+    # alone cannot distinguish from a correct merge.
+    assert 'stroke-width="7"' in direct_svg
+    assert 'stroke-width="7"' in dispatched_svg
+
+
+def test_dispatcher_prior_layer_refuses_result_data():
+    """Mutation-tester advisory (close-remediation cycle 2, PM8): the
+    prior-layer branch's `result.data` refusal in `_resolve_pending_impl`
+    had no test -- it is reachable only when the dispatcher runs with an
+    explicit `prior_mark=`, which no shipped desugar reaches today
+    (`desugar_function` is the only `.data` producer, and `mark_function`
+    always calls it directly, bypassing the dispatcher). Drives the same
+    adapter with `prior_mark="point"` added, the reviewer's exact recipe."""
+    fn = lambda x: x**2  # noqa: E731
+    chart = fe.Chart(None).mark_point().encode(x="x", y="y")
+    pending = chart._set_composite_mark(
+        "function",
+        _function_desugar_via_dispatcher,
+        {"fn": fn, "domain": (0, 5), "n": 50, "clip": False},
+        placeholder="line",
+        prior_mark="point",
+    )
+    with pytest.raises(ValueError, match="ran alongside a prior primitive-mark layer"):
+        pending._resolve_pending()
+
+
 def test_function_clip_false_no_longer_raises():
     """E13/F-L02-04: mark_function(clip=False) used to raise; the scene-level
     clip escape (Task 9's MarkBatch.clip) supports it now."""
@@ -774,7 +883,9 @@ def test_function_clip_true_is_byte_identical_to_default():
     output is byte-identical to omitting clip= entirely."""
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
     svg_default = fe.Chart(df).mark_function(lambda x: x**2, domain=(0, 5), n=50).to_svg()
-    svg_explicit = fe.Chart(df).mark_function(lambda x: x**2, domain=(0, 5), n=50, clip=True).to_svg()
+    svg_explicit = (
+        fe.Chart(df).mark_function(lambda x: x**2, domain=(0, 5), n=50, clip=True).to_svg()
+    )
     assert svg_default == svg_explicit
 
 
@@ -847,7 +958,9 @@ def test_function_clip_false_renders_vertices_outside_panel_rect():
     pts_false = vertices(svg_false)
     outside_false = outside_panel(svg_false, pts_false)
 
-    assert not outside_true, f"clip=True must confine every vertex to the panel rect, got {outside_true}"
+    assert not outside_true, (
+        f"clip=True must confine every vertex to the panel rect, got {outside_true}"
+    )
     assert outside_false, "clip=False must render at least one vertex outside the panel rect"
     # Measured 13/50 vertices outside under this exact domain mismatch; use
     # a safe lower bound rather than pinning the exact count.

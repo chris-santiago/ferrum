@@ -36,3 +36,18 @@ mod color_dtype_parity;
 /// `rect` and `tick` implement one sentence.
 #[cfg(test)]
 mod band_width;
+
+/// Test-only: `clip=False` means one thing across the whole line family
+/// (`line`, `area`, `ribbon`). Same reason again — the kwarg is accepted by all
+/// three, so a per-mark pin is exactly what let two of them keep only half of
+/// it.
+#[cfg(test)]
+mod clip_escape;
+
+/// Test-only: the cross-mark `CurveAxis` agreement matrix. Three independent
+/// derivations (`series_curve_axis`, `BottomEdge::axis`, `RIBBON_CURVE_AXIS`)
+/// answer one question, getting it wrong is silent, and it has already gone
+/// wrong twice — so the check has to compare each mark's chosen axis against
+/// the shape its point loop actually builds.
+#[cfg(test)]
+mod curve_axis;
