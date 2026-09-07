@@ -424,6 +424,60 @@ def _prep_boxen_palette_color_conflict(ctx: _ResolveContext) -> None:
         )
 
 
+def _prep_boxen_ramp_depth(ctx: _ResolveContext) -> None:
+    """Inject the real per-chart materialized letter-value depth so the
+    default opacity ramp normalizes against what THIS chart actually
+    renders, not the mark's full registry-derived depth cap (quality-review
+    REVISE, 2026-09-06 cycle 2): raising that cap (6->12, F-L03-04b) must
+    not flatten the ramp's visual contrast on a chart whose real rendered
+    depth hasn't changed at all.
+
+    This is the one place a composite desugar's prep step reads the bound
+    chart data (``ctx.chart._data``) -- desugar functions otherwise never
+    touch it (see ``composite._boxen_band_color_index``'s docstring on why
+    real per-group depth is normally Rust-only). The computation itself
+    stays in ``composite.py`` (:func:`_boxen_materialized_depth`), scoped to
+    a lightweight arithmetic mirror of the depth-selection formula, never
+    the quantile math; a `palette=` chart skips this entirely since it
+    never uses the opacity ramp.
+
+    ``group_field`` MUST mirror ``desugar_boxen``'s own ``group =
+    color_field if color_field else cat`` exactly (spec-review cycle-2
+    finding: the fallback used to also consult ``ctx._color_field()`` --
+    the chart-level ``.encode(color=...)`` channel -- which is not a
+    grouping boxen ever uses. ``desugar_boxen``'s own docstring is explicit
+    that ``palette`` "does not interact with ``color_field`` (which only
+    changes the ``LetterValue`` groupby, not color", i.e. the *only*
+    grouping input is the ``color_field=`` mark kwarg, never the chart-level
+    color encoding -- boxen's ``_PENDING_PREP`` tuple deliberately omits
+    ``_prep_color_field`` for exactly this reason. Estimating depth from the
+    wrong grouping reproduces the cycle-1 symptom (a ramp normalized
+    against a depth the chart doesn't render) through a new mechanism, on
+    any chart that merely adds a cosmetic ``.encode(color=...)`` without
+    ``palette=``.
+    """
+    if ctx.transform_kwargs.get("palette") is not None:
+        return
+    horizontal = bool(ctx.transform_kwargs.get("horizontal", False))
+    value_field = ctx.x_field if horizontal else ctx.y_field
+    cat_field = ctx.y_field if horizontal else ctx.x_field
+    group_field = ctx.transform_kwargs.get("color_field") or cat_field
+    if value_field is None or group_field is None:
+        return
+
+    from ferrum.marks.composite import _boxen_materialized_depth
+
+    depth = _boxen_materialized_depth(
+        ctx.chart._data,
+        value_field=value_field,
+        group_field=group_field,
+        k_depth=ctx.transform_kwargs.get("k_depth", "tukey"),
+        k_proportion=ctx.transform_kwargs.get("k_proportion", 0.007),
+    )
+    if depth is not None:
+        ctx.transform_kwargs = {**ctx.transform_kwargs, "materialized_depth": depth}
+
+
 def _prep_cat_axis_sorts(ctx: _ResolveContext) -> None:
     """Inject x_sort and y_sort for composites with a categorical positional axis.
 
@@ -499,7 +553,12 @@ class _KindPrep:
 _PENDING_PREP: dict[str, _KindPrep] = {
     "ribbon": _KindPrep(pre=(_prep_ribbon_y2,)),
     "boxen": _KindPrep(
-        pre=(_prep_boxen_agg_sort, _prep_cat_axis_sorts, _prep_boxen_palette_color_conflict),
+        pre=(
+            _prep_boxen_agg_sort,
+            _prep_cat_axis_sorts,
+            _prep_boxen_palette_color_conflict,
+            _prep_boxen_ramp_depth,
+        ),
     ),
     "boxplot": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),
     "errorbar": _KindPrep(pre=(_prep_cat_axis_sorts, _prep_color_field)),

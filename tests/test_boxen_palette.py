@@ -25,6 +25,7 @@ import pytest
 
 import ferrum
 from ferrum._warn import reset_warnings
+from ferrum.marks.composite import _boxen_depth_count
 
 
 def _boxen_df() -> pl.DataFrame:
@@ -46,6 +47,21 @@ def _boxen_df_multi_band() -> pl.DataFrame:
         {
             "group": ["a"] * 200 + ["b"] * 200,
             "val": list(range(200)) + list(range(100, 300)),
+        }
+    )
+
+
+def _boxen_df_full_cap() -> pl.DataFrame:
+    """Large enough per group that ``k_depth="full"`` (``floor(log2(n))``,
+    clamped to the mark's configured depth cap) reaches the cap itself
+    (``_boxen_depth_count()``, currently 12 -- ``floor(log2(n)) >= 12``
+    needs ``n >= 4096``), so every one of the ``_BOXEN_VISIBLE_BANDS``
+    consumable palette slots gets real, non-degenerate data."""
+    n = 8192
+    return pl.DataFrame(
+        {
+            "group": ["a"] * n + ["b"] * n,
+            "val": list(range(n)) + list(range(n // 2, n + n // 2)),
         }
     )
 
@@ -107,7 +123,7 @@ def test_mark_boxen_palette_named_yields_distinct_band_fills():
         warnings.simplefilter("always")
         svg = ferrum.Chart(df).mark_boxen(palette="tableau10").encode(x="group", y="val").to_svg()
     assert [w for w in caught if issubclass(w.category, UserWarning)] == []
-    expected = ferrum.color.palette("tableau10", n=5)
+    expected = ferrum.color.palette("tableau10", n=_boxen_depth_count() - 1)
     band_fills = [f for f in _rect_fills(svg) if f in expected]
     assert len(set(band_fills)) >= 2
     # k=1 (the always-degenerate median band) borrows k=2's color slot
@@ -122,10 +138,11 @@ def test_mark_boxen_palette_list_applies_in_order_and_cycles():
     """An explicit color sequence is applied to bands in order, and a
     shorter-than-the-colorable-band-count list cycles (spec §4.4/§9.4).
 
-    ``k_depth="full"`` on the standard fixture reaches all 6 configured
-    depths; the mark's default ``k_depth="tukey"`` on the same data
-    reaches only ~3 real depths, and since k=1 always shares k=2's color
-    slot (previous test), a 3-depth render only ever shows 2
+    ``k_depth="full"`` on the standard fixture (n=200/group) reaches real
+    depth ``k=7`` (``floor(log2(200))``, well under the mark's 12-band
+    configured cap); the mark's default ``k_depth="tukey"`` on the same
+    data reaches only ~3 real depths, and since k=1 always shares k=2's
+    color slot (previous test), a 3-depth render only ever shows 2
     dedup-distinct colors -- not enough to prove cycling through a
     2-color list."""
     df = _boxen_df_multi_band()
@@ -142,12 +159,13 @@ def test_mark_boxen_palette_list_applies_in_order_and_cycles():
     band_colors = _dedup_consecutive(_rect_fills(svg))
     band_colors = [c for c in band_colors if c in {"#111111", "#222222"}]
     assert len(band_colors) >= 3, "need >=3 bands to prove cycling"
-    # Cycled to 5 slots (colors[i % 2] for i in 0..4): [c0,c1,c0,c1,c0],
-    # indexed k=2->0, k=3->1, k=4->2, k=5->3, k=6->4 (base-band anchor).
-    # Document order is widest-first (k=6..2, then k=1 merging into k=2):
-    # fills = [c0,c1,c0,c1,c0,c0] -> dedup = [c0,c1,c0,c1,c0].
-    assert band_colors[0] == "#111111"  # k=6, index 4 -> cycled color c0
-    assert band_colors[1] == "#222222"  # k=5, index 3 -> c1
+    # Cycled to _BOXEN_VISIBLE_BANDS (11) slots (colors[i % 2] for i in
+    # 0..10): index k=2->0, k=3->1, ..., k=7->5 (base-band anchor).
+    # Document order is widest-first (k=7..2, real depth for this fixture,
+    # then k=1 merging into k=2): fills = [c1,c0,c1,c0,c1,c0,c0] ->
+    # dedup = [c1,c0,c1,c0,c1,c0].
+    assert band_colors[0] == "#222222"  # k=7, index 5 (odd) -> cycled color c1
+    assert band_colors[1] == "#111111"  # k=6, index 4 (even) -> c0
     assert band_colors[-1] == "#111111"  # k=2 (and k=1, merged): index 0 -> c0
 
 
@@ -218,13 +236,14 @@ def test_mark_boxen_palette_bands_paint_widest_first_per_group():
     whenever *any* real depth exists -- at ``k_depth="full"``, the mark's
     default ``k_depth`` on the standard fixture, and at a small ``n`` that
     barely reaches one real band. An earlier anchor (widest *configured*
-    band, ``k=_BOXEN_K_MAX``) only rendered ``colors[0]`` when a dataset
-    happened to reach full depth -- dead on every typical dataset under
+    band, the deepest depth the mark builds a layer for) only rendered
+    ``colors[0]`` when a dataset happened to reach full depth -- dead on
+    every typical dataset under
     the default ``k_depth`` (measured by quality review: only the last
     two of six colors ever appeared at n=200) -- so this test deliberately
     covers all three regimes, not just the one configuration
     (``k_depth="full"``) that cannot fail."""
-    expected = ferrum.color.palette("tableau10", n=5)
+    expected = ferrum.color.palette("tableau10", n=_boxen_depth_count() - 1)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -254,26 +273,28 @@ def test_mark_boxen_palette_bands_paint_widest_first_per_group():
 
 def test_mark_boxen_palette_continuous_scheme_full_depth_reaches_ramp_endpoint():
     """Regression guard for the palette-expansion-count defect (quality-
-    review cycle-3 S3, fixed by sizing ``_resolve_boxen_palette``'s
-    request to ``_BOXEN_VISIBLE_BANDS`` instead of ``_BOXEN_K_MAX``) --
-    proven necessary by quality review's cycle-4 mutation probe: setting
-    ``_BOXEN_VISIBLE_BANDS = _BOXEN_K_MAX`` left every existing palette
-    test green, because ``_boxen_band_color_index`` always yields exactly
-    5 distinct indices regardless of list length, and the categorical
-    (``tableau10``) tests used elsewhere only check that *known* colors
-    appear, not that the request count matches the consumable slot count.
+    review cycle-3 S3, fixed by sizing ``_resolve_boxen_palette``'s request
+    to ``_BOXEN_VISIBLE_BANDS`` instead of the mark's full configured depth
+    count) -- proven necessary by quality review's cycle-4 mutation probe:
+    setting ``_BOXEN_VISIBLE_BANDS`` equal to the full depth count left
+    every existing palette test green, because ``_boxen_band_color_index``
+    always yields exactly ``_BOXEN_VISIBLE_BANDS`` distinct indices
+    regardless of list length, and the categorical (``tableau10``) tests
+    used elsewhere only check that *known* colors appear, not that the
+    request count matches the consumable slot count.
 
-    A *continuous* palette is the shape that actually discriminates: it
-    is resampled evenly across ``[0, 1]`` at however many colors are
-    requested, so requesting 6 points instead of 5 shifts *every* sample
-    position, not just the extra one -- under the mutation, the last
-    *consumed* color (index 4 of 6, at ``t=0.8``) is no longer the
-    palette's endpoint (``t=1.0``), so ``viridis``'s final color never
-    renders at all. ``k_depth="full"`` on the standard fixture guarantees
-    every one of the 5 consumable bands (``k=2..6``) has real data, so
-    every one of the 5 expected samples -- including the endpoint --
-    must appear on a non-degenerate (height > 1) rect."""
-    df = _boxen_df_multi_band()
+    A *continuous* palette is the shape that actually discriminates: it is
+    resampled evenly across ``[0, 1]`` at however many colors are
+    requested, so requesting one extra point shifts *every* sample
+    position, not just the extra one -- under that mutation, the last
+    *consumed* color is no longer the palette's endpoint, so ``viridis``'s
+    final color never renders at all. ``_boxen_df_full_cap()`` (n=8192/
+    group) with ``k_depth="full"`` reaches the mark's full configured
+    depth cap (``_boxen_depth_count()``, currently 12), so every one of the
+    ``_BOXEN_VISIBLE_BANDS`` consumable bands (``k=2..depth_count``) has
+    real data, and every one of the requested samples -- including the
+    endpoint -- must appear on a non-degenerate (height > 1) rect."""
+    df = _boxen_df_full_cap()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         svg = (
@@ -282,7 +303,7 @@ def test_mark_boxen_palette_continuous_scheme_full_depth_reaches_ramp_endpoint()
             .encode(x="group", y="val")
             .to_svg()
         )
-    expected = ferrum.color.palette("viridis", n=5)
+    expected = ferrum.color.palette("viridis", n=_boxen_depth_count() - 1)
     rendered_non_degenerate = {fill for _x, _y, _w, h, fill in _rect_geoms(svg) if h > 1}
     missing = set(expected) - rendered_non_degenerate
     assert not missing, (

@@ -20,6 +20,7 @@ supplying both the canonical name and ``extent=`` in the same call raises a
 """
 
 from __future__ import annotations
+import math
 import warnings
 from typing import Any, Optional, Sequence
 
@@ -43,12 +44,6 @@ from ferrum.marks._mark_kwargs import (
 # object is always reliable, unlike value comparison against floats or
 # runtime-built strings (which may not be interned).
 _MISSING = object()
-
-# Number of nested letter-value bands ``desugar_boxen`` builds.  This single
-# constant drives both the ``range`` loop that creates the ``depth_*`` layers
-# and the ``register_layer_names("boxen", ...)`` call that declares their names,
-# so the two cannot drift apart.
-_BOXEN_K_MAX = 6
 
 #: The ``name=`` ``desugar_boxen`` gives its ``LetterValue`` transform.
 #: ``letter_value`` prefixes every secondary batch key with it
@@ -183,7 +178,7 @@ def desugar_boxplot(
        name (IQR box, ``width=size``).
     5. ``tick``   — ``y=median``, dark stroke (median line).
     6. ``point``  — ``y=<val>``, ``filled=False`` from the ``"outliers"``
-       output (when ``outliers=True``).
+       output (when ``outliers=True`` and ``whisker_mult != "min-max"``).
 
     Parameters
     ----------
@@ -202,7 +197,9 @@ def desugar_boxplot(
             release.  Use ``whisker_mult=`` instead.  ``extent`` is reserved
             for data-domain ``[min, max]`` bounds.
     outliers : bool, default True
-        Whether to overlay an outlier point layer.
+        Whether to overlay an outlier point layer.  Forced off when
+        ``whisker_mult="min-max"`` regardless of this flag: whiskers already
+        reach the data minimum/maximum, so nothing can lie beyond them.
     size : float or None, default None
         Box width as a fraction of the band (default ``0.6``). The lower
         and upper whisker caps and the median tick all share this width.
@@ -239,6 +236,11 @@ def desugar_boxplot(
     whisker_mult = _resolve_deprecated_extent(
         "whisker_mult", whisker_mult, mark_kwargs, real_default=1.5
     )
+    # whisker_mult="min-max" extends the whiskers to the data extremes, so by
+    # definition no observation lies beyond them -- reuse the outliers=False
+    # suppression path below (both the Outliers transform and the outlier
+    # layer) rather than adding a second mechanism (F-L03-10).
+    outliers = outliers and whisker_mult != "min-max"
     user_kw = _validate("boxplot", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
@@ -260,7 +262,7 @@ def desugar_boxplot(
             Outliers(
                 field=val,
                 groupby=groupby,
-                extent=_extent_to_iqr_k(whisker_mult),
+                extent=float(whisker_mult),
                 name="outliers",
             )
         )
@@ -748,16 +750,143 @@ register_layer_names(
 )
 
 
+def _boxen_depth_count() -> int:
+    """Number of nested letter-value bands ``desugar_boxen`` builds.
+
+    Derived by counting ``letter_value``'s registry-declared ``depth_*``
+    secondary-output keys (Rust's ``K_MAX_NAMED``) rather than a
+    hand-copied literal, so a Rust-side change to that cap is picked up
+    here automatically instead of drifting into a stale Python constant
+    (F-L03-04b). This single derivation drives both the ``range()`` loop
+    that creates ``desugar_boxen``'s ``depth_*`` layers and the
+    ``register_layer_names("boxen", ...)`` call that declares their names,
+    so the two cannot drift from each other either.
+    """
+    from ferrum._core import transform_registry
+
+    keys = [key for key, _cols in transform_registry("letter_value")["secondary_outputs"]]
+    return sum(1 for key in keys if key.startswith("depth_"))
+
+
+def _k_for_depth(k_depth: str, k_proportion: float, n: int) -> int:
+    """Thin arithmetic mirror of ``letter_value::k_for_depth`` (Rust),
+    restricted to the piece that decides HOW MANY bands a group of size *n*
+    materializes -- never the quantile values themselves, which stay
+    exclusively Rust-computed everywhere else in this module. See
+    :func:`_boxen_materialized_depth`'s docstring for why this mirror
+    exists at all and what happens if it ever drifts from the real
+    formula. Unrecognized ``k_depth`` values fall back to the full
+    configured cap (the caller only uses this for a styling estimate; the
+    real transform is what actually validates ``k_depth`` and raises).
+    """
+    depth_count = _boxen_depth_count()
+    if n <= 0:
+        return 1
+    if k_depth == "tukey":
+        k = math.floor(math.log2(n)) - 3
+    elif k_depth == "proportion":
+        target = max(math.ceil(k_proportion * n), 1)
+        k = 1
+        while (1 << (k - 1)) < target:
+            k += 1
+            if k > depth_count:
+                break
+    elif k_depth == "trustworthy":
+        k = math.floor(math.log2(n / 3.32))
+    elif k_depth == "full":
+        k = math.floor(math.log2(n))
+    else:
+        return depth_count
+    return max(min(k, depth_count), 1)
+
+
+def _boxen_materialized_depth(
+    data: Any, *, value_field: str, group_field: str, k_depth: str, k_proportion: float
+) -> Optional[int]:
+    """The deepest letter-value depth ANY group in *data* will actually
+    materialize, guarded to a minimum of ``2`` (the base band always
+    anchors the ramp, matching ``_boxen_band_color_index``'s ``max(k, 2)``
+    convention elsewhere in this file) -- or ``None`` when it can't be
+    determined (absent or unreadable data), in which case the caller falls
+    back to the full configured depth cap, exactly the pre-2026-09-06-
+    cycle-2 behavior (never a crash; this is a styling estimate, not a
+    correctness-critical value).
+
+    Why this exists: raising the registry-derived depth cap 6->12
+    (F-L03-04b) also raised the default opacity ramp's normalization
+    range, which flattened the ramp's visual contrast on every chart whose
+    REAL rendered depth had not changed at all (quality-review REVISE,
+    2026-09-06 cycle 2) -- the ramp must track what a chart actually
+    renders, not the mark's full configured ceiling. Desugar functions in
+    this module otherwise never touch the bound data (by design -- real
+    per-group depth is normally a Rust-side-only quantity, see
+    ``_boxen_band_color_index``'s docstring), so this is a narrow,
+    deliberate exception scoped to one styling computation: it counts real
+    per-group row counts here and reuses :func:`_k_for_depth`'s lightweight
+    arithmetic (not the quantile math) to estimate the deepest band any
+    group reaches. A drift between this estimate and the real Rust
+    computation degrades to a slightly-off ramp contrast, never a wrong
+    rendered value -- the actual bands, still built for every
+    ``k`` in ``1..depth_count`` regardless of this estimate, read their
+    real data from Rust exactly as before.
+    """
+    if data is None:
+        return None
+    import polars as pl
+
+    try:
+        from ferrum._coerce import to_polars
+
+        frame = to_polars(data)
+    except (TypeError, ValueError, KeyError, ImportError, pl.exceptions.PolarsError):
+        # Best-effort styling estimate only: an unsupported/unreadable data
+        # shape falls back to the full configured cap rather than crashing
+        # a rendering-only computation. Deliberately NOT a bare `except
+        # Exception` (quality-review S2, cycle 3): a broader catch here
+        # would silently reinstate the exact cap-normalization regression
+        # this function exists to prevent, with no signal, for ANY
+        # unexpected error rather than just the coercion failures this is
+        # actually meant to absorb.
+        return None
+    if value_field not in frame.columns or group_field not in frame.columns:
+        return None
+
+    # Mirror `letter_value::extract_values` exactly (quality-review S1,
+    # cycle 3): Rust drops a row when its VALUE is null or NaN, but keeps a
+    # null GROUP as its own group (BTreeMap keyed by `Option<String>`) --
+    # `drop_nulls()` over both columns previously did the opposite on both
+    # counts (dropped null-group rows, kept NaN values), which measurably
+    # overcounted a group's real size whenever its value column carried
+    # NaN (400 rows with 200 NaN estimated depth 5, Rust materializes 4).
+    value_col = pl.col(value_field)
+    valid = value_col.is_not_null()
+    if frame.schema[value_field] in (pl.Float32, pl.Float64):
+        valid = valid & value_col.is_not_nan()
+    try:
+        sizes = (
+            frame.select([group_field, value_field])
+            .filter(valid)
+            .group_by(group_field)
+            .len()["len"]
+            .to_list()
+        )
+    except (TypeError, ValueError, KeyError, pl.exceptions.PolarsError):
+        return None
+    if not sizes:
+        return None
+    return max(max(_k_for_depth(k_depth, k_proportion, n) for n in sizes), 2)
+
+
 # Number of color slots ``palette=`` can ever actually paint. ``k=1`` (the
 # median band) is always zero-pixel by construction (see
 # ``_boxen_band_color_index``) and borrows ``k=2``'s slot rather than
-# consuming one of its own, so only bands ``k=2.._BOXEN_K_MAX`` are
-# independently colorable -- one fewer than ``_BOXEN_K_MAX``. Requesting
-# exactly this many colors (not ``_BOXEN_K_MAX``) means a full-depth
-# dataset shows every generated color, including a named continuous
-# palette's endpoint (``viridis`` reaches ``#fde725``), instead of a
-# structurally-dead last slot.
-_BOXEN_VISIBLE_BANDS = _BOXEN_K_MAX - 1
+# consuming one of its own, so only bands ``k=2..depth_count`` are
+# independently colorable -- one fewer than the derived depth count.
+# Requesting exactly this many colors (not the full depth count) means a
+# full-depth dataset shows every generated color, including a named
+# continuous palette's endpoint (``viridis`` reaches ``#fde725``), instead
+# of a structurally-dead last slot.
+_BOXEN_VISIBLE_BANDS = _boxen_depth_count() - 1
 
 
 def _resolve_boxen_palette(palette: str | Sequence[str] | None) -> list[str] | None:
@@ -801,14 +930,15 @@ def _boxen_band_color_index(k: int) -> int:
 
     ``k=1`` is *always* a zero-pixel band by construction, not merely for
     small samples: ``lv_depth_1``'s rows satisfy ``lower == upper ==
-    median`` (it is the median rule's own data source, see the comment
-    above the median-rule layer below), so it never has a visible extent
+    median`` (it is the median tick's own data source, see the comment
+    above the median-tick layer below), so it never has a visible extent
     for any dataset. ``k=2`` is the **base band**: the first real interval
     beyond the median, guaranteed to render whenever ``LetterValue``
     produces *any* non-degenerate depth at all (real depth count is never
     less than 2 once it exceeds 1). Anchoring ``colors[0]`` at ``k=2``
     (spec §4.4, re-amended after a second quality-review pass) rather than
-    at the widest *configured* band (``k=_BOXEN_K_MAX``) is deliberate:
+    at the widest *configured* band (the deepest depth the mark builds a
+    layer for) is deliberate:
     "outermost rendered band gets colors[0]" is not decidable at desugar
     time (no data access here -- real per-group depth is a Rust-side
     quantity, computed later, and can differ between groups in the same
@@ -844,14 +974,22 @@ def desugar_boxen(
     x_sort: Any = None,
     y_sort: Any = None,
     boxen_agg_sort: dict | None = None,
+    materialized_depth: int | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Letter-value (boxen) composite mark.
 
     Desugars into a `LetterValue` transform plus N nested rect bands (one per
-    depth, opacity ramping outer→inner), a median rule, and a point layer for
+    depth, opacity ramping outer→inner), a band-confined median tick, and a point layer for
     outliers. Each rect layer reads from a dedicated `lv_depth_K` named output
     (no overlapping rows).
+
+    ``materialized_depth`` is internal plumbing, not a public ``mark_boxen()``
+    parameter: ``_desugar._prep_boxen_ramp_depth`` computes it from the bound
+    data (via :func:`_boxen_materialized_depth`) and injects it before this
+    function runs, the same idiom ``boxen_agg_sort`` already uses. ``None``
+    (no data available, or the ``palette=`` path, which never reads it) falls
+    back to the full configured depth cap.
 
     LetterValue secondary-output schemas:
         ``lv_depth_K``:  ``[group, lower, upper, level]``
@@ -879,7 +1017,7 @@ def desugar_boxen(
     to render whenever ``LetterValue`` produces any non-degenerate depth
     at all, for any dataset -- and later colors consume outward
     (``k=3``, ``k=4``, ...) as richer data materializes more bands.
-    ``k=1``, the median-rule band, is always a zero-pixel degenerate row
+    ``k=1``, the median-tick band, is always a zero-pixel degenerate row
     (``lower == upper == median``) and never consumes a color of its own;
     it borrows ``k=2``'s. See ``_boxen_band_color_index`` for the exact
     mapping and why the anchor is inside-out rather than the intuitive
@@ -936,22 +1074,49 @@ def desugar_boxen(
     # registry since 2026-09-06 and read through the secondary lookup rather
     # than the primary one -- see this function's docstring for why the
     # primary schema is the wrong thing to check these against. Every
-    # `depth_{k}` batch carries the same schema, so one lookup covers all
-    # `_BOXEN_K_MAX` band layers; that the registry declares a batch for each
-    # k this mark builds is pinned by
+    # `depth_{k}` batch carries the same schema, so one lookup covers every
+    # band layer this mark builds; that the registry declares a batch for
+    # each k this mark builds is pinned by
     # `tests/test_boxen_secondary_outputs.py`.
     depth_cols = registry_secondary_columns(
         "letter_value", _LV_DEPTH_1_KEY, ["group", "lower", "upper"]
     )
     outlier_cols = registry_secondary_columns("letter_value", _LV_OUTLIERS_KEY, ["group", "value"])
+    depth_count = _boxen_depth_count()
 
-    # The LetterValue transform renames the groupby column to "group" in its
-    # output, so sort must be applied to the "group" encoding in the layers.
-    # Both secondary schemas declare it -- the lookups above check both, and
-    # the band layers and the outlier layer must agree on the name.
+    # The LetterValue transform renames the groupby column to "group" and the
+    # value axis to "lower"/"upper"/"value" in its output, so every layer's
+    # positional encoding must be retitled with the user's own field names
+    # (F-L03-12) or the rendered axes show LetterValue's internal column
+    # names instead. Unlike desugar_boxplot's enc() helper (composite.py
+    # ~L280), whose categorical field is never renamed, boxen renames BOTH
+    # channels identically across every layer, so both are titled once here
+    # rather than per call site.
     group_col = depth_cols["group"]
-    group_enc_x = X(group_col, sort=cat_sort) if cat_sort is not None else group_col
-    group_enc_y = Y(group_col, sort=cat_sort) if cat_sort is not None else group_col
+    group_enc_x = (
+        X(group_col, title=group, sort=cat_sort)
+        if cat_sort is not None
+        else X(group_col, title=group)
+    )
+    group_enc_y = (
+        Y(group_col, title=group, sort=cat_sort)
+        if cat_sort is not None
+        else Y(group_col, title=group)
+    )
+
+    def enc(value_col: str, value2_col: str | None = None) -> dict:
+        """This layer's positional encoding: the categorical channel from
+        ``group_enc_x``/``group_enc_y`` (already titled with ``group``) plus
+        the value channel titled with ``val``, the user's original field."""
+        if horizontal:
+            d: dict = {"x": X(value_col, title=val), "y": group_enc_y}
+            if value2_col:
+                d["x2"] = value2_col
+        else:
+            d = {"x": group_enc_x, "y": Y(value_col, title=val)}
+            if value2_col:
+                d["y2"] = value2_col
+        return d
 
     transforms = [
         LetterValue(
@@ -965,12 +1130,12 @@ def desugar_boxen(
         ),
     ]
 
-    # Per-depth named outputs (lv_depth_1 … lv_depth_{_BOXEN_K_MAX}) let each
-    # rect layer read its own slice (no overlap). ``_BOXEN_K_MAX`` visible
-    # bands; for data with fewer effective depths, unused outputs are zero-row
-    # batches and render nothing.  The same constant derives the registry's
-    # ``depth_*`` names below, so the loop bound and the registered set cannot
-    # drift apart.
+    # Per-depth named outputs (lv_depth_1 … lv_depth_{depth_count}) let each
+    # rect layer read its own slice (no overlap). `depth_count` (derived from
+    # the registry above) visible bands; for data with fewer effective
+    # depths, unused outputs are zero-row batches and render nothing.  The
+    # same derived count drives the registry's `depth_*` names below, so the
+    # loop bound and the registered set cannot drift apart.
     #
     # Paint order (spec §4.4, amended 2026-08-27 after quality review):
     # k=1 is the innermost band; under a palette, every band renders at
@@ -981,40 +1146,56 @@ def desugar_boxen(
     # (and stays byte-identical) since the opacity ramp already makes the
     # painted-last widest band read as nested via alpha blending.
     depth_ks = (
-        range(_BOXEN_K_MAX, 0, -1) if palette_colors is not None else range(1, _BOXEN_K_MAX + 1)
+        range(depth_count, 0, -1) if palette_colors is not None else range(1, depth_count + 1)
     )
+    # Opacity ramp normalization (quality-review REVISE, 2026-09-06 cycle 2):
+    # normalized against `ramp_depth` -- the depth THIS chart actually
+    # materializes (`materialized_depth`, injected by
+    # `_desugar._prep_boxen_ramp_depth` from the bound data), falling back to
+    # the full configured `depth_count` only when that couldn't be determined
+    # -- never against `depth_count` itself. Raising the registry-derived cap
+    # (6->12, F-L03-04b) must not flatten a chart's ramp contrast when its
+    # real rendered depth hasn't changed; normalizing by the configured cap
+    # unconditionally did exactly that (measured: adjacent-band opacity step
+    # shrank from ~0.11 to ~0.05 on an unchanged n=200 chart). Depths beyond
+    # `ramp_depth` (empty bands in the ordinary case; a possible underestimate
+    # in the pathological case) are clamped rather than left to go negative.
+    ramp_depth = materialized_depth if materialized_depth is not None else depth_count
+    ramp_denominator = max(ramp_depth - 1, 1)
     layers: list = []
     for k in depth_ks:
         if palette_colors is not None:
             depth_kwargs = {"fill": palette_colors[_boxen_band_color_index(k)], "opacity": 1.0}
         else:
-            opacity = 0.85 - (0.55 * (k - 1) / max(_BOXEN_K_MAX - 1, 1))
-            depth_kwargs = {"opacity": opacity}
-        enc = (
-            {"x": depth_cols["lower"], "x2": depth_cols["upper"], "y": group_enc_y}
-            if horizontal
-            else {"x": group_enc_x, "y": depth_cols["lower"], "y2": depth_cols["upper"]}
-        )
+            opacity = 0.85 - (0.55 * (k - 1) / ramp_denominator)
+            depth_kwargs = {"opacity": min(max(opacity, 0.15), 0.85)}
         layers.append(
             _Layer(
                 name=f"depth_{k}",
                 mark="rect",
-                encoding=enc,
+                encoding=enc(depth_cols["lower"], depth_cols["upper"]),
                 mark_kwargs=depth_kwargs,
                 data_source=f"{_LV_TRANSFORM_NAME}_{_lv_depth_key(k)}",
             )
         )
 
-    # Median rule: at depth=1, ``lower == upper == median``.
+    # Median tick: at depth=1, ``lower == upper == median``. A tick (not a
+    # rule) confined to the deepest rendered band's own width rule so the
+    # median mark spans only its category's band instead of the full panel
+    # width (F-L03-02). No explicit `band_size` here: `tick.rs`'s ordinal
+    # "boxplot median" branch already resolves an unset `band_size` to 0.6
+    # (`unwrap_or(0.6)`), the exact same default `rect.rs` resolves for
+    # every depth band above (neither ever overrides it) -- restating the
+    # literal here would let a future change to that shared default move
+    # the bands while leaving the median tick pinned at the old value.
+    # Declares BOTH positional channels (category + value) -- a
+    # single-channel tick normalizes to a rug (`Mark::Tick` own-channel
+    # normalization), which this is not.
     layers.append(
         _Layer(
             name="median",
-            mark="rule",
-            encoding=(
-                {"x": depth_cols["lower"], "y": group_enc_y}
-                if horizontal
-                else {"x": group_enc_x, "y": depth_cols["lower"]}
-            ),
+            mark="tick",
+            encoding=enc(depth_cols["lower"]),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source=f"{_LV_TRANSFORM_NAME}_{_lv_depth_key(1)}",
         )
@@ -1025,11 +1206,7 @@ def desugar_boxen(
         _Layer(
             name="outlier",
             mark="point",
-            encoding=(
-                {"x": outlier_cols["value"], "y": group_enc_y}
-                if horizontal
-                else {"x": group_enc_x, "y": outlier_cols["value"]}
-            ),
+            encoding=enc(outlier_cols["value"]),
             data_source=f"{_LV_TRANSFORM_NAME}_{_LV_OUTLIERS_KEY}",
         )
     )
@@ -1039,13 +1216,9 @@ def desugar_boxen(
 
 register_layer_names(
     "boxen",
-    frozenset({f"depth_{k}" for k in range(1, _BOXEN_K_MAX + 1)}) | {"median", "outlier"},
+    frozenset({f"depth_{k}" for k in range(1, _boxen_depth_count() + 1)}) | {"median", "outlier"},
 )
 
 
 def _extent_to_box(extent):
     return "min-max" if extent == "min-max" else float(extent)
-
-
-def _extent_to_iqr_k(extent):
-    return 1.5 if extent == "min-max" else float(extent)

@@ -933,11 +933,14 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > bands; a `k` that never materializes for a given dataset simply leaves
 > its color, and every color past it, unused (the same tail-truncation as
 > a palette longer than the actual number of categories elsewhere). `k=1`
-> — the median rule's own row, `lower == upper == median` by construction,
+> — the median tick's own row (see the 2026-09-06 note below: a
+> band-confined `tick`, not a full-panel `rule`), `lower == upper == median`
+> by construction,
 > always zero-pixel on every render — never consumes a color of its own
 > (it borrows `k=2`'s). Fills apply at opacity 1.0, replacing the opacity
 > ramp. A named palette (`str`) is expanded via `ferrum.color.palette(name,
-> n=_BOXEN_K_MAX - 1)` — exactly the number of colorable band slots, so a
+> n=<colorable band count>)` — exactly the number of colorable band slots
+> (11 as of the 2026-09-06 note below; was 5 pre-batch), so a
 > full-depth dataset shows every generated color, including a continuous
 > palette's endpoint (`viridis` reaches `#fde725`) — raising the same
 > `ValueError` shape `scheme=` raises for an unrecognized name; an
@@ -978,7 +981,8 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > hue at all, contradicted by this very note's own "no hue channel"
 > sentence two lines earlier); the hue-remedy fix landed clean, but the
 > color-mapping fix that pass shipped anchored `colors[0]` at the widest
-> *configured* band (`k=_BOXEN_K_MAX`) instead of the widest *rendered*
+> *configured* band (`k=<the mark's full configured depth cap>`, see the
+> 2026-09-06 note below for how that cap is derived) instead of the widest *rendered*
 > one — real per-group depth is a Rust-side quantity this desugar function
 > has no access to, so that anchor only rendered `colors[0]` when a
 > dataset happened to reach full configured depth, which is not the
@@ -987,7 +991,8 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > only the palette's *last* two colors ever appearing at n=200. The
 > now-shipped base-band anchor (`k=2`, above) replaces it, along with
 > sizing the palette request to the actual number of colorable slots
-> (`_BOXEN_K_MAX - 1`, not `_BOXEN_K_MAX` — the previous request generated
+> (the full configured depth cap minus one, not the full cap itself — the
+> previous request generated
 > one color, `colors[-1]`, that no mapping could ever reach, truncating
 > every continuous-palette ramp one step short of its endpoint
 > unconditionally). The "architecturally-unavoidable-in-Python" framing
@@ -997,6 +1002,72 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > dependent), but not of removing the gap itself, which the base-band
 > anchor does in pure Python by choosing a different, always-present
 > anchor point instead.
+>
+> **2026-09-06 (batch-E T10, F-L03-02/04b/10/11/12 — closes the stale
+> `_BOXEN_K_MAX` references above):** `_BOXEN_K_MAX` (the hardcoded literal
+> `6` this section's earlier notes name) is **deleted**. `desugar_boxen`'s
+> depth-band count now derives from `letter_value`'s registry-declared
+> `secondary_outputs` (`depth_1..depth_N`), which the Rust `K_MAX_NAMED`
+> constant governs — currently **12**, raised from 6/8 by the same batch's
+> T5. Every place the notes above say "the mark's full configured depth
+> cap" now means 12, not 6; the colorable-band count (`colors[0..]`'s
+> length) is therefore **11**, not 5. **Disclosed rendered-output
+> consequences** (byte-stability exceptions for this batch):
+> - `palette=` boxen charts sample `ferrum.color.palette(name, n=11)`
+>   instead of `n=5`. For a *continuous* palette this shifts every sampled
+>   position (resampled evenly across `[0, 1]` at the requested count), so
+>   colors on an existing `palette=` chart using a continuous scheme change
+>   even when its real letter-value depth is unchanged. A *categorical*
+>   palette's early colors (`colors[0]`, `colors[1]`, …) are unaffected as
+>   long as the palette has ≥5 entries (`colors[i % len(colors)]` for
+>   `i < len(colors)` doesn't depend on the requested count).
+> - A chart whose real per-group depth exceeds 6 (n large enough that
+>   `k_depth` computes more than 6 real bands — e.g. `k_depth="full"` on a
+>   few hundred rows) now renders those previously-silently-dropped deeper
+>   bands: real `LetterValue` output that existed all along (Rust's cap was
+>   already 12) but that `desugar_boxen` had no layer to read past `k=6`.
+> - The median mark is now `mark="tick"` (band-confined to its category),
+>   not `mark="rule"` (which drew a bare `{x, y}` pair with no `x2`/`y2` —
+>   `rule.rs`'s documented shape table resolves that pattern to a
+>   full-panel `HorizontalSpan`, so the median line used to run across
+>   every category, not just its own).
+> - Every layer's positional encoding titles both axes with the user's own
+>   field names (`X(title=...)`/`Y(title=...)`); previously the axes showed
+>   `LetterValue`'s internal `"group"`/`"lower"`/`"upper"`/`"value"` column
+>   names verbatim.
+> - `letter_value`'s `"outliers"` secondary batch now emits only rows where
+>   `is_outlier == true` (T5); `desugar_boxen`'s own outlier-point encoding
+>   is unchanged, so this is purely a batch-filtering fix — the outlier
+>   layer draws exactly the true outliers instead of every observation.
+> - The default (`palette=None`) opacity ramp is renormalized against the
+>   depth THIS chart actually materializes (its real Tukey/proportion/
+>   trustworthy/full depth, computed from the bound data via a lightweight
+>   arithmetic estimate — never the quantile math, which stays Rust-only),
+>   guarded to a minimum of 2 bands — not against the full configured cap
+>   of 12. Normalizing by the cap unconditionally would have flattened the
+>   ramp's visual contrast on every chart whose real depth is small (the
+>   overwhelmingly common case), even though that chart's own rendered
+>   depth did not change: adjacent-band opacity steps would have shrunk
+>   from ≈0.11-0.18 (typical pre-batch contrast) to ≈0.05 (normalized
+>   against 12) for no data-driven reason. A chart whose real depth cannot
+>   be determined (no bound data reachable, or the data shape can't be
+>   read) falls back to normalizing against the full cap, matching the
+>   batch's initial (pre-cycle-2) behavior — never a crash, since this is a
+>   styling estimate, not a correctness-critical value.
+> - `whisker_mult="min-max"` (boxplot, not boxen) now suppresses the
+>   outlier point layer entirely, regardless of `outliers=`: whiskers
+>   already reach the data extremes, so nothing can lie beyond them.
+>   Previously the `Outliers` transform still ran at a fixed `1.5`×IQR
+>   fence unrelated to the whiskers' own `"min-max"` extent, so points
+>   between that fence and the true min/max rendered as "outliers" —
+>   contradicting the min-max whisker plot's own geometry, which already
+>   reached those same points.
+>
+> `k_depth` (every strategy) clamps at depth 12: two `k_depth` rules that
+> differ only in the depth they'd compute beyond 12 render identically —
+> reachable only at group sizes from roughly 4,000 rows (`"full"`) up into
+> the tens of thousands (`"tukey"`/`"trustworthy"`), depending on the
+> strategy's own formula.
 
 ---
 

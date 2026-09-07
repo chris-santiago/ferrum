@@ -26,7 +26,7 @@ import pytest
 
 from ferrum._overrides import LAYER_NAME_CATALOG
 from ferrum.marks.composite import (
-    _BOXEN_K_MAX,
+    _boxen_depth_count,
     desugar_boxen,
     desugar_boxplot,
     desugar_errorband,
@@ -101,7 +101,7 @@ MAXIMIZING_CASES: list[tuple] = [
     ("errorbar", "errorbar", desugar_errorbar, ("day", "tip"), {}),
     ("errorband", "errorband", desugar_errorband, ("x", "y"), {}),
     ("ribbon", "ribbon", desugar_ribbon, ("x", "lower"), {"y2_field": "upper"}),
-    # boxen: builds depth_1.._BOXEN_K_MAX + median + outlier unconditionally.
+    # boxen: builds depth_1..depth_count + median + outlier unconditionally.
     ("boxen", "boxen", desugar_boxen, ("species", "sepal_length"), {}),
     # --- statistical --------------------------------------------------------
     # smooth: ci + show_metrics builds {ribbon, line, metrics} (layered path).
@@ -267,10 +267,11 @@ def test_every_registered_kind_is_non_empty() -> None:
 
 
 def test_boxen_depth_count_derives_from_constant() -> None:
-    """Pin the 2a derivation: boxen builds and registers exactly _BOXEN_K_MAX bands.
+    """Pin the 2a derivation: boxen builds and registers exactly
+    ``_boxen_depth_count()`` bands.
 
     The depth-band loop bound and the registered ``depth_*`` name set both come
-    from ``_BOXEN_K_MAX``, so this asserts they stay in lockstep.
+    from ``_boxen_depth_count()``, so this asserts they stay in lockstep.
     """
     result = desugar_boxen("species", "sepal_length")
     built_depths = sorted(
@@ -278,10 +279,10 @@ def test_boxen_depth_count_derives_from_constant() -> None:
         for layer in (result.layers or [])
         if layer.name and layer.name.startswith("depth_")
     )
-    assert len(built_depths) == _BOXEN_K_MAX
+    assert len(built_depths) == _boxen_depth_count()
 
     registered_depths = sorted(
         name for name in LAYER_NAME_CATALOG["boxen"] if name.startswith("depth_")
     )
-    assert len(registered_depths) == _BOXEN_K_MAX
+    assert len(registered_depths) == _boxen_depth_count()
     assert built_depths == registered_depths

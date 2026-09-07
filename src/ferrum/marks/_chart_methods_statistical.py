@@ -329,6 +329,9 @@ class StatisticalMarksMixin:
         whisker_mult : float or "min-max", optional
             Whisker reach as a multiple of IQR, or ``"min-max"`` to extend
             whiskers to the data minimum/maximum.  Default is ``1.5``.
+            ``"min-max"`` also suppresses the outlier point layer regardless
+            of ``outliers=``: whiskers already reach every observation, so
+            nothing can lie beyond them.
 
             .. deprecated::
                 The old spelling ``extent=`` is accepted as an alias for one
@@ -343,7 +346,8 @@ class StatisticalMarksMixin:
             ``size`` takes precedence.
         outliers : bool, optional
             Whether to draw outlier points beyond the whiskers.  Default is
-            ``True``.
+            ``True``.  Forced off when ``whisker_mult="min-max"`` (see above),
+            regardless of this flag.
         color_field : str or None, optional
             Column name to drive per-group fill colour on the box layer.
         horizontal : bool, optional
@@ -419,21 +423,36 @@ class StatisticalMarksMixin:
     ) -> "Chart":
         """Render a letter-value (boxen) plot via composite mark desugaring.
 
-        Produces nested rectangular bands for each letter-value depth, a median
-        rule, and an outlier-point layer via the ``LetterValue`` transform.
-        Requires a categorical ``x`` encoding and a continuous ``y`` (or the
-        reverse when ``horizontal=True`` or ``orient="horizontal"``).
+        Produces nested rectangular bands for each letter-value depth, a
+        band-confined median tick, and an outlier-point layer via the
+        ``LetterValue`` transform. Requires a categorical ``x`` encoding and
+        a continuous ``y`` (or the reverse when ``horizontal=True`` or
+        ``orient="horizontal"``).
 
         Parameters
         ----------
         k_depth : {"tukey", "proportion", "trustworthy", "full"}, default "tukey"
-            Rule for choosing the number of letter-value levels.
+            Rule for choosing the number of letter-value levels. Every
+            strategy clamps at depth 12 (the registry-derived band cap,
+            ``letter_value``'s ``K_MAX_NAMED``): two ``k_depth`` rules that
+            differ only in the depth they'd compute beyond 12 (group sizes
+            from roughly 4,000 rows for ``"full"`` up into the tens of
+            thousands for ``"tukey"``/``"trustworthy"``, depending on the
+            strategy's own formula) render identically, since neither ever
+            builds a layer past the cap.
         k_proportion : float, optional
             Proportion parameter used when ``k_depth="proportion"``.  Default
             is ``0.007``.
         outlier_threshold : float, optional
-            IQR multiple beyond which points are considered outliers.  Default
-            is ``1.5``.
+            Fence multiple applied to the OUTERMOST computed letter-value
+            band's own span (``upper - lower`` of the deepest depth
+            ``LetterValue`` reaches for a group), not the interquartile
+            range: a value is flagged as an outlier when it falls outside
+            ``[lower - outlier_threshold * span, upper + outlier_threshold *
+            span]``.  This coincides with the classic IQR multiple only when
+            the deepest depth is ``k=2`` (the first real band beyond the
+            median); at any greater depth the reference span is that band's
+            own, narrower span.  Default is ``1.5``.
         palette : str, sequence of str, or None, optional
             Colors the depth bands directly at opacity 1.0, replacing the
             opacity ramp.  The mapping anchors on the **base band**:
@@ -441,7 +460,7 @@ class StatisticalMarksMixin:
             beyond the median -- guaranteed to render whenever any
             non-degenerate depth exists, for any dataset -- and later
             colors consume outward as richer data materializes more
-            bands.  Band ``k=1`` (the median rule's own row, always
+            bands.  Band ``k=1`` (the median tick's own row, always
             zero-pixel by construction) never consumes a color of its
             own; it borrows ``k=2``'s.  Bands paint widest-first
             (outermost under, innermost on top) so the nesting stays
