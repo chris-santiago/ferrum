@@ -2251,6 +2251,35 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
 > the auto-inferred path has (tracked as SCALE-1 in the code-archaeology
 > followups doc). The other six kinds are byte-identical.
 >
+> **2026-09-10 (batch F close):** every option stated on a channel the CALLER
+> built reaches all eight kinds. `x=fm.X("cat", sort=[...])` and
+> `hue=fm.Color("g", sort=[...])` were honored by the six per-row kinds and
+> dropped by `kind="point"`/`"bar"`, whose layers rebuilt both channels from
+> bare field names and re-threaded only `type_`, `order=` and the
+> native-scale domain -- so the encoding spelling of an order was inert while
+> the `order=`/`hue_order=` kwarg spelling worked. Both spellings resolve at
+> one site now and produce byte-identical output for the same order; where
+> both are given the kwarg wins (unchanged, and the same on every kind). The
+> third door is uniform too: `encode={"x": ...}` is a raw override that
+> REPLACES the builder's normalized category channel (discarding its typing
+> and its native-scale padding, as `encode=` is documented to). It always did
+> that on the six per-row kinds; it now does it on the two estimating kinds
+> as well, which previously kept their own channel and left the door inert.
+> `encode`'s `x` is the layer-space CATEGORY channel under both orientations,
+> the same key space the value-scale refusal and the scale propagation
+> already read it in.
+> **Refused, not dropped:** a PER-OBSERVATION appearance channel on the two
+> estimating kinds -- `size`, `shape`, `opacity`, `fill_opacity`,
+> `stroke_opacity`, `stroke_width`, `stroke_dash`, `angle`, `color`, `fill`,
+> `stroke`, through a bare keyword or the `encode=` dict -- raises naming the
+> route. These kinds draw one mark per (category × `hue`) group, so the
+> mapping has no row to read: it reached the chart-level encoding only, where
+> it drew the channel's LEGEND over marks that carried none (measured:
+> `size=` rendered a six-swatch legend beside uniform-radius estimators;
+> `opacity=` was byte-identical to passing nothing). `hue=` is deliberately
+> NOT in the set -- it joins the `Summary` groupby, so its legend is true.
+> The six per-row kinds accept all of these unchanged.
+>
 > **2026-09-10 (batch F, T5r rider — renderer-wide):** a LAYERED chart's
 > auto-inferred value-axis domain now extends to zero when a bar layer binds
 > that channel, mirroring the zero-anchor a single-chart `mark_bar` already
@@ -2392,6 +2421,29 @@ parameter is forwarded to `lmplot` unchanged.
 > literally named `_label` plus `label=` now refuses with a typed
 > collision error instead of the label silently overwriting it.
 > `color=None` is byte-identical to before.
+
+> **2026-09-10 (batch F close, F-L10-02):** `lmplot`/`regplot`'s scatter
+> layer keeps the OBSERVATIONS. With `ci=None` and `show_metrics=False` the
+> fit chart collapsed to a single line mark bound to a chain-advancing
+> (unnamed) `Smooth`, and composing it with the scatter applied that
+> transform to BOTH layers: every rendered "observation" landed exactly on a
+> fit vertex (measured: 200 of 200, zero spread about the curve) for `lm`,
+> `loess`, `quadratic`, `gam`, `log` and `sqrt`, in both functions -- or
+> raised `unknown column` when the frame's columns were not themselves named
+> `x`/`y`. The fit now binds to a NAMED transform through `data_source=`
+> whenever a scatter layer is present, the same shape the `ci=` path and the
+> `logistic`/`glm`/`robust` methods already used; with `scatter=False` the
+> single-mark shape is kept, since there is no sibling layer to corrupt and
+> its chart-level encoding is what titles the axes with the caller's own
+> column names. **One layer renames:** on that combination the fit layer is
+> `"line"` rather than `"fit"` -- which every other `lmplot` shape already
+> called it -- so a per-layer `mark={"fit": ...}` override for it becomes
+> `mark={"line": ...}`. Separately, `x_jitter=` on a non-Float64 predictor
+> now renders: `Jitter` writes a Float64 offset back into the column it
+> adjusts, so an Int64 predictor failed Arrow's schema check on three of the
+> four `ci`/`show_metrics` combinations and was masked on the fourth by the
+> corruption above; the predictor is widened before either chart is built,
+> and the cast is deleted once `apply_jitter` coerces the column it writes.
 
 #### Matrix / Pairwise
 

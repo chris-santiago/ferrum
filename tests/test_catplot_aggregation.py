@@ -17,7 +17,9 @@ own module per the test-homing convention in CLAUDE.md.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
+import math
 import re
 
 import numpy as np
@@ -25,7 +27,10 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+from ferrum.encoding._channel_policy import _ALIAS_CHANNELS, _RENDERER_HONORED_CHANNELS
+from ferrum.plots.distribution import _CATPLOT_PER_ROW_APPEARANCE_CHANNELS
 
+from _svg_extents import y_axis_units_per_pixel
 from _svg_rects import data_bar_rects, svg_elements
 
 # The whisker is a `rule` mark stroked with the theme's `label` token. Axis
@@ -57,6 +62,11 @@ def whisker_spans(svg: str) -> list[tuple[float, float, float]]:
         (round(float(a["x1"]), 3), round(float(a["y1"]), 3), round(float(a["y2"]), 3))
         for a in whisker_lines(svg)
     ]
+
+
+def text_labels(svg: str) -> list[str]:
+    """Every rendered ``<text>`` string (axis ticks, titles, legend labels)."""
+    return re.findall(r"<text[^>]*>([^<]*)</text>", svg)
 
 
 def first_index(svg: str, pattern: str) -> int:
@@ -188,6 +198,44 @@ class TestLayerOrder:
 
 
 class TestBootstrapArguments:
+    def test_ci_is_a_percent_and_reaches_summary_as_a_level(self, cat_df):
+        """``ci=95`` draws a 95 % interval -- an ABSOLUTE claim, in data units.
+
+        ``ci`` is a percent on catplot's signature and a level on ``Summary``,
+        and ``_catplot_ci_level`` is the single site that divides by 100. Every
+        other assertion in this class is relative (narrower ci -> shorter
+        whisker, different seed -> different whisker) and therefore invariant
+        under a wrong constant: dividing by 200 instead renders a 47.5 %
+        interval and passes all of them. This converts the rendered whisker
+        back into data units through the axis ladder and checks it against the
+        interval's own normal approximation, ``1.96 * sd / sqrt(n)``, which a
+        47.5 % interval (``0.639 * sd / sqrt(n)``, a third as wide) fails.
+
+        The tolerance is deliberately loose: a percentile bootstrap over 50
+        points is close to, not equal to, the normal approximation. It is
+        still an order of magnitude tighter than the mutation it exists to
+        catch.
+        """
+        svg = fm.catplot(cat_df, x="cat", y="val", kind="point", ci=95).to_svg()
+        units = y_axis_units_per_pixel(svg)
+        half_widths = [abs(y1 - y2) * units / 2 for _, y1, y2 in whisker_spans(svg)]
+        assert len(half_widths) == 4
+
+        per_category = cat_df.group_by("cat").agg(
+            pl.col("val").std().alias("sd"), pl.len().alias("n")
+        )
+        expected = [
+            1.96 * row["sd"] / math.sqrt(row["n"]) for row in per_category.iter_rows(named=True)
+        ]
+        observed_mean = sum(half_widths) / len(half_widths)
+        expected_mean = sum(expected) / len(expected)
+        ratio = observed_mean / expected_mean
+        assert 0.7 < ratio < 1.4, (
+            f"ci=95 must draw a 95 % interval: observed half-width {observed_mean:.4f} data "
+            f"units vs normal-approx {expected_mean:.4f} (ratio {ratio:.3f}). A ratio near "
+            "0.33 means the percent was converted to a level with the wrong divisor."
+        )
+
     def test_narrower_ci_draws_shorter_whiskers(self, cat_df):
         """ci=90 is nested inside ci=95: every whisker must be shorter."""
         default = whisker_spans(fm.catplot(cat_df, x="cat", y="val", kind="point").to_svg())
@@ -310,13 +358,336 @@ class TestOrdering:
 
 
 # ---------------------------------------------------------------------------
-# The value axis: zero baseline, and a caller's explicit scale=
+# The caller's own channel objects reach the layers
 # ---------------------------------------------------------------------------
 
 
-def text_labels(svg: str) -> list[str]:
-    """Every rendered ``<text>`` string (axis ticks, titles, legend labels)."""
-    return re.findall(r"<text[^>]*>([^<]*)</text>", svg)
+#: Every kind, so the aggregating pair is pinned AGAINST its siblings rather
+#: than in isolation. The two spellings of one intent (`order=`/`hue_order=`
+#: kwargs vs `sort=` on a channel the caller built) diverged silently once --
+#: point/bar honored only the kwargs -- because nothing compared the kinds.
+_ALL_KINDS = ["strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"]
+
+#: The kinds a caller can hand an already-built category CHANNEL to.
+#: ``kind="count"`` builds its ``Aggregate`` from the raw ``x=`` argument, so a
+#: channel object there raises inside the transform constructor -- pre-existing,
+#: unrelated to the layer/chart split this section covers, and tracked
+#: separately. It stays in the color-channel tables below, which it passes.
+_CHANNEL_OBJECT_KINDS = [k for k in _ALL_KINDS if k != "count"]
+
+
+def _catplot_kwargs(kind: str, **kwargs) -> dict:
+    """Call kwargs for *kind*: ``count`` takes a category channel only."""
+    if kind != "count":
+        kwargs["y"] = "val"
+    return {"kind": kind, **kwargs}
+
+
+def cat_axis_labels(svg: str) -> list[str]:
+    """The rendered category-axis labels, in screen order."""
+    return [t for t in text_labels(svg) if t in set("abcd")]
+
+
+def hue_legend_labels(svg: str) -> list[str]:
+    """The rendered hue-legend labels, in screen order."""
+    return [t for t in text_labels(svg) if t in {"X", "Y"}]
+
+
+class TestCallerChannelOptions:
+    """A channel object the caller built reaches the layers intact.
+
+    ``kind="point"``/``"bar"`` build their marks as LAYERS over a ``Summary``
+    output, and a layered chart resolves its axis and color scales from the
+    layer encodings -- so anything left only on the chart-level encoding is
+    inert for them. They used to rebuild both channels from bare field names
+    and re-thread three options by hand, which honored ``order=``/
+    ``hue_order=`` while silently discarding the identical intent spelled on
+    the caller's own channel (measured: ``x=fm.X("cat", sort=["c","b","a"])``
+    rendered ``a, b, c``). Both spellings now resolve at one site.
+    """
+
+    @pytest.mark.parametrize("kind", _CHANNEL_OBJECT_KINDS)
+    def test_channel_sort_orders_the_category_axis(self, cat_df, kind):
+        svg = fm.catplot(
+            cat_df, **_catplot_kwargs(kind, x=fm.X("cat", sort=["c", "b", "a", "d"]))
+        ).to_svg()
+        assert cat_axis_labels(svg) == ["c", "b", "a", "d"]
+
+    @pytest.mark.parametrize("kind", _CHANNEL_OBJECT_KINDS)
+    def test_channel_sort_and_order_kwarg_render_identically(self, cat_df, kind):
+        """Two spellings of one intent, byte-for-byte -- on every kind."""
+        via_channel = fm.catplot(
+            cat_df, **_catplot_kwargs(kind, x=fm.X("cat", sort=["c", "b", "a", "d"]))
+        ).to_svg()
+        via_kwarg = fm.catplot(
+            cat_df, **_catplot_kwargs(kind, x="cat", order=["c", "b", "a", "d"])
+        ).to_svg()
+        assert via_channel == via_kwarg
+
+    @pytest.mark.parametrize("kind", _ALL_KINDS)
+    def test_color_channel_sort_orders_the_legend(self, cat_df, kind):
+        svg = fm.catplot(
+            cat_df, **_catplot_kwargs(kind, x="cat", hue=fm.Color("grp", sort=["Y", "X"]))
+        ).to_svg()
+        assert hue_legend_labels(svg) == ["Y", "X"]
+
+    @pytest.mark.parametrize("kind", _ALL_KINDS)
+    def test_color_channel_sort_and_hue_order_render_identically(self, cat_df, kind):
+        via_channel = fm.catplot(
+            cat_df, **_catplot_kwargs(kind, x="cat", hue=fm.Color("grp", sort=["Y", "X"]))
+        ).to_svg()
+        via_kwarg = fm.catplot(
+            cat_df, **_catplot_kwargs(kind, x="cat", hue="grp", hue_order=["Y", "X"])
+        ).to_svg()
+        assert via_channel == via_kwarg
+
+    @pytest.mark.parametrize("kind", ["point", "bar"])
+    def test_other_channel_options_survive_too(self, cat_df, kind):
+        """`sort=` is not special-cased: an axis `title=` rides in the same way.
+
+        This is the assertion that fails if the fix is a fourth hand-threaded
+        option rather than "take the caller's resolved channel".
+        """
+        svg = fm.catplot(cat_df, x=fm.X("cat", title="CATEGORY"), y="val", kind=kind).to_svg()
+        assert "CATEGORY" in text_labels(svg)
+
+    @pytest.mark.parametrize("kind", _ALL_KINDS)
+    def test_the_encode_dict_door_orders_the_axis_on_every_kind(self, cat_df, kind):
+        """The third door, pinned across the same table as the other two.
+
+        `encode=` is a raw override applied after the builder's own
+        normalization, so it REPLACES the category channel rather than being
+        normalized on top of -- but it must do that on all eight kinds. The
+        estimating kinds bind their own layers, which a chart-level override
+        never reaches, so before this they kept the builder's channel and the
+        door went inert on exactly two kinds (measured: `c, b, a, d` on box,
+        `a, b, c, d` on point). This is the column the cross-kind table was
+        missing when the divergence shipped.
+        """
+        svg = fm.catplot(
+            cat_df,
+            **_catplot_kwargs(kind, x="cat", encode={"x": fm.X("cat", sort=["c", "b", "a", "d"])}),
+        ).to_svg()
+        assert cat_axis_labels(svg) == ["c", "b", "a", "d"]
+
+    @pytest.mark.parametrize("kind", ["box", "point", "bar"])
+    def test_the_encode_dict_door_is_layer_space_under_orient_h(self, cat_df, kind):
+        """`encode`'s `x` is the CATEGORY channel under both orientations.
+
+        That is the convention the value-scale refusal and the scale
+        propagation already read this door in (`chart_encoding = {**enc,
+        **encode}`, built after the orientation swap), so the channel
+        resolution reads it the same way rather than inventing a second
+        key space for the same dict.
+        """
+        svg = fm.catplot(
+            cat_df,
+            y="cat",
+            x="val",
+            kind=kind,
+            orient="h",
+            encode={"x": fm.X("cat", sort=["c", "b", "a", "d"])},
+        ).to_svg()
+        assert cat_axis_labels(svg) == ["c", "b", "a", "d"]
+
+    @pytest.mark.parametrize("kind", _CHANNEL_OBJECT_KINDS)
+    def test_the_order_kwarg_wins_over_the_channel_sort(self, cat_df, kind):
+        """Pinned precedence: the kwarg spelling overrides the channel's own.
+
+        Measured across all eight kinds before and after the unification --
+        `order=` has always rebuilt the category channel with its own `sort=`,
+        so this is the shipped rule, stated once here instead of implied by
+        two implementations.
+        """
+        if kind == "count":
+            # `kind="count"` builds its Aggregate from the raw x= argument, so
+            # a channel OBJECT there raises inside the transform constructor
+            # (pre-existing, all-kinds-independent, tracked separately). The
+            # precedence question is therefore only askable on the other seven.
+            pytest.skip("count takes a bare category column name, not a channel object")
+        svg = fm.catplot(
+            cat_df,
+            **_catplot_kwargs(
+                kind, x=fm.X("cat", sort=["c", "b", "a", "d"]), order=["d", "c", "b", "a"]
+            ),
+        ).to_svg()
+        assert cat_axis_labels(svg) == ["d", "c", "b", "a"]
+
+    @pytest.mark.parametrize("kind", _ALL_KINDS)
+    def test_hue_order_with_a_channel_hue_refuses_on_every_kind(self, cat_df, kind):
+        """The color channel's own precedence answer: a typed refusal, uniformly.
+
+        `hue_order=` rebuilds the color channel from the `hue=` argument, which
+        must be a column name -- combining it with an already-built `Color(...)`
+        raises, and always has, on all eight kinds. Pinned so the aggregating
+        kinds cannot quietly acquire a different answer than their siblings
+        (the x channel's equivalent combination was made to work in batch F;
+        this one is tracked as a follow-up, not silently split).
+        """
+        with pytest.raises(TypeError, match="field must be str"):
+            fm.catplot(
+                cat_df,
+                **_catplot_kwargs(
+                    kind, x="cat", hue=fm.Color("grp", sort=["X", "Y"]), hue_order=["Y", "X"]
+                ),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Per-observation appearance channels on an aggregate
+# ---------------------------------------------------------------------------
+
+
+#: Channels catplot resolves itself: the category and value axes it normalizes
+#: (`x`/`y`, from its own `x=`/`y=`/`orient=`/`order=` surface) and the span
+#: companions the estimating kinds' whisker layer binds to the Summary output
+#: (`x2`/`y2`). Not a caller-facing appearance mapping, so not the refusal's
+#: subject.
+BUILDER_RESOLVED = frozenset({"x", "y", "x2", "y2"})
+
+#: Channels accepted and inert on the estimating kinds -- see
+#: `test_non_appearance_channels_are_still_accepted_and_inert` for the two
+#: distinct reasons behind them and the follow-up that closes the second.
+ACCEPTED_INERT = frozenset({"text", "detail", "tooltip", "href", "description", "url", "key"})
+
+
+class TestPerRowAppearanceChannels:
+    """An aggregate cannot carry a per-observation visual mapping, and says so.
+
+    Before this refusal, `catplot(kind="point", size=<column>)` drew its
+    estimator marks at the uniform default radius UNDER a six-swatch size
+    legend -- a legend asserting a mapping the marks did not carry -- and
+    `opacity=<column>` was byte-identical to passing nothing at all (both
+    measured). Both doors onto the chart
+    encoding (the bare keyword and the `encode=` dict) are refused, and the
+    six per-row kinds are unaffected.
+    """
+
+    REFUSED = [
+        "size",
+        "shape",
+        "opacity",
+        "fill_opacity",
+        "stroke_opacity",
+        "stroke_width",
+        "stroke_dash",
+        "angle",
+        "color",
+        "fill",
+        "stroke",
+    ]
+
+    @pytest.mark.parametrize("channel", REFUSED)
+    @pytest.mark.parametrize("kind", ["point", "bar"])
+    def test_per_row_appearance_channel_refuses(self, cat_df, kind, channel):
+        with pytest.raises(ValueError, match=rf"catplot\(kind='{kind}', {channel}=\.\.\.\)"):
+            fm.catplot(cat_df, x="cat", y="val", kind=kind, **{channel: "val"})
+
+    @pytest.mark.parametrize("kind", ["point", "bar"])
+    def test_the_encode_dict_door_refuses_too(self, cat_df, kind):
+        with pytest.raises(ValueError, match="is not supported"):
+            fm.catplot(cat_df, x="cat", y="val", kind=kind, encode={"size": "val"})
+
+    @pytest.mark.parametrize("kind", ["point", "bar"])
+    def test_the_message_names_every_refused_channel(self, cat_df, kind):
+        with pytest.raises(ValueError) as excinfo:
+            fm.catplot(cat_df, x="cat", y="val", kind=kind, size="val", opacity="val")
+        message = str(excinfo.value)
+        assert "opacity=..." in message and "size=..." in message
+        assert "hue=" in message and "strip" in message
+
+    @pytest.mark.parametrize("kind", ["point", "bar"])
+    def test_hue_is_not_refused(self, cat_df, kind):
+        """`hue=` joins the Summary groupby, so its legend is true -- the
+        refusal must not catch the one non-positional channel that works."""
+        svg = fm.catplot(cat_df, x="cat", y="val", hue="grp", kind=kind, dodge=True).to_svg()
+        assert hue_legend_labels(svg) == ["X", "Y"]
+
+    @pytest.mark.parametrize("kind", ["strip", "box"])
+    def test_the_per_row_kinds_still_honor_size(self, cat_df, kind):
+        """One mark per row can carry a per-row size, and still does."""
+        svg = fm.catplot(cat_df, x="cat", y="val", kind=kind, size="val").to_svg()
+        radii = {c["r"] for c in svg_elements(svg, "circle", lambda a: "r" in a)}
+        assert len(radii) > 1, f"kind={kind!r} must map size= per row; got radii {radii}"
+
+    @pytest.mark.parametrize("channel", sorted(ACCEPTED_INERT))
+    def test_non_appearance_channels_are_still_accepted_and_inert(self, cat_df, channel):
+        """The refusal is scoped to channels that assert a VISUAL mapping.
+
+        These claim nothing and draw no legend, so refusing them would reject
+        calls that merely do nothing -- byte-identity to the no-channel render
+        is that "merely", asserted rather than assumed.
+
+        Two different reasons live in this list, with two different futures:
+
+        * `text` and `detail` are inert for a MARK-LEVEL reason that has
+          nothing to do with aggregation -- `mark_point`/`mark_bar` do not
+          read them, and `text=` is equally inert on `kind="strip"`. `detail`
+          already says so through `alias_detail_channel`'s warning. Nothing
+          for catplot to fix.
+        * `tooltip`, `href`, `description`, `url` and `key` are inert because
+          the summary batch does not carry the source column. These are the
+          ones with a real future: a tooltip reading "mean 3.2, CI [2.1, 4.3]"
+          is the natural affordance of an estimate mark, and `Summary`'s
+          output already holds the columns to build it. The filed follow-up is
+          to THREAD them onto the summary layers -- not to refuse them, which
+          would foreclose the feature.
+
+        A failure here means one of them stopped being inert, which is the
+        moment to move it out of this bucket rather than to loosen the test.
+        """
+        baseline = fm.catplot(cat_df, x="cat", y="val", kind="point").to_svg()
+        svg = fm.catplot(cat_df, x="cat", y="val", kind="point", **{channel: "grp"}).to_svg()
+        assert svg == baseline, f"{channel}= is pinned as accepted-inert, but it changed the render"
+
+    def test_every_renderer_honored_channel_has_a_disposition(self):
+        """The partition that keeps the refusal set from silently falling behind.
+
+        `_CATPLOT_PER_ROW_APPEARANCE_CHANNELS` is hand-curated against the
+        renderer's own channel vocabulary, which is exactly the drift shape
+        batch F flagged in `_spec_build.py` ("this allowlist is still
+        hand-curated ... so it can drift from what the struct actually
+        accepts"). Without this test, a channel added to
+        `_RENDERER_HONORED_CHANNELS` would default to silence: accepted,
+        unrefused, and un-threaded, reintroducing the fabricated-legend defect
+        for that one channel.
+
+        So: every renderer-honored channel, plus the three alias channels that
+        also reach `Chart.encode`, must land in exactly one bucket -- resolved
+        by the builder, refused, or pinned accepted-inert above. Adding a
+        channel to the policy module now forces that decision here instead of
+        leaving it to the next design review.
+        """
+        reachable = frozenset(_RENDERER_HONORED_CHANNELS) | _ALIAS_CHANNELS
+        buckets = {
+            "resolved by the builder": BUILDER_RESOLVED,
+            "refused": frozenset(self.REFUSED),
+            "accepted-inert": ACCEPTED_INERT,
+        }
+        for left, right in itertools.combinations(buckets, 2):
+            overlap = buckets[left] & buckets[right]
+            assert not overlap, f"{sorted(overlap)} is in both '{left}' and '{right}'"
+
+        classified = frozenset().union(*buckets.values())
+        unclassified = reachable - classified
+        assert not unclassified, (
+            f"{sorted(unclassified)} reaches catplot's encoding with no stated disposition. "
+            "Decide: does it map a per-observation visual property on an aggregate (add it "
+            "to _CATPLOT_PER_ROW_APPEARANCE_CHANNELS and to REFUSED here), is it resolved by "
+            "the builder (BUILDER_RESOLVED), or is it inert (ACCEPTED_INERT, with the "
+            "byte-identity pin above)?"
+        )
+        stale = classified - reachable
+        assert not stale, f"{sorted(stale)} is classified here but no longer reaches the renderer"
+
+        assert frozenset(self.REFUSED) == _CATPLOT_PER_ROW_APPEARANCE_CHANNELS, (
+            "the refused list in this module must be the shipped constant, not a copy of it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The value axis: zero baseline, and a caller's explicit scale=
+# ---------------------------------------------------------------------------
 
 
 class TestValueAxis:

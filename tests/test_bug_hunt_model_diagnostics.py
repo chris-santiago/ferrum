@@ -2241,7 +2241,9 @@ def test_discrimination_threshold_metrics_subset_without_f1_suppresses_threshold
     )
     svg = chart.to_svg()
     assert "<svg" in svg
-    assert _THRESHOLD_RULE_STROKE not in svg, "the threshold rule must not render without its sentinel"
+    assert _THRESHOLD_RULE_STROKE not in svg, (
+        "the threshold rule must not render without its sentinel"
+    )
     polylines = re.findall(r'<polyline points="([^"]+)"', svg)
     assert len(polylines) == 2, (
         f"expected 2 metric polylines (precision, recall), got {len(polylines)}"
@@ -2262,7 +2264,9 @@ def test_discrimination_threshold_default_metrics_renders_threshold_line():
     )
     svg = chart.to_svg()
     assert "<svg" in svg
-    assert _THRESHOLD_RULE_STROKE in svg, "the threshold rule must render when its sentinel is present"
+    assert _THRESHOLD_RULE_STROKE in svg, (
+        "the threshold rule must render when its sentinel is present"
+    )
 
 
 # ---------------------------------------------------------------------------

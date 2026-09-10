@@ -42,6 +42,7 @@ from ferrum.encoding import Color, X, Y
 from ferrum.encoding._aliases import resolve_color_alias
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._fit_layers import build_fit_layers
+from ferrum.marks.statistical import desugar_smooth
 from ferrum.plots._helpers import (
     _color_field_for,
     _column_or_literal_color,
@@ -432,13 +433,19 @@ def _fit_chart_from_named_transform(
     ``lmplot`` rather than through ``mark_smooth``'s ``_PendingMark`` desugar,
     so the chart has to be assembled here.
 
-    ``kind`` doubles as the transform's own ``name=`` (both call sites below
-    pass the same string for both), hence one parameter for the registry kind
-    and the layers' ``data_source``.
+    ``kind`` doubles as the transform's own ``name=`` (every call site below
+    passes the same string for both), hence one parameter for the registry
+    kind and the layers' ``data_source``.
 
-    ``neutral_stroke``: ``Logistic``/``Glm``/``Robust`` have no ``groupby``,
-    so they always produce one POOLED fit. When any channel that resolves to
-    ``color`` is active on the sibling scatter layer -- ``hue=``, or any of
+    ``lmplot``'s ``mark_smooth``-routed methods use this too, whenever a
+    scatter layer will be composed beside the fit: the layer shape it builds
+    is the one that binds every layer to the NAMED transform output, which is
+    what keeps the scatter reading the raw rows. See that call site.
+
+    ``neutral_stroke``: a POOLED fit -- ``Logistic``/``Glm``, which take no
+    ``groupby`` at all, and ``Robust``, which has one that ``lmplot`` does
+    not yet wire ``hue=`` into. When any channel that resolves to ``color``
+    is active on the sibling scatter layer -- ``hue=``, or any of
     ``color=``/``fill=``/``stroke=`` in keyword or ``encode=`` dict form,
     resolved once as ``lmplot``'s ``color_active`` through
     ``ferrum.encoding._aliases.resolve_color_alias`` so a future alias needs
@@ -528,9 +535,11 @@ def lmplot(
     * ``"robust"``   -- ``Robust`` transform + pooled fit line + CI band.
 
     ``"logistic"``/``"glm"``/``"robust"`` fit **one pooled curve across the
-    whole dataset** -- their Rust transforms take no ``groupby``, unlike
-    ``mark_smooth``'s ``"lm"``/``"loess"``/etc. When any channel that
-    resolves to ``color`` is active -- ``hue=``, a bare ``color=``/
+    whole dataset**, unlike ``mark_smooth``'s ``"lm"``/``"loess"``/etc.
+    ``Logistic`` and ``Glm`` take no ``groupby`` at all; ``Robust`` gained one
+    (``residplot(color=)`` uses it), so its pooling is a wiring gap here
+    rather than a missing capability -- tracked as a follow-up. When any
+    channel that resolves to ``color`` is active -- ``hue=``, a bare ``color=``/
     ``fill=``/``stroke=`` keyword, or the ``encode=`` dict equivalent -- the
     scatter is still colored per level, but the fit line and CI band render
     in a neutral stroke/fill (see ``hue`` below), not a level's color.
@@ -547,9 +556,9 @@ def lmplot(
         Column name to map to color. For every ``mark_smooth``-routed
         ``method`` (see ``method`` below), the fit is refit per hue level via
         ``groupby``, so each level gets its own fit line and CI band in that
-        level's scatter color. For ``"logistic"``, ``"glm"``, ``"robust"``
-        (no ``groupby`` on those transforms), the scatter is colored per hue
-        level but the fit is a single curve pooled across every group,
+        level's scatter color. For ``"logistic"``, ``"glm"``, ``"robust"``,
+        the scatter is colored per hue level but the fit is a single curve
+        pooled across every group,
         rendered in a neutral stroke/fill distinct from the palette -- it
         does not represent any one group's fit. This pooled-neutral behavior
         for the three dedicated methods is not specific to ``hue=`` -- it
@@ -557,9 +566,10 @@ def lmplot(
         reaches the chart (``hue=``, a bare ``color=``/``fill=``/``stroke=``
         keyword, or ``encode={"color": ...}``/``encode={"fill": ...}``/
         ``encode={"stroke": ...}``), since all are the same "one pooled fit,
-        colored scatter" situation. Per-group fits for these three methods
-        require ``groupby`` support on the underlying Rust transform
-        (tracked as a follow-up, not yet built).
+        colored scatter" situation. Per-group fits are not built for any of
+        the three: ``"logistic"``/``"glm"`` need ``groupby`` support on the
+        underlying Rust transform first, while ``"robust"`` has it already
+        and needs only the wiring here. Both tracked as follow-ups.
     col : str, optional
         Column name for faceting across columns.
     row : str, optional
@@ -797,6 +807,31 @@ def lmplot(
         except (AttributeError, KeyError):
             x_range = None
 
+    # `x_jitter` offsets the scatter's x column by writing a Float64 noise
+    # array back into it (`apply_jitter`, `render/position.rs`), which fails
+    # Arrow's schema check on any other numeric dtype: `Jitter: ... expected
+    # Int64 but found Float64`. Widen the column once, here, so BOTH charts
+    # built below share it -- the merged chart carries the scatter chart's own
+    # data, so casting one and not the other would put two dtypes on one
+    # column. Gated on `scatter` because `x_jitter` adjusts nothing without a
+    # scatter layer to adjust, and on the dtype so a Float64 column is
+    # untouched (a non-numeric x is left alone too: the renderer refuses it in
+    # its own terms rather than failing here on a cast).
+    #
+    # Until this batch the defect was visible on 3 of the 4 ci/show_metrics
+    # combinations and hidden on the 4th only because the scatter layer was
+    # reading the fit's own (Float64) grid there -- the corruption F-L10-02
+    # closes. DELETE CONDITION: when `apply_jitter` coerces the column it
+    # writes, the way the transform engine already coerces its inputs
+    # (`numeric_util::coerce_to_float64`, batch D M1). `catplot(native_scale=
+    # True)` carries the same workaround for the same renderer behavior.
+    if scatter and x_jitter is not None:
+        jitter_frame = to_polars(data)
+        jitter_column = _field_name(x)
+        dtype = jitter_frame.schema.get(jitter_column)
+        if dtype is not None and dtype.is_numeric() and dtype != pl.Float64:
+            data = jitter_frame.with_columns(pl.col(jitter_column).cast(pl.Float64))
+
     # Shared encoding.
     #
     # `hue` is typed Nominal once here and reused on every layer below. It is
@@ -870,7 +905,7 @@ def lmplot(
     # - `show_metrics` needs no gate here: `metrics_applied` is already False
     #   whenever `hue` is set (and for logistic/glm), computed above.
     if method in _SMOOTH_ROUTED_METHODS:
-        fit = Chart(data).mark_smooth(
+        smooth_kwargs: dict = dict(
             method=method,
             ci=ci_frac,
             x_bins=x_bins,
@@ -880,9 +915,58 @@ def lmplot(
             **_smooth_degree_kwargs(method, order, "lmplot"),
             **({"x_range": x_range} if x_range is not None else {}),
         )
-        fit = (
-            fit.encode(x=x_enc, y=y, color=hue_ch) if hue is not None else fit.encode(x=x_enc, y=y)
-        )
+        if scatter_layer is None:
+            # No sibling layer: the fit IS the chart, so `mark_smooth`'s own
+            # shape is the right one -- including the single-line shortcut it
+            # takes for `ci=None, show_metrics=False`, whose chain-advancing
+            # (unnamed) `Smooth` correctly becomes the chart's data, and whose
+            # chart-level encoding is what titles the axes with the caller's
+            # own column names.
+            fit = Chart(data).mark_smooth(**smooth_kwargs)
+            fit = (
+                fit.encode(x=x_enc, y=y, color=hue_ch)
+                if hue is not None
+                else fit.encode(x=x_enc, y=y)
+            )
+        else:
+            # A scatter layer will be composed beside this fit, so the fit's
+            # transform must be a NAMED fan-out its own layers read through
+            # `data_source=` -- never a chain-advancing transform, which
+            # `_merge_layers` would apply to the scatter layer too. That is
+            # exactly what `mark_smooth`'s single-line shortcut produces for
+            # `ci=None, show_metrics=False`, and it corrupted the scatter:
+            # measured on the pre-fix tree, `lmplot(df, x=, y=, ci=None,
+            # show_metrics=False)` drew all 200 "observations" on the fit
+            # grid's own vertices (0.000 px spread about a perfect line) for
+            # lm/loess/quadratic/gam/log/sqrt in both lmplot and regplot --
+            # or raised "unknown column" outright when the raw columns were
+            # not themselves named x/y. Batch D's fix reached the CI path
+            # only, because only that path was already layered.
+            #
+            # The transform still comes from `desugar_smooth`, not a second
+            # construction here: it owns the per-method kwarg matrix (which
+            # knobs forward, which are omitted so Rust's own defaults apply)
+            # and the fit grid's `n`/`seed`. Only its LAYER shape is replaced,
+            # by the same `build_fit_layers` triple the CI path and the
+            # dedicated fit methods below already emit.
+            # One transform, unpacked rather than indexed so a desugar that
+            # ever emits a second one fails here instead of silently losing it.
+            (smooth_transform,) = desugar_smooth(
+                _field_name(x), _field_name(y), name="smooth", **smooth_kwargs
+            ).transforms
+            fit = _fit_chart_from_named_transform(
+                data,
+                smooth_transform,
+                # `kind` doubles as the transform's `name=` here exactly as it
+                # does for the three dedicated methods below.
+                kind="smooth",
+                ci=ci_frac,
+                # `line_kws` is applied to the emitted line layer below, in the
+                # one block that already owns it for these methods.
+                line_kwargs={},
+                chart_x=x_enc,
+                metrics=metrics_applied,
+            )
     elif method == "logistic":
         fit = _fit_chart_from_named_transform(
             data,

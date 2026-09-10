@@ -324,8 +324,7 @@ class TestOverlayCountAxisVisibility:
         # `coord_flipped_bar_position_channel_never_zero_extends` in
         # `domain.rs` -- because this fixture is structurally blind to it.
         assert digest == "84afa395a92ad173597898b22adb9b7615996dbd82112e667ce7102a42f09e4f", (
-            "stat='density' overlay output moved -- expected byte-identity "
-            "with the T5r baseline"
+            "stat='density' overlay output moved -- expected byte-identity with the T5r baseline"
         )
 
     def test_stat_count_sets_count_scale_matching_bins(self, unimodal_df):

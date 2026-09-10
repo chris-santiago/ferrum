@@ -53,6 +53,42 @@ _RELPLOT_VALID_KINDS = {"scatter", "line"}
 # rather than one mark per row, and therefore consume ``ci=``/``n_boot=``.
 _CATPLOT_AGGREGATING_KINDS = frozenset({"point", "bar"})
 
+# Encoding channels that assert a PER-OBSERVATION visual mapping, refused by
+# ``_CATPLOT_AGGREGATING_KINDS`` (see ``_reject_per_row_appearance_channels``
+# for why, and for why ``hue=`` is not one of them).  Every non-positional
+# channel ``Chart.encode`` accepts was checked against the aggregated output;
+# the ones here either drew a fabricated legend over uniform marks or were
+# byte-identical no-ops.  Hand-curated against
+# ``encoding._channel_policy._RENDERER_HONORED_CHANNELS`` and TEST-ENFORCED
+# against it -- a channel added there with no disposition fails
+# ``test_every_renderer_honored_channel_has_a_disposition`` rather than
+# silently escaping this refusal.
+_CATPLOT_PER_ROW_APPEARANCE_CHANNELS = frozenset(
+    {
+        "size",
+        "shape",
+        "opacity",
+        "fill_opacity",
+        "stroke_opacity",
+        "stroke_width",
+        "stroke_dash",
+        "angle",
+        "color",
+        "fill",
+        "stroke",
+    }
+)
+
+# The one ``ci=`` refusal text, shared by the three ways a value can fail it
+# (a bool, a non-number, and an out-of-range number) so they cannot drift into
+# three descriptions of one rule.
+_CI_REFUSAL = (
+    "catplot(ci={ci!r}) is not supported -- ci is a PERCENT and must be a number in "
+    "the open interval (0, 100), exclusive at both ends (a 0 % interval has no width "
+    "and a 100 % bootstrap interval is not estimable from a finite resample). Pass "
+    "ci=95 (the default) or any percent strictly between 0 and 100."
+)
+
 # Name of catplot's ``Summary`` transform.  Named (not chained) so it reads the
 # original rows while the chart's main batch stays the raw data; the estimator
 # and whisker layers bind to it through ``data_source=``.
@@ -188,9 +224,7 @@ def _kde_overlay(
     if hue is not None:
         encoding["color"] = nominal_color_channel(hue)
 
-    from ferrum._layer import _Layer as _OverlayLayer
-
-    layer = _OverlayLayer(
+    layer = _Layer(
         name="kde",
         mark="line",
         encoding=encoding,
@@ -550,7 +584,6 @@ def _displot_build(
     # advancing it.  The overlay _Layer objects set data_source to the named
     # transform key so they read the correct output.
     if (kde and kind != "kde") or (rug and kind != "rug"):
-        from ferrum._layer import _Layer as _OverlayLayer
         from ferrum.encoding.base import ChannelBase as _CB_overlay
 
         chart = chart._resolve_pending()
@@ -561,7 +594,7 @@ def _displot_build(
         # mark + encoding into a primary layer so overlay layers can be
         # appended alongside it.
         if chart._layers is None and chart._mark is not None:
-            primary_layer = _OverlayLayer(
+            primary_layer = _Layer(
                 mark=chart._mark,
                 encoding=dict(chart._encoding),
                 mark_kwargs=dict(chart._mark_kwargs) if chart._mark_kwargs else None,
@@ -595,7 +628,7 @@ def _displot_build(
             # captures the original data for the rug tick marks.
             chart._transforms = [rug_xform] + list(chart._transforms or [])
             chart._layers.append(
-                _OverlayLayer(
+                _Layer(
                     name="rug",
                     mark="tick",
                     encoding={"x": x_field},
@@ -680,20 +713,25 @@ def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
     intended rather than naming the accepted range. ``ci=1`` and ``n_boot=1``
     stay accepted; only the boolean spelling is rejected.
     """
+    # Message shape follows this family's house form -- `func(param=value) is
+    # not supported -- <why>. <alternative>` -- the same one
+    # `_reject_per_row_appearance_channels` and `lmplot`'s refusals use. The
+    # bare `catplot: ci= ...` prefix these three carried was the file's one
+    # outlier (design review, cycle 1 S1 / cycle 2 carried).
     if isinstance(ci, bool):
-        raise ValueError(
-            f"catplot: ci= must be a number in the open interval (0, 100); got {ci!r}."
-        )
+        raise ValueError(_CI_REFUSAL.format(ci=ci))
     try:
         ci_percent = float(ci)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"catplot: ci= must be a number in the open interval (0, 100); got {ci!r}."
-        ) from exc
+        raise ValueError(_CI_REFUSAL.format(ci=ci)) from exc
     if not 0.0 < ci_percent < 100.0:
-        raise ValueError(f"catplot: ci= must be in the open interval (0, 100); got {ci!r}.")
+        raise ValueError(_CI_REFUSAL.format(ci=ci))
     if not isinstance(n_boot, int) or isinstance(n_boot, bool) or n_boot < 1:
-        raise ValueError(f"catplot: n_boot= must be an integer >= 1; got {n_boot!r}.")
+        raise ValueError(
+            f"catplot(n_boot={n_boot!r}) is not supported -- n_boot is the bootstrap "
+            "resample count and must be an integer >= 1. Pass n_boot=1000 (the default) "
+            "or any positive count."
+        )
     return ci_percent / 100.0
 
 
@@ -920,13 +958,9 @@ def _native_scale_padded_domain(
 def _catplot_summary_layers(
     *,
     kind: str,
-    cat_field: str,
-    cat_type: str | None,
-    cat_domain: tuple[float, float] | None,
+    cat_channel: Any,
     val_field: str,
-    hue_field: str | None,
-    order: Any,
-    hue_order: Any,
+    color_channel: Any,
     position: Any,
     chart_encoding: dict,
     ci_level: float,
@@ -945,6 +979,22 @@ def _catplot_summary_layers(
     The caps that desugar adds are deliberately absent -- spec §4 describes
     point/bar's interval as a plain whisker, matching seaborn's capless
     ``pointplot``/``barplot`` default.
+
+    ``cat_channel`` and ``color_channel`` are the ALREADY-RESOLVED category
+    and color channels ``_catplot_build`` binds at the chart level -- the
+    same objects, not a rebuild. That is the whole of this function's channel
+    handling, and it is deliberate (design-review F1): these layers used to
+    reconstruct both channels from bare field names and re-thread three
+    options by hand (``type_``, ``order=``, the ``cat_domain`` padding),
+    which silently dropped every OTHER option the caller had stated on their
+    own channel object -- ``x=fm.X("cat", sort=[...])`` and
+    ``hue=fm.Color("g", sort=[...])`` were honored by the six per-row kinds
+    and discarded here. A layered chart resolves its axis and color scales
+    from the LAYER encodings, so a channel left only at the chart level is
+    inert for these two kinds; taking the resolved channel is what makes the
+    encoding spelling and the ``order=``/``hue_order=`` kwarg spelling land
+    in one place instead of two, and makes the next channel option a
+    zero-site change here.
 
     ``position`` is set EXPLICITLY on both layers rather than inherited from
     the chart: whisker and marker must carry the SAME adjustment or they
@@ -970,20 +1020,27 @@ def _catplot_summary_layers(
     union with a single-column domain, clipping every upper CI above
     ``max(mean)`` off the panel (measured: 3 of 4 whiskers vanished).
 
-    A scale the CALLER set is a different matter and is honored:
-    ``chart_encoding``'s positional channels are propagated onto both layers
-    through the shared ``_propagate_layer_scale`` (the same mechanism the
-    composite-mark desugars and ``lmplot``'s fit layers use), so
+    A scale the CALLER set is a different matter and is honored. On the
+    category channel it simply rides ``cat_channel`` in, like every other
+    option the caller stated; on the VALUE channel -- whose layer bindings are
+    fresh ``Y(<summary column>)`` objects -- ``chart_encoding`` is propagated
+    onto both layers through the shared ``_propagate_layer_scale`` (the same
+    mechanism the composite-mark desugars and ``lmplot``'s fit layers use), so
     ``y=fm.Y("tip", scale={"domain": [0, 120]})`` governs the axis exactly as
     it does for ``kind="box"``. The one combination refused rather than
     honored is a caller scale on the VALUE channel that carries no ``domain``
     (e.g. a bare ``{"type": "log"}``) -- see ``_reject_domainless_value_scale``.
     """
     from ferrum import Summary
-    from ferrum.encoding import X as _X
     from ferrum.encoding import Y as _Y
 
     _reject_domainless_value_scale(kind, chart_encoding)
+
+    # The data-side names behind the two resolved channels. Read off the
+    # channels themselves rather than passed alongside them, so the columns
+    # the transform groups by cannot drift from the columns the layers bind.
+    cat_field = _field_name(cat_channel)
+    hue_field = _field_name(color_channel)
 
     # The shared "hue joins the groupby unless it IS the category" rule
     # (`desugar_errorbar` uses the same helper): a duplicate groupby column is
@@ -1016,43 +1073,20 @@ def _catplot_summary_layers(
     # stale column -- instead of silently rendering an empty panel.
     cols = registry_output_columns("summary", ["mean", "lower", "upper"])
 
-    # `order=`/`hue_order=` act through the layers' own channels, not the
-    # chart-level encoding: a layered chart resolves its axis and color scales
-    # from the layer encodings, so a sort left only at the chart level is
-    # inert here (the same reason `desugar_errorbar` threads `x_sort`). The
-    # SAME is true of the category channel's type_: point/bar always rebuild
-    # `x_channel` from the bare `cat_field` name (never the caller's raw x=/y=
-    # object, if one was passed), so `cat_type` -- resolved once in
-    # `_catplot_build` via `_catplot_cat_type` -- must be applied here too,
-    # not left to whatever the chart-level encoding inferred.
-    x_kwargs: dict = {"type_": cat_type}
-    if order is not None:
-        x_kwargs["sort"] = list(order)
-    # `cat_domain` (cycle-2 fix, quality finding 1): the Jitter/Dodge
-    # domain-clipping padding `_catplot_build` computed, attached here for
-    # the SAME reason `cat_type` is -- the chart-level `enc["x"]` this
-    # padding might also carry is inert for these two kinds. Skipped when
-    # the caller already put an explicit scale on the chart-level x channel
-    # (`x=fm.X(..., scale=...)` or `encode={"x": ...}`, both already folded
-    # into `chart_encoding` by `_catplot_build`): a caller's own domain must
-    # still govern, the same rule `_reject_domainless_value_scale` applies
-    # to the value channel.
-    if cat_domain is not None and _explicit_positional_scale(chart_encoding.get("x")) is None:
-        x_kwargs["scale"] = LinearScale(domain=list(cat_domain))
-    x_channel = _X(cat_field, **x_kwargs)
-    color_sort = list(hue_order) if hue_order is not None else None
     layer_position = position if position is not None else Identity()
 
     def _encoding(y_col: str, y2_col: str | None = None) -> dict:
-        enc: dict = {"x": x_channel, "y": _Y(y_col, title=val_field)}
+        enc: dict = {"x": cat_channel, "y": _Y(y_col, title=val_field)}
         if y2_col is not None:
             enc["y2"] = y2_col
-        if hue_field is not None:
-            # Built at the binding site (as `desugar_errorbar._enc` does) so
-            # every color channel in the tree is visibly typed Nominal --
-            # `tests/test_color_binding_completeness.py` reads these bindings
-            # syntactically and a hoisted variable reads as undeclared.
-            enc["color"] = nominal_color_channel(hue_field, sort=color_sort)
+        if color_channel is not None:
+            # `color_channel` is `_catplot_build`'s own resolved hue channel,
+            # which is built through `nominal_color_channel`/`Color` there --
+            # so this binding is typed at its single construction site rather
+            # than re-typed here. `tests/test_color_binding_completeness.py`
+            # reads these bindings syntactically and accepts a name that a
+            # typed constructor assigned, which is the shape this is.
+            enc["color"] = color_channel
         return enc
 
     whisker = _Layer(
@@ -1075,12 +1109,14 @@ def _catplot_summary_layers(
         position=layer_position,
     )
     layers = [whisker, estimator] if kind == "point" else [estimator, whisker]
-    # These layers are rebuilt from bare output-column names, which is exactly
-    # the shape `_propagate_layer_scale` exists to repair: without it a
-    # caller's explicit positional `scale=` is silently dropped, as it was for
-    # every composite desugar before GH #45. Returns each layer unchanged when
-    # no positional channel carries an explicit scale, so the ordinary call is
-    # a no-op rather than a branch.
+    # The value channel is bound to a bare Summary output column, which is
+    # exactly the shape `_propagate_layer_scale` exists to repair: without it
+    # a caller's explicit positional `scale=` is silently dropped, as it was
+    # for every composite desugar before GH #45. (The category channel needs
+    # no repair -- it IS the caller's channel -- and the propagation is a
+    # no-op for a layer channel that already carries a domain.) Returns each
+    # layer unchanged when no positional channel carries an explicit scale,
+    # so the ordinary call is a no-op rather than a branch.
     return transform, [_propagate_layer_scale(chart_encoding, layer) for layer in layers]
 
 
@@ -1130,6 +1166,73 @@ def _reject_domainless_value_scale(kind: str, chart_encoding: dict) -> None:
         "silently clipped. Add a domain (e.g. "
         "scale={'type': 'log', 'domain': [lo, hi]}), or use a kind that draws "
         "one mark per row."
+    )
+
+
+def _reject_per_row_appearance_channels(kind: str, caller_channels: dict) -> None:
+    """Refuse per-observation appearance channels on the estimating kinds.
+
+    ``catplot`` forwards any encoding channel a caller names -- through
+    ``**encode_kwargs`` (``catplot(..., size="sz")``) or the ``encode=`` dict
+    -- straight onto the chart. On the six kinds that draw one mark per row
+    that is exactly right. On ``kind="point"``/``"bar"`` the marks are
+    ESTIMATES over a ``Summary`` aggregate: there is no observation for a
+    per-row visual property to read, so the channel cannot reach the mark --
+    and the chart-level encoding it lands on still builds the channel's
+    LEGEND. Measured on the pre-refusal tree: a ``size=`` column drew every
+    estimator mark at the default ``r=3.385`` beneath a six-swatch size
+    legend, and ``opacity=`` was byte-identical to no argument at all.
+    A legend asserting a mapping the marks do not carry is the same defect
+    class the value-scale refusal above exists for -- "a materially wrong
+    statistical chart, drawn silently" -- so it is refused, not dropped.
+
+    :data:`_CATPLOT_PER_ROW_APPEARANCE_CHANNELS` is the refused set, checked
+    against the aggregated output channel by channel rather than assumed.
+    The color family (``color``/``fill``/``stroke``) is in it and ``hue=`` is
+    NOT, which is not an inconsistency: ``hue=`` joins the ``Summary``
+    groupby, so the estimate really is split by it and the legend it draws is
+    true. A raw ``color=``/``fill=``/``stroke=`` reaches the chart-level
+    encoding only -- it splits nothing, colors nothing, and draws a legend --
+    so its route is ``hue=``, which the message names.
+
+    The information channels are deliberately NOT in the set: they assert no
+    visual mapping and fabricate no legend, so refusing them would reject
+    calls that are merely inert. Their inertness has two different causes,
+    with two different futures, and only one of them is about aggregation:
+
+    - ``text`` and ``detail`` are inert for a MARK-LEVEL reason -- ``point``
+      and ``bar`` do not read them, and ``text=`` is equally inert on
+      ``kind="strip"``. ``detail`` already says so, through
+      ``alias_detail_channel``'s own warning. A catplot-specific refusal here
+      would be a second mechanism answering a question the alias layer
+      already answers, in a different voice.
+    - ``tooltip``, ``href``, ``description``, ``url`` and ``key`` are inert
+      because the summary batch does not carry the source column. These are
+      the ones with a real future: a tooltip reading "mean 3.2, CI [2.1,
+      4.3]" is the natural affordance of an estimate mark, and ``Summary``'s
+      output already holds the columns to build it. The tracked follow-up is
+      therefore to THREAD them onto the summary layers -- refusing them would
+      foreclose that feature.
+
+    ``tests/test_catplot_aggregation.py`` pins both the refused set and the
+    inert one, and asserts that every channel the renderer honors falls into
+    exactly one of them (or is resolved by the builder), so a channel added
+    to ``_RENDERER_HONORED_CHANNELS`` forces a decision here instead of
+    defaulting to silence.
+    """
+    refused = [name for name in caller_channels if name in _CATPLOT_PER_ROW_APPEARANCE_CHANNELS]
+    if not refused:
+        return
+    named = ", ".join(f"{name}=..." for name in sorted(refused))
+    raise ValueError(
+        f"catplot(kind={kind!r}, {named}) is not supported -- those channels map a "
+        f"visual property per OBSERVATION, and kind={kind!r} draws one estimate per "
+        "(category, hue) group from a Summary aggregate, so no row is left for them "
+        "to read: the estimator marks would render uniform under a legend asserting "
+        "a mapping they do not carry. Split the estimate with hue= (the one "
+        "non-positional channel these kinds honor -- it joins the Summary groupby), "
+        "or use a kind that draws one mark per row (strip, swarm, box, violin, "
+        "boxen) for a per-observation mapping."
     )
 
 
@@ -1319,6 +1422,17 @@ def catplot(
         If ``kind`` is ``"point"`` or ``"bar"`` and ``ci`` is outside the open
         interval ``(0, 100)``, ``n_boot`` is below 1, or either the category
         or the value channel is unbound.
+    ValueError
+        If ``kind`` is ``"point"`` or ``"bar"`` and a per-observation
+        appearance channel is bound -- ``size``, ``shape``, ``opacity``,
+        ``fill_opacity``, ``stroke_opacity``, ``stroke_width``,
+        ``stroke_dash``, ``angle``, ``color``, ``fill`` or ``stroke``,
+        through either a bare keyword or the ``encode=`` dict. These kinds
+        draw ONE mark per (category, ``hue``) group from an aggregate, so no
+        row is left for a per-observation mapping to read: the marks would
+        render uniform beneath a legend asserting a mapping they do not
+        carry. Use ``hue=`` (which splits the aggregate itself) or a kind
+        that draws one mark per row.
 
     Examples
     --------
@@ -1438,6 +1552,32 @@ def _catplot_build(
     # honored verbatim, untouched by any of them, the same as its `type_`
     # already is.
     native_typed = native_scale and cat_explicit_type is None and cat_type == "Q"
+    # The category channel arriving through the OTHER encoding door. `encode=`
+    # is a raw `Chart.encode(**encode)` override applied last by
+    # `_finalize_chart`, so an `x` in it replaces whatever this builder
+    # normalizes -- for every kind -- and it is read here for both questions
+    # that depend on it: whether the caller stated a scale of their own
+    # (`explicit_cat_scale`, immediately below) and which channel the
+    # estimating kinds bind on their layers (further down). Reading it for one
+    # and not the other is what made the door govern six kinds and go inert on
+    # two (design re-review, cycle 2).
+    #
+    # Layer space, not user space: `encode`'s `x` is the CATEGORY channel under
+    # both orientations, matching the `chart_encoding={**enc, **encode}` merge
+    # the value-scale refusal and the scale propagation already read it in.
+    encode_cat_channel = (encode or {}).get("x")
+
+    # "The caller stated a scale on the category channel themselves", through
+    # EITHER door: their own channel object (`x=fm.X("year", scale=...)`, whose
+    # kwargs `cat_kwargs` copies) or the `encode=` override. One predicate for
+    # both, resolved once here, so the padding gate below reads the same answer
+    # the layer build does -- the two used to spell this question differently
+    # (`"scale" not in x_kwargs` at the chart level,
+    # `_explicit_positional_scale(...)` in the layer build) and could disagree
+    # about the same call.
+    explicit_cat_scale = (
+        "scale" in cat_kwargs or _explicit_positional_scale(encode_cat_channel) is not None
+    )
 
     stats: "_NativeScaleStats | None" = None
     if native_typed:
@@ -1512,8 +1652,13 @@ def _catplot_build(
     # hue answered three different ways across the eight kinds (violin
     # categorical, box a typed raise, bar/boxen/strip/swarm/point a silent
     # fabricated colorbar), and the divergence was invisible in the signature.
-    if hue is not None:
-        enc["color"] = nominal_color_channel(hue)
+    #
+    # Bound to a name because the estimating kinds need this SAME resolved
+    # channel on their layers (see `_catplot_summary_layers`): one resolution,
+    # both consumers.
+    color_channel = nominal_color_channel(hue)
+    if color_channel is not None:
+        enc["color"] = color_channel
 
     # The category channel is ALWAYS explicitly typed here -- the one
     # normalisation site shared by every kind (F-L09-03) AND both input
@@ -1535,6 +1680,10 @@ def _catplot_build(
     # to raise when combined with `order=` (a loud failure that must not
     # silently become "order dropped"; rebuilding here restores it working,
     # a strictly better outcome than restoring the raise).
+    #
+    # Bound to a name for the same reason `color_channel` is: the estimating
+    # kinds bind this exact channel on their layers.
+    cat_channel = None
     if cat_name is not None:
         x_kwargs = dict(cat_kwargs)
         if cat_explicit_type is None:
@@ -1542,18 +1691,39 @@ def _catplot_build(
         if order is not None:
             x_kwargs["sort"] = list(order)
         # `cat_domain` (Jitter/Dodge clipping padding, quality finding 1):
-        # skipped when the caller already put ANY explicit scale on their
-        # own channel object -- an explicit caller scale/domain must still
-        # govern, never silently widened out from under it.
-        if cat_domain is not None and "scale" not in x_kwargs:
+        # skipped when the caller already stated a scale of their own on
+        # either encoding door (`explicit_cat_scale`, resolved above) -- an
+        # explicit caller scale/domain must still govern, never silently
+        # widened out from under it.
+        if cat_domain is not None and not explicit_cat_scale:
             x_kwargs["scale"] = LinearScale(domain=list(cat_domain))
-        enc["x"] = _X(cat_name, **x_kwargs)
+        cat_channel = _X(cat_name, **x_kwargs)
+        enc["x"] = cat_channel
+
+    # ...and the `encode=` door wins over it, for the LAYERS as it already does
+    # for the chart level. `_finalize_chart` applies `encode` through
+    # `Chart.encode`, which writes the chart-level encoding only -- invisible
+    # to a layered chart, whose axis resolves from layer 0. So the estimating
+    # kinds have to take the override here, from the same read
+    # `explicit_cat_scale` performs, or `encode={"x": fm.X("cat", sort=[...])}`
+    # would order the axis on the six per-row kinds and do nothing on these two
+    # (measured before this: `c, b, a` on box, `a, b, c` on point).
+    #
+    # It is a REPLACEMENT, not a merge, because that is what the door means
+    # everywhere else: `encode=` is documented as a raw override that discards
+    # this builder's normalizations (the typing, the padding), and honoring it
+    # here the same way is what makes the two kind families agree. Prefer
+    # `x=fm.X(...)`, which this builder normalizes on top of -- see catplot's
+    # `native_scale` docs.
+    if encode_cat_channel is not None:
+        cat_channel = encode_cat_channel
 
     # Wire hue_order → sort on the color encoding. Typed Nominal for the same
     # reason as above, and a fortiori: an explicit hue_order= is a statement
     # that the levels are categories.
     if hue_order is not None and hue is not None:
-        enc["color"] = _Color(hue, sort=list(hue_order), type_="nominal")
+        color_channel = _Color(hue, sort=list(hue_order), type_="nominal")
+        enc["color"] = color_channel
 
     enc.update(encode_kwargs)
 
@@ -1604,8 +1774,8 @@ def _catplot_build(
         # One estimate per (category, hue) group, not one mark per row: a
         # named `Summary` computes mean + bootstrap CI in Rust and the two
         # emitted layers read it through `data_source=` (F-L09-02/03).
-        # `cat_name`/`cat_type` were already resolved above, shared with the
-        # chart-level enc normalisation.
+        # `cat_channel`/`color_channel` were already resolved above, shared
+        # verbatim with the chart-level enc normalisation.
         val_name = _field_name(val_field)
         if cat_name is None or val_name is None:
             raise ValueError(
@@ -1625,15 +1795,17 @@ def _catplot_build(
                 "kinds, so reaching here means the builder was called directly with "
                 "ci_level=None."
             )
+        # Refused before anything is built: a per-observation appearance
+        # channel cannot reach an aggregated mark, and the chart-level
+        # encoding it would land on still draws its legend.  Both doors are
+        # checked -- the bare keyword (`**encode_kwargs`) and the `encode=`
+        # dict -- because both reach `chart.encode` for these kinds.
+        _reject_per_row_appearance_channels(kind, {**encode_kwargs, **(encode or {})})
         summary, summary_layers = _catplot_summary_layers(
             kind=kind,
-            cat_field=cat_name,
-            cat_type=cat_type,
-            cat_domain=cat_domain,
+            cat_channel=cat_channel,
             val_field=val_name,
-            hue_field=_field_name(hue),
-            order=order,
-            hue_order=hue_order,
+            color_channel=color_channel,
             position=position,
             # `enc` is already normalized to cat-on-x / value-on-y (and carries
             # the caller's `encode_kwargs`), so it is the layer-space encoding
@@ -1672,11 +1844,13 @@ def _catplot_build(
         # hue dtype. Counting per (category, hue) is also the reading the rest
         # of this branch already assumes, since `dodge=True` offsets the bars
         # by hue level, and it matches seaborn's countplot(hue=).
-        count_groupby = [cat_field]
-        if hue is not None:
-            hue_name = _field_name(hue)
-            if hue_name != cat_field:
-                count_groupby.append(hue_name)
+        #
+        # Through the SAME helper the aggregating kinds use, not a second
+        # inline copy of its rule: "hue joins the groupby unless it names the
+        # category column" is one rule with one owner, and this branch and
+        # `_catplot_summary_layers` were spelling it separately, forty lines
+        # apart, inside one function.
+        count_groupby, _split_hue = resolve_color_groupby(cat_field, _field_name(hue), [cat_field])
         chart = chart.transform(Aggregate([op], groupby=count_groupby))
         chart = chart.mark_bar(position=position) if position is not None else chart.mark_bar()
         # Remap value axis to the count column.

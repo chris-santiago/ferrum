@@ -19,9 +19,11 @@ regression the finding describes.
 from __future__ import annotations
 
 import re
+import warnings
 
 import numpy as np
 import polars as pl
+import pytest
 
 import ferrum as fm
 
@@ -228,6 +230,84 @@ def test_bare_mark_boxplot_color_sort_none_byte_identical():
         .to_svg()
     )
     assert svg_bare == svg_explicit_none
+
+
+# ---------------------------------------------------------------------------
+# The two guards on the color_sort injection (`_prep_color_field`)
+# ---------------------------------------------------------------------------
+#
+# Both were documented in that function's docstring and unpinned: the mutation
+# gate relaxed each in turn and the whole suite still passed. They are the
+# difference between "an out-of-contract sort stays as inert as it was" and "a
+# UserWarning naming an internal column the caller never wrote", and between
+# "the caller's explicit kwarg wins" and "the encoding silently overrides it".
+
+
+@pytest.mark.parametrize(
+    "out_of_contract_sort",
+    [
+        pytest.param("-y", id="shorthand"),
+        pytest.param({"field": "tip", "op": "sum", "order": "descending"}, id="aggregate-dict"),
+    ],
+)
+def test_out_of_contract_color_sort_is_inert_and_silent(out_of_contract_sort):
+    """Only a literal level list/tuple is forwarded to the composite desugar.
+
+    A shorthand or aggregate-sort spec cannot resolve against a desugar's
+    RENAMED output columns (`lower_whisker`, `q1`, ...), so forwarding it
+    would turn a pre-existing silent no-op into a `UserWarning` naming a
+    column the caller never wrote. Byte-identity to the no-sort render is the
+    "still inert" half; zero warnings is the "still silent" half.
+
+    The shorthand case is the one that discriminates: relaxing the type guard
+    to `is not None` forwards `"-y"` and the render then emits two warnings
+    reading `cannot read sort value field "lower_whisker"`. The aggregate-dict
+    case is inert either way today and is pinned as the documented contract,
+    so a future forwarding change has to face it deliberately.
+    """
+    df = _boxplot_df()
+    baseline = fm.Chart(df).mark_boxplot().encode(x="day", y="tip", color="sex").to_svg()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = (
+            fm.Chart(df)
+            .mark_boxplot()
+            .encode(x="day", y="tip", color=fm.Color("sex", sort=out_of_contract_sort))
+            .to_svg()
+        )
+    assert svg == baseline, "an out-of-contract color sort must stay exactly as inert as before"
+    assert [str(w.message) for w in caught] == [], (
+        "an out-of-contract color sort must not surface an internal column name in a warning"
+    )
+
+
+def test_explicit_color_sort_kwarg_wins_over_the_encoding():
+    """The caller's own `color_sort=` is never clobbered by the encoding's.
+
+    Same precedence `color_field` already has: whichever of the two the caller
+    supplied wins. Dropping the override guard makes the encoding-derived
+    order win instead, silently discarding the argument -- so the two renders
+    below (identical encodings, opposite explicit kwargs) must differ, and
+    each must match the encoding-only render of its OWN order.
+    """
+    df = _boxplot_df()
+    encoded = fm.Color("sex", sort=["Female", "Male"])
+    female_first = (
+        fm.Chart(df)
+        .mark_boxplot(color_sort=["Female", "Male"])
+        .encode(x="day", y="tip", color=encoded)
+        .to_svg()
+    )
+    male_first = (
+        fm.Chart(df)
+        .mark_boxplot(color_sort=["Male", "Female"])
+        .encode(x="day", y="tip", color=encoded)
+        .to_svg()
+    )
+    assert female_first != male_first, "an explicit color_sort= kwarg must reach the desugar"
+    assert _legend_label_order(male_first) == ["Male", "Female"], (
+        "the caller's explicit color_sort= must order the legend, not the encoding's sort="
+    )
 
 
 # ---------------------------------------------------------------------------

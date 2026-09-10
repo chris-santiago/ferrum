@@ -8,6 +8,7 @@ use arrow::record_batch::RecordBatch;
 use super::column_min_max_f64;
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
+use crate::spec::layer::Layer;
 use crate::spec::mark::Mark;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
@@ -402,6 +403,85 @@ fn sort_domain_by_aggregate(
     });
 }
 
+/// Would Python's own single-chart zero-anchor injection have anchored this
+/// layer on this channel? The eligibility half of the bar zero-anchor rule
+/// (T5r; narrowed cycle 2 — spec-review issue 1; extended cycle 2 —
+/// rust-quality-review findings 1-3), extracted from `numeric_domain_union`'s
+/// union loop so the concept is nameable and directly unit-testable rather
+/// than reachable only end-to-end through a 285-line function (batch-F close
+/// review). `numeric_domain_union` owns the *arithmetic* (the two guarded
+/// assignments that widen the resolved extent to zero); this owns the
+/// *question*.
+///
+/// `channel`/`layer_fields` are read in the channel's own POST-flip
+/// coordinate space — the caller normalizes the layer's encoding via
+/// `Encoding::flip_positional` before deriving `layer_fields`, so both sides
+/// of every read below live in one space. `value_field_contributed` says
+/// whether the layer's value-slot field actually resolved to data in some
+/// batch, so a merely-DECLARED field (wrong `data_source`, not loaded yet)
+/// cannot force a zero-anchor on the strength of its name alone (spec-review
+/// finding 3).
+///
+/// The terms mirror the single-chart injection's guards
+/// (`_spec_build.py::_build_encoding_specs`'s zero-anchor block), not just
+/// its arithmetic:
+///   (a) `axis == "y"` there — the anchor is the bar's EXTENT axis only,
+///       never its POSITION axis. Ferrum always authors a bar's value on
+///       `y` (category/position on `x`, or the reverse under `CoordFlip`,
+///       which is exactly what the caller's `coord_flipped`/`encoding`
+///       normalization already applies) — so the value channel is `"y"`
+///       unflipped, `"x"` flipped. Dropping this guard is what fired the
+///       anchor on a histogram bar's `x` (bin-range position) channel too,
+///       squeezing `displot(kind="hist")` bars into a fraction of the panel
+///       when the data doesn't straddle zero. A bar authored with its value
+///       on the OTHER channel directly (no `CoordFlip`) — e.g.
+///       `_explanation.py::desugar_shap_waterfall`'s floating `x`/`x2` bars
+///       (`x=x0`, `x2=x1`, `y=feature`) — is excluded by this same guard for
+///       the identical reason Python's own `axis=="y"` rule already excludes
+///       it: ferrum's zero-anchor has never covered a directly-authored
+///       x-as-value bar, layered or not, so this mirrors existing scope
+///       rather than widening it under this fix.
+///   (b) `not _y2_bound` there (the D3 rule) — when this layer's OWN value
+///       channel carries a paired span field (`y2`, or `x2` under flip —
+///       `layer_fields[1]`), the extent is taken literally from `[value,
+///       span]` and force-anchoring to zero would distort a domain that was
+///       never meant to touch zero. `desugar_shap_waterfall` is ALSO the
+///       concrete instance of this shape (its bar layer's value channel
+///       carries `x2`) — doubly protected here: guard (a) already excludes
+///       it (its value channel is `x`, never the recognized value slot
+///       unflipped), and guard (b) would independently exclude it too if
+///       ferrum ever authored a value-on-`y`-with-`y2` floating bar (the
+///       shape `y2_bound_bar_layer_never_zero_extends` below pins).
+///   (c) the layer's own opt-out — `layer.mark_style.zero == Some(false)`,
+///       the per-layer mirror of `mark_bar(zero=False)` / `_mark_zero`
+///       (`spec::mark_style::MarkKwargsSpec::zero`, T5r cycle 2). Live and
+///       user-reachable today via the generic per-layer `mark=` passthrough
+///       on layered figure functions — e.g. `fm.catplot(..., kind="bar",
+///       mark={"bar": {"zero": False}})` resolves the value axis to the raw
+///       data range (measured: `58..61.5`, not `0..61.5`) — see that field's
+///       doc comment for the plumbing and the one path that stays inert.
+///
+/// The Python rule's remaining guard (`_y_is_categorical`) needs no mirror:
+/// `numeric_domain_union` is only ever called for a quantitative/temporal
+/// axis (`build_axis_scale`'s ordinal/nominal branch never reaches here), so
+/// an ordinal position channel is excluded structurally, not by an extra
+/// flag.
+fn layer_wants_bar_zero_anchor(
+    layer: &Layer,
+    channel: &str,
+    coord_flipped: bool,
+    layer_fields: [Option<&str>; 2],
+    value_field_contributed: bool,
+) -> bool {
+    let is_value_channel = if coord_flipped { channel == "x" } else { channel == "y" };
+    let layer_wants_zero = layer.mark_style.as_ref().and_then(|m| m.zero).unwrap_or(true);
+    is_value_channel
+        && layer.mark == Mark::Bar
+        && layer_wants_zero
+        && value_field_contributed
+        && layer_fields[1].is_none()
+}
+
 /// Compute the unioned numeric/temporal extent for an axis field across
 /// the relevant batches.
 ///
@@ -444,22 +524,13 @@ fn sort_domain_by_aggregate(
 ///     include zero — mirroring `resolve_continuous_domain_and_range`'s
 ///     `zero: true` block (`d[0] > 0.0 → 0.0`, `d[1] < 0.0 → 0.0`) exactly,
 ///     just applied on the AUTO-INFERRED path instead of an explicit
-///     `ScaleSpec`. All four conditions mirror the single-chart injection's
-///     guards (`_spec_build.py:394-399`: `axis == "y"`, `not _y2_bound` —
-///     the D3 rule, `:379-385` — and `_mark_zero`/`zero_anchor()`); dropping
-///     any of them widens a channel Python's own rule would never anchor —
-///     e.g. without the value-slot guard, a histogram bar layer (`x`/`x2` =
-///     bin range, `y` = count) had its POSITION axis wrongly zero-anchored,
-///     squeezing `displot(kind="hist")` bars into a corner of the panel
-///     whenever the data doesn't straddle zero. The data-contribution
-///     requirement additionally guards against a layer whose declared value
-///     field is absent from every batch (wrong `data_source`, not loaded
-///     yet) forcing a zero-anchor on the strength of its NAME alone. See
-///     `MarkKwargsSpec::zero`'s doc comment for the live, user-reachable
-///     path that sets the opt-out today (`catplot(..., mark={"bar": {"zero":
-///     False}})` and any other layered figure function's `mark=`
-///     passthrough). A single (non-layered) `mark_bar` never
-///     reaches this function at all: Python's
+///     `ScaleSpec`. The eligibility question — all four conditions, and why
+///     each one mirrors a guard of the single-chart injection
+///     (`_spec_build.py::_build_encoding_specs`: `axis == "y"`,
+///     `_y2_bound`'s D3 rule, `_mark_zero`) — lives in
+///     [`layer_wants_bar_zero_anchor`], which owns the per-term rationale;
+///     this function owns only the arithmetic. A single (non-layered)
+///     `mark_bar` never reaches this function at all: Python's
 ///     `_spec_build.py::_build_encoding_specs` already injects an explicit
 ///     `scale={"zero": True}` onto that chart's y encoding, which routes
 ///     through `build_from_scale_spec` and returns before this function is
@@ -627,68 +698,13 @@ pub(in crate::render) fn numeric_domain_union(
                     value_field_contributed = contributed;
                 }
             }
-            // Bar zero-anchor detection (T5r; narrowed cycle 2 — spec-review
-            // issue 1; extended cycle 2 — rust-quality-review findings 1-3).
-            // Mirrors the single-chart injection's guards
-            // (`_spec_build.py:394-399`), not just its arithmetic:
-            //   (a) `axis == "y"` there — the anchor is the bar's EXTENT
-            //       axis only, never its POSITION axis. Ferrum always
-            //       authors a bar's value on `y` (category/position on `x`,
-            //       or the reverse under `CoordFlip`, which is exactly what
-            //       `coord_flipped`/`encoding` above already normalizes) —
-            //       so the value channel is `"y"` unflipped, `"x"` flipped.
-            //       Dropping this guard is what fired the anchor on a
-            //       histogram bar's `x` (bin-range position) channel too,
-            //       squeezing `displot(kind="hist")` bars into a fraction of
-            //       the panel when the data doesn't straddle zero. A bar
-            //       authored with its value on the OTHER channel directly
-            //       (no `CoordFlip`) — e.g. `shap_waterfall`'s floating
-            //       `x`/`x2` bars (`marks/diagnostic/_explanation.py:285-296`,
-            //       `x=x0`, `x2=x1`, `y=feature`) — is excluded by this same
-            //       guard for the identical reason Python's own `axis=="y"`
-            //       rule already excludes it: ferrum's zero-anchor has never
-            //       covered a directly-authored x-as-value bar, layered or
-            //       not, so this mirrors existing scope rather than widening
-            //       it under this fix.
-            //   (b) `not _y2_bound` there (the D3 rule, `:379-385`) — when
-            //       this layer's OWN value channel carries a paired span
-            //       field (`y2`, or `x2` under flip — `layer_fields[1]`),
-            //       the extent is taken literally from `[value, span]` and
-            //       force-anchoring to zero would distort a domain that was
-            //       never meant to touch zero. `shap_waterfall` is ALSO the
-            //       concrete instance of this shape (its bar layer's value
-            //       channel carries `x2`) — doubly protected here: guard (a)
-            //       already excludes it (its value channel is `x`, never the
-            //       recognized value slot unflipped), and guard (b) would
-            //       independently exclude it too if ferrum ever authored a
-            //       value-on-`y`-with-`y2` floating bar (the shape
-            //       `y2_bound_bar_layer_never_zero_extends` below pins).
-            //   (c) the layer's own opt-out — `layer.mark_style.zero ==
-            //       Some(false)`, the per-layer mirror of
-            //       `mark_bar(zero=False)` / `_mark_zero`
-            //       (`spec::mark_style::MarkKwargsSpec::zero`, T5r cycle 2).
-            //       Live and user-reachable today via the generic per-layer
-            //       `mark=` passthrough on layered figure functions — e.g.
-            //       `fm.catplot(..., kind="bar", mark={"bar": {"zero":
-            //       False}})` resolves the value axis to the raw data range
-            //       (measured: `58..61.5`, not `0..61.5`) — see that field's
-            //       doc comment for the plumbing and the one path that
-            //       stays inert.
-            // The Python rule's remaining guard (`not _y_is_categorical`)
-            // needs no mirror: `numeric_domain_union` is only ever called
-            // for a quantitative/temporal axis (`build_axis_scale`'s
-            // ordinal/nominal branch never reaches here), so an ordinal
-            // position channel is excluded structurally, not by an extra
-            // flag.
-            let is_value_channel = if coord_flipped { channel == "x" } else { channel == "y" };
-            let layer_wants_zero =
-                layer.mark_style.as_ref().and_then(|m| m.zero).unwrap_or(true);
-            if is_value_channel
-                && layer.mark == Mark::Bar
-                && layer_wants_zero
-                && value_field_contributed
-                && layer_fields[1].is_none()
-            {
+            if layer_wants_bar_zero_anchor(
+                layer,
+                channel,
+                coord_flipped,
+                layer_fields,
+                value_field_contributed,
+            ) {
                 bar_zero_wanted = true;
             }
         }
@@ -845,6 +861,107 @@ mod tests {
         }
         // Sorted keys: "lv" < "lv_depth_1" < … so the "lv" batch (A, B, Z) wins.
         assert_eq!(first_seen.as_deref(), Some("A"));
+    }
+
+    // --- layer_wants_bar_zero_anchor: per-term unit tests --------------------
+    //
+    // The rule used to be a five-term boolean inlined in `numeric_domain_union`,
+    // reachable only end-to-end through a whole spec + batch fixture (the
+    // `*_SPEC_JSON` tests below still cover that integration). Extracted
+    // (batch-F close review), each term gets a direct negative case here: flip
+    // exactly one input away from the eligible baseline and the answer must
+    // flip too. That is what makes "would Python's injection have anchored
+    // this layer?" a checkable question rather than an emergent one.
+
+    fn zero_anchor_layer(mark: Mark, zero: Option<bool>) -> Layer {
+        Layer {
+            mark,
+            encoding: Default::default(),
+            transforms: Vec::new(),
+            mark_style: zero.map(|z| crate::spec::mark_style::MarkKwargsSpec {
+                zero: Some(z),
+                ..Default::default()
+            }),
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        }
+    }
+
+    /// The eligible baseline every negative case below perturbs: an unflipped
+    /// `y` channel, a `Mark::Bar` layer with no `zero` opt-out, a value field
+    /// that contributed data, and no paired span field.
+    #[test]
+    fn bar_zero_anchor_baseline_is_eligible() {
+        let layer = zero_anchor_layer(Mark::Bar, None);
+        assert!(layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], true));
+    }
+
+    /// Term (a), position half: the bar's POSITION channel is never anchored.
+    /// This is the term whose absence squeezed `displot(kind="hist")` bars into
+    /// a corner by zero-anchoring their `x` bin-range axis.
+    #[test]
+    fn bar_zero_anchor_refuses_position_channel() {
+        let layer = zero_anchor_layer(Mark::Bar, None);
+        assert!(!layer_wants_bar_zero_anchor(&layer, "x", false, [Some("v"), None], true));
+    }
+
+    /// Term (a), flip half: under `CoordFlip` the value channel is `x`, not
+    /// `y` — both readings move together, so the flipped `y` is now the
+    /// position channel and is refused.
+    #[test]
+    fn bar_zero_anchor_follows_the_flip() {
+        let layer = zero_anchor_layer(Mark::Bar, None);
+        assert!(layer_wants_bar_zero_anchor(&layer, "x", true, [Some("v"), None], true));
+        assert!(!layer_wants_bar_zero_anchor(&layer, "y", true, [Some("v"), None], true));
+    }
+
+    /// Mark term: only `Mark::Bar` anchors. A point/line/rule layer on the
+    /// same value channel leaves the union alone.
+    #[test]
+    fn bar_zero_anchor_refuses_non_bar_marks() {
+        for mark in [Mark::Point, Mark::Line, Mark::Rule, Mark::Area] {
+            let layer = zero_anchor_layer(mark, None);
+            assert!(
+                !layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], true),
+                "only Mark::Bar anchors, got an anchor for {mark:?}"
+            );
+        }
+    }
+
+    /// Term (c): the per-layer opt-out. `zero: Some(false)` refuses;
+    /// `Some(true)` and an absent `mark_style` are both the default-on case.
+    #[test]
+    fn bar_zero_anchor_honors_the_per_layer_opt_out() {
+        let opted_out = zero_anchor_layer(Mark::Bar, Some(false));
+        assert!(!layer_wants_bar_zero_anchor(&opted_out, "y", false, [Some("v"), None], true));
+        let opted_in = zero_anchor_layer(Mark::Bar, Some(true));
+        assert!(layer_wants_bar_zero_anchor(&opted_in, "y", false, [Some("v"), None], true));
+    }
+
+    /// Term (b): a value channel carrying a paired span field (`y2`, or `x2`
+    /// under flip) takes its extent literally from `[value, span]`.
+    #[test]
+    fn bar_zero_anchor_refuses_a_span_bound_value_channel() {
+        let layer = zero_anchor_layer(Mark::Bar, None);
+        assert!(!layer_wants_bar_zero_anchor(
+            &layer,
+            "y",
+            false,
+            [Some("lo"), Some("hi")],
+            true
+        ));
+    }
+
+    /// The data-contribution term: a merely-DECLARED value field that never
+    /// resolved in any batch (wrong `data_source`, not loaded yet) must not
+    /// force an anchor on the strength of its name alone.
+    #[test]
+    fn bar_zero_anchor_refuses_a_field_that_contributed_no_data() {
+        let layer = zero_anchor_layer(Mark::Bar, None);
+        assert!(!layer_wants_bar_zero_anchor(&layer, "y", false, [Some("v"), None], false));
     }
 
     // --- R3: SortSpecIgnored (channel-shorthand family) ---------------------
@@ -1193,8 +1310,8 @@ mod tests {
     // as a `Mark::Bar` layer bound it — no distinction between the bar's
     // VALUE axis and its POSITION axis, and no exclusion for a layer whose
     // own value channel already carries a paired span field. Both guards
-    // mirror `_spec_build.py:394-399`'s single-chart injection exactly
-    // (`axis == "y"`, `not _y2_bound`). Missing them is what let a
+    // mirror `_spec_build.py::_build_encoding_specs`'s single-chart
+    // injection exactly (`axis == "y"`, `not _y2_bound`). Missing them let a
     // `displot(kind="hist")` histogram bar's `x`/`x2` bin-range POSITION
     // widen to zero — a live regression in this same batch's T4 feature,
     // caught by spec review, not by the cycle-1 test suite (none of the four
@@ -1276,7 +1393,8 @@ mod tests {
     /// 2026-09-10, T5r cycle 2) — a bar layer whose own VALUE channel
     /// carries a paired span field, reachable from the public `Chart` API
     /// (`.encode(y2=...)` is a generically honored channel on any mark).
-    /// Mirrors the D3 rule `_spec_build.py:379-385` already applies to the
+    /// Mirrors the D3 rule (`_spec_build.py::_build_encoding_specs`'s
+    /// `_y2_bound`/`_zero_anchor_wanted`) already applies to the
     /// single-chart case: an explicit `[y, y2]` extent is taken literally
     /// and must not be force-anchored to zero.
     const Y2_BOUND_BAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}}},{"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"lo"}}}]}"#;
@@ -1391,7 +1509,7 @@ mod tests {
 
     /// Verbatim `chart.to_dict()` JSON for `fm.Chart(df).mark_rank1d(orient="vertical")`
     /// (captured 2026-09-10, T5r cycle 2) — a REAL single-bar-layer
-    /// production shape (`marks/diagnostic/_ranking.py:43`,
+    /// production shape (`marks/diagnostic/_ranking.py`,
     /// `desugar_rank1d`'s vertical orientation: `x=feature`, `y=score`).
     /// Reused (with different fixture batches) for the `mx < 0.0` arm and
     /// the zero-before-degenerate-widening ordering test below.

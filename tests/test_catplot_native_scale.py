@@ -346,10 +346,10 @@ def test_native_scale_caller_explicit_domain_is_not_overridden():
 
 
 def test_native_scale_encode_x_door_bypasses_padding_and_typing():
-    """Documents (does not endorse or fix) a pre-existing, module-wide
-    ``encode=`` override semantic, not a new ``native_scale`` gap (quality
-    review cycle 2's one non-blocking follow-up): ``encode={"x": ...}`` is a
-    raw ``Chart.encode(**encode)`` override applied AFTER this builder's own
+    """Documents (does not endorse) a pre-existing, module-wide ``encode=``
+    override semantic, not a new ``native_scale`` gap (quality review cycle
+    2's one non-blocking follow-up): ``encode={"x": ...}`` is a raw
+    ``Chart.encode(**encode)`` override applied AFTER this builder's own
     normalization, so it replaces the padded/typed channel wholesale --
     even with no ``scale=`` of its own, unlike the ``x=fm.X(..., scale=...)``
     door (`test_native_scale_caller_explicit_domain_is_not_overridden`
@@ -357,11 +357,19 @@ def test_native_scale_encode_x_door_bypasses_padding_and_typing():
     detects and defers to. The identical override already erases this
     builder's OTHER normalizations the same way (e.g. `hue=`'s nominal-color
     typing, shipped earlier this batch) -- this is `encode=`'s documented
-    contract, not something `native_scale` introduces. Not fixed here: the
-    stronger route (routing `encode.get("x")` through
-    `_catplot_cat_field_parts`) has an unresolved `orient="h"` key-space
-    question (logged as a batch follow-up), so this test pins the CURRENT
-    behavior as a known boundary instead.
+    contract, not something `native_scale` introduces.
+
+    What DID change (batch-F close, design re-review cycle 2): the door now
+    reaches every kind the same way. The estimating kinds bind their own
+    layers, which a chart-level override never reaches, so they used to keep
+    the normalization the six per-row kinds lost here -- one door, two
+    answers. `_catplot_build` now resolves the category channel through the
+    same merged read it already used for "did the caller state a scale?", so
+    the last assertion below pins CONVERGENCE where it once pinned the split.
+    That also settles the `orient="h"` key-space question this test's earlier
+    note left open: `encode`'s `x` is the layer-space category channel under
+    both orientations, which is the convention the value-scale refusal and the
+    scale propagation already read it in.
     """
     df = _three_group_df(1.0)
     # Padding lost: the same 30-row jitter fixture that renders 30/30 through
@@ -398,11 +406,12 @@ def test_native_scale_encode_x_door_bypasses_padding_and_typing():
     gap_2_10 = xs[2] - xs[1]
     assert gap_2_10 > gap_1_2 * 3  # native spacing, not equal-spaced bands
 
-    # The two kind families disagree on this same door: point/bar rebuild
-    # their own x_channel from the bare field name (bypassing encode=
-    # entirely for the CATEGORY channel, per `_catplot_summary_layers`'s
-    # existing "layered chart resolves from its own layer encodings" design),
-    # so they keep the force-nominal bands the chart-level channel lost.
+    # The two kind families now agree on this same door. point/bar used to
+    # rebuild their own x_channel from the bare field name, bypassing encode=
+    # for the CATEGORY channel entirely, so they kept the force-nominal bands
+    # the chart-level channel lost -- one door, two answers. They now take the
+    # override too, and lose the typing exactly as strip does above: the same
+    # uneven native spacing, not equal-spaced bands.
     svg_point = fm.catplot(
         numeric_df,
         x="cat",
@@ -415,7 +424,13 @@ def test_native_scale_encode_x_door_bypasses_padding_and_typing():
         encode={"x": fm.X("cat")},
     ).to_svg()
     xs_point = sorted(set(_circle_cx(svg_point)))
-    assert xs_point != xs  # point still bands; strip (via encode=) does not
+    assert len(xs_point) == 3
+    point_gap_1_2 = xs_point[1] - xs_point[0]
+    point_gap_2_10 = xs_point[2] - xs_point[1]
+    assert point_gap_2_10 > point_gap_1_2 * 3, (
+        "the encode= door must reach kind='point' the same way it reaches "
+        f"kind='strip': native spacing, not bands; got {xs_point}"
+    )
 
 
 # ---------------------------------------------------------------------------

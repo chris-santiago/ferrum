@@ -1,12 +1,30 @@
-//! Shared group-keying for the stat transforms (aggregate, summary, error_extent,
-//! box_stats, violin).
+//! The crate's grouping toolkit: everything every grouped transform needs to
+//! turn a `groupby` request into partitioned rows and back into an output
+//! batch whose group columns carry their *original* dtypes.
 //!
-//! All grouping transforms partition rows by one or more groupby columns, then
-//! reconstruct those columns in their output batch with the *original* dtype
-//! preserved. This module is the single source of truth for:
-//!   - which Arrow dtypes are valid groupby keys ([`is_groupby_supported_dtype`]),
-//!   - how a single row's key is extracted ([`groupby_key_at`]), and
-//!   - how the keys are materialized back into an output column ([`materialize_groupby_col`]).
+//! What lives here (the charter grew well past the original three-item
+//! key-handling list, and a refusal policy landing inside a stacking helper
+//! was the cost of not saying so — batch-F close review):
+//!   - **Key vocabulary** — which Arrow dtypes are valid groupby keys
+//!     ([`is_groupby_supported_dtype`]), how one row's key is extracted
+//!     ([`groupby_key_at`]), and how keys are materialized back into an
+//!     output column ([`materialize_groupby_col`], [`groupby_field_nullable`]).
+//!   - **Partitioning** — [`group_partition_multi`], the shared partitioner.
+//!     It owns the policies that belong to the groupby *request* itself:
+//!     dtype support, first-appearance group order, the null-key skip, and
+//!     the repeated-name refusal. Most grouped transforms route through it;
+//!     the ones that still hand-roll their own loop over the key primitives
+//!     above are named in its doc, and moving them over is a filed follow-up.
+//!   - **Grouped-execution templates** — [`grouped_two_column_fit`] (the
+//!     `RegressionData`/`LoessData` shape: fit per group, stack two Float64
+//!     grids) and [`stack_grouped_batches`] (the `Smooth`/`Robust` shape:
+//!     stack already-computed per-group batches). Both append the group
+//!     columns; the second also refuses a groupby name that collides with
+//!     the transform's own output columns.
+//!   - **Boundary parsing** — the wire back-compat shim
+//!     ([`deserialize_groupby_vec`]) and the PyO3 argument parser
+//!     ([`parse_groupby_pyany`]), so `null`/`"col"`/`["a","b"]` normalize to
+//!     `Vec<String>` in exactly one place.
 //!
 //! Before this module existed, four sibling transforms each carried their own
 //! `Str`/`Float`-only `KeyValue` enum and rejected integer/uint/bool groupby
@@ -297,6 +315,40 @@ pub(crate) type GroupPartitionMulti = (
 /// This mirrors the single-column behaviour (a null in the groupby column is not
 /// assigned to any group). The null skip applies when *any* dimension of the
 /// composite key contains [`KeyValue::Null`].
+///
+/// **Repeated-name policy:** `group_cols` may not repeat a name (e.g.
+/// `groupby=["g", "g"]`). A repeat is a malformed *request*, not a property of
+/// any one transform's output shape: a grouped transform appends one output
+/// field per groupby dimension, so a repeat means two identically-named Arrow
+/// fields, and `Schema::index_of` silently resolves to the FIRST match — every
+/// downstream reader of "the groupby column" would see the wrong column's
+/// values. The refusal lives here rather than in any single execution
+/// template: batch F installed it in [`stack_grouped_batches`] instead, which
+/// closed `smooth`/`robust` and left every other grouped transform corrupting
+/// silently (batch-F close review, F1). Installed here it covers every caller
+/// of this function — `bin`, `kde`, `kde_2d`, `smooth`, `robust`, `outliers`,
+/// `top_k`, `impute`, plus `regression_data`/`loess_data` through
+/// [`grouped_two_column_fit`]. It does NOT cover the transforms that still
+/// hand-roll their own partition loop over this module's key primitives
+/// (`summary`, `violin`, `aggregate`, `box_stats`, `error_extent`,
+/// `density_data`, `pivot`, `data_aggregate`); migrating those onto this
+/// partitioner is the filed follow-up that also generalizes
+/// `stack_grouped_batches`'s output-collision guard. `ctx` keeps the error in
+/// the calling transform's voice.
+///
+/// **That residual is a duplicated rule, not an open hole.** No public API
+/// path reaches a hand-rolled partitioner with a repeated groupby name:
+/// `aggregate`, `summary`, `violin`, `box_stats`, and `error_extent` each
+/// refuse the same repeat at their own PyO3 constructor (`"Aggregate:
+/// duplicate groupby field 'g'"` and its four siblings), and `density_data`
+/// (`PyDensityData::new` takes only `field`/`name`), `pivot`, and
+/// `data_aggregate` (no `#[pyclass]` at all — wire-only) cannot be
+/// constructed with a `groupby` from Python in the first place. So the
+/// invariant holds everywhere; what differs is WHERE and in WHOSE WORDS it
+/// is enforced — one rule with two messages at two lifecycle stages
+/// (construction time for those five, partition time here). The follow-up is
+/// therefore a consolidation for message consistency and wire-path coverage,
+/// not a corruption fix; scope it accordingly.
 pub(crate) fn group_partition_multi(
     batch: &RecordBatch,
     group_cols: &[String],
@@ -305,11 +357,21 @@ pub(crate) fn group_partition_multi(
     let schema = batch.schema();
     let mut group_dtypes: Vec<DataType> = Vec::with_capacity(group_cols.len());
     let mut group_arrays: Vec<usize> = Vec::with_capacity(group_cols.len());
+    let mut seen_group_cols: std::collections::HashSet<&str> =
+        std::collections::HashSet::with_capacity(group_cols.len());
 
     for col_name in group_cols {
         let gi = schema.index_of(col_name).map_err(|_| {
             PyValueError::new_err(format!("{ctx}: groupby column '{col_name}' not found"))
         })?;
+        // Checked after the existence lookup so a missing column still reports
+        // "not found" first, as it did before this guard moved here.
+        if !seen_group_cols.insert(col_name.as_str()) {
+            return Err(PyValueError::new_err(format!(
+                "{ctx}: groupby column '{col_name}' is repeated in `groupby`; \
+                 each groupby column must have a distinct name (got groupby={group_cols:?})"
+            )));
+        }
         let gtype = schema.field(gi).data_type().clone();
         if !is_groupby_supported_dtype(&gtype) {
             return Err(PyValueError::new_err(format!(
@@ -444,22 +506,27 @@ pub(crate) fn grouped_two_column_fit(
 /// so an `Int64`/`Boolean`/etc. groupby column round-trips at its original
 /// dtype rather than widening to `String`.
 ///
-/// **Name-collision guard:** the output must not carry two fields with the
-/// same name. Two distinct ways to violate that would otherwise slip
-/// through: (a) a groupby column's name matches one of the per-group
-/// output's own field names (e.g. grouping by a column literally named `x`
-/// or `residual`), and (b) `group_cols` itself repeats a name (e.g.
-/// `groupby=["g", "g"]`). Arrow does not reject duplicate schema field
-/// names, and `Schema::index_of` silently resolves to the FIRST match, so
-/// every downstream reader of "the groupby column" would silently see the
-/// wrong column's values instead. This refuses both cases with a typed
-/// error naming the colliding column and, for case (a), this transform's
-/// actual output columns (so the message is actionable from Python — a
-/// caller can rename the offending groupby column, but cannot rename a
-/// transform's fixed output schema). This is a behavior change versus the
-/// pre-hoist `smooth`/`robust` bodies, which had no such guard — both
-/// collision cases were previously mis-resolved silently, not merely
-/// undocumented.
+/// **Output-collision guard:** the output must not carry two fields with the
+/// same name. This refuses the case that is a property of *appending group
+/// columns*: a groupby column's name matches one of the per-group output's
+/// own field names (e.g. grouping by a column literally named `x` or
+/// `residual`). Arrow does not reject duplicate schema field names, and
+/// `Schema::index_of` silently resolves to the FIRST match, so every
+/// downstream reader of "the groupby column" would silently see the wrong
+/// column's values instead. The error names both the colliding column and
+/// this transform's actual output columns, so the message is actionable
+/// from Python — a caller can rename the offending groupby column, but
+/// cannot rename a transform's fixed output schema. This is a behavior
+/// change versus the pre-hoist `smooth`/`robust` bodies, which had no such
+/// guard — the collision was previously mis-resolved silently, not merely
+/// undocumented. It is still installed here rather than at the ~13 sites
+/// that append group columns; generalizing it is a filed follow-up.
+///
+/// The sibling case — `group_cols` itself repeating a name — is NOT checked
+/// here: it is a property of the groupby *request* rather than of stacking,
+/// so it belongs to (and lives in) [`group_partition_multi`], which both
+/// callers of this function run first and whose output `group_cols`/`gtypes`
+/// they pass straight through. See that function's "Repeated-name policy".
 pub(crate) fn stack_grouped_batches(
     ctx: &str,
     per_group_batches: &[(Vec<KeyValue>, RecordBatch)],
@@ -475,19 +542,12 @@ pub(crate) fn stack_grouped_batches(
 
     let output_field_names: Vec<String> =
         stacked.schema().fields().iter().map(|f| f.name().clone()).collect();
-    let mut seen_group_cols: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for col_name in group_cols {
         if output_field_names.iter().any(|f| f == col_name) {
             return Err(PyValueError::new_err(format!(
                 "{ctx}: groupby column '{col_name}' collides with this transform's own output \
                  column '{col_name}' (output columns: {}); rename the data column before grouping",
                 output_field_names.join(", ")
-            )));
-        }
-        if !seen_group_cols.insert(col_name.as_str()) {
-            return Err(PyValueError::new_err(format!(
-                "{ctx}: groupby column '{col_name}' is repeated in `groupby`; \
-                 each groupby column must have a distinct name (got groupby={group_cols:?})"
             )));
         }
     }
@@ -1146,28 +1206,39 @@ mod tests {
         assert_eq!(g2.value(2), 2);
     }
 
-    /// Task 2h review finding 2: `group_cols` repeating a name (e.g. a caller
-    /// passing `groupby=["g", "g"]`) must also refuse — the guard exists to
-    /// establish "no duplicate field names in the output", not merely "no
-    /// group column collides with a fit column".
+    /// Task 2h review finding 2, re-homed by the batch-F close review (F1):
+    /// `group_cols` repeating a name (e.g. a caller passing
+    /// `groupby=["g", "g"]`) must refuse — the guard exists to establish "no
+    /// duplicate field names in the output", not merely "no group column
+    /// collides with a fit column". It lives in `group_partition_multi` (the
+    /// shared partitioner) rather than in one stacking template, so
+    /// `kde`/`bin`/`kde_2d`/`top_k`/`impute`/`outliers` are covered by the
+    /// same eight lines that cover `smooth`/`robust`.
     #[test]
-    fn stack_grouped_batches_rejects_duplicate_name_within_group_cols() {
+    fn group_partition_multi_rejects_duplicate_name_within_group_cols() {
         pyo3::Python::initialize();
-        let per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = vec![
-            (
-                vec![KeyValue::Str("a".into()), KeyValue::Str("a".into())],
-                xy_group_batch(vec![1.0], vec![10.0]),
-            ),
-        ];
-        let err = stack_grouped_batches(
-            "test",
-            &per_group_batches,
-            &["g".to_string(), "g".to_string()],
-            &[DataType::Utf8, DataType::Utf8],
-        )
-        .expect_err("groupby=['g', 'g'] must refuse rather than emit two 'g' fields");
+        let batch = xy_group_batch(vec![1.0, 2.0], vec![10.0, 20.0]);
+        // `x` exists in this batch, so the refusal is about the REPEAT, not
+        // about a missing column.
+        let err = group_partition_multi(&batch, &["x".to_string(), "x".to_string()], "test")
+            .expect_err("groupby=['x', 'x'] must refuse rather than key on one column twice");
         let msg = err.to_string();
-        assert!(msg.contains('g'), "error must name the repeated column: {msg}");
+        assert!(msg.contains('x'), "error must name the repeated column: {msg}");
         assert!(msg.contains("repeated"), "error must explain the duplication: {msg}");
+        assert!(msg.contains("test"), "error must stay in the caller's voice: {msg}");
+    }
+
+    /// The precedence half of the same guard: a repeated name that does not
+    /// exist still reports "not found" first, exactly as it did before the
+    /// repeat check moved into this function.
+    #[test]
+    fn group_partition_multi_missing_column_outranks_the_repeat_check() {
+        pyo3::Python::initialize();
+        let batch = xy_group_batch(vec![1.0], vec![10.0]);
+        let err =
+            group_partition_multi(&batch, &["ghost".to_string(), "ghost".to_string()], "test")
+                .expect_err("a missing groupby column must still refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("not found"), "missing column must report 'not found': {msg}");
     }
 }

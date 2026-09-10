@@ -109,6 +109,38 @@ def axis_tick_labels(svg: str, *, axis: str) -> list[str]:
     return [text for _, text in sorted(ents)]
 
 
+def y_axis_units_per_pixel(svg: str) -> float:
+    """Data units per vertical pixel, read off a single-panel chart's y ticks.
+
+    Rendered geometry is in pixels, so no ABSOLUTE claim about a distance in
+    it ("this interval is 0.28 data units wide", "these points are spread like
+    the data") can be made until the axis says what a pixel is worth. The
+    scale comes from the axis's own rendered tick ladder, so it is read off
+    the same artifact the assertion is about.
+
+    A RATIO of pixel distances, not a position: tick labels are placed by
+    their text baseline, a few pixels off the tick they name, so the ladder
+    fixes the axis's scale exactly but its offset only approximately. Callers
+    convert LENGTHS (a whisker's height, a point's distance from another
+    point), never a lone coordinate.
+
+    The ladder is the leftmost column of at least three numeric tick labels --
+    the same rule :func:`axis_tick_labels` uses for ``axis="y"``. Raises when
+    there is none: a chart with no numeric y ticks cannot answer the question.
+    """
+    columns: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for x, y, value in numeric_text_entries(svg):
+        columns[round(x)].append((y, value))
+    for x_key in sorted(columns):
+        ladder = sorted(columns[x_key])
+        if len(ladder) >= 3:
+            break
+    else:
+        raise AssertionError("no y-axis tick ladder in the rendered SVG")
+    (pixel_top, value_top), (pixel_bottom, value_bottom) = ladder[0], ladder[-1]
+    return abs((value_bottom - value_top) / (pixel_bottom - pixel_top))
+
+
 def x_axis_extents(svg: str) -> list[AxisExtent]:
     """Per-panel x-axis tick extents for a column-faceted chart.
 
