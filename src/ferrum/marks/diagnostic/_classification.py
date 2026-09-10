@@ -334,6 +334,16 @@ def desugar_discrimination_threshold(
     ``Chart.mark_discrimination_threshold``'s ``data_transform`` so the
     feature works for both chart-API and figure-function entry points
     (Schwabish C7 audit-rework, 2026-05-12).
+
+    Both flags are trusted here at face value -- this function does not (and
+    cannot, without the actual data) verify the sentinel columns it just
+    documented are really present. ``_prep_discrimination_threshold_sentinels``
+    (``ferrum._desugar``, the ``"discrimination_threshold"`` entry in
+    ``_PENDING_PREP``) is the enforcement point: it runs before this desugar
+    and downgrades ``threshold_line``/``optimum_label`` to ``False``
+    whenever the transform below did not inject the matching sentinel,
+    keeping this function's contract honest without either flag ever
+    reaching here true-but-unbacked.
     """
     # metrics is wired via data_transform in Chart.mark_discrimination_threshold
     # (filters to the requested metric names when present in the data);

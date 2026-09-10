@@ -493,6 +493,14 @@ class ClassificationMarksMixin:
             # column injection this whole block exists to perform.
             f1_rows = df.filter(_normalized_col("metric") == "f1")
             if f1_rows.height == 0:
+                # No F1 row survives (e.g. `metrics=` excludes "f1"): neither
+                # `_threshold_best` nor the `_optimum_*` sentinels below get
+                # injected. `_prep_discrimination_threshold_sentinels`
+                # (`ferrum._desugar`) is the code that downgrades
+                # `threshold_line`/`optimum_label` back to `False` for this
+                # exact case before `desugar_discrimination_threshold` runs
+                # -- keep that function's early return in sync with this one
+                # if the sentinel set here ever changes.
                 return df
             best_idx = int(f1_rows["value"].arg_max() or 0)
             best_t = float(f1_rows["threshold"][best_idx])

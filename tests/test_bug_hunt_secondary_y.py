@@ -608,6 +608,25 @@ def test_base_without_y_encoding_plus_secondary_renders():
 
 
 def test_smooth_transform_on_secondary_member_renders_dual_axis():
+    """The secondary member's ``y`` encoding must name the Smooth transform's
+    OWN output column, not the raw pre-transform column (``z``).
+
+    ``fm.Smooth(x, y)``'s fitted-curve output batch always has the canonical
+    ``[x, y, ci_lower, ci_upper]`` schema (``FIT_OUTPUT_COLUMNS`` in
+    ``crates/ferrum-core/src/transform/registry/mod.rs``) regardless of the
+    raw column names passed in -- the fitted value column is always literally
+    named ``y``, never the raw input field (``z`` here) and never a
+    caller-chosen name (``output=`` selects the Fitted/Residuals *mode*, not
+    a column name). A layer that encodes the raw column while reading from
+    the transform's named output has nothing to draw from. Pre-batch-F this
+    rendered a silently empty secondary layer (axis titles come from the
+    encoding field name, not from any rendered mark, so the missing curve
+    was undetectable); the Rust layer-positional-column gate (batch F, Task
+    3) now catches this shape and raises ``ValueError: layer 1: encoding
+    'y' references unknown column 'z'``. An explicit ``title="z"`` on the
+    corrected channel keeps this test's original semantic intent (primary
+    axis "y", secondary axis "z") even though the field itself is ``y``.
+    """
     df = pl.DataFrame(
         {
             "x": [1.0, 2.0, 3.0, 4.0],
@@ -616,11 +635,26 @@ def test_smooth_transform_on_secondary_member_renders_dual_axis():
         }
     )
     primary = fm.Chart(df).mark_bar().encode(x="x", y="y")
-    smooth = fm.Chart(df).mark_line().encode(x="x", y="z").transform(fm.Smooth("x", "z"))
+    smooth = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x", y=fm.Y("y", title="z"))
+        .transform(fm.Smooth("x", "z"))
+    )
     svg = LayerChart(primary, smooth, resolve={"y": "independent"}).to_svg()
     _assert_no_bad_tokens(svg)
     titles = _rotated_titles(svg)
     assert "y" in titles and "z" in titles
+    # Strengthen: the old assertion above only checked axis titles, which
+    # come from the encoding field name regardless of whether any mark
+    # actually drew -- that is precisely why the pre-fix empty render
+    # passed. Assert the fit polyline itself exists with real geometry.
+    body = _svg_body(svg)
+    polylines = re.findall(r'<polyline points="([^"]+)"', body)
+    assert polylines, "expected a rendered polyline for the smooth fit line"
+    assert any(len(pl_points.split()) > 1 for pl_points in polylines), (
+        "smooth fit polyline must have more than one point"
+    )
 
 
 def test_aggregate_shorthand_on_secondary_member_renders():

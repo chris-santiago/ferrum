@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import polars as pl
 import pytest
@@ -2161,6 +2163,106 @@ def test_discrimination_threshold_chart_custom_metrics_subset():
     svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
+
+
+def test_discrimination_threshold_metrics_subset_without_f1_suppresses_optimum_label():
+    """A ``metrics=`` subset that drops f1 must render WITHOUT the optimum-label
+    text layer -- ``mark_discrimination_threshold``'s data_transform only injects
+    the ``_optimum_x``/``_optimum_y``/``_optimum_text`` sentinel columns when an
+    f1 row survives the filter (``metrics=`` restricts to precision/recall here),
+    so the desugar must suppress the layer that would otherwise reference
+    nonexistent columns. Regression for the layer-positional-column gate
+    (batch F, Task 3) surfacing this: pre-fix this raised
+    ``ValueError: layer 1: encoding 'x' references unknown column '_optimum_x'``.
+
+    Also asserts the chart's real content still renders (2 metric polylines,
+    one per requested metric) -- ``"<svg" in svg`` alone would pass for an
+    empty over-suppressed chart just as readily as for the correct one.
+    """
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(
+        y_true=y_true,
+        y_pred=y_pred,
+        n_thresholds=10,
+        metrics=("precision", "recall"),
+    )
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    assert "max F1" not in svg
+    polylines = re.findall(r'<polyline points="([^"]+)"', svg)
+    assert len(polylines) == 2, (
+        f"expected 2 metric polylines (precision, recall), got {len(polylines)}"
+    )
+
+
+def test_discrimination_threshold_default_metrics_renders_optimum_label():
+    """The default ``metrics=`` (which includes f1) must still render the
+    optimum-label text layer -- the suppression above must not blanket-disable
+    the feature, only the case where its sentinel data is absent."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(
+        y_true=y_true,
+        y_pred=y_pred,
+        n_thresholds=10,
+    )
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    assert "max F1" in svg
+
+
+# The threshold-line rule's mark_kwargs (stroke="#AAAAAA", opacity=0.6) render
+# as this exact SVG color -- distinct from any axis/grid stroke color, so its
+# presence/absence discriminates the rule layer specifically.
+_THRESHOLD_RULE_STROKE = "rgba(170,170,170,0.600)"
+
+
+def test_discrimination_threshold_metrics_subset_without_f1_suppresses_threshold_line():
+    """Sibling of the optimum-label suppression test, for ``threshold_line=True``.
+
+    ``_threshold_best`` is injected by the SAME F1-optimum-row lookup as the
+    ``_optimum_*`` sentinels, gated by the SAME ``f1_rows.height == 0`` early
+    return (``_disc_threshold_prep``) -- a ``metrics=`` subset that drops f1
+    must therefore ALSO suppress the vertical rule layer that would
+    otherwise reference the nonexistent ``_threshold_best`` column. Pre-fix
+    this raised ``ValueError: layer 1: encoding 'x' references unknown
+    column '_threshold_best'`` (found by python-quality-reviewer against
+    the cycle-1 fix, which only guarded ``optimum_label``).
+    """
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(
+        y_true=y_true,
+        y_pred=y_pred,
+        n_thresholds=10,
+        metrics=("precision", "recall"),
+        threshold_line=True,
+    )
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    assert _THRESHOLD_RULE_STROKE not in svg, "the threshold rule must not render without its sentinel"
+    polylines = re.findall(r'<polyline points="([^"]+)"', svg)
+    assert len(polylines) == 2, (
+        f"expected 2 metric polylines (precision, recall), got {len(polylines)}"
+    )
+
+
+def test_discrimination_threshold_default_metrics_renders_threshold_line():
+    """Default ``metrics=`` (f1 present) + ``threshold_line=True`` must still
+    draw the vertical rule -- the suppression above must not blanket-disable
+    the feature, only the case where its sentinel data is absent."""
+    y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
+    y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
+    chart = ferrum.discrimination_threshold_chart(
+        y_true=y_true,
+        y_pred=y_pred,
+        n_thresholds=10,
+        threshold_line=True,
+    )
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    assert _THRESHOLD_RULE_STROKE in svg, "the threshold rule must render when its sentinel is present"
 
 
 # ---------------------------------------------------------------------------

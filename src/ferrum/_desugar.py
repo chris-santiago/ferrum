@@ -612,6 +612,40 @@ def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "field": color_field}
 
 
+def _prep_discrimination_threshold_sentinels(ctx: _ResolveContext) -> None:
+    """Suppress the optimum-label / threshold-line layers when their sentinel columns were never injected.
+
+    ``Chart.mark_discrimination_threshold``'s ``data_transform``
+    (``_disc_threshold_prep`` in ``marks/_chart_mixins/_classification.py``)
+    injects BOTH ``_threshold_best`` (for ``threshold_line``) and
+    ``_optimum_x``/``_optimum_y``/``_optimum_text`` (for ``optimum_label``)
+    from the SAME F1-optimum-row lookup, gated by the SAME
+    ``f1_rows.height == 0`` early return -- with no f1 row there is no
+    optimum to draw a rule at or label. ``threshold_line``/``optimum_label``
+    themselves default independently of ``metrics=``, so a ``metrics=``
+    subset that drops f1 used to reach
+    :func:`ferrum.marks.diagnostic.desugar_discrimination_threshold` with
+    one or both flags ``True`` and no sentinel columns to back them -- the
+    emitted ``mark_rule``/``mark_text`` layers referenced columns that did
+    not exist. This is the enforcement point for that shared contract: it
+    threads the transform's actual answer ("were the sentinels injected?")
+    back into the desugar kwargs for EACH sentinel family independently, so
+    neither layer is ever emitted for data that cannot back it, rather than
+    letting the desugar and the transform disagree.
+    """
+    data = ctx.chart._data
+    columns = getattr(data, "columns", None) if data is not None else None
+    has_columns = columns is not None
+
+    if ctx.transform_kwargs.get("optimum_label", True):
+        if not has_columns or "_optimum_x" not in columns:
+            ctx.transform_kwargs = {**ctx.transform_kwargs, "optimum_label": False}
+
+    if ctx.transform_kwargs.get("threshold_line", False):
+        if not has_columns or "_threshold_best" not in columns:
+            ctx.transform_kwargs = {**ctx.transform_kwargs, "threshold_line": False}
+
+
 def _prep_smooth_force_name(ctx: _ResolveContext) -> None:
     """When mark_smooth was called on a chart that already had a primitive mark,
     force the Smooth transform to be named so __final__ stays the raw data for
@@ -650,6 +684,7 @@ _PENDING_PREP: dict[str, _KindPrep] = {
     "histogram": _KindPrep(pre=(_prep_groupby_from_color,)),
     "hex": _KindPrep(pre=(_prep_hex_field_from_color,)),
     "smooth": _KindPrep(pre=(_prep_smooth_force_name,)),
+    "discrimination_threshold": _KindPrep(pre=(_prep_discrimination_threshold_sentinels,)),
 }
 
 

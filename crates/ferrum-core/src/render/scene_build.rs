@@ -1177,6 +1177,17 @@ fn build_panel_mark_batches(
             continue;
         }
 
+        // This layer's OWN resolved batch — the base data, or the named
+        // `data_source` output it reads — captured before the
+        // position-adjustment shadowing below, because that is the batch the
+        // positional gate (`validate_layer_positional_columns`, called with
+        // the DrawCtx-local encoding further down) means by "this layer's own
+        // data". Position adjustment never adds a column an encoding could
+        // name, so checking the pre-adjust batch and the post-adjust one give
+        // the same answer today; binding the pre-adjust one keeps the gate's
+        // contract independent of that fact.
+        let own_batch: &RecordBatch = layer_batch;
+
         // Bind this layer to its y-slot (secondary-y-axis, GH #52). Shared layers
         // (and every layer on a chart with no independent slot) draw through the
         // primary `scales` unchanged — byte-stable. An independent layer draws
@@ -1377,14 +1388,28 @@ fn build_panel_mark_batches(
             mark_style: &mark_style,
         };
 
-        // Validate the encoding the mark builder will actually see — the
-        // DrawCtx-local copy, not the pre-normalization merge — so the refusal
-        // gate and the geometry can never disagree about a layer's shape
-        // (batch-A Task 13 spec c3). Only rule's and tick's own-span-axis
-        // normalization above touches a positional channel (tick has no
-        // channel-combination refusal to trip either way — see
+        // Both refusal gates below read the encoding the mark builder will
+        // actually see — the DrawCtx-local copy, not the pre-normalization
+        // merge — so a refusal gate and the geometry can never disagree about
+        // a layer's shape (batch-A Task 13 spec c3). Only rule's and tick's
+        // own-span-axis normalization above touches a positional channel (tick
+        // has no channel-combination refusal to trip either way — see
         // `validate_mark_encoding`'s `_ => Ok(())` fallthrough), so every
         // other mark's gate decision is unchanged.
+        //
+        // The positional gate (layers ≥ 1, F-L10-01 rider) is checked against
+        // `own_batch` — this layer's own resolved batch, captured above before
+        // the position-adjustment shadowing. It sits here, on this side of the
+        // normalization, for exactly the reason `validate_mark_encoding` does:
+        // on the other side it refused a `mark_rule`/`mark_tick` layer over an
+        // inherited channel the normalization then cleared and no builder ever
+        // read — a working chart turned into a hard error.
+        validate_layer_positional_columns(
+            li,
+            &layer_spec.encoding,
+            own_batch,
+            prep.coord_flipped,
+        )?;
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, prep.coord_flipped)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
 
@@ -2712,6 +2737,92 @@ fn validate_mark_encoding(
     }
 }
 
+/// Refuse a layer beyond the first whose positional encoding names a column
+/// absent from that layer's own resolved batch (F-L10-01 rider, spec §4/§6).
+///
+/// **Why this gate exists.** Only layer 0's encoding reaches scale resolution
+/// — `resolve_panel_scales` merges layer 0 onto the chart encoding, and
+/// `resolve_layer_y_scale` covers only an `independent_y` layer's `y`. A layer
+/// ≥ 1 naming a missing positional column therefore sailed past every check
+/// and reached the mark builders, whose `.ok()`-swallowing column reads
+/// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs`) turned it into an
+/// empty mark batch: the layer vanished from the render with no error and no
+/// warning. Those readers are deliberately unchanged — they are correct for
+/// the per-row null/dtype cases they were written for; the drift they could
+/// not distinguish (a column that isn't there at all) is caught here instead,
+/// once, upstream of all of them.
+///
+/// **Where it runs, and why there.** Immediately before
+/// [`validate_mark_encoding`], on the DrawCtx-local `layer_spec.encoding` —
+/// the post-normalization copy the mark builder actually reads — and against
+/// the layer's own PRE-position-adjust batch. Both refusal gates therefore
+/// judge one encoding, which is what batch-A Task 13 spec c3 already ruled for
+/// `validate_mark_encoding`: a refusal gate and the geometry must not disagree
+/// about a layer's shape. Placed on the other side of the rule/tick own-span
+/// normalization (its first home), this gate refused a `mark_rule`/`mark_tick`
+/// layer for an inherited channel that normalization then cleared and no
+/// builder ever read — e.g. a chart whose `x` names a named-fan-out transform
+/// output column (absent from `__final__`, found by `locate_field` only in the
+/// named output) plus an added `mark_rule().encode(y=…)`, which renders
+/// correctly and must keep rendering.
+///
+/// **Scope (normative, spec §4).**
+/// - Layer 0 is exempt: it already raises [`RenderError::UnknownColumn`] from
+///   scale resolution, and standalone single-mark charts must keep that exact
+///   error.
+/// - Positional channels only. A non-owning layer that merely INHERITED a
+///   `color` channel naming a column its own batch lacks keeps rendering
+///   exactly as before (#106 ownership); so does every other non-positional
+///   channel.
+/// - The batch is the layer's OWN resolved batch — base data for
+///   `data_source: None`, the named transform output otherwise — never the
+///   union `locate_field` searches. A field that exists only in some sibling
+///   transform output is precisely the silent-drop shape: the scale resolves,
+///   the marks cannot.
+/// - Zero-row layers never reach here (the caller skips them first), so an
+///   empty batch still means "nothing to draw", not "broken encoding".
+///
+/// **Known boundary.** Marks that ignore positional channels entirely
+/// (`Mark::Arc`, `Mark::Geoshape`) are still refusable on an inherited `x`/`y`
+/// they never read — nothing normalizes those away the way rule/tick's own-span
+/// rule does. Left as-is deliberately: every constructible shape was already
+/// degenerate (`mark_arc` under a non-Polar coord refuses earlier via
+/// [`RenderError::MarkRequiresCoord`], and its dropped-channel case already
+/// warns), so widening the gate with a per-mark "does this mark read
+/// positional channels" table would add a second, drift-prone answer to a
+/// question `dispatch_mark_build` already owns.
+///
+/// Checks in a fixed channel order so the reported channel is deterministic
+/// when a layer gets more than one of them wrong.
+fn validate_layer_positional_columns(
+    layer_index: usize,
+    encoding: &crate::spec::encoding::Encoding,
+    batch: &RecordBatch,
+    coord_flipped: bool,
+) -> Result<(), RenderError> {
+    if layer_index == 0 {
+        return Ok(());
+    }
+    let positional = [
+        ("x", encoding.x.as_ref()),
+        ("y", encoding.y.as_ref()),
+        ("x2", encoding.x2.as_ref()),
+        ("y2", encoding.y2.as_ref()),
+    ];
+    for (channel, enc) in positional {
+        let Some(enc) = enc else { continue };
+        if batch.column_by_name(&enc.field).is_none() {
+            return Err(RenderError::LayerUnknownColumn {
+                layer: layer_index,
+                channel,
+                name: enc.field.clone(),
+                coord_flipped,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3654,6 +3765,22 @@ mod tests {
     /// (which is hardcoded to [`two_layer_dual_y_spec`]) for tests that need
     /// a customized spec.
     fn build_scene_for(spec: &ChartSpec, batch: &RecordBatch) -> ferrum_scene::SceneGraph {
+        try_build_scene_for(spec, batch).unwrap()
+    }
+
+    /// [`build_scene_for`] without the final unwrap, for the refusal tests
+    /// (the layer positional gate) that need the pipeline's `Err` itself.
+    ///
+    /// Propagates BOTH `prepare_render_inputs`' and `build_scene`'s
+    /// `RenderError`, so a test can assert which of the two refused a given
+    /// spec — that distinction is the layer-0-vs-layer-≥1 contract itself
+    /// (layer 0 refuses in prepare's scale resolution; a layer ≥ 1 refuses in
+    /// the scene-build gate). Only `compute_layout` still unwraps: its error
+    /// type is `LayoutError`, and no gate under test can produce one.
+    fn try_build_scene_for(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+    ) -> Result<ferrum_scene::SceneGraph, RenderError> {
         let theme = ThemeInputs::default();
         let viewport = crate::layout::Viewport {
             width: 600.0,
@@ -3669,8 +3796,7 @@ mod tests {
             viewport,
             &crate::render::chart_config::ChartConfig::default(),
             None,
-        )
-        .unwrap();
+        )?;
         // Mirror the real orchestration (`config_apply`'s
         // `build_effective_theme_config_over_theme`, pass 15): `apply_show_defaults`
         // is the bottom of the grid/domain
@@ -3705,7 +3831,6 @@ mod tests {
             &chart_config,
             None,
         )
-        .unwrap()
     }
 
     // ── Task 4 remediation (spec §4.4, 2026-08-28 T4 amendment): layered
@@ -7028,6 +7153,508 @@ mod tests {
                 h: 200.0
             }),
             0.0
+        );
+    }
+
+    // ── F-L10-01 rider: the layer positional gate ────────────────────────────
+    //
+    // These exercise the FULL `prepare → layout → build_scene` pipeline rather
+    // than `validate_layer_positional_columns` alone, because the whole point
+    // of the finding is WHICH batch a layer ≥ 1 is checked against, and that
+    // batch is chosen by `build_scene`'s layer-batch resolution (base data vs.
+    // named `data_source` output) — a unit test that hands the function a batch
+    // picks the answer it is meant to prove.
+
+    /// Two-layer chart with a FAN-OUT named `Bin` transform:
+    ///
+    /// - base batch: `x`/`y0` (Float64) + `cat` (Utf8); `__final__` keeps it,
+    ///   since a *named* transform does not advance the chain.
+    /// - named output `"binned"`: `bin_start`/`bin_end`/`count`/`density` —
+    ///   disjoint from the base schema in both directions.
+    /// - layer 0: line on the base data (`x`, `y0`).
+    /// - layer 1: point reading `data_source: "binned"`, with its own
+    ///   `x="bin_start"`, `y="density"`.
+    ///
+    /// Chart-level `color="cat"` exists only in the base batch, so layer 1
+    /// inherits (non-positional inheritance) a color channel its own batch does
+    /// not carry — the #106 shape the gate must leave alone.
+    fn layer_gate_binned_spec() -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
+        use crate::transform::core::TransformSpec;
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let field = |name: &str| {
+            Some(EncodingSpec {
+                field: name.into(),
+                ..Default::default()
+            })
+        };
+        let layer0 = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: field("y0"),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let layer1 = Layer {
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: field("bin_start"),
+                y: field("density"),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: Some("binned".into()),
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: field("x"),
+                color: field("cat"),
+                ..Default::default()
+            },
+            transforms: vec![TransformSpec::Bin(BinSpec {
+                field: "x".into(),
+                mode: BinMode::Fixed { n: 2 },
+                extent: Some((1.0, 3.0)),
+                nice: false,
+                cumulative: false,
+                shared_extent: false,
+                groupby: vec![],
+                agg_field: None,
+                agg: None,
+                name: Some("binned".into()),
+            })],
+            facet: None,
+            layers: Some(vec![layer0, layer1]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// Mutate layer 1's `y` field in place.
+    fn set_layer1_y_field(spec: &mut ChartSpec, field: &str) {
+        spec.layers
+            .as_mut()
+            .expect("layer_gate_binned_spec always sets layers")[1]
+            .encoding
+            .y
+            .as_mut()
+            .expect("layer 1 always declares its own y")
+            .field = field.into();
+    }
+
+    fn panel_mark_batch_node_counts(scene: &ferrum_scene::SceneGraph) -> Vec<usize> {
+        scene.panels[0]
+            .marks
+            .iter()
+            .map(|b| b.nodes.len())
+            .collect()
+    }
+
+    /// The finding itself. Layer 1 names a positional column that lives in the
+    /// BASE batch but not in the `data_source` output it actually reads — the
+    /// exact silent-drop shape, because `scale_resolve::locate_field` searches
+    /// every named output and so happily resolves a scale for it, while the
+    /// mark builder reads only this layer's own batch and produced an empty
+    /// mark batch. The gate must refuse, naming the layer index and column.
+    #[test]
+    fn layer_one_positional_column_absent_from_its_own_batch_raises_naming_layer() {
+        pyo3::Python::initialize();
+        let (mut spec, batch) = layer_gate_binned_spec();
+        set_layer1_y_field(&mut spec, "y0");
+
+        let err = try_build_scene_for(&spec, &batch)
+            .expect_err("layer 1's y is absent from the binned output it reads");
+        match err {
+            RenderError::LayerUnknownColumn {
+                layer,
+                channel,
+                ref name,
+                coord_flipped,
+            } => {
+                assert_eq!(layer, 1, "the offending layer index must be named");
+                assert_eq!(channel, "y");
+                assert_eq!(name, "y0");
+                assert!(!coord_flipped);
+            }
+            ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("layer 1"), "message must name the layer: {msg}");
+        assert!(msg.contains("'y0'"), "message must name the column: {msg}");
+    }
+
+    /// The same refusal for a column that exists nowhere at all, proving the
+    /// gate is not keyed to the "present in a sibling output" case specifically.
+    #[test]
+    fn layer_one_wholly_unknown_positional_column_raises() {
+        pyo3::Python::initialize();
+        let (mut spec, batch) = layer_gate_binned_spec();
+        set_layer1_y_field(&mut spec, "no_such_column");
+
+        let err = try_build_scene_for(&spec, &batch).expect_err("layer 1's y names nothing");
+        assert!(
+            matches!(
+                err,
+                RenderError::LayerUnknownColumn { layer: 1, channel: "y", ref name, .. }
+                    if name == "no_such_column"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// Layer 0 is exempt: a standalone/primary layer with a missing positional
+    /// column keeps raising the plain `UnknownColumn` it always did — the gate
+    /// must not restate that error in a second vocabulary. Asserted through the
+    /// same whole-pipeline entry point every other test here uses (rather than
+    /// against `prepare_render_inputs` alone), so it pins the error a USER
+    /// sees, not merely the one prepare returns internally.
+    #[test]
+    fn layer_zero_missing_positional_column_still_raises_plain_unknown_column() {
+        pyo3::Python::initialize();
+        let (mut spec, batch) = layer_gate_binned_spec();
+        spec.layers
+            .as_mut()
+            .expect("layers")
+            .get_mut(0)
+            .expect("layer 0")
+            .encoding
+            .y
+            .as_mut()
+            .expect("layer 0 declares y")
+            .field = "no_such_column".into();
+
+        let err = try_build_scene_for(&spec, &batch).expect_err("layer 0's y is unresolvable");
+        assert!(
+            matches!(err, RenderError::UnknownColumn { ref name } if name == "no_such_column"),
+            "layer 0 must keep its existing error shape, got {err:?}"
+        );
+    }
+
+    /// A `data_source` layer is checked against ITS OWN batch, not the base
+    /// data: `bin_start`/`density` exist only in the named output, and the
+    /// layer renders. (Under a base-batch check this fixture would refuse.)
+    #[test]
+    fn data_source_layer_positional_resolves_against_its_own_batch() {
+        pyo3::Python::initialize();
+        let (spec, batch) = layer_gate_binned_spec();
+        let scene = try_build_scene_for(&spec, &batch).expect("both layers resolve");
+        let counts = panel_mark_batch_node_counts(&scene);
+        assert_eq!(counts.len(), 2, "both layers must render: {counts:?}");
+        assert!(
+            counts.iter().all(|&n| n > 0),
+            "neither layer may render empty: {counts:?}"
+        );
+    }
+
+    /// #106 ownership: layer 1 INHERITS chart-level `color="cat"`, a column its
+    /// own (binned) batch does not carry. That is untouched by this gate — the
+    /// layer renders exactly as it does with no chart-level color at all.
+    #[test]
+    fn inherited_absent_color_on_non_owning_layer_still_renders() {
+        pyo3::Python::initialize();
+        let (spec, batch) = layer_gate_binned_spec();
+        let with_color = try_build_scene_for(&spec, &batch)
+            .expect("an inherited absent color must not refuse");
+
+        let mut without_color = spec.clone();
+        without_color.encoding.color = None;
+        let baseline = try_build_scene_for(&without_color, &batch).expect("baseline renders");
+
+        assert_eq!(
+            panel_mark_batch_node_counts(&with_color),
+            panel_mark_batch_node_counts(&baseline),
+            "the inherited absent color must change nothing about what renders"
+        );
+    }
+
+    /// A zero-row layer still skips, gate or no gate: an empty batch means
+    /// "nothing to draw", which is not the same fact as an unknown column. The
+    /// layer here is BOTH zero-row AND positionally broken — the skip wins.
+    #[test]
+    fn zero_row_layer_with_broken_positional_column_still_skips() {
+        pyo3::Python::initialize();
+        use crate::transform::core::TransformSpec;
+        use crate::transform::filter::FilterSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        // Swap the named Bin for a named Filter that keeps no rows, and point
+        // layer 1 at it with an unresolvable y.
+        spec.transforms = vec![TransformSpec::Filter(FilterSpec {
+            predicate: "datum.x > 1000".into(),
+            name: Some("binned".into()),
+            param: None,
+        })];
+        set_layer1_y_field(&mut spec, "no_such_column");
+        spec.layers.as_mut().expect("layers")[1]
+            .encoding
+            .x
+            .as_mut()
+            .expect("layer 1 declares x")
+            .field = "x".into();
+
+        let scene = try_build_scene_for(&spec, &batch)
+            .expect("a zero-row layer is skipped before the gate can see it");
+        assert_eq!(
+            panel_mark_batch_node_counts(&scene).len(),
+            1,
+            "only layer 0 may emit a mark batch"
+        );
+    }
+
+    /// The gate reads the layer's `x2`/`y2` endpoints too, not just `x`/`y`.
+    #[test]
+    fn layer_one_missing_y2_endpoint_raises_naming_that_channel() {
+        pyo3::Python::initialize();
+        use crate::spec::encoding::EncodingSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        spec.layers.as_mut().expect("layers")[1].encoding.y2 = Some(EncodingSpec {
+            field: "y0".into(),
+            ..Default::default()
+        });
+
+        let err = try_build_scene_for(&spec, &batch).expect_err("y2 names a column layer 1 lacks");
+        assert!(
+            matches!(
+                err,
+                RenderError::LayerUnknownColumn { layer: 1, channel: "y2", ref name, .. }
+                    if name == "y0"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// Second gate fixture, for the inherited-channel half: the chart-level
+    /// `x` names `bin_start`, a column that exists ONLY in the named fan-out
+    /// `Bin` output — `__final__` keeps the base schema, so every layer whose
+    /// `data_source` is `None` reads a batch that does NOT carry it. Scale
+    /// resolution still succeeds, because `scale_resolve::domain::locate_field`
+    /// searches the named outputs too; that mismatch is what makes this shape
+    /// the interesting one.
+    ///
+    /// Layer 0 is a bar on the output-only columns (renders empty, layer 0 is
+    /// exempt); layer 1 carries `layer1_mark` and declares only its own
+    /// `y="y0"`, inheriting the chart-level `x`. For `Mark::Rule`/`Mark::Tick`
+    /// the own-span normalization clears that inherited `x` before any builder
+    /// reads it; for every other mark the builder really does read it.
+    ///
+    /// This is the reviewer's live repro, in Python terms:
+    /// ```text
+    /// base = fm.Chart(df).mark_bar().encode(x="bin_start", y="count").transform(fm.Bin("x", name="b"))
+    /// (base + fm.Chart(df).mark_rule().encode(y="y")).to_svg()
+    /// ```
+    fn layer_gate_output_only_x_spec(layer1_mark: Mark) -> (ChartSpec, RecordBatch) {
+        use crate::spec::encoding::EncodingSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        spec.mark = Mark::Bar;
+        spec.encoding.x = Some(EncodingSpec {
+            field: "bin_start".into(),
+            ..Default::default()
+        });
+        spec.encoding.color = None;
+        let layers = spec.layers.as_mut().expect("layers");
+        layers[0].mark = Mark::Bar;
+        layers[0].encoding.y = Some(EncodingSpec {
+            field: "count".into(),
+            ..Default::default()
+        });
+        // Layer 1 reads the BASE data and declares only `y` — the one-own-
+        // positional-channel shape the own-span normalization exists for.
+        layers[1].mark = layer1_mark;
+        layers[1].data_source = None;
+        layers[1].encoding.x = None;
+        layers[1].encoding.y = Some(EncodingSpec {
+            field: "y0".into(),
+            ..Default::default()
+        });
+        (spec, batch)
+    }
+
+    /// Cycle-2 regression (quality review, Bug Risk #1). A `mark_rule` layer
+    /// that declares only `y` and inherits a chart-level `x` its own batch does
+    /// not carry must RENDER: `build_panel_mark_batches`' own-span-axis
+    /// normalization clears that inherited `x` before any builder reads it, and
+    /// the rule draws as a horizontal span. The gate's first home was ABOVE
+    /// that normalization, so it refused this working chart on a channel the
+    /// layer neither declares nor reads.
+    #[test]
+    fn rule_layer_inheriting_absent_x_still_renders_after_own_span_normalization() {
+        pyo3::Python::initialize();
+        let (spec, batch) = layer_gate_output_only_x_spec(Mark::Rule);
+        let scene = try_build_scene_for(&spec, &batch)
+            .expect("the inherited x is cleared by own-span normalization; the rule must render");
+        let counts = panel_mark_batch_node_counts(&scene);
+        assert!(
+            counts.last().is_some_and(|&n| n > 0),
+            "the rule layer must emit nodes: {counts:?}"
+        );
+    }
+
+    /// The same for `mark_tick` — the second mark the own-span normalization
+    /// covers (batch-E task-3 extension).
+    #[test]
+    fn tick_layer_inheriting_absent_x_still_renders_after_own_span_normalization() {
+        pyo3::Python::initialize();
+        let (spec, batch) = layer_gate_output_only_x_spec(Mark::Tick);
+        let scene = try_build_scene_for(&spec, &batch)
+            .expect("the inherited x is cleared by own-span normalization; the tick must render");
+        let counts = panel_mark_batch_node_counts(&scene);
+        assert!(
+            counts.last().is_some_and(|&n| n > 0),
+            "the tick layer must emit nodes: {counts:?}"
+        );
+    }
+
+    /// The other side of that boundary, and the guard against over-narrowing
+    /// the cycle-2 fix to "own-declared channels only": the SAME inherited,
+    /// absent `x` on a mark nothing normalizes — `mark_point` genuinely reads
+    /// its `x` column — must still refuse. Also the only refusal test whose
+    /// layer 1 has `data_source: None`, i.e. reads the base data.
+    #[test]
+    fn non_data_source_layer_inheriting_absent_x_on_a_mark_that_reads_it_raises() {
+        pyo3::Python::initialize();
+        let (spec, batch) = layer_gate_output_only_x_spec(Mark::Point);
+        let err = try_build_scene_for(&spec, &batch)
+            .expect_err("mark_point reads x; an absent inherited x must refuse");
+        assert!(
+            matches!(
+                err,
+                RenderError::LayerUnknownColumn { layer: 1, channel: "x", ref name, .. }
+                    if name == "bin_start"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// The reported index is the offending layer's own, not "the first
+    /// non-primary layer": here layers 0 and 1 are sound and layer 2 is broken.
+    /// Also the `x`-channel refusal case (the other tests cover `y`/`y2`).
+    #[test]
+    fn broken_layer_two_raises_naming_index_two_and_the_x_channel() {
+        pyo3::Python::initialize();
+        use crate::spec::encoding::EncodingSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        let layers = spec.layers.as_mut().expect("layers");
+        let mut broken = layers[1].clone();
+        broken.encoding.x = Some(EncodingSpec {
+            field: "y0".into(), // base-batch column, absent from the binned output
+            ..Default::default()
+        });
+        layers.push(broken);
+
+        let err = try_build_scene_for(&spec, &batch).expect_err("layer 2's x is unresolvable");
+        assert!(
+            matches!(
+                err,
+                RenderError::LayerUnknownColumn { layer: 2, channel: "x", ref name, .. }
+                    if name == "y0"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// The `x2` endpoint, completing the four-channel scope. A bar declaring
+    /// `x2` alone is a legal shape (`validate_mark_encoding` refuses bars only
+    /// when BOTH `x2` and `y2` are bound), so this refusal can only come from
+    /// the positional gate.
+    #[test]
+    fn layer_one_missing_x2_endpoint_raises_naming_that_channel() {
+        pyo3::Python::initialize();
+        use crate::spec::encoding::EncodingSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        let layer1 = &mut spec.layers.as_mut().expect("layers")[1];
+        layer1.mark = Mark::Bar;
+        layer1.encoding.x2 = Some(EncodingSpec {
+            field: "y0".into(),
+            ..Default::default()
+        });
+
+        let err = try_build_scene_for(&spec, &batch).expect_err("x2 names a column layer 1 lacks");
+        assert!(
+            matches!(
+                err,
+                RenderError::LayerUnknownColumn { layer: 1, channel: "x2", ref name, .. }
+                    if name == "y0"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// Under `CoordFlip` the gate acts on the RESOLVED (post-swap) channel, so
+    /// the reported token is un-flipped back to what the user wrote (R3): a
+    /// broken `y=` becomes a resolved `x`, and the message must still say `y`.
+    #[test]
+    fn layer_gate_channel_token_is_unflipped_under_coord_flip() {
+        pyo3::Python::initialize();
+        let (mut spec, batch) = layer_gate_binned_spec();
+        spec.coord = Some(crate::spec::coord::CoordKind::Flip);
+        set_layer1_y_field(&mut spec, "y0");
+
+        let err = try_build_scene_for(&spec, &batch).expect_err("layer 1's y is unresolvable");
+        match err {
+            RenderError::LayerUnknownColumn {
+                channel,
+                coord_flipped,
+                ..
+            } => {
+                assert_eq!(channel, "x", "the gate acts on the resolved channel");
+                assert!(coord_flipped, "the un-flip flag must be patched in");
+            }
+            ref other => panic!("expected LayerUnknownColumn, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'y'"),
+            "the message must name the channel the user wrote: {msg}"
         );
     }
 }

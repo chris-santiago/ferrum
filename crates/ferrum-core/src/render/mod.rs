@@ -248,6 +248,43 @@ pub enum RenderError {
         required: &'static str,
         hint: &'static str,
     },
+    /// A layer beyond the first bound a positional channel (`x`/`y`/`x2`/`y2`)
+    /// to a column that is absent from **that layer's own resolved batch** —
+    /// the base data, or the named `data_source` output the layer reads from
+    /// (F-L10-01 rider, spec §4).
+    ///
+    /// Only layer 0's encoding reaches scale resolution
+    /// (`scene_build::resolve_panel_scales` merges layer 0 onto the chart
+    /// encoding; `resolve_layer_y_scale` covers only an `independent_y`
+    /// layer's `y`), so a layer ≥ 1 naming a missing positional column used to
+    /// reach the mark builders, where the `.ok()`-swallowing column readers
+    /// (`marks/point.rs`, `marks/text.rs`, `marks/geoshape.rs`) turned it into
+    /// an empty mark batch: the layer simply vanished from the render, with no
+    /// error and no warning. That is how a broken regression-fit layer shipped
+    /// undetected.
+    ///
+    /// Shape follows the composite `CompositeRenderError::LeafRender { index,
+    /// source }` precedent (`composite_render.rs`) — the offending index is
+    /// named, so the message points at one layer rather than at the chart.
+    /// Standalone single-mark charts are untouched: layer 0 keeps raising the
+    /// plain [`RenderError::UnknownColumn`] from scale resolution.
+    ///
+    /// Scope is deliberately positional-only (#106 ownership): a non-owning
+    /// layer that INHERITED a `color` channel naming a column its own batch
+    /// does not carry keeps rendering exactly as before, and a zero-row layer
+    /// keeps being skipped (an empty batch is not an unknown column).
+    ///
+    /// `channel` is the RESOLVED (post-`CoordFlip`) token the gate acted on;
+    /// `coord_flipped` (R3) is the `Display`-time un-flip back to the token
+    /// the user wrote, patched at the one construction site
+    /// (`scene_build::validate_layer_positional_columns`) from
+    /// `PreparedInputs::coord_flipped`.
+    LayerUnknownColumn {
+        layer: usize,
+        channel: &'static str,
+        name: String,
+        coord_flipped: bool,
+    },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -306,7 +343,13 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::InvalidFormatSpec { .. }
         | RenderError::InvalidScaleDomainConfig { .. }
         | RenderError::UnknownInterpolate { .. }
-        | RenderError::MarkRequiresCoord { .. }) => other,
+        | RenderError::MarkRequiresCoord { .. }
+        // Carries a `coord_flipped` field, patched at its own single
+        // construction site (`scene_build::validate_layer_positional_columns`,
+        // which has `PreparedInputs::coord_flipped` in hand) — same discipline
+        // as `EncodingTypeMismatch` and friends above, so this boundary must
+        // leave it alone rather than overwrite it.
+        | RenderError::LayerUnknownColumn { .. }) => other,
     }
 }
 
@@ -447,6 +490,14 @@ impl std::fmt::Display for RenderError {
                 write!(f, "invalid format spec {spec:?}: {reason}"),
             Self::MarkRequiresCoord { mark, required, hint } =>
                 write!(f, "{mark} requires a {required} coord; {hint}"),
+            Self::LayerUnknownColumn { layer, channel, name, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                write!(
+                    f,
+                    "layer {layer}: encoding '{channel}' references unknown column '{name}' \
+                     (not present in that layer's data)"
+                )
+            }
         }
     }
 }
