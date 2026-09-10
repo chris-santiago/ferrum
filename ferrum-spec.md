@@ -2181,6 +2181,45 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
 > (`resolve={"y": "independent"}`, `SecondaryY`, and every `.interactive()`
 > `LayerChart`), where the chart-level injection never ran.
 
+> **2026-09-10 (batch F, F-L09-03):** the categorical channel is now ALWAYS
+> explicitly typed, for every one of the 8 `kind=` values, instead of never
+> being typed at all. `native_scale=False` (the default) types it
+> `"nominal"` -- **disclosed behavior change:** a numeric category column
+> (e.g. an integer year) previously inferred `"quantitative"` and rendered
+> on a linear axis, silently contradicting this documented default; it now
+> renders as equal-spaced categorical bands, matching a string column and
+> matching seaborn. `native_scale=True` types it `"quantitative"` and
+> places category values at their real numeric positions; it raises,
+> naming the column and its dtype, when the column is not numeric. The
+> former `native_scale=True` refusal ("the renderer does not support
+> quantitative categorical axes") is deleted -- it was factually wrong; the
+> renderer's continuous-band `Dodge` and non-ordinal `Jitter` paths already
+> existed and needed no Rust change. `kind="strip"`'s `Jitter` width on a
+> native scale is rescaled Python-side from the ordinal 0.4 band-fraction
+> to `0.4 x` the category column's own median unique-value spacing (data
+> units), mirroring the bandwidth proxy `Dodge`'s continuous-band path
+> already computes; a single-category column falls back to the literal 0.4.
+> One exclusion, orthogonal to this change: `kind="boxen"`'s letter-value
+> transform hard-requires a Utf8 groupby column regardless of
+> `native_scale` (a pre-existing Rust-transform gap, not introduced or
+> closed here).
+>
+> **2026-09-10 addendum (cycle-2 close-out, same finding F-L09-03):** the
+> category channel's typing now covers the documented `x : str or encoding`
+> shape uniformly -- an already-built channel object (`x=fm.X("year")`) is
+> typed and `order=`-sorted exactly like a bare field name, honoring an
+> explicit `type_=` the caller stated on their own channel verbatim when
+> present. A quantitative axis's domain is otherwise just the raw data
+> extent, with no room for `Jitter`/`Dodge` to move a mark into; when
+> `kind="strip"` jitters (default `jitter=True`) or any kind dodges
+> (`dodge=True` + `hue=`), the category channel's domain is padded by half
+> that position adjustment's own maximum offset (plus a 5% safety margin)
+> so no mark renders outside it and is silently dropped by the renderer,
+> which resolves no awareness of the pending offset on its own. This
+> padding never overrides a domain the caller set explicitly (`x=fm.X(...,
+> scale=...)` or `encode={"x": ...}`) -- an explicit caller domain still
+> governs, and a mark that clips against IT is the caller's own choice.
+
 #### Relational
 
 ```

@@ -11,7 +11,7 @@ or count marks.
 """
 
 from __future__ import annotations
-from typing import Any
+from typing import Any, NamedTuple
 
 from ferrum import (
     Aggregate,
@@ -22,6 +22,7 @@ from ferrum import (
     Dodge,
     Identity,
     Jitter,
+    LinearScale,
     Stack,
 )
 from ferrum._coerce import to_polars
@@ -696,10 +697,232 @@ def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
     return ci_percent / 100.0
 
 
+def _catplot_cat_field_parts(cat_field: Any) -> tuple[str | None, str | None, dict]:
+    """Split catplot's category-channel argument into name / explicit type / kwargs.
+
+    Accepts the documented ``x : str or encoding`` shape uniformly (cycle-2
+    fix, quality finding 3 / spec issue 1): a bare string has no type_ and
+    no other kwargs to preserve; an already-built channel object (e.g.
+    ``x=fm.X("year")``) yields its ``.field``, its own ``.option("type")``
+    (the already-normalized short code ``"Q"``/``"N"``/``"O"``/``"T"``, or
+    ``None`` when the caller stated no ``type_``), and a COPY of its
+    ``_kwargs`` (``sort=``, ``scale=``, ``axis=``, ``title=``, ...) so a
+    caller can rebuild a fresh channel -- typed and/or re-sorted -- without
+    mutating or discarding the original. ``None`` returns ``(None, None,
+    {})``.
+    """
+    if cat_field is None:
+        return None, None, {}
+    name = _field_name(cat_field)
+    if isinstance(cat_field, str):
+        return name, None, {}
+    return name, cat_field.option("type"), dict(cat_field._kwargs)
+
+
+def _catplot_cat_type(
+    data: Any, cat_field: str | None, *, native_scale: bool, explicit_type: str | None = None
+) -> str | None:
+    """Resolve catplot's category-channel ``type_`` from ``native_scale``.
+
+    This is the ONE site that decides how catplot's category channel is
+    typed, for every one of the 8 kinds (F-L09-03) AND both input shapes
+    (bare field name or an already-built channel object, cycle-2 fix):
+    ``native_scale=False`` (the default) resolves to ``"N"`` -- even a
+    numeric category column renders as categorical bands. That is a
+    disclosed behavior change: before this, the category channel was never
+    explicitly typed and a numeric column silently inferred
+    ``"quantitative"``, which contradicted the documented default (seaborn
+    parity is the new behavior). ``native_scale=True`` resolves to ``"Q"``
+    and requires the column to actually be numeric -- a non-numeric column
+    has no native scale to place values on, so this raises naming the
+    column and its dtype rather than silently falling back to nominal.
+
+    ``explicit_type`` -- the caller's own ``type_=`` statement on a channel
+    object they built themselves (``x=fm.X("cat", type_="Q")``), extracted
+    by :func:`_catplot_cat_field_parts` -- is honored VERBATIM and returned
+    immediately, bypassing ``native_scale``'s own typing decision (including
+    its numeric-dtype check) entirely: this is the same pass-through
+    precedent ``nominal_color_channel`` already sets for an explicit
+    ``hue=`` channel -- the caller stated the type, so ``native_scale``
+    does not overrule it.
+
+    Returns ``None`` when ``cat_field`` is ``None`` (no category channel
+    bound yet): callers that require one raise their own, more specific,
+    "requires x=/y=" message downstream, and there is nothing to type-check
+    here.
+    """
+    if cat_field is None:
+        return None
+    if explicit_type is not None:
+        return explicit_type
+    if not native_scale:
+        return "N"
+    frame = to_polars(data)
+    if cat_field not in frame.columns:
+        # Same wording as the Rust render-time check (`render/mod.rs`'s
+        # `RenderError::UnknownColumn`) so a missing column reads the same
+        # way regardless of which side of the CDI boundary catches it first
+        # -- this Python-side dtype check runs eagerly, at `catplot()` call
+        # time rather than `.to_svg()` render time, so it would otherwise
+        # surface a raw `KeyError` for exactly the case that error exists to
+        # explain.
+        raise ValueError(f"unknown column {cat_field!r} referenced by an encoding")
+    dtype = frame.schema[cat_field]
+    if not dtype.is_numeric():
+        raise ValueError(
+            f"catplot(native_scale=True): the category column {cat_field!r} is "
+            f"not numeric (dtype {dtype}), so it has no native scale to place "
+            "values on. Pass native_scale=False (the default) to render it as "
+            "categorical bands instead."
+        )
+    return "Q"
+
+
+class _NativeScaleStats(NamedTuple):
+    """Finite, deduplicated data-unit stats for a native-scale category column.
+
+    Shared by the jitter-width and domain-padding computations below so both
+    read the exact same filtered/sorted values instead of two independent
+    (and potentially divergent) passes over the data.
+    """
+
+    data_min: float
+    data_max: float
+    #: Upper-median spacing between consecutive unique values (Rust's own
+    #: `diffs[diffs.len() / 2]` convention, `render/position.rs`'s
+    #: continuous-band `Dodge`), or `None` when fewer than 2 unique finite
+    #: values exist to derive a spacing from.
+    median_spacing: float | None
+
+
+def _native_scale_stats(data: Any, cat_field: str) -> "_NativeScaleStats | None":
+    """Finite, deduplicated, sorted stats for a native-scale category column.
+
+    Filters non-finite values (NaN/±inf) in addition to nulls (cycle-2 fix,
+    quality finding 2): ``drop_nulls()`` alone does not drop NaN, and
+    ``sorted()`` over a diff sequence containing NaN is not a total order,
+    so a NaN/inf category value previously poisoned the jitter-width
+    computation into returning NaN/inf, which then failed at render time
+    with an opaque JSON-serialization error naming nothing. A non-finite
+    category value cannot contribute a meaningful spacing or extent, and
+    excluding it from this computation does not stop ITS OWN row from
+    rendering (a NaN x position is not touched by jitter/dodge either way;
+    without them, the same frame already renders that row fine).
+
+    Returns ``None`` when there are no finite values at all (a fully
+    null/NaN/inf column) -- callers skip width-scaling/padding in that case
+    since there is nothing to scale around.
+    """
+    series = to_polars(data).get_column(cat_field).drop_nulls()
+    series = series.filter(series.is_finite())
+    values = series.unique().sort().to_list()
+    if not values:
+        return None
+    if len(values) == 1:
+        return _NativeScaleStats(values[0], values[0], None)
+    diffs = sorted(b - a for a, b in zip(values, values[1:]))
+    median_spacing = diffs[len(diffs) // 2]
+    return _NativeScaleStats(values[0], values[-1], median_spacing)
+
+
+def _native_scale_jitter_width(
+    stats: "_NativeScaleStats | None", *, base_width: float = 0.4
+) -> float:
+    """Jitter width for a native-scale (quantitative) category axis, in data units.
+
+    ``native_scale=True`` types the category channel Quantitative, so it
+    renders on a linear axis rather than a band -- Rust's non-ordinal
+    ``Jitter`` branch (``render/position.rs``'s ``apply_jitter``) then
+    applies ``width`` as a literal DATA-unit offset instead of a fraction of
+    a band's pixel width. The ordinal default, ``base_width=0.4``, is a
+    BAND-FRACTION: applied verbatim as a data-unit offset it is the wrong
+    magnitude on any real numeric domain (e.g. ``±0.2`` total spread on a
+    column spanning ``[0, 1000]`` is imperceptible; the same width on a
+    ``[0, 1]`` column would swallow the whole axis).
+
+    This mirrors the bandwidth proxy continuous-band ``Dodge`` already
+    computes for the identical situation (``apply_dodge``'s "median spacing
+    of unique band values"): scaling ``base_width`` by the category column's
+    own median spacing between unique values keeps the jittered spread
+    proportional to how far apart the categories actually sit, computed
+    Python-side from the real data rather than guessed at a fixed magnitude.
+
+    Falls back to ``base_width`` itself (0.4 data units) when there are
+    fewer than two unique finite values to derive a spacing from -- a
+    single-category column, an all-null/non-finite one, or ``stats is
+    None`` -- since there is no spacing to scale and 0.4 is a small,
+    bounded, deterministic default for that degenerate case.
+    """
+    if stats is None or stats.median_spacing is None:
+        return base_width
+    return base_width * stats.median_spacing
+
+
+def _native_scale_padded_domain(
+    stats: "_NativeScaleStats | None",
+    *,
+    jitter_active: bool,
+    dodge_active: bool,
+    jitter_base_width: float = 0.4,
+) -> tuple[float, float] | None:
+    """Domain wide enough that a Jitter/Dodge offset never lands outside it.
+
+    Cycle-2 fix (quality finding 1 / S3, blocks): typing the category
+    channel Quantitative makes its axis domain the raw data extent
+    (``numeric_extent`` / ``column_min_max_f64``, resolved with no
+    awareness that a position adjustment is about to move points). Both
+    ``Jitter`` (a literal data-unit offset, ``render/position.rs``'s
+    ``apply_jitter``) and continuous-band ``Dodge`` (a bandwidth-based
+    offset, ``apply_dodge``) can then place a mark up to half their own
+    extent away from its raw position -- Jitter's ``width/2``, Dodge's
+    ``bandwidth/2`` (the outermost sub-band's offset is always strictly
+    less than half the bandwidth by construction; see
+    ``apply_dodge_ordinal``'s formula) -- and the renderer silently DROPS
+    any mark whose adjusted position lands outside the domain it inferred:
+    no error, no warning. Measured pre-fix: 17 of 30 marks under ``Jitter``,
+    6 of 12 under ``Dodge``, on ordinary (non-adversarial) fixtures.
+
+    The fix is Python-side, at the SAME single typing site this module
+    already resolves the category channel's type at: attach an EXPLICIT
+    domain wide enough to absorb the largest possible offset, plus a 5%
+    safety margin against float-rounding pushing a mark that lands exactly
+    on the padded edge back outside it. The renderer does not clip inside
+    an explicit domain the way it re-derives one from the data, so widening
+    it here is sufficient with no Rust change (`NS-1` in the code
+    archaeology followups doc covers the underlying Rust divergence this
+    module also works around).
+
+    Returns ``None`` -- meaning "leave the axis domain exactly as it would
+    already resolve, do not touch it" -- in two cases: ``stats is None``
+    (nothing to pad around), or neither ``jitter_active`` nor
+    ``dodge_active`` (no position adjustment will run for this kind/call,
+    so the data's own extent is already the correct domain). Callers must
+    ALSO skip attaching this domain when the caller already supplied their
+    own explicit scale/domain for the category channel -- an explicit
+    caller domain must still govern (checked at each call site, not here,
+    since it depends on which of catplot's several encoding doors the
+    caller used).
+    """
+    if stats is None:
+        return None
+    half_extent = 0.0
+    if dodge_active and stats.median_spacing is not None:
+        half_extent = stats.median_spacing / 2
+    if jitter_active:
+        jitter_width = _native_scale_jitter_width(stats, base_width=jitter_base_width)
+        half_extent = max(half_extent, jitter_width / 2)
+    if half_extent <= 0.0:
+        return None
+    pad = half_extent * 1.05
+    return (stats.data_min - pad, stats.data_max + pad)
+
+
 def _catplot_summary_layers(
     *,
     kind: str,
     cat_field: str,
+    cat_type: str | None,
+    cat_domain: tuple[float, float] | None,
     val_field: str,
     hue_field: str | None,
     order: Any,
@@ -796,8 +1019,27 @@ def _catplot_summary_layers(
     # `order=`/`hue_order=` act through the layers' own channels, not the
     # chart-level encoding: a layered chart resolves its axis and color scales
     # from the layer encodings, so a sort left only at the chart level is
-    # inert here (the same reason `desugar_errorbar` threads `x_sort`).
-    x_channel = _X(cat_field, sort=list(order)) if order is not None else cat_field
+    # inert here (the same reason `desugar_errorbar` threads `x_sort`). The
+    # SAME is true of the category channel's type_: point/bar always rebuild
+    # `x_channel` from the bare `cat_field` name (never the caller's raw x=/y=
+    # object, if one was passed), so `cat_type` -- resolved once in
+    # `_catplot_build` via `_catplot_cat_type` -- must be applied here too,
+    # not left to whatever the chart-level encoding inferred.
+    x_kwargs: dict = {"type_": cat_type}
+    if order is not None:
+        x_kwargs["sort"] = list(order)
+    # `cat_domain` (cycle-2 fix, quality finding 1): the Jitter/Dodge
+    # domain-clipping padding `_catplot_build` computed, attached here for
+    # the SAME reason `cat_type` is -- the chart-level `enc["x"]` this
+    # padding might also carry is inert for these two kinds. Skipped when
+    # the caller already put an explicit scale on the chart-level x channel
+    # (`x=fm.X(..., scale=...)` or `encode={"x": ...}`, both already folded
+    # into `chart_encoding` by `_catplot_build`): a caller's own domain must
+    # still govern, the same rule `_reject_domainless_value_scale` applies
+    # to the value channel.
+    if cat_domain is not None and _explicit_positional_scale(chart_encoding.get("x")) is None:
+        x_kwargs["scale"] = LinearScale(domain=list(cat_domain))
+    x_channel = _X(cat_field, **x_kwargs)
     color_sort = list(hue_order) if hue_order is not None else None
     layer_position = position if position is not None else Identity()
 
@@ -965,10 +1207,58 @@ def catplot(
         For ``kind="strip"``, add ``Jitter`` on the categorical axis.
         Ignored when ``dodge=True``.
     native_scale : bool, default False
-        When ``True``, treat the categorical axis as quantitative instead
-        of ordinal (preserves numeric spacing rather than equal-spacing
-        categories).  Currently raises ``ValueError`` because the renderer
-        does not support quantitative categorical axes.
+        Explicitly types the categorical axis for every ``kind`` (F-L09-03).
+        ``False`` (the default) types it ``"nominal"``: values render as
+        equal-spaced categorical bands, even when the category column is
+        numeric.  **Behavior change:** before this parameter was implemented,
+        the category channel was never explicitly typed and a numeric
+        column silently inferred a quantitative (linear) axis, contradicting
+        this documented default; ``native_scale=False`` now forces the
+        nominal reading seaborn's ``catplot`` gives by default.  ``True``
+        types it ``"quantitative"``: the category column's numeric values
+        place marks at their real numeric positions (preserving spacing)
+        instead of equal-spaced bands, and ``Jitter``'s width for
+        ``kind="strip"`` is rescaled from a band-fraction to a data-unit
+        offset proportional to the column's own median unique-value
+        spacing.  Requires the category column to actually be numeric --
+        raises on a non-numeric column (see Raises below) -- **unless an
+        explicit** ``type_=`` **is set on the channel** (``x=fm.X("cat",
+        type_=...)``), **which takes precedence**: a caller's own stated
+        type bypasses ``native_scale``'s resolution entirely, including
+        this numeric-dtype check, so it never raises here regardless of
+        the column's dtype or ``native_scale``'s value.
+
+        **Axis padding when a position adjustment is active.** A
+        quantitative axis's domain is otherwise just the data's own extent,
+        with no room for ``Jitter``/``Dodge`` to move a mark into -- so
+        when ``kind="strip"`` jitters (the default, ``jitter=True``) or any
+        kind dodges (``dodge=True`` with ``hue=`` set), the category
+        channel's domain is padded by half that position adjustment's own
+        maximum offset (plus a 5% safety margin) so no mark renders outside
+        it and gets silently dropped.  This padding is skipped -- your own
+        domain always governs -- when you set an explicit ``scale=`` on the
+        category channel yourself, e.g. ``x=fm.X("year", scale=fm.LinearScale(domain=[...]))``
+        or ``encode={"x": fm.X("year", scale=...)}``: in that case a
+        mark whose adjusted position falls outside YOUR domain clips
+        exactly as it would on any other explicit domain, and that is your
+        choice to make, not this parameter's to override.
+
+        **The** ``encode={"x": ...}`` **door bypasses this padding
+        entirely, even with no** ``scale=`` **of your own.** ``encode=``
+        is a raw ``Chart.encode(**encode)`` override applied after this
+        builder's own normalization, so ``encode={"x": fm.X("year")}``
+        (no ``scale=``) replaces the padded, typed channel this parameter
+        built wholesale -- silently losing BOTH the padding (marks can
+        drop again, with no domain of your own to blame it on) and, under
+        ``native_scale=False``, the force-nominal typing itself (a numeric
+        column reverts to native positions). This is not specific to
+        ``native_scale``: the identical ``encode=`` override already
+        erases this builder's other normalizations the same way (e.g. the
+        ``hue=`` nominal-color typing), since ``encode=`` is documented as
+        exactly that -- an override door, not a channel this builder
+        reads back from. Prefer ``x=fm.X(...)`` (or a bare ``x="year"``)
+        over ``encode={"x": ...}`` when you want ``native_scale`` and its
+        padding to keep working.
     ci : int or float, default 95
         Bootstrap confidence-interval width, as a percent in the open
         interval ``(0, 100)``, for the estimating kinds ``"point"`` and
@@ -1018,7 +1308,13 @@ def catplot(
         If ``kind="count"`` is used without specifying ``x`` (or ``y`` when
         ``orient="h"``).
     ValueError
-        If ``native_scale=True`` is passed (not yet supported by the renderer).
+        If ``native_scale=True`` is passed and the category column (``x``,
+        or ``y`` when ``orient="h"``) is not numeric -- unless ``x``/``y``
+        is an already-built channel object stating its own explicit
+        ``type_=`` (``x=fm.X("cat", type_=...)``); that statement takes
+        precedence over ``native_scale`` and is honored verbatim, so this
+        numeric-dtype check never runs for it and this never raises for
+        that call, regardless of the column's actual dtype.
     ValueError
         If ``kind`` is ``"point"`` or ``"bar"`` and ``ci`` is outside the open
         interval ``(0, 100)``, ``n_boot`` is below 1, or either the category
@@ -1037,17 +1333,16 @@ def catplot(
 
     >>> fm.catplot(df, x="day", y="tip", kind="point", ci=90, n_boot=500)
 
+    Numeric category column at its true numeric positions instead of
+    equal-spaced bands:
+
+    >>> fm.catplot(df, x="year", y="value", kind="strip", native_scale=True)
+
     Horizontal violin plot:
 
     >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
     validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
-
-    if native_scale:
-        raise ValueError(
-            "catplot: native_scale=True is not supported; the renderer does not "
-            "support quantitative categorical axes"
-        )
 
     ci_level = _catplot_ci_level(ci, n_boot) if kind in _CATPLOT_AGGREGATING_KINDS else None
 
@@ -1064,6 +1359,7 @@ def catplot(
         orient=orient,
         dodge=dodge,
         jitter=jitter,
+        native_scale=native_scale,
         ci_level=ci_level,
         n_boot=n_boot,
         seed=seed,
@@ -1092,6 +1388,7 @@ def _catplot_build(
     orient: Any,
     dodge: bool,
     jitter: bool,
+    native_scale: bool,
     ci_level: float | None,
     n_boot: int,
     seed: int | None,
@@ -1106,11 +1403,13 @@ def _catplot_build(
 ) -> Chart:
     """Construct the catplot chart from validated inputs.
 
-    The public ``catplot`` validates ``kind``, rejects unsupported
-    ``native_scale``, and converts ``ci`` from a percent to the ``ci_level``
-    in ``(0, 1)`` this builder passes to ``Summary``; ``ci_level`` is ``None``
-    for the six kinds that draw no interval. This builder owns the
-    axis-orientation handling, mark dispatch, coord-flip, faceting, and sizing.
+    The public ``catplot`` validates ``kind`` and converts ``ci`` from a
+    percent to the ``ci_level`` in ``(0, 1)`` this builder passes to
+    ``Summary``; ``ci_level`` is ``None`` for the six kinds that draw no
+    interval. This builder owns the axis-orientation handling, mark
+    dispatch, coord-flip, faceting, and sizing -- and, for ``native_scale``,
+    resolving the category channel's explicit type (see
+    ``_catplot_cat_type``) once for every kind.
     """
     # Determine the categorical and value axes. By default x is categorical,
     # y is value; orient="h" flips to y categorical / x value (and we add
@@ -1119,10 +1418,70 @@ def _catplot_build(
     cat_field = x if not horizontal else y
     val_field = y if not horizontal else x
 
+    # Resolved ONCE, shared by the chart-level enc normalisation below and by
+    # `_catplot_summary_layers`'s own x_channel for point/bar -- so a
+    # non-numeric column under native_scale=True refuses exactly once
+    # regardless of which of the 8 kinds asked, and every kind types the
+    # SAME field the SAME way. `cat_explicit_type`/`cat_kwargs` cover the
+    # documented `x : str or encoding` shape uniformly (cycle-2 fix, quality
+    # finding 3 / spec issue 1): a bare-string `cat_field` carries neither,
+    # an already-built channel object (`x=fm.X("year")`) carries whatever
+    # `type_=`/`sort=`/`scale=`/... the caller stated.
+    cat_name, cat_explicit_type, cat_kwargs = _catplot_cat_field_parts(cat_field)
+    cat_type = _catplot_cat_type(
+        data, cat_name, native_scale=native_scale, explicit_type=cat_explicit_type
+    )
+    # True exactly when `cat_type` came FROM `native_scale`, not from the
+    # caller's own explicit `type_=` statement -- gates every native-scale
+    # safety mitigation below (the Float64 cast, the jitter-width rescale,
+    # the domain padding) so an explicitly-typed channel's own statement is
+    # honored verbatim, untouched by any of them, the same as its `type_`
+    # already is.
+    native_typed = native_scale and cat_explicit_type is None and cat_type == "Q"
+
+    stats: "_NativeScaleStats | None" = None
+    if native_typed:
+        # `native_scale=True` types the category channel "quantitative", but
+        # Rust's position-adjustment pipeline uses TWO different signals for
+        # "is this axis a categorical band or a continuous one", and they
+        # disagree for a non-Float64 numeric column: `apply_jitter`
+        # (`render/position.rs`) reads the RESOLVED SCALE KIND, so it
+        # correctly takes the continuous branch for an Int64 column typed
+        # quantitative here -- then crashes writing a Float64 noise array
+        # back into a still-Int64-schemaed column. `apply_dodge` instead
+        # reads the RAW COLUMN DTYPE (`is_ordinal_band = dtype != Float64`),
+        # so the SAME Int64 column takes the ORDINAL branch and silently
+        # no-ops instead of dodging. Casting the category column to Float64
+        # whenever it is typed quantitative makes both signals agree --
+        # which is also simply the correct representation for a column the
+        # chart is declaring continuous. DELETE CONDITION: when
+        # `apply_dodge`'s `is_ordinal_band` reads the resolved scale kind
+        # instead of the raw dtype (matching Jitter's own check), this cast
+        # becomes redundant and can be dropped.
+        import polars as pl
+
+        data = to_polars(data).with_columns(pl.col(cat_name).cast(pl.Float64))
+        stats = _native_scale_stats(data, cat_name)
+
     # Position adjustment.
     position = None
     if dodge and hue is not None:
         position = Dodge(by=hue)
+
+    # Domain padding against the silent Jitter/Dodge mark-drop (cycle-2 fix,
+    # quality finding 1): `jitter_active` mirrors the exact condition the
+    # `kind == "strip"` dispatch below uses for a plain (non-dodged)
+    # `Jitter`; `dodge_active` covers every kind whose mark call below passes
+    # `position=position` (strip-with-dodge, swarm, box, violin, boxen,
+    # point, bar, count). `None` when no position adjustment will run for
+    # this call, or when `stats` has nothing to pad around -- see
+    # `_native_scale_padded_domain`'s own docstring for the full mechanism
+    # and the Rust-side root cause (`NS-1`, code archaeology followups doc).
+    jitter_active = native_typed and kind == "strip" and jitter and position is None
+    dodge_active = native_typed and position is not None
+    cat_domain = _native_scale_padded_domain(
+        stats, jitter_active=jitter_active, dodge_active=dodge_active
+    )
 
     # Encoding shared across all kinds.
     from ferrum.encoding import Color as _Color
@@ -1156,10 +1515,39 @@ def _catplot_build(
     if hue is not None:
         enc["color"] = nominal_color_channel(hue)
 
-    # Wire order → sort on the categorical axis encoding.
-    # After the swap above, cat is always on x, so cat_channel is always "x".
-    if order is not None and cat_field is not None:
-        enc["x"] = _X(cat_field, sort=list(order))
+    # The category channel is ALWAYS explicitly typed here -- the one
+    # normalisation site shared by every kind (F-L09-03) AND both input
+    # shapes (cycle-2 fix, quality finding 3 / spec issue 1): native_scale
+    # =False (default) types "N" even for a numeric category column, a
+    # disclosed behavior change (see catplot's docstring); native_scale=True
+    # types "Q" (refused earlier, in `_catplot_cat_type`, when the column
+    # isn't numeric). Rebuilt from `cat_kwargs` -- a COPY of whatever the
+    # caller already put on their own channel object (`scale=`, `axis=`,
+    # `title=`, an existing `sort=`, ...), or `{}` for a bare-string
+    # `cat_field` -- so nothing the caller stated is dropped. `type_` is
+    # added only when the caller stated none of their own
+    # (`cat_explicit_type is None`): an explicit `type_=` on the caller's
+    # own channel is honored verbatim, mirroring `nominal_color_channel`'s
+    # pass-through rule for an explicit `hue=`. `order=` always sets `sort=`
+    # on the rebuilt channel -- overriding any `sort=` the channel already
+    # carried, the same as it already does for a bare-string `cat_field` --
+    # rather than the pre-fix `TypeError` a channel-object `cat_field` used
+    # to raise when combined with `order=` (a loud failure that must not
+    # silently become "order dropped"; rebuilding here restores it working,
+    # a strictly better outcome than restoring the raise).
+    if cat_name is not None:
+        x_kwargs = dict(cat_kwargs)
+        if cat_explicit_type is None:
+            x_kwargs["type_"] = cat_type
+        if order is not None:
+            x_kwargs["sort"] = list(order)
+        # `cat_domain` (Jitter/Dodge clipping padding, quality finding 1):
+        # skipped when the caller already put ANY explicit scale on their
+        # own channel object -- an explicit caller scale/domain must still
+        # govern, never silently widened out from under it.
+        if cat_domain is not None and "scale" not in x_kwargs:
+            x_kwargs["scale"] = LinearScale(domain=list(cat_domain))
+        enc["x"] = _X(cat_name, **x_kwargs)
 
     # Wire hue_order → sort on the color encoding. Typed Nominal for the same
     # reason as above, and a fortiori: an explicit hue_order= is a statement
@@ -1178,9 +1566,17 @@ def _catplot_build(
             chart = chart.mark_point(position=position)
         elif jitter:
             # After the enc normalisation above, cat is always on x, so jitter
-            # always acts on the x axis (the categorical band axis).
+            # always acts on the x axis. On a native (quantitative) scale
+            # that axis is linear, not a band, so the ordinal 0.4
+            # band-fraction default is the wrong magnitude -- rescale it by
+            # the category column's own median unique-value spacing (see
+            # `_native_scale_jitter_width`). `jitter_active` (resolved above,
+            # alongside `cat_domain`) is exactly this branch's own condition
+            # (`kind == "strip"`, `jitter`, `position is None`) ANDed with
+            # `native_typed`.
+            jitter_width = _native_scale_jitter_width(stats) if jitter_active else 0.4
             chart = chart.mark_point(
-                position=Jitter(axis="x", width=0.4, seed=seed),
+                position=Jitter(axis="x", width=jitter_width, seed=seed),
             )
         else:
             chart = chart.mark_point(position=Identity())
@@ -1208,7 +1604,8 @@ def _catplot_build(
         # One estimate per (category, hue) group, not one mark per row: a
         # named `Summary` computes mean + bootstrap CI in Rust and the two
         # emitted layers read it through `data_source=` (F-L09-02/03).
-        cat_name = _field_name(cat_field)
+        # `cat_name`/`cat_type` were already resolved above, shared with the
+        # chart-level enc normalisation.
         val_name = _field_name(val_field)
         if cat_name is None or val_name is None:
             raise ValueError(
@@ -1231,6 +1628,8 @@ def _catplot_build(
         summary, summary_layers = _catplot_summary_layers(
             kind=kind,
             cat_field=cat_name,
+            cat_type=cat_type,
+            cat_domain=cat_domain,
             val_field=val_name,
             hue_field=_field_name(hue),
             order=order,
