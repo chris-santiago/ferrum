@@ -37,6 +37,7 @@ from ferrum.plots._helpers import _field_name, _finalize_chart
 
 _DISPLOT_VALID_KINDS = {"hist", "kde", "ecdf", "rug"}
 _DISPLOT_VALID_MULTIPLE = {"layer", "stack", "fill", "dodge"}
+_DISPLOT_VALID_STAT = {"count", "density"}
 
 _CATPLOT_VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}
 _RELPLOT_VALID_KINDS = {"scatter", "line"}
@@ -79,6 +80,108 @@ def _multiple_to_position(multiple: str, hue: Any):
     if multiple == "fill":
         return Stack(by=hue, offset="normalize")
     raise ValueError(f"unknown multiple {multiple!r}")
+
+
+def _histogram_bin_count(bins: Any) -> int | None:
+    """Return the value `mark_histogram`'s `Bin` transform actually receives for `bin_count`.
+
+    An int fixes the count; any other `bins` value (the `"sturges"` default,
+    or any other rule string such as `"fd"`) becomes `None`, because 1-D
+    `Bin`'s `bin_count` parameter is `Optional[int]` only -- it has no
+    string-rule vocabulary, and `None` always falls back to `Bin`'s own
+    Sturges default.
+    """
+    return bins if isinstance(bins, int) else None
+
+
+def _histogram_count_scale(bins: Any) -> int | str:
+    """Return the `Kde(count_scale=...)` value that bit-matches what `Bin` actually used.
+
+    `Bin` cannot honor a non-int `bins` rule (see `_histogram_bin_count`), so
+    matching the *real* bars means requesting `"sturges"` here too rather
+    than the raw `bins` string -- passing e.g. `"fd"` through would compute
+    the overlay's bin width from a rule the bars themselves never applied.
+    """
+    bin_count = _histogram_bin_count(bins)
+    return bin_count if bin_count is not None else "sturges"
+
+
+def _kde_overlay(
+    x_field: str,
+    *,
+    hue: Any,
+    kind: str,
+    stat: str,
+    multiple: str,
+    bins: Any,
+    bandwidth: Any,
+    bw_adjust: float,
+    cumulative: bool,
+):
+    """Build the named `Kde` transform and `_Layer` for displot's `kde=True` overlay.
+
+    Returns `(transform, layer)`: the caller prepends the transform (so it
+    reads the original, pre-`Bin` data batch) and appends the layer.
+
+    `groupby=hue` gives one curve per hue level instead of one curve pooled
+    across all rows; `shared_extent=False` mirrors what the real histogram's
+    `Bin` transform actually receives on this call path (`_displot_build`
+    never forwards `multiple=` into `mark_histogram`, so `Bin` always runs
+    ungrouped-extent regardless of displot's `multiple=`) -- this must track
+    that value, not re-derive `multiple in ("stack", "fill")`, or a grouped
+    count-scaled bin width diverges from the bars' own
+    (`test_wire_shared_extent_matches_the_real_bin_transform` guards this).
+    `count_scale` is requested only when the histogram's own value axis is
+    actually a count axis: `kind == "hist"` (not ecdf's cumulative-count
+    line, not rug, which has no bar axis at all), `stat == "count"` (density
+    is already normalized), and `multiple != "fill"` (fill normalizes bars
+    to a `[0, 1]` proportion via `Stack(offset="normalize")` regardless of
+    `stat`, and a count-scaled overlay sharing that axis would stretch it).
+
+    `position=Identity()` is set explicitly: a density curve is never
+    meaningfully stacked, dodged, or normalized, and leaving `position`
+    unset lets the layer inherit the chart-level position adjustment --
+    under `multiple="fill"` specifically, once `groupby=hue` put the hue
+    column into this layer's own batch, `Stack(offset="normalize")` found a
+    match and flattened the curve to a constant against the panel edge.
+    """
+    from ferrum import Kde as _KdeTransform
+
+    kde_kwargs: dict = dict(
+        bandwidth=bandwidth,
+        bw_adjust=bw_adjust,
+        cumulative=cumulative,
+        shared_extent=False,
+        name="kde_overlay",
+    )
+    if hue is not None:
+        kde_kwargs["groupby"] = hue
+    # count_scale may only be requested when the histogram's own value axis
+    # is actually a count axis -- a future axis-changing mode must extend
+    # this predicate's reading, not add a fourth ad hoc clause here.
+    histogram_value_axis_is_count = kind == "hist" and stat == "count" and multiple != "fill"
+    if histogram_value_axis_is_count:
+        kde_kwargs["count_scale"] = _histogram_count_scale(bins)
+    transform = _KdeTransform(x_field, **kde_kwargs)
+
+    # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
+    # Rust-side rename of either Kde output column raises here instead of
+    # silently drawing an empty overlay line.
+    _kde_cols = registry_output_columns("kde", ["value", "density"])
+    encoding: dict = {"x": _kde_cols["value"], "y": _kde_cols["density"]}
+    if hue is not None:
+        encoding["color"] = nominal_color_channel(hue)
+
+    from ferrum._layer import _Layer as _OverlayLayer
+
+    layer = _OverlayLayer(
+        name="kde",
+        mark="line",
+        encoding=encoding,
+        data_source="kde_overlay",
+        position=Identity(),
+    )
+    return transform, layer
 
 
 def _apply_facet_sizing(
@@ -184,16 +287,23 @@ def displot(
         Fill the area under the KDE curve (``kind="kde"`` only).
     cumulative : bool, default False
         Produce a cumulative histogram or density (``kind="hist"`` and
-        ``kind="kde"``).
+        ``kind="kde"``).  Also drives the ``kde=True`` overlay curve (below),
+        so a cumulative histogram's overlay is a matching CDF, not a PDF.
     log_scale : bool, default False
         Apply a ``log`` scale to the ``x`` axis.
     stat : {"count", "density"}, default "count"
         Statistic to plot on the value axis for ``kind="hist"``.
         ``"density"`` normalises so the total area integrates to 1.
+        Validated for every ``kind`` (not just ``"hist"``): an unsupported
+        value raises regardless of ``kind``.
     bins : int or str, default "sturges"
         Binning rule for ``kind="hist"``.  An integer is forwarded as
-        ``bin_count``; a string (``"sturges"``, ``"fd"``, etc.) lets the
-        Rust engine decide the count automatically.
+        ``bin_count``.  A string is accepted but, today, only changes
+        behavior for the exact value ``"sturges"`` (the default): any other
+        string (e.g. ``"fd"``) is silently treated the same as ``"sturges"``,
+        since the underlying ``Bin`` transform has no string-rule vocabulary
+        and always falls back to Sturges' rule when no integer count is
+        given.
     bandwidth : str, default "scott"
         Bandwidth selector for ``kind="kde"`` (``"scott"`` or ``"silverman"``).
     bw_adjust : float, default 1.0
@@ -204,8 +314,17 @@ def displot(
         side by side; ``"stack"`` and ``"fill"`` use ``Stack`` with
         ``offset="zero"`` or ``offset="normalize"`` respectively.
     kde : bool, default False
-        When ``True`` and ``kind != "kde"``, layer a ``mark_density`` on
-        top of the primary mark.
+        When ``True`` and ``kind != "kde"``, layer a KDE curve (a
+        ``mark="line"`` layer) on top of the primary mark, grouped and
+        colored by ``hue`` the same way the primary mark is.  Under
+        ``kind="hist", stat="count"``, the curve is rescaled onto the
+        count axis (``density x n_group x bin_width`` using the histogram's
+        own bin width) so it is visible against the bars instead of a flat
+        sliver -- except when ``kind != "hist"`` (an ``"ecdf"``/``"rug"``
+        primary mark has no matching count axis) or ``multiple="fill"``
+        (the bars are normalised to a ``[0, 1]`` proportion, which a
+        count-scaled curve would not match).  Under any other ``stat``/
+        ``kind``/``multiple`` combination the curve is an unscaled density.
     rug : bool, default False
         When ``True`` and ``kind != "rug"``, layer a ``mark_tick`` rug
         on top of the primary mark.
@@ -237,7 +356,7 @@ def displot(
     Raises
     ------
     ValueError
-        If ``kind`` or ``multiple`` is not one of the supported values.
+        If ``kind``, ``multiple``, or ``stat`` is not one of the supported values.
     ValueError
         If ``kind="ecdf"`` is used without specifying ``x=``.
 
@@ -256,6 +375,7 @@ def displot(
     """
     validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
     validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
+    validate_choice("displot", "stat", stat, _DISPLOT_VALID_STAT)
 
     return _displot_build(
         data,
@@ -344,13 +464,12 @@ def _displot_build(
 
     # Mark + transforms by kind.
     if kind == "hist":
-        bin_count = bins if isinstance(bins, int) else None
         # When `multiple` requires per-group binning (stack/fill/dodge) and a
         # hue is bound, thread `groupby=hue` so the Bin transform emits per-
         # (bin, group) rows preserving the hue column for color encoding +
         # position adjustment.
         hist_kwargs: dict = dict(
-            bin_count=bin_count,
+            bin_count=_histogram_bin_count(bins),
             cumulative=cumulative,
             density=(stat == "density"),
             position=position,
@@ -368,6 +487,7 @@ def _displot_build(
             bandwidth=bandwidth,
             bw_adjust=bw_adjust,
             fill=fill,
+            cumulative=cumulative,
             position=position,
         )
         if hue is not None:
@@ -380,10 +500,11 @@ def _displot_build(
         from ferrum.encoding import X as _X_ecdf
         from ferrum.encoding.base import ChannelBase as _CB_ecdf
 
-        bin_count = bins if isinstance(bins, int) else None
         # Extract the original field name for the axis title.
         _ecdf_x_name = x.field if isinstance(x, _CB_ecdf) else str(x)
-        chart = chart.transform(Bin(field=_ecdf_x_name, bin_count=bin_count, cumulative=True))
+        chart = chart.transform(
+            Bin(field=_ecdf_x_name, bin_count=_histogram_bin_count(bins), cumulative=True)
+        )
         chart = chart.mark_line()
         # Re-route encoding to bin output columns, preserving the original
         # variable name as the x-axis title.
@@ -434,27 +555,21 @@ def _displot_build(
             chart._mark = None
 
         if kde and kind != "kde" and x_field is not None:
-            from ferrum import Kde as _KdeTransform
-            import polars as pl
-
-            kde_xform = _KdeTransform(
-                x_field, bandwidth=bandwidth, bw_adjust=bw_adjust, name="kde_overlay"
+            kde_transform, kde_layer = _kde_overlay(
+                x_field,
+                hue=hue,
+                kind=kind,
+                stat=stat,
+                multiple=multiple,
+                bins=bins,
+                bandwidth=bandwidth,
+                bw_adjust=bw_adjust,
+                cumulative=cumulative,
             )
             # Prepend the named Kde before the unnamed Bin so it reads from
             # the original (pre-Bin) data batch.
-            chart._transforms = [kde_xform] + list(chart._transforms or [])
-            # Derived from the registry (spec §4.6 / M6a) rather than
-            # hardcoded, so a Rust-side rename of either Kde output column
-            # raises here instead of silently drawing an empty overlay line.
-            _kde_cols = registry_output_columns("kde", ["value", "density"])
-            chart._layers.append(
-                _OverlayLayer(
-                    name="kde",
-                    mark="line",
-                    encoding={"x": _kde_cols["value"], "y": _kde_cols["density"]},
-                    data_source="kde_overlay",
-                )
-            )
+            chart._transforms = [kde_transform] + list(chart._transforms or [])
+            chart._layers.append(kde_layer)
 
         if rug and kind != "rug" and x_field is not None:
             from ferrum.marks._desugar_helpers import identity_transform
@@ -469,6 +584,11 @@ def _displot_build(
                     mark="tick",
                     encoding={"x": x_field},
                     data_source="rug_data",
+                    # Explicit Identity(), not inherited chart-level position:
+                    # a rug tick mark is never meaningfully stacked, dodged,
+                    # or normalized either (same class of bug as the kde
+                    # overlay above -- see `_kde_overlay`'s docstring).
+                    position=Identity(),
                 )
             )
 
