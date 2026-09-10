@@ -581,7 +581,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             secondary_outputs: vec![],
             params: vec![
                 "x", "y", "n_grid", "ci", "huber_c", "max_iter", "tol", "output",
-                "inject_zero_ref", "inject_metrics", "name", "x_range",
+                "inject_zero_ref", "inject_metrics", "groupby", "name", "x_range",
             ],
         },
         "identity" => TransformRegistryEntry {

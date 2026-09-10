@@ -31,8 +31,12 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::group_key::{
+    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+};
 use crate::transform::logistic::inv_normal_cdf;
-use crate::transform::numeric_util::coerce_xy_pairs;
+use crate::transform::numeric_util::coerce_xy_pairs_at;
 use crate::transform::residuals;
 use crate::transform::smooth::SmoothOutput;
 
@@ -56,6 +60,18 @@ pub(crate) struct RobustSpec {
     /// See SmoothSpec.inject_metrics. Schwabish SB-followup (2026-05-12).
     #[serde(default)]
     pub inject_metrics: bool,
+    /// See SmoothSpec.groupby: when non-empty, partition input by these
+    /// columns and refit independently per group, re-emitting the group-key
+    /// columns (with original dtypes, XFORM-03) as additional output fields.
+    /// Batch-F F-L10-04: lets ``residplot(robust=True)`` compose with
+    /// ``color=``/``label=`` grouping the same way ``Smooth`` already does.
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
     /// WI-7 (2026-05-15): when set, evaluate the fit line over this x range
@@ -66,8 +82,28 @@ pub(crate) struct RobustSpec {
 
 // ---------- Main apply ----------
 
+/// Entry point: dispatches to the grouped or ungrouped fit depending on
+/// `spec.groupby`. Mirrors `smooth::apply_with_context`'s dispatch shape,
+/// minus the `TransformContext` threading — Robust has no context-dependent
+/// whole-frame refusal (Smooth's rank-deficient-`degree` case), so it needs
+/// no `is_partition` signal and stays reachable through the plain `apply()`
+/// path (`TransformSpec::apply_with_context`'s default fallback).
 pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let (xs, ys) = coerce_xy_pairs(batch, &spec.x, &spec.y, "Robust")?;
+    if !spec.groupby.is_empty() {
+        return apply_grouped(spec, batch, &spec.groupby);
+    }
+    apply_one_group(spec, batch, None)
+}
+
+/// Fit one group's (or the whole frame's) rows. `only_indices` restricts the
+/// x/y extraction to those row positions when set (a groupby partition);
+/// `None` scans every row, byte-identical to this function's pre-groupby body.
+fn apply_one_group(
+    spec: &RobustSpec,
+    batch: &RecordBatch,
+    only_indices: Option<&[usize]>,
+) -> PyResult<RecordBatch> {
+    let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "Robust", only_indices)?;
 
     let n_grid = spec.n_grid.max(1);
 
@@ -234,6 +270,79 @@ pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBa
     };
 
     build_fitted_batch(grid, y_fit, lo, hi, metrics)
+}
+
+/// Partition input batch by the groupby columns, call `apply_one_group` per
+/// partition, then stack the results into a single batch with the group
+/// columns appended (with their original dtypes, XFORM-03) as additional
+/// fields.
+///
+/// Mirrors `smooth::apply_grouped`'s stacking shape (batch-D T9/T3.8a):
+/// first-appearance group order, null-key skip (`group_partition_multi`),
+/// schema reconciliation via `concat::concat_by_name` (Robust's schema is
+/// spec-determined — the same `output`/`inject_metrics` combination on every
+/// group — so no group can legitimately diverge from its siblings; this is
+/// belt-and-braces the same way it is for Smooth), and dtype-preserving
+/// group-column re-emission via the shared `group_key` helpers.
+///
+/// DUPLICATION-PENDING (rust-coder, batch-F task 2): the per-group loop plus
+/// the stack-and-append-group-columns block below (~30 lines) is structurally
+/// identical to `smooth::apply_grouped`'s (`smooth.rs:394-460`), differing
+/// only in the per-group fit call and the error-context string. `group_key.rs`
+/// is outside this task's declared footprint (robust.rs, registry/mod.rs,
+/// _core.pyi), so it isn't hoisted here; a follow-up should extract a shared
+/// `group_key::stack_grouped_batches(context, per_group_batches, group_cols,
+/// gtypes) -> PyResult<RecordBatch>` helper covering both call sites.
+fn apply_grouped(
+    spec: &RobustSpec,
+    batch: &RecordBatch,
+    group_cols: &[String],
+) -> PyResult<RecordBatch> {
+    let (group_order, group_idx_map, gtypes) = group_partition_multi(batch, group_cols, "Robust")?;
+
+    let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();
+    for g in &group_order {
+        let ixs = group_idx_map.get(g).ok_or_else(|| {
+            PyValueError::new_err(format!("Robust: missing group key {g:?} in index map"))
+        })?;
+        let out = apply_one_group(spec, batch, Some(ixs))?;
+        per_group_batches.push((g.clone(), out));
+    }
+
+    if per_group_batches.is_empty() {
+        // Every group key was null: there is no per-group output to stack.
+        // Fall back to the full batch on `None` indices, mirroring
+        // `smooth::apply_grouped`'s identical fallback.
+        return apply_one_group(spec, batch, None);
+    }
+
+    let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
+    let stacked = crate::transform::concat::concat_by_name(
+        "Robust",
+        per_group_batches.iter().map(|(_, b)| b.clone()).collect(),
+    )
+    .map_err(PyValueError::new_err)?;
+
+    // Append the group columns, preserving their ORIGINAL dtypes (XFORM-03).
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(total_rows);
+    for (g, b) in &per_group_batches {
+        for _ in 0..b.num_rows() {
+            group_keys_out.push(g.clone());
+        }
+    }
+    let mut out_fields: Vec<Field> =
+        stacked.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut out_cols: Vec<ArrayRef> = stacked.columns().to_vec();
+    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
+        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
+        let group_col_arr =
+            materialize_groupby_col(&group_keys_out, gi, dtype).map_err(PyValueError::new_err)?;
+        out_cols.push(group_col_arr);
+    }
+
+    let out_schema = Arc::new(Schema::new(out_fields));
+    RecordBatch::try_new(out_schema, out_cols)
+        .map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
 }
 
 // ---------- Helpers ----------
@@ -433,6 +542,10 @@ use crate::transform::core::TransformSpec;
 /// output : {"fitted", "residuals"}, default "fitted"
 ///     When ``"residuals"``, the ``y`` column contains ``y_obs - y_fitted``
 ///     instead of the fitted values.
+/// groupby : str | list[str], optional
+///     When set, partition the input by these column(s) and refit
+///     independently per group, appending the group-key column(s) (at
+///     their original dtype) to the output. Mirrors ``Smooth(groupby=)``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -457,6 +570,7 @@ impl PyRobust {
         output = "fitted",
         inject_zero_ref = false,
         inject_metrics = false,
+        groupby = None,
         name = None,
         x_range = None,
     ))]
@@ -471,6 +585,7 @@ impl PyRobust {
         output: &str,
         inject_zero_ref: bool,
         inject_metrics: bool,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
         x_range: Option<[f64; 2]>,
     ) -> PyResult<Self> {
@@ -513,6 +628,7 @@ impl PyRobust {
         // Smooth's policy (post-C5 audit-rework, 2026-05-12). On Fitted the
         // metrics annotation lands on the fit-grid output via
         // ``residuals::append_metrics_columns`` after the IRLS converges.
+        let groupby = parse_groupby_pyany(groupby)?;
         Ok(PyRobust(TransformSpec::Robust(RobustSpec {
             x: x.to_string(),
             y: y.to_string(),
@@ -524,6 +640,7 @@ impl PyRobust {
             output: output_parsed,
             inject_zero_ref,
             inject_metrics,
+            groupby,
             name,
             x_range,
         })))
@@ -532,9 +649,9 @@ impl PyRobust {
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Robust(s) => format!(
-                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, name={:?})",
+                "Robust(x='{}', y='{}', n_grid={}, ci={:?}, huber_c={}, max_iter={}, tol={}, output={:?}, inject_zero_ref={}, inject_metrics={}, groupby={:?}, name={:?})",
                 s.x, s.y, s.n_grid, s.ci, s.huber_c, s.max_iter, s.tol, s.output,
-                s.inject_zero_ref, s.inject_metrics, s.name,
+                s.inject_zero_ref, s.inject_metrics, s.groupby, s.name,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -545,7 +662,7 @@ impl PyRobust {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Float64Array, RecordBatch};
+    use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -557,6 +674,21 @@ mod tests {
         RecordBatch::try_new(schema, vec![
             Arc::new(Float64Array::from(x)),
             Arc::new(Float64Array::from(y)),
+        ]).unwrap()
+    }
+
+    /// `xy_batch` plus a Utf8 groupby column `g`, for the grouped-fit tests
+    /// below. Mirrors `smooth.rs`'s own groupby test fixtures.
+    fn xy_batch_with_group(x: Vec<f64>, y: Vec<f64>, g: Vec<&str>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(x)),
+            Arc::new(Float64Array::from(y)),
+            Arc::new(StringArray::from(g)),
         ]).unwrap()
     }
 
@@ -574,7 +706,8 @@ mod tests {
             output,
             inject_zero_ref: false,
             inject_metrics: false,
-        x_range: None,
+            groupby: vec![],
+            x_range: None,
             name: None,
         }
     }
@@ -588,6 +721,7 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: vec![],
             name: None,
             x_range: None,
         };
@@ -603,6 +737,7 @@ mod tests {
             output: SmoothOutput::Residuals,
             inject_zero_ref: false,
             inject_metrics: false,
+            groupby: vec![],
             name: Some("r1".into()),
             x_range: None,
         };
@@ -754,7 +889,6 @@ mod tests {
         // Schwabish C5: inject_metrics=true on Fitted output should
         // append _metrics_text + _metrics_y columns with exactly one
         // non-null row, mirroring Smooth's behavior.
-        use arrow::array::StringArray;
         let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let ys: Vec<f64> = xs.iter().map(|&x| 0.5 * x + 1.0).collect();
         let batch = xy_batch(xs, ys);
@@ -765,7 +899,8 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: true,
-        x_range: None,
+            groupby: vec![],
+            x_range: None,
             name: None,
         };
         let out = apply(&s, &batch).unwrap();
@@ -820,7 +955,8 @@ mod tests {
             output: SmoothOutput::Fitted,
             inject_zero_ref: false,
             inject_metrics: false,
-        x_range: None,
+            groupby: vec![],
+            x_range: None,
             name: None,
         };
         let out = apply(&s, &batch).unwrap();
@@ -863,5 +999,166 @@ mod tests {
         let s = spec(50, None, 1.345, SmoothOutput::Fitted);
         let out = apply(&s, &batch).unwrap();
         assert_eq!(out.num_rows(), 50);
+    }
+
+    // ── Batch-F F-L10-04: Robust groupby ─────────────────────────────────
+
+    #[test]
+    fn test_robust_grouped_refit_differs_per_group() {
+        // Group "a": slope 2; group "b": slope -3. A grouped fit must
+        // recover each group's own line independently rather than pooling
+        // across groups, and the output schema gains the "g" column.
+        let n_per_group = 20;
+        let xs_a: Vec<f64> = (0..n_per_group).map(|i| i as f64).collect();
+        let ys_a: Vec<f64> = xs_a.iter().map(|&x| 2.0 * x + 1.0).collect();
+        let xs_b: Vec<f64> = (0..n_per_group).map(|i| i as f64).collect();
+        let ys_b: Vec<f64> = xs_b.iter().map(|&x| -3.0 * x + 5.0).collect();
+
+        let mut xs = xs_a;
+        xs.extend(xs_b);
+        let mut ys = ys_a;
+        ys.extend(ys_b);
+        let groups: Vec<&str> = std::iter::repeat("a")
+            .take(n_per_group)
+            .chain(std::iter::repeat("b").take(n_per_group))
+            .collect();
+
+        let batch = xy_batch_with_group(xs, ys, groups);
+        let mut s = spec(10, None, 1.345, SmoothOutput::Fitted);
+        s.groupby = vec!["g".into()];
+        let out = apply(&s, &batch).unwrap();
+
+        let schema = out.schema();
+        assert_eq!(schema.fields().len(), 5, "core 4 columns + 1 groupby column");
+        assert_eq!(schema.field(4).name(), "g");
+        assert_eq!(out.num_rows(), 20, "10 grid points × 2 groups");
+
+        let g_col = out.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+        let x_col = col(&out, "x");
+        let y_col = col(&out, "y");
+        for i in 0..out.num_rows() {
+            let (x, y) = (x_col[i], y_col[i]);
+            match g_col.value(i) {
+                "a" => assert!((y - (2.0 * x + 1.0)).abs() < 1e-6,
+                    "group a fit should match y=2x+1 at x={x}; got y={y}"),
+                "b" => assert!((y - (-3.0 * x + 5.0)).abs() < 1e-6,
+                    "group b fit should match y=-3x+5 at x={x}; got y={y}"),
+                other => panic!("unexpected group key {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_robust_grouped_key_dtype_preserved() {
+        // Int64 groupby column must round-trip as Int64 in the output
+        // (XFORM-03), not get widened to a string — mirrors Smooth's
+        // groupby dtype-preservation contract.
+        use arrow::array::Int64Array;
+        let n_per_group = 15;
+        let xs: Vec<f64> = (0..2 * n_per_group).map(|i| (i % n_per_group) as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| if i < n_per_group { 2.0 * x } else { -1.0 * x + 10.0 })
+            .collect();
+        let groups: Vec<i64> = (0..2 * n_per_group)
+            .map(|i| if i < n_per_group { 1_i64 } else { 2_i64 })
+            .collect();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Int64Array::from(groups)),
+        ]).unwrap();
+
+        let mut s = spec(5, None, 1.345, SmoothOutput::Fitted);
+        s.groupby = vec!["g".into()];
+        let out = apply(&s, &batch).unwrap();
+
+        let out_schema = out.schema();
+        assert_eq!(out_schema.field(4).name(), "g");
+        assert_eq!(out_schema.field(4).data_type(), &DataType::Int64,
+            "groupby column dtype must be preserved as Int64, not widened to a string");
+
+        let g_col = out.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        let distinct: std::collections::BTreeSet<i64> =
+            (0..g_col.len()).map(|i| g_col.value(i)).collect();
+        assert_eq!(distinct, [1_i64, 2].into_iter().collect());
+    }
+
+    #[test]
+    fn test_robust_grouped_residuals_output() {
+        // The grouped path must work for output="residuals" too (cross-task
+        // note: BOTH output modes), mirroring Smooth's grouped-residuals
+        // contract.
+        let n_per_group = 10;
+        let xs_a: Vec<f64> = (0..n_per_group).map(|i| i as f64).collect();
+        let ys_a: Vec<f64> = xs_a.iter().map(|&x| 2.0 * x + 1.0).collect();
+        let xs_b: Vec<f64> = (0..n_per_group).map(|i| i as f64).collect();
+        let ys_b: Vec<f64> = xs_b.iter().map(|&x| -1.0 * x).collect();
+
+        let mut xs = xs_a;
+        xs.extend(xs_b);
+        let mut ys = ys_a;
+        ys.extend(ys_b);
+        let groups: Vec<&str> = std::iter::repeat("a")
+            .take(n_per_group)
+            .chain(std::iter::repeat("b").take(n_per_group))
+            .collect();
+
+        let batch = xy_batch_with_group(xs, ys, groups);
+        let mut s = spec(10, None, 1.345, SmoothOutput::Residuals);
+        s.groupby = vec!["g".into()];
+        let out = apply(&s, &batch).unwrap();
+
+        let schema = out.schema();
+        assert_eq!(schema.fields().len(), 3, "residuals [x, residual] + 1 groupby column");
+        assert_eq!(schema.field(0).name(), "x");
+        assert_eq!(schema.field(1).name(), "residual");
+        assert_eq!(schema.field(2).name(), "g");
+        assert_eq!(out.num_rows(), 2 * n_per_group);
+
+        // Clean per-group linear data → residuals ~0 for both groups.
+        let r = col(&out, "residual");
+        for &v in &r {
+            assert!(v.abs() < 1e-6, "residual on clean linear per-group data should be ~0; got {v}");
+        }
+    }
+
+    #[test]
+    fn test_robust_empty_groupby_byte_identical_to_ungrouped() {
+        // A groupby-shaped column can be present in the input batch without
+        // being requested (`spec.groupby == []`): the fit must ignore it
+        // entirely, producing the exact same canonical
+        // `[x, y, ci_lower, ci_upper]` schema and fitted values as if the
+        // column didn't exist — pins the "empty groupby is byte-identical to
+        // today" contract (batch-F task 2 intent).
+        // Alternating +/-0.5 noise (as in `test_robust_ci_brackets_fit`) keeps
+        // the MAD residual scale > 0, so `ci_lower`/`ci_upper` are finite
+        // rather than the degenerate exact-fit NaN band — a perfectly linear
+        // fixture would make this assertion vacuously true via NaN != NaN.
+        let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| 2.0 * x + 1.0 + if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let plain_batch = xy_batch(xs.clone(), ys.clone());
+        let groups: Vec<&str> = (0..20).map(|i| if i % 2 == 0 { "a" } else { "b" }).collect();
+        let batch_with_unused_col = xy_batch_with_group(xs, ys, groups);
+
+        let s = spec(20, Some(0.95), 1.345, SmoothOutput::Fitted); // groupby: vec![]
+        let out_plain = apply(&s, &plain_batch).unwrap();
+        let out_with_unused_col = apply(&s, &batch_with_unused_col).unwrap();
+
+        assert_eq!(
+            out_plain.schema(), out_with_unused_col.schema(),
+            "an unrequested groupby column in the input batch must not change the output schema"
+        );
+        assert_eq!(col(&out_plain, "x"), col(&out_with_unused_col, "x"));
+        assert_eq!(col(&out_plain, "y"), col(&out_with_unused_col, "y"));
+        assert_eq!(col(&out_plain, "ci_lower"), col(&out_with_unused_col, "ci_lower"));
+        assert_eq!(col(&out_plain, "ci_upper"), col(&out_with_unused_col, "ci_upper"));
     }
 }

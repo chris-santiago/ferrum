@@ -586,6 +586,7 @@ fn robust_outputs_match_shared_fit_schema() {
         output: SmoothOutput::Fitted,
         inject_zero_ref: false,
         inject_metrics: false,
+        groupby: vec![],
         name: None,
         x_range: None,
     };
@@ -916,7 +917,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         ("robust", Robust(RobustSpec {
             x: "x".into(), y: "y".into(), n_grid: 10, ci: None, huber_c: 1.345, max_iter: 25,
             tol: 1e-8, output: SmoothOutput::Fitted, inject_zero_ref: false, inject_metrics: false,
-            name: None, x_range: None,
+            groupby: vec![], name: None, x_range: None,
         })),
         ("identity", Identity(IdentitySpec { name: None })),
         ("filter", Filter(FilterSpec { predicate: "x > 0".into(), name: None, param: None })),

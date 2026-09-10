@@ -744,6 +744,7 @@ class Robust:
         output: str = "fitted",
         inject_zero_ref: bool = False,
         inject_metrics: bool = False,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
     ) -> None: ...
