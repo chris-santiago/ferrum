@@ -1126,6 +1126,23 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > `output: "fitted" | "residuals"`; `Robust` accepts the same `output`
 > parameter for residual diagnostics.
 >
+> **2026-09-10 (batch F, F-L10-04):** `Robust` gains `groupby` (a column
+> name or list, serde-default empty, wire-compatible), mirroring
+> `Smooth`'s existing grouped-fit pipeline: a per-group Huber IRLS refit,
+> with `x_range`/`inject_zero_ref`/`inject_metrics` all honored per group,
+> and the group-key columns re-emitted at their original dtypes. Ungrouped
+> output (the default) is byte-identical. This is what lets `residplot`'s
+> `robust=True` compose with `color=` (grouped refits) and `label=`
+> (previously a silent no-op, since `Robust` had nothing to carry the
+> injected `_label` column into its output -- see `residplot`'s dated note
+> in §3.14). The grouped-stack-plus-group-key-append block is shared with
+> `Smooth` via one helper (`group_key.rs::stack_grouped_batches`); a
+> `groupby` column colliding with a transform's own output column name, or
+> repeated within `groupby` itself, now refuses with a typed error naming
+> the real output columns -- previously a duplicate-named Arrow field was
+> silently mis-resolved by `Schema::index_of`, corrupting output instead
+> of refusing (applies to both `Smooth` and `Robust`).
+>
 > **GLM Family / Link Compatibility (Phase 9)**
 >
 > | Family | Canonical link | Other valid |
@@ -1761,6 +1778,28 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 > symbol exists in the codebase anymore — and the totality behavior
 > described above replaced it.
 
+> **2026-09-10 (batch F, F-L10-01 rider):** a layered chart (any compound
+> view lowering to `spec.layers` -- `LayerChart`, catplot's `"point"`/
+> `"bar"` kinds, and every composite-mark desugar) now refuses, rather
+> than silently drops, a layer at index >= 1 whose POSITIONAL encoding
+> (`x`/`y`/`x2`/`y2`) names a column absent from that layer's own resolved
+> batch: `RenderError::LayerUnknownColumn` names the layer index, the
+> channel, and the column. Previously only layer 0's encoding was
+> validated before scale resolution; every subsequent layer's per-mark
+> builder swallowed the missing column via `.ok()` and rendered nothing
+> for that layer, with no error and no visible signal beyond an
+> inexplicably absent series. Explicitly unaffected, by design: an
+> INHERITED color channel absent from a layer's batch still renders
+> (structural, owned by #106 -- see the chrome-dedup note above); a
+> legitimately empty (zero-row) layer still skips rather than raising; a
+> `data_source=` layer is checked against its OWN resolved batch, not
+> layer 0's. The gate surfaced two pre-existing, now-fixed bugs it made
+> visible for the first time: the discrimination-threshold desugar was
+> rendering its optimum-label/threshold-line layers even when the
+> f1-gated sentinel columns were never injected, and a secondary-y smooth
+> test asserted a fit polyline against a column name the transform never
+> actually emitted.
+
 #### `JointChart`
 
 Compound view with a center plot and optional marginal distribution plots sharing the center's x-axis (top) and y-axis (right). The marginals are independent `Chart` objects, typically `mark_histogram` or `mark_density`.
@@ -2123,6 +2162,39 @@ ferrum.displot(data, *, x=None, y=None, hue=None, col=None, row=None,
                kde=False, rug=False, height=None, aspect=None, theme=None)
 ```
 
+> **2026-09-10 (batch F, F-L09-01 + F-L09-10):** `kind="kde"`'s
+> `cumulative=` reaches the `Kde` transform end to end (grouped fits
+> included) -- previously `_displot_build` silently dropped it for the
+> primary KDE mark, so `cumulative=True` rendered byte-identically to
+> `cumulative=False`. It now produces a real CDF. The `kde=True` overlay on
+> `kind="hist"` inherits the same `cumulative` value, so a cumulative
+> histogram never carries a mismatched (non-cumulative) PDF overlay.
+>
+> The `kind="hist", kde=True` overlay is also count-scaled and per-hue,
+> closing two adjacent bugs. Under `kind="hist", stat="count"`,
+> `multiple != "fill"` (the only combination where the histogram's y-axis
+> is actually in counts -- `multiple="fill"` normalizes bars to `[0, 1]`,
+> which a count-scaled curve would not match), the overlay's `Kde`
+> transform gains an opt-in `count_scale` (`n_group x bin_width` for the
+> density, `n_group` for the cumulative CDF) computed from the same
+> bin-width routine `Bin` uses on the histogram's own bins, so the curve is
+> visible against the bars instead of a flat ~2%-height sliver (measured
+> curve/bar height ratio 0.02 before, matching the bars after). The overlay
+> also now threads `groupby=hue` with a matching color channel --
+> previously a `hue=` histogram drew ONE pooled KDE curve in the theme's
+> flat default color over the per-hue bars, silently ignoring the
+> grouping. `stat=` is validated against its documented `{"count",
+> "density"}` vocabulary for every `kind=`, not just `"hist"`; an
+> unsupported value (e.g. the undocumented `"probability"`) now raises
+> instead of silently degrading to a count-mode render. `stat="density"`
+> overlays and `kind="ecdf"` are byte-identical (scaling is opt-in and
+> applies only to the count-axis case above). The overlay also carries an
+> explicit `Identity()` position so it can never inherit a `Stack`/
+> normalize adjustment from `multiple=` -- fixing a pre-existing crash
+> where `rug=True` combined with `hue=` and `multiple="stack"`/`"fill"`
+> raised `"Stack: value (y) encoding required"` (the rug tick layer gets
+> the same `Identity()` fix, so rug ticks are never dodged/stacked either).
+
 #### Categorical
 
 ```
@@ -2136,6 +2208,22 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
                theme=None)
 ```
 
+> **2026-09-10 (batch F, F-L09-04):** `hue_order=` is honored for
+> `kind="box"` and `kind="violin"` -- previously silently ignored (byte-
+> identical output regardless of the argument). catplot already built
+> `Color(hue, sort=hue_order)` correctly; the drop point was
+> `_ResolveContext._color_field()` flattening the channel to a bare string
+> before the box/violin desugars ever saw the sort. The color sort now
+> rides the same threading pipeline `x_sort`/`y_sort` already use: a
+> `sort=` on a bare `Color(...)` channel -- catplot's `hue_order=`, or a
+> caller's own `mark_boxplot()`/`mark_violin()`/`mark_errorbar()`/
+> `mark_errorband()` plus `Color(sort=...)` -- now reaches the desugared
+> layers' color encoding and the legend order. `kind="boxen"` and
+> `kind="swarm"` keep their pre-existing, documented exclusion from this
+> mechanism (their own `hue_order=` already worked through chart-level
+> color, unaffected by this fix). `sort=None` (or omitted) is
+> byte-identical.
+>
 > **2026-09-10 (batch F, F-L09-02/03):** `kind="point"` and `kind="bar"` are
 > ESTIMATING kinds. Each draws one mean per (category × `hue`) group from a
 > `Summary` transform, with a bootstrap CI whisker: the whisker paints under
@@ -2179,7 +2267,14 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
 > now travels with the mark as `mark_style.zero` when a chart is composed into
 > a layer, so it survives on the merged single-panel path
 > (`resolve={"y": "independent"}`, `SecondaryY`, and every `.interactive()`
-> `LayerChart`), where the chart-level injection never ran.
+> `LayerChart`), where the chart-level injection never ran. On
+> `catplot(kind="bar")` itself -- whose bar layer is built directly as a
+> `_Layer`, not composed from a standalone `mark_bar()` chart -- the identical
+> opt-out is reachable through the ordinary per-layer `mark=` override:
+> `catplot(kind="bar", mark={"bar": {"zero": False}})` merges `zero: False`
+> into that layer's `mark_kwargs` (`_apply_mark_overrides`), which
+> `_build_layers_list` serializes wholesale as the layer's wire `mark_style` --
+> no special-case wiring needed, live and honored.
 
 > **2026-09-10 (batch F, F-L09-03):** the categorical channel is now ALWAYS
 > explicitly typed, for every one of the 8 `kind=` values, instead of never
@@ -2247,14 +2342,56 @@ ferrum.lmplot(data, *, x, y, hue=None, col=None, row=None,
 ferrum.regplot(data, *, x, y, hue=None,
                method="lm",          # same as lmplot
                ci=95, order=None, scatter=True, scatter_kws=None, line_kws=None,   # order=None = the method's own default degree; an explicit order forwards into the method's degree-acceptance matrix (2026-09-05, batch D; previously order=1 and silently absorbed)
-               truncate=True, x_jitter=None, theme=None)
+               truncate=True, x_bins=None, x_estimator=None, x_jitter=None,
+               logx=False, show_metrics=True, theme=None)
+# 2026-09-10 (batch F, F-L10-09): logx, show_metrics, x_bins, x_estimator are
+# now real named parameters (identical defaults to lmplot's), corrected above
+# to the live signature -- previously reachable only through **encode_kwargs,
+# invisible to introspection. col=/row= raise TypeError naming lmplot as the
+# faceting route (previously silently faceted) -- see the prose note below.
 
 ferrum.residplot(data, *, x, y, lowess=False, order=1, robust=False,
-                 dropna=True, label=None, color=None, theme=None)
+                 dropna=True, show_metrics=True, zero_line=True,
+                 label=None, color=None, theme=None)
+# 2026-09-10 (batch F): the block above adds show_metrics= and zero_line=,
+# which the signature has always accepted but this doc omitted.
 ```
 
 `regplot` is the axes-level equivalent of `lmplot` — identical API minus
-`col=` and `row=` (no faceting). All parameters are forwarded to `lmplot`.
+`col=` and `row=`: passing either now raises `TypeError` naming `lmplot` as
+the faceting route (2026-09-10, batch F, F-L10-09 -- previously they
+silently faceted through `**encode_kwargs`). This exclusion is specific to
+`col=`/`row=`; it does not extend to the grammar-level `facet=` encoding
+channel, which `regplot` accepts the same as any other `Chart`. Every other
+parameter is forwarded to `lmplot` unchanged.
+
+> **2026-09-10 (batch F, F-L10-04):** `residplot`'s `color=` works, both
+> documented halves. A value that names a column of `data` groups the
+> residuals -- `Smooth`/`Robust` refit per group (via the transform's
+> `groupby`, the same mechanism `label=` already used) and the points/
+> lowess overlay color by that column; previously EVERY `color=` value
+> raised `ValueError: unknown column`, whether it named a column or not.
+> A value that is not a column is parsed as a literal color (CSS name,
+> hex, `rgb()`/`rgba()`, or an RGB tuple) and painted onto the points via
+> the mark's own `fill=` -- never through `encode(color=)` -- composing
+> with `label=` (a labeled legend swatch in that literal color, via a
+> pinned single-range `OrdinalScale`). A value that is neither raises,
+> naming both interpretations. Column-membership against the INPUT frame
+> is checked first, so a column literally named `"red"` groups rather than
+> paints, and a column name that collides with a transform OUTPUT column
+> (e.g. `"x"`) still resolves deterministically by input-frame membership.
+> `Robust` gained `groupby` in Rust to make this possible (see the
+> `Robust` dated note in §3.4) -- as a side effect, `robust=True,
+> label=...` now shows the label (previously a silent no-op, since
+> `Robust` had no `groupby` to carry the injected `_label` column into its
+> output). `lowess=True` with a grouping `color=` draws one curve per
+> group instead of one curve through the pooled cloud. `show_metrics=True`'s
+> corner annotation is suppressed only when `color=` actually groups
+> (mirrors `lmplot`'s `hue`-gated `metrics_applied`); a `label=`-only
+> grouping (one level by construction) keeps its corner. A user column
+> literally named `_label` plus `label=` now refuses with a typed
+> collision error instead of the label silently overwriting it.
+> `color=None` is byte-identical to before.
 
 #### Matrix / Pairwise
 
@@ -2293,6 +2430,31 @@ ferrum.clustermap(data, *, method="ward", metric="euclidean",
 > `linecolor=` are honored (default `linewidths=0.5`, `linecolor="white"`)
 > — every heatmap now ships default white 0.5px cell borders;
 > `linewidths=0` disables the border.
+
+> **2026-09-10 (batch F, F-L09-08):** `clustermap`'s dendrogram panels no
+> longer silently blank at practical ratios. The row/column dendrogram
+> leaves reserved axis chrome -- a title gutter and (row side) a label
+> band -- for axes their own `axis(show=False)` never draws;
+> `_clustermap_build` now blanks the dendrogram leaves' `_X`/`_Y` titles
+> the same way the center heatmap already blanks its own
+> (`matrix.py:1157-1160`). At `dendrogram_ratio=0.1`, both dendrograms now
+> render instead of collapsing to an empty panel; at the default
+> `dendrogram_ratio=0.2`, a short center heatmap (e.g.
+> `figsize=(480, 200)`) no longer silently blanks the column dendrogram.
+> Sub-floor ratios still raise `PaddingExceedsViewport` as before -- the
+> fix removes dead chrome, it does not relax the hard floor. **All
+> clustermap output changes geometry** as a result (more of each
+> dendrogram panel is now real branch area rather than reserved-but-unused
+> chrome); the `clustermap_basic` and `clustermap_row_col_dendrograms`
+> goldens were regenerated and PNG-inspected. The same fix closed two
+> adjacent layered-chart wire bugs found alongside it (general, not
+> clustermap-specific): `SpecBuildMixin._build_layers_list` was dropping a
+> layer's `title=""` via a truthiness check instead of a presence check
+> (so `title=None` on a layered channel now also reaches the wire and
+> suppresses the axis title, where `title=""` already did), `format=` on
+> any layered channel no longer raises an unknown-field error
+> (`format_type` is what Rust actually calls the key), and a layer's
+> `condition=` now reaches the wire instead of silently vanishing.
 
 #### Joint Distribution
 
