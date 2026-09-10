@@ -143,7 +143,7 @@ def test_coerce_X_y_zero_row_dataframe():
     """Zero-row DataFrame should coerce without error."""
     X = pl.DataFrame({"a": pl.Series([], dtype=pl.Float64), "b": pl.Series([], dtype=pl.Float64)})
     y = pl.Series("y", [], dtype=pl.Float64)
-    X_out, y_out = _coerce_X_y(X, y)
+    X_out, y_out, _ = _coerce_X_y(X, y)
     assert X_out.height == 0
     assert y_out.len() == 0
 
@@ -297,7 +297,7 @@ def test_coerce_y_dataframe_single_column():
     """A y DataFrame with exactly 1 column should work fine."""
     X = pl.DataFrame({"a": [1.0, 2.0]})
     y = pl.DataFrame({"target": [1.0, 2.0]})
-    _, y_ser = _coerce_X_y(X, y)
+    _, y_ser, _ = _coerce_X_y(X, y)
     assert isinstance(y_ser, pl.Series)
     assert y_ser.len() == 2
 

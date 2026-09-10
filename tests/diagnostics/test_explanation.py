@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import polars as pl
 import pytest
@@ -91,6 +93,33 @@ def test_importances_caches_per_method(rf_source):
     # Different std columns prove the two calls produced independent frames.
     assert float(a["std"].sum()) == 0.0
     assert float(b["std"].sum()) > 0.0
+
+
+def test_importances_builtin_ties_use_stable_sort():
+    """RED regression: `np.argsort`'s default "quicksort" kind is not
+    stable and reorders equal-|importance| features nondeterministically
+    once the tie group is large enough (observed divergence at this exact
+    22-feature shape -- verified against `np.argsort(..., kind="quicksort")`
+    before this fix). `ModelSource.importances()` must return tied
+    features in their original column order.
+
+    Layout: index 10 is a unique max (0.9); indices [0..9] and [11..19]
+    tie at 0.5; indices [20, 21] tie at 0.3. Stable order keeps each tie
+    group in ascending original-index order.
+    """
+
+    class _TiedModel:
+        feature_importances_ = np.array([0.5] * 10 + [0.9] + [0.5] * 9 + [0.3] * 2)
+
+    feature_names = [f"f{i}" for i in range(len(_TiedModel.feature_importances_))]
+    X = pl.DataFrame({name: [0.0, 1.0] for name in feature_names})
+    src = ferrum.ModelSource(_TiedModel(), X, pl.Series("y", [0.0, 1.0]))
+    imp = src.importances(method="builtin")
+
+    expected_order = (
+        ["f10"] + [f"f{i}" for i in list(range(10)) + list(range(11, 20))] + ["f20", "f21"]
+    )
+    assert imp["feature"].to_list() == expected_order
 
 
 # --- importance_chart figure function -----------------------------------
@@ -858,6 +887,410 @@ def test_pdp_chart_kind_invalid_raises():
             features=["f0"],
             kind="not_a_kind",
         )
+
+
+# ---------------------------------------------------------------------------
+# G9 (F-L12-08): pdp/importances(permutation) named-frame rebuild for
+# sklearn's feature-name warnings.
+# ---------------------------------------------------------------------------
+
+
+def _named_frame_ridge():
+    """A Ridge model fit directly on a named polars frame -- sklearn's
+    `feature_names_in_` picks up column names from any object exposing
+    `.columns` at fit time (pandas *and* polars), so this is a realistic
+    "model fit on named columns" case without needing a pandas fixture.
+    Deliberately a *brute*-method estimator (no `feature_importances_`/
+    `coef_`-recursion support in sklearn's PDP), which is exactly the
+    shape that emits 100 warnings per `grid_resolution=100` call today.
+    """
+    from sklearn.linear_model import Ridge
+
+    rng = np.random.RandomState(0)
+    X_np = rng.randn(60, 3)
+    y_np = X_np @ np.array([1.0, -1.0, 0.5]) + rng.randn(60) * 0.1
+    X = pl.DataFrame({"f0": X_np[:, 0], "f1": X_np[:, 1], "f2": X_np[:, 2]})
+    y = pl.Series("y", y_np)
+    model = Ridge().fit(X, y_np)
+    assert hasattr(model, "feature_names_in_"), "fixture must exercise the named-fit path"
+    return model, X, y
+
+
+def test_partial_dependence_named_frame_model_emits_zero_warnings():
+    """RED proof: pre-fix, `partial_dependence` on a model fit with named
+    columns raised one `UserWarning` per grid point (100 for the default
+    `grid_resolution=100`) because it handed sklearn a bare numpy array.
+    """
+    model, X, y = _named_frame_ridge()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        src.partial_dependence(["f0"], grid_resolution=100)
+    feature_name_warnings = [w for w in caught if "feature names" in str(w.message)]
+    assert feature_name_warnings == []
+
+
+def test_partial_dependence_named_frame_matches_numpy_path_to_machine_precision(monkeypatch):
+    """Numeric parity, same model both ways: force `_sklearn_X` to take the
+    numpy-fallback branch for one call and the named-frame branch for the
+    other, on the SAME fitted model and SAME X -- not a separately-fit twin
+    (a twin's coefficients could differ at a scale `assert_allclose`'s
+    default `rtol=1e-7` wouldn't catch). The two conversions must agree to
+    within a couple ULPs of float64 (empirically ~2.22e-16, one epsilon)."""
+    import ferrum.diagnostics.sources._importance as _importance_mod
+
+    model, X, y = _named_frame_ridge()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    named = src.partial_dependence(["f0", "f1"], grid_resolution=25)
+
+    monkeypatch.setattr(
+        _importance_mod,
+        "_sklearn_X",
+        lambda model, X, *, x_names_synthetic, diagnostic: X.to_numpy(),
+    )
+    src._cache.clear()
+    numpy_path = src.partial_dependence(["f0", "f1"], grid_resolution=25)
+
+    assert named["feature_value"].to_list() == numpy_path["feature_value"].to_list()
+    diff = np.abs(named["pd_value"].to_numpy() - numpy_path["pd_value"].to_numpy())
+    eps = np.finfo(np.float64).eps
+    assert diff.max() <= 4 * eps, f"named-frame vs numpy-path PD values diverge by {diff.max()}"
+
+
+def test_partial_dependence_recursion_method_model_unaffected():
+    """Probe-verified baseline: a RandomForestRegressor (recursion method,
+    no `feature_names_in_` on this repo's numpy-fit fixture) already emits
+    zero warnings and must stay at zero after the named-frame rebuild."""
+    model, X, y = _rf_xy()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        src.partial_dependence(["f0"], grid_resolution=100)
+    assert caught == []
+
+
+def test_importances_permutation_named_frame_model_emits_zero_warnings():
+    """RED proof: pre-fix, `_importances_permutation` passed the polars
+    frame straight to sklearn, which still raises the feature-name
+    warning at predict time (polars satisfies sklearn's fit-time name
+    capture but not its pandas-specific transform-time check)."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    rng = np.random.RandomState(0)
+    X_np = rng.randn(60, 3)
+    y_np = X_np @ np.array([1.0, -1.0, 0.5]) + rng.randn(60) * 0.1
+    X = pl.DataFrame({"f0": X_np[:, 0], "f1": X_np[:, 1], "f2": X_np[:, 2]})
+    y = pl.Series("y", y_np)
+    model = RandomForestRegressor(n_estimators=10, random_state=0).fit(X, y_np)
+    assert hasattr(model, "feature_names_in_")
+
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        imp = src.importances(method="permutation", n_repeats=3, random_state=0)
+    feature_name_warnings = [w for w in caught if "feature names" in str(w.message)]
+    assert feature_name_warnings == []
+    assert imp.height == 3
+
+
+def _named_frame_model(names, estimator_cls=None, *, n=60):
+    """Fit a model directly on a polars frame with genuinely non-synthetic
+    column names (not ferrum's `f0, f1, ...` ndarray-coercion schema), so
+    `_sklearn_X`'s "real caller-supplied names" branch is the one under
+    test -- the `f0, f1, f2` fixtures elsewhere in this file coincide with
+    the synthetic schema and can't distinguish the two branches."""
+    from sklearn.linear_model import Ridge
+
+    estimator_cls = estimator_cls or Ridge
+    rng = np.random.RandomState(0)
+    X_np = rng.randn(n, len(names))
+    coef = np.linspace(1.0, -1.0, len(names))
+    y_np = X_np @ coef + rng.randn(n) * 0.1
+    X = pl.DataFrame({name: X_np[:, i] for i, name in enumerate(names)})
+    y = pl.Series("y", y_np)
+    model = estimator_cls().fit(X, y_np)
+    assert hasattr(model, "feature_names_in_")
+    return model, X, y
+
+
+def test_sklearn_X_branches_direct():
+    """Unit-level pin of every `_sklearn_X` branch, driven by the
+    ``x_names_synthetic`` PROVENANCE FLAG (captured once at coercion time
+    in `sources/_base.py`'s `_coerce_X_y`) rather than by guessing from
+    X's column-name strings. Cases 3/4 below deliberately use column
+    names that look like the OPPOSITE of what the flag says (synthetic
+    ``"0"/"1"`` stamped because the flag says so; real ``"f0"/"f1"``
+    passed through honestly because the flag says so) -- proving the
+    branch decision is the flag, not a name-pattern coincidence. See the
+    two `pd.DataFrame(array)` / `pl.DataFrame(array)` tests below for the
+    end-to-end regression/misfire this closes at the public API."""
+    from ferrum.diagnostics.sources._importance import _sklearn_X
+
+    X = pl.DataFrame({"f0": [1.0, 2.0], "f1": [3.0, 4.0]})
+
+    # 1. No feature_names_in_ -> bare numpy array, regardless of the flag.
+    class _NoNames:
+        pass
+
+    result = _sklearn_X(_NoNames(), X, x_names_synthetic=False, diagnostic="partial_dependence")
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, X.to_numpy())
+
+    # 2. Width mismatch -> typed ferrum ValueError, checked before any
+    # pandas frame is built (no raw pandas "Shape of passed values" leak),
+    # regardless of the flag.
+    class _ThreeNames:
+        feature_names_in_ = np.array(["f0", "f1", "f2"])
+
+    with pytest.raises(ValueError, match=r"ModelSource\.partial_dependence\(\).*2 column.*3 name"):
+        _sklearn_X(_ThreeNames(), X, x_names_synthetic=True, diagnostic="partial_dependence")
+    with pytest.raises(ValueError, match=r"ModelSource\.importances\(\).*2 column.*3 name"):
+        _sklearn_X(_ThreeNames(), X, x_names_synthetic=False, diagnostic="importances")
+
+    # 3. x_names_synthetic=True -> stamp the fitted names, even on columns
+    # that don't look like ferrum's own f0/f1 schema (here, pandas'
+    # RangeIndex-derived "0"/"1" strings, as `pd.DataFrame(array)` would
+    # coerce to) -- the decision is the flag, not a name-pattern guess.
+    class _RenamedFit:
+        feature_names_in_ = np.array(["alpha", "beta"])
+
+    import pandas as pd
+
+    X_positional = pl.DataFrame({"0": [1.0, 2.0], "1": [3.0, 4.0]})
+    stamped = _sklearn_X(
+        _RenamedFit(), X_positional, x_names_synthetic=True, diagnostic="partial_dependence"
+    )
+    assert isinstance(stamped, pd.DataFrame)
+    assert list(stamped.columns) == ["alpha", "beta"]
+    np.testing.assert_array_equal(stamped.to_numpy(), X_positional.to_numpy())
+
+    # 4. x_names_synthetic=False -> honest passthrough of X's OWN names,
+    # even when they happen to look synthetic (f0/f1) -- this is the
+    # opposite misfire a name-pattern heuristic made (a real frame
+    # literally named f0/f1 silently stamped with the wrong names); the
+    # flag closes it because a real f0/f1 frame reports False, not True.
+    class _MatchingFit:
+        feature_names_in_ = np.array(["f0", "f1"])
+
+    honest = _sklearn_X(_MatchingFit(), X, x_names_synthetic=False, diagnostic="partial_dependence")
+    assert isinstance(honest, pd.DataFrame)
+    assert list(honest.columns) == ["f0", "f1"]
+    np.testing.assert_array_equal(honest.to_numpy(), X.to_numpy())
+
+    # 5. x_names_synthetic=False + reordered real columns -> honest
+    # passthrough of X's OWN (out-of-order) names; the raise happens
+    # downstream in sklearn, not inside `_sklearn_X` itself.
+    class _AlphaBetaFit:
+        feature_names_in_ = np.array(["alpha", "beta"])
+
+    X_real = pl.DataFrame({"alpha": [1.0, 2.0], "beta": [3.0, 4.0]})
+    X_reordered = X_real.select(["beta", "alpha"])
+    passthrough = _sklearn_X(
+        _AlphaBetaFit(), X_reordered, x_names_synthetic=False, diagnostic="partial_dependence"
+    )
+    assert isinstance(passthrough, pd.DataFrame)
+    assert list(passthrough.columns) == ["beta", "alpha"]
+    np.testing.assert_array_equal(passthrough.to_numpy(), X_reordered.to_numpy())
+
+
+def test_partial_dependence_reordered_real_columns_raises_sklearns_own_message():
+    """RED proof (pre-fix: 0 warnings, silently wrong `pd_value`s -- worse
+    than the original bug). Real, non-synthetic column names
+    (alpha/beta/gamma) reordered relative to the fit order must surface
+    sklearn's own precise name/order `ValueError`, not a silently
+    mislabeled positional result."""
+    model, X, y = _named_frame_model(["alpha", "beta", "gamma"])
+    X_reordered = X.select(["gamma", "beta", "alpha"])
+    src = ferrum.ModelSource(model, X_reordered, y, random_state=0)
+    with pytest.raises(ValueError, match="feature names should match"):
+        src.partial_dependence(["alpha"], grid_resolution=10)
+
+
+def test_importances_permutation_reordered_real_columns_raises_sklearns_own_message():
+    """Same sibling-exception-drift pin as above, for the other
+    sklearn-inspection call site (`_importances_permutation`)."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    model, X, y = _named_frame_model(
+        ["alpha", "beta", "gamma"], estimator_cls=RandomForestRegressor
+    )
+    X_reordered = X.select(["gamma", "beta", "alpha"])
+    src = ferrum.ModelSource(model, X_reordered, y, random_state=0)
+    with pytest.raises(ValueError, match="feature names should match"):
+        src.importances(method="permutation", n_repeats=2, random_state=0)
+
+
+def test_partial_dependence_column_count_mismatch_raises_typed_ferrum_message():
+    """RED proof: pre-fix, a width mismatch raised pandas' own untyped
+    `Shape of passed values ... indices imply ...` (from the DataFrame
+    rebuild), naming neither the model nor ferrum."""
+    model, X, y = _named_frame_model(["alpha", "beta", "gamma"])
+    X_short = X.select(["alpha", "beta"])
+    src = ferrum.ModelSource(model, X_short, y, random_state=0)
+    with pytest.raises(
+        ValueError,
+        match=r"ModelSource\.partial_dependence\(\) got X with 2 column\(s\).*3 name\(s\)",
+    ):
+        src.partial_dependence(["alpha"], grid_resolution=10)
+
+
+def test_importances_permutation_column_count_mismatch_raises_typed_ferrum_message():
+    """Same sibling-exception-drift pin as above, for `_importances_permutation`."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    model, X, y = _named_frame_model(
+        ["alpha", "beta", "gamma"], estimator_cls=RandomForestRegressor
+    )
+    X_short = X.select(["alpha", "beta"])
+    src = ferrum.ModelSource(model, X_short, y, random_state=0)
+    with pytest.raises(
+        ValueError,
+        match=r"ModelSource\.importances\(\) got X with 2 column\(s\).*3 name\(s\)",
+    ):
+        src.importances(method="permutation", n_repeats=2, random_state=0)
+
+
+def test_partial_dependence_positional_ndarray_X_preserves_warning_free_intent():
+    """The case `_sklearn_X`'s synthetic-columns branch exists for: a model
+    fit on a named frame (real names), but this `ModelSource` built from a
+    bare numpy `X` (so `_coerce_X_y` invents `f0, f1, ...` names). This
+    must stay warning-free (the whole point of the rebuild) AND numerically
+    match calling sklearn directly with the same bare ndarray -- the stamp
+    doesn't perturb values, it only supplies names sklearn accepts."""
+    from sklearn.inspection import partial_dependence as sk_pd
+
+    model, X, y = _named_frame_model(["alpha", "beta", "gamma"])
+    X_np = X.to_numpy()
+    src = ferrum.ModelSource(model, X_np, y, random_state=0)
+    assert src.feature_names == ["f0", "f1", "f2"]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pd_df = src.partial_dependence(["f0"], grid_resolution=15)
+    feature_name_warnings = [w for w in caught if "feature names" in str(w.message)]
+    assert feature_name_warnings == []
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        reference = sk_pd(model, X_np, features=[0], grid_resolution=15, kind="average")
+    np.testing.assert_allclose(pd_df["pd_value"].to_numpy(), np.asarray(reference["average"])[0])
+
+
+def test_sklearn_X_pandas_unavailable_falls_back_to_numpy(monkeypatch):
+    """The pandas-unavailable fallback branch (the one that keeps ferrum
+    installable without pandas) -- block `import pandas` via `sys.meta_path`
+    after dropping any already-cached `pandas` modules, matching this
+    repo's `test_no_sklearn_at_import.py` module-cache-drop idiom."""
+    import sys
+
+    from ferrum.diagnostics.sources._importance import _sklearn_X
+
+    for mod in list(sys.modules):
+        if mod == "pandas" or mod.startswith("pandas."):
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+    class _BlockPandas:
+        def find_spec(self, name, path, target=None):
+            if name == "pandas" or name.startswith("pandas."):
+                raise ImportError("pandas blocked for test")
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [_BlockPandas(), *sys.meta_path])
+
+    class _NamedModel:
+        feature_names_in_ = np.array(["f0", "f1"])
+
+    X = pl.DataFrame({"f0": [1.0, 2.0], "f1": [3.0, 4.0]})
+    result = _sklearn_X(_NamedModel(), X, x_names_synthetic=True, diagnostic="partial_dependence")
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, X.to_numpy())
+
+
+def test_partial_dependence_pandas_dataframe_array_named_fit_computes_correctly():
+    """RED proof against the cycle-2 tree: `pd.DataFrame(array)` -- one of
+    the two most ordinary ways to hand over a nameless feature matrix --
+    gets a default `RangeIndex` column labeling (`0`, `1`, `2`, ...).
+    Cycle-2's name-PATTERN heuristic recognized only ferrum's own
+    `f0, f1, ...` schema as synthetic, so this shape took the
+    honest-passthrough branch and hard-errored on input that computed
+    correctly at HEAD (with a feature-name warning). `_coerce_X_y`'s
+    structural RangeIndex check recognizes this shape regardless of the
+    label strings, restoring HEAD's numeric result with zero warnings."""
+    import pandas as pd
+
+    model, X, y = _named_frame_model(["alpha", "beta", "gamma"])
+    X_nameless = pd.DataFrame(X.to_numpy())  # default RangeIndex columns
+    src = ferrum.ModelSource(model, X_nameless, y, random_state=0)
+    assert src.feature_names == ["0", "1", "2"]
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pd_df = src.partial_dependence(["0"], grid_resolution=15)
+    feature_name_warnings = [w for w in caught if "feature names" in str(w.message)]
+    assert feature_name_warnings == []
+
+    reference = ferrum.ModelSource(model, X, y, random_state=0).partial_dependence(
+        ["alpha"], grid_resolution=15
+    )
+    np.testing.assert_allclose(pd_df["pd_value"].to_numpy(), reference["pd_value"].to_numpy())
+
+
+def test_importances_permutation_pandas_dataframe_array_named_fit_computes_correctly():
+    """Same RangeIndex regression pin as above, for the other
+    sklearn-inspection call site (`_importances_permutation`)."""
+    import pandas as pd
+    from sklearn.ensemble import RandomForestRegressor
+
+    model, X, y = _named_frame_model(
+        ["alpha", "beta", "gamma"], estimator_cls=RandomForestRegressor
+    )
+    X_nameless = pd.DataFrame(X.to_numpy())
+    src = ferrum.ModelSource(model, X_nameless, y, random_state=0)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        imp = src.importances(method="permutation", n_repeats=3, random_state=0)
+    feature_name_warnings = [w for w in caught if "feature names" in str(w.message)]
+    assert feature_name_warnings == []
+
+    reference = ferrum.ModelSource(model, X, y, random_state=0).importances(
+        method="permutation", n_repeats=3, random_state=0
+    )
+    np.testing.assert_allclose(imp["importance"].to_numpy(), reference["importance"].to_numpy())
+
+
+def test_partial_dependence_polars_dataframe_array_named_fit_raises_disclosed_residual():
+    """Disclosed residual (see `_sklearn_X`'s docstring): `pl.DataFrame(array)`
+    -- a bare-array polars frame the CALLER builds with no `schema=` --
+    auto-generates `column_0, column_1, ...` labels with no structural
+    marker anywhere on a `pl.DataFrame` instance distinguishing them from
+    real, user-chosen names. This input is therefore treated as
+    genuinely named and now raises sklearn's own name-mismatch error,
+    where HEAD silently computed a positionally-correct result (with a
+    warning). This is a deliberate, disclosed behavior change -- a loud,
+    actionable error beats a silent guess that happens to be right --
+    not a regression; this pin exists so a future refactor can't quietly
+    reintroduce silent positional trust for this one residual shape.
+    """
+    model, X, y = _named_frame_model(["alpha", "beta", "gamma"])
+    X_nameless = pl.DataFrame(X.to_numpy())  # auto column_0/column_1/column_2
+    assert X_nameless.columns == ["column_0", "column_1", "column_2"]
+    src = ferrum.ModelSource(model, X_nameless, y, random_state=0)
+    with pytest.raises(ValueError, match="feature names should match"):
+        src.partial_dependence(["column_0"], grid_resolution=10)
+
+
+def test_importances_permutation_polars_dataframe_array_named_fit_raises_disclosed_residual():
+    """Same disclosed-residual pin as above, for `_importances_permutation`."""
+    from sklearn.ensemble import RandomForestRegressor
+
+    model, X, y = _named_frame_model(
+        ["alpha", "beta", "gamma"], estimator_cls=RandomForestRegressor
+    )
+    X_nameless = pl.DataFrame(X.to_numpy())
+    src = ferrum.ModelSource(model, X_nameless, y, random_state=0)
+    with pytest.raises(ValueError, match="feature names should match"):
+        src.importances(method="permutation", n_repeats=2, random_state=0)
 
 
 # ---------------------------------------------------------------------------

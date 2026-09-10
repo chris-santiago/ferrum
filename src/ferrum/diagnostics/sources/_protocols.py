@@ -49,6 +49,7 @@ class _SourceState(Protocol):
     _random_state: int | None
     _capabilities: frozenset[str]
     _cache: dict[tuple, pl.DataFrame]
+    _x_names_synthetic: bool
 
     def _x_record_batch(self, diagnostic: str) -> pa.RecordBatch: ...
 

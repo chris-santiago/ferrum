@@ -3,8 +3,8 @@
 Holds every piece of state that the per-domain mixin classes need
 (``_X``, ``_y``, ``_model``, ``_capabilities``, ``_cache``,
 ``_feature_names``, ``_class_names``, ``_sample_weight``,
-``_random_state``) plus the small helpers every mixin reaches for —
-``_require_capability`` (raises ``AttributeError`` when the wrapped
+``_random_state``, ``_x_names_synthetic``) plus the small helpers every
+mixin reaches for — ``_require_capability`` (raises ``AttributeError`` when the wrapped
 estimator is missing a needed protocol method) and ``_cache_key``
 (builds a hashable cache key from method name + kwargs).
 
@@ -40,8 +40,9 @@ _PROTOCOL_ATTRS: tuple[str, ...] = (
 )
 
 
-def _coerce_X_y(X: Any, y: Any) -> tuple["pl.DataFrame | None", "pl.Series | None"]:
-    """Coerce X to polars.DataFrame (or None) and y to polars.Series (or None).
+def _coerce_X_y(X: Any, y: Any) -> tuple["pl.DataFrame | None", "pl.Series | None", bool]:
+    """Coerce X to polars.DataFrame (or None) and y to polars.Series (or None);
+    also report whether X's column names were INVENTED during coercion.
 
     ``X=None`` passes straight through — ``ModelSource`` is constructible
     without a feature matrix; diagnostics that need one read it via
@@ -55,15 +56,47 @@ def _coerce_X_y(X: Any, y: Any) -> tuple["pl.DataFrame | None", "pl.Series | Non
     ...`` chart-data convention), so it stays local; every other input
     shape (``pl.DataFrame`` passthrough, narwhals-compatible frames, dict,
     list[dict]) delegates to the canonical ``to_polars`` coercion.
+
+    Returns
+    -------
+    tuple[pl.DataFrame | None, pl.Series | None, bool]
+        Coerced X, coerced y, and ``x_names_synthetic`` — ``True`` when
+        X's column names were invented by this coercion rather than
+        supplied by the caller: a bare 2D ``numpy.ndarray`` (this
+        function's own ``f0, f1, ...`` naming), or a ``pandas.DataFrame``
+        whose column index is a default ``RangeIndex`` (``pd.DataFrame(array)``
+        with no ``columns=`` given — a *structural* check on the index
+        type, not a guess from the label strings, so it can't be
+        confused with a caller who deliberately named a column ``"f0"``).
+        Every other shape — a pandas DataFrame with a real column index,
+        any ``polars.DataFrame`` (including ``pl.DataFrame(array)``, whose
+        auto-generated ``column_0, column_1, ...`` labels carry no
+        structural marker distinguishing them from user-chosen names —
+        see `sources/_importance.py`'s `_sklearn_X` docstring for the
+        disclosed consequence), dict, list[dict], or other
+        narwhals-compatible frame — reports ``False`` (genuinely named).
+        Consumed by `_sklearn_X` to decide whether it's safe to stamp a
+        model's ``feature_names_in_`` onto X positionally, or whether
+        X's own names must be honored and validated by sklearn.
     """
+    x_names_synthetic = False
     if X is None:
         X_df: "pl.DataFrame | None" = None
     elif isinstance(X, np.ndarray):
         if X.ndim != 2:
             raise ValueError(f"X must be 2D; got shape {X.shape}")
         X_df = pl.from_numpy(X, schema=[f"f{i}" for i in range(X.shape[1])])
+        x_names_synthetic = True
     else:
         from ferrum._coerce import to_polars
+
+        # Structural check on the ORIGINAL object (before to_polars strips
+        # the type information): a pandas DataFrame's default RangeIndex
+        # column labeling means no real names were ever supplied. Duck-typed
+        # by module/class name rather than `isinstance(X, pd.DataFrame)` so
+        # constructing a ModelSource never imports pandas as a side effect.
+        if type(X).__module__.startswith("pandas.") and type(X).__name__ == "DataFrame":
+            x_names_synthetic = type(X.columns).__name__ == "RangeIndex"
 
         X_df = to_polars(X)
         if not isinstance(X_df, pl.DataFrame):
@@ -81,7 +114,7 @@ def _coerce_X_y(X: Any, y: Any) -> tuple["pl.DataFrame | None", "pl.Series | Non
             y_ser = y.to_series()
         else:
             y_ser = pl.Series("y", list(y))
-    return X_df, y_ser
+    return X_df, y_ser, x_names_synthetic
 
 
 class BaseSource:
@@ -106,7 +139,7 @@ class BaseSource:
         random_state: int | None = None,
     ):
         self._model = model
-        self._X, self._y = _coerce_X_y(X, y)
+        self._X, self._y, self._x_names_synthetic = _coerce_X_y(X, y)
         self._feature_names: list[str] = (
             list(feature_names)
             if feature_names is not None
@@ -225,8 +258,7 @@ class BaseSource:
         """
         if self._X is None:
             raise ValueError(
-                f"ModelSource.{diagnostic}() requires the training data: "
-                f"ModelSource(model, X)."
+                f"ModelSource.{diagnostic}() requires the training data: ModelSource(model, X)."
             )
         return self._X
 

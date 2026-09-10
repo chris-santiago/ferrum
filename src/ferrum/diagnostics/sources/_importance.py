@@ -111,7 +111,11 @@ class FeatureImportanceMixin(_MixinBase):
                 f"the full feature matrix via X= or the full name list "
                 f"via feature_names=."
             )
-        order = np.argsort(-np.abs(imp))
+        # kind="stable" so tied |importance| values keep their original
+        # feature order across runs -- the default "quicksort" is not
+        # stable and reorders ties nondeterministically for larger
+        # feature counts (observed divergence at n>=~20 tied values).
+        order = np.argsort(-np.abs(imp), kind="stable")
         rows = [
             {
                 "feature": str(self._feature_names[i]),
@@ -162,7 +166,12 @@ class FeatureImportanceMixin(_MixinBase):
             raise ValueError(
                 "ModelSource.importances(method='permutation') requires y to be provided."
             )
-        X = self._require_X("importances")
+        X = _sklearn_X(
+            self._model,
+            self._require_X("importances"),
+            x_names_synthetic=self._x_names_synthetic,
+            diagnostic="importances",
+        )
         result = permutation_importance(
             self._model,
             X,
@@ -308,9 +317,18 @@ class FeatureImportanceMixin(_MixinBase):
         # here, so they'd otherwise reach the typed message while string
         # ones didn't -- the guard must come first regardless of `features`'
         # shape.
-        # numpy required: sklearn.inspection.partial_dependence uses numpy integer
-        # column indexing internally, which polars does not support.
-        X_np = self._require_X("partial_dependence").to_numpy()
+        # numpy required as the fallback: sklearn.inspection.partial_dependence
+        # uses numpy integer column indexing internally, which polars does not
+        # support. `_sklearn_X` upgrades this to a named pandas frame when the
+        # model carries `feature_names_in_`, so sklearn gets column names
+        # instead of raising a feature-name UserWarning once per grid-point
+        # evaluation.
+        X_sklearn = _sklearn_X(
+            self._model,
+            self._require_X("partial_dependence"),
+            x_names_synthetic=self._x_names_synthetic,
+            diagnostic="partial_dependence",
+        )
         feature_idxs = [self._feature_names.index(f) if isinstance(f, str) else f for f in features]
         rows: list[dict] = []
         for f_idx in feature_idxs:
@@ -319,7 +337,7 @@ class FeatureImportanceMixin(_MixinBase):
                 self._pd_rows_for_feature(
                     f_idx,
                     fname,
-                    X_np,
+                    X_sklearn,
                     grid_resolution=grid_resolution,
                     kind=kind,
                 )
@@ -332,12 +350,19 @@ class FeatureImportanceMixin(_MixinBase):
         self,
         f_idx: int,
         fname: str,
-        X_np: np.ndarray,
+        X_sklearn: Any,
         *,
         grid_resolution: int,
         kind: str,
     ) -> list[dict]:
         """Build partial-dependence rows for a single feature.
+
+        ``X_sklearn`` is whatever `_sklearn_X` produced: a ``pandas.DataFrame``
+        carrying either the model's fitted column names (synthetic-ndarray
+        case) or ``X``'s own real column names (named-frame case), or a
+        plain ``numpy.ndarray`` fallback. All are valid ``X`` inputs to
+        ``sklearn.inspection.partial_dependence``, which integer-indexes
+        ``features=[f_idx]`` positionally either way.
 
         sklearn returns ``individual`` of shape ``(n_outputs, n_samples,
         n_grid)`` when ``kind in ("individual", "both")``; this method
@@ -349,7 +374,7 @@ class FeatureImportanceMixin(_MixinBase):
 
         r = _sk_pd(
             self._model,
-            X_np,
+            X_sklearn,
             features=[f_idx],
             grid_resolution=grid_resolution,
             kind=kind,
@@ -376,6 +401,112 @@ class FeatureImportanceMixin(_MixinBase):
                     for v, p in zip(grid, individual[s])
                 )
         return rows
+
+
+def _sklearn_X(model: Any, X: pl.DataFrame, *, x_names_synthetic: bool, diagnostic: str) -> Any:
+    """Coerce a feature frame for a call into sklearn, avoiding feature-name
+    warnings when the model was fit on named columns -- without silently
+    mislabeling ``X`` or masking a genuine shape mismatch.
+
+    sklearn records the column names an estimator was fit with on
+    ``feature_names_in_``; handing that estimator a positionally-indexed
+    array back at predict/inspect time raises a ``UserWarning`` per
+    evaluation (for ``partial_dependence`` that's one warning per grid
+    point -- 100 for the default ``grid_resolution=100``; polars frames
+    trigger the same warning as plain arrays, since sklearn's transform-time
+    name check is pandas-specific). Three cases, checked in order:
+
+    1. No ``feature_names_in_`` on the model -- return a plain numpy array
+       (today's behavior; there's nothing to reconcile).
+    2. ``feature_names_in_`` present but ``X.width`` disagrees with it --
+       raise a typed :class:`ValueError` naming ``diagnostic`` *before*
+       building any pandas frame. (Without this check, building
+       ``pd.DataFrame(X.to_numpy(), columns=list(names))`` on a width
+       mismatch raises pandas' own ``Shape of passed values ... indices
+       imply ...``, which names neither the model nor ferrum.)
+    3. ``feature_names_in_`` present and widths agree -- branch on
+       ``x_names_synthetic``, a fact *captured at coercion time* by
+       ``sources/_base.py``'s ``_coerce_X_y`` (structural: a bare
+       ``numpy.ndarray`` or a ``pandas.DataFrame`` with a default
+       ``RangeIndex`` column index), not guessed here from name strings.
+       An earlier version of this helper guessed provenance from whether
+       ``X.columns`` matched ferrum's own ``f0, f1, ...`` schema, which
+       misfired in both directions: real columns that happened to be
+       literally named ``f0, f1, f2`` were misread as invented (silently
+       producing a sign-flipped wrong answer with zero warning), and
+       invented columns under any OTHER naming convention -- e.g.
+       ``pd.DataFrame(array)``'s ``'0', '1', '2'`` or
+       ``pl.DataFrame(array)``'s ``column_0, column_1, ...`` -- were
+       misread as real (a hard error on input that used to compute
+       correctly). Provenance is knowable exactly one frame up, so this
+       is a fact lookup, not a guess:
+
+       - ``x_names_synthetic=True`` -- ``X`` carries no real name
+         information to defer to (a bare-array ``X`` never offered any),
+         so stamp the model's fitted names onto ``X`` positionally:
+         positional alignment with the fit order is the only contract
+         those shapes ever offered. This is the case the whole rebuild
+         exists for.
+       - ``x_names_synthetic=False`` -- ``X`` carries real,
+         caller-supplied names, so hand sklearn ``X``'s *own* names
+         (``pd.DataFrame(X.to_numpy(), columns=list(X.columns))``) and let
+         sklearn perform its own name/order validation: a match silences
+         the warning exactly like the stamp branch; a genuine mismatch
+         (renamed or reordered columns) raises sklearn's own precise
+         ``ValueError('The feature names should match those that were
+         passed during fit...')`` instead of silently producing a
+         positionally-wrong (and warning-free) result. NEVER silently
+         falls back to positional trust for a named frame.
+
+    Disclosed residual (documented in `_coerce_X_y`'s docstring too):
+    ``pl.DataFrame(array)`` -- a bare-array polars DataFrame built by the
+    *caller* with no ``schema=`` given -- auto-generates ``column_0,
+    column_1, ...`` labels that carry no structural marker distinguishing
+    them from a user's real, deliberately-chosen names; polars does not
+    expose anywhere on a ``pl.DataFrame`` instance whether its column
+    labels were auto-assigned. That input is therefore treated as
+    genuinely named (``x_names_synthetic=False``), so
+    ``ModelSource(model_fit_with_real_names, pl.DataFrame(array), y)``
+    now raises sklearn's name-mismatch error where a prior version of
+    this helper silently computed a positionally-correct result with a
+    warning. This is a deliberate, disclosed behavior change: a loud,
+    actionable error naming the mismatched columns is strictly better
+    than a silent guess that happens to be right. The two most common
+    ways to hand over a nameless feature matrix -- a bare
+    ``numpy.ndarray``, and ``pd.DataFrame(array)`` -- are unaffected;
+    both are detected structurally, not by name pattern.
+
+    Falls back to a plain numpy array when pandas isn't importable (no
+    ``feature_names_in_`` means no warning today either way).
+
+    Both of `_importance.py`'s sklearn-inspection call sites
+    (``_importances_permutation``, ``partial_dependence``) route through
+    this so they agree on one conversion rule instead of one passing a
+    polars frame straight through (which sklearn rejects for integer
+    column indexing, and still warns on feature names) and the other
+    passing a bare numpy array.
+    """
+    names = getattr(model, "feature_names_in_", None)
+    if names is None:
+        return X.to_numpy()
+
+    if X.width != len(names):
+        raise ValueError(
+            f"ModelSource.{diagnostic}() got X with {X.width} column(s) but "
+            f"the model's feature_names_in_ records {len(names)} name(s) -- "
+            f"the model was fit on a different number of features than this "
+            f"ModelSource's X. Pass the same feature matrix (or feature "
+            f"count) the model was trained on via X=."
+        )
+
+    try:
+        import pandas as pd
+    except ImportError:
+        return X.to_numpy()
+
+    if x_names_synthetic:
+        return pd.DataFrame(X.to_numpy(), columns=list(names))
+    return pd.DataFrame(X.to_numpy(), columns=list(X.columns))
 
 
 def _split_shap_by_class(sv_raw: Any, model: Any) -> list[np.ndarray]:
