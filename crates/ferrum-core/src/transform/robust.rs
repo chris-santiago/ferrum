@@ -32,8 +32,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
-    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+    deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
+    KeyValue,
 };
 use crate::transform::logistic::inv_normal_cdf;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
@@ -279,20 +279,14 @@ fn apply_one_group(
 ///
 /// Mirrors `smooth::apply_grouped`'s stacking shape (batch-D T9/T3.8a):
 /// first-appearance group order, null-key skip (`group_partition_multi`),
-/// schema reconciliation via `concat::concat_by_name` (Robust's schema is
-/// spec-determined — the same `output`/`inject_metrics` combination on every
-/// group — so no group can legitimately diverge from its siblings; this is
-/// belt-and-braces the same way it is for Smooth), and dtype-preserving
-/// group-column re-emission via the shared `group_key` helpers.
-///
-/// DUPLICATION-PENDING (rust-coder, batch-F task 2): the per-group loop plus
-/// the stack-and-append-group-columns block below (~30 lines) is structurally
-/// identical to `smooth::apply_grouped`'s (`smooth.rs:394-460`), differing
-/// only in the per-group fit call and the error-context string. `group_key.rs`
-/// is outside this task's declared footprint (robust.rs, registry/mod.rs,
-/// _core.pyi), so it isn't hoisted here; a follow-up should extract a shared
-/// `group_key::stack_grouped_batches(context, per_group_batches, group_cols,
-/// gtypes) -> PyResult<RecordBatch>` helper covering both call sites.
+/// and dtype-preserving group-column re-emission, both via the shared
+/// `group_key::stack_grouped_batches` template (batch-F T2h hoist — the two
+/// `apply_grouped` bodies were ~30 lines differing only in the per-group fit
+/// call and the error-context string). Robust's schema is spec-determined —
+/// the same `output`/`inject_metrics` combination on every group — so no
+/// group can legitimately diverge from its siblings; the by-name schema
+/// reconciliation inside `stack_grouped_batches` is belt-and-braces the same
+/// way it is for Smooth.
 fn apply_grouped(
     spec: &RobustSpec,
     batch: &RecordBatch,
@@ -316,33 +310,7 @@ fn apply_grouped(
         return apply_one_group(spec, batch, None);
     }
 
-    let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
-    let stacked = crate::transform::concat::concat_by_name(
-        "Robust",
-        per_group_batches.iter().map(|(_, b)| b.clone()).collect(),
-    )
-    .map_err(PyValueError::new_err)?;
-
-    // Append the group columns, preserving their ORIGINAL dtypes (XFORM-03).
-    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(total_rows);
-    for (g, b) in &per_group_batches {
-        for _ in 0..b.num_rows() {
-            group_keys_out.push(g.clone());
-        }
-    }
-    let mut out_fields: Vec<Field> =
-        stacked.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
-    let mut out_cols: Vec<ArrayRef> = stacked.columns().to_vec();
-    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
-        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
-        let group_col_arr =
-            materialize_groupby_col(&group_keys_out, gi, dtype).map_err(PyValueError::new_err)?;
-        out_cols.push(group_col_arr);
-    }
-
-    let out_schema = Arc::new(Schema::new(out_fields));
-    RecordBatch::try_new(out_schema, out_cols)
-        .map_err(|e| PyValueError::new_err(format!("Robust: {e}")))
+    stack_grouped_batches("Robust", &per_group_batches, group_cols, &gtypes)
 }
 
 // ---------- Helpers ----------
@@ -1089,6 +1057,82 @@ mod tests {
         assert_eq!(distinct, [1_i64, 2].into_iter().collect());
     }
 
+    /// Batch-F T2h: grouping by a column whose name collides with an output
+    /// column name (`ci_lower`) must refuse with a typed error naming the
+    /// collision, not silently append a second `ci_lower` field that
+    /// `Schema::index_of` would resolve to the wrong one downstream. Mirrors
+    /// Smooth's identical collision-guard contract, since both transforms
+    /// share `group_key::stack_grouped_batches`.
+    #[test]
+    fn test_robust_grouped_name_collision_with_output_column_refuses() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..6).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x).collect();
+        let group_vals: Vec<&str> = vec!["a", "a", "a", "b", "b", "b"];
+        // The groupby column is literally named "ci_lower" — one of the
+        // Fitted output's own field names — while the real x/y data live in
+        // "x_in"/"y_in".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x_in", DataType::Float64, true),
+            Field::new("y_in", DataType::Float64, true),
+            Field::new("ci_lower", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(group_vals)),
+            ],
+        )
+        .unwrap();
+        let mut s = spec(4, None, 1.345, SmoothOutput::Fitted);
+        s.x = "x_in".into();
+        s.y = "y_in".into();
+        s.groupby = vec!["ci_lower".into()];
+        let err = apply(&s, &batch).expect_err(
+            "groupby column colliding with an output column name must refuse",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("ci_lower"), "error must name the colliding column: {msg}");
+        assert!(msg.contains("collides"), "error must explain the collision: {msg}");
+    }
+
+    /// Task 2h review finding 2, reproduced end-to-end for Robust:
+    /// `groupby=['g', 'g']` must refuse rather than silently emit two
+    /// identically-named 'g' fields (the exact live repro the review used:
+    /// `Robust(x='x_in', y='y_in', groupby=['g','g'])`).
+    #[test]
+    fn test_robust_grouped_duplicate_groupby_name_refuses() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..6).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x).collect();
+        let group_vals: Vec<&str> = vec!["a", "a", "a", "b", "b", "b"];
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x_in", DataType::Float64, true),
+            Field::new("y_in", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(group_vals)),
+            ],
+        )
+        .unwrap();
+        let mut s = spec(4, None, 1.345, SmoothOutput::Fitted);
+        s.x = "x_in".into();
+        s.y = "y_in".into();
+        s.groupby = vec!["g".into(), "g".into()];
+        let err = apply(&s, &batch)
+            .expect_err("groupby=['g', 'g'] must refuse rather than emit two 'g' fields");
+        let msg = err.to_string();
+        assert!(msg.contains('g'), "error must name the repeated column: {msg}");
+        assert!(msg.contains("repeated"), "error must explain the duplication: {msg}");
+    }
+
     #[test]
     fn test_robust_grouped_residuals_output() {
         // The grouped path must work for output="residuals" too (cross-task
@@ -1138,8 +1182,12 @@ mod tests {
         // today" contract (batch-F task 2 intent).
         // Alternating +/-0.5 noise (as in `test_robust_ci_brackets_fit`) keeps
         // the MAD residual scale > 0, so `ci_lower`/`ci_upper` are finite
-        // rather than the degenerate exact-fit NaN band — a perfectly linear
-        // fixture would make this assertion vacuously true via NaN != NaN.
+        // rather than the degenerate exact-fit NaN band. A perfectly linear
+        // fixture would drive `s == 0` and emit NaN CI bounds instead — and
+        // `assert_eq!` on `Vec<f64>` FAILS when the compared vectors carry
+        // NaN at matching positions (NaN != NaN), so a degenerate fixture
+        // would make this assertion spuriously FAIL, not vacuously pass. The
+        // noisy fixture is required for the CI assertions to mean anything.
         let xs: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let ys: Vec<f64> = xs.iter().enumerate()
             .map(|(i, &x)| 2.0 * x + 1.0 + if i % 2 == 0 { 0.5 } else { -0.5 })

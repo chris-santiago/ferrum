@@ -17,7 +17,7 @@ use arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     RecordBatch, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::PyResult;
@@ -422,6 +422,94 @@ pub(crate) fn grouped_two_column_fit(
 
     RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_cols)
         .map_err(|e| PyValueError::new_err(format!("{label}: {e}")))
+}
+
+/// Stack a transform's already-computed per-group output batches into one
+/// batch, appending the group-key columns at their ORIGINAL dtypes
+/// (XFORM-03).
+///
+/// This is the grouped-stacking template `smooth::apply_grouped` and
+/// `robust::apply_grouped` share (batch-F T2h hoist: the two bodies were
+/// ~30 lines differing only in the context label passed through error
+/// messages). `ctx` supplies that label; `per_group_batches` is one
+/// `(group key, per-group output batch)` pair per distinct group, in the
+/// order they should be stacked; `group_cols` / `gtypes` are
+/// [`group_partition_multi`]'s own output, so callers pass them straight
+/// through.
+///
+/// Reconciles schema divergence across groups via [`concat_by_name`] (a
+/// degenerate fit for one group can legitimately emit a narrower batch than
+/// its siblings — see that function's module doc), then appends one output
+/// field per groupby dimension, materialized via [`materialize_groupby_col`]
+/// so an `Int64`/`Boolean`/etc. groupby column round-trips at its original
+/// dtype rather than widening to `String`.
+///
+/// **Name-collision guard:** the output must not carry two fields with the
+/// same name. Two distinct ways to violate that would otherwise slip
+/// through: (a) a groupby column's name matches one of the per-group
+/// output's own field names (e.g. grouping by a column literally named `x`
+/// or `residual`), and (b) `group_cols` itself repeats a name (e.g.
+/// `groupby=["g", "g"]`). Arrow does not reject duplicate schema field
+/// names, and `Schema::index_of` silently resolves to the FIRST match, so
+/// every downstream reader of "the groupby column" would silently see the
+/// wrong column's values instead. This refuses both cases with a typed
+/// error naming the colliding column and, for case (a), this transform's
+/// actual output columns (so the message is actionable from Python — a
+/// caller can rename the offending groupby column, but cannot rename a
+/// transform's fixed output schema). This is a behavior change versus the
+/// pre-hoist `smooth`/`robust` bodies, which had no such guard — both
+/// collision cases were previously mis-resolved silently, not merely
+/// undocumented.
+pub(crate) fn stack_grouped_batches(
+    ctx: &str,
+    per_group_batches: &[(Vec<KeyValue>, RecordBatch)],
+    group_cols: &[String],
+    gtypes: &[DataType],
+) -> PyResult<RecordBatch> {
+    let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
+    let stacked = crate::transform::concat::concat_by_name(
+        ctx,
+        per_group_batches.iter().map(|(_, b)| b.clone()).collect(),
+    )
+    .map_err(PyValueError::new_err)?;
+
+    let output_field_names: Vec<String> =
+        stacked.schema().fields().iter().map(|f| f.name().clone()).collect();
+    let mut seen_group_cols: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for col_name in group_cols {
+        if output_field_names.iter().any(|f| f == col_name) {
+            return Err(PyValueError::new_err(format!(
+                "{ctx}: groupby column '{col_name}' collides with this transform's own output \
+                 column '{col_name}' (output columns: {}); rename the data column before grouping",
+                output_field_names.join(", ")
+            )));
+        }
+        if !seen_group_cols.insert(col_name.as_str()) {
+            return Err(PyValueError::new_err(format!(
+                "{ctx}: groupby column '{col_name}' is repeated in `groupby`; \
+                 each groupby column must have a distinct name (got groupby={group_cols:?})"
+            )));
+        }
+    }
+
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(total_rows);
+    for (g, b) in per_group_batches {
+        for _ in 0..b.num_rows() {
+            group_keys_out.push(g.clone());
+        }
+    }
+    let mut out_fields: Vec<Field> =
+        stacked.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut out_cols: Vec<ArrayRef> = stacked.columns().to_vec();
+    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
+        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
+        let group_col_arr =
+            materialize_groupby_col(&group_keys_out, gi, dtype).map_err(PyValueError::new_err)?;
+        out_cols.push(group_col_arr);
+    }
+
+    let out_schema = Arc::new(Schema::new(out_fields));
+    RecordBatch::try_new(out_schema, out_cols).map_err(|e| PyValueError::new_err(format!("{ctx}: {e}")))
 }
 
 /// Serde deserializer that accepts `null`, a bare JSON string, or a JSON array
@@ -939,5 +1027,147 @@ mod tests {
         assert_eq!(s.value(0), "A");
         assert!(s.is_null(1), "Null key must materialize as Arrow null, not empty string");
         assert_eq!(s.value(2), "B");
+    }
+
+    // ── stack_grouped_batches (batch-F T2h hoist) ─────────────────────────
+
+    fn xy_group_batch(x: Vec<f64>, y: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(x)) as ArrayRef,
+                Arc::new(Float64Array::from(y)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The ordinary case: two groups' per-group output batches stack into
+    /// one batch with the group column appended at its original dtype,
+    /// rows in the same order the per-group batches were supplied.
+    #[test]
+    fn stack_grouped_batches_happy_path_appends_group_column() {
+        let per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = vec![
+            (vec![KeyValue::Str("a".into())], xy_group_batch(vec![1.0, 2.0], vec![10.0, 20.0])),
+            (vec![KeyValue::Str("b".into())], xy_group_batch(vec![3.0], vec![30.0])),
+        ];
+        let out = stack_grouped_batches(
+            "test",
+            &per_group_batches,
+            &["g".to_string()],
+            &[DataType::Utf8],
+        )
+        .unwrap();
+
+        assert_eq!(out.num_rows(), 3);
+        assert_eq!(out.schema().fields().len(), 3);
+        assert_eq!(out.schema().field(2).name(), "g");
+        let g_col = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(g_col.value(0), "a");
+        assert_eq!(g_col.value(1), "a");
+        assert_eq!(g_col.value(2), "b");
+    }
+
+    /// Batch-F T2h rider 1: a groupby column whose name collides with one of
+    /// the per-group output's own field names must refuse with a typed
+    /// error naming the colliding column, rather than appending a second
+    /// same-named field that `Schema::index_of` would silently resolve to
+    /// the wrong one.
+    #[test]
+    fn stack_grouped_batches_rejects_name_collision_with_output_column() {
+        pyo3::Python::initialize();
+        let per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = vec![
+            (vec![KeyValue::Str("a".into())], xy_group_batch(vec![1.0], vec![10.0])),
+        ];
+        let err = stack_grouped_batches(
+            "test",
+            &per_group_batches,
+            &["y".to_string()],
+            &[DataType::Utf8],
+        )
+        .expect_err("groupby column 'y' collides with the output's own 'y' field");
+        let msg = err.to_string();
+        assert!(msg.contains('y'), "error must name the colliding column: {msg}");
+        assert!(msg.contains("collides"), "error must explain the collision: {msg}");
+        assert!(
+            msg.contains("x") && msg.contains("y"),
+            "error must name the transform's actual output columns so the message is \
+             actionable from Python: {msg}"
+        );
+    }
+
+    /// Task 2h review finding 3: the moved multi-column append loop
+    /// (`group_cols.iter().zip(gtypes.iter()).enumerate()`) is where a
+    /// transposed `gi`/dtype pairing would hide, and nothing exercised
+    /// `gi > 0` through this helper. Two group columns of different dtypes
+    /// (Utf8 then Int64) pins that each output column gets ITS OWN dtype and
+    /// values, not the first dimension's for both.
+    #[test]
+    fn stack_grouped_batches_two_column_groupby_preserves_each_dtype() {
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = vec![
+            (
+                vec![KeyValue::Str("a".into()), KeyValue::Int(1)],
+                xy_group_batch(vec![1.0, 2.0], vec![10.0, 20.0]),
+            ),
+            (
+                vec![KeyValue::Str("b".into()), KeyValue::Int(2)],
+                xy_group_batch(vec![3.0], vec![30.0]),
+            ),
+        ];
+        let out = stack_grouped_batches(
+            "test",
+            &per_group_batches,
+            &["g1".to_string(), "g2".to_string()],
+            &[DataType::Utf8, DataType::Int64],
+        )
+        .unwrap();
+
+        assert_eq!(out.num_rows(), 3);
+        assert_eq!(out.schema().fields().len(), 4, "x, y, g1, g2");
+        assert_eq!(out.schema().field(2).name(), "g1");
+        assert_eq!(out.schema().field(2).data_type(), &DataType::Utf8);
+        assert_eq!(out.schema().field(3).name(), "g2");
+        assert_eq!(out.schema().field(3).data_type(), &DataType::Int64);
+
+        let g1 = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(g1.value(0), "a");
+        assert_eq!(g1.value(1), "a");
+        assert_eq!(g1.value(2), "b");
+
+        let g2 = out.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(g2.value(0), 1);
+        assert_eq!(g2.value(1), 1);
+        assert_eq!(g2.value(2), 2);
+    }
+
+    /// Task 2h review finding 2: `group_cols` repeating a name (e.g. a caller
+    /// passing `groupby=["g", "g"]`) must also refuse — the guard exists to
+    /// establish "no duplicate field names in the output", not merely "no
+    /// group column collides with a fit column".
+    #[test]
+    fn stack_grouped_batches_rejects_duplicate_name_within_group_cols() {
+        pyo3::Python::initialize();
+        let per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = vec![
+            (
+                vec![KeyValue::Str("a".into()), KeyValue::Str("a".into())],
+                xy_group_batch(vec![1.0], vec![10.0]),
+            ),
+        ];
+        let err = stack_grouped_batches(
+            "test",
+            &per_group_batches,
+            &["g".to_string(), "g".to_string()],
+            &[DataType::Utf8, DataType::Utf8],
+        )
+        .expect_err("groupby=['g', 'g'] must refuse rather than emit two 'g' fields");
+        let msg = err.to_string();
+        assert!(msg.contains('g'), "error must name the repeated column: {msg}");
+        assert!(msg.contains("repeated"), "error must explain the duplication: {msg}");
     }
 }

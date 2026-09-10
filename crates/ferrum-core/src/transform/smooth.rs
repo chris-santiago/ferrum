@@ -103,8 +103,8 @@ use std::sync::Arc;
 use crate::transform::context::TransformContext;
 use crate::transform::gam;
 use crate::transform::group_key::{
-    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
-    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+    deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
+    KeyValue,
 };
 use crate::transform::numeric_util::coerce_to_float64;
 use crate::transform::residuals;
@@ -415,53 +415,27 @@ fn apply_grouped(
         return apply_one_group(spec, batch, None, is_partition);
     }
 
-    // Reconcile the per-group fit batches through the ONE shared algorithm
-    // (`transform::concat::concat_by_name`), which every schema-divergent
-    // stack in the crate now uses — see its module doc for why two copies
-    // existed and which one survived (R1 design finding 3).
+    // Reconcile the per-group fit batches and append the group columns via
+    // the ONE shared stacking template (`group_key::stack_grouped_batches`,
+    // batch-F T2h hoist), which both `Smooth` and `Robust` now use — see its
+    // doc for the by-name reconciliation and the groupby/output-column
+    // collision guard.
     //
-    // Why divergence is possible at all: a degenerate fit (rank-deficient/
-    // non-convergent design, zero-variance x, too few points) for one group's
-    // own slice used to emit the CORE 4-column `[x, y, ci_lower, ci_upper]`
-    // batch even when `inject_metrics` was set. Batch-D T9 round 4 closed that
-    // at the source by routing every degenerate branch through
-    // `build_degenerate_smooth_batch`, which emits null metrics columns when
-    // requested — so this is a belt-and-braces net, not a live path. The net
-    // still matters because the failure mode it replaced was a live
-    // `PanicException` through `Chart.to_svg()`: the original code pinned the
-    // reference schema to `per_group_batches[0]` and indexed every other group
-    // POSITIONALLY against it, so a degenerate first group silently dropped
-    // later groups' real metrics columns and a degenerate later group indexed
-    // past its own narrower schema.
-    let total_rows: usize = per_group_batches.iter().map(|(_, b)| b.num_rows()).sum();
-    let stacked = crate::transform::concat::concat_by_name(
-        "stat_smooth",
-        per_group_batches.iter().map(|(_, b)| b.clone()).collect(),
-    )
-    .map_err(PyValueError::new_err)?;
-
-    // Append the group columns, preserving their ORIGINAL dtypes (XFORM-03): one
-    // KeyValue tuple per output row, materialized via the shared group_key helper so
-    // Int64/Boolean groups round-trip as Int64/Boolean rather than String.
-    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(total_rows);
-    for (g, b) in &per_group_batches {
-        for _ in 0..b.num_rows() {
-            group_keys_out.push(g.clone());
-        }
-    }
-    let mut out_fields: Vec<Field> =
-        stacked.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
-    let mut out_cols: Vec<ArrayRef> = stacked.columns().to_vec();
-    for (gi, (col_name, dtype)) in group_cols.iter().zip(gtypes.iter()).enumerate() {
-        out_fields.push(Field::new(col_name, dtype.clone(), groupby_field_nullable()));
-        let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
-            .map_err(PyValueError::new_err)?;
-        out_cols.push(group_col_arr);
-    }
-
-    let out_schema = Arc::new(Schema::new(out_fields));
-    RecordBatch::try_new(out_schema, out_cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_smooth: {e}")))
+    // Why schema divergence across groups is possible at all: a degenerate
+    // fit (rank-deficient/non-convergent design, zero-variance x, too few
+    // points) for one group's own slice used to emit the CORE 4-column
+    // `[x, y, ci_lower, ci_upper]` batch even when `inject_metrics` was set.
+    // Batch-D T9 round 4 closed that at the source by routing every
+    // degenerate branch through `build_degenerate_smooth_batch`, which emits
+    // null metrics columns when requested — so this is a belt-and-braces
+    // net, not a live path. The net still matters because the failure mode
+    // it replaced was a live `PanicException` through `Chart.to_svg()`: the
+    // original code pinned the reference schema to `per_group_batches[0]`
+    // and indexed every other group POSITIONALLY against it, so a
+    // degenerate first group silently dropped later groups' real metrics
+    // columns and a degenerate later group indexed past its own narrower
+    // schema.
+    stack_grouped_batches("stat_smooth", &per_group_batches, group_cols, &gtypes)
 }
 
 fn pre_aggregate_xy(
@@ -2533,6 +2507,50 @@ mod tests {
         for i in 5..10 {
             assert!((yf[i] - (1.0 - 1.0 * xg[i])).abs() < 1e-9, "group 200 fit");
         }
+    }
+
+    /// Batch-F T2h: grouping by a column whose name collides with an output
+    /// column name (`y`) must refuse with a typed error naming the
+    /// collision, not silently append a second `y` field that
+    /// `Schema::index_of` would resolve to the wrong one downstream.
+    #[test]
+    fn test_smooth_grouped_name_collision_with_output_column_refuses() {
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..6).map(|i| i as f64).collect();
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x).collect();
+        let group_vals: Vec<&str> = vec!["a", "a", "a", "b", "b", "b"];
+        // The groupby column is literally named "y" — the Fitted output's
+        // own fitted-y field — while the real x/y data live in "x_in"/"y_in".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x_in", DataType::Float64, true),
+            Field::new("y_in", DataType::Float64, true),
+            Field::new("y", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(arrow::array::StringArray::from(group_vals)),
+            ],
+        )
+        .unwrap();
+        let spec = SmoothSpec {
+            x: "x_in".into(), y: "y_in".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 4, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec!["y".into()],
+            name: None,
+        };
+        let err = apply(&spec, &batch).expect_err(
+            "groupby column colliding with an output column name must refuse",
+        );
+        let msg = err.to_string();
+        assert!(msg.contains('y'), "error must name the colliding column: {msg}");
+        assert!(msg.contains("collides"), "error must explain the collision: {msg}");
     }
 
     /// A Boolean group column must work (was "must be Utf8") and round-trip as
