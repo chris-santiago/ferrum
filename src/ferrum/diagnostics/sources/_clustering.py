@@ -73,7 +73,11 @@ class ClusteringMixin(_MixinBase):
             mask = labels == c
             idxs = np.where(mask)[0]
             vals = sv[mask]
-            order = np.argsort(-vals)
+            # kind="stable" so exact silhouette-value ties keep sample_id
+            # order deterministic (the default quicksort has no such
+            # guarantee) -- consistent with the other argsort(-scores)
+            # sites in ferrum.diagnostics (G1 sweep, batch G T1).
+            order = np.argsort(-vals, kind="stable")
             for i, val in zip(idxs[order], vals[order]):
                 rows.append(
                     {
@@ -218,8 +222,9 @@ class ClusteringMixin(_MixinBase):
             ``cluster_centers_``.
         method : {"mds", "tsne"}, default "mds"
             Embedding algorithm for projecting cluster centers to 2D.
-            ``"tsne"`` requires at least 4 clusters; use ``"mds"`` for small
-            ``k``.
+            ``"tsne"`` requires at least 4 clusters and clamps perplexity to
+            ``min(5, k-2)`` (strictly below the k-1 kNN size); use ``"mds"``
+            for small ``k``.
         """
         validate_choice("ModelSource.intercluster_distance", "method", method, ("mds", "tsne"))
         key = self._cache_key(
@@ -256,7 +261,10 @@ class ClusteringMixin(_MixinBase):
             centers_arrow = pa.RecordBatch.from_pydict(
                 {f"f{j}": centers[:k, j].tolist() for j in range(centers.shape[1])}
             )
-            perplexity = float(max(1, min(5, int(k) - 1)))
+            # kNN size for k centers is k-1 (each center's k-1 co-embedded
+            # neighbors); t-SNE requires perplexity strictly less than that,
+            # so the clamp ceiling is k-2, not k-1 (F-L12-02).
+            perplexity = float(max(1, min(5, int(k) - 2)))
             tsne_batch = _core.tsne_embedding(
                 centers_arrow,
                 2,

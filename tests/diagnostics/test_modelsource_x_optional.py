@@ -1,17 +1,25 @@
-"""F-L12-01 (batch G, G6) — ``ModelSource`` constructs without ``X``.
+"""F-L12-01 (batch G, G6) — ``ModelSource`` constructs without ``X``, and
+F-L12-02 (batch G, G7) — ``intercluster_distance(method="tsne")`` perplexity
+clamp.
 
-X-free diagnostics (``pca_scree_chart`` / ``intercluster_distance_chart``,
+F-L12-01: X-free diagnostics (``pca_scree_chart`` / ``intercluster_distance_chart``,
 both computed from model attributes alone) render end to end without ``X``.
 X-needing diagnostics (``silhouette_chart``, ``manifold_chart``, and every
 other ``self._X`` consumer) refuse with a typed domain message naming the
 diagnostic and the fix (``ModelSource(model, X)``) — the leaked
 ``Chart(data=None) requires per-layer data...`` message from
 ``ferrum._coerce.to_polars`` must never surface from source construction.
+
+F-L12-02: ``intercluster_distance(method="tsne")`` must work for every
+``k >= 4`` as documented (see the module's own F-L12-02 section near the
+bottom of this file for the perplexity-clamp tests, and
+``ModelSource.silhouette()``'s stable-sort tie-ordering pin).
 """
 
 from __future__ import annotations
 
 import numpy as np
+import polars as pl
 import pytest
 
 import ferrum
@@ -337,3 +345,152 @@ def test_intercluster_distance_chart_x_ful_matches_x_less():
     chart_with_x = ferrum.intercluster_distance_chart(model, df, method="mds")
     chart_without_x = ferrum.intercluster_distance_chart(model, method="mds")
     assert chart_with_x.to_svg() == chart_without_x.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# F-L12-02 (batch G, G7) -- intercluster_distance(method="tsne") perplexity
+# clamp. Unrelated to this file's F-L12-01 X-optional scope, but placed here
+# per batch-G task-5 footprint: this is where the existing ModelSource-level
+# intercluster_distance tests live (test_decomposition.py only exercises
+# ``_core.tsne_embedding`` directly, below the clamp this bug lives in).
+#
+# t-SNE's kNN size for k embedded centers is k-1 (each center's k-1 peers);
+# perplexity must be strictly less than that. The old clamp,
+# ``min(5, k-1)``, hit that ceiling exactly for k in {4, 5, 6} and raised
+# ``tsne_embedding failed: perplexity (n) must be strictly less than the
+# kNN size (n)`` -- despite the docstring promising every k >= 4 works. The
+# fix is ``min(5, k-2)``.
+# ---------------------------------------------------------------------------
+
+
+class _KCentersModel:
+    """Minimal duck-typed clusterer: only ``cluster_centers_``/``labels_``,
+    exactly what ``intercluster_distance(method="tsne")`` reads. No fixture
+    exists for k in {4, 5, 6, 7} clusters, so this stub -- built directly
+    from the real k requested -- stays on the production
+    ``ModelSource.intercluster_distance`` path rather than hand-built output
+    shapes."""
+
+    def __init__(self, k: int, seed: int = 0):
+        rng = np.random.RandomState(seed)
+        self.cluster_centers_ = rng.rand(k, 3)
+        self.labels_ = np.arange(k)
+
+
+@pytest.mark.parametrize("k", [4, 5, 6, 7])
+def test_intercluster_distance_tsne_renders_for_every_k_ge_4(k):
+    """RED pre-fix for k in {4, 5, 6}: the old ``min(5, k-1)`` clamp hit the
+    kNN-size ceiling exactly and raised. k=7 already worked pre-fix (clamp
+    saturates at 5 < 6); kept in the parametrization as a non-regression
+    control."""
+    model = _KCentersModel(k)
+    source = ferrum.ModelSource(model, X=None)
+    result = source.intercluster_distance(k, method="tsne")
+    assert result.height == k
+    assert set(result["cluster"].to_list()) == {str(i) for i in range(k)}
+    # Pin the fix's outcome (a real embedding), not just its non-raising:
+    # a NaN or all-identical embedding would still pass the two asserts
+    # above.
+    xy = result.select("x", "y").to_numpy()
+    assert np.isfinite(xy).all()
+    assert len(set(map(tuple, xy))) == k
+
+
+def test_intercluster_distance_chart_tsne_renders_for_k4():
+    """Same fix, exercised through the documented public entry point
+    (``intercluster_distance_chart``, not just the source method)."""
+    model = _KCentersModel(4)
+    chart = ferrum.intercluster_distance_chart(model, method="tsne", k=4)
+    svg = chart.to_svg()
+    assert "<svg" in svg
+
+
+def test_intercluster_distance_tsne_k2_and_k3_still_refuse():
+    """The k >= 4 floor is untouched by the clamp fix -- still refuses
+    below it, unchanged from the pre-existing k<4 pin."""
+    for k in (2, 3):
+        model = _KCentersModel(4)  # centers available; k requested is what's tested
+        source = ferrum.ModelSource(model, X=None)
+        with pytest.raises(ValueError, match="at least 4"):
+            source.intercluster_distance(k, method="tsne")
+
+
+# --- silhouette() tie-ordering (carried-forward G1-sweep rider) ----------
+#
+# ``argsort(-vals)`` in ``ClusteringMixin.silhouette()`` changed from the
+# default quicksort to ``kind="stable"`` (batch G, T5). Duplicate rows in a
+# real feature matrix produce exact silhouette-value ties through the real
+# Rust kernel, and ``silhouette()`` emits ``y_position`` in row order, so
+# tie ordering decides ``mark_silhouette``'s rendered bar order -- this is a
+# user-observable behavior change, not an internal-only sort. Mirrors T1's
+# precedent at ``tests/diagnostics/test_metric_correctness.py:278-293``
+# (a deliberately tie-heavy frame pinning the stable ranking through the
+# real frame builder), applied to the real ``ModelSource.silhouette()``
+# path instead of a hand-built frame.
+#
+# 40 real, distinct points from the clustering fixture, tiled 12x -> 480
+# rows / ~144-192 per cluster. Exact duplicates get exactly tied silhouette
+# values (each duplicate's distance profile to the rest of the dataset is
+# the same multiset), and at this size numpy's introsort has long left the
+# small-array insertion-sort regime, so an unstable sort's tie order is
+# genuinely arbitrary rather than accidentally ascending.
+
+
+class _TiledPredictStub:
+    """Duck-typed model with ``predict`` only (no ``labels_``), so
+    ``silhouette()`` takes the ``predict(X)`` capability branch against the
+    tiled ``X`` instead of the fixture model's original 200-row
+    ``labels_``."""
+
+    def __init__(self, tiled_labels: np.ndarray):
+        self._tiled_labels = tiled_labels
+
+    def predict(self, X):
+        assert len(X) == len(self._tiled_labels)
+        return self._tiled_labels
+
+
+def _tiled_tie_frame() -> tuple["pl.DataFrame", np.ndarray]:
+    df = load_dataset("clustering")
+    base_labels = np.asarray(load_fixture("kmeans_3cluster").labels_)[:40]
+    base_X = df.head(40).to_numpy()
+    tiled_X = np.tile(base_X, (12, 1))
+    tiled_labels = np.tile(base_labels, 12)
+    X = pl.DataFrame({f"f{j}": tiled_X[:, j] for j in range(tiled_X.shape[1])})
+    return X, tiled_labels
+
+
+def _tie_groups_ascend(sil: "pl.DataFrame") -> bool:
+    """True iff, within every run of equal ``silhouette_value`` (the frame
+    is sorted descending by value, so ties are contiguous), ``sample_id``
+    is ascending. Also asserts at least one tie group exists per cluster,
+    since an assertion that never exercises a tie proves nothing."""
+    for c in sorted(set(sil["cluster"].to_list())):
+        sub = sil.filter(pl.col("cluster") == c)
+        values = sub["silhouette_value"].to_list()
+        ids = sub["sample_id"].to_list()
+        saw_tie = False
+        i = 0
+        while i < len(values):
+            j = i
+            while j + 1 < len(values) and values[j + 1] == values[i]:
+                j += 1
+            if j > i:
+                saw_tie = True
+                group = ids[i : j + 1]
+                if group != sorted(group):
+                    return False
+            i = j + 1
+        if not saw_tie:
+            raise AssertionError(f"cluster {c!r} has no tied silhouette_value group")
+    return True
+
+
+def test_silhouette_tie_ordering_is_stable_ascending():
+    """RED pre-fix (``kind="quicksort"``): duplicated rows produce real
+    ties whose ``sample_id`` order the unstable sort scrambles. GREEN
+    post-fix (``kind="stable"``): every tie group's ``sample_id`` ascends."""
+    X, tiled_labels = _tiled_tie_frame()
+    source = ferrum.ModelSource(_TiledPredictStub(tiled_labels), X)
+    sil = source.silhouette()
+    assert _tie_groups_ascend(sil)

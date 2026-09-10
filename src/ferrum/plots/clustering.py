@@ -852,9 +852,10 @@ def intercluster_distance_chart(
         ``ValueError`` if neither attribute is present.
     method : {"mds", "tsne"}, default "mds"
         Dimensionality-reduction method for embedding cluster centers.
-        ``"mds"`` (default) uses sklearn MDS to preserve pairwise
-        distances; ``"tsne"`` uses t-SNE (perplexity clamped to
-        ``min(5, k-1)`` for small cluster counts).
+        ``"mds"`` (default) uses ferrum's Rust classical MDS
+        (``_core.mds_classical``) to preserve pairwise distances, no
+        sklearn required; ``"tsne"`` uses t-SNE (perplexity clamped to
+        ``min(5, k-2)`` for small cluster counts; requires ``k >= 4``).
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     mark : dict, optional
