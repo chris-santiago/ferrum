@@ -149,3 +149,71 @@ def test_non_bar_mark_no_zero_injection():
     chart = fm.Chart(df).mark_line().encode(x="x", y="y")
     scale = _enc(chart, "y").get("scale", {})
     assert "zero" not in scale
+
+
+# ---------------------------------------------------------------------------
+# Merged-flat layer path: the zero=False opt-out must survive the
+# chart-to-layer conversion (batch F, T5r rider).
+#
+# `resolve={"y": "independent"}` (and `SecondaryY`, and every
+# `.interactive()` LayerChart) renders through the merged single-panel
+# `spec.layers` path rather than the composite overlay tree. There, the
+# chart-level `scale.zero` injection above never runs -- the renderer's own
+# layered-bar rule anchors instead -- so a bar the caller opted out of was
+# anchored anyway until `_expand_layers` began forwarding the opt-out as the
+# layer's `mark_style.zero`. The pair below is the discriminating shape: the
+# opt-out case and the default case must NOT agree.
+# ---------------------------------------------------------------------------
+
+_MERGED_FLAT_DF = pl.DataFrame(
+    {"cat": ["a", "b", "c"], "val": [60.0, 70.0, 80.0], "other": [55.0, 65.0, 75.0]}
+)
+
+
+def _merged_flat_y_ticks(bar_chart):
+    """Render `bar_chart` overlaid with a line under independent-y and return
+    the numeric y-axis tick labels."""
+    import re
+
+    line = fm.Chart(_MERGED_FLAT_DF).mark_line().encode(x="cat", y="other")
+    svg = fm.LayerChart(bar_chart, line, resolve={"y": "independent"}).to_svg()
+    return [
+        float(t)
+        for t in re.findall(r"<text[^>]*>([^<]*)</text>", svg)
+        if re.fullmatch(r"-?\d+(\.\d+)?", t or "")
+    ]
+
+
+def test_merged_flat_bar_zero_false_keeps_the_axis_off_zero():
+    """`mark_bar(zero=False)` composed into a merged-flat layer stays opted out."""
+    bar = fm.Chart(_MERGED_FLAT_DF).mark_bar(zero=False).encode(x="cat", y="val")
+    ticks = _merged_flat_y_ticks(bar)
+    assert min(ticks) > 0.0, (
+        f"zero=False must survive the chart-to-layer conversion; axis ran to {min(ticks)}"
+    )
+
+
+def test_merged_flat_bar_default_still_anchors_at_zero():
+    """The default bar keeps the renderer's layered zero-anchor on the same path."""
+    bar = fm.Chart(_MERGED_FLAT_DF).mark_bar().encode(x="cat", y="val")
+    assert min(_merged_flat_y_ticks(bar)) == 0.0
+
+
+def test_merged_flat_zero_false_reaches_the_layer_mark_style():
+    """The opt-out is carried by the layer's own `mark_style`, which is the
+    field the renderer reads (a chart-level `scale.zero` never reaches this
+    path)."""
+    bar = fm.Chart(_MERGED_FLAT_DF).mark_bar(zero=False).encode(x="cat", y="val")
+    line = fm.Chart(_MERGED_FLAT_DF).mark_line().encode(x="cat", y="other")
+    merged = fm.LayerChart(bar, line, resolve={"y": "independent"})._build_merged()
+    layers = json.loads(merged.to_spec().to_json())["layers"]
+    assert layers[0]["mark_style"]["zero"] is False
+
+
+def test_merged_flat_default_bar_emits_no_zero_key():
+    """Charts that leave `zero` at its default serialize as they always did."""
+    bar = fm.Chart(_MERGED_FLAT_DF).mark_bar().encode(x="cat", y="val")
+    line = fm.Chart(_MERGED_FLAT_DF).mark_line().encode(x="cat", y="other")
+    merged = fm.LayerChart(bar, line, resolve={"y": "independent"})._build_merged()
+    layers = json.loads(merged.to_spec().to_json())["layers"]
+    assert all("zero" not in (ly.get("mark_style") or {}) for ly in layers)

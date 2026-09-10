@@ -2136,6 +2136,51 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
                theme=None)
 ```
 
+> **2026-09-10 (batch F, F-L09-02/03):** `kind="point"` and `kind="bar"` are
+> ESTIMATING kinds. Each draws one mean per (category × `hue`) group from a
+> `Summary` transform, with a bootstrap CI whisker: the whisker paints under
+> the point marker and over the bar. Previously both drew one mark per raw row
+> (200 overplotted circles for a 200-row frame) and any non-default `ci=`/
+> `n_boot=` raised "not yet supported". `ci` is now a percent in the open
+> interval `(0, 100)` and `n_boot` must be `>= 1`; both are validated at the
+> catplot boundary for these two kinds only (they remain inert on the other
+> six). `seed=` seeds the bootstrap as well as `Jitter`, with `None` mapping
+> to the fixed default seed, so output is byte-deterministic. Both kinds are
+> layered charts now, so `mark=` takes per-layer keys (`"whisker"` plus
+> `"point"`/`"bar"`) rather than a flat mark-kwargs dict, and a call missing
+> either the category or the value channel raises instead of drawing a
+> value-less strip. `ci`/`n_boot` also refuse a `bool` (it subclasses `int`,
+> so `n_boot=True` would silently mean one resample); the numeric `1` stays
+> valid for both. An explicit positional `scale=` on the value channel (via
+> `y=`/`x=`, `encode=`, or `**encode_kwargs`) is honored on these kinds as it
+> is on the others **when it carries a `domain`**; a domain-less one (e.g. a
+> bare `{"type": "log"}`) now raises instead — main accepted it when these
+> kinds were single-mark charts, but on a layered chart the renderer resolves
+> an explicit domain-less scale from one column and would silently clip the CI
+> whiskers (the same gap drops marks on `kind="box"`/`"boxen"` today, without
+> an error). Adding a `domain` is the documented route; the refusal is deleted,
+> not relaxed, once the explicit-scale path gains the cross-layer domain union
+> the auto-inferred path has (tracked as SCALE-1 in the code-archaeology
+> followups doc). The other six kinds are byte-identical.
+>
+> **2026-09-10 (batch F, T5r rider — renderer-wide):** a LAYERED chart's
+> auto-inferred value-axis domain now extends to zero when a bar layer binds
+> that channel, mirroring the zero-anchor a single-chart `mark_bar` already
+> gets from its injected `scale.zero`; it is suppressed when the bar binds an
+> explicit span channel (`y2`/`x2`), whose extent is taken literally, matching
+> the same suppression on the single-chart rule. This is what keeps
+> `catplot(kind="bar")`'s bars on a zero baseline without an explicit
+> per-layer scale, which would have replaced the cross-layer domain union and
+> clipped the CI whiskers. The rule is not catplot-specific: any layered spec
+> with a bar layer on an auto-inferred value axis is affected, and one
+> phase-10 golden (`class_prediction_error_multiclass.svg`) moved its baseline
+> accordingly. `mark_bar(zero=False)` opts a layer out of the new rule as it
+> already opted a single chart out of the injected `scale.zero`: the opt-out
+> now travels with the mark as `mark_style.zero` when a chart is composed into
+> a layer, so it survives on the merged single-panel path
+> (`resolve={"y": "independent"}`, `SecondaryY`, and every `.interactive()`
+> `LayerChart`), where the chart-level injection never ran.
+
 #### Relational
 
 ```

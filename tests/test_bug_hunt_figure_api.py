@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 
 import polars as pl
 import pytest
@@ -1126,7 +1127,15 @@ class TestCatplotDodge:
         assert "NaN" not in svg
 
     def test_catplot_bar_dodge_with_hue(self):
-        """catplot(kind='bar', dodge=True, hue=...) should produce side-by-side bars."""
+        """catplot(kind='bar', dodge=True, hue=...) produces side-by-side estimates.
+
+        ``kind="bar"`` aggregates now (batch F, F-L09-02/03): one mean bar per
+        (category, hue) cell with a CI whisker, and the dodge adjustment lives
+        on each LAYER rather than on the chart. Asserting the rendered offsets
+        is what discriminates "side-by-side" from the smoke check this used to
+        be -- a whisker that missed the adjustment would sit on the band center
+        while its bar moved off it.
+        """
         df = pl.DataFrame(
             {
                 "cat": (["a"] * 4 + ["b"] * 4),
@@ -1135,9 +1144,30 @@ class TestCatplotDodge:
             }
         )
         chart = fm.catplot(df, x="cat", y="val", hue="grp", kind="bar", dodge=True)
+        spec = json.loads(chart.to_spec().to_json())
+        assert [ly["position"]["type"] for ly in spec["layers"]] == ["dodge", "dodge"]
+
         svg = chart.to_svg()
-        assert "<svg" in svg
         assert "NaN" not in svg
+        bars = [
+            r
+            for r in re.findall(r"<rect[^/]*/>", svg)
+            if 'fill="#2563eb"' in r or 'fill="#dc2626"' in r
+        ]
+        whisker_x = sorted(
+            float(re.search(r'x1="([\d.]+)"', ln).group(1))
+            for ln in re.findall(r"<line[^/]*/>", svg)
+            if 'stroke-width="1.5"' in ln
+        )
+        bar_centers = sorted(
+            float(re.search(r'x="([\d.]+)"', r).group(1))
+            + float(re.search(r'width="([\d.]+)"', r).group(1)) / 2
+            for r in bars
+        )
+        # 2 categories x 2 hue levels, each pair offset within its band.
+        assert len(bar_centers) == 4
+        assert len(set(whisker_x)) == 4
+        assert bar_centers == pytest.approx(whisker_x, abs=0.05)
 
 
 # ===================================================================
@@ -1518,22 +1548,31 @@ class TestDisplotStatDensity:
 
 
 class TestCatplotPointBar:
-    """Tests for catplot kind='point' and kind='bar' (non-composite).
-    Targets distribution.py catplot lines 573-576.
+    """Tests for catplot kind='point' and kind='bar' (the estimating kinds).
+
+    Both became layered estimates in batch F (F-L09-02/03): one mean mark per
+    category over a bootstrap CI whisker, instead of one mark per row.
     """
 
     def test_catplot_point_kind(self, cat_float_df):
-        """catplot(kind='point') should render mark_point."""
+        """catplot(kind='point') renders one mean marker per category."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="point")
+        assert chart.layer_names == ["whisker", "point"]
         svg = chart.to_svg()
         assert "<svg" in svg
+        # 20 rows, 2 categories -> 2 markers and 2 whiskers, not 20 circles.
+        assert svg.count("<circle") == 2
+        assert len(re.findall(r'stroke-width="1.5"', svg)) == 2
 
     def test_catplot_bar_kind(self, cat_float_df):
-        """catplot(kind='bar') should render mark_bar."""
+        """catplot(kind='bar') renders one mean bar per category."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="bar")
+        assert chart.layer_names == ["bar", "whisker"]
         svg = chart.to_svg()
         assert "<svg" in svg
-        assert "<rect" in svg
+        bars = [r for r in re.findall(r"<rect[^/]*/>", svg) if 'fill="#2563eb"' in r]
+        assert len(bars) == 2
+        assert len(re.findall(r'stroke-width="1.5"', svg)) == 2
 
 
 # ===================================================================

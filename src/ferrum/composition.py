@@ -3528,10 +3528,42 @@ def _expand_layers(c) -> tuple[list, list]:
             mark=c._mark,
             encoding=dict(c._encoding),
             transforms=[],
-            mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
+            mark_kwargs=_layer_mark_kwargs(c),
             position=c._position,
         )
     ], _top_transforms(c)
+
+
+def _layer_mark_kwargs(c) -> dict | None:
+    """Return the per-layer ``mark_kwargs`` for a single-mark chart becoming a layer.
+
+    The chart's own ``_mark_kwargs`` plus the one piece of mark state that
+    lives OUTSIDE that dict: ``mark_bar(zero=False)``'s zero-anchor opt-out.
+    ``MarkBase.to_mark_kwargs_dict`` deliberately excludes ``zero`` because on
+    a single-mark chart it is consumed Python-side (``_build_encoding_specs``
+    suppresses its ``scale.zero=True`` injection), and ``_mark_zero`` is a
+    chart attribute a ``_Layer`` has no slot for. So a bar composed into a
+    layer used to arrive with the opt-out silently dropped.
+
+    That was harmless while nothing anchored a layered bar. It stopped being
+    harmless when the renderer gained the layered-bar zero rule
+    (``render/scale_resolve/domain.rs::numeric_domain_union``, T5r): on the
+    merged-flat path -- ``resolve={"y": "independent"}``, ``SecondaryY``, and
+    every ``.interactive()`` ``LayerChart``, all of which render through
+    ``spec.layers`` rather than the composite overlay tree -- a bar the caller
+    had explicitly opted out of was anchored to zero anyway (measured:
+    ``LayerChart(mark_bar(zero=False), line, resolve={"y": "independent"})``
+    resolved ``y`` to ``(0, 80)`` instead of ``(50, 80)``). Forwarding the
+    opt-out as the layer's own ``mark_style.zero`` is what makes the request
+    survive the chart-to-layer conversion; Rust already reads that field.
+
+    Emitted ONLY when the opt-out was actually requested, so every chart that
+    leaves ``zero`` at its default serializes byte-identically to before.
+    """
+    kwargs = dict(c._mark_kwargs) if c._mark_kwargs else {}
+    if getattr(c, "_mark_zero", True) is False:
+        kwargs["zero"] = False
+    return kwargs or None
 
 
 def _merge_top_transforms(new, rhs_top_xforms: list) -> None:

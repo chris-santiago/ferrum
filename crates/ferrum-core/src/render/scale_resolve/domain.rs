@@ -8,6 +8,7 @@ use arrow::record_batch::RecordBatch;
 use super::column_min_max_f64;
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
+use crate::spec::mark::Mark;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// Result of looking up a field across the primary batch and named
@@ -431,6 +432,46 @@ fn sort_domain_by_aggregate(
 ///   - The paired field (x2/y2) follows the same lookup discipline.
 ///   - Every OTHER layer's fields for this channel are unioned too, read in
 ///     the channel's own coordinate space — see the `spec.layers` loop below.
+///   - **Bar zero-anchor (T5r, catplot aggregation; narrowed cycle 2 per
+///     spec-review issue 1 and rust-quality-review findings 1-3).** When a
+///     `Mark::Bar` layer binds this channel's VALUE slot (never its position
+///     slot — `"y"` unflipped, `"x"` under `CoordFlip`, in the channel's own
+///     coordinate space, same `coord_flipped` normalization the layer-union
+///     loop already applies) with data that actually contributed to the
+///     union, AND that layer does not itself bind the paired span field on
+///     this channel (`y2`/`x2`), AND the layer does not explicitly opt out
+///     (`mark_style.zero == Some(false)`), the resolved extent is widened to
+///     include zero — mirroring `resolve_continuous_domain_and_range`'s
+///     `zero: true` block (`d[0] > 0.0 → 0.0`, `d[1] < 0.0 → 0.0`) exactly,
+///     just applied on the AUTO-INFERRED path instead of an explicit
+///     `ScaleSpec`. All four conditions mirror the single-chart injection's
+///     guards (`_spec_build.py:394-399`: `axis == "y"`, `not _y2_bound` —
+///     the D3 rule, `:379-385` — and `_mark_zero`/`zero_anchor()`); dropping
+///     any of them widens a channel Python's own rule would never anchor —
+///     e.g. without the value-slot guard, a histogram bar layer (`x`/`x2` =
+///     bin range, `y` = count) had its POSITION axis wrongly zero-anchored,
+///     squeezing `displot(kind="hist")` bars into a corner of the panel
+///     whenever the data doesn't straddle zero. The data-contribution
+///     requirement additionally guards against a layer whose declared value
+///     field is absent from every batch (wrong `data_source`, not loaded
+///     yet) forcing a zero-anchor on the strength of its NAME alone. See
+///     `MarkKwargsSpec::zero`'s doc comment for the live, user-reachable
+///     path that sets the opt-out today (`catplot(..., mark={"bar": {"zero":
+///     False}})` and any other layered figure function's `mark=`
+///     passthrough). A single (non-layered) `mark_bar` never
+///     reaches this function at all: Python's
+///     `_spec_build.py::_build_encoding_specs` already injects an explicit
+///     `scale={"zero": True}` onto that chart's y encoding, which routes
+///     through `build_from_scale_spec` and returns before this function is
+///     even called. This rule exists for the case Python's injection cannot
+///     serve without silently clipping other layers: a layered spec
+///     (`catplot(kind="bar")`'s bar + CI-whisker `rule`), where an explicit
+///     per-layer `ScaleSpec` would replace this cross-layer union with a
+///     single-column domain and clip whichever layer's field extends
+///     furthest (measured: 3 of 4 upper CI whiskers vanished off-panel).
+///     Scoped to `spec.layers` only (never `spec.mark`), so a genuinely
+///     unlayered spec's auto path is untouched — byte-identical, because a
+///     single-chart bar never reaches the auto path in the first place.
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
     field: &str,
@@ -445,6 +486,10 @@ pub(in crate::render) fn numeric_domain_union(
         None => std::collections::HashSet::new(),
     };
     let (mut mn, mut mx) = (f64::INFINITY, f64::NEG_INFINITY);
+    // T5r bar zero-anchor: set when a `Mark::Bar` layer binds this channel's
+    // primary (non-paired) field, in the channel's own coordinate space. See
+    // this function's doc comment ("Bar zero-anchor") for the full rationale.
+    let mut bar_zero_wanted = false;
     let mut accumulate = |c: &dyn Array, source_field: &str| -> Result<(), RenderError> {
         let (a, b) = column_min_max_f64(c).map_err(|_| RenderError::UnsupportedDtype {
             field: source_field.to_string(),
@@ -456,10 +501,19 @@ pub(in crate::render) fn numeric_domain_union(
         Ok(())
     };
 
-    let mut union_field = |f: &str| -> Result<(), RenderError> {
+    // Returns whether `f` was found (and accumulated) in ANY batch —
+    // `Ok(false)` is the normal "field lives in a batch not loaded yet /
+    // wrong data_source" outcome, not an error. Callers that only care about
+    // the accumulated extent ignore the bool; the bar zero-anchor rule below
+    // (T5r cycle 2) needs it so a layer's merely-DECLARED value field, never
+    // found in any batch, cannot force a zero-anchor on the strength of its
+    // name alone (spec-review finding 3).
+    let mut union_field = |f: &str| -> Result<bool, RenderError> {
+        let mut found = false;
         let primary_has = primary_batch.column_by_name(f).is_some();
         if let Some(c) = primary_batch.column_by_name(f) {
             accumulate(c.as_ref(), f)?;
+            found = true;
         }
         for (key, batch) in transform_outputs.iter() {
             let key_is_referenced = layer_data_sources.contains(key.as_str());
@@ -471,13 +525,14 @@ pub(in crate::render) fn numeric_domain_union(
             if !primary_has || key_is_referenced || key_is_final {
                 if let Some(c) = batch.column_by_name(f) {
                     accumulate(c.as_ref(), f)?;
+                    found = true;
                 }
             }
         }
-        Ok(())
+        Ok(found)
     };
 
-    union_field(field)?;
+    let field_found = union_field(field)?;
     if let Some(p) = paired_field {
         union_field(p)?;
     }
@@ -549,12 +604,92 @@ pub(in crate::render) fn numeric_domain_union(
                 ],
                 _ => [None, None],
             };
-            for lf in layer_fields.into_iter().flatten() {
-                if lf != field {
+            // Union every declared field for this layer on this channel, and
+            // remember whether the VALUE slot (index 0) actually resolved to
+            // data in some batch — `value_field_contributed` below. One pass
+            // replaces what used to be a separate "union everything, then
+            // separately ask `.is_some()`" step: a layer's field can be
+            // absent from every batch (wrong `data_source`, not loaded yet),
+            // and the bar zero-anchor rule below must not fire on the
+            // strength of the field's declared NAME alone when it never
+            // contributed a single value (spec-review finding 3).
+            let mut value_field_contributed = false;
+            for (i, lf) in layer_fields.into_iter().enumerate() {
+                let Some(lf) = lf else { continue };
+                let contributed = if lf == field {
+                    field_found
+                } else {
                     // Ignore errors — the field may not exist in all batches
                     // (e.g. when it lives in a named output that isn't loaded yet).
-                    let _ = union_field(lf);
+                    union_field(lf).unwrap_or(false)
+                };
+                if i == 0 {
+                    value_field_contributed = contributed;
                 }
+            }
+            // Bar zero-anchor detection (T5r; narrowed cycle 2 — spec-review
+            // issue 1; extended cycle 2 — rust-quality-review findings 1-3).
+            // Mirrors the single-chart injection's guards
+            // (`_spec_build.py:394-399`), not just its arithmetic:
+            //   (a) `axis == "y"` there — the anchor is the bar's EXTENT
+            //       axis only, never its POSITION axis. Ferrum always
+            //       authors a bar's value on `y` (category/position on `x`,
+            //       or the reverse under `CoordFlip`, which is exactly what
+            //       `coord_flipped`/`encoding` above already normalizes) —
+            //       so the value channel is `"y"` unflipped, `"x"` flipped.
+            //       Dropping this guard is what fired the anchor on a
+            //       histogram bar's `x` (bin-range position) channel too,
+            //       squeezing `displot(kind="hist")` bars into a fraction of
+            //       the panel when the data doesn't straddle zero. A bar
+            //       authored with its value on the OTHER channel directly
+            //       (no `CoordFlip`) — e.g. `shap_waterfall`'s floating
+            //       `x`/`x2` bars (`marks/diagnostic/_explanation.py:285-296`,
+            //       `x=x0`, `x2=x1`, `y=feature`) — is excluded by this same
+            //       guard for the identical reason Python's own `axis=="y"`
+            //       rule already excludes it: ferrum's zero-anchor has never
+            //       covered a directly-authored x-as-value bar, layered or
+            //       not, so this mirrors existing scope rather than widening
+            //       it under this fix.
+            //   (b) `not _y2_bound` there (the D3 rule, `:379-385`) — when
+            //       this layer's OWN value channel carries a paired span
+            //       field (`y2`, or `x2` under flip — `layer_fields[1]`),
+            //       the extent is taken literally from `[value, span]` and
+            //       force-anchoring to zero would distort a domain that was
+            //       never meant to touch zero. `shap_waterfall` is ALSO the
+            //       concrete instance of this shape (its bar layer's value
+            //       channel carries `x2`) — doubly protected here: guard (a)
+            //       already excludes it (its value channel is `x`, never the
+            //       recognized value slot unflipped), and guard (b) would
+            //       independently exclude it too if ferrum ever authored a
+            //       value-on-`y`-with-`y2` floating bar (the shape
+            //       `y2_bound_bar_layer_never_zero_extends` below pins).
+            //   (c) the layer's own opt-out — `layer.mark_style.zero ==
+            //       Some(false)`, the per-layer mirror of
+            //       `mark_bar(zero=False)` / `_mark_zero`
+            //       (`spec::mark_style::MarkKwargsSpec::zero`, T5r cycle 2).
+            //       Live and user-reachable today via the generic per-layer
+            //       `mark=` passthrough on layered figure functions — e.g.
+            //       `fm.catplot(..., kind="bar", mark={"bar": {"zero":
+            //       False}})` resolves the value axis to the raw data range
+            //       (measured: `58..61.5`, not `0..61.5`) — see that field's
+            //       doc comment for the plumbing and the one path that
+            //       stays inert.
+            // The Python rule's remaining guard (`not _y_is_categorical`)
+            // needs no mirror: `numeric_domain_union` is only ever called
+            // for a quantitative/temporal axis (`build_axis_scale`'s
+            // ordinal/nominal branch never reaches here), so an ordinal
+            // position channel is excluded structurally, not by an extra
+            // flag.
+            let is_value_channel = if coord_flipped { channel == "x" } else { channel == "y" };
+            let layer_wants_zero =
+                layer.mark_style.as_ref().and_then(|m| m.zero).unwrap_or(true);
+            if is_value_channel
+                && layer.mark == Mark::Bar
+                && layer_wants_zero
+                && value_field_contributed
+                && layer_fields[1].is_none()
+            {
+                bar_zero_wanted = true;
             }
         }
     }
@@ -563,6 +698,21 @@ pub(in crate::render) fn numeric_domain_union(
         // All values were null/NaN — return a default domain so the chart
         // renders with axes but no marks, instead of raising an error.
         return Ok((0.0, 1.0));
+    }
+    if bar_zero_wanted {
+        // Mirrors `resolve_continuous_domain_and_range`'s `zero: true` block
+        // exactly (same two guarded assignments), applied here instead of
+        // there because a layered bar spec never reaches that function (see
+        // this function's doc comment). Runs BEFORE the degenerate-domain
+        // widening below so a single-row/all-equal bar value (e.g. one
+        // category) resolves to a real `[0, v]` span instead of the
+        // synthetic `±0.5` band that widening produces for non-bar data.
+        if mn > 0.0 {
+            mn = 0.0;
+        }
+        if mx < 0.0 {
+            mx = 0.0;
+        }
     }
     // Degenerate domain: a single row or all-equal values produce mn == mx.
     // As of GH #104, `scale::core::degenerate_ratio` already makes every
@@ -860,6 +1010,553 @@ mod tests {
             (3.0, 4.0),
             "under CoordFlip the y axis holds the authored x field; an authored \
              y/y2 must not widen it"
+        );
+    }
+
+    // ── T5r: bar zero-anchor on the layered/auto-inferred path ──────────────
+    //
+    // `catplot(kind="bar")` renders a `bar` layer (one mean per category) plus
+    // a `rule` "whisker" layer (the bootstrap CI), both reading a named
+    // `Summary` transform output via `data_source`. Before this fix the
+    // auto-inferred cross-layer union (this function) had no zero rule at
+    // all, so the value axis stopped at the union of `mean`/`lower`/`upper`
+    // and bars looked truncated at the panel bottom. An explicit per-layer
+    // `scale={"zero": True}` (the mechanism a plain single-chart `mark_bar`
+    // uses, injected by `_spec_build.py`) was measured and rejected: it
+    // routes through `build_from_scale_spec`, which resolves the domain from
+    // ONE column, so it silently clipped the whisker layer's own extent (3 of
+    // 4 upper CI whiskers vanished off-panel) — see the coder's report,
+    // `.sdd/task-5-report.md` concern 1, and this function's own doc comment
+    // ("Bar zero-anchor") above.
+
+    /// Verbatim `chart.to_dict()` JSON for `fm.catplot(df, x="cat", y="val",
+    /// kind="bar")` (captured 2026-09-10, T5r, with `df` mapping `cat` to
+    /// two groups and `val` to values whose bootstrap mean/CI land around
+    /// 50-90). Two layers: `bar` on the transform's `mean` output, `whisker`
+    /// (a `rule`) on `lower`/`upper`, both via `data_source: "summary"`.
+    const CATPLOT_BAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"val"}},"transforms":[{"type":"summary","field":"val","groupby":["cat"],"error_fn":"ci","ci":0.95,"n_boot":1000,"seed":0,"name":"summary"}],"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"mean","title":"val"}},"data_source":"summary","position":{"type":"identity"},"name":"bar"},{"mark":"rule","encoding":{"x":{"field":"cat"},"y":{"field":"lower","title":"val"},"y2":{"field":"upper"}},"mark_style":{"stroke":"theme:label","stroke_dash":[]},"data_source":"summary","position":{"type":"identity"},"name":"whisker"}]}"#;
+
+    /// The same call with `orient="h"` (captured 2026-09-10, T5r). The
+    /// authored encoding is untouched (the value field is still authored on
+    /// `y`); only `coord` gains `{"kind": "flip"}`, so the RENDERED x axis is
+    /// where the bar's value lives and where the zero-anchor must land.
+    const CATPLOT_BAR_FLIPPED_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"val"}},"transforms":[{"type":"summary","field":"val","groupby":["cat"],"error_fn":"ci","ci":0.95,"n_boot":1000,"seed":0,"name":"summary"}],"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"mean","title":"val"}},"data_source":"summary","position":{"type":"identity"},"name":"bar"},{"mark":"rule","encoding":{"x":{"field":"cat"},"y":{"field":"lower","title":"val"},"y2":{"field":"upper"}},"mark_style":{"stroke":"theme:label","stroke_dash":[]},"data_source":"summary","position":{"type":"identity"},"name":"whisker"}],"coord":{"kind":"flip"}}"#;
+
+    /// `CATPLOT_BAR_SPEC_JSON` with the `bar` layer's mark swapped to
+    /// `"point"` — the ONLY difference from the spec above, isolating mark
+    /// type as the sole variable. Proves the anchor is gated on `Mark::Bar`
+    /// specifically, not merely on "a layered spec with a `rule` sibling".
+    const CATPLOT_NONBAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"val"}},"transforms":[{"type":"summary","field":"val","groupby":["cat"],"error_fn":"ci","ci":0.95,"n_boot":1000,"seed":0,"name":"summary"}],"layers":[{"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"mean","title":"val"}},"data_source":"summary","position":{"type":"identity"},"name":"bar"},{"mark":"rule","encoding":{"x":{"field":"cat"},"y":{"field":"lower","title":"val"},"y2":{"field":"upper"}},"mark_style":{"stroke":"theme:label","stroke_dash":[]},"data_source":"summary","position":{"type":"identity"},"name":"whisker"}]}"#;
+
+    /// A non-layered `mark_bar` spec — `spec.layers` is absent entirely. This
+    /// case never reaches `numeric_domain_union` in real rendering (Python's
+    /// `_spec_build.py::_build_encoding_specs` already injects an explicit
+    /// `scale={"zero": True}` onto a single-chart bar's y encoding, which
+    /// resolves through `build_from_scale_spec` instead), but the function
+    /// itself must not ALSO add a zero rule keyed on `spec.mark` — only on
+    /// `spec.layers` — so this pins the auto path stays untouched if it were
+    /// ever reached directly.
+    const SINGLE_BAR_SPEC_JSON: &str =
+        r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"val"}}}"#;
+
+    /// The shape a real `Summary` transform emits: `mean`, `lower`, `upper`,
+    /// all positive and well clear of zero (50..90), so a resolved domain
+    /// that reaches zero can only be explained by the bar zero-anchor, never
+    /// by the data itself.
+    fn catplot_summary_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("mean", DataType::Float64, false),
+            Field::new("lower", DataType::Float64, false),
+            Field::new("upper", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![50.0, 80.0])),
+                Arc::new(Float64Array::from(vec![40.0, 70.0])),
+                Arc::new(Float64Array::from(vec![60.0, 90.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Resolve one axis's auto-inferred extent for a catplot-shaped lowered
+    /// spec: the primary batch carries an unrelated `group` column (mirroring
+    /// the real primary batch, which the Summary transform's `mean`/`lower`/
+    /// `upper` output columns are absent from), and those three fields live
+    /// in the named `"summary"` transform output every layer's `data_source`
+    /// references — the same wiring `catplot`'s lowered spec carries.
+    fn catplot_axis_extent(spec_json: &str, channel: &str, field: &str) -> (f64, f64) {
+        let spec: ChartSpec =
+            serde_json::from_str(spec_json).expect("lowered spec JSON must deserialize");
+        let primary = group_batch(vec!["a", "b"]);
+        let mut outputs = HashMap::new();
+        outputs.insert("summary".to_string(), catplot_summary_batch());
+        numeric_domain_union(channel, field, None, &primary, &outputs, &spec, false)
+            .expect("every field in the fixture is Float64")
+    }
+
+    /// Before this fix, the union of `mean` (50..80), `lower` (40..70), and
+    /// `upper` (60..90) is `(40.0, 90.0)` — the domain the coder's report
+    /// found truncated relative to zero. The `bar` layer's own field
+    /// (`mean`) participates in the y-channel union, so the zero-anchor
+    /// widens the lower bound to 0, while the whisker's own `upper` extent
+    /// (90) stays reachable — the exact property the report's rejected
+    /// explicit-`ScaleSpec` fix could not preserve.
+    ///
+    /// RED (verified in place): commenting out the `if bar_zero_wanted`
+    /// block in `numeric_domain_union` makes this fail with `(40.0, 90.0)`.
+    #[test]
+    fn layered_bar_and_whisker_value_domain_includes_zero() {
+        assert_eq!(
+            catplot_axis_extent(CATPLOT_BAR_SPEC_JSON, "y", "mean"),
+            (0.0, 90.0),
+            "a bar-mark layer on the y channel must widen the domain to include \
+             zero while keeping the whisker's own extent (90) reachable"
+        );
+    }
+
+    /// Control: the identical layer shape with the bar layer's mark swapped
+    /// to `"point"` must NOT gain the zero-anchor — the union is exactly what
+    /// `layered_bar_and_whisker_value_domain_includes_zero` computed BEFORE
+    /// the zero-anchor widened it, `(40.0, 90.0)`.
+    #[test]
+    fn nonbar_layered_spec_value_domain_unchanged() {
+        assert_eq!(
+            catplot_axis_extent(CATPLOT_NONBAR_SPEC_JSON, "y", "mean"),
+            (40.0, 90.0),
+            "a layered spec with no bar-mark layer must not gain a zero-anchor"
+        );
+    }
+
+    /// CoordFlip twin: the authored encoding is unchanged (the bar's value
+    /// field is still authored on `y`), but under `.coord(CoordFlip())` that
+    /// value is RENDERED on the x axis, so the zero-anchor must land there —
+    /// same union arithmetic as the unflipped case (`(40.0, 90.0)` before the
+    /// anchor), mirroring `coord_flipped_layer_paired_endpoint_widens_the_other_axis`
+    /// above.
+    ///
+    /// RED (verified in place): commenting out the `if bar_zero_wanted`
+    /// block makes this fail with `(40.0, 90.0)` too — proving the anchor
+    /// follows the coordinate-space normalization, not just the unflipped
+    /// case. Also genuinely discriminating on the flip normalization itself
+    /// (rust-quality-review finding, re-measured T5r cycle 2): dropping
+    /// `flip_positional` from the detection (reading `layer.encoding`
+    /// directly) makes this fail too, with `(50.0, 80.0)` — the bar's `cat`
+    /// field is absent from every batch in this fixture, so the mutant's
+    /// `value_field_contributed` check for the (wrongly-read) unflipped
+    /// value slot fails and the anchor never fires. See
+    /// `coord_flipped_bar_position_channel_never_zero_extends` below for the
+    /// companion fixture that discriminates the same mutant with real data
+    /// on both channels instead of an absent field.
+    #[test]
+    fn coord_flipped_bar_widens_the_rendered_x_axis() {
+        assert_eq!(
+            catplot_axis_extent(CATPLOT_BAR_FLIPPED_SPEC_JSON, "x", "mean"),
+            (0.0, 90.0),
+            "under CoordFlip the bar's authored y (the value field) occupies \
+             the rendered x axis and must carry the zero-anchor there"
+        );
+    }
+
+    /// Single-chart (non-layered) `mark_bar`: this function must not add a
+    /// zero-anchor on its own when `spec.layers` is absent — pinned to catch
+    /// a future widening of the bar-zero rule from `spec.layers` to
+    /// `spec.mark`, which would silently diverge from the explicit-scale
+    /// path's `nice`/padding treatment that single-chart bars actually get
+    /// in real rendering.
+    #[test]
+    fn single_chart_bar_auto_path_unchanged() {
+        let spec: ChartSpec = serde_json::from_str(SINGLE_BAR_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema = Arc::new(Schema::new(vec![Field::new("val", DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![50.0, 80.0]))])
+                .unwrap()
+        };
+        let extent = numeric_domain_union("y", "val", None, &batch, &HashMap::new(), &spec, false)
+            .expect("val is Float64");
+        assert_eq!(
+            extent,
+            (50.0, 80.0),
+            "a non-layered mark_bar spec must not gain a zero-anchor from this \
+             function; Python's explicit scale={{\"zero\": true}} injection owns \
+             that case"
+        );
+    }
+
+    // ── T5r cycle 2 (spec-review issue 1): the two dropped guards ───────────
+    //
+    // The cycle-1 rule fired for whatever channel was being resolved, as long
+    // as a `Mark::Bar` layer bound it — no distinction between the bar's
+    // VALUE axis and its POSITION axis, and no exclusion for a layer whose
+    // own value channel already carries a paired span field. Both guards
+    // mirror `_spec_build.py:394-399`'s single-chart injection exactly
+    // (`axis == "y"`, `not _y2_bound`). Missing them is what let a
+    // `displot(kind="hist")` histogram bar's `x`/`x2` bin-range POSITION
+    // widen to zero — a live regression in this same batch's T4 feature,
+    // caught by spec review, not by the cycle-1 test suite (none of the four
+    // cycle-1 tests exercised a bar layer's position channel or a `y2`-bound
+    // bar).
+
+    /// Verbatim `chart.to_dict()` JSON for `fm.displot(df, x="val",
+    /// kind="hist", kde=True)` (captured 2026-09-10, T5r cycle 2) — the exact
+    /// shape the spec reviewer measured live: a `bar` histogram layer whose
+    /// POSITION channel is `x`/`x2` (the bin range) and whose VALUE channel
+    /// is `y` (`count`). The sibling `kde` line layer reads a named
+    /// `"kde_overlay"` output this test's fixture omits — its own field,
+    /// `value`, unions to nothing and is silently skipped (`union_field`'s
+    /// documented "ignore errors" behavior), so omitting it doesn't affect
+    /// the assertion below.
+    const DISPLOT_HIST_KDE_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"val"},"y":{"field":"count","type":"quantitative"},"x2":{"field":"bin_end","type":"quantitative"}},"transforms":[{"type":"kde","field":"val","bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":512,"cumulative":false,"shared_extent":false,"kernel":"gaussian","count_scale":{"kind":"sturges"},"name":"kde_overlay"},{"type":"bin","field":"val","nice":true,"cumulative":false,"shared_extent":false}],"layers":[{"mark":"bar","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"val"},"y":{"field":"count","type":"quantitative"},"x2":{"field":"bin_end","type":"quantitative"}},"position":{"type":"identity"},"name":"histogram"},{"mark":"line","encoding":{"x":{"field":"value"},"y":{"field":"density"}},"data_source":"kde_overlay","position":{"type":"identity"},"name":"kde"}],"position":{"type":"identity"}}"#;
+
+    /// Bin edges offset well clear of zero (50..89), matching the spec
+    /// reviewer's reproduction data — a domain that reaches zero can only be
+    /// explained by the (wrong) position-channel anchor, never by the data.
+    fn displot_hist_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end", DataType::Float64, false),
+            Field::new("count", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![50.0, 70.0])),
+                Arc::new(Float64Array::from(vec![70.0, 89.0])),
+                Arc::new(Float64Array::from(vec![4.0, 5.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Before the value-channel guard (cycle 1), this incorrectly returned
+    /// `(0.0, 89.0)` — the bar layer's POSITION channel (`x`/`x2`, the bin
+    /// range) got the anchor only its VALUE channel (`y`, `count`) is
+    /// supposed to get. Measured live by the spec reviewer:
+    /// `displot(x="val", kind="hist", kde=True)` with data in `[50, 89]`
+    /// rendered its x axis `0…90`, squeezing every bar into the right ~44%
+    /// of the panel.
+    ///
+    /// This fixture's position channel also carries `x2` (`bin_end`), so
+    /// guard (b) (span-suppression) independently protects it too —
+    /// dropping guard (a) alone does NOT turn this test red (verified: the
+    /// span guard still catches it). `bar_layer_own_position_channel_without_span_never_zero_extends`
+    /// below isolates guard (a) with a position channel that carries no
+    /// span field at all, so only guard (a) protects it.
+    #[test]
+    fn bar_position_channel_never_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(DISPLOT_HIST_KDE_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = displot_hist_batch();
+        let extent = numeric_domain_union(
+            "x",
+            "bin_start",
+            Some("bin_end"),
+            &batch,
+            &HashMap::new(),
+            &spec,
+            false,
+        )
+        .expect("bin_start/bin_end are Float64");
+        assert_eq!(
+            extent,
+            (50.0, 89.0),
+            "a bar layer's POSITION channel (the bin range) must never gain \
+             the value-channel zero-anchor"
+        );
+    }
+
+    /// Verbatim `chart.to_dict()` JSON for
+    /// `fm.Chart(df).mark_bar().encode(x="cat", y="lo", y2="hi") +
+    /// fm.Chart(df).mark_point().encode(x="cat", y="lo")` (captured
+    /// 2026-09-10, T5r cycle 2) — a bar layer whose own VALUE channel
+    /// carries a paired span field, reachable from the public `Chart` API
+    /// (`.encode(y2=...)` is a generically honored channel on any mark).
+    /// Mirrors the D3 rule `_spec_build.py:379-385` already applies to the
+    /// single-chart case: an explicit `[y, y2]` extent is taken literally
+    /// and must not be force-anchored to zero.
+    const Y2_BOUND_BAR_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"lo"},"y2":{"field":"hi"}}},{"mark":"point","encoding":{"x":{"field":"cat"},"y":{"field":"lo"}}}]}"#;
+
+    fn y2_bound_bar_batch() -> RecordBatch {
+        use arrow::array::Float64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("lo", DataType::Float64, false),
+            Field::new("hi", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![50.0, 60.0])),
+                Arc::new(Float64Array::from(vec![80.0, 90.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// The D3 rule: a bar layer that binds its OWN value channel's paired
+    /// span field (`y2` here) must not be force-anchored to zero — the
+    /// extent stays taken literally from `[lo, hi]` (50..90), exactly the
+    /// pre-anchor union.
+    ///
+    /// RED (verified in place): removing the `layer_fields[1].is_none()`
+    /// guard makes this fail with `(0.0, 90.0)`.
+    #[test]
+    fn y2_bound_bar_layer_never_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(Y2_BOUND_BAR_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = y2_bound_bar_batch();
+        let extent =
+            numeric_domain_union("y", "lo", Some("hi"), &batch, &HashMap::new(), &spec, false)
+                .expect("lo/hi are Float64");
+        assert_eq!(
+            extent,
+            (50.0, 90.0),
+            "a bar layer that binds its own value channel's paired span \
+             field must not be force-anchored to zero"
+        );
+    }
+
+    // ── T5r cycle 2 (rust-quality-review): discriminating flip test, the
+    // remaining two arithmetic arms, and the `zero=False` opt-out ──────────
+
+    /// `DISPLOT_HIST_KDE_SPEC_JSON` with `.coord(fm.CoordFlip())` appended —
+    /// same shape as `LAYERED_Y2_FLIPPED_SPEC_JSON` above ("the same
+    /// layering with `.coord(fm.CoordFlip())`"), not itself reachable
+    /// through `displot`'s own `orient=` (histograms have none), but a real,
+    /// generically composable shape (`CoordFlip` applies to any chart).
+    /// Under this flip the histogram's VALUE channel (`y`=`count`,
+    /// authored) is RENDERED on `x`, and its POSITION channel (`x`/`x2` =
+    /// the bin range, authored) is rendered on `y`/`y2`.
+    const DISPLOT_HIST_KDE_FLIPPED_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"val"},"y":{"field":"count","type":"quantitative"},"x2":{"field":"bin_end","type":"quantitative"}},"transforms":[{"type":"kde","field":"val","bandwidth":{"kind":"scott"},"bw_adjust":1.0,"n":512,"cumulative":false,"shared_extent":false,"kernel":"gaussian","count_scale":{"kind":"sturges"},"name":"kde_overlay"},{"type":"bin","field":"val","nice":true,"cumulative":false,"shared_extent":false}],"layers":[{"mark":"bar","encoding":{"x":{"field":"bin_start","type":"quantitative","title":"val"},"y":{"field":"count","type":"quantitative"},"x2":{"field":"bin_end","type":"quantitative"}},"position":{"type":"identity"},"name":"histogram"},{"mark":"line","encoding":{"x":{"field":"value"},"y":{"field":"density"}},"data_source":"kde_overlay","position":{"type":"identity"},"name":"kde"}],"position":{"type":"identity"},"coord":{"kind":"flip"}}"#;
+
+    /// Companion to `coord_flipped_bar_widens_the_rendered_x_axis` above,
+    /// with a bar layer that carries REAL numeric data on BOTH channels
+    /// (`count` and the `bin_start`/`bin_end` bin range) rather than relying
+    /// on the sibling test's category field (`"cat"`) being absent from
+    /// every fixture batch to make a coordinate-space mutant visible.
+    ///
+    /// RED (verified in place, measured — not predicted): reverting the
+    /// `let flipped = ...` / `let encoding = ...` pair above to read
+    /// `&layer.encoding` directly (dropping the `flip_positional`
+    /// normalization) makes the `x` assertion below fail with `(4.0, 89.0)`
+    /// — `count`'s own 4..5 range unions with the RAW (unflipped) `x`/`x2`
+    /// fields (`bin_start`/`bin_end`, 50..89) because the mutant reads them
+    /// onto the wrong slot, and the span-suppression guard (still correctly
+    /// seeing an `x2`-shaped pair, just the WRONG pair) blocks the anchor —
+    /// so the x axis ends up neither zero-anchored nor at `count`'s own
+    /// range. The `y` assertion does not independently discriminate this
+    /// mutant (`is_value_channel` is computed from `coord_flipped`
+    /// directly, not from the encoding read, so it stays correctly `false`
+    /// for `channel == "y"` either way) — kept for its own sake, as the
+    /// position-channel-untouched pin under `CoordFlip`. The SAME mutant is
+    /// also caught by the pre-existing (non-bar) T13 test
+    /// `coord_flipped_layer_paired_endpoint_widens_the_other_axis`, which
+    /// exercises the identical normalization for the x2/y2 union.
+    #[test]
+    fn coord_flipped_bar_position_channel_never_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(DISPLOT_HIST_KDE_FLIPPED_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = displot_hist_batch();
+        let x_extent =
+            numeric_domain_union("x", "count", None, &batch, &HashMap::new(), &spec, false)
+                .expect("count is Float64");
+        assert_eq!(
+            x_extent,
+            (0.0, 5.0),
+            "under CoordFlip the histogram's VALUE channel (count, authored \
+             y) is rendered on x and must carry the zero-anchor"
+        );
+        let y_extent = numeric_domain_union(
+            "y",
+            "bin_start",
+            Some("bin_end"),
+            &batch,
+            &HashMap::new(),
+            &spec,
+            false,
+        )
+        .expect("bin_start/bin_end are Float64");
+        assert_eq!(
+            y_extent,
+            (50.0, 89.0),
+            "under CoordFlip the histogram's POSITION channel (the bin \
+             range, authored x/x2) is rendered on y/y2 and must never gain \
+             the value-channel zero-anchor"
+        );
+    }
+
+    /// Verbatim `chart.to_dict()` JSON for `fm.Chart(df).mark_rank1d(orient="vertical")`
+    /// (captured 2026-09-10, T5r cycle 2) — a REAL single-bar-layer
+    /// production shape (`marks/diagnostic/_ranking.py:43`,
+    /// `desugar_rank1d`'s vertical orientation: `x=feature`, `y=score`).
+    /// Reused (with different fixture batches) for the `mx < 0.0` arm and
+    /// the zero-before-degenerate-widening ordering test below.
+    const SINGLE_BAR_LAYER_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{},"layers":[{"mark":"bar","encoding":{"x":{"field":"feature"},"y":{"field":"score"}},"name":"bar"}]}"#;
+
+    /// Isolates guard (a) alone: `SINGLE_BAR_LAYER_SPEC_JSON`'s bar layer
+    /// has NO span field on either channel, so guard (b)
+    /// (`layer_fields[1].is_none()`) is trivially satisfied regardless of
+    /// which channel is being resolved — unlike
+    /// `bar_position_channel_never_zero_extends` and the `x`/`y` pair in
+    /// `coord_flipped_bar_position_channel_never_zero_extends`, whose
+    /// position channels carry `x2`/`y2` and so are ALSO (redundantly)
+    /// protected by guard (b). Querying the POSITION channel (`x` =
+    /// `feature`) directly with real, contributing Float64 data means ONLY
+    /// guard (a) stands between this layer and a wrong zero-anchor.
+    ///
+    /// RED (verified in place): replacing `is_value_channel` with `true` in
+    /// the detection condition makes this fail with `(0.0, 90.0)`.
+    #[test]
+    fn bar_layer_own_position_channel_without_span_never_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(SINGLE_BAR_LAYER_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema =
+                Arc::new(Schema::new(vec![Field::new("feature", DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![50.0, 90.0]))])
+                .unwrap()
+        };
+        let extent =
+            numeric_domain_union("x", "feature", None, &batch, &HashMap::new(), &spec, false)
+                .expect("feature is Float64 in this fixture");
+        assert_eq!(
+            extent,
+            (50.0, 90.0),
+            "a bar layer's own POSITION channel must never gain the \
+             value-channel zero-anchor, even with no span field to fall \
+             back on for protection"
+        );
+    }
+
+    /// Every value negative (`-3.0`, `-8.0`) — a bar chart of negative
+    /// scores anchors from ABOVE, not below: `mx < 0.0 → mx = 0.0`, `mn`
+    /// (already `<= 0.0`) untouched.
+    ///
+    /// RED (verified in place): deleting the `if mx < 0.0 { mx = 0.0; }`
+    /// arm makes this fail with `(-8.0, -3.0)`.
+    #[test]
+    fn negative_bar_values_anchor_from_above() {
+        let spec: ChartSpec = serde_json::from_str(SINGLE_BAR_LAYER_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema = Arc::new(Schema::new(vec![Field::new("score", DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![-3.0, -8.0]))])
+                .unwrap()
+        };
+        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false)
+            .expect("score is Float64");
+        assert_eq!(
+            extent,
+            (-8.0, 0.0),
+            "an all-negative bar layer must anchor from above (mx -> 0.0), \
+             not below"
+        );
+    }
+
+    /// A single row (one category, one score `5.0`): pre-anchor `mn == mx
+    /// == 5.0`, the degenerate case. Running the zero-anchor BEFORE the
+    /// degenerate-domain widening (as `numeric_domain_union` does) resolves
+    /// this to the real `[0, 5]` span; running it AFTER (widening first,
+    /// `4.5..5.5`, THEN zero-extending `4.5 -> 0.0`) would instead yield the
+    /// wrong `(0.0, 5.5)`.
+    ///
+    /// RED (verified in place): moving the `if bar_zero_wanted { ... }`
+    /// block below the "Degenerate domain" widening block makes this fail
+    /// with `(0.0, 5.5)`.
+    #[test]
+    fn single_row_bar_value_zero_extends_before_degenerate_widening() {
+        let spec: ChartSpec = serde_json::from_str(SINGLE_BAR_LAYER_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema = Arc::new(Schema::new(vec![Field::new("score", DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![5.0]))]).unwrap()
+        };
+        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false)
+            .expect("score is Float64");
+        assert_eq!(
+            extent,
+            (0.0, 5.0),
+            "the zero-anchor must run BEFORE the degenerate-domain widening, \
+             not after"
+        );
+    }
+
+    /// `SINGLE_BAR_LAYER_SPEC_JSON` with `"mark_style": {"zero": false}`
+    /// hand-added to the bar layer — the per-layer mirror of the
+    /// single-chart `mark_bar(zero=False)` opt-out (`MarkKwargsSpec::zero`,
+    /// T5r cycle 2). Hand-authored rather than captured from a live call on
+    /// THIS fixture's own shape (`mark_rank1d`), but the field itself is
+    /// live and user-reachable on the wire this test pins: see
+    /// `MarkKwargsSpec::zero`'s doc comment for the verbatim, measured
+    /// `fm.catplot(..., kind="bar", mark={"bar": {"zero": False}})` shape
+    /// that reaches this exact `"mark_style":{"zero":false}` key today.
+    const ZERO_FALSE_BAR_LAYER_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{},"layers":[{"mark":"bar","encoding":{"x":{"field":"feature"},"y":{"field":"score"}},"mark_style":{"zero":false},"name":"bar"}]}"#;
+
+    /// Otherwise-eligible bar layer (value channel, no paired span, data
+    /// contributes) but explicitly opts out via `mark_style.zero == false`
+    /// — the extent must stay the raw data range, not zero-anchored.
+    ///
+    /// RED (verified in place): dropping the `layer_wants_zero` guard makes
+    /// this fail with `(0.0, 80.0)`.
+    #[test]
+    fn zero_false_layer_opts_out_of_anchor() {
+        let spec: ChartSpec = serde_json::from_str(ZERO_FALSE_BAR_LAYER_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema = Arc::new(Schema::new(vec![Field::new("score", DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![50.0, 80.0]))])
+                .unwrap()
+        };
+        let extent = numeric_domain_union("y", "score", None, &batch, &HashMap::new(), &spec, false)
+            .expect("score is Float64");
+        assert_eq!(
+            extent,
+            (50.0, 80.0),
+            "mark_style.zero == Some(false) must suppress the layered bar \
+             zero-anchor, mirroring mark_bar(zero=False)"
+        );
+    }
+
+    /// A `point` layer with a real field (`existing`) plus a sibling `bar`
+    /// layer whose declared value field (`phantom`) is absent from every
+    /// batch (no `data_source` resolves it, and it isn't in the primary
+    /// batch either) — the bar layer's NAME alone must not force a
+    /// zero-anchor when its own field never contributed a value
+    /// (rust-quality-review finding 3).
+    const PHANTOM_FIELD_BAR_LAYER_SPEC_JSON: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{},"layers":[{"mark":"point","encoding":{"y":{"field":"existing"}}},{"mark":"bar","encoding":{"x":{"field":"cat"},"y":{"field":"phantom"}}}]}"#;
+
+    /// RED (verified in place): replacing `value_field_contributed` with
+    /// `layer_fields[0].is_some()` (the cycle-1 shape, "declared" instead of
+    /// "contributed") makes this fail with `(0.0, 20.0)` — the bar layer's
+    /// merely-declared `phantom` field forces the anchor even though it
+    /// never resolves to data anywhere.
+    #[test]
+    fn phantom_field_bar_layer_never_zero_extends() {
+        let spec: ChartSpec = serde_json::from_str(PHANTOM_FIELD_BAR_LAYER_SPEC_JSON)
+            .expect("lowered spec JSON must deserialize");
+        let batch = {
+            use arrow::array::Float64Array;
+            let schema =
+                Arc::new(Schema::new(vec![Field::new("existing", DataType::Float64, false)]));
+            RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![10.0, 20.0]))])
+                .unwrap()
+        };
+        let extent =
+            numeric_domain_union("y", "existing", None, &batch, &HashMap::new(), &spec, false)
+                .expect("existing is Float64");
+        assert_eq!(
+            extent,
+            (10.0, 20.0),
+            "a bar layer whose declared value field never resolves to data \
+             must not force a zero-anchor from its name alone"
         );
     }
 }

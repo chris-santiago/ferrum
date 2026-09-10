@@ -1762,8 +1762,18 @@ mod tests {
         chart_enc.y = Some(enc("value"));
         let mut layer_enc = Encoding::default();
         layer_enc.y = Some(enc("upper"));
+        // `Mark::Rect`, not `Mark::Bar` (T5r): mirrors what `desugar_boxplot`
+        // actually emits for the IQR box body (`marks/composite.py`'s layer
+        // 4, a `rect`) — `Mark::Bar` here was a synthetic mismatch with the
+        // real production shape, which the T5r bar zero-anchor
+        // (`scale_resolve/domain.rs::numeric_domain_union`) exposed: this
+        // fixture's "upper" whisker extent (0.5..12.0) doesn't start at
+        // zero, so under `Mark::Bar` the new rule zero-anchored it and this
+        // test's asserted union stopped matching. A real boxplot never hits
+        // that rule (its body layer is `rect`), so fixing the fixture's mark
+        // to match reality is the correct fix, not a workaround.
         let layer = Layer {
-            mark: Mark::Bar,
+            mark: Mark::Rect,
             encoding: layer_enc,
             transforms: Vec::new(),
             mark_style: None,

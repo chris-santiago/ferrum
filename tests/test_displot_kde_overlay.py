@@ -290,9 +290,42 @@ class TestOverlayCountAxisVisibility:
         svg = chart.to_svg()
         _assert_finite_svg(svg)
         digest = hashlib.sha256(svg.encode()).hexdigest()
-        assert digest == "118ad56b5e7a9e4655f1619a9615a3bed007e9b2aa9c5907051c8203b705d15f", (
+        # Digest updated (T5r, 2026-09-10): a `kind="hist", kde=True` overlay
+        # is a layered spec (the histogram `bar` layer plus the KDE `line`
+        # layer) whose density y-axis previously stopped at the auto-inferred
+        # union of the two layers' extents -- the SAME truncated-axis bug
+        # `catplot(kind="bar")` had, fixed in the same place:
+        # `numeric_domain_union`'s bar zero-anchor
+        # (`crates/ferrum-core/src/render/scale_resolve/domain.rs`). The
+        # y-axis now reaches exactly 0 instead of stopping just above it, so
+        # this pinned baseline moved; the pre-fix digest was
+        # "118ad56b5e7a9e4655f1619a9615a3bed007e9b2aa9c5907051c8203b705d15f".
+        # Re-verified visually (rasterized PNG) that the histogram + KDE
+        # overlay render correctly at the new baseline.
+        #
+        # Cycle-2 note (rust-quality-review): the FIRST version of this fix
+        # (cycle 1) over-applied the anchor to the bar layer's POSITION
+        # channel too (any numeric channel a bar layer bound, not just its
+        # value channel), which would have moved THIS digest for the wrong
+        # reason on off-center data. `unimodal_df` (`rng.normal(size=300)`,
+        # zero-centered) cannot reveal that bug either way: its x extent
+        # already straddles zero, so the (over-broad, cycle-1) x-anchor was
+        # a structural no-op for this fixture specifically (`mn` was already
+        # negative, `mx` already positive -- neither zero-extension branch
+        # could fire). Confirmed after narrowing to the value-channel-only
+        # rule (cycle 2): this digest is UNCHANGED from cycle 1, and the
+        # rendered x extent (-3.5..3.5) is identical before and after
+        # narrowing -- so the "density y-axis alone" attribution above holds
+        # precisely, not just plausibly. The off-center case the narrowing
+        # actually fixes (`displot(x=..., kind="hist", kde=True)` on data
+        # like `normal(100, 5)`, where the bug visibly squeezed bars into a
+        # corner of the panel) is pinned at the Rust level instead --
+        # `bar_position_channel_never_zero_extends` and
+        # `coord_flipped_bar_position_channel_never_zero_extends` in
+        # `domain.rs` -- because this fixture is structurally blind to it.
+        assert digest == "84afa395a92ad173597898b22adb9b7615996dbd82112e667ce7102a42f09e4f", (
             "stat='density' overlay output moved -- expected byte-identity "
-            "with the pre-fix baseline"
+            "with the T5r baseline"
         )
 
     def test_stat_count_sets_count_scale_matching_bins(self, unimodal_df):

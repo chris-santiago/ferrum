@@ -1,6 +1,8 @@
 """Phase 9e figure-level function tests."""
 
 import json
+import re
+
 import numpy as np
 import polars as pl
 import pytest
@@ -197,14 +199,29 @@ class TestCatplot:
         assert any(t.get("type") == "letter_value" for t in d.get("transforms", []))
 
     def test_point(self, cat_data):
+        """point is a LAYERED estimate: a CI whisker under one mean marker.
+
+        Asserted on the layers, not the vestigial chart-level ``mark`` key --
+        that key still reads ``"point"`` on any layered chart (it is the
+        spec's default), so the original assertion passed no matter what the
+        chart actually drew. 60 rows over 3 categories must render 3 markers.
+        """
         chart = fe.catplot(cat_data, x="group", y="value", kind="point")
         d = json.loads(chart.to_spec().to_json())
-        assert d["mark"] == "point"
+        assert [ly["mark"] for ly in d["layers"]] == ["rule", "point"]
+        assert any(t["type"] == "summary" for t in d["transforms"])
+        assert all(ly["data_source"] == "summary" for ly in d["layers"])
+        assert chart.to_svg().count("<circle") == 3
 
     def test_bar(self, cat_data):
+        """bar is a LAYERED estimate: one mean bar under its CI whisker."""
         chart = fe.catplot(cat_data, x="group", y="value", kind="bar")
         d = json.loads(chart.to_spec().to_json())
-        assert d["mark"] == "bar"
+        assert [ly["mark"] for ly in d["layers"]] == ["bar", "rule"]
+        assert any(t["type"] == "summary" for t in d["transforms"])
+        assert all(ly["data_source"] == "summary" for ly in d["layers"])
+        svg = chart.to_svg()
+        assert len([r for r in re.findall(r"<rect[^/]*/>", svg) if 'fill="#2563eb"' in r]) == 3
 
     def test_count(self, cat_data):
         chart = fe.catplot(cat_data, x="group", kind="count")
@@ -213,6 +230,14 @@ class TestCatplot:
         assert any(t.get("type") == "aggregate" for t in d.get("transforms", []))
 
     def test_dodge_with_hue(self, cat_data):
+        """dodge=True offsets EVERY layer of the estimate, not the chart.
+
+        ``kind="bar"`` is layered now, so the adjustment lives on each layer
+        (the bar and its whisker must carry the same one, or the interval
+        drifts off its estimate) -- a chart-level ``position`` key would be
+        inherited-by-accident, which is exactly the shape this batch is
+        removing. The rendered offsets are the discriminating half.
+        """
         chart = fe.catplot(
             cat_data,
             x="group",
@@ -222,8 +247,26 @@ class TestCatplot:
             dodge=True,
         )
         d = json.loads(chart.to_spec().to_json())
-        assert d.get("position", {}).get("type") == "dodge"
-        assert d["position"].get("by") == "subgroup"
+        assert [ly["position"] for ly in d["layers"]] == [
+            {"type": "dodge", "by": "subgroup", "padding": 0.05},
+            {"type": "dodge", "by": "subgroup", "padding": 0.05},
+        ]
+        svg = chart.to_svg()
+        # 3 categories x 2 hue levels: 6 bars in 2 palette colors, each with
+        # its own whisker at the same dodged offset.
+        bar_x = [
+            float(re.search(r'x="([\d.]+)"', r).group(1))
+            for r in re.findall(r"<rect[^/]*/>", svg)
+            if 'fill="#2563eb"' in r or 'fill="#dc2626"' in r
+        ]
+        whisker_x = [
+            float(re.search(r'x1="([\d.]+)"', ln).group(1))
+            for ln in re.findall(r"<line[^/]*/>", svg)
+            if 'stroke-width="1.5"' in ln
+        ]
+        assert len(bar_x) == 6
+        assert len(whisker_x) == 6
+        assert len(set(whisker_x)) == 6, "each hue level gets its own offset within the band"
 
     def test_orient_horizontal(self, cat_data):
         chart = fe.catplot(cat_data, y="group", x="value", kind="box", orient="h")

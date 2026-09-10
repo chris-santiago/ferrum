@@ -111,6 +111,31 @@ pub struct MarkKwargsSpec {
     /// byte-stable, matching every mark before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<bool>,
+    // ── T5r cycle 2: zero (bar, layered zero-anchor opt-out) ─────────────────
+    /// Per-layer mirror of the single-chart `mark_bar(zero=False)` /
+    /// `MarkBase.zero_anchor()` concept, consulted by
+    /// `render::scale_resolve::domain::numeric_domain_union`'s bar
+    /// zero-anchor rule (T5r). `None`/unset resolves to `true` (anchor, when
+    /// otherwise eligible — value channel, no bound span field) — byte-stable,
+    /// matching every layer before this field existed. `Some(false)` opts a
+    /// `Mark::Bar` layer out of the anchor even when eligible, mirroring
+    /// `_spec_build.py`'s D3 `not _y2_bound`-style suppression but keyed on
+    /// an explicit request rather than a span binding.
+    ///
+    /// Live and user-reachable today via the generic per-layer `mark=`
+    /// passthrough on layered figure functions — e.g.
+    /// `fm.catplot(df, x=..., y=..., kind="bar", mark={"bar": {"zero":
+    /// False}})` resolves the value axis to the raw data range (`58..61.5`
+    /// for data in that range), not `0..61.5`. That passthrough
+    /// (`marks/_mark_kwargs.py::apply_user_mark_kwargs`) merges validated
+    /// user kwargs straight into a layer's `mark_kwargs` dict, bypassing
+    /// `MarkBase.to_mark_kwargs_dict`'s chart-level exclusion entirely — the
+    /// ONE path that stays inert is `Chart.mark_bar(zero=False)` composed
+    /// via `+` into a layer (`_mark_zero` is consumed and dropped before
+    /// that chart becomes a layer, predating this field), which this field
+    /// does not change and was never meant to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zero: Option<bool>,
 }
 
 impl MarkKwargsSpec {
@@ -221,5 +246,38 @@ mod tests {
         assert_eq!(json, r#"{"clip":false}"#);
         let parsed: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, m);
+    }
+
+    // ── T5r cycle 2: zero (bar, layered zero-anchor opt-out) ────────────────
+
+    #[test]
+    fn mark_kwargs_default_zero_is_none_and_omitted() {
+        // Covered by `mark_kwargs_default_omits_all_fields` too, but this
+        // pins the specific field so a future refactor of that test can't
+        // silently stop covering `zero`.
+        let m = MarkKwargsSpec::default();
+        assert_eq!(m.zero, None);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("zero"), "unset zero must be omitted: {json}");
+    }
+
+    #[test]
+    fn mark_kwargs_round_trip_with_zero_false() {
+        let m = MarkKwargsSpec { zero: Some(false), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"zero":false}"#);
+        let parsed: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn mark_kwargs_pre_existing_layer_json_without_zero_key_deserializes_default() {
+        // Absolute wire back-compat: a layer's `mark_style` dict from before
+        // this field existed (no "zero" key at all) must deserialize to
+        // `zero: None`, not an error and not a spurious `Some(_)`.
+        let json = r#"{"size":50.0}"#;
+        let m: MarkKwargsSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(m.zero, None);
+        assert_eq!(m.size, Some(50.0));
     }
 }
