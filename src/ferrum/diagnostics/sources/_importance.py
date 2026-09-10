@@ -73,6 +73,44 @@ class FeatureImportanceMixin(_MixinBase):
                 random_state=rs,
             )
 
+        if len(self._feature_names) < len(imp):
+            # The discriminator is name AVAILABILITY, not X-presence: X is
+            # just one of two ways names arrive (`X.columns` or an
+            # explicit `feature_names=` kwarg, `_base.py`), and either one
+            # can independently be absent or merely too short. Truth
+            # table (imp has 5 entries):
+            #   _feature_names == []                              -> nothing to label with at all      -> "requires feature names" (regardless of X)
+            #   _feature_names == ["f0","f1","f2"] (from X)        -> names exist but too few            -> mismatch message
+            #   _feature_names == ["a","b"] (from feature_names=)  -> names exist but too few            -> mismatch message
+            # Branching on `self._X is None` instead (a prior version of
+            # this guard) got the third row wrong: an X-less source with
+            # an explicit-but-short `feature_names=` has names -- telling
+            # it to pass `feature_names=[...]` is advice it already took.
+            if not self._feature_names:
+                # Nothing to label with at all: no X, no explicit
+                # feature_names=. This is the only quadrant where the
+                # "requires feature names" message is accurate.
+                raise ValueError(
+                    "ModelSource.importances() requires feature names: "
+                    "construct with ModelSource(model, X) or "
+                    "ModelSource(model, feature_names=[...])."
+                )
+            # Names exist (from X's columns or an explicit feature_names=)
+            # but there are fewer of them than the model's importance
+            # vector -- a genuine count mismatch (e.g. X is missing
+            # columns the model was fit on, or feature_names= is too
+            # short), not a missing-names problem. Do not advise
+            # supplying X or feature_names=: whichever the caller used to
+            # arrive at `self._feature_names`, they already did.
+            raise ValueError(
+                f"ModelSource.importances() got {len(imp)} importance "
+                f"value(s) from the model but only "
+                f"{len(self._feature_names)} feature name(s) (from X's "
+                f"columns or feature_names=). The model was likely fit on "
+                f"more features than this ModelSource was given -- pass "
+                f"the full feature matrix via X= or the full name list "
+                f"via feature_names=."
+            )
         order = np.argsort(-np.abs(imp))
         rows = [
             {
@@ -124,9 +162,10 @@ class FeatureImportanceMixin(_MixinBase):
             raise ValueError(
                 "ModelSource.importances(method='permutation') requires y to be provided."
             )
+        X = self._require_X("importances")
         result = permutation_importance(
             self._model,
-            self._X,
+            X,
             self._y,
             n_repeats=n_repeats,
             scoring=scoring,
@@ -183,7 +222,7 @@ class FeatureImportanceMixin(_MixinBase):
         shap = require_shap("shap_values")
 
         # SHAP explainers do not reliably accept polars DataFrames (as of shap 0.45).
-        X_np = self._X.to_numpy()
+        X_np = self._require_X("shap_values").to_numpy()
         if "coef_" in self._capabilities:
             explainer = shap.LinearExplainer(self._model, X_np)
         elif "feature_importances_" in self._capabilities:
@@ -260,10 +299,19 @@ class FeatureImportanceMixin(_MixinBase):
             return self._cache[key]
         require_sklearn("partial_dependence")
 
-        feature_idxs = [self._feature_names.index(f) if isinstance(f, str) else f for f in features]
+        # Guard before resolving string feature names: on an X-less source
+        # `self._feature_names` is `[]` (it only ever populates from
+        # `X.columns` or an explicit `feature_names=` kwarg), so
+        # `.index(f)` for a string `f` would raise an untyped
+        # `ValueError: 'f' is not in list` before the typed X refusal ever
+        # runs. Integer-indexed `features` don't touch `_feature_names`
+        # here, so they'd otherwise reach the typed message while string
+        # ones didn't -- the guard must come first regardless of `features`'
+        # shape.
         # numpy required: sklearn.inspection.partial_dependence uses numpy integer
         # column indexing internally, which polars does not support.
-        X_np = self._X.to_numpy()
+        X_np = self._require_X("partial_dependence").to_numpy()
+        feature_idxs = [self._feature_names.index(f) if isinstance(f, str) else f for f in features]
         rows: list[dict] = []
         for f_idx in feature_idxs:
             fname = str(self._feature_names[f_idx])

@@ -61,9 +61,18 @@ class ModelSource(
         ``cluster_centers_``, ``explained_variance_ratio_``, …) and
         raise ``AttributeError`` with the missing attribute name when
         called against an incompatible model.
-    X : polars.DataFrame | pandas.DataFrame | pyarrow.Table | numpy.ndarray
+    X : polars.DataFrame | pandas.DataFrame | pyarrow.Table | numpy.ndarray, optional
         Feature matrix. Coerced internally to a polars DataFrame; any
-        ``narwhals``-compatible input also works.
+        ``narwhals``-compatible input also works. Optional — a
+        ``ModelSource`` constructs fine with just a model. Diagnostics
+        that read the feature matrix (e.g. ``silhouette``, ``embeddings``,
+        ``predictions``, every classification-curve and model-selection
+        method) raise ``ValueError`` naming the diagnostic and the fix
+        (``ModelSource(model, X)``) when called on an X-less source.
+        Diagnostics that read model attributes alone —
+        ``pca_variance`` when the model exposes
+        ``explained_variance_ratio_``, and ``intercluster_distance`` —
+        work without ``X``.
     y : array-like, optional
         Target. Required by methods that depend on ground truth (every
         method except ``probabilities`` and the unsupervised

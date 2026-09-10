@@ -40,8 +40,15 @@ _PROTOCOL_ATTRS: tuple[str, ...] = (
 )
 
 
-def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, "pl.Series | None"]:
-    """Coerce X to polars.DataFrame and y to polars.Series (or None).
+def _coerce_X_y(X: Any, y: Any) -> tuple["pl.DataFrame | None", "pl.Series | None"]:
+    """Coerce X to polars.DataFrame (or None) and y to polars.Series (or None).
+
+    ``X=None`` passes straight through — ``ModelSource`` is constructible
+    without a feature matrix; diagnostics that need one read it via
+    ``BaseSource._require_X`` rather than ``self._X`` directly, so an
+    X-less source refuses with a typed domain message instead of this
+    function ever seeing ``None`` and delegating to ``to_polars(None)``
+    (which raises an unrelated ``Chart(data=None)`` error).
 
     ``X``'s 2D-ndarray arm uses the sklearn-style ``f0, f1, ...`` feature
     naming (distinct from ``ferrum._coerce.to_polars``'s ``col_0, col_1,
@@ -49,7 +56,9 @@ def _coerce_X_y(X: Any, y: Any) -> tuple[pl.DataFrame, "pl.Series | None"]:
     shape (``pl.DataFrame`` passthrough, narwhals-compatible frames, dict,
     list[dict]) delegates to the canonical ``to_polars`` coercion.
     """
-    if isinstance(X, np.ndarray):
+    if X is None:
+        X_df: "pl.DataFrame | None" = None
+    elif isinstance(X, np.ndarray):
         if X.ndim != 2:
             raise ValueError(f"X must be 2D; got shape {X.shape}")
         X_df = pl.from_numpy(X, schema=[f"f{i}" for i in range(X.shape[1])])
@@ -88,7 +97,7 @@ class BaseSource:
     def __init__(
         self,
         model: Any,
-        X: Any,
+        X: Any = None,
         y: Any = None,
         *,
         feature_names: Sequence[str] | None = None,
@@ -99,7 +108,9 @@ class BaseSource:
         self._model = model
         self._X, self._y = _coerce_X_y(X, y)
         self._feature_names: list[str] = (
-            list(feature_names) if feature_names is not None else list(self._X.columns)
+            list(feature_names)
+            if feature_names is not None
+            else (list(self._X.columns) if self._X is not None else [])
         )
         self._class_names: list[str] | None = list(class_names) if class_names is not None else None
         self._sample_weight = sample_weight
@@ -111,13 +122,19 @@ class BaseSource:
         self._cache: dict[tuple, pl.DataFrame] = {}
 
     @property
-    def X(self) -> pl.DataFrame:
-        """Feature matrix coerced to a polars DataFrame.
+    def X(self) -> "pl.DataFrame | None":
+        """Feature matrix coerced to a polars DataFrame, or ``None``.
 
-        Returns the value supplied to ``__init__`` (after coercion).
-        Use this for read-only access from chart builders and external
-        callers — ``source._X`` is an internal alias preserved for
-        back-compat.
+        Returns the value supplied to ``__init__`` (after coercion), or
+        ``None`` when the source was constructed without one — a
+        ``ModelSource`` is constructible with just a model, and X-free
+        diagnostics (``pca_variance`` off ``explained_variance_ratio_``,
+        ``intercluster_distance``) work without it. Diagnostics that
+        need the feature matrix call ``_require_X`` internally, which
+        raises a typed error naming the fix rather than letting a
+        ``None`` leak into unrelated code downstream. Use this property
+        for read-only access from chart builders and external callers —
+        ``source._X`` is an internal alias preserved for back-compat.
         """
         return self._X
 
@@ -175,16 +192,18 @@ class BaseSource:
         """
         return self._capabilities
 
-    def _x_record_batch(self) -> pa.RecordBatch:
+    def _x_record_batch(self, diagnostic: str) -> pa.RecordBatch:
         """Coerce ``self._X`` to a ``pa.RecordBatch`` for Rust kernel calls.
 
         All derived-data methods that pass the feature matrix to Rust kernels
         should call this instead of inlining the ``from_pydict`` expression.
-        ``self._X`` is always a polars DataFrame (guaranteed by ``_coerce_X_y``),
-        so the conversion is a direct column-by-column Arrow export — no copy
-        beyond what polars already holds.
+        Routes through ``_require_X(diagnostic)`` itself, so an X-less
+        source refuses with the typed domain message rather than crashing
+        on a ``None`` subscript; the conversion is a direct column-by-column
+        Arrow export with no copy beyond what polars already holds.
         """
-        return pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
+        X = self._require_X(diagnostic)
+        return pa.RecordBatch.from_pydict({c: X[c].to_arrow() for c in X.columns})
 
     def _require_capability(self, attr: str, method_name: str) -> None:
         if attr not in self._capabilities:
@@ -193,6 +212,23 @@ class BaseSource:
                 f"implement '{attr}'. Got {type(self._model).__name__!r} which "
                 f"does not."
             )
+
+    def _require_X(self, diagnostic: str) -> pl.DataFrame:
+        """Return ``self._X``, raising a typed domain error when absent.
+
+        Every diagnostic that reads the feature matrix calls this instead
+        of touching ``self._X`` directly, so an X-less ``ModelSource``
+        refuses with a message naming the diagnostic and the fix, instead
+        of ``self._X`` being ``None`` and leaking an unrelated error (e.g.
+        ``Chart(data=None) requires per-layer data...``) from deep inside
+        a chart builder or Rust kernel call.
+        """
+        if self._X is None:
+            raise ValueError(
+                f"ModelSource.{diagnostic}() requires the training data: "
+                f"ModelSource(model, X)."
+            )
+        return self._X
 
     def _cache_key(self, method: str, **kwargs) -> tuple:
         """Build a hashable cache key from method name + kwargs.

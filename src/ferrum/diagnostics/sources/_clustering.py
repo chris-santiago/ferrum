@@ -50,16 +50,17 @@ class ClusteringMixin(_MixinBase):
         if key in self._cache:
             return self._cache[key]
 
+        X = self._require_X("silhouette")
         if "labels_" in self._capabilities:
             labels = np.asarray(self._model.labels_)
         elif "predict" in self._capabilities:
-            labels = np.asarray(self._model.predict(self._X))
+            labels = np.asarray(self._model.predict(X))
         else:
             raise AttributeError(
                 "ModelSource.silhouette() requires the wrapped model to "
                 "expose 'labels_' or 'predict'."
             )
-        x_arrow = self._x_record_batch()
+        x_arrow = self._x_record_batch("silhouette")
         labels_arrow = pa.array(labels.astype(int).tolist(), type=pa.int64())
         sv_raw = _core.silhouette_samples(x_arrow, labels_arrow, "euclidean")
         sv = np.array(pa.array(sv_raw), dtype=np.float64)
@@ -117,7 +118,7 @@ class ClusteringMixin(_MixinBase):
                 }
             )
         else:
-            x_arrow = self._x_record_batch()
+            x_arrow = self._x_record_batch("pca_variance")
             result = _core.pca_variance(x_arrow, n_components)
             df = pl.from_arrow(result)
         self._cache[key] = df
@@ -160,7 +161,7 @@ class ClusteringMixin(_MixinBase):
             return self._cache[key]
         seed = self._random_state if self._random_state is not None else 0
         if method == "umap":
-            x_arrow = self._x_record_batch()
+            x_arrow = self._x_record_batch("embeddings")
             result = _core.umap_embedding(
                 x_arrow,
                 n_components,
@@ -171,7 +172,7 @@ class ClusteringMixin(_MixinBase):
             )
             df = pl.from_arrow(result)
         elif method == "tsne":
-            x_arrow = self._x_record_batch()
+            x_arrow = self._x_record_batch("embeddings")
             result = _core.tsne_embedding(
                 x_arrow,
                 n_components,
@@ -183,7 +184,7 @@ class ClusteringMixin(_MixinBase):
             df = pl.from_arrow(result)
         else:
             # method == "pca" (validated above)
-            x_arrow = self._x_record_batch()
+            x_arrow = self._x_record_batch("embeddings")
             scores_batch = _core.pca_scores(x_arrow, n_components)
             df = pl.from_arrow(scores_batch)
         if self._y is not None:

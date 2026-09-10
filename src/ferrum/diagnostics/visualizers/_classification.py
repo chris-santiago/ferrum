@@ -396,6 +396,21 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         require_sklearn("ClassificationReportVisualizer")
         from sklearn.metrics import f1_score
 
+        if self._source.X is None:
+            # Reachable via ``ClassificationReportVisualizer(model).fit(None, y)``
+            # -- ``fit`` forwards its ``X`` argument straight into
+            # ``ModelSource`` unguarded (`_base.py:118`), so an explicit
+            # ``X=None`` builds an X-less source. Without this guard
+            # ``self._source.model.predict(self._source.X)`` below hands
+            # sklearn a bare ``None`` and leaks
+            # "Expected 2D array, got scalar array instead: array=None...".
+            # This guard runs before ``_build_chart`` (which routes through
+            # ``plots/classification.py``'s own ``classification_report_chart``
+            # leak site), so it closes the visualizer's path independently.
+            raise ValueError(
+                "ClassificationReportVisualizer.fit() requires the "
+                "training data: fit(X, y)."
+            )
         y_true = self._source.y
         y_pred = self._source.model.predict(self._source.X)
         self._metrics["f1_macro"] = float(

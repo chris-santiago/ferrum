@@ -281,7 +281,7 @@ class ClassificationCurvesMixin(_MixinBase):
 
         # numpy required: CV split uses integer-array row indexing (X_np[tr], X_np[te])
         # which polars does not support.
-        X_np = self._X.to_numpy()
+        X_np = self._require_X("discrimination_threshold").to_numpy()
         splitter = (
             cv
             if hasattr(cv, "split")
@@ -332,8 +332,9 @@ class ClassificationCurvesMixin(_MixinBase):
 
         if self._y is None:
             raise ValueError("ModelSource.confusion_matrix() requires y to be provided.")
+        X = self._require_X("confusion_matrix")
         y_true = np.asarray(self._y)
-        y_pred = np.asarray(self._model.predict(self._X))
+        y_pred = np.asarray(self._model.predict(X))
 
         if self._class_names is not None:
             labels: list = list(self._class_names)

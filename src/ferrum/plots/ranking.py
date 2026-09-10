@@ -227,8 +227,13 @@ def rank1d_chart(
         first-param name; the legacy keyword ``source=`` is accepted as a
         deprecated alias.)
     X, y : optional
-        Feature matrix / target -- forwarded to ``_resolve_source`` when
-        ``data_or_source`` is a raw estimator.
+        Feature matrix / target. When ``data_or_source`` is raw data (a
+        ``polars``/``pandas`` ``DataFrame`` or 2D ``numpy`` array), ``X``
+        overrides ``data_or_source`` as the feature matrix when given, and
+        ``y`` is required for ``algorithm="covariance"`` (unused for other
+        algorithms). When ``data_or_source`` is a fitted estimator (not
+        raw data, not a ``ModelSource``) and ``algorithm="covariance"``,
+        ``X``/``y`` are forwarded to ``_resolve_source`` instead.
     algorithm : str or None, default None
         Ranking algorithm. ``None`` selects ``"shapiro"``.
     top_k : int or None, optional
@@ -239,7 +244,11 @@ def rank1d_chart(
     color_field : str or None, optional
         Column name to map to bar color.
     random_state : int or None, default None
-        Seed forwarded to ``ModelSource``.
+        Seed forwarded to ``ModelSource`` when ``data_or_source`` is a
+        fitted estimator (not raw data, not already a ``ModelSource``)
+        and ``algorithm="covariance"``. Unused otherwise -- the raw-data
+        covariance path and every non-covariance algorithm are
+        deterministic statistics with no randomness to seed.
     mark : dict, optional
         Per-layer mark overrides.  For composite-mark charts, keys are
         layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
@@ -280,13 +289,43 @@ def rank1d_chart(
     if isinstance(data_or_source, ferrum.ModelSource):
         df = data_or_source.rank1d(algorithm=algo)
     elif algo == "covariance":
-        ms = _resolve_source(
-            data_or_source,
-            X,
-            y,
-            random_state=random_state,
-        )
-        df = ms.rank1d(algorithm=algo)
+        # Raw-vs-model detection mirrors clustering.py's pca_scree_chart
+        # is_raw_data idiom (plots/clustering.py:612-624): a fitted
+        # estimator is not raw tabular data, so it must not take the
+        # raw-data path below -- doing so would hand the estimator object
+        # itself to np.asarray()/polars_or_array_to_record_batch() and leak
+        # an internal TypeError instead of the typed ModelSource refusal.
+        import numpy as np
+
+        is_raw_data = False
+        if isinstance(data_or_source, pl.DataFrame):
+            is_raw_data = True
+        elif isinstance(data_or_source, np.ndarray) and data_or_source.ndim == 2:
+            is_raw_data = True
+        else:
+            try:
+                import pandas as pd
+
+                if isinstance(data_or_source, pd.DataFrame):
+                    is_raw_data = True
+            except ImportError:
+                pass
+
+        if is_raw_data:
+            from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
+
+            if y is None:
+                raise ValueError("rank1d_chart(algorithm='covariance') requires y.")
+            input_data = data_or_source if X is None else X
+            df = rank1d_compute_with_y(input_data, y, algorithm=algo)
+        else:
+            ms = _resolve_source(
+                data_or_source,
+                X,
+                y,
+                random_state=random_state,
+            )
+            df = ms.rank1d(algorithm=algo)
     else:
         from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
 
@@ -917,6 +956,11 @@ def _decision_boundary_chart_from_source(
     """
     import ferrum
 
+    if source.X is None:
+        raise ValueError(
+            "decision_boundary_chart() requires the training data: "
+            "ModelSource(model, X)."
+        )
     feat_idx = _resolve_decision_boundary_features(source, features)
     grid_info = _build_decision_boundary_grid(
         source,

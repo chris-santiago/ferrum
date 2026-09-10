@@ -74,6 +74,7 @@ class ModelSelectionMixin(_MixinBase):
         """
         if self._y is None:
             raise ValueError("ModelSource.learning_curve() requires y to be provided.")
+        X = self._require_X("learning_curve")
         key = self._cache_key(
             "learning_curve",
             cv=cv,
@@ -88,7 +89,7 @@ class ModelSelectionMixin(_MixinBase):
         sizes = train_sizes if train_sizes is not None else np.linspace(0.1, 1.0, 5)
         ts, tr_scores, te_scores = _lc(
             self._model,
-            self._X,
+            X,
             self._y,
             train_sizes=sizes,
             cv=cv,
@@ -132,6 +133,7 @@ class ModelSelectionMixin(_MixinBase):
         """
         if self._y is None:
             raise ValueError("ModelSource.validation_curve() requires y to be provided.")
+        X = self._require_X("validation_curve")
         vals = np.asarray(list(values), dtype=np.float64)
         key = self._cache_key(
             "validation_curve",
@@ -147,7 +149,7 @@ class ModelSelectionMixin(_MixinBase):
 
         tr, te = _vc(
             self._model,
-            self._X,
+            X,
             self._y,
             param_name=param,
             param_range=vals,
@@ -184,6 +186,7 @@ class ModelSelectionMixin(_MixinBase):
         """
         if self._y is None:
             raise ValueError("ModelSource.cv_scores() requires y to be provided.")
+        X = self._require_X("cv_scores")
         key = self._cache_key(
             "cv_scores",
             cv=cv,
@@ -196,7 +199,7 @@ class ModelSelectionMixin(_MixinBase):
 
         result = cross_validate(
             self._model,
-            self._X,
+            X,
             self._y,
             cv=cv,
             scoring=scoring,
@@ -237,6 +240,7 @@ class ModelSelectionMixin(_MixinBase):
         """
         if self._y is None:
             raise ValueError("ModelSource.alpha_selection() requires y to be provided.")
+        X = self._require_X("alpha_selection")
         vals = np.asarray(list(alphas), dtype=np.float64)
         key = self._cache_key(
             "alpha_selection",
@@ -251,7 +255,7 @@ class ModelSelectionMixin(_MixinBase):
 
         _, te = _vc(
             self._model,
-            self._X,
+            X,
             self._y,
             param_name="alpha",
             param_range=vals,

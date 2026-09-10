@@ -34,7 +34,8 @@ class PredictionsMixin(_MixinBase):
             return self._cache[key]
 
         self._require_capability("predict", "predictions")
-        y_pred = np.asarray(self._model.predict(self._X), dtype=np.float64)
+        X = self._require_X("predictions")
+        y_pred = np.asarray(self._model.predict(X), dtype=np.float64)
         y_true = (
             np.asarray(self._y, dtype=np.float64)
             if self._y is not None
@@ -45,7 +46,7 @@ class PredictionsMixin(_MixinBase):
         if "coef_" in self._capabilities and self._y is not None:
             from ferrum._core import hat_matrix_stats
 
-            x_arrow = self._x_record_batch()
+            x_arrow = self._x_record_batch("predictions")
             yt_arrow = pa.array(y_true, type=pa.float64())
             yp_arrow = pa.array(y_pred, type=pa.float64())
             result = hat_matrix_stats(x_arrow, yt_arrow, yp_arrow)
@@ -83,11 +84,12 @@ class PredictionsMixin(_MixinBase):
             return self._cache[key]
 
         require_sklearn("probabilities")
+        X = self._require_X("probabilities")
 
         if "predict_proba" in self._capabilities:
-            proba = np.asarray(self._model.predict_proba(self._X), dtype=np.float64)
+            proba = np.asarray(self._model.predict_proba(X), dtype=np.float64)
         elif "decision_function" in self._capabilities:
-            scores = np.asarray(self._model.decision_function(self._X), dtype=np.float64)
+            scores = np.asarray(self._model.decision_function(X), dtype=np.float64)
             if scores.ndim == 1:
                 # Binary classifier — apply sigmoid.
                 p1 = 1.0 / (1.0 + np.exp(-scores))

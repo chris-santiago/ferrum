@@ -133,6 +133,150 @@ def test_rank_chart_1d_variance_top_k():
     assert "<svg" in svg
 
 
+def test_rank1d_chart_covariance_raw_dataframe_renders():
+    # F-L12-03: rank1d_chart(df, y=..., algorithm="covariance") on a raw
+    # DataFrame previously stuffed the frame into _resolve_source's model
+    # slot (X=None) and crashed with the leaked Chart(data=None) error.
+    # It must route through rank1d_compute_with_y instead -- the same Rust
+    # entry the already-working Rank1DVisualizer path uses -- and produce
+    # byte-identical output to that path on the same data.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y = load_dataset("regression")["y"]
+
+    chart = ferrum.rank1d_chart(df, y=y, algorithm="covariance")
+    svg = chart.to_svg()
+    assert "<svg" in svg and "</svg>" in svg
+    assert svg.count("<rect") >= len(_REGRESSION_FEATURES)
+
+    viz_svg = ferrum.Rank1DVisualizer(algorithm="covariance").fit(df, y).show().to_svg()
+    assert svg == viz_svg
+
+
+def test_rank1d_chart_covariance_raw_dataframe_requires_y():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    with pytest.raises(ValueError, match="requires y"):
+        ferrum.rank1d_chart(df, algorithm="covariance")
+
+
+def test_rank1d_chart_covariance_raw_dataframe_null_y_matches_model_source():
+    # Quality-review regression (#1): rank1d_compute_with_y coerced y via
+    # np.asarray(y, dtype=np.float64), which casts a polars null to NaN
+    # instead of preserving it as an Arrow validity-bitmap null. A single
+    # missing target silently zeroed every score, and the chart still
+    # rendered -- 0 real bars, literal "NaN" embedded in the SVG, no raise.
+    # The raw arm must agree with the model arm's finite scores instead.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y_list = load_dataset("regression")["y"].to_list()
+    y_list[0] = None
+    y_null = pl.Series("y", y_list)
+    model = load_fixture("regression_ridge")
+
+    from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
+
+    raw_df = rank1d_compute_with_y(df, y_null, algorithm="covariance").sort("feature")
+    model_df = ferrum.ModelSource(model, df, y_null).rank1d(algorithm="covariance").sort(
+        "feature"
+    )
+    assert not raw_df["score"].is_nan().any()
+    assert raw_df["score"].to_list() == pytest.approx(model_df["score"].to_list())
+
+    chart = ferrum.rank1d_chart(df, y=y_null, algorithm="covariance")
+    svg = chart.to_svg()
+    assert "NaN" not in svg
+    assert svg.count("<rect") >= len(_REGRESSION_FEATURES)
+
+
+def test_rank1d_chart_covariance_string_y_raises_identically_on_both_arms():
+    # Quality-review S2 pin: before _y_to_float64_arrow, a numeric-looking
+    # string y silently rendered on the raw arm (numpy string-parsed it via
+    # np.asarray(y, dtype=np.float64)) while raising ArrowInvalid on the
+    # ModelSource arm -- same public function, same algorithm, divergent
+    # semantics chosen by the type of the first positional argument.
+    # _y_to_float64_arrow closes this by construction: both arms now build
+    # the Arrow array the same way (pl.Series(...).to_list() ->
+    # pa.array(..., type=pa.float64())), so both must raise the identical
+    # exception, not just "some" exception.
+    import pyarrow as pa
+
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y_str = pl.Series("y", [str(v) for v in load_dataset("regression")["y"].to_list()])
+    model = load_fixture("regression_ridge")
+
+    from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
+
+    with pytest.raises(pa.lib.ArrowInvalid) as raw_exc:
+        rank1d_compute_with_y(df, y_str, algorithm="covariance")
+    with pytest.raises(pa.lib.ArrowInvalid) as model_exc:
+        ferrum.ModelSource(model, df, y_str).rank1d(algorithm="covariance")
+
+    assert str(raw_exc.value) == str(model_exc.value)
+
+
+def test_rank1d_chart_covariance_raw_ndarray_renders_and_x_override():
+    # Pins the 2-D numpy.ndarray arm of the is_raw_data gate and the
+    # raw-arm X-override line (ranking.py: input_data = data_or_source if
+    # X is None else X) together: a narrower X restricts which features
+    # get ranked even when data_or_source is the full array.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y = load_dataset("regression")["y"]
+    X_full = df.to_numpy()
+
+    chart_full = ferrum.rank1d_chart(X_full, y=y, algorithm="covariance")
+    svg_full = chart_full.to_svg()
+    assert "<svg" in svg_full
+    assert svg_full.count("<rect") >= len(_REGRESSION_FEATURES)
+
+    X_narrow = df.select(["f0", "f1"]).to_numpy()
+    chart_narrow = ferrum.rank1d_chart(X_full, X_narrow, y, algorithm="covariance")
+    svg_narrow = chart_narrow.to_svg()
+    assert svg_narrow.count("<rect") < svg_full.count("<rect")
+
+
+def test_rank1d_chart_covariance_raw_pandas_dataframe_matches_polars():
+    # Pins the pandas.DataFrame arm of the is_raw_data gate; asserts parity
+    # with the polars-frame result on identical data.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y = load_dataset("regression")["y"]
+    pdf = df.to_pandas()
+
+    chart_pd = ferrum.rank1d_chart(pdf, y=y, algorithm="covariance")
+    svg_pd = chart_pd.to_svg()
+    assert "<svg" in svg_pd
+    assert svg_pd.count("<rect") >= len(_REGRESSION_FEATURES)
+
+    chart_pl = ferrum.rank1d_chart(df, y=y, algorithm="covariance")
+    assert svg_pd == chart_pl.to_svg()
+
+
+def test_rank1d_chart_covariance_fitted_estimator_no_x_typed_refusal():
+    # A fitted estimator (not raw data, not a ModelSource) is not caught
+    # by an isinstance(ModelSource) check -- it must still route through
+    # the model path (_resolve_source), not the raw-data path, so an
+    # X-less call surfaces ModelSource's typed refusal instead of a
+    # leaked ``TypeError: float() argument must be a string or a real
+    # number, not 'Ridge'`` from np.asarray() inside the raw helper.
+    y = load_dataset("regression")["y"]
+    model = load_fixture("regression_ridge")
+    with pytest.raises(ValueError, match="requires the training data"):
+        ferrum.rank1d_chart(model, y=y, algorithm="covariance")
+
+
+def test_rank1d_chart_covariance_fitted_estimator_with_x_matches_model_source_path():
+    # Estimator + explicit X + y for algorithm="covariance" must stay on
+    # the exact model path a pre-built ModelSource already uses (spec G8:
+    # "Model/ModelSource inputs keep the current path unchanged"), not the
+    # raw-data path added for bare DataFrame/array input.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y = load_dataset("regression")["y"]
+    model = load_fixture("regression_ridge")
+
+    chart = ferrum.rank1d_chart(model, df, y, algorithm="covariance")
+    via_model_source = ferrum.rank1d_chart(
+        ferrum.ModelSource(model, df, y), algorithm="covariance"
+    )
+    assert chart.to_svg() == via_model_source.to_svg()
+
+
 def test_rank_chart_2d_pearson_renders():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     chart = ferrum.rank_chart(df, rank="2d", algorithm="pearson")

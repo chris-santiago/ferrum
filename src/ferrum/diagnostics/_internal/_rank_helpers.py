@@ -5,8 +5,9 @@ it to Arrow and delegate to ``ferrum._core.py_rank1d`` / ``py_rank2d``.
 
 ``polars_or_array_to_record_batch`` handles arbitrary external inputs
 (polars, pandas, numpy, pyarrow).  It is the raw-data counterpart to
-``BaseSource._x_record_batch``, which only handles ``self._X`` (always a
-polars DataFrame) and is therefore simpler and faster.
+``BaseSource._x_record_batch``, which only handles ``self._X`` (a polars
+DataFrame, or ``None`` on an X-less source -- guarded via ``_require_X``)
+and is therefore simpler and faster.
 """
 
 from __future__ import annotations
@@ -20,9 +21,10 @@ def polars_or_array_to_record_batch(X) -> pa.RecordBatch:
 
     Used by the raw-data (non-ModelSource) paths of ``rank1d_compute``,
     ``rank1d_compute_with_y``, and ``rank2d_compute``.  Internal ModelSource
-    methods should call ``self._x_record_batch()`` instead, which assumes
-    ``self._X`` is already a polars DataFrame and avoids the type-dispatch
-    overhead.
+    methods should call ``self._x_record_batch(diagnostic)`` instead, which
+    resolves ``self._X`` through ``_require_X`` (raising a typed error on an
+    X-less source) and avoids the type-dispatch overhead once it's a known
+    polars DataFrame.
     """
     if isinstance(X, pa.RecordBatch):
         return X
@@ -48,6 +50,43 @@ def polars_or_array_to_record_batch(X) -> pa.RecordBatch:
     )
 
 
+def _y_to_float64_arrow(y) -> pa.Array:
+    """Coerce ``y`` to an Arrow ``Float64`` array, agreeing with ``ModelSource``.
+
+    Mirrors the conversion ``ModelSource.rank1d`` already uses for its own
+    ``y`` (``BaseSource._coerce_X_y`` wraps ``y`` in a ``polars.Series``;
+    ``RankingMixin.rank1d`` then calls ``pa.array(self._y.to_list(),
+    type=pa.float64())``). Building a ``polars.Series`` first -- rather than
+    ``np.asarray(y, dtype=np.float64)`` -- preserves missing values as Arrow
+    validity-bitmap nulls instead of silently casting them to ``NaN``, so
+    this raw-data path now produces the exact same Arrow array
+    ``ModelSource.rank1d`` would build from the same ``y``: the two call
+    sites no longer drift (a ``NaN`` used to be indistinguishable from a
+    real floating-point value once it reached the Rust kernel, corrupting
+    every score; a numeric-looking string ``y`` used to be silently parsed
+    here via ``numpy`` while ``ModelSource`` raised). It also means a
+    non-numeric ``y`` now raises the same ``pyarrow.lib.ArrowInvalid`` the
+    ``ModelSource`` path already raises, instead of ``numpy``'s more
+    permissive string parsing.
+
+    This does **not** make the covariance statistic itself null-aware.
+    ``py_rank1d_with_y`` (``crates/ferrum-core/src/transform/stats/mod.rs``,
+    ``py_rank1d_with_y`` / around L402-407) reads the Arrow array's raw
+    value buffer and never consults the validity bitmap, so a null ``y``
+    slot is read as the buffer's default ``0.0`` and folded into the
+    covariance as a zero-valued observation rather than dropped or
+    otherwise excluded -- on **both** the raw-data and ``ModelSource``
+    arms, since both now build the same null-preserving Arrow array and
+    feed the same kernel. This is pre-existing Rust-kernel behavior, not
+    introduced here; it is tracked as a separate Rust-side follow-up
+    (`py_rank1d_with_y` should decide and implement an explicit null
+    policy -- e.g. drop-row -- rather than silently zero-impute), not
+    something this Python-side coercion fix can or should change.
+    """
+    y_ser = y if isinstance(y, pl.Series) else pl.Series("y", y)
+    return pa.array(y_ser.to_list(), type=pa.float64())
+
+
 def rank1d_compute(
     X,
     *,
@@ -70,10 +109,8 @@ def rank1d_compute_with_y(
 ) -> pl.DataFrame:
     from ferrum._core import py_rank1d_with_y
 
-    import numpy as np
-
     batch = polars_or_array_to_record_batch(X)
-    y_arrow = pa.array(np.asarray(y, dtype=np.float64), type=pa.float64())
+    y_arrow = _y_to_float64_arrow(y)
     result = py_rank1d_with_y(batch, y_arrow, algorithm, top_k)
     return pl.from_arrow(result)
 

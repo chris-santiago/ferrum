@@ -41,7 +41,7 @@ class _SourceState(Protocol):
     """
 
     _model: Any
-    _X: pl.DataFrame
+    _X: pl.DataFrame | None
     _y: pl.Series | None
     _feature_names: list[str]
     _class_names: list[str] | None
@@ -50,9 +50,11 @@ class _SourceState(Protocol):
     _capabilities: frozenset[str]
     _cache: dict[tuple, pl.DataFrame]
 
-    def _x_record_batch(self) -> pa.RecordBatch: ...
+    def _x_record_batch(self, diagnostic: str) -> pa.RecordBatch: ...
 
     def _require_capability(self, attr: str, method_name: str) -> None: ...
+
+    def _require_X(self, diagnostic: str) -> pl.DataFrame: ...
 
     def _cache_key(self, method: str, **kwargs: Any) -> tuple: ...
 
