@@ -559,18 +559,25 @@ def test_pr_chart_annotate_ap_false_no_text_labels():
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=False)
     svg = chart.to_svg()
     assert "<svg" in svg
-    assert "AP = 0." not in svg
+    assert "AP = " not in svg
 
 
 def test_pr_chart_annotate_ap_true_has_text_labels():
-    """annotate_ap=True (default) should inject AP text annotations."""
+    """annotate_ap=True (default) should inject AP text annotations.
+
+    Every positive here outscores every negative (positives 0.9/0.8/0.7/0.85,
+    negatives 0.1/0.3/0.2/0.15), so the average precision is exactly 1.0 by
+    hand. The label used to read ``AP = 0.9xx`` because the Python re-derivation
+    mispaired recall increments with precisions; it now reads the frame's own
+    kernel-computed ``ap`` (F-L11-01).
+    """
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=True)
     svg = chart.to_svg()
     assert "<svg" in svg
     assert "<text" in svg
-    assert "AP = 0." in svg
+    assert "AP = 1.000" in svg
 
 
 def test_pr_chart_iso_lines_annotation_text():
@@ -593,7 +600,9 @@ def test_pr_chart_annotate_ap_and_iso_lines_combined():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=True, iso_lines=True)
     svg = chart.to_svg()
-    assert "AP = 0." in svg
+    # Perfectly separable scores -> AP is exactly 1.0 (see
+    # test_pr_chart_annotate_ap_true_has_text_labels).
+    assert "AP = 1.000" in svg
     assert "F=0.6" in svg
     assert "NaN" not in svg
 
@@ -1738,7 +1747,9 @@ def test_pr_chart_configure_with_iso_lines_and_ap():
     configured = chart.configure(grid=GridConfig(color="#cccccc"))
     svg = configured.to_svg()
     assert "<svg" in svg
-    assert "AP = 0." in svg
+    # Perfectly separable scores -> AP is exactly 1.0 (see
+    # test_pr_chart_annotate_ap_true_has_text_labels).
+    assert "AP = 1.000" in svg
     assert "F=0.6" in svg
     assert "NaN" not in svg
 
@@ -1815,7 +1826,8 @@ def test_residuals_visualizer_show_then_configure():
 
 def test_inject_curve_annotation_zero_row_df():
     """_inject_curve_annotation with zero-row DataFrame should not crash."""
-    from ferrum.plots.classification import _inject_curve_annotation
+    from ferrum._metric_labels import _trapezoid_auc
+    from ferrum.marks._desugar_helpers import _inject_curve_annotation
 
     df = pl.DataFrame(
         {
@@ -1831,6 +1843,9 @@ def test_inject_curve_annotation_zero_row_df():
         metric_field="auc",
         metric_label="AUC",
         prefix="_auc",
+        metric_fn=_trapezoid_auc,
+        x_col="fpr",
+        y_col="tpr",
     )
     # Should return the DataFrame unchanged (no crash on zero-row input)
     assert result.height == 0
@@ -1838,13 +1853,15 @@ def test_inject_curve_annotation_zero_row_df():
 
 def test_inject_curve_annotation_null_group():
     """_inject_curve_annotation with None in the group column should skip nulls."""
-    from ferrum.plots.classification import _inject_curve_annotation
+    from ferrum._metric_labels import _trapezoid_auc
+    from ferrum.marks._desugar_helpers import _inject_curve_annotation
 
     df = pl.DataFrame(
         {
             "class": ["a", None, "b"],
             "metric": [0.9, 0.8, 0.7],
             "x": [1.0, 2.0, 3.0],
+            "y": [1.0, 2.0, 3.0],
         }
     )
     result = _inject_curve_annotation(
@@ -1853,6 +1870,9 @@ def test_inject_curve_annotation_null_group():
         metric_field="metric",
         metric_label="M",
         prefix="_m",
+        metric_fn=_trapezoid_auc,
+        x_col="x",
+        y_col="y",
     )
     assert result.height == 3
     # The null group should be skipped; only "a" and "b" get labels

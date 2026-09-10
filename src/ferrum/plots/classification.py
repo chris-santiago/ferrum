@@ -46,58 +46,6 @@ register_layer_names("calibration", frozenset({"line", "reference", "point"}))
 # ---------------------------------------------------------------------------
 
 
-def _inject_curve_annotation(
-    df: pl.DataFrame,
-    *,
-    group_field: str,
-    metric_field: str,
-    metric_label: str,
-    prefix: str,
-) -> pl.DataFrame:
-    """Inject one-non-null-row-per-group annotation columns.
-
-    Adds three columns:
-    - ``{prefix}_label_x: Float64`` -- x coordinate of the label anchor
-      (fixed at 0.65 on the data axis so labels live in the lower-right
-      region where ROC / PR curves typically asymptote).
-    - ``{prefix}_label_y: Float64`` -- staggered y per group (one slot
-      every 0.06 of axis range, starting at 0.05) so multi-class labels
-      don't overlap.
-    - ``{prefix}_label: Utf8`` -- formatted string
-      ``"{group_value}: {metric_label} = {value:.3f}"``.
-
-    All rows except one per group are null; ``mark_text`` skips nulls
-    so exactly N labels render for N groups.  Used by ``mark_roc``'s
-    ``annotate_auc`` and ``mark_pr``'s ``annotate_ap`` paths.
-    """
-    n_rows = df.height
-    if n_rows == 0:
-        return df
-    group_values = df[group_field].to_list()
-    metric_values = df[metric_field].to_list()
-    groups: list[str] = []
-    for g in group_values:
-        if g is None:
-            continue
-        if g not in groups:
-            groups.append(str(g))
-    label_x: list[float | None] = [None] * n_rows
-    label_y: list[float | None] = [None] * n_rows
-    label_text: list[str | None] = [None] * n_rows
-    for i, g in enumerate(groups):
-        # First row matching this group anchors the label.
-        idx = group_values.index(g)
-        label_x[idx] = 0.65
-        label_y[idx] = 0.05 + i * 0.06
-        value = float(metric_values[idx])
-        label_text[idx] = f"{g}: {metric_label} = {value:.3f}"
-    return df.with_columns(
-        pl.Series(f"{prefix}_label_x", label_x, dtype=pl.Float64),
-        pl.Series(f"{prefix}_label_y", label_y, dtype=pl.Float64),
-        pl.Series(f"{prefix}_label", label_text, dtype=pl.Utf8),
-    )
-
-
 def _inject_pr_iso_lines(
     df: pl.DataFrame,
     *,
@@ -209,11 +157,20 @@ def _roc_chart_from_source(
     :class:`ferrum.AUCLabel` text per curve via the explicit-field helper
     (so the figure builder does not need a chart-level color encoding
     that would leak into mark_roc's diagonal reference layer).
-    """
-    import numpy as np
 
+    F-L11-01 (2026-09-10): title, legend text and overlay all resolve their
+    AUC through ``metric_field="auc"`` -- the frame's Rust-computed column
+    -- so the three surfaces show one number from one source. For
+    ``per_class=False`` that column holds the weighted mean of the
+    per-class AUCs (sklearn parity), which is what the averaged-curve title
+    reports.
+    """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit, _trapezoid_auc
+    from ferrum._metric_labels import (
+        _apply_metric_label_explicit,
+        _curve_metric,
+        _trapezoid_auc,
+    )
     from ferrum.marks._desugar_helpers import _roc_render_frame
 
     df = source.roc_curve(average=None if per_class else average)
@@ -226,6 +183,7 @@ def _roc_chart_from_source(
             x_col="fpr",
             y_col="tpr",
             metric_fn=_trapezoid_auc,
+            metric_field="auc",
             metric_name="AUC",
         )
 
@@ -262,9 +220,13 @@ def _roc_chart_from_source(
     )
     n_curves = len(set(curve_df[color_field].to_list())) if color_field is not None else 1
     if n_curves == 1:
-        fpr = np.asarray(curve_df["fpr"].to_list(), dtype=float)
-        tpr = np.asarray(curve_df["tpr"].to_list(), dtype=float)
-        auc_value = _trapezoid_auc(fpr, tpr)
+        auc_value = _curve_metric(
+            curve_df,
+            metric_field="auc",
+            metric_fn=_trapezoid_auc,
+            x_col="fpr",
+            y_col="tpr",
+        )
         chart = chart.properties(
             title=ferrum.Title(f"ROC Curve — AUC {auc_value:.3f}", subtitle=subtitle),
         )
@@ -278,6 +240,7 @@ def _roc_chart_from_source(
             x_col="fpr",
             y_col="tpr",
             color_col=color_field,
+            metric_field="auc",
             position="end",
         )
 
@@ -306,11 +269,19 @@ def _pr_chart_from_source(
     positive-class-prevalence baseline hline for binary classifiers,
     and per-curve :class:`ferrum.APLabel` overlay via the explicit-field
     helper.
-    """
-    import numpy as np
 
+    F-L11-01 (2026-09-10): title, legend text and overlay all resolve their
+    AP through ``metric_field="ap"`` -- the frame's Rust-computed column --
+    so the three surfaces show one number from one source. For
+    ``per_class=False`` that column holds the weighted mean of the
+    per-class APs.
+    """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit, _ap_step
+    from ferrum._metric_labels import (
+        _ap_step,
+        _apply_metric_label_explicit,
+        _curve_metric,
+    )
 
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
@@ -325,6 +296,7 @@ def _pr_chart_from_source(
             x_col="recall",
             y_col="precision",
             metric_fn=_ap_step,
+            metric_field="ap",
             metric_name="AP",
             curve_filter=lambda d: d.filter(pl.col("precision").is_not_null()),
         )
@@ -381,9 +353,13 @@ def _pr_chart_from_source(
     else:
         n_curves = 1
     if n_curves == 1:
-        recall = np.asarray(curve_df["recall"].to_list(), dtype=float)
-        precision = np.asarray(curve_df["precision"].to_list(), dtype=float)
-        ap_value = _ap_step(recall, precision)
+        ap_value = _curve_metric(
+            curve_df,
+            metric_field="ap",
+            metric_fn=_ap_step,
+            x_col="recall",
+            y_col="precision",
+        )
         chart = chart.properties(
             title=ferrum.Title(
                 f"Precision–Recall Curve — AP {ap_value:.3f}",
@@ -414,6 +390,7 @@ def _pr_chart_from_source(
             x_col="recall",
             y_col="precision",
             color_col=color_field,
+            metric_field="ap",
             position="end",
         )
 

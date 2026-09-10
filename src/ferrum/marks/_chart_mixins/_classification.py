@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ferrum._metric_labels import _ap_step, _trapezoid_auc
 from ferrum.marks._desugar_helpers import (
     _filter_class_average,
+    _inject_curve_annotation,
     _normalize_names,
     _normalized_col,
     _roc_render_frame,
@@ -86,9 +88,19 @@ class ClassificationMarksMixin:
         from ferrum.marks.diagnostic import desugar_roc
 
         def _roc_prep(df):
-            return _roc_render_frame(
-                df, average, reference_line=reference_line, mark_name="mark_roc"
-            )
+            df = _roc_render_frame(df, average, reference_line=reference_line, mark_name="mark_roc")
+            if annotate_auc and "_auc_label" not in df.columns:
+                df = _inject_curve_annotation(
+                    df,
+                    group_field=color_field,
+                    metric_field="auc",
+                    metric_label="AUC",
+                    prefix="_auc",
+                    metric_fn=_trapezoid_auc,
+                    x_col="fpr",
+                    y_col="tpr",
+                )
+            return df
 
         return self._set_composite_mark(
             "roc",
@@ -156,6 +168,21 @@ class ClassificationMarksMixin:
         """
         from ferrum.marks.diagnostic import desugar_pr
 
+        def _pr_prep(df):
+            df = _filter_class_average(df, average, mark_name="mark_pr")
+            if annotate_ap and "_ap_label" not in df.columns:
+                df = _inject_curve_annotation(
+                    df,
+                    group_field=color_field,
+                    metric_field="ap",
+                    metric_label="AP",
+                    prefix="_ap",
+                    metric_fn=_ap_step,
+                    x_col="recall",
+                    y_col="precision",
+                )
+            return df
+
         return self._set_composite_mark(
             "pr",
             desugar_pr,
@@ -168,7 +195,7 @@ class ClassificationMarksMixin:
             },
             placeholder="point",
             position=position,
-            data_transform=(lambda df: _filter_class_average(df, average, mark_name="mark_pr")),
+            data_transform=_pr_prep,
         )
 
     def mark_calibration(

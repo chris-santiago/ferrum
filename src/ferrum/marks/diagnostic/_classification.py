@@ -44,10 +44,11 @@ def desugar_roc(
       defaults are intentional.
     * When ``annotate_auc=True`` this desugar emits a ``mark_text`` layer
       reading ``_auc_label_x`` / ``_auc_label_y`` / ``_auc_label`` columns.
-      Those columns must be injected upstream (the data does not carry them
-      out of ``ModelSource.roc_curve()``); the figure path supplies its
-      annotation through ``_metric_labels`` instead, so this branch is the
-      hook for a caller that pre-injects the columns.
+      ``Chart.mark_roc`` injects them from its ``data_transform`` (via
+      ``_inject_curve_annotation``) whenever they are absent, reading the
+      frame's ``auc`` column, so ``mark_roc(annotate_auc=True)`` annotates
+      a plain ``ModelSource.roc_curve()`` frame with no other setup. A
+      caller that pre-injects the columns keeps its own values.
 
     ``average`` is wired via ``data_transform`` in ``Chart.mark_roc`` (filters
     to the row(s) matching the requested average); informational at the
@@ -113,9 +114,11 @@ def desugar_pr(
       the annotation via ``_apply_metric_label_explicit``. The divergent
       defaults are intentional (raw mark vs. figure function).
     * When ``annotate_ap=True`` this desugar emits a ``mark_text`` layer
-      reading ``_ap_label_x`` / ``_ap_label_y`` / ``_ap_label`` columns,
-      which must be injected upstream (they do not come out of
-      ``ModelSource.pr_curve()``).
+      reading ``_ap_label_x`` / ``_ap_label_y`` / ``_ap_label`` columns.
+      ``Chart.mark_pr`` injects them from its ``data_transform`` (via
+      ``_inject_curve_annotation``) whenever they are absent, reading the
+      frame's ``ap`` column. A caller that pre-injects the columns keeps
+      its own values.
 
     When ``iso_lines=True`` the chart builder appends F-score iso-curve rows
     for F in {0.2, 0.4, 0.6, 0.8} with synthetic columns ``_iso_recall``,

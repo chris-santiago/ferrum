@@ -66,6 +66,19 @@ def _f64(arr: np.ndarray) -> pa.Array:
     return pa.array(np.asarray(arr).astype(np.float64), type=pa.float64())
 
 
+def _descending_score_order(scores: np.ndarray) -> np.ndarray:
+    """Row order for a "best-scored first" sweep, ties in original row order.
+
+    Shared by the cumulative-gain and lift frames, which both walk the
+    population from the highest-scoring sample down. The sort is stable, so
+    samples sharing a score (routine for tree ensembles and any model with
+    coarse probability output) keep their input order instead of whichever
+    permutation numpy's quicksort happens to produce -- the curve is then a
+    function of the data alone, not of the sort's internal state.
+    """
+    return np.argsort(-scores, kind="stable")
+
+
 def _avg_weights(y_bin: np.ndarray, average: str, n_classes: int) -> np.ndarray:
     """Per-class weights for macro (uniform) or weighted (support) averaging."""
     if average == "macro":
@@ -246,7 +259,10 @@ def _pr_average(
         r_i = c_i["recall"].to_numpy()
         p_i = c_i["precision"].to_numpy()
         # Curve recall descends from 1 to 0; sort ascending for np.interp.
-        order = np.argsort(r_i)
+        # Stable so tied recall values (routine at the curve extremes) keep
+        # their threshold order and the interpolated curve is the same frame
+        # on every run.
+        order = np.argsort(r_i, kind="stable")
         precisions.append(np.interp(grid, r_i[order], p_i[order]))
         per_class_ap.append(float(average_precision(yt_i, ys_i)))
 
@@ -399,7 +415,7 @@ def gain_frame(
     frames: list[pl.DataFrame] = []
     for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
         y_bin = (y_true == cls_val).astype(int)
-        order = np.argsort(-y_score_matrix[:, i])
+        order = _descending_score_order(y_score_matrix[:, i])
         cum_pos = np.cumsum(y_bin[order])
         total_pos = max(int(cum_pos[-1]), 1) if n else 1
         pct_pop = np.arange(1, n + 1) / max(n, 1)
@@ -466,7 +482,7 @@ def lift_frame(
         base_rate = float(y_bin.mean()) if n else 0.0
         if base_rate == 0.0:
             continue
-        order = np.argsort(-y_score_matrix[:, i])
+        order = _descending_score_order(y_score_matrix[:, i])
         cum_pos = np.cumsum(y_bin[order])
         denom = np.arange(1, n + 1)
         cum_rate = cum_pos / denom

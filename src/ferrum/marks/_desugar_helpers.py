@@ -12,9 +12,11 @@ Rust transform registry is mark- or desugar-specific.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
+
+from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -279,6 +281,96 @@ def _roc_render_frame(
     if reference_line:
         df = _sort_by(df, "fpr")
     return df
+
+
+#: Data-space anchor for a curve-annotation label. ROC and PR curves both
+#: asymptote toward the top-left / top-right, leaving the lower-right region
+#: free, so every label is placed at this x and stacked upward from
+#: ``_CURVE_LABEL_Y0`` in ``_CURVE_LABEL_Y_STEP`` increments (one slot per
+#: group, so multi-class labels do not overlap).
+_CURVE_LABEL_X = 0.65
+_CURVE_LABEL_Y0 = 0.05
+_CURVE_LABEL_Y_STEP = 0.06
+
+
+def _inject_curve_annotation(
+    df: pl.DataFrame,
+    *,
+    group_field: str | None,
+    metric_field: str | None,
+    metric_label: str,
+    prefix: str,
+    metric_fn: Callable[[Any, Any], float],
+    x_col: str,
+    y_col: str,
+) -> pl.DataFrame:
+    """Inject one-non-null-row-per-group annotation columns.
+
+    Adds three columns:
+
+    - ``{prefix}_label_x: Float64`` -- x coordinate of the label anchor.
+    - ``{prefix}_label_y: Float64`` -- staggered y per group.
+    - ``{prefix}_label: Utf8`` -- formatted string
+      ``"{group_value}: {metric_label} = {value:.3f}"``, or
+      ``"{metric_label} = {value:.3f}"`` when the data carries no group
+      column.
+
+    All rows except one per group are null; ``mark_text`` skips nulls so
+    exactly N labels render for N groups. This is what backs
+    ``mark_roc(annotate_auc=True)`` and ``mark_pr(annotate_ap=True)``:
+    those desugars emit a text layer bound to these columns, and
+    ``Chart.mark_roc`` / ``Chart.mark_pr`` call this from their
+    ``data_transform`` so the columns exist by the time the layer binds.
+
+    The metric per group is resolved by :func:`ferrum._metric_labels._curve_metric`
+    -- the frame's broadcast ``metric_field`` (``"auc"``/``"ap"``, as
+    ``ModelSource.roc_curve()``/``pr_curve()`` emit it) when it carries the
+    value, else ``metric_fn`` integrated over ``(x_col, y_col)`` so a
+    hand-built curve frame annotates too.
+    """
+    n_rows = df.height
+    if n_rows == 0:
+        return df
+
+    label_x: list[float | None] = [None] * n_rows
+    label_y: list[float | None] = [None] * n_rows
+    label_text: list[str | None] = [None] * n_rows
+
+    if group_field is not None and group_field in df.columns:
+        metrics = _curve_metrics_by_group(
+            df,
+            group_field=group_field,
+            metric_field=metric_field,
+            metric_fn=metric_fn,
+            x_col=x_col,
+            y_col=y_col,
+        )
+        first_row: dict[str, int] = {}
+        for row_i, value in enumerate(df[group_field].to_list()):
+            if value is not None:
+                first_row.setdefault(str(value), row_i)
+        for slot, (group, metric) in enumerate(metrics.items()):
+            idx = first_row[group]
+            label_x[idx] = _CURVE_LABEL_X
+            label_y[idx] = _CURVE_LABEL_Y0 + slot * _CURVE_LABEL_Y_STEP
+            label_text[idx] = f"{group}: {metric_label} = {metric:.3f}"
+    else:
+        metric = _curve_metric(
+            df,
+            metric_field=metric_field,
+            metric_fn=metric_fn,
+            x_col=x_col,
+            y_col=y_col,
+        )
+        label_x[0] = _CURVE_LABEL_X
+        label_y[0] = _CURVE_LABEL_Y0
+        label_text[0] = f"{metric_label} = {metric:.3f}"
+
+    return df.with_columns(
+        pl.Series(f"{prefix}_label_x", label_x, dtype=pl.Float64),
+        pl.Series(f"{prefix}_label_y", label_y, dtype=pl.Float64),
+        pl.Series(f"{prefix}_label", label_text, dtype=pl.Utf8),
+    )
 
 
 def resolve_cmap_alias(

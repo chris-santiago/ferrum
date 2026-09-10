@@ -22,10 +22,21 @@ both surfaces.  (The value functions ``_trapezoid_auc`` / ``_ap_step`` /
 ``_brier_score`` were already single-homed here; the metric→(fn, prefix)
 association was the piece duplicated between ``_apply_metric_label_explicit``
 and the per-class dataclass ``__radd__`` methods.)
+
+Where the metric value comes from (F-L11-01, 2026-09-10)
+--------------------------------------------------------
+:func:`_curve_metric` is the one rule every AUC/AP display surface obeys:
+when the frame carries the Rust kernel's broadcast metric column (``auc``
+on a ROC frame, ``ap`` on a PR frame), that value is shown; only data
+without such a column -- the ``+ AUCLabel()`` composable path over
+arbitrary user data -- is integrated here in Python. The chart title, the
+legend text, the label overlay and the ``mark_roc(annotate_auc=True)``
+annotation therefore cannot disagree about what a curve's AUC is.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Literal, Optional
 
@@ -51,19 +62,32 @@ def _resolve_field(enc_value: Any) -> Optional[str]:
 
 
 def _trapezoid_auc(x, y) -> float:
-    """Trapezoidal AUC for a curve. Sorts by x before integrating."""
+    """Trapezoidal AUC for a curve. Sorts by x before integrating.
+
+    The sort is **stable** (F-L11-01): ROC/PR curves routinely carry many
+    rows sharing one x value (``fpr``/``recall`` ties at the curve
+    extremes), and numpy's default quicksort scrambles the y order within
+    each tied-x run. Which y ends up last in a run sets the next segment's
+    starting height, so an unstable order corrupts the integral outright --
+    it is not a tie-breaking preference but a wrong number. With
+    ``kind="stable"`` ties keep their original (threshold) order and the
+    result matches the Rust kernel's AUC exactly.
+    """
     import numpy as np
 
-    order = np.argsort(x)
+    order = np.argsort(x, kind="stable")
     trap = getattr(np, "trapezoid", None) or np.trapz  # type: ignore[attr-defined]
     return float(trap(y[order], x[order]))
 
 
 def _ap_step(x, y) -> float:
-    """Step-integrated average precision: sum((R_i - R_{i-1}) * P_i)."""
+    """Step-integrated average precision: sum((R_i - R_{i-1}) * P_i).
+
+    Stable-sorted for the same reason as :func:`_trapezoid_auc`.
+    """
     import numpy as np
 
-    order = np.argsort(x)
+    order = np.argsort(x, kind="stable")
     xs, ys = x[order], y[order]
     return float(np.sum(np.diff(np.concatenate([[0.0], xs])) * ys))
 
@@ -73,6 +97,87 @@ def _brier_score(p, obs) -> float:
     import numpy as np
 
     return float(np.mean((p - obs) ** 2))
+
+
+def _broadcast_metric(df: pl.DataFrame, metric_field: Optional[str]) -> Optional[float]:
+    """The one value a broadcast metric column carries for ``df``, or ``None``.
+
+    Diagnostic curve frames repeat a kernel-computed scalar on every row of
+    a curve (``auc`` on ROC frames, ``ap`` on PR frames -- see
+    ``diagnostics/_internal/_curve_frames.py``). ``None`` means "this frame
+    does not carry the metric for these rows": the column is absent, holds
+    no usable value, or holds *more than one* distinct value, which says the
+    rows span several curves and no single broadcast value describes them.
+    """
+    if metric_field is None or metric_field not in df.columns:
+        return None
+    values = df[metric_field].drop_nulls().unique().to_list()
+    if len(values) != 1:
+        return None
+    value = float(values[0])
+    return None if math.isnan(value) else value
+
+
+def _curve_metric(
+    df: pl.DataFrame,
+    *,
+    metric_field: Optional[str],
+    metric_fn: Callable[[Any, Any], float],
+    x_col: str,
+    y_col: str,
+) -> float:
+    """The metric for the single curve held in ``df``.
+
+    One resolution rule, shared by every surface that displays an AUC/AP
+    (chart title, legend text, label overlay, mark annotation): read the
+    frame's broadcast metric column when it carries this curve's value,
+    and integrate ``metric_fn`` over ``(x_col, y_col)`` only when it does
+    not. The column is the Rust kernel's own number, so a diagnostic chart
+    shows one metric from one source; the integration path is what makes
+    the composable ``+ AUCLabel()`` marks work on arbitrary user data,
+    which has no such column.
+    """
+    value = _broadcast_metric(df, metric_field)
+    if value is not None:
+        return value
+
+    import numpy as np
+
+    return float(
+        metric_fn(
+            np.asarray(df[x_col].to_list(), dtype=float),
+            np.asarray(df[y_col].to_list(), dtype=float),
+        )
+    )
+
+
+def _curve_metrics_by_group(
+    df: pl.DataFrame,
+    *,
+    group_field: str,
+    metric_field: Optional[str],
+    metric_fn: Callable[[Any, Any], float],
+    x_col: str,
+    y_col: str,
+) -> dict[str, float]:
+    """:func:`_curve_metric` per ``group_field`` value, keyed by ``str(value)``.
+
+    Groups are enumerated in first-appearance order (null group values are
+    skipped) so callers that assign per-group display slots -- staggered
+    label rows, for instance -- get a deterministic order; polars'
+    ``unique()`` does not promise one.
+    """
+    groups = dict.fromkeys(v for v in df[group_field].to_list() if v is not None)
+    return {
+        str(value): _curve_metric(
+            df.filter(pl.col(group_field) == value),
+            metric_field=metric_field,
+            metric_fn=metric_fn,
+            x_col=x_col,
+            y_col=y_col,
+        )
+        for value in groups
+    }
 
 
 # Canonical metric-kind table — the single source for the
@@ -122,6 +227,7 @@ def _apply_metric_label(
     label: "AUCLabel | APLabel | BrierLabel",
     *,
     metric_fn,
+    metric_field: Optional[str] = None,
     x_col_override: Optional[str] = None,
     y_col_override: Optional[str] = None,
     color_col_override: Optional[str] = None,
@@ -134,6 +240,13 @@ def _apply_metric_label(
     and ``_label_y`` columns (one non-null entry per series at the endpoint
     along the y axis, staggered so multi-curve labels do not collide).
     Adds a ``mark_text`` layer reading those columns via ``+``.
+
+    ``metric_field`` (F-L11-01, 2026-09-10) names a broadcast metric column
+    on the base chart's data -- ``"auc"`` on a ROC frame, ``"ap"`` on a PR
+    frame. When the data carries it, the overlay shows that kernel-computed
+    value, so the label, the chart title and the legend text are one number
+    from one source. ``None`` (the ``+ AUCLabel()`` composable path, whose
+    data is arbitrary user data) integrates ``metric_fn`` instead.
 
     Schwabish SB3 (2026-05-11): accepts explicit field overrides so the
     figure-level builders (which hide encoding behind ``_pending_stat_mark``
@@ -185,12 +298,12 @@ def _apply_metric_label(
             group = df.filter(pl.col(color_col) == cls)
             if group.is_empty():
                 continue
-            # metric_fn expects numpy arrays (AUC/AP/Brier integration)
-            import numpy as np
-
-            metric = metric_fn(
-                np.asarray(group[x_col].to_list(), dtype=float),
-                np.asarray(group[y_col].to_list(), dtype=float),
+            metric = _curve_metric(
+                group,
+                metric_field=metric_field,
+                metric_fn=metric_fn,
+                x_col=x_col,
+                y_col=y_col,
             )
             text = f"{label.prefix}{metric:{label.format}}"
             # nulls_last=True so a null x (which polars' default descending
@@ -211,11 +324,12 @@ def _apply_metric_label(
             else:
                 label_x_col[global_idx] = float(endpoint_x) if endpoint_x is not None else x_top
     else:
-        import numpy as np
-
-        metric = metric_fn(
-            np.asarray(df[x_col].to_list(), dtype=float),
-            np.asarray(df[y_col].to_list(), dtype=float),
+        metric = _curve_metric(
+            df,
+            metric_field=metric_field,
+            metric_fn=metric_fn,
+            x_col=x_col,
+            y_col=y_col,
         )
         text = f"{label.prefix}{metric:{label.format}}"
         global_idx = df[x_col].arg_max()
@@ -471,6 +585,7 @@ def _apply_metric_label_explicit(
     x_col: str,
     y_col: str,
     color_col: Optional[str] = None,
+    metric_field: Optional[str] = None,
     position: str = "end",
     fmt: str = ".3f",
     prefix: Optional[str] = None,
@@ -483,7 +598,10 @@ def _apply_metric_label_explicit(
 
     Shares the metric-kind table (:data:`_METRIC_LABEL_SPECS`) with the
     direct-mark ``__radd__`` path, so a value-function or prefix change is
-    observed identically by both surfaces.
+    observed identically by both surfaces. ``metric_field`` is forwarded to
+    :func:`_apply_metric_label`: a diagnostic builder names the broadcast
+    metric column its frame already carries (``"auc"`` / ``"ap"``) so the
+    overlay reads the same number the title and legend do.
     """
     validate_choice("_apply_metric_label_explicit", "label_kind", label_kind, _METRIC_LABEL_SPECS)
     metric_fn, default_prefix = _METRIC_LABEL_SPECS[label_kind]
@@ -496,6 +614,7 @@ def _apply_metric_label_explicit(
         base,
         label_obj,
         metric_fn=metric_fn,
+        metric_field=metric_field,
         x_col_override=x_col,
         y_col_override=y_col,
         color_col_override=color_col,
