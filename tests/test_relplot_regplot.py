@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import polars as pl
 import pytest
 
@@ -124,6 +126,84 @@ def test_regplot_scatter_kws(df):
 def test_regplot_invalid_method_raises(df):
     with pytest.raises(ValueError, match="method must be one of"):
         fm.regplot(df, x="x", y="y", method="bad_method")
+
+
+# ---------------------------------------------------------------------------
+# regplot — col/row are lmplot-only (F-L10-09)
+# ---------------------------------------------------------------------------
+
+
+def test_regplot_col_raises_typeerror_naming_lmplot(df):
+    with pytest.raises(TypeError, match="lmplot"):
+        fm.regplot(df, x="x", y="y", col="time")
+
+
+def test_regplot_row_raises_typeerror_naming_lmplot(df):
+    with pytest.raises(TypeError, match="lmplot"):
+        fm.regplot(df, x="x", y="y", row="group")
+
+
+# ---------------------------------------------------------------------------
+# regplot — leaked params are now real named parameters (F-L10-09)
+# ---------------------------------------------------------------------------
+
+
+def test_regplot_logx_is_named_param_and_matches_lmplot(df):
+    chart = fm.regplot(df, x="x", y="y", logx=True)
+    equivalent = fm.lmplot(df, x="x", y="y", logx=True)
+    assert chart.to_json() == equivalent.to_json()
+    assert chart.to_json() != fm.regplot(df, x="x", y="y").to_json()
+
+
+def test_regplot_show_metrics_is_named_param_and_matches_lmplot(df):
+    chart = fm.regplot(df, x="x", y="y", show_metrics=False)
+    equivalent = fm.lmplot(df, x="x", y="y", show_metrics=False)
+    assert chart.to_json() == equivalent.to_json()
+    assert chart.to_json() != fm.regplot(df, x="x", y="y").to_json()
+
+
+def test_regplot_x_bins_is_named_param_and_matches_lmplot(df):
+    chart = fm.regplot(df, x="x", y="y", x_bins=5)
+    equivalent = fm.lmplot(df, x="x", y="y", x_bins=5)
+    assert chart.to_json() == equivalent.to_json()
+    assert chart.to_json() != fm.regplot(df, x="x", y="y").to_json()
+
+
+def test_regplot_x_estimator_is_named_param_and_matches_lmplot(df):
+    # "max" (not "mean") is the discriminating value here: "mean" is the
+    # transform's own default, so x_estimator="mean" round-trips to a
+    # byte-identical render on this 8-row fixture (bins hold <=2 points)
+    # and would still pass even if x_estimator were silently dropped
+    # downstream of the spec.
+    chart = fm.regplot(df, x="x", y="y", x_bins=5, x_estimator="max")
+    equivalent = fm.lmplot(df, x="x", y="y", x_bins=5, x_estimator="max")
+    assert chart.to_json() == equivalent.to_json()
+    assert chart.to_json() != fm.regplot(df, x="x", y="y", x_bins=5).to_json()
+
+
+# ---------------------------------------------------------------------------
+# regplot — signature parity with lmplot minus {col, row} (spec §6)
+# ---------------------------------------------------------------------------
+
+
+def test_regplot_signature_matches_lmplot_minus_col_row():
+    lmplot_params = set(inspect.signature(fm.lmplot).parameters) - {"col", "row"}
+    regplot_params = set(inspect.signature(fm.regplot).parameters)
+    assert regplot_params == lmplot_params
+
+    # Names alone don't pin the "identical API" contract -- a future default
+    # drift on either side (e.g. lmplot's show_metrics=True -> False without
+    # a matching regplot change) would leave the name-only check green.
+    # Compare defaults too, so both sides of the parity contract are pinned.
+    lmplot_defaults = {
+        name: param.default
+        for name, param in inspect.signature(fm.lmplot).parameters.items()
+        if name not in {"col", "row"}
+    }
+    regplot_defaults = {
+        name: param.default for name, param in inspect.signature(fm.regplot).parameters.items()
+    }
+    assert regplot_defaults == lmplot_defaults
 
 
 # ---------------------------------------------------------------------------

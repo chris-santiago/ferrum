@@ -1204,7 +1204,11 @@ def regplot(
     scatter_kws: Any = None,
     line_kws: Any = None,
     truncate: bool = True,
+    x_bins: Any = None,
+    x_estimator: Any = None,
     x_jitter: Any = None,
+    logx: bool = False,
+    show_metrics: bool = True,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
@@ -1215,8 +1219,13 @@ def regplot(
     """Axes-level regression scatter plot.
 
     The axes-level equivalent of ``lmplot`` — identical API except
-    ``col=`` and ``row=`` are excluded because ``regplot`` does not
-    facet.  Every parameter is forwarded to ``lmplot`` unchanged.
+    ``lmplot``'s figure-level ``col=``/``row=`` faceting parameters are
+    excluded (passing either raises ``TypeError`` naming ``lmplot`` as the
+    faceting route -- see Raises below). This exclusion is specific to
+    ``col=``/``row=``; it does not extend to the grammar-level ``facet=``
+    encoding channel, which remains available on ``regplot`` the same as
+    on any other ``Chart``. Every other parameter is forwarded to
+    ``lmplot`` unchanged.
 
     Parameters
     ----------
@@ -1256,9 +1265,27 @@ def regplot(
         When ``False``, forwarded to ``lmplot`` -- see ``lmplot``'s
         ``truncate`` parameter for the full accepted set (not supported for
         ``method="logistic"``/``"glm"``; raises ``ValueError``).
+    x_bins : int or None, optional
+        Aggregate the data into this many equal-width x bins before fitting,
+        forwarded to ``lmplot`` -- see ``lmplot``'s ``x_bins`` parameter
+        (not supported for ``"logistic"``/``"glm"``/``"robust"``; raises
+        ``ValueError``).
+    x_estimator : str or None, optional
+        The aggregate applied within each ``x_bins`` bin, forwarded to
+        ``lmplot`` -- see ``lmplot``'s ``x_estimator`` parameter for the
+        accepted values and the same ``"logistic"``/``"glm"``/``"robust"``
+        refusal as ``x_bins`` above.
     x_jitter : float or None, optional
         When set, applies ``Jitter(axis="x", width=x_jitter)`` to the
         scatter layer.
+    logx : bool, default False
+        Apply a ``log`` scale to the x-axis on both scatter and fit layers,
+        forwarded to ``lmplot`` -- see ``lmplot``'s ``logx`` parameter.
+    show_metrics : bool, default True
+        Overlay a top-right corner annotation with ``R^2`` / ``RMSE`` /
+        ``MAE`` computed from the fit, forwarded to ``lmplot`` -- see
+        ``lmplot``'s ``show_metrics`` parameter for the method/``hue``
+        exclusions.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional
@@ -1282,11 +1309,18 @@ def regplot(
 
     Raises
     ------
+    TypeError
+        If ``col=`` or ``row=`` is passed -- ``regplot`` does not facet;
+        use ``lmplot`` instead.
     ValueError
         If ``method`` is not one of the supported values.
     ValueError
         If ``truncate=False`` with ``method="logistic"`` or ``"glm"``
         (neither transform accepts ``x_range``).
+    ValueError
+        If ``x_bins`` or ``x_estimator`` is set with
+        ``method="logistic"``, ``"glm"``, or ``"robust"`` -- forwarded from
+        ``lmplot``, see its ``x_bins`` parameter.
     ValueError
         If an explicit ``order`` is not valid for ``method``, or is a
         negative int -- forwarded from ``lmplot``, see its ``order``
@@ -1301,6 +1335,20 @@ def regplot(
 
     >>> fm.regplot(df, x="size", y="tip", method="robust")
     """
+    # regplot is the axes-level (non-faceting) counterpart to lmplot.
+    # col=/row= would otherwise reach lmplot silently through the
+    # **encode_kwargs splice below (they bind to lmplot's own named
+    # col/row params) and facet -- refuse explicitly rather than let an
+    # unsupported feature work by accident. Checked before the splice, on
+    # the same "name the unsupported thing and the supported alternative"
+    # precedent as lmplot's own x_bins/x_estimator refusal above.
+    if "col" in encode_kwargs or "row" in encode_kwargs:
+        bad = "col" if "col" in encode_kwargs else "row"
+        raise TypeError(
+            f"regplot({bad}=...) is not supported -- regplot is the "
+            "axes-level regression plot and does not facet. Use "
+            f"lmplot(..., {bad}=...) instead."
+        )
     return lmplot(
         data,
         x=x,
@@ -1313,7 +1361,11 @@ def regplot(
         scatter_kws=scatter_kws,
         line_kws=line_kws,
         truncate=truncate,
+        x_bins=x_bins,
+        x_estimator=x_estimator,
         x_jitter=x_jitter,
+        logx=logx,
+        show_metrics=show_metrics,
         mark=mark,
         encode=encode,
         properties=properties,
