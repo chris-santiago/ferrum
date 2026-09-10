@@ -1188,8 +1188,13 @@ def _clustermap_build(
         name="col_dendrogram",
         mark="segment",
         encoding={
-            "x": _segment_cols["x"],
-            "y": _segment_cols["y"],
+            # Blank the axis titles (mirrors the center heatmap's _X/_Y
+            # title="" above): axis(show=False) below guarantees these axes
+            # never draw, but an unblanked title still reserved a phantom
+            # title gutter in layout, silently eating into the dendrogram's
+            # share of dendrogram_ratio (F-L09-08).
+            "x": _X(_segment_cols["x"], title=""),
+            "y": _Y(_segment_cols["y"], title=""),
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },
@@ -1207,8 +1212,10 @@ def _clustermap_build(
         name="row_dendrogram",
         mark="segment",
         encoding={
-            "x": _segment_cols["x"],
-            "y": _segment_cols["y"],
+            # See col_dendro_layer above: blank titles so the axis(show=False)
+            # below doesn't leave a phantom title gutter reserved in layout.
+            "x": _X(_segment_cols["x"], title=""),
+            "y": _Y(_segment_cols["y"], title=""),
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],
         },

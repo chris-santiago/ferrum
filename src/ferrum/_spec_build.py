@@ -510,21 +510,58 @@ class SpecBuildMixin:
                     # honor stacking and warn. Shares ``_strip_unstackable`` with
                     # the single-chart path in ``_build_encoding_specs``.
                     _strip_unstackable(d, layer.mark or "point")
+                    # Presence, not truthiness: each key's own handler in
+                    # ``_SPEC_DICT_HANDLERS`` already decides whether the key
+                    # belongs in `d` (e.g. `_emit_axis`/`_emit_format` only add
+                    # it for a real value). A truthy check here second-guesses
+                    # that decision and silently drops legitimate falsy wire
+                    # values -- notably ``title=""`` (`_emit_title`'s explicit
+                    # "suppress the title" sentinel, ``None``-passed-by-caller
+                    # forwarded as an empty string), which used to vanish here
+                    # and leave the phantom axis-title gutter this key exists
+                    # to close (F-L09-08).
+                    #
+                    # This allowlist is still hand-curated against Rust's
+                    # ``EncodingSpec`` (`crates/ferrum-core/src/spec/encoding.rs`),
+                    # not derived from it, so it can drift from what the struct
+                    # actually accepts -- exactly what quality review caught here
+                    # (batch-F task 8 cycle 2): ``condition`` (a public honored
+                    # kwarg on every appearance channel, `encoding/_honored.py`,
+                    # `_emit_condition`) was missing entirely, and ``aggregate``
+                    # is dead weight (no handler ever emits it into `d`, so it
+                    # can never match `opt_key in d`; kept only because removing
+                    # it is a separate cleanup from this fix).
                     for opt_key in (
                         "title",
                         "aggregate",
                         "scheme",
                         "format",
-                        "format_type",
                         "scale",
                         "axis",
                         "legend",
                         "sort",
                         "stack",
                         "impute",
+                        "condition",
                     ):
-                        if d.get(opt_key):
+                        if opt_key in d:
                             enc_json_dict[opt_key] = d[opt_key]
+                    # `format_type` needs its own line, not the loop above:
+                    # `EncodingSpec.format_type` carries `#[serde(rename =
+                    # "formatType")]` plus `deny_unknown_fields`
+                    # (encoding.rs:792), so forwarding the Python-side
+                    # snake_case key verbatim makes Rust reject the whole
+                    # layer with "unknown field `format_type`" -- for ANY
+                    # layered channel with a format that derives one (e.g.
+                    # `X(field, format="percent")`, where `_emit_format`
+                    # derives `format_type="number"`). `_build_encoding_specs`
+                    # (the chart-level path) never hits this: it passes `**d`
+                    # straight into the PyO3 `_EncodingSpec` constructor, which
+                    # takes the snake_case Python name directly and handles
+                    # the wire rename internally. Only this JSON-dict wire
+                    # path needs the rename spelled out by hand.
+                    if "format_type" in d:
+                        enc_json_dict["formatType"] = d["format_type"]
                     encoding_dict[axis] = enc_json_dict
                 elif isinstance(ch, str):
                     encoding_dict[axis] = {"field": ch}
