@@ -856,40 +856,53 @@ def _classification_report_chart(
     Long-form data: one row per (class, metric) cell with ``value`` and
     ``value_fmt``.  Renders via the same rect-plus-text pattern as
     ``mark_confusion``.
+
+    Precomputed path (F-L11-05, 2026-09-10): a ``_PrecomputedSource``
+    already holds the per-class report via
+    ``source.classification_report()``, computed from confusion counts
+    with no sklearn. The model path still calls sklearn's
+    ``classification_report`` on ``model.predict(X)``, guarded against
+    both an X-less and a y-less source (F-L12-01 sibling, 2026-09-10):
+    without these guards, ``model.predict(None)`` or
+    ``classification_report(None, ...)`` leaks a bare sklearn error
+    instead of the typed domain message every other X/y-consuming
+    diagnostic raises (mirrors ``ModelSource.confusion_matrix``'s own
+    y-then-X guard order, ``sources/_classification.py:333-337``). The
+    X guard routes through ``BaseSource._require_X`` rather than
+    hand-writing its message, so both guards' wording has one owner.
     """
-    from ferrum.diagnostics._internal.deps import require_sklearn
-
-    require_sklearn("ClassificationReportVisualizer")
-    from sklearn.metrics import classification_report
-
     import ferrum
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
-    y_true = source.y
-    y_pred = source.model.predict(source.X)
-    report = classification_report(
-        y_true,
-        y_pred,
-        output_dict=True,
-        zero_division=0,
-    )
+    if isinstance(source, _PrecomputedSource):
+        df = source.classification_report()
+    else:
+        from ferrum.diagnostics._internal.deps import require_sklearn
 
-    rows: list[dict] = []
-    for cls_label, metrics_dict in report.items():
-        if cls_label in {"accuracy", "macro avg", "weighted avg"}:
-            continue
-        if not isinstance(metrics_dict, dict):
-            continue
-        for m_name in ("precision", "recall", "f1-score"):
-            val = float(metrics_dict[m_name])
-            rows.append(
-                {
-                    "class": str(cls_label),
-                    "metric": m_name,
-                    "value": val,
-                    "value_fmt": f"{val:.2f}",
-                }
-            )
-    df = pl.DataFrame(rows)
+        require_sklearn("classification_report")
+        from sklearn.metrics import classification_report
+
+        if source.y is None:
+            raise ValueError("ModelSource.classification_report() requires y to be provided.")
+        X = source._require_X("classification_report")
+        y_true = source.y
+        y_pred = source.model.predict(X)
+        report = classification_report(
+            y_true,
+            y_pred,
+            output_dict=True,
+            zero_division=0,
+        )
+
+        from ferrum.diagnostics._internal import _curve_frames
+
+        per_class_metrics = {
+            str(cls_label): metrics_dict
+            for cls_label, metrics_dict in report.items()
+            if cls_label not in {"accuracy", "macro avg", "weighted avg"}
+            and isinstance(metrics_dict, dict)
+        }
+        df = _curve_frames.classification_report_frame(per_class_metrics)
 
     from ferrum._layer import _Layer
 
@@ -909,6 +922,7 @@ def _classification_report_chart(
             )
         )
     )
+    chart = chart.properties(title=ferrum.Title("Classification Report"))
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
@@ -1806,6 +1820,8 @@ def classification_report_chart(
     X: Any = None,
     y: Any = None,
     *,
+    y_true: Any = None,
+    y_pred: Any = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -1831,6 +1847,11 @@ def classification_report_chart(
     y : array-like, optional
         True labels. Required when ``model`` is a raw estimator;
         ignored when it is already a ``ModelSource``.
+    y_true : array-like, optional
+        Ground-truth class labels for the precomputed path. Must be
+        paired with ``y_pred``; mutually exclusive with ``model``.
+    y_pred : array-like, optional
+        Predicted class labels for the precomputed path.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1856,8 +1877,12 @@ def classification_report_chart(
     --------
     >>> import ferrum as fm
     >>> fm.classification_report_chart(clf, X_test, y_test)
+
+    Precomputed path (``y_pred`` = 1-D hard class labels):
+
+    >>> fm.classification_report_chart(y_true=y_test, y_pred=clf.predict(X_test))
     """
-    source = _resolve_source(model, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
     return _classification_report_chart(
         source,
         mark=mark,

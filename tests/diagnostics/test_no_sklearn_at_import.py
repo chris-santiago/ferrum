@@ -41,6 +41,24 @@ def test_modelsource_init_does_not_load_sklearn():
     assert source is not None
 
 
+def test_precomputed_classification_report_does_not_load_sklearn():
+    """G3 (F-L11-05, 2026-09-10): the precomputed ``classification_report``
+    path computes precision/recall/F1 from confusion counts, never sklearn.
+    """
+    _drop_sklearn()
+
+    import ferrum
+
+    chart = ferrum.classification_report_chart(
+        y_true=[0, 0, 1, 1],
+        y_pred=[0, 1, 1, 1],
+    )
+    assert "sklearn" not in sys.modules, (
+        "sklearn loaded as a side-effect of classification_report_chart(y_true=, y_pred=)"
+    )
+    assert chart is not None
+
+
 def test_require_sklearn_raises_clear_message_when_missing(monkeypatch):
     """Simulates sklearn missing — ImportError must mention `ferrum[models]`."""
     import builtins

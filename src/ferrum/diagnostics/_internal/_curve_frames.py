@@ -12,7 +12,14 @@ The callers own input concerns the kernels cannot: obtaining the score arrays
 scikit-learn) and coercing class labels to ``y``'s dtype. They pass resolved
 class labels plus float arrays into these builders.
 
-No scikit-learn import lives here — the kernels are sklearn-free.
+``classification_report_frame`` is the one non-kernel builder here: its
+callers already reduce their inputs to a per-class metrics dict (sklearn's
+``output_dict`` on the model path, confusion-count ratios on the precomputed
+path) before calling it, so it owns only the shared long-form row shaping,
+not a Rust kernel call.
+
+No scikit-learn import lives here — the kernels are sklearn-free, and
+``classification_report_frame`` never imports it either.
 
 Python-facing DataFrame schemas (the chart-builder contract, unchanged):
 
@@ -20,6 +27,7 @@ Python-facing DataFrame schemas (the chart-builder contract, unchanged):
 - PR: ``precision, recall, threshold, class, ap``
 - Calibration: ``mean_predicted, fraction_positive, count``
 - Confusion: ``actual, predicted, value, value_fmt``
+- Classification report: ``class, metric, value, value_fmt``
 - Discrimination threshold: ``threshold, precision, recall, f1, queue_rate``
 - Cumulative gain: ``percent_population, gain, class``
 - Lift: ``percent_population, lift, class``
@@ -376,6 +384,41 @@ def confusion_frame(
             "value_fmt": value_fmt,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Classification report
+# ---------------------------------------------------------------------------
+
+
+def classification_report_frame(per_class_metrics: dict[str, dict[str, float]]) -> pl.DataFrame:
+    """Long-form per-class precision/recall/F1: one row per (class, metric).
+
+    ``per_class_metrics`` maps each class label (string) to a dict holding
+    ``"precision"``, ``"recall"``, and ``"f1-score"`` -- the shape both
+    callers already produce before handing off here: the sklearn-backed
+    model path (``plots/classification.py``'s ``_classification_report_chart``,
+    filtered from ``sklearn.metrics.classification_report(output_dict=True)``)
+    and the confusion-count-derived precomputed path
+    (``_PrecomputedSource.classification_report``, no sklearn). This function
+    owns only the shared shaping -- turning a metrics dict into the long-form
+    rows ``classification_report_chart`` renders -- not the metric math
+    itself, which differs by caller (sklearn vs. confusion-count ratios) and
+    stays in each caller.
+    """
+    rows: list[dict] = []
+    for cls_label, metrics in per_class_metrics.items():
+        for m_name in ("precision", "recall", "f1-score"):
+            val = float(metrics[m_name])
+            rows.append(
+                {
+                    "class": str(cls_label),
+                    "metric": m_name,
+                    "value": val,
+                    "value_fmt": f"{val:.2f}",
+                }
+            )
+    return pl.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------

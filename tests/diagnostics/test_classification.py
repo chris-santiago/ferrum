@@ -615,6 +615,173 @@ def test_classification_report_chart_returns_chart():
     assert "<svg" in chart.to_svg()
 
 
+# --- G3: precomputed path + title + X-less refusal (F-L11-05 + F-L11-09) ---
+
+
+def test_classification_report_chart_has_title():
+    """F-L11-09: the chart carries a title like every sibling — pre-fix
+    ``chart._title`` was ``None``.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    chart = ferrum.classification_report_chart(model, X, df["y"])
+    assert chart._title is not None
+    assert chart._title.text == "Classification Report"
+
+
+def test_classification_report_chart_precomputed_renders():
+    """F-L11-05: ``y_true=``/``y_pred=`` must work — pre-fix this raised
+    ``TypeError: classification_report_chart() got an unexpected keyword
+    argument 'y_true'`` because the tenth precomputed-family member never
+    forwarded these kwargs into ``_resolve_source``.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y_pred = model.predict(X.to_numpy())
+    chart = ferrum.classification_report_chart(y_true=df["y"].to_numpy(), y_pred=y_pred)
+    assert "<svg" in chart.to_svg()
+    assert chart._title.text == "Classification Report"
+
+
+def test_classification_report_chart_precomputed_matches_model_path():
+    """Precomputed and model-path reports agree to machine precision on
+    identical predictions (G3 acceptance criterion 4).
+
+    Deliberately order-insensitive: both frames are sorted by
+    ``(class, metric)`` before comparing, because the two paths render
+    their class axis in different (but each individually documented and
+    separately pinned -- see
+    ``test_classification_report_chart_class_axis_order_documented_divergence``)
+    orders for >= 10 numeric classes. This test's job is value parity,
+    not axis order.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y_true = df["y"].to_numpy()
+    y_pred = model.predict(X.to_numpy())
+
+    model_chart = ferrum.classification_report_chart(model, X, df["y"])
+    precomputed_chart = ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+
+    model_rows = model_chart._data.sort(["class", "metric"])[
+        ["class", "metric", "value"]
+    ].to_dicts()
+    precomputed_rows = precomputed_chart._data.sort(["class", "metric"])[
+        ["class", "metric", "value"]
+    ].to_dicts()
+    assert [(r["class"], r["metric"]) for r in model_rows] == [
+        (r["class"], r["metric"]) for r in precomputed_rows
+    ]
+    for model_row, precomputed_row in zip(model_rows, precomputed_rows):
+        assert model_row["value"] == pytest.approx(precomputed_row["value"], abs=1e-9)
+
+
+def test_classification_report_chart_class_axis_order_documented_divergence():
+    """The model path orders classes as sklearn's ``classification_report``
+    returns them (numeric-sorted, via ``unique_labels``); the precomputed
+    path orders them ``sorted(..., key=str)`` (the ``confusion_matrix``
+    precedent -- see ``_PrecomputedSource.classification_report``'s
+    docstring). For >= 10 numeric classes these disagree: string order
+    interleaves ``"10"``/``"11"`` before ``"2"``. The parity test above
+    sorts both frames before comparing, so it cannot see a regression in
+    either path's own render order -- this test pins each path's ORDER
+    independently instead of the row multiset.
+    """
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+
+    n_classes = 12
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(400, 3))
+    y = rng.integers(0, n_classes, size=400)
+    # Guarantee every class appears at least once in y_true so both paths'
+    # label sets (unique_labels / sorted(set(...))) cover all n_classes
+    # regardless of what the fitted model actually predicts.
+    X = np.vstack([X, np.zeros((n_classes, 3))])
+    y = np.concatenate([y, np.arange(n_classes)])
+    model = LogisticRegression(max_iter=200).fit(X, y)
+    y_pred = model.predict(X)
+
+    model_chart = ferrum.classification_report_chart(model, X, y)
+    precomputed_chart = ferrum.classification_report_chart(y_true=y, y_pred=y_pred)
+
+    model_order = list(dict.fromkeys(model_chart._data["class"].to_list()))
+    precomputed_order = list(dict.fromkeys(precomputed_chart._data["class"].to_list()))
+
+    assert model_order == [str(c) for c in sorted(set(y.tolist()))]
+    assert precomputed_order == sorted({str(c) for c in y.tolist()}, key=str)
+    assert model_order != precomputed_order, (
+        "expected the documented >= 10-class order divergence between the "
+        "model path (numeric) and precomputed path (string-sorted)"
+    )
+
+
+def test_precomputed_source_classification_report_hand_computed():
+    """Precision/recall/F1 computed from confusion counts against a
+    hand-computed reference (not sklearn) — class ``2`` is never predicted,
+    exercising the zero-division-as-0 branch.
+    """
+    y_true = [0, 0, 1, 1, 2, 2]
+    y_pred = [0, 0, 1, 1, 1, 1]
+
+    chart = ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+    rows = {(r["class"], r["metric"]): r["value"] for r in chart._data.to_dicts()}
+
+    expected = {
+        ("0", "precision"): 1.0,
+        ("0", "recall"): 1.0,
+        ("0", "f1-score"): 1.0,
+        ("1", "precision"): 0.5,
+        ("1", "recall"): 1.0,
+        ("1", "f1-score"): 2 * 0.5 * 1.0 / (0.5 + 1.0),
+        ("2", "precision"): 0.0,
+        ("2", "recall"): 0.0,
+        ("2", "f1-score"): 0.0,
+    }
+    for key, expected_value in expected.items():
+        assert rows[key] == pytest.approx(expected_value, abs=1e-9), key
+
+
+def test_classification_report_chart_model_path_requires_X():
+    """G6 sibling refusal: ``classification_report_chart(model, y=...)`` with
+    no ``X`` must raise the typed domain message — pre-fix
+    ``model.predict(None)`` leaked sklearn's bare "Expected 2D array, got
+    scalar array instead: array=None..." error.
+
+    ``y`` is supplied here (unlike a bare ``classification_report_chart(model)``)
+    so this test isolates the X guard specifically: the guard order is
+    y-then-X (mirroring ``ModelSource.confusion_matrix``'s own order,
+    ``sources/_classification.py:333-337``), so an X-and-y-less call would
+    hit the y guard first — that case is
+    ``test_classification_report_chart_model_path_requires_y`` below.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    with pytest.raises(ValueError, match=r"classification_report.*requires the training data"):
+        ferrum.classification_report_chart(model, y=df["y"])
+
+
+def test_classification_report_chart_model_path_requires_y():
+    """Sibling refusal to the X guard above, mirroring
+    ``ModelSource.confusion_matrix``'s y-then-X guard order
+    (``sources/_classification.py:333-337``): ``classification_report_chart(model,
+    X)`` with no ``y`` must raise the typed domain message — pre-fix
+    sklearn's ``classification_report(None, ...)`` leaked a foreign
+    ``InvalidParameterError`` naming ``y_true``, a real keyword of this
+    same chart function, so following the leaked message led to a dead
+    end (``classification_report_chart(y_true=...)`` without ``y_pred=``
+    raises a different error).
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    with pytest.raises(ValueError, match=r"classification_report\(\) requires y to be provided"):
+        ferrum.classification_report_chart(model, X)
+
+
 def test_class_balance_chart_returns_chart():
     df = load_dataset("multiclass_classification")
     chart = ferrum.class_balance_chart(df["y"])

@@ -201,6 +201,63 @@ class _PrecomputedSource:
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()), key=str)
         return _curve_frames.confusion_frame(y_true, y_pred, labels, normalize=normalize)
 
+    def classification_report(self) -> pl.DataFrame:
+        """Per-class precision/recall/F1 in long form, from confusion counts.
+
+        No scikit-learn required (F-L11-05, 2026-09-10): precision, recall,
+        and F1 are computed directly as ratios of the confusion matrix's
+        per-class counts -- ``precision_c = TP_c / predicted_total_c``,
+        ``recall_c = TP_c / actual_total_c``, and ``f1_c`` their harmonic
+        mean (0 when either denominator is 0, matching sklearn's
+        ``classification_report(zero_division=0)`` convention) -- so the
+        precomputed path never imports sklearn. ``y_pred`` must be 1-D
+        hard class labels, same as ``confusion_matrix``.
+
+        Schema (``class, metric, value, value_fmt``) matches the model
+        path's sklearn-backed report, so ``classification_report_chart``
+        renders either source kind uniformly.
+
+        Class *order* is a documented divergence, not a bug: labels are
+        ``sorted(..., key=str)`` here (the ``confusion_matrix`` precedent
+        this method reuses, same as ``ModelSource.confusion_matrix``'s
+        own ``sorted(...)`` fallback), whereas the model path inherits
+        sklearn's numeric ``unique_labels`` order. For fewer than 10
+        numeric classes the two agree; at 10+ they diverge (string order
+        interleaves ``"10"``, ``"11"`` before ``"2"``). Both paths agree
+        on the row *values* (see the model-vs-precomputed parity test),
+        just not the class-axis render order.
+        """
+        cm = self.confusion_matrix(normalize=None)
+        actual_col = cm["actual"].to_list()
+        predicted_col = cm["predicted"].to_list()
+        value_col = cm["value"].to_list()
+        labels = sorted(set(actual_col) | set(predicted_col), key=str)
+
+        predicted_totals: dict[str, float] = {}
+        actual_totals: dict[str, float] = {}
+        true_positives: dict[str, float] = {}
+        for actual, predicted, value in zip(actual_col, predicted_col, value_col):
+            value = float(value)
+            actual_totals[actual] = actual_totals.get(actual, 0.0) + value
+            predicted_totals[predicted] = predicted_totals.get(predicted, 0.0) + value
+            if actual == predicted:
+                true_positives[actual] = true_positives.get(actual, 0.0) + value
+
+        per_class_metrics: dict[str, dict[str, float]] = {}
+        for label in labels:
+            tp = true_positives.get(label, 0.0)
+            pred_total = predicted_totals.get(label, 0.0)
+            actual_total = actual_totals.get(label, 0.0)
+            precision = tp / pred_total if pred_total > 0 else 0.0
+            recall = tp / actual_total if actual_total > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            per_class_metrics[label] = {
+                "precision": precision,
+                "recall": recall,
+                "f1-score": f1,
+            }
+        return _curve_frames.classification_report_frame(per_class_metrics)
+
     def predictions(self) -> pl.DataFrame:
         """Return y_true, y_pred, residual, studentized_residual, cooks_distance, leverage.
 
