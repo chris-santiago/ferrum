@@ -198,6 +198,31 @@ def test_scatter_false_still_renders_the_fit_alone(obs_df, method):
     assert "predictor" in titles and "response" in titles
 
 
+@pytest.mark.parametrize("figure", [fm.lmplot, fm.regplot], ids=["lmplot", "regplot"])
+@pytest.mark.parametrize("method", SMOOTH_ROUTED)
+def test_scatter_layer_present_still_shows_metrics(obs_df, figure, method):
+    """The R² annotation survives on the named-transform (scatter-present) branch.
+
+    ``ci=None`` is what pushes ``mark_smooth`` toward its chain-advancing
+    single-line shortcut for ``show_metrics=False`` -- which is why the rest
+    of this module fixes ``ci=None``. With ``show_metrics=True`` (the
+    default) that shortcut is never taken, but the fit is still built through
+    ``_fit_chart_from_named_transform`` on the ``scatter_layer is not None``
+    branch, which appends the metrics text layer only when it is called with
+    ``metrics=metrics_applied`` -- not a hardcoded ``False``. This is the
+    exact branch and trigger combination the mutation gate found under-tested
+    (batch-F close, F-L10-02): killing ``metrics=metrics_applied`` ->
+    ``metrics=False`` there left the whole suite in this module green.
+    """
+    svg = figure(
+        obs_df, x="predictor", y="response", method=method, ci=None, show_metrics=True
+    ).to_svg()
+    assert "R²" in svg, (
+        f"{figure.__name__}(method={method!r}, ci=None, show_metrics=True): "
+        "expected the R² metrics annotation on the scatter+fit chart"
+    )
+
+
 @pytest.mark.parametrize("ci", [95, None])
 @pytest.mark.parametrize("show_metrics", [True, False])
 def test_hue_still_fits_and_colors_per_group(obs_df, ci, show_metrics):

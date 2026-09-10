@@ -1700,6 +1700,24 @@ fn kde_repr_shows_every_constructor_parameter() {
         "count_scale_extent has no constructor parameter — it is set only by the \
          facet pin, so it is not part of the value a user wrote: {repr}"
     );
+    // Name-substring checks above pass regardless of what the expressions
+    // evaluate to (the format string emits `"shared_extent="` etc. as a
+    // literal no matter what follows it). Assert the rendered VALUES for the
+    // spec's deliberately distinctive fields too, so a repr that renders
+    // every value wrong — e.g. `shared_extent`'s True/False arms swapped —
+    // is caught.
+    assert!(
+        repr.contains("shared_extent=True"),
+        "repr must render shared_extent's actual value (True): {repr}"
+    );
+    assert!(
+        repr.contains("bw_adjust=1.5"),
+        "repr must render bw_adjust's actual value (1.5): {repr}"
+    );
+    assert!(
+        repr.contains("name=Some(\"overlay\")"),
+        "repr must render name's actual value (Some(\"overlay\")): {repr}"
+    );
 }
 
 /// Close-remediation F3 (batch-F rust design review): `count_scale_extent`
@@ -1746,6 +1764,36 @@ fn kde_count_scale_extent_non_finite_refuses() {
         err.to_string().contains("count_scale_extent"),
         "error must name the slot: {err}"
     );
+}
+
+/// Close-remediation mutation gate (advisory): the guard's error text
+/// promises `lo < hi` with both finite, but the sibling tests above only
+/// pin the reversed shape (`kde_count_scale_extent_reversed_refuses_through_the_wire`)
+/// and the hi-side non-finite shape (`kde_count_scale_extent_non_finite_refuses`).
+/// Two more ways to violate the same contract had no coverage: a degenerate
+/// `lo == hi` extent (does not trip `lo >= hi`'s strict form being weakened
+/// to `lo > hi` — an undetected mutant there would let it through, and it
+/// would flow to `resolve_group_bin_width` as a pinned extent with
+/// `should_nice = false`, yielding bin width `(hi - lo) / n_bins == 0.0` and
+/// silently collapsing every count-scaled density to zero) and a lo-side
+/// non-finite bound (`-inf`/`NaN` — `NaN >= hi` is false, so a mutant that
+/// only checks `!hi.is_finite()` would still refuse the hi-side case but
+/// wrongly accept these).
+#[test]
+fn kde_count_scale_extent_degenerate_and_lo_side_non_finite_refuse() {
+    let batch = batch_with("x", (0..10).map(|i| i as f64).collect());
+    for (lo, hi) in [(5.0, 5.0), (f64::NEG_INFINITY, 10.0), (f64::NAN, 10.0)] {
+        let spec = KdeSpec {
+            count_scale_extent: Some((lo, hi)),
+            ..count_scale_spec("x", 8, (0.0, 9.0), Some(BinMode::Fixed { n: 5 }))
+        };
+        let err = apply(&spec, &batch)
+            .expect_err(&format!("count_scale_extent=({lo}, {hi}) must refuse"));
+        assert!(
+            err.to_string().contains("count_scale_extent"),
+            "error must name the slot for ({lo}, {hi}): {err}"
+        );
+    }
 }
 
 /// The bin width the REAL ungrouped `Bin` transform renders for

@@ -1228,11 +1228,19 @@ mod tests {
         assert!(msg.contains("test"), "error must stay in the caller's voice: {msg}");
     }
 
-    /// The precedence half of the same guard: a repeated name that does not
-    /// exist still reports "not found" first, exactly as it did before the
-    /// repeat check moved into this function.
+    /// A missing column that is ALSO repeated still reports "not found",
+    /// not "repeated" — i.e. the missing-column error is the one that fires
+    /// in the observable output when both conditions are present.
+    ///
+    /// This does not pin a genuine ordering/precedence property: a name can
+    /// only be detected as repeated on its second occurrence, and by then
+    /// its first occurrence has already passed `schema.index_of` — a
+    /// missing name fails `index_of` on its very first occurrence, before a
+    /// repeat could ever be observed. So the two checks cannot actually
+    /// race on any input; this test documents which error text a caller
+    /// sees for this shape, not which check "wins".
     #[test]
-    fn group_partition_multi_missing_column_outranks_the_repeat_check() {
+    fn group_partition_multi_missing_column_reports_not_found_not_repeated() {
         pyo3::Python::initialize();
         let batch = xy_group_batch(vec![1.0], vec![10.0]);
         let err =
