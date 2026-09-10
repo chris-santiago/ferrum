@@ -450,6 +450,11 @@ class TestResidplot:
         )
         d = json.loads(chart.to_spec().to_json())
         assert d.get("encoding", {}).get("color", {}).get("field") == "_label"
+        # The encoding claim alone is not the feature: the `_label` column has
+        # to survive the residual transform for that channel to resolve. A
+        # spec-only assertion is exactly what let the robust path's silent
+        # label drop live (F-L10-04), so pin the rendered legend entry too.
+        assert ">Residuals<" in chart.to_svg()
 
     def test_no_lowess_legacy_single_layer(self, reg_data):
         chart = fe.residplot(

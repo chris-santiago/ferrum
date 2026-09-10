@@ -27,6 +27,7 @@ from ferrum import (
     Glm,
     Jitter,
     Logistic,
+    OrdinalScale,
     Robust,
     Smooth,
 )
@@ -37,12 +38,13 @@ from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
-from ferrum.encoding import X, Y
+from ferrum.encoding import Color, X, Y
 from ferrum.encoding._aliases import resolve_color_alias
 from ferrum.marks._desugar_helpers import nominal_color_channel
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.plots._helpers import (
     _color_field_for,
+    _column_or_literal_color,
     _compose_compare,
     _field_name,
     _finalize_chart,
@@ -923,15 +925,16 @@ def lmplot(
     else:  # pragma: no cover — guarded above
         raise ValueError(f"unreachable: method={method!r}")
 
-    # `_DEDICATED_FIT_METHODS` (logistic/glm/robust) have no `groupby` on
-    # their Rust transform, so exactly one pooled fit is produced regardless
-    # of whether a color encoding is active. `neutral_stroke=color_active`
-    # above is what stops that pooled fit from rendering in a color level's
-    # palette color beside a full legend -- a materially wrong statistical
-    # chart, drawn silently, and the same failure class `nominal_color_channel`
-    # names for a mistyped hue column. Per-group fits for these three methods
-    # need `groupby` added to the `Logistic`/`Glm`/`Robust` Rust transforms --
-    # tracked as a batch-close follow-up.
+    # `_DEDICATED_FIT_METHODS` (logistic/glm/robust) are called here WITHOUT a
+    # `groupby`, so exactly one pooled fit is produced regardless of whether a
+    # color encoding is active. `neutral_stroke=color_active` above is what
+    # stops that pooled fit from rendering in a color level's palette color
+    # beside a full legend -- a materially wrong statistical chart, drawn
+    # silently, and the same failure class `nominal_color_channel` names for a
+    # mistyped hue column. `Robust` did gain a Rust-side `groupby` in batch F
+    # (`residplot(color=)` consumes it), so wiring `hue=` through to per-group
+    # robust fits is now a Python-side change here; `Logistic`/`Glm` still need
+    # the Rust capability first. Both tracked as batch-close follow-ups.
 
     # Compose scatter + fit. (When ``metrics_applied``, the fit chart
     # already carries the metrics-text layer reading the Smooth output.)
@@ -1019,16 +1022,31 @@ def residplot(
         annotation with ``R^2`` / ``RMSE`` / ``MAE`` computed inside the
         Rust Smooth/Robust transform via the ``inject_metrics=True``
         kwarg -- same single execution model as fitted residuals, no
-        Python-side regression duplication.
+        Python-side regression duplication. Suppressed when ``color=``
+        names a column, mirroring ``lmplot``'s ``hue`` exclusion: those
+        residuals are refit per group, so there is no single corner value
+        to report. ``label=`` does not suppress it -- that grouping has
+        one level by construction, so the corner stays correct.
     zero_line : bool, default True
         Schwabish SB-followup: draw a dashed horizontal reference at
         ``y=0`` via the Rust transform's ``inject_zero_ref=True`` opt-in.
     label : str, optional
         Legend label for the residual series.  When set, a constant
         ``_label`` column is injected and mapped to color, producing a
-        single-entry legend.
+        single-entry legend.  Composes with ``robust=True``, with a
+        grouping ``color=`` (both reach the transform's ``groupby``), and
+        with a constant ``color=`` (the legend entry takes that color).
     color : str or encoding, optional
-        Column name or constant color forwarded to ``Chart.encode(color=)``.
+        Either a **column name** (or an encoding object naming one) or a
+        **constant color**, resolved in that order: a name that matches a
+        column of ``data`` groups the residuals -- they are refit per
+        group, coloured by that column, and a ``lowess=True`` overlay
+        draws one curve per group -- so a column literally named ``"red"``
+        groups rather than paints. Otherwise the value is parsed as a
+        color (CSS name, hex, ``rgb()``/``rgba()``, or an RGB tuple) and
+        painted onto the residual points as a constant ``fill``; combined
+        with ``label=``, that same color is also the legend swatch. A
+        value that is neither raises ``ValueError`` naming both readings.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional
@@ -1051,6 +1069,15 @@ def residplot(
         Scatter of residuals (possibly with a lowess layer, zero
         reference line, and corner R^2/RMSE/MAE annotation).
 
+    Raises
+    ------
+    ValueError
+        If ``color`` is neither a column of ``data`` nor a value ferrum's
+        color parser accepts -- see its parameter above.
+    ValueError
+        If ``label`` is set and ``data`` already has a ``_label`` column,
+        which this function needs for the label's own group key.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -1059,23 +1086,76 @@ def residplot(
     Robust residuals with annotations:
 
     >>> fm.residplot(df, x="size", y="tip", robust=True)
+
+    Residuals refit and coloured per group:
+
+    >>> fm.residplot(df, x="total_bill", y="tip", color="day")
+
+    Every residual point painted one constant color:
+
+    >>> fm.residplot(df, x="total_bill", y="tip", color="steelblue")
     """
     data = to_polars(data)
     if dropna:
         data = data.drop_nulls(subset=[x, y])
 
+    # `color=` is documented two ways -- a grouping column or a constant
+    # color -- and the dispatch runs against the INPUT frame, before the
+    # `_label` column below is injected, so membership is tested against
+    # exactly the columns the caller supplied (spec §6: membership is
+    # primary, so a column literally named "red" groups and never paints).
+    color_arg = _column_or_literal_color(color, data.columns, func_name="residplot")
+    # The one channel object every layer that reads the color scale binds
+    # (the points and, when grouped, the lowess overlay), so that scale is
+    # never asked to be two scale types at once. `None` unless `color=`
+    # named a column; a literal color paints marks instead (see
+    # `point_kwargs` below) and never reaches an encoding.
+    color = color_arg.channel
+
+    # A literal `color=` and `label=` are both honored, not one at the other's
+    # expense: `label=` carries its legend entry on a one-level color scale,
+    # and an encoding outranks a mark's own `fill`, so left alone the scale
+    # would repaint the points in a palette color and silently discard the
+    # literal. Pinning that scale's single range slot to the literal makes the
+    # points AND the legend swatch the requested color -- one legend entry, in
+    # the color the caller asked for. The domain is the single level the
+    # `_label` column below is built from.
+    label_paint_channel = None
+    if label is not None and color_arg.paint is not None:
+        label_paint_channel = Color(
+            "_label",
+            type_="nominal",
+            scale=OrdinalScale(domain=[str(label)], range=[color_arg.paint]),
+        )
+
     # The Rust Smooth/Robust transforms inject ``_ref_zero``,
     # ``_metrics_text``, and ``_metrics_y`` columns when the corresponding
     # ``inject_*`` kwargs are set — single source of truth for residual
     # computation lives in Rust; Python only declares the spec.
-    # When ``label`` is set, inject a constant ``_label`` column into the data
-    # and use ``groupby="_label"`` on the Smooth transform so the column
-    # survives the Rust transform's output schema (which otherwise only emits
-    # its declared columns).  Robust does not support groupby, so the label
-    # column cannot be preserved through that path — a Rust-side ``groupby``
-    # addition to the Robust transform would be needed.
+    # A column reaches the residual output only by being in ``groupby``: the
+    # transforms emit their declared columns plus the group keys, nothing
+    # else. So ``label=`` injects a constant ``_label`` column and groups by
+    # it, and a grouping ``color=`` joins the same list — both Smooth and
+    # Robust take a list of group columns (Robust gained ``groupby`` in
+    # batch F), so the two compose and residuals are refit per group.
+    groupby: list[str] = []
     if label is not None:
+        # `_label` is this function's own synthetic column, so a caller who
+        # already has one loses it: the literal would overwrite their values
+        # and `groupby` would carry the name twice. Rust tolerates the
+        # duplicate key and renders, which is the silent half -- refuse and
+        # name the collision instead.
+        if "_label" in data.columns:
+            raise ValueError(
+                "residplot(label=...) needs a private '_label' column, but the "
+                "data already has one -- the label would overwrite it silently. "
+                "Rename that column, or drop label= and encode the existing "
+                "column yourself with color='_label'."
+            )
         data = data.with_columns(pl.lit(str(label)).alias("_label"))
+        groupby.append("_label")
+    if color_arg.group_field is not None:
+        groupby.append(color_arg.group_field)
 
     # `residplot` passes `degree=order` straight to `Smooth` below, so it
     # needs the same typed refusal `lmplot` gets from `_smooth_degree_kwargs`
@@ -1103,33 +1183,52 @@ def residplot(
     # follow-up.
     _resid_x = "x"
 
-    if robust:
-        resid_transform = Robust(
-            x=x,
-            y=y,
-            output="residuals",
-            inject_zero_ref=zero_line,
-            inject_metrics=show_metrics,
-        )
-    else:
-        smooth_kwargs: dict = dict(
-            method="lm",
-            degree=order,
-            ci=None,
-            output="residuals",
-            inject_zero_ref=zero_line,
-            inject_metrics=show_metrics,
-        )
-        if label is not None:
-            smooth_kwargs["groupby"] = "_label"
-        resid_transform = Smooth(x=x, y=y, **smooth_kwargs)
+    # Mirrors `lmplot`'s `metrics_applied`: the corner annotation is one
+    # R²/RMSE/MAE for one fit, so a residplot refit per data group has no
+    # single corner to render, and labelling one group's metrics as the
+    # chart's would be wrong rather than crowded.
+    #
+    # Gated on the `color=` grouping ONLY, not on `groupby` as a whole. A
+    # `label=` grouping is one level by construction (`pl.lit`), so the
+    # transform emits exactly one corner for it and the reason above simply
+    # does not apply -- suppressing there would take the R²/RMSE/MAE away
+    # from a plain `residplot(..., label="…")` for no benefit. That is the
+    # same distinction `lmplot` draws: it gates on a real multi-level `hue`.
+    #
+    # It gates the transform's `inject_metrics` too, so the columns the
+    # metrics layer reads exist exactly when that layer is built.
+    metrics_applied = show_metrics and color_arg.group_field is None
 
-    chart = Chart(data).transform(resid_transform).mark_point()
+    # Both residual transforms take the same residual-mode arguments; only
+    # the fit family differs (and `degree`, which Robust has no analogue for).
+    resid_kwargs: dict = dict(
+        x=x,
+        y=y,
+        output="residuals",
+        inject_zero_ref=zero_line,
+        inject_metrics=metrics_applied,
+    )
+    if groupby:
+        resid_kwargs["groupby"] = groupby
+    if robust:
+        resid_transform = Robust(**resid_kwargs)
+    else:
+        resid_transform = Smooth(method="lm", degree=order, ci=None, **resid_kwargs)
+
+    # A literal `color=` paints the residual points through the point mark's
+    # own kwargs -- never through `encode(color=)`, which would fabricate a
+    # one-level color scale and a legend for what the caller asked to be a
+    # constant. Same neutral-paint idiom `build_fit_layers` uses.
+    point_kwargs: dict = {} if color_arg.paint is None else {"fill": color_arg.paint}
+
+    chart = Chart(data).transform(resid_transform).mark_point(**point_kwargs)
     enc: dict = {"x": _resid_x, "y": "residual"}
-    if label is not None and color is None and not robust:
-        enc["color"] = "_label"
     if color is not None:
         enc["color"] = color
+    elif label_paint_channel is not None:
+        enc["color"] = label_paint_channel
+    elif label is not None:
+        enc["color"] = "_label"
     enc.update(encode_kwargs)
     chart = chart.encode(**enc)
 
@@ -1137,10 +1236,17 @@ def residplot(
     # metrics text, or lowess smoother). The augmented-DataFrame pattern
     # works because all overlays reference columns the Rust transform
     # already emitted into the same residuals batch.
-    layered = lowess or zero_line or show_metrics
+    layered = lowess or zero_line or metrics_applied
     if layered:
         chart = chart._clone()
-        internal_layers: list = [_Layer(name="point", mark="point", encoding=dict(enc))]
+        internal_layers: list = [
+            _Layer(
+                name="point",
+                mark="point",
+                encoding=dict(enc),
+                mark_kwargs=point_kwargs or None,
+            )
+        ]
         if zero_line:
             internal_layers.append(
                 _Layer(
@@ -1150,7 +1256,7 @@ def residplot(
                     mark_kwargs={"stroke_dash": [3, 3], "stroke": "#8a8a8a"},
                 )
             )
-        if show_metrics:
+        if metrics_applied:
             internal_layers.append(
                 _Layer(
                     name="metrics",
@@ -1168,6 +1274,11 @@ def residplot(
                     method="loess",
                     ci=None,
                     name="lowess",
+                    # The overlay reads the residual batch, which carries the
+                    # group keys, so a grouped residplot smooths each group's
+                    # own residuals -- one curve per group instead of one
+                    # curve through the pooled cloud.
+                    **({"groupby": groupby} if groupby else {}),
                 ),
             ]
             # Derived from the registry (spec §4.6 / M6a) rather than
@@ -1175,11 +1286,25 @@ def residplot(
             # transform's fit-grid output, so a Rust-side rename raises here
             # instead of silently drawing nothing.
             _lowess_cols = registry_output_columns("smooth", ["x", "y"])
+            lowess_enc: dict = {"x": _lowess_cols["x"], "y": _lowess_cols["y"]}
+            # A line mark draws ONE polyline through the rows it is handed:
+            # what splits the per-group curves is the color channel, so this
+            # layer names it rather than leaning on the chart-level channel
+            # being inherited by a layer that declares none (#106 -- real
+            # today, deliberately left in flux, and written against a
+            # different batch than the one this layer reads). It binds the
+            # same channel object the points bind: one scale, one scale type.
+            if color is not None:
+                lowess_enc["color"] = color
+            elif label_paint_channel is not None:
+                lowess_enc["color"] = label_paint_channel
+            elif label is not None:
+                lowess_enc["color"] = "_label"
             internal_layers.append(
                 _Layer(
                     name="lowess",
                     mark="line",
-                    encoding={"x": _lowess_cols["x"], "y": _lowess_cols["y"]},
+                    encoding=lowess_enc,
                     data_source="lowess",
                 )
             )

@@ -5,15 +5,18 @@ Shared by the ``ferrum.plots.*`` domain modules.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple
 
 import polars as pl
 
 from ferrum._overrides import _apply_overrides
+from ferrum.color import to_hex
+from ferrum.marks._desugar_helpers import nominal_color_channel
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
     from ferrum.composition import ConcatChart
+    from ferrum.encoding.base import ChannelBase
 
 
 def _inject_cook_outliers(
@@ -180,6 +183,72 @@ def _field_name(value: Any) -> str | None:
     if value is None:
         return None
     return value.field if hasattr(value, "field") else str(value)
+
+
+class _ColorArgument(NamedTuple):
+    """How a two-way ``color=`` argument resolved.
+
+    Exactly one interpretation is live: either the argument named a data
+    column -- ``group_field`` is the column name and ``channel`` is the
+    ready-to-encode color channel -- or it named a literal color, in which
+    case ``paint`` is its normalized hex and the other two are ``None``.
+    ``color=None`` leaves all three ``None``.
+    """
+
+    group_field: str | None
+    channel: "ChannelBase | None"
+    paint: str | None
+
+
+def _column_or_literal_color(
+    color: Any,
+    columns: Iterable[str],
+    *,
+    func_name: str,
+) -> _ColorArgument:
+    """Resolve a ``color=`` argument documented as "column name *or* constant color".
+
+    The dispatch order is normative: **column membership in the input frame
+    wins**, so a column literally named ``"red"`` groups by that column and
+    never paints. Only when no such column exists is the value offered to
+    ferrum's single color parser (:func:`ferrum.color.to_hex`), and only when
+    that also refuses does this raise -- naming both interpretations, because
+    from the outside a rejected value is ambiguous between a column typo and a
+    color typo.
+
+    The column branch types the channel Nominal via ``nominal_color_channel``
+    (an already-constructed channel object passes through untouched): a
+    ``color=`` that drives a transform's ``groupby=`` is a discriminator by
+    construction, so a numeric group column must not infer a Continuous scale
+    -- and its consumer layers all share one color scale.
+
+    The literal branch normalizes through ``to_hex`` so the value handed to a
+    mark's ``fill=``/``stroke=`` is the same hex every other ferrum color
+    boundary would produce, tuples included.
+    """
+    if color is None:
+        return _ColorArgument(None, None, None)
+
+    field = _field_name(color)
+    if field is not None and field in set(columns):
+        return _ColorArgument(field, nominal_color_channel(color), None)
+
+    try:
+        paint = to_hex(color)
+    except (ValueError, TypeError) as exc:
+        # `TypeError` too: the third leg of the dispatch is normatively "a
+        # typed ValueError naming both readings", and this is the site that
+        # owes it. `to_hex` documents `ValueError` for an unrecognized tuple,
+        # but a non-numeric one (`("a", "b", "c")`) escapes that contract as a
+        # raw `TypeError` from the component comparison -- which would reach
+        # the caller as an unexplained internal error.
+        raise ValueError(
+            f"{func_name}(color={color!r}): not a column of the data and not a "
+            f"parseable color. As a column name it would group the data, but no "
+            f"column {field!r} exists; as a literal color it would paint the "
+            f"marks, but the color parser refused it ({exc})."
+        ) from exc
+    return _ColorArgument(None, None, paint)
 
 
 def _reject_compare(compare: dict | None, *, chart: str, reason: str) -> None:

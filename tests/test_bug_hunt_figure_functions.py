@@ -434,29 +434,54 @@ class TestResidplotLabel:
         assert "NaN" not in svg
 
     def test_residplot_label_color_parameter_overrides(self, simple_float_df):
-        """residplot(label=..., color=...) — explicit color overrides _label.
-        regression.py lines 855-858: color wins over label."""
+        """residplot(label=..., color=<column>) — the column wins the colour scale.
+
+        Re-homed in batch F (F-L10-04). This used to pass ``color="x"``, which
+        under the pre-fix contract meant "colour by the residual batch's x" and
+        under the new one means "group the residuals by the x column" — one
+        group per row, which the fit transform degenerates to zero rows, so the
+        test went on passing over a chart that rendered *nothing* because it
+        only read the spec. It now uses a real categorical grouping and asserts
+        rendered content, so "colour wins over label" is claimed about a chart
+        that exists. (The degenerate high-cardinality case is a known gap:
+        it renders blank with no diagnostic, and the fix is a Rust-side
+        warning keyed on group cardinality vs the fit minimum — logged as a
+        batch-close follow-up, not pinned here as desirable behavior.)
+        """
+        df = simple_float_df.with_columns(
+            pl.Series("grp", ["a", "a", "a", "a", "b", "b", "b", "b"])
+        )
         chart = fm.residplot(
-            simple_float_df,
+            df,
             x="x",
             y="y",
             label="test",
-            color="x",
+            color="grp",
             show_metrics=False,
             zero_line=False,
         )
         spec = json.loads(chart.to_spec().to_json())
         enc = spec.get("encoding", {})
         color_field = enc.get("color", {}).get("field", enc.get("color"))
-        assert color_field == "x", "Explicit color= should override label"
+        assert color_field == "grp", "Explicit color= should override label"
+        # `_label` still rides along as a group key, so label= is not dropped —
+        # it just does not win the colour scale.
+        smooth_t = next(t for t in spec.get("transforms", []) if t.get("type") == "smooth")
+        assert smooth_t.get("groupby") == ["_label", "grp"]
+        svg = chart.to_svg()
+        assert svg.count("<circle") >= 8, "the chart rendered no data points"
+        assert "NaN" not in svg
 
-    def test_residplot_robust_no_label_support(
-        self, simple_float_df
-    ):  # BUG: ValueError: unknown column '_label' — Robust transform drops _label column but encoding still references it via color='_label'
-        """residplot(robust=True, label=...) — Robust has no groupby, so _label
-        is dropped by the transform output, but the encoding still references
-        it via color='_label', causing a ValueError at render time.
-        regression.py line 826-827 warns about the limitation but doesn't guard against it."""
+    def test_residplot_robust_label_renders_the_label(self, simple_float_df):
+        """residplot(robust=True, label=...) — the label reaches the legend.
+
+        This used to be a silent no-op: ``Robust`` had no ``groupby``, so the
+        injected ``_label`` column never reached the transform's output while
+        the encoding still asked for ``color='_label'``. residplot's answer
+        was to drop the colour encoding on the robust path, which discarded
+        ``label=`` without a word. ``Robust`` gained ``groupby`` in batch F
+        (F-L10-04), so the label now groups and legends exactly as it does on
+        the Smooth path."""
         chart = fm.residplot(
             simple_float_df,
             x="x",
@@ -468,8 +493,11 @@ class TestResidplotLabel:
         )
         svg = chart.to_svg()
         assert "<svg" in svg
-        # The Robust transform drops _label. The encoding
-        # references _label via color, causing the crash.
+        assert ">robust_label<" in svg, "label= is still dropped on the robust path"
+        spec = json.loads(chart.to_spec().to_json())
+        robust_t = next(t for t in spec.get("transforms", []) if t.get("type") == "robust")
+        assert robust_t.get("groupby") == ["_label"]
+        assert spec["encoding"]["color"]["field"] == "_label"
 
 
 # ===================================================================
