@@ -26,6 +26,7 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart
 
+from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import _normalize_names, nominal_color_channel
 from ferrum._overrides import register_layer_names
@@ -399,6 +400,43 @@ def _pr_chart_from_source(
     )
 
 
+def _per_sample_brier(source: Any) -> float | None:
+    """Return the per-sample Brier score for one binary-classification source.
+
+    ``None`` when ``source`` cannot produce one: a ``_PrecomputedSource``
+    always can (it holds exactly ``brier_score()`` needs); a ``ModelSource``
+    can when its wrapped model exposes ``predict_proba`` and returns
+    exactly two columns. A ``ComparedModelSource`` has no single per-sample
+    story of its own -- callers iterate ``.items()`` and call this once per
+    wrapped ``ModelSource`` instead (F-L11-04, 2026-09-10).
+    """
+    import numpy as np
+
+    from ferrum._metric_labels import _brier_score
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
+
+    if isinstance(source, _PrecomputedSource):
+        return source.brier_score()
+
+    model = getattr(source, "model", None)
+    X_attr = getattr(source, "X", None)
+    y_attr = getattr(source, "y", None)
+    if model is None or X_attr is None or y_attr is None or not hasattr(model, "predict_proba"):
+        return None
+    try:
+        proba = np.asarray(model.predict_proba(X_attr))
+    except Exception:
+        # A wrapped model that advertises predict_proba but fails on this
+        # X (e.g. an incompatible feature count) degrades the title, not
+        # the chart -- matches the pre-fix behavior's graceful fallback.
+        return None
+    if proba.ndim != 2 or proba.shape[1] != 2:
+        return None
+    p = proba[:, 1].astype(float)
+    obs = np.asarray(y_attr, dtype=float)
+    return _brier_score(p, obs)
+
+
 def _calibration_chart_from_source(
     source: Any,
     *,
@@ -417,11 +455,23 @@ def _calibration_chart_from_source(
     Schwabish SB3 (2026-05-11): active title carrying the per-sample
     Brier score when the chart shows a single model; per-series
     :class:`ferrum.BrierLabel` overlay when ``annotate_brier=True``.
-    """
-    import numpy as np
 
+    F-L11-04 (2026-09-10): both the title and the overlay read the *same*
+    per-sample Brier -- ``_per_sample_brier`` computed from the held
+    predictions, never from the binned ``(mean_predicted,
+    fraction_positive)`` reliability-diagram data ``n_bins=``/``strategy=``
+    control. Single-model: one value drives both the title and the
+    ungrouped overlay. Compared (``isinstance(source, ComparedModelSource)``
+    -- the dead ``hasattr(source, "models")`` check is gone, no source class
+    ever had a ``models`` attribute): the title stays plain (no single
+    number describes several models, unchanged from before), but each
+    model's own per-sample Brier drives its own overlay label, keyed by
+    model name to match the ``color="model"`` grouping (user checkpoint
+    decision 2, supersedes the spec's prior bin-level-for-compared
+    sanction -- see ``ferrum-spec.md``'s dated note).
+    """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit, _brier_score
+    from ferrum._metric_labels import _apply_metric_label_explicit
 
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None
@@ -434,28 +484,17 @@ def _calibration_chart_from_source(
         y=Y("fraction_positive", title="Fraction of positives"),
     )
 
-    # Active title fires when exactly one model.  Compute the true
-    # per-sample Brier from ``source.model.predict_proba`` and
-    # ``source.y``; the compared-model case skips the active title.
-    is_single_model = not hasattr(source, "models")
-    brier_value: float | None = None
-    if is_single_model:
-        try:
-            model_attr = getattr(source, "model", None) or getattr(source, "_model", None)
-            X_attr = getattr(source, "X", None)
-            if X_attr is None:
-                X_attr = getattr(source, "_X", None)
-            y_attr = getattr(source, "y", None)
-            if y_attr is None:
-                y_attr = getattr(source, "_y", None)
-            if model_attr is not None and X_attr is not None and y_attr is not None:
-                proba = model_attr.predict_proba(X_attr)
-                if proba.ndim == 2 and proba.shape[1] == 2:
-                    p = np.asarray(proba[:, 1], dtype=float)
-                    obs = np.asarray(y_attr, dtype=float)
-                    brier_value = _brier_score(p, obs)
-        except Exception:
-            brier_value = None
+    if isinstance(source, ComparedModelSource):
+        brier_value: float | None = None
+        per_model_brier = {
+            name: _per_sample_brier(model_source) for name, model_source in source.items()
+        }
+        overlay_value: float | dict[str, float] | None = {
+            name: value for name, value in per_model_brier.items() if value is not None
+        } or None
+    else:
+        brier_value = _per_sample_brier(source)
+        overlay_value = brier_value
 
     if brier_value is not None:
         chart = chart.properties(
@@ -473,13 +512,17 @@ def _calibration_chart_from_source(
         # Brier overlay shares the canonical metric-kind table in
         # _metric_labels (same single source as the ROC/PR AUC/AP overlays).
         # mark_calibration has no annotate flag, so the figure function is the
-        # sole annotation surface here.
+        # sole annotation surface here. precomputed_value= makes the overlay
+        # show the true per-sample number(s) above rather than integrating
+        # the bin-level curve _apply_metric_label_explicit would otherwise
+        # compute from (mean_predicted, fraction_positive).
         chart = _apply_metric_label_explicit(
             chart,
             "brier",
             x_col="mean_predicted",
             y_col="fraction_positive",
             color_col=color,
+            precomputed_value=overlay_value,
             position="corner",
         )
 

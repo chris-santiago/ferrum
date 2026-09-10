@@ -222,12 +222,36 @@ def _validate_metric_label_fields(label: "AUCLabel | APLabel | BrierLabel") -> N
         ) from exc
 
 
+def _resolve_precomputed_metric(
+    precomputed_value: "float | dict[str, float] | None", group_key: Any = None
+) -> Optional[float]:
+    """The precomputed override for one curve/group, or ``None`` when unset.
+
+    ``precomputed_value`` is either a single float (one curve, no color
+    grouping -- e.g. a single-model calibration chart) or a
+    ``dict[str, float]`` keyed by ``str(group_key)`` (one value per color
+    group -- e.g. a compared calibration chart's per-model Brier), matching
+    the keying convention :func:`_curve_metrics_by_group` already uses.
+    ``None`` (either the whole override or the specific group's entry) means
+    "fall back to ``metric_fn``/``metric_field`` for this curve."
+    """
+    if precomputed_value is None:
+        return None
+    if isinstance(precomputed_value, dict):
+        if group_key is None:
+            return None
+        value = precomputed_value.get(str(group_key))
+        return None if value is None else float(value)
+    return float(precomputed_value)
+
+
 def _apply_metric_label(
     base: "Chart",
     label: "AUCLabel | APLabel | BrierLabel",
     *,
     metric_fn,
     metric_field: Optional[str] = None,
+    precomputed_value: "float | dict[str, float] | None" = None,
     x_col_override: Optional[str] = None,
     y_col_override: Optional[str] = None,
     color_col_override: Optional[str] = None,
@@ -247,6 +271,15 @@ def _apply_metric_label(
     value, so the label, the chart title and the legend text are one number
     from one source. ``None`` (the ``+ AUCLabel()`` composable path, whose
     data is arbitrary user data) integrates ``metric_fn`` instead.
+
+    ``precomputed_value`` (F-L11-04, 2026-09-10) overrides both of the
+    above: when set, ``metric_fn`` is not consulted and no broadcast column
+    is read for that curve/group -- the caller's own per-sample value is
+    shown verbatim. Calibration's Brier overlay is the motivating case: a
+    bin-level Brier computed from ``(mean_predicted, fraction_positive)``
+    swings with ``n_bins=``/``strategy=`` and is not the Brier score, so the
+    calibration builder always passes the true per-sample value it computes
+    from the held predictions, invariant to binning.
 
     Schwabish SB3 (2026-05-11): accepts explicit field overrides so the
     figure-level builders (which hide encoding behind ``_pending_stat_mark``
@@ -298,13 +331,15 @@ def _apply_metric_label(
             group = df.filter(pl.col(color_col) == cls)
             if group.is_empty():
                 continue
-            metric = _curve_metric(
-                group,
-                metric_field=metric_field,
-                metric_fn=metric_fn,
-                x_col=x_col,
-                y_col=y_col,
-            )
+            metric = _resolve_precomputed_metric(precomputed_value, cls)
+            if metric is None:
+                metric = _curve_metric(
+                    group,
+                    metric_field=metric_field,
+                    metric_fn=metric_fn,
+                    x_col=x_col,
+                    y_col=y_col,
+                )
             text = f"{label.prefix}{metric:{label.format}}"
             # nulls_last=True so a null x (which polars' default descending
             # sort places FIRST) never becomes the selected "endpoint" row;
@@ -324,13 +359,15 @@ def _apply_metric_label(
             else:
                 label_x_col[global_idx] = float(endpoint_x) if endpoint_x is not None else x_top
     else:
-        metric = _curve_metric(
-            df,
-            metric_field=metric_field,
-            metric_fn=metric_fn,
-            x_col=x_col,
-            y_col=y_col,
-        )
+        metric = _resolve_precomputed_metric(precomputed_value)
+        if metric is None:
+            metric = _curve_metric(
+                df,
+                metric_field=metric_field,
+                metric_fn=metric_fn,
+                x_col=x_col,
+                y_col=y_col,
+            )
         text = f"{label.prefix}{metric:{label.format}}"
         global_idx = df[x_col].arg_max()
         # arg_max() returns None (not an int index) for an empty or
@@ -586,6 +623,7 @@ def _apply_metric_label_explicit(
     y_col: str,
     color_col: Optional[str] = None,
     metric_field: Optional[str] = None,
+    precomputed_value: "float | dict[str, float] | None" = None,
     position: str = "end",
     fmt: str = ".3f",
     prefix: Optional[str] = None,
@@ -602,6 +640,13 @@ def _apply_metric_label_explicit(
     :func:`_apply_metric_label`: a diagnostic builder names the broadcast
     metric column its frame already carries (``"auc"`` / ``"ap"``) so the
     overlay reads the same number the title and legend do.
+
+    ``precomputed_value`` (F-L11-04, 2026-09-10) is forwarded verbatim: when
+    set, neither ``metric_fn`` nor ``metric_field`` is consulted for the
+    matching curve/group -- see :func:`_apply_metric_label`'s docstring.
+    Calibration is the only caller today (its Brier must be a per-sample
+    value, never the bin-level number ``metric_fn``/``metric_field`` would
+    otherwise produce from the binned reliability-diagram data).
     """
     validate_choice("_apply_metric_label_explicit", "label_kind", label_kind, _METRIC_LABEL_SPECS)
     metric_fn, default_prefix = _METRIC_LABEL_SPECS[label_kind]
@@ -615,6 +660,7 @@ def _apply_metric_label_explicit(
         label_obj,
         metric_fn=metric_fn,
         metric_field=metric_field,
+        precomputed_value=precomputed_value,
         x_col_override=x_col,
         y_col_override=y_col,
         color_col_override=color_col,

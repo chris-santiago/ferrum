@@ -155,6 +155,24 @@ class _PrecomputedSource:
             strategy,
         )
 
+    def brier_score(self) -> float:
+        """Per-sample Brier score of the held predictions (F-L11-04, 2026-09-10).
+
+        ``mean((y_pred - y_true) ** 2)`` over the raw ``(y_true, y_pred)``
+        arrays supplied at construction -- ``y_pred`` is the 1-D positive-
+        class probability ``calibration_curve`` also consumes. Shares the
+        one Brier formula with the model-backed and composable label paths
+        (:func:`ferrum._metric_labels._brier_score`) so the precomputed
+        calibration chart's title carries the same true per-sample number
+        the ``BrierLabel`` overlay shows, not a value recomputed from the
+        binned reliability-diagram output.
+        """
+        from ferrum._metric_labels import _brier_score
+
+        y_true = self._y_true_np.astype(np.float64)
+        y_pred = self._y_pred_np.astype(np.float64)
+        return _brier_score(y_pred, y_true)
+
     def cumulative_gain(self) -> pl.DataFrame:
         """Cumulative-gain curve.  Mirrors ``ModelSource.cumulative_gain`` schema."""
         y_true = self._y_true_np

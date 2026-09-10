@@ -1,6 +1,6 @@
-"""Batch G / F-L11-01 — every displayed AUC/AP is the correct metric, once.
+"""Batch G / F-L11-01 + F-L11-04 — every displayed metric is the correct one, once.
 
-Three claims are pinned here, all at the user-observable surface:
+Four claims are pinned here, all at the user-observable surface:
 
 1. Every one of the four swept sort sites is **stable**, so a curve with tied
    values (routine on ROC/PR/gain/lift curves) yields the correct answer
@@ -13,11 +13,15 @@ Three claims are pinned here, all at the user-observable surface:
    with the column and with each other.
 3. ``mark_roc(annotate_auc=True)`` / ``mark_pr(annotate_ap=True)`` render
    their label instead of raising ``layer N: unknown column '_auc_label_x'``.
+4. (G2, F-L11-04) A calibration chart shows **one** Brier score: the title
+   and the ``BrierLabel`` overlay agree, and that number is the true
+   per-sample Brier -- invariant to ``n_bins=``/``strategy=`` -- on the
+   single-model, compared, and precomputed paths alike.
 
 Every numeric expectation is hand-computed here (Python's ``sorted`` is a
-guaranteed-stable sort; the trapezoid and step-integration loops are written
-out inline) or read from a *different* code path than the one asserted --
-never from the function under test.
+guaranteed-stable sort; the trapezoid, step-integration, and Brier loops are
+written out inline) or read from a *different* code path than the one
+asserted -- never from the function under test.
 """
 
 from __future__ import annotations
@@ -374,3 +378,78 @@ def test_pr_average_interpolates_over_a_stable_recall_sort():
     assert macro["class"].unique().to_list() == ["macro"]
     assert macro["recall"].to_list() == pytest.approx(list(grid))
     assert macro["precision"].to_list() == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# 6. Brier: per-sample everywhere (G2, F-L11-04)
+# ---------------------------------------------------------------------------
+
+
+def hand_brier(proba_positive: np.ndarray, y_true: np.ndarray) -> float:
+    """Per-sample Brier score, written out by hand -- never the function
+    under test."""
+    p = np.asarray(proba_positive, dtype=float)
+    y = np.asarray(y_true, dtype=float)
+    return float(np.sum((p - y) ** 2) / len(p))
+
+
+def test_calibration_title_and_overlay_agree_and_are_invariant_to_binning(binary_source):
+    """The finding's exact repro: `strategy=`/`n_bins=` must not move the
+    displayed Brier, and the title and the corner overlay must show the
+    same number. Pre-fix, the title already carried the true per-sample
+    value, but the overlay was a bin-level number computed from
+    (mean_predicted, fraction_positive) -- and that bin-level number swung
+    with `n_bins=`/`strategy=` while the title held still."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X_mat = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    expected = hand_brier(model.predict_proba(X_mat)[:, 1], y.to_numpy())
+
+    chart_a = ferrum.calibration_chart(binary_source, n_bins=5, strategy="uniform")
+    chart_b = ferrum.calibration_chart(binary_source, n_bins=20, strategy="quantile")
+
+    for chart in (chart_a, chart_b):
+        assert chart._title.text == f"Calibration Curve — Brier {expected:.3f}"
+        assert f"Brier = {expected:.3f}" in svg_texts(chart.to_svg())
+
+
+def test_calibration_compared_overlay_shows_each_models_own_per_sample_brier():
+    """Two models with genuinely different probabilities on the same data
+    must show two distinct, model-own per-sample Brier overlays -- not a
+    shared bin-level number computed off the merged reliability curve."""
+    from sklearn.linear_model import LogisticRegression
+
+    df = load_dataset("binary_classification")
+    X_mat = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    loose = load_fixture("binary_logistic")
+    strict = LogisticRegression(C=0.01, max_iter=1000).fit(X_mat.to_numpy(), y.to_numpy())
+
+    expected_loose = hand_brier(loose.predict_proba(X_mat)[:, 1], y.to_numpy())
+    expected_strict = hand_brier(strict.predict_proba(X_mat)[:, 1], y.to_numpy())
+    assert f"{expected_loose:.3f}" != f"{expected_strict:.3f}"  # the fixture really discriminates
+
+    cms = ferrum.ModelSource.compare({"loose": loose, "strict": strict}, X_mat, y)
+    texts = svg_texts(ferrum.calibration_chart(cms).to_svg())
+
+    assert f"Brier = {expected_loose:.3f}" in texts
+    assert f"Brier = {expected_strict:.3f}" in texts
+
+
+def test_calibration_precomputed_title_carries_brier():
+    """The precomputed path (`y_true=`/`y_pred=`) previously rendered a bare
+    "Calibration Curve" title -- neither `.model` nor `.X` exist on
+    `_PrecomputedSource` for the old attribute-chasing code to find. The
+    title must now carry the true per-sample Brier, matching the overlay."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X_mat = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    proba = model.predict_proba(X_mat)[:, 1]
+    expected = hand_brier(proba, y.to_numpy())
+
+    chart = ferrum.calibration_chart(y_true=y.to_numpy(), y_pred=proba)
+
+    assert chart._title.text == f"Calibration Curve — Brier {expected:.3f}"
+    assert f"Brier = {expected:.3f}" in svg_texts(chart.to_svg())
