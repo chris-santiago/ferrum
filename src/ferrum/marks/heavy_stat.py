@@ -270,6 +270,7 @@ def desugar_violin(
     x_sort: Any = None,
     y_sort: Any = None,
     color_field: str | None = None,
+    color_sort: Any = None,
     shared_extent: bool = False,
     horizontal: bool = False,
 ) -> MarkDesugarResult:
@@ -331,6 +332,10 @@ def desugar_violin(
         violins are overlaid (distinct fills, ``fill_opacity=0.5``) within each
         x-category band.  When ``None`` the output is byte-identical to a
         single-group violin.
+    color_sort : optional
+        Explicit hue-level order for the color channel, injected by the
+        composite-mark expansion from ``sort=`` on a ``.encode(color=...)``
+        channel (F-L09-04). Ignored when there is no color split.
     shared_extent : bool, default False
         When ``True``, all groups within the violin share the same KDE
         evaluation range (the cross-group global min/max), making the value
@@ -422,7 +427,7 @@ def desugar_violin(
     # cat, the color encoding is redundant with the axis, so it is suppressed to
     # match the errorbar/errorband siblings.
     if split_hue:
-        body_encoding["color"] = nominal_color_channel(color_field)
+        body_encoding["color"] = nominal_color_channel(color_field, sort=color_sort)
 
     transforms = [
         Violin(
@@ -450,7 +455,7 @@ def desugar_violin(
         else:
             point_encoding = {"x": cat_enc, "y": val_field}
         if color_field is not None:
-            point_encoding["color"] = nominal_color_channel(color_field)
+            point_encoding["color"] = nominal_color_channel(color_field, sort=color_sort)
         # raw points read from the original (unsplit) data, so coloring by the
         # hue column is always valid regardless of split_hue. Typed Nominal
         # rather than taking the `point` carve-out: this layer shares a chart
@@ -494,7 +499,7 @@ def desugar_violin(
             # siblings. (Contrast with the point inner above, which reads the
             # unsplit original data and so always colors by the hue column.)
             if split_hue:
-                quart_encoding["color"] = nominal_color_channel(color_field)
+                quart_encoding["color"] = nominal_color_channel(color_field, sort=color_sort)
             layers.append(
                 _Layer(
                     name=col,
@@ -519,6 +524,7 @@ def desugar_violin(
         x_sort=x_sort,
         y_sort=y_sort,
         color_field=color_field if split_hue else None,
+        color_sort=color_sort if split_hue else None,
     )
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],

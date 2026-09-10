@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 import polars as pl
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ferrum.encoding.base import ChannelBase
 
 #: Feature-ranking / display-ordering vocabulary shared by
@@ -48,7 +50,9 @@ SHAP_ORDER_VALUES: tuple[str, ...] = ("abs_mean", "mean", "max", "none")
 SHAP_BEESWARM_COLOR_FIELD = "Feature value"
 
 
-def nominal_color_channel(field: "str | ChannelBase | None") -> "ChannelBase | None":
+def nominal_color_channel(
+    field: "str | ChannelBase | None", *, sort: "Sequence[str] | None" = None
+) -> "ChannelBase | None":
     """Bind *field* to the color channel typed Nominal.
 
     The rule, not an enumeration: **every** encoding whose color channel
@@ -120,12 +124,23 @@ def nominal_color_channel(field: "str | ChannelBase | None") -> "ChannelBase | N
     scan over ``src/ferrum/marks`` and ``src/ferrum/plots``, so a new call
     site that binds a bare name to a color channel fails a test rather than
     waiting for a reviewer to find the wrong chart.
+
+    ``sort`` carries an explicit hue-level order (e.g. a figure function's
+    ``hue_order=`` or a caller's ``.encode(color=Color(field, sort=[...]))``)
+    through to the constructed channel (F-L09-04). It is a literal level
+    list, not a shorthand/aggregate sort spec, so it is forwarded verbatim
+    rather than run through ``_resolve_sort_for_composite``. Left as
+    ``None`` (the default), no ``sort=`` kwarg reaches ``Color`` at all --
+    that keeps every existing call site byte-identical.
     """
     if field is None or not isinstance(field, str):
         return field
     from ferrum.encoding import Color
 
-    return Color(field, type_="nominal")
+    kwargs: dict = {"type_": "nominal"}
+    if sort is not None:
+        kwargs["sort"] = sort
+    return Color(field, **kwargs)
 
 
 def shap_beeswarm_color_channel(*, color_bar: bool):

@@ -144,6 +144,7 @@ def desugar_boxplot(
     outliers: bool = True,
     size: Optional[float] = None,
     color_field: Optional[str] = None,
+    color_sort: Any = None,
     horizontal: bool = False,
     x_sort: Any = None,
     y_sort: Any = None,
@@ -206,6 +207,10 @@ def desugar_boxplot(
     color_field : str or None, default None
         Optional column to use for color encoding (also added to the
         ``groupby`` list for the transforms).
+    color_sort : optional
+        Explicit hue-level order for the color channel, injected by the
+        composite-mark expansion from ``sort=`` on a ``.encode(color=...)``
+        channel (F-L09-04). Ignored when there is no color split.
     horizontal : bool, default False
         If ``True``, flip axes so that categories are on the y-axis.
     x_sort, y_sort : optional
@@ -306,7 +311,7 @@ def desugar_boxplot(
         # same field as cat, the color encoding is redundant with the axis, so
         # it is suppressed to match the errorbar/errorband siblings.
         if split_hue:
-            d["color"] = nominal_color_channel(color_field)
+            d["color"] = nominal_color_channel(color_field, sort=color_sort)
         return d
 
     layers = [
@@ -384,6 +389,7 @@ def desugar_errorbar(
     method: str = _MISSING,  # type: ignore[assignment]
     ticks: bool = True,
     color_field: Optional[str] = None,
+    color_sort: Any = None,
     x_sort: Any = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
@@ -432,6 +438,10 @@ def desugar_errorbar(
         extent is computed per (x, color) group, and every emitted layer carries
         a ``color`` encoding so each group is visually distinct.  When ``None``,
         behavior is byte-stable with the previous (no-hue) implementation.
+    color_sort : optional
+        Explicit hue-level order for the color channel, injected by the
+        composite-mark expansion from ``sort=`` on a ``.encode(color=...)``
+        channel (F-L09-04). Ignored when there is no color split.
     x_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
@@ -474,7 +484,7 @@ def desugar_errorbar(
         if y2_col is not None:
             d["y2"] = y2_col
         if split_hue:
-            d["color"] = nominal_color_channel(color_field)
+            d["color"] = nominal_color_channel(color_field, sort=color_sort)
         return d
 
     transforms = [ErrorExtent(field=y_field, groupby=groupby, method=method, name="err")]
@@ -532,6 +542,7 @@ def desugar_errorband(
     method: str = _MISSING,  # type: ignore[assignment]
     borders: bool = False,
     color_field: Optional[str] = None,
+    color_sort: Any = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Error-band (shaded CI ribbon) composite mark desugar.
@@ -577,6 +588,10 @@ def desugar_errorband(
         extent is computed per (x, color) group, and every emitted layer carries
         a ``color`` encoding so each group's ribbon is visually distinct.  When
         ``None``, behavior is byte-stable with the previous (no-hue) implementation.
+    color_sort : optional
+        Explicit hue-level order for the color channel, injected by the
+        composite-mark expansion from ``sort=`` on a ``.encode(color=...)``
+        channel (F-L09-04). Ignored when there is no color split.
 
     Returns
     -------
@@ -616,13 +631,13 @@ def desugar_errorband(
             "y2": _err_cols["upper"],
         }
         if split_hue:
-            d["color"] = nominal_color_channel(color_field)
+            d["color"] = nominal_color_channel(color_field, sort=color_sort)
         return d
 
     def _enc_border(y_col: str) -> dict:
         d: dict = {"x": x_field, "y": y_col}
         if split_hue:
-            d["color"] = nominal_color_channel(color_field)
+            d["color"] = nominal_color_channel(color_field, sort=color_sort)
         return d
 
     transforms = [ErrorExtent(field=y_field, groupby=groupby, method=method, name="err")]

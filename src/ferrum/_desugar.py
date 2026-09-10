@@ -338,8 +338,8 @@ class _ResolveContext:
 
     A single context object lets the dispatch-table prep functions read and
     write the same fields the old per-``kind`` ``if`` chain mutated inline
-    (``transform_kwargs``, ``x_sort``/``y_sort``), so the orchestration stays a
-    flat, readable sequence.
+    (``transform_kwargs``, ``x_sort``/``y_sort``, ``color_sort``), so the
+    orchestration stays a flat, readable sequence.
     """
 
     chart: "Chart"
@@ -349,6 +349,7 @@ class _ResolveContext:
     transform_kwargs: dict
     x_sort: Any
     y_sort: Any
+    color_sort: Any
 
     def _color_field(self) -> str | None:
         color_enc = self.chart._encoding.get("color")
@@ -583,12 +584,36 @@ def _prep_color_field(ctx: _ResolveContext) -> None:
     Respect an explicit caller-supplied color_field (non-falsy overrides the
     encoding-inferred one); a None/empty value from the mark call's default is
     treated as "not set" so the encoding can still inject it.
+
+    Also threads ``color_sort`` -- the chart's ``.encode(color=Color(...,
+    sort=[...]))`` level order (F-L09-04) -- alongside the field, so a
+    ``hue_order=`` built by a figure function (or a caller's own explicit
+    ``Color(sort=...)``) reaches the composite desugar's color channel
+    instead of being flattened away by :meth:`_ResolveContext._color_field`.
+    Two guards apply, independently of the ``color_field`` early-return above:
+
+    - **Type guard.** Only a literal level list/tuple is forwarded. A color
+      sort is documented as a literal hue-level order, not a shorthand
+      (``"-y"``) or an aggregate-sort dict -- those forms cannot resolve
+      against a composite desugar's renamed output columns (e.g.
+      ``lower_whisker``), so forwarding them would turn a pre-fix silent
+      no-op into a noisy, misleading ``UserWarning`` naming an internal
+      column the caller never wrote. Out-of-contract shapes stay exactly as
+      inert as they were before this field existed.
+    - **Override guard.** An explicit ``color_sort=`` mark kwarg (reachable
+      via ``mark_boxplot(color_sort=...)`` etc., since it is a declared
+      desugar parameter) is never clobbered by the encoding-derived value --
+      this matches ``color_field``'s own override precedence exactly, not
+      just in spirit: whichever of the two is caller-supplied wins over
+      whatever ``.encode(color=...)`` would otherwise inject.
     """
     if ctx.transform_kwargs.get("color_field"):
         return
     color_field = ctx._color_field()
     if color_field:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "color_field": color_field}
+        if isinstance(ctx.color_sort, (list, tuple)) and not ctx.transform_kwargs.get("color_sort"):
+            ctx.transform_kwargs = {**ctx.transform_kwargs, "color_sort": ctx.color_sort}
 
 
 def _prep_groupby_from_color(ctx: _ResolveContext) -> None:
@@ -746,6 +771,11 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         if _raw_y_sort is not None
         else None
     )
+    # A color sort is a literal hue-level order (e.g. `hue_order=`), not a
+    # shorthand/aggregate sort spec like x_sort/y_sort -- it is forwarded
+    # verbatim, never through `_resolve_sort_for_composite` (F-L09-04).
+    color_enc = chart._encoding.get("color")
+    color_sort = color_enc.option("sort") if isinstance(color_enc, ChannelBase) else None
     # Partition the user kwargs by the desugar signature: declared params are
     # transform kwargs; everything else is a constant mark-style override.
     # ``style_dict`` is validated/normalised through MarkBase so aliases
@@ -763,6 +793,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         transform_kwargs=transform_kwargs,
         x_sort=x_sort,
         y_sort=y_sort,
+        color_sort=color_sort,
     )
     prep = _PENDING_PREP.get(kind)
     if prep is not None:
