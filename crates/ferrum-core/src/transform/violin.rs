@@ -292,6 +292,8 @@ pub(crate) fn apply_with_context(
             cumulative: false,
             kernel: crate::transform::kde::default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let kde_out = kde::apply(&kde_spec, &synth_batch)?;

@@ -29,8 +29,12 @@ mod legend;
 
 // Re-exported into this module's namespace so the orchestrator and the inline
 // `#[cfg(test)] mod tests` (which uses `super::*`) resolve the extracted helpers
-// from their cohesive submodules without a path change.
-use extent::fix_transform_extents_for_facet;
+// from their cohesive submodules without a path change. `pub(crate)` (batch F,
+// quality-review cycle-4 finding B) so `kde.rs`'s own test module can call it
+// directly to prove `Kde::count_scale_extent`'s facet pin matches `Bin`'s
+// (`crate::render::prepare::fix_transform_extents_for_facet`) — no logic fork,
+// same visibility-only pattern as `bin::resolve_bin_extent`'s cycle-1 export.
+pub(crate) use extent::fix_transform_extents_for_facet;
 
 /// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
 /// `None` row value = wrap mode (single-field facet).
@@ -3127,6 +3131,8 @@ mod tests {
             shared_extent: false,
             kernel: "gaussian".into(),
             groupby: vec!["g".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Kde(spec.clone())], &batch);
@@ -3174,6 +3180,8 @@ mod tests {
             shared_extent: false,
             kernel: "gaussian".into(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = fix_transform_extents_for_facet(
@@ -3236,6 +3244,8 @@ mod tests {
             shared_extent: false,
             kernel: "gaussian".into(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let violin_spec = ViolinSpec {

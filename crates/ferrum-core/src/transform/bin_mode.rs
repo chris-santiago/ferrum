@@ -100,15 +100,19 @@ pub(crate) fn resolve_bin_count(
 /// Parse a Python `bins`-axis value into a [`BinMode`].
 ///
 /// Accepts a rule string (`"sturges"` / `"fd"` / `"freedman_diaconis"`), an int
-/// (fixed count), or a float (fixed width). Used by `Bin2D`'s constructor; the
-/// 1-D `Bin` keeps its separate `bin_count`/`bin_width` params instead.
-pub(crate) fn parse_bin_axis(obj: &Bound<'_, PyAny>) -> PyResult<BinMode> {
+/// (fixed count), or a float (fixed width). Used by `Bin2D`'s constructor
+/// (`ctx = "Bin2D"`) and `Kde`'s `count_scale` (`ctx = "stat_kde"`, batch F);
+/// the 1-D `Bin` keeps its separate `bin_count`/`bin_width` params instead.
+/// `ctx` prefixes both error messages so each caller's error names the
+/// transform the user actually invoked, mirroring `resolve_bin_count`'s own
+/// `ctx` parameter.
+pub(crate) fn parse_bin_axis(obj: &Bound<'_, PyAny>, ctx: &str) -> PyResult<BinMode> {
     if let Ok(s) = obj.extract::<&str>() {
         return match s {
             "sturges" => Ok(BinMode::Sturges),
             "fd" | "freedman_diaconis" => Ok(BinMode::FreedmanDiaconis),
             _ => Err(PyValueError::new_err(format!(
-                "Bin2D: unknown bins value '{s}'; expected 'sturges'|'fd'|int|float"
+                "{ctx}: unknown bins value '{s}'; expected 'sturges'|'fd'|int|float"
             ))),
         };
     }
@@ -118,9 +122,9 @@ pub(crate) fn parse_bin_axis(obj: &Bound<'_, PyAny>) -> PyResult<BinMode> {
     if let Ok(w) = obj.extract::<f64>() {
         return Ok(BinMode::Width { w });
     }
-    Err(PyValueError::new_err(
-        "Bin2D: bins must be 'sturges'|'fd'|int|float",
-    ))
+    Err(PyValueError::new_err(format!(
+        "{ctx}: bins must be 'sturges'|'fd'|int|float",
+    )))
 }
 
 #[cfg(test)]
@@ -173,6 +177,59 @@ mod tests {
         let err =
             resolve_bin_count(&BinMode::Width { w: 0.0 }, &vals, 0.0, 1.0, "Bin2D").unwrap_err();
         assert!(err.to_string().contains("Bin2D: Width must be a positive finite number"));
+    }
+
+    /// `parse_bin_axis`'s unknown-string-value error must be prefixed by
+    /// whatever `ctx` the caller passes — regression pin for the batch-F
+    /// cycle-2 fix (a `Kde(count_scale='bogus')` error previously named
+    /// `Bin2D`, a transform the user never called, because `parse_bin_axis`
+    /// hardcoded that prefix from its sole prior caller).
+    #[test]
+    fn parse_bin_axis_unknown_string_errors_with_kde_ctx() {
+        use pyo3::types::PyString;
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let obj = PyString::new(py, "bogus").into_any();
+            let err = parse_bin_axis(&obj, "stat_kde").unwrap_err();
+            assert!(
+                err.to_string().contains("stat_kde: unknown bins value 'bogus'"),
+                "err: {err}"
+            );
+        });
+    }
+
+    /// `Bin2D`'s own unknown-string-value error text must stay byte-identical
+    /// after threading `ctx` through — same call, same `ctx` it always
+    /// passed, so this is the "no behavior change for the existing caller"
+    /// half of the cycle-2 fix.
+    #[test]
+    fn parse_bin_axis_unknown_string_errors_with_bin2d_ctx_byte_identical() {
+        use pyo3::types::PyString;
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let obj = PyString::new(py, "bogus").into_any();
+            let err = parse_bin_axis(&obj, "Bin2D").unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "ValueError: Bin2D: unknown bins value 'bogus'; expected 'sturges'|'fd'|int|float"
+            );
+        });
+    }
+
+    /// The second `parse_bin_axis` error arm (wrong Python type entirely —
+    /// not a string, int, or float) must ALSO carry the caller's `ctx`, not
+    /// just the string-value arm.
+    #[test]
+    fn parse_bin_axis_wrong_type_errors_with_ctx() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let obj = py.None().into_bound(py);
+            let err = parse_bin_axis(&obj, "stat_kde").unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "ValueError: stat_kde: bins must be 'sturges'|'fd'|int|float"
+            );
+        });
     }
 
     // ── BUG-HUNT (step4): degenerate / boundary resolve_bin_count inputs ────────

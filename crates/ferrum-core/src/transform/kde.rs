@@ -5,6 +5,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::bin::resolve_bin_extent;
+use crate::transform::bin_mode::{parse_bin_axis, BinMode};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, KeyValue,
@@ -87,6 +89,41 @@ pub(crate) struct KdeSpec {
         deserialize_with = "deserialize_groupby_vec"
     )]
     pub groupby: Vec<String>,
+    /// Opt-in histogram count-scaling (batch F, F-L09-10). When `Some`, the
+    /// output `density` is rescaled per group to match the counts a
+    /// histogram binned the same way would show: multiplied by
+    /// `n_group × bin_width` (non-cumulative) or the CDF by `n_group`
+    /// (cumulative). `bin_width` is derived PER GROUP via the exact same
+    /// extent-fold/nicing/bin-count routine [`crate::transform::bin::Bin`]
+    /// uses (see [`resolve_bin_extent`] and [`resolve_group_bin_width`]),
+    /// mirroring `Bin::apply_grouped`'s own `shared_extent` gate (reusing
+    /// this spec's existing `shared_extent` field, which Python sets from
+    /// the same `multiple in ("stack","fill")` rule for both
+    /// `mark_histogram` and `mark_density`) AND [`count_scale_extent`]'s
+    /// facet pin (mirroring `Bin::apply`'s own `spec.extent` check — see
+    /// that field's doc). The one remaining unmirrored input: `nice` is
+    /// always assumed `true` (`Bin`'s own default, and the only value
+    /// `mark_histogram` currently passes) — a `Bin` with `nice=False` would
+    /// diverge silently, since `count_scale` carries no wire slot for it
+    /// (quality-review cycle-4 finding B; no current caller can trigger this,
+    /// so no slot was added speculatively). `None` (the default) reproduces
+    /// today's output byte-for-byte.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub count_scale: Option<BinMode>,
+    /// Facet-pinned extent for [`count_scale`]'s bin-width derivation —
+    /// independent of [`extent`](Self::extent), which is the KDE's own grid
+    /// domain. Set ONLY by `fix_transform_extents_for_facet`
+    /// (`render/prepare/extent.rs`), mirroring the niced-global pin it gives
+    /// `BinSpec::extent` (via `bin::global_extent` on a synthetic `BinSpec`
+    /// built from this spec's `field`/`count_scale` mode) — never set by
+    /// `Kde`'s own constructor, since a user has no direct way to express
+    /// "the histogram's facet-shared bin range." When `Some`, takes absolute
+    /// precedence over `shared_extent` in [`resolve_group_bin_width`]
+    /// (mirroring `Bin::apply`'s own explicit-extent-wins precedence) and is
+    /// used verbatim with no re-nicing. `None` (the default, and always true
+    /// outside a faceted chart) falls back to `shared_extent`'s own gate.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub count_scale_extent: Option<(f64, f64)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -109,17 +146,115 @@ pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64,
     crate::transform::numeric_util::column_extent(batch, &spec.field)
 }
 
+/// Compute the global extent [`KdeSpec::count_scale_extent`] should be
+/// pinned to for `spec` — i.e. the SAME niced-global extent
+/// `fix_transform_extents_for_facet` gives `BinSpec::extent` for the
+/// equivalent histogram (quality-review cycle-4 finding B). Returns `None`
+/// when `spec.count_scale` is absent (nothing to pin) or the field yields no
+/// extent (missing/non-numeric/all-null).
+///
+/// Builds a synthetic [`crate::transform::bin::BinSpec`] from `spec.field`
+/// and `spec.count_scale`'s mode and delegates to
+/// [`crate::transform::bin::global_extent`] — the SAME routine `Bin`'s own
+/// facet-pin arm calls — rather than re-deriving the nice/target logic here.
+/// `nice: true` matches `Bin`'s own default and the only value
+/// `mark_histogram` currently passes (see `KdeSpec::count_scale`'s doc for
+/// the one input this does NOT mirror: an explicit `Bin(nice=False)`).
+pub(crate) fn count_scale_global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
+    let mode = spec.count_scale.as_ref()?;
+    let synthetic_bin_spec = crate::transform::bin::BinSpec {
+        field: spec.field.clone(),
+        mode: mode.clone(),
+        extent: None,
+        nice: true,
+        cumulative: false,
+        shared_extent: false,
+        groupby: vec![],
+        agg_field: None,
+        agg: None,
+        name: None,
+    };
+    crate::transform::bin::global_extent(&synthetic_bin_spec, batch)
+}
+
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby);
+        // `count_scale`'s bin-edge sharing mirrors `Bin::apply_grouped`'s own
+        // `resolve_shared_extent(spec.extent, spec.shared_extent, ...)` call
+        // exactly, with `count_scale_extent` standing in for `Bin`'s own
+        // `spec.extent` role (an explicit/facet-pinned extent always wins,
+        // regardless of `shared_extent`'s value — see `count_scale_extent`'s
+        // doc): a real histogram only shares one DATA-DERIVED extent across
+        // hue levels when `shared_extent` is set (Python sets it from the
+        // SAME `multiple in ("stack","fill")` rule for both
+        // `mark_histogram` and `mark_density` — see `KdeSpec::count_scale`'s
+        // doc). The default `multiple="layer"` leaves both `None`, so each
+        // group derives its own extent, exactly like an un-shared `Bin`.
+        // `shared_extent` is otherwise inert when ungrouped (real `Bin`'s
+        // ungrouped `apply()` never consults it either), so it is only
+        // folded in here on the grouped branch.
+        let count_scale_pinned_extent = spec.count_scale.as_ref().and_then(|_| {
+            resolve_shared_extent(spec.count_scale_extent, spec.shared_extent, batch, &spec.field)
+        });
+        return apply_grouped(spec, batch, &spec.groupby, count_scale_pinned_extent);
     }
-    apply_one_group(spec, batch, None)
+    // `count_scale_extent`'s facet pin mirrors `Bin::apply`'s own
+    // `spec.extent` check, which is NOT gated on grouping (unlike
+    // `shared_extent`) — an ungrouped, faceted `Kde` must still honor it.
+    let count_scale_pinned_extent = spec.count_scale.as_ref().and(spec.count_scale_extent);
+    apply_one_group(spec, batch, None, count_scale_pinned_extent)
+}
+
+/// Resolve the histogram bin width `Bin` would compute for THIS group's own
+/// clean (non-null/non-NaN) values, given `mode` and an optional pinned
+/// extent (either a facet-pinned `count_scale_extent` or a `shared_extent`
+/// data-derived extent — see `apply()`'s call site for which). Mirrors
+/// `Bin::apply_one_group`'s extent-fold, degenerate-collapse, nice-rounding,
+/// and bin-count decision via [`resolve_bin_extent`] — the SAME per-group
+/// derivation `Bin::apply_grouped` uses (batch F, F-L09-10 fix): a `None`
+/// pinned extent means this group derives its own `(lo, hi)` AND its own
+/// nice target from its own `clean.len()`, exactly like an un-shared `Bin`;
+/// a `Some((lo, hi))` pinned extent is used verbatim with no nicing
+/// (mirroring `Bin::apply_grouped`'s `Cow`-patched explicit-extent path,
+/// which skips `apply_one_group`'s nicing branch since `nice` only applies
+/// when `extent.is_none()`) — bin-count resolution (and hence width) still
+/// depends on THIS group's own `clean.len()` for Sturges/FreedmanDiaconis, so
+/// width can still differ per group even when the extent is pinned. Returns
+/// `Ok(None)` — "nothing to scale by" — for an empty `clean`, rather than a
+/// NaN sentinel; the caller already leaves `n_group=0`'s factor unapplied in
+/// that case since the group's own density is already all-NaN.
+fn resolve_group_bin_width(
+    clean: &[f64],
+    mode: &BinMode,
+    pinned_extent: Option<(f64, f64)>,
+    ctx: &str,
+) -> PyResult<Option<f64>> {
+    if clean.is_empty() {
+        return Ok(None);
+    }
+    let (lo, hi, should_nice) = match pinned_extent {
+        Some((lo, hi)) => (lo, hi, false),
+        None => {
+            let (lo, hi) = clean
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+            if lo == hi {
+                // Matches `Bin`'s degenerate all-equal collapse to a single
+                // unit-width bin (`single_unit_bin`).
+                return Ok(Some(1.0));
+            }
+            (lo, hi, true)
+        }
+    };
+    let (lo, hi, n_bins) = resolve_bin_extent(clean, mode, lo, hi, should_nice, ctx)?;
+    Ok(Some((hi - lo) / n_bins as f64))
 }
 
 fn apply_one_group(
     spec: &KdeSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
+    count_scale_pinned_extent: Option<(f64, f64)>,
 ) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
@@ -166,11 +301,29 @@ fn apply_one_group(
         }
     };
 
-    let density = if spec.cumulative {
+    let mut density = if spec.cumulative {
         trapezoidal_cumulative(&grid, &density)
     } else {
         density
     };
+
+    // Batch-F count-scale (F-L09-10): non-cumulative density scales by
+    // n_group × bin_width; cumulative CDF scales by n_group alone (see
+    // `KdeSpec::count_scale`'s doc for the normative semantics). `n_group`
+    // is this group's own clean (non-null/non-NaN) count — the same
+    // null-drop policy `Bin` applies — so it matches the bar-height total a
+    // per-hue histogram would show for this group. `bin_width` is THIS
+    // group's own width (see `resolve_group_bin_width`), not a single
+    // scalar shared across every group.
+    if let Some(mode) = &spec.count_scale {
+        if let Some(bw) = resolve_group_bin_width(&clean, mode, count_scale_pinned_extent, "stat_kde")? {
+            let n_group = clean.len() as f64;
+            let factor = if spec.cumulative { n_group } else { n_group * bw };
+            for d in density.iter_mut() {
+                *d *= factor;
+            }
+        }
+    }
 
     let out_schema = Arc::new(Schema::new(vec![
         Field::new("value", DataType::Float64, false),
@@ -191,6 +344,7 @@ fn apply_grouped(
     spec: &KdeSpec,
     batch: &RecordBatch,
     group_cols: &[String],
+    count_scale_pinned_extent: Option<(f64, f64)>,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
     let (group_order, group_idx_map, gtypes) =
@@ -212,7 +366,7 @@ fn apply_grouped(
         let ixs = group_idx_map.get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
                 "stat_kde: missing group key {g:?} in index map")))?;
-        let out = apply_one_group(&shared_spec, batch, Some(ixs))?;
+        let out = apply_one_group(&shared_spec, batch, Some(ixs), count_scale_pinned_extent)?;
         let n = out.num_rows();
         let values = out.column(0).as_any().downcast_ref::<Float64Array>()
             .ok_or_else(|| PyValueError::new_err("stat_kde: expected Float64Array for 'value' output column"))?;
@@ -485,6 +639,19 @@ use crate::transform::core::TransformSpec;
 /// groupby : list[str] or str or None, optional
 ///     One or more group-key columns; KDE computed independently per group.
 ///     Output schema gains one column per groupby field after the 2nd field.
+/// count_scale : str, int, float, or None, optional
+///     Opt-in histogram count-scaling. When set, rescales ``density`` per
+///     group to match the counts a histogram of ``field`` binned the same
+///     way would show: ``density × n_group × bin_width`` (or the CDF ×
+///     ``n_group`` when ``cumulative=True``). Accepts the same binning-rule
+///     vocabulary as ``Bin2D``'s ``bins_x``/``bins_y``: a bin-count rule
+///     string (``"sturges"`` or ``"fd"``), an ``int`` (fixed bin count), or
+///     a ``float`` (fixed bin width). ``bin_width`` is derived PER GROUP
+///     (mirroring ``Bin``'s own grouped derivation and this spec's
+///     ``shared_extent`` gate), using the same routine ``Bin`` uses — bit
+///     parity with a histogram binned the same way, including per-hue-level
+///     widths when ``shared_extent=False`` (the ``displot`` default).
+///     Default ``None`` leaves ``density`` unscaled (today's behavior).
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -506,7 +673,7 @@ pub(crate) struct PyKde(pub(crate) TransformSpec);
 #[pymethods]
 impl PyKde {
     #[new]
-    #[pyo3(signature = (field, *, bandwidth = None, bw_adjust = 1.0, n = 512, extent = None, cumulative = false, shared_extent = false, kernel = "gaussian", groupby = None, name = None))]
+    #[pyo3(signature = (field, *, bandwidth = None, bw_adjust = 1.0, n = 512, extent = None, cumulative = false, shared_extent = false, kernel = "gaussian", groupby = None, count_scale = None, name = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
@@ -518,6 +685,7 @@ impl PyKde {
         shared_extent: bool,
         kernel: &str,
         groupby: Option<&Bound<'_, PyAny>>,
+        count_scale: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if !bw_adjust.is_finite() || bw_adjust <= 0.0 {
@@ -569,6 +737,7 @@ impl PyKde {
         }
         let kernel_str = kernel.to_string();
         let groupby = parse_groupby_pyany(groupby)?;
+        let count_scale = count_scale.map(|obj| parse_bin_axis(obj, "stat_kde")).transpose()?;
         Ok(PyKde(TransformSpec::Kde(KdeSpec {
             field: field.to_string(),
             bandwidth: bw,
@@ -579,6 +748,12 @@ impl PyKde {
             shared_extent,
             kernel: kernel_str,
             groupby,
+            count_scale,
+            // `count_scale_extent` has no constructor parameter — it is set
+            // ONLY by `fix_transform_extents_for_facet`'s facet-pinning
+            // pass (see its doc). A user-constructed `Kde` always starts
+            // `None`.
+            count_scale_extent: None,
             name,
         })))
     }
@@ -667,6 +842,8 @@ mod tests {
                 cumulative: case.cumulative,
                 kernel: default_kernel(),
                 groupby: vec![],
+                count_scale: None,
+                count_scale_extent: None,
                 name: None,
             };
             let batch = batch_with("x", case.input.clone());
@@ -708,6 +885,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -728,6 +907,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -761,6 +942,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec!["g".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -809,6 +992,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec!["g".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).expect("Int64 groupby must succeed");
@@ -852,6 +1037,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec!["g".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).expect("Boolean groupby must succeed");
@@ -882,6 +1069,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -904,6 +1093,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec!["ghost".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -932,6 +1123,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let int_out = apply(&spec, &int_batch).expect("Int64 KDE should succeed");
@@ -968,6 +1161,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).expect("Int32 KDE should succeed");
@@ -995,6 +1190,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -1014,6 +1211,8 @@ mod tests {
             shared_extent: false,
             kernel: "gaussian".to_string(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -1036,6 +1235,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1062,6 +1263,8 @@ mod tests {
             cumulative: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1085,6 +1288,8 @@ mod tests {
             cumulative: false,
             kernel: kernel.to_string(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         }
     }
@@ -1138,6 +1343,8 @@ mod tests {
             cumulative: false,
             kernel: "epanechnikov".to_string(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1317,6 +1524,8 @@ mod tests {
             cumulative: false,
             kernel: "not_a_real_kernel".into(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -1406,6 +1615,7 @@ mod tests {
                 "laplacian",
                 None,
                 None,
+                None,
             );
             assert!(result.is_err(), "unknown kernel 'laplacian' must return an error");
             let msg = result.unwrap_err().to_string();
@@ -1429,6 +1639,8 @@ mod tests {
             shared_extent: false,
             kernel: "epanechnikov".to_string(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -1465,6 +1677,8 @@ mod tests {
             shared_extent: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1490,6 +1704,8 @@ mod tests {
             shared_extent: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1510,6 +1726,8 @@ mod tests {
             shared_extent: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1532,6 +1750,8 @@ mod tests {
             shared_extent: false,
             kernel: default_kernel(),
             groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1578,6 +1798,8 @@ mod tests {
             shared_extent: false,
             kernel: default_kernel(),
             groupby: vec!["g1".into(), "g2".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1633,6 +1855,8 @@ mod tests {
             shared_extent: false,
             kernel: default_kernel(),
             groupby: vec!["col".into()],
+            count_scale: None,
+            count_scale_extent: None,
             name: None,
         };
 
@@ -1654,5 +1878,559 @@ mod tests {
         let empty = KdeSpec { groupby: vec![], ..spec.clone() };
         let empty_json = serde_json::to_string(&empty).unwrap();
         assert!(!empty_json.contains("groupby"), "empty groupby must be omitted: {empty_json}");
+    }
+
+    // ── Batch F (F-L09-10): count-scale ─────────────────────────────────────
+
+    fn count_scale_spec(field: &str, n: usize, extent: (f64, f64), count_scale: Option<BinMode>) -> KdeSpec {
+        KdeSpec {
+            field: field.into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n,
+            extent: Some(extent),
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: vec![],
+            count_scale,
+            count_scale_extent: None,
+            name: None,
+        }
+    }
+
+    /// Wire-default round-trip: `count_scale` is omitted from serialized JSON
+    /// when absent (matching every other `Option` field on `KdeSpec`), old
+    /// JSON with no `count_scale` key deserializes to `None` (today's wire
+    /// specs stay byte-identical), and a `Some` value round-trips through its
+    /// tagged `BinMode` shape unchanged.
+    #[test]
+    fn test_kde_count_scale_wire_default_round_trip() {
+        let unscaled = count_scale_spec("x", 8, (0.0, 10.0), None);
+        let json = serde_json::to_string(&unscaled).unwrap();
+        assert!(!json.contains("count_scale"), "absent count_scale must be omitted: {json}");
+        let parsed: KdeSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, unscaled);
+
+        // Old JSON (pre-batch-F) with no count_scale key must deserialize to None.
+        let old_json = r#"{"field":"x","bandwidth":{"kind":"scott"},"n":8,"extent":[0.0,10.0]}"#;
+        let from_old: KdeSpec = serde_json::from_str(old_json).unwrap();
+        assert_eq!(from_old.count_scale, None, "missing count_scale key must default to None");
+
+        // A `Some` value round-trips through its tagged BinMode wire shape.
+        let scaled = count_scale_spec("x", 8, (0.0, 10.0), Some(BinMode::Fixed { n: 5 }));
+        let scaled_json = serde_json::to_string(&scaled).unwrap();
+        assert!(
+            scaled_json.contains(r#""count_scale":{"kind":"fixed","n":5}"#),
+            "expected tagged BinMode shape, got: {scaled_json}"
+        );
+        let scaled_parsed: KdeSpec = serde_json::from_str(&scaled_json).unwrap();
+        assert_eq!(scaled_parsed, scaled);
+    }
+
+    /// Absent `count_scale` (the default) must leave `density` EXACTLY the
+    /// raw kernel-density output — a real byte-identity pin against an
+    /// independently-derived oracle, not a determinism check. Cross-checks
+    /// `apply()`'s output against a direct call to `gaussian_density_at_grid`
+    /// (the same primitive `apply_one_group` dispatches to for a fixed
+    /// bandwidth) computed OUTSIDE `apply()`, so a regression that
+    /// spuriously applies ANY scaling factor when `count_scale=None` would
+    /// be caught — unlike the prior `apply(&spec)` vs `apply(&spec)`
+    /// self-comparison, which could never fail regardless of what `apply()`
+    /// computed.
+    #[test]
+    fn test_kde_count_scale_absent_matches_raw_kernel_density_exactly() {
+        let x = vec![0.0, 1.0, 2.0, 4.0];
+        let h = 1.0;
+        let batch = batch_with("x", x.clone());
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Fixed { value: h },
+            bw_adjust: 1.0,
+            n: 6,
+            extent: Some((0.0, 4.0)),
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: vec![],
+            count_scale: None,
+            count_scale_extent: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let got_value = col(&out, "value");
+        let got_density = col(&out, "density");
+
+        // Independently-computed oracle: the raw kernel density on the
+        // ACTUAL returned grid, called directly (bypassing `apply()`'s own
+        // count-scale dispatch entirely).
+        let expected_density = gaussian_density_at_grid(&x, h, &got_value);
+        for (i, (g, e)) in got_density.iter().zip(expected_density.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(), e.to_bits(),
+                "point {i}: count_scale=None must be the RAW kernel density, got {g} vs expected {e}"
+            );
+        }
+    }
+
+    /// Ungrouped count-scale: `density × n × bin_width` must have bit-parity
+    /// with `Bin`'s OWN bin width for the same field + bin mode — not a
+    /// hand-derived approximation. Runs the real `Bin` transform on the same
+    /// batch/field/mode and cross-checks the scaling factor against its
+    /// actual `bin_end - bin_start`.
+    #[test]
+    fn test_kde_count_scale_ungrouped_scales_by_n_times_bin_width() {
+        let values: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let batch = batch_with("x", values.clone());
+
+        // The real Bin transform, same field + mode, to get the ACTUAL bin width.
+        let bin_spec = crate::transform::bin::BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 5 },
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let bin_out = crate::transform::bin::apply(&bin_spec, &batch).unwrap();
+        let bin_starts = bin_out
+            .column(bin_out.schema().index_of("bin_start").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let bin_ends = bin_out
+            .column(bin_out.schema().index_of("bin_end").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let expected_bin_width = bin_ends.value(0) - bin_starts.value(0);
+
+        let unscaled = count_scale_spec("x", 12, (0.0, 19.0), None);
+        let scaled = count_scale_spec("x", 12, (0.0, 19.0), Some(BinMode::Fixed { n: 5 }));
+        let out_unscaled = apply(&unscaled, &batch).unwrap();
+        let out_scaled = apply(&scaled, &batch).unwrap();
+        let d_unscaled = col(&out_unscaled, "density");
+        let d_scaled = col(&out_scaled, "density");
+
+        let n = values.len() as f64;
+        for (i, (u, s)) in d_unscaled.iter().zip(d_scaled.iter()).enumerate() {
+            let expected = u * n * expected_bin_width;
+            assert!(
+                (s - expected).abs() < 1e-9,
+                "point {i}: scaled {s} != unscaled {u} * n {n} * bin_width {expected_bin_width} = {expected}"
+            );
+        }
+    }
+
+    /// Runs the REAL grouped `Bin` transform on `batch`/`field`/`group_cols`
+    /// under `shared_extent` and returns the bin width (`bin_end -
+    /// bin_start`) actually rendered for each group. The oracle every
+    /// grouped count-scale test below cross-checks against — never
+    /// `resolve_bin_extent` called with the implementation's own arguments,
+    /// which would be tautological on the exact global-vs-per-group
+    /// dimension these tests exist to pin (quality-review cycle-3
+    /// finding 1/3). Parameterized on `shared_extent` (quality-review
+    /// cycle-4 finding A) so both `Bin::apply_grouped` branches — an
+    /// un-shared per-group extent (`shared_extent=false`, the `displot`
+    /// default) and a shared extent with still-per-group `n_bins`
+    /// (`shared_extent=true`) — get a real-`Bin` oracle, not just a
+    /// hand-traced claim.
+    fn actual_bin_widths_per_group(
+        batch: &RecordBatch,
+        field: &str,
+        group_cols: &[String],
+        mode: BinMode,
+        shared_extent: bool,
+    ) -> std::collections::HashMap<String, f64> {
+        let bin_spec = crate::transform::bin::BinSpec {
+            field: field.into(),
+            mode,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent,
+            groupby: group_cols.to_vec(),
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let bin_out = crate::transform::bin::apply(&bin_spec, batch).unwrap();
+        widths_by_group_from_bin_output(&bin_out, &group_cols[0])
+    }
+
+    /// Read `bin_end - bin_start` per group off an ALREADY-COMPUTED `Bin`
+    /// output batch, keyed by `group_col`'s value. Shared by
+    /// `actual_bin_widths_per_group` (which builds its own `BinSpec`) and
+    /// the faceted test below (which needs the width `Bin` renders for a
+    /// spec it does NOT control the construction of — the facet-pinned
+    /// spec `fix_transform_extents_for_facet` produces).
+    fn widths_by_group_from_bin_output(
+        bin_out: &RecordBatch,
+        group_col: &str,
+    ) -> std::collections::HashMap<String, f64> {
+        use arrow::array::StringArray;
+        let s = bin_out.schema();
+        let starts = bin_out.column(s.index_of("bin_start").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let ends = bin_out.column(s.index_of("bin_end").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let groups = bin_out.column(s.index_of(group_col).unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        let mut widths = std::collections::HashMap::new();
+        for i in 0..bin_out.num_rows() {
+            widths.entry(groups.value(i).to_string())
+                .or_insert_with(|| ends.value(i) - starts.value(i));
+        }
+        widths
+    }
+
+    /// Grouped count-scale, `Fixed` mode: `bin_width` must be derived PER
+    /// GROUP, mirroring `Bin::apply_grouped`'s `shared_extent=false` default
+    /// (the `displot` default, `multiple="layer"`) — NOT one scalar shared
+    /// across every hue level. Reproduces the quality reviewer's own
+    /// hand-computed numbers: group A `[0,2,4,6,8]` and group B
+    /// `[10,14,18]` under `Fixed{n:4}` each render width **2** from `Bin`
+    /// (`nice_step(0,8,4)=2`, `nice_step(10,18,4)=2`), NOT the global width
+    /// **5** a single-scalar derivation over the full `[0..18]` range would
+    /// give (`nice_step(0,18,4)=5`) — confirmed live: this test fails
+    /// (asserts 5.0 where `Bin` renders 2.0) against the pre-fix
+    /// implementation and passes against the per-group fix.
+    #[test]
+    fn test_kde_count_scale_grouped_fixed_mirrors_bin_per_group_width() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let xs = Float64Array::from(vec![
+            0.0, 2.0, 4.0, 6.0, 8.0, // group A (5 points)
+            10.0, 14.0, 18.0,        // group B (3 points)
+        ]);
+        let gs = StringArray::from(vec!["A", "A", "A", "A", "A", "B", "B", "B"]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(gs)]).unwrap();
+        let group_cols = vec!["g".to_string()];
+        let mode = BinMode::Fixed { n: 4 };
+
+        let widths = actual_bin_widths_per_group(&batch, "x", &group_cols, mode.clone(), false);
+        assert!((widths["A"] - 2.0).abs() < 1e-9, "group A: Bin renders width 2.0, got {}", widths["A"]);
+        assert!((widths["B"] - 2.0).abs() < 1e-9, "group B: Bin renders width 2.0, got {}", widths["B"]);
+
+        let unscaled = KdeSpec { groupby: group_cols.clone(), ..count_scale_spec("x", 10, (0.0, 18.0), None) };
+        let scaled = KdeSpec { groupby: group_cols, ..count_scale_spec("x", 10, (0.0, 18.0), Some(mode)) };
+        let out_unscaled = apply(&unscaled, &batch).unwrap();
+        let out_scaled = apply(&scaled, &batch).unwrap();
+        let d_unscaled = col(&out_unscaled, "density");
+        let d_scaled = col(&out_scaled, "density");
+        let groups = out_unscaled.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(out_scaled.num_rows(), out_unscaled.num_rows());
+
+        for i in 0..out_unscaled.num_rows() {
+            let g = groups.value(i).to_string();
+            let n_group = if g == "A" { 5.0 } else { 3.0 };
+            let expected = d_unscaled[i] * n_group * widths[&g];
+            assert!(
+                (d_scaled[i] - expected).abs() < 1e-9,
+                "row {i} (group {g}): scaled {} != unscaled {} * n_group {n_group} * bin_width {} = {expected}",
+                d_scaled[i], d_unscaled[i], widths[&g],
+            );
+        }
+    }
+
+    /// Grouped count-scale, `Sturges` mode (the `displot` default rule):
+    /// `resolve_bin_count`'s Sturges arm depends on `vals.len()`, so two
+    /// groups of DIFFERENT sizes must render DIFFERENT bin counts (hence
+    /// widths) even under the same field range — exactly what `Bin` itself
+    /// does and what a single shared-scalar derivation could never
+    /// reproduce. Discriminates the exact bug finding 1 describes for the
+    /// most common real-world `count_scale` mode (the pre-batch-F default
+    /// `bins="sturges"` displot forwards).
+    #[test]
+    fn test_kde_count_scale_grouped_sturges_mirrors_bin_per_group_n_bins() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let a: Vec<f64> = (0..12).map(|i| i as f64).collect(); // 12 points
+        let b: Vec<f64> = vec![0.0, 4.0, 8.0, 12.0];            // 4 points
+        let mut xs_vals = a.clone();
+        xs_vals.extend(b.iter().copied());
+        let mut gs_vals = vec!["A"; a.len()];
+        gs_vals.extend(vec!["B"; b.len()]);
+        let xs = Float64Array::from(xs_vals);
+        let gs = StringArray::from(gs_vals);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(gs)]).unwrap();
+        let group_cols = vec!["g".to_string()];
+
+        let widths = actual_bin_widths_per_group(&batch, "x", &group_cols, BinMode::Sturges, false);
+        assert!(
+            (widths["A"] - widths["B"]).abs() > 1e-9,
+            "expected different Sturges widths per group (A={}, B={}) — otherwise this \
+             test can't discriminate per-group from a shared-scalar derivation",
+            widths["A"], widths["B"],
+        );
+
+        let unscaled = KdeSpec { groupby: group_cols.clone(), ..count_scale_spec("x", 8, (0.0, 12.0), None) };
+        let scaled = KdeSpec { groupby: group_cols, ..count_scale_spec("x", 8, (0.0, 12.0), Some(BinMode::Sturges)) };
+        let out_unscaled = apply(&unscaled, &batch).unwrap();
+        let out_scaled = apply(&scaled, &batch).unwrap();
+        let d_unscaled = col(&out_unscaled, "density");
+        let d_scaled = col(&out_scaled, "density");
+        let groups = out_unscaled.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        for i in 0..out_unscaled.num_rows() {
+            let g = groups.value(i).to_string();
+            let n_group = if g == "A" { a.len() as f64 } else { b.len() as f64 };
+            let expected = d_unscaled[i] * n_group * widths[&g];
+            assert!(
+                (d_scaled[i] - expected).abs() < 1e-9,
+                "row {i} (group {g}): scaled {} != unscaled {} * n_group {n_group} * bin_width {} = {expected}",
+                d_scaled[i], d_unscaled[i], widths[&g],
+            );
+        }
+    }
+
+    /// Grouped count-scale, `shared_extent=true` + `Sturges` mode
+    /// (quality-review cycle-4 finding A) — the one branch the two tests
+    /// above never exercise: `resolve_group_bin_width`'s `Some((lo, hi))`
+    /// arm, reached when `multiple in ("stack","fill")` sets `shared_extent`
+    /// on both `mark_histogram` and `mark_density`. Group B's own 3 points
+    /// span only `[5,7]` — if the extent were (wrongly) still derived
+    /// per-group, group B would bin over `[5,7]`, not the shared `[0,9]`;
+    /// this test would then still pass by accident unless it also proves
+    /// the shared bound is actually reaching `Bin` and `Kde` identically,
+    /// which the real-`Bin` oracle does by construction (both read the same
+    /// `shared_extent=true` semantics). Sturges still varies `n_bins` (and
+    /// hence width) per group SIZE even though the extent is shared — group
+    /// A (10 points) and group B (3 points) get different bin counts over
+    /// the same `[0,9]` range, pinning both halves of the branch at once.
+    #[test]
+    fn test_kde_count_scale_grouped_shared_extent_sturges_mirrors_bin_shared_extent_per_group_n_bins() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let a: Vec<f64> = (0..10).map(|i| i as f64).collect(); // 10 points, spans [0,9]
+        let b: Vec<f64> = vec![5.0, 6.0, 7.0];                  // 3 points, spans [5,7] alone
+        let mut xs_vals = a.clone();
+        xs_vals.extend(b.iter().copied());
+        let mut gs_vals = vec!["A"; a.len()];
+        gs_vals.extend(vec!["B"; b.len()]);
+        let xs = Float64Array::from(xs_vals);
+        let gs = StringArray::from(gs_vals);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(gs)]).unwrap();
+        let group_cols = vec!["g".to_string()];
+
+        let widths = actual_bin_widths_per_group(&batch, "x", &group_cols, BinMode::Sturges, true);
+        assert!(
+            (widths["A"] - widths["B"]).abs() > 1e-9,
+            "expected different Sturges n_bins per group even under a shared extent \
+             (A={}, B={}) — otherwise this test can't discriminate the shared-extent, \
+             still-per-group-n_bins shape from either extreme",
+            widths["A"], widths["B"],
+        );
+
+        let unscaled = KdeSpec {
+            groupby: group_cols.clone(),
+            shared_extent: true,
+            ..count_scale_spec("x", 8, (0.0, 9.0), None)
+        };
+        let scaled = KdeSpec {
+            groupby: group_cols,
+            shared_extent: true,
+            ..count_scale_spec("x", 8, (0.0, 9.0), Some(BinMode::Sturges))
+        };
+        let out_unscaled = apply(&unscaled, &batch).unwrap();
+        let out_scaled = apply(&scaled, &batch).unwrap();
+        let d_unscaled = col(&out_unscaled, "density");
+        let d_scaled = col(&out_scaled, "density");
+        let groups = out_unscaled.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        for i in 0..out_unscaled.num_rows() {
+            let g = groups.value(i).to_string();
+            let n_group = if g == "A" { a.len() as f64 } else { b.len() as f64 };
+            let expected = d_unscaled[i] * n_group * widths[&g];
+            assert!(
+                (d_scaled[i] - expected).abs() < 1e-9,
+                "row {i} (group {g}): scaled {} != unscaled {} * n_group {n_group} * bin_width {} = {expected}",
+                d_scaled[i], d_unscaled[i], widths[&g],
+            );
+        }
+    }
+
+    /// Faceted grouped count-scale (quality-review cycle-4 finding B): a
+    /// faceted `displot(col=, kind="hist", kde=True, stat="count")` runs
+    /// each panel's `Bin` with its extent PRE-PINNED to the niced GLOBAL
+    /// span (`fix_transform_extents_for_facet`, `render/prepare/extent.rs`),
+    /// so a narrow panel's histogram still bins over the WHOLE-dataset
+    /// range, not its own local span. `count_scale_extent` must be pinned
+    /// the SAME way (`kde::count_scale_global_extent`) so a faceted KDE
+    /// overlay derives the SAME per-panel bin width the real `Bin` renders
+    /// in that panel — not the panel's own local (narrower) span, which
+    /// would under-scale the overlay (the reviewer's ~25%,
+    /// unbounded-for-narrow-panels divergence). Simulates faceting
+    /// directly: pins BOTH a `Bin` and a `Kde` spec against the FULL
+    /// pre-facet batch (mirroring `fix_transform_extents_for_facet`'s
+    /// actual call in `render::prepare`), then applies BOTH to a NARROW
+    /// panel sub-batch — reproducing the divergence's exact shape.
+    #[test]
+    fn test_kde_count_scale_faceted_grouped_matches_bin_actual_panel_width() {
+        use crate::render::prepare::fix_transform_extents_for_facet;
+        use crate::transform::core::TransformSpec;
+        use arrow::array::StringArray;
+
+        // Full pre-facet dataset: spans [0, 20], two hue groups.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let full_xs: Vec<f64> = (0..=20).map(|i| i as f64).collect();
+        let full_gs: Vec<&str> = (0..=20).map(|i| if i % 2 == 0 { "A" } else { "B" }).collect();
+        let full_batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(full_xs)) as ArrayRef,
+                Arc::new(StringArray::from(full_gs)) as ArrayRef,
+            ],
+        ).unwrap();
+
+        let mode = BinMode::Fixed { n: 5 };
+        let group_cols = vec!["g".to_string()];
+        let bin_spec = crate::transform::bin::BinSpec {
+            field: "x".into(),
+            mode: mode.clone(),
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: group_cols.clone(),
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let kde_spec = KdeSpec {
+            groupby: group_cols.clone(),
+            ..count_scale_spec("x", 8, (2.0, 9.0), Some(mode.clone()))
+        };
+
+        // Mirror `render::prepare`'s actual facet-pin call: pin BOTH specs
+        // against the FULL pre-facet batch.
+        let pinned = fix_transform_extents_for_facet(
+            &[TransformSpec::Bin(bin_spec), TransformSpec::Kde(kde_spec)],
+            &full_batch,
+        );
+        let TransformSpec::Bin(pinned_bin) = &pinned[0] else { panic!("expected a pinned Bin") };
+        let TransformSpec::Kde(pinned_kde) = &pinned[1] else { panic!("expected a pinned Kde") };
+
+        // A NARROW panel: only rows with x in [2, 9] (8 points) — a fraction
+        // of the full [0, 20] dataset span, the shape that diverges under a
+        // per-panel-local derivation.
+        let panel_xs: Vec<f64> = (2..=9).map(|i| i as f64).collect();
+        let panel_gs: Vec<&str> = (2..=9).map(|i| if i % 2 == 0 { "A" } else { "B" }).collect();
+        let panel_batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(panel_xs)) as ArrayRef,
+                Arc::new(StringArray::from(panel_gs.clone())) as ArrayRef,
+            ],
+        ).unwrap();
+
+        // The REAL Bin transform's ACTUAL per-group width IN THIS PANEL
+        // (using the facet-pinned spec, exactly as `render::prepare` would
+        // apply it per panel).
+        let bin_out = crate::transform::bin::apply(pinned_bin, &panel_batch).unwrap();
+        let panel_widths = widths_by_group_from_bin_output(&bin_out, "g");
+
+        // Sanity: the panel's OWN local span [2,9] must give a DIFFERENT
+        // (narrower) width than the global-pinned one Bin actually
+        // rendered — otherwise this test can't discriminate the facet-pin
+        // fix from a false pass.
+        let local_widths = actual_bin_widths_per_group(&panel_batch, "x", &group_cols, mode, false);
+        assert!(
+            (panel_widths["A"] - local_widths["A"]).abs() > 1e-9,
+            "test setup must produce a real global-vs-local divergence to discriminate the fix \
+             (global-pinned width {} == local-only width {})",
+            panel_widths["A"], local_widths["A"],
+        );
+
+        // `Kde`'s own facet-pinned `count_scale_extent` must equal `Bin`'s
+        // own facet-pinned `extent` — both derived via the SAME
+        // niced-global routine over the SAME field.
+        assert_eq!(
+            pinned_kde.count_scale_extent, pinned_bin.extent,
+            "Kde's facet-pinned count_scale_extent must equal Bin's facet-pinned extent \
+             (both niced-global over the same field)"
+        );
+
+        // Apply Kde (scaled vs unscaled) to the SAME narrow panel and
+        // confirm the applied factor equals Bin's ACTUAL per-panel-group
+        // width — not the panel's own local span.
+        let unscaled_kde = KdeSpec {
+            count_scale: None,
+            count_scale_extent: None,
+            ..pinned_kde.clone()
+        };
+        let out_unscaled = apply(&unscaled_kde, &panel_batch).unwrap();
+        let out_scaled = apply(pinned_kde, &panel_batch).unwrap();
+        let d_unscaled = col(&out_unscaled, "density");
+        let d_scaled = col(&out_scaled, "density");
+        let groups = out_unscaled.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+
+        for i in 0..out_unscaled.num_rows() {
+            let g = groups.value(i).to_string();
+            let n_group = panel_gs.iter().filter(|&&v| v == g).count() as f64;
+            let expected = d_unscaled[i] * n_group * panel_widths[&g];
+            assert!(
+                (d_scaled[i] - expected).abs() < 1e-9,
+                "row {i} (group {g}): faceted scaled {} != unscaled {} * n_group {n_group} * \
+                 Bin's ACTUAL panel width {} = {expected}",
+                d_scaled[i], d_unscaled[i], panel_widths[&g],
+            );
+        }
+    }
+
+    /// Direct unit tests for `resolve_group_bin_width` (quality-review
+    /// cycle-3 findings 4/5): the empty-clean case returns `Ok(None)` — "no
+    /// scaling factor" — rather than a NaN sentinel, and the degenerate
+    /// all-equal case collapses to `Bin`'s unit-width bin (`1.0`) exactly.
+    #[test]
+    fn test_resolve_group_bin_width_empty_returns_none() {
+        let width = resolve_group_bin_width(&[], &BinMode::Sturges, None, "stat_kde").unwrap();
+        assert_eq!(width, None, "empty clean column must return None, not a NaN sentinel");
+    }
+
+    #[test]
+    fn test_resolve_group_bin_width_degenerate_all_equal_matches_bin_unit_width() {
+        let clean = vec![5.0, 5.0, 5.0, 5.0];
+        let width = resolve_group_bin_width(&clean, &BinMode::Fixed { n: 3 }, None, "stat_kde").unwrap();
+        assert_eq!(width, Some(1.0), "degenerate all-equal field must collapse to Bin's unit-width bin");
+    }
+
+    /// Cumulative count-scale: the CDF scales by `n_group` alone — NOT
+    /// `n_group × bin_width` — per the normative spec semantics.
+    #[test]
+    fn test_kde_count_scale_cumulative_scales_by_n_group_only() {
+        let values: Vec<f64> = (0..15).map(|i| i as f64).collect();
+        let batch = batch_with("x", values.clone());
+
+        let mut unscaled = count_scale_spec("x", 10, (0.0, 14.0), None);
+        unscaled.cumulative = true;
+        let mut scaled = count_scale_spec("x", 10, (0.0, 14.0), Some(BinMode::Fixed { n: 5 }));
+        scaled.cumulative = true;
+
+        let out_unscaled = apply(&unscaled, &batch).unwrap();
+        let out_scaled = apply(&scaled, &batch).unwrap();
+        let d_unscaled = col(&out_unscaled, "density");
+        let d_scaled = col(&out_scaled, "density");
+
+        let n = values.len() as f64;
+        for (i, (u, s)) in d_unscaled.iter().zip(d_scaled.iter()).enumerate() {
+            let expected = u * n;
+            assert!(
+                (s - expected).abs() < 1e-9,
+                "point {i}: cumulative scaled {s} != unscaled {u} * n {n} = {expected} (bin_width must NOT apply to the CDF)"
+            );
+        }
     }
 }

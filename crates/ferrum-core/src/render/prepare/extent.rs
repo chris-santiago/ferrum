@@ -37,12 +37,18 @@ use arrow::record_batch::RecordBatch;
 /// or nice from the pinned range inside `apply`, and `Kde2D`/`Bin2D`/`Hex`/`Raster`
 /// because their `apply` divides the raw `(min, max)` directly. The divergence is
 /// owned by each transform's `global_extent` (each carries a `NICENESS CONTRACT`
-/// note), not by this orchestrator.
+/// note), not by this orchestrator. `Kde::count_scale_extent` (batch F,
+/// quality-review cycle-4 finding B) is the one exception carried on a
+/// non-`Bin` transform: it pins NICED, via `kde::count_scale_global_extent`
+/// delegating to `bin::global_extent` on a synthetic `BinSpec`, because it is
+/// standing in for a `Bin`'s own bin range, not `Kde`'s grid domain.
 ///
 /// A spec that already carries an explicit extent (user-provided) is left
 /// unchanged; `Bin2D`'s per-axis `extent_x`/`extent_y` are pinned independently so
 /// a partially-specified extent keeps the user axis and pins only the unset one.
-/// All non-extent-carrying transforms are passed through unchanged.
+/// `Kde`'s `extent` and `count_scale_extent` are likewise pinned independently —
+/// see the `Kde` arm's own comment. All non-extent-carrying transforms are
+/// passed through unchanged.
 pub(crate) fn fix_transform_extents_for_facet(
     transforms: &[crate::transform::core::TransformSpec],
     batch: &RecordBatch,
@@ -55,14 +61,36 @@ pub(crate) fn fix_transform_extents_for_facet(
             // ── 1-D single-extent transforms ──────────────────────────────────
             // Each calls its own `global_extent(spec, batch)` which owns the
             // niced-vs-raw decision (XFORM-08: Bin nices; all others are raw).
-            TransformSpec::Kde(spec) if spec.extent.is_none() => {
-                pin_single_extent(crate::transform::kde::global_extent(spec, batch), |e| {
-                    TransformSpec::Kde(crate::transform::kde::KdeSpec {
-                        extent: Some(e),
-                        ..spec.clone()
-                    })
-                })
-                .unwrap_or_else(|| t.clone())
+            //
+            // `Kde` carries TWO independent extent-like slots — `extent`
+            // (its own grid domain, pinned RAW like every non-`Bin`
+            // transform here) and `count_scale_extent` (the histogram bin
+            // range `KdeSpec::count_scale` derives its width from, pinned
+            // NICED — mirroring the `Bin` arm below exactly, via
+            // `kde::count_scale_global_extent`'s synthetic `BinSpec`). These
+            // are pinned independently (unlike every other arm here, which
+            // is all-or-nothing per variant) because a spec can have one
+            // set and not the other — e.g. an explicit `extent=` with
+            // `count_scale` still set, or vice versa (quality-review
+            // cycle-4 finding B: the un-pinned `count_scale_extent` let a
+            // faceted `count_scale` bin over each panel's own local span
+            // while the real `Bin` binned over the whole-dataset span).
+            TransformSpec::Kde(spec) => {
+                let mut pinned = spec.clone();
+                let mut changed = false;
+                if spec.extent.is_none() {
+                    if let Some(e) = crate::transform::kde::global_extent(spec, batch) {
+                        pinned.extent = Some(e);
+                        changed = true;
+                    }
+                }
+                if spec.count_scale.is_some() && spec.count_scale_extent.is_none() {
+                    if let Some(e) = crate::transform::kde::count_scale_global_extent(spec, batch) {
+                        pinned.count_scale_extent = Some(e);
+                        changed = true;
+                    }
+                }
+                if changed { TransformSpec::Kde(pinned) } else { t.clone() }
             }
             TransformSpec::Bin(spec) if spec.extent.is_none() => {
                 pin_single_extent(crate::transform::bin::global_extent(spec, batch), |e| {

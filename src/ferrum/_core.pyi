@@ -492,6 +492,7 @@ class Kde:
         shared_extent: bool = False,
         kernel: str = "gaussian",
         groupby: Optional[Union[str, List[str]]] = None,
+        count_scale: Optional[Union[str, int, float]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

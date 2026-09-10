@@ -281,6 +281,8 @@ fn kde_outputs_match_actual_schema() {
         shared_extent: false,
         kernel: "gaussian".into(),
         groupby: vec![],
+        count_scale: None,
+        count_scale_extent: None,
         name: None,
     };
     let batch = f64_batch(&[("v", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
@@ -841,7 +843,7 @@ fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec)> {
         ("kde", Kde(KdeSpec {
             field: "v".into(), bandwidth: BandwidthSpec::Scott, bw_adjust: 1.0, n: 16,
             extent: None, cumulative: false, shared_extent: false, kernel: "gaussian".into(),
-            groupby: vec![], name: None,
+            groupby: vec![], count_scale: None, count_scale_extent: None, name: None,
         })),
         ("smooth", Smooth(SmoothSpec {
             x: "x".into(), y: "y".into(), method: SmoothMethod::Lm, ci: None, bandwidth: 0.75,

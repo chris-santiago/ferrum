@@ -350,7 +350,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             secondary_outputs: vec![],
             params: vec![
                 "field", "bandwidth", "bw_adjust", "n", "extent", "cumulative", "shared_extent",
-                "kernel", "groupby", "name",
+                "kernel", "groupby", "count_scale", "count_scale_extent", "name",
             ],
         },
         // `methods` reads the SAME const the parser's pre-check and error

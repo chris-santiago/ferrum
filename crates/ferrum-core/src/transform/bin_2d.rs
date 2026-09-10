@@ -350,11 +350,11 @@ impl PyBin2D {
     ) -> PyResult<Self> {
         let bins_x = match bins_x {
             None => BinMode::Sturges,
-            Some(obj) => parse_bin_axis(obj)?,
+            Some(obj) => parse_bin_axis(obj, "Bin2D")?,
         };
         let bins_y = match bins_y {
             None => BinMode::Sturges,
-            Some(obj) => parse_bin_axis(obj)?,
+            Some(obj) => parse_bin_axis(obj, "Bin2D")?,
         };
         // Reject reversed/degenerate explicit extents at construction, mirroring
         // the 1-D `Bin` (which errors on `lo >= hi`). A reversed `extent=(hi, lo)`

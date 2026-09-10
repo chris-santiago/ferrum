@@ -37,6 +37,40 @@ fn nice_extent(lo: f64, hi: f64, target: usize) -> (f64, f64) {
     }
 }
 
+/// Resolve the `(lo, hi, n_bins)` triple `apply_one_group` derives from an
+/// already-known non-degenerate `(lo, hi)` extent, given `mode` and whether
+/// nice-rounding applies. Extracted from `apply_one_group`'s inline
+/// nice-rounding + bin-count block (batch F) so `Kde`'s opt-in count-scale
+/// feature (`KdeSpec::count_scale`) can derive `Bin`'s exact bin width via
+/// the same primitives (`nice_extent`, `resolve_bin_count`) instead of
+/// re-implementing the decision — see `crate::transform::kde`'s
+/// `resolve_group_bin_width`. `should_nice` mirrors `apply_one_group`'s own
+/// `spec.nice && spec.extent.is_none()` gate: nicing only ever applies to an
+/// auto-derived extent, never a caller-pinned one. `ctx` is threaded through
+/// to `resolve_bin_count`'s error messages, same as the inline call it
+/// replaces.
+pub(crate) fn resolve_bin_extent(
+    clean: &[f64],
+    mode: &BinMode,
+    lo: f64,
+    hi: f64,
+    should_nice: bool,
+    ctx: &str,
+) -> PyResult<(f64, f64, usize)> {
+    let (lo, hi) = if should_nice {
+        let target = match mode {
+            BinMode::Fixed { n } => *n,
+            _ => sturges_floor(clean.len()),
+        }
+        .max(1);
+        nice_extent(lo, hi, target)
+    } else {
+        (lo, hi)
+    };
+    let n_bins = resolve_bin_count(mode, clean, lo, hi, ctx)?;
+    Ok((lo, hi, n_bins))
+}
+
 /// 1-D equal-width binning spec.
 ///
 /// The bin-count decision is a typed [`BinMode`] (no overlapping
@@ -305,22 +339,12 @@ fn apply_one_group(
         }
     };
 
-    // Optional "nice" rounding of the extent. Only applies when extent is
-    // auto-derived (not when the caller explicitly set extent). When the mode is
-    // `Fixed{n}` the target is that count; Width/Sturges/FD round to the Sturges
-    // target (preserving the old `bin_count.unwrap_or(sturges)` behavior).
-    let (lo, hi) = if spec.nice && spec.extent.is_none() {
-        let target = match &spec.mode {
-            BinMode::Fixed { n } => *n,
-            _ => sturges_floor(clean.len()),
-        }
-        .max(1);
-        nice_extent(lo, hi, target)
-    } else {
-        (lo, hi)
-    };
-
-    let n_bins: usize = resolve_bin_count(&spec.mode, &clean, lo, hi, "stat_bin")?;
+    // Optional "nice" rounding of the extent, plus bin-count resolution.
+    // Only nices when extent is auto-derived (not when the caller explicitly
+    // set extent). See `resolve_bin_extent`'s doc for the target-selection
+    // rule (Fixed{n} vs Sturges fallback).
+    let should_nice = spec.nice && spec.extent.is_none();
+    let (lo, hi, n_bins) = resolve_bin_extent(&clean, &spec.mode, lo, hi, should_nice, "stat_bin")?;
 
     let edges: Vec<f64> = (0..=n_bins)
         .map(|i| lo + (hi - lo) * (i as f64) / (n_bins as f64))
