@@ -515,3 +515,173 @@ def test_a_whole_target_mismatch_still_refuses_under_cv():
     for kwargs in ({}, {"cv": 3}):
         with pytest.raises(ValueError, match=r"no row of y equals the positive class"):
             source.discrimination_threshold(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# The refusal message's own content (close mutation gate, G4)
+# ---------------------------------------------------------------------------
+
+
+def test_the_refusal_message_lists_ys_values_sorted_and_capped():
+    """The message promises "the values `y` actually holds" -- so the list
+    itself has to be right.
+
+    The existing refusal test uses a `y` with a single distinct value, which
+    leaves both the 8-value cap and the sort order inert: truncating the
+    listing to one value, or reversing its order, changed nothing any
+    assertion could see. A realistic mismatched target has many values, and
+    a message that prints one of them defeats its own purpose.
+
+    The order is by `repr`, not by value -- a target reaching this path is
+    by definition suspect and may hold mixed or unorderable types -- which
+    is why `11` and `13` sort before `2` below.
+    """
+    from ferrum.diagnostics._internal._curve_frames import binary_indicator
+
+    eleven_values = np.array([9, 3, 11, 5, 7, 1, 13, 2, 4, 6, 8])
+
+    with pytest.raises(ValueError) as excinfo:
+        binary_indicator(eleven_values, 99, diagnostic="roc_curve")
+    message = str(excinfo.value)
+
+    assert "the positive class 99" in message
+    # Exactly eight, repr-sorted, from the eleven present.
+    assert "y holds [1, 11, 13, 2, 3, 4, 5, 6]" in message
+    assert "roc_curve:" in message
+
+
+def test_the_refusal_message_lists_every_value_when_under_the_cap():
+    """Below the cap nothing is dropped, so a caller with a small suspect
+    target sees all of it."""
+    from ferrum.diagnostics._internal._curve_frames import binary_indicator
+
+    with pytest.raises(ValueError) as excinfo:
+        binary_indicator(np.array([5, 7, 5, 7]), 1, diagnostic="pr_curve")
+    assert "y holds [5, 7]" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Documented degenerate allowances (close mutation gate, advisories 1 and 4)
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_target_is_not_a_mismatch():
+    """`binary_indicator` documents "an empty target is *not* an error --
+    there is nothing to mismatch". Nothing exercised it, so making an empty
+    target refuse survived the whole pin set.
+    """
+    from ferrum.diagnostics._internal._curve_frames import binary_indicator
+
+    indicator = binary_indicator(np.array([]), 1, diagnostic="roc_curve")
+    assert list(indicator) == []
+
+
+def test_binary_class_values_falls_back_to_zero_one_on_an_empty_target():
+    """The empty-target arm of `binary_class_values`: with no values to
+    read, the pair is `0`/`1` in that order. Order matters -- slot 1 is the
+    positive class every binary builder binarizes against.
+    """
+    from ferrum.diagnostics._internal._curve_frames import binary_class_values
+
+    values, labels = binary_class_values(np.array([]))
+    assert values == [0, 1]
+    assert labels == ["0", "1"]
+
+
+def test_binary_class_values_degenerate_slots_agree():
+    """A single-distinct-value target puts that value in *both* slots, with
+    labels to match. Values and labels disagreeing is the trap the branch's
+    docstring promises cannot happen, and only the `class` discriminator
+    makes it visible to a user.
+    """
+    from ferrum.diagnostics._internal._curve_frames import binary_class_values
+
+    for target, expected in ((np.array([0, 0, 0, 0]), 0), (np.array([7, 7]), 7)):
+        values, labels = binary_class_values(target)
+        assert values == [expected, expected]
+        assert labels == [str(expected), str(expected)]
+
+
+# ---------------------------------------------------------------------------
+# The three tiers of _resolve_class_values (close mutation gate, G3 + adv. 3)
+# ---------------------------------------------------------------------------
+
+
+def test_tier_1_uses_classes_even_when_y_cannot_supply_the_values():
+    """``model.classes_`` outranks both other tiers, and the difference is
+    observable.
+
+    Tier 1 is the hottest line in the resolver (a `raise` there fails 129
+    tests) yet disabling it cost nothing, because on every input the suite
+    had, tier 2 produced the same answer. This is the constructible case
+    where they diverge: ``y`` holds one of three classes, so tier 2 cannot
+    supply three values and the fallback chain reaches tier 3 -- which
+    returns the user's *display aliases*, comparison values matching no row
+    of ``y``. That is the display-label-as-comparison-value defect the
+    whole helper exists to prevent.
+    """
+    from ferrum.diagnostics.sources._classification import _resolve_class_values
+
+    classes = np.array(["bird", "cat", "dog"])
+    y = pl.Series("y", ["cat"] * 10)
+    aliases = ["A", "B", "C"]
+
+    assert _resolve_class_values(classes, y, aliases) == ["bird", "cat", "dog"]
+    # Without classes_, the same call falls past tier 2 (1 distinct value,
+    # 3 labels) to tier 3 and yields the aliases -- which is exactly why
+    # tier 1 must come first.
+    assert _resolve_class_values(None, y, aliases) == aliases
+
+
+def test_tier_2_resolves_a_multiclass_model_that_has_no_classes_attr():
+    """Tier 2's multiclass arm is reachable and correct.
+
+    A multiclass estimator with no ``classes_`` had no coverage at all --
+    disabling the arm entirely survived the pin set. Here ``y``'s three
+    distinct values match the three score columns, so tier 2 supplies the
+    comparison values and the one-vs-rest curves match sklearn exactly.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    from ferrum.diagnostics.sources._classification import _resolve_class_values
+
+    rng = np.random.default_rng(0)
+    features = rng.normal(size=(150, 4))
+    y = np.array([i % 3 for i in range(150)])
+    X = pl.DataFrame(features, schema=[f"f{i}" for i in range(4)])
+    fitted = LogisticRegression(max_iter=1000).fit(features, y)
+
+    assert _resolve_class_values(None, pl.Series("y", y), ["class_0", "class_1", "class_2"]) == [
+        0,
+        1,
+        2,
+    ]
+
+    source = ferrum.ModelSource(_DuckProba(fitted), X, pl.Series("y", y))
+    roc = source.roc_curve()
+    proba = fitted.predict_proba(features)
+    for index in range(3):
+        expected = float(roc_auc_score((y == index).astype(int), proba[:, index]))
+        curve = roc.filter(pl.col("class") == f"class_{index}")
+        assert curve["auc"].unique().to_list() == pytest.approx([expected], abs=1e-9)
+
+
+def test_tier_3_binary_refuses_rather_than_collapsing(binary_data):
+    """Tier 3 -- the display-label parse -- is reachable, and on the binary
+    path its unsound values are caught by the total-mismatch refusal.
+
+    Reached when no ``classes_`` is available *and* ``y``'s cardinality
+    disagrees with the score-column count, so neither sounder tier applies.
+    Here a two-column model meets a three-valued ``y``: the parsed
+    ``"class_1"`` matches no row, and the caller is told so by name instead
+    of being handed a curve drawn against a phantom target.
+    """
+    rng = np.random.default_rng(0)
+    features = rng.normal(size=(150, 4))
+    y3 = np.array([i % 3 for i in range(150)])
+    X = pl.DataFrame(features, schema=[f"f{i}" for i in range(4)])
+    fitted = LogisticRegression(max_iter=1000).fit(features, (y3 > 0).astype(int))
+
+    source = ferrum.ModelSource(_DuckProba(fitted), X, pl.Series("y", y3))
+    with pytest.raises(ValueError, match=r"no row of y equals the positive class 'class_1'"):
+        source.roc_curve()

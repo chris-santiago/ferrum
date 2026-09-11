@@ -104,16 +104,26 @@ def multi_source():
 @pytest.fixture(scope="module")
 def separating_source():
     """A deliberately noisy 4-class fixture on which the two candidate
-    readings of an averaged AUC visibly disagree (0.754 column-sourced vs
-    0.756 integrated-over-the-interpolated-curve).
+    readings of an averaged AUC visibly disagree (0.745 column-sourced vs
+    0.746 integrated-over-the-interpolated-curve).
 
     The repo's ordinary multiclass fixture is too separable: both readings
     round to 0.987 there, so a test built on it cannot fail when the
     column-read is removed. `flip_y=0.35` with `class_sep=0.4` is what
     pulls the interpolated macro curve away from the per-class mean.
+
+    The estimator is `GaussianNB` specifically because its fit is
+    **closed-form**. An earlier version used `LogisticRegression`, whose
+    lbfgs optimum on data this noisy is nearly flat (it converged in 9
+    iterations), so tiny floating-point differences in the full-suite
+    process could land on slightly different coefficients and move the
+    rendered AUC — the tests passed in isolation and in every subset, and
+    failed intermittently under the full `-n auto` run. A fixture whose
+    whole job is to separate two readings by 0.001 must not itself depend
+    on an iterative optimizer's exact stopping point.
     """
     from sklearn.datasets import make_classification
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.naive_bayes import GaussianNB
 
     X, y = make_classification(
         n_samples=90,
@@ -126,7 +136,7 @@ def separating_source():
         random_state=0,
     )
     frame = pl.DataFrame(X, schema=[f"f{i}" for i in range(5)])
-    model = LogisticRegression(max_iter=1000).fit(X, y)
+    model = GaussianNB().fit(X, y)
     return ferrum.ModelSource(model, frame, pl.Series("y", y))
 
 
@@ -217,8 +227,8 @@ def test_roc_chart_averaged_title_is_the_macro_mean_of_per_class_aucs(separating
     candidate readings both round to 0.987, so the test asserted this line
     without being able to tell the two apart. The mutation gate proved that
     empty -- breaking ``metric_field="auc"`` to ``None`` here changed
-    nothing any assertion could see. Here the readings are 0.754 (column)
-    vs 0.756 (integrated).
+    nothing any assertion could see. Here the readings are 0.745 (column)
+    vs 0.746 (integrated).
     """
     frame = separating_source.roc_curve(average=None)
     per_class = [
@@ -244,8 +254,8 @@ def test_roc_chart_averaged_overlay_and_legend_read_the_auc_column(separating_so
     On a binary or per-class curve the frame's ``auc`` and a trapezoid over
     the drawn curve agree by construction, so only an *averaged* multiclass
     curve can tell them apart: the rendered curve is the interpolated macro
-    curve (integral 0.756) while its ``auc`` column holds the weighted mean
-    of the per-class AUCs (0.754).
+    curve (integral 0.746) while its ``auc`` column holds the weighted mean
+    of the per-class AUCs (0.745).
     """
     frame = separating_source.roc_curve(average=None)
     per_class = [
@@ -698,3 +708,40 @@ def test_mark_roc_stackers_each_group_label_on_its_own_row():
         "a: AUC = 0.550",
         "b: AUC = 0.400",
     ]
+
+
+def test_single_model_compared_calibration_omits_the_brier_title():
+    """The compared-source title guard is load-bearing, and was untested.
+
+    ``_calibration_chart_from_source`` titles a calibration chart with the
+    frame's broadcast Brier *unless* the source is a ``ComparedModelSource``,
+    where no single number describes several models. In the only compared
+    case the suite built, two genuinely different models put two distinct
+    values in the ``brier`` column, so ``_broadcast_metric``'s multi-value
+    rule returned ``None`` anyway and the guard did nothing -- deleting it
+    changed no test.
+
+    A compared source wrapping **one** model (or two identical ones) is the
+    case that separates them: the column holds a single value, so without
+    the guard the chart would print a Brier title on a compared chart, which
+    is exactly what the guard exists to prevent.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+
+    compared = ferrum.ModelSource.compare({"only": model}, X, y)
+    # The premise: the column really does carry one broadcast value here.
+    assert len(compared.calibration_curve()["brier"].unique().to_list()) == 1
+
+    assert ferrum.calibration_chart(compared)._title.text == "Calibration Curve"
+    # The per-model overlay still carries the number, so nothing is lost --
+    # it is the *title* that has no single model to describe.
+    assert any(
+        t.startswith("Brier = ") for t in svg_texts(ferrum.calibration_chart(compared).to_svg())
+    )
+
+    # Control: the same model as a plain single source does title its Brier.
+    plain = ferrum.ModelSource(model, X, y)
+    assert ferrum.calibration_chart(plain)._title.text.startswith("Calibration Curve — Brier ")

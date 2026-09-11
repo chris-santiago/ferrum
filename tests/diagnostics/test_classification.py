@@ -1285,3 +1285,48 @@ def test_classification_report_chart_refuses_a_y_less_source_before_an_x_less_on
     y_only = ferrum.ModelSource(model, None, df["y"])
     with pytest.raises(ValueError, match=r"requires the training data"):
         ferrum.classification_report_chart(y_only)
+
+
+def test_calibration_error_is_the_mean_squared_deviation_not_the_mean():
+    """``calibration_error``'s *magnitude*, against arithmetic done here.
+
+    The batch verified which model each number belonged to and never what
+    the number was: one test asserted only ``>= 0.0``, one only that the
+    keys existed, and one compared the per-model value against the *solo*
+    visualizer's value -- i.e. against itself, which any consistent formula
+    change satisfies. So swapping the documented mean *squared* deviation
+    for a plain mean survived the whole pin set.
+
+    The strict model is the discriminating fixture: its bins sit mostly
+    above the diagonal, so the signed mean is **negative** while the mean
+    square is positive. A formula swap cannot hide behind a sign here.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    strict = LogisticRegression(C=0.01, max_iter=1000).fit(X.to_numpy(), y.to_numpy())
+
+    # Recomputed from the frame the visualizer charted, by a different
+    # expression than the one under test.
+    bins = ferrum.ModelSource(strict, X, y).calibration_curve(n_bins=5)
+    deviation = (bins["fraction_positive"] - bins["mean_predicted"]).to_numpy()
+    expected = float(np.mean(deviation**2))
+    signed_mean = float(np.mean(deviation))
+
+    # The fixture really discriminates: the two candidate formulas do not
+    # even agree on sign.
+    assert signed_mean < 0.0 < expected
+
+    viz = ferrum.CalibrationVisualizer(strict, n_bins=5).fit(X, y)
+    assert viz._metrics["calibration_error"] == pytest.approx(expected)
+    # And the absolute magnitude, pinned outright.
+    assert viz._metrics["calibration_error"] == pytest.approx(0.06288996582434439)
+
+    # A better-calibrated model must score lower -- the metric has to be
+    # oriented, not merely reproducible.
+    loose = load_fixture("binary_logistic")
+    loose_viz = ferrum.CalibrationVisualizer(loose, n_bins=5).fit(X, y)
+    assert loose_viz._metrics["calibration_error"] == pytest.approx(0.00498048724996414)
+    assert loose_viz._metrics["calibration_error"] < viz._metrics["calibration_error"]

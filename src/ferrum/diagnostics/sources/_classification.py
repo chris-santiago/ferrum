@@ -81,6 +81,21 @@ def _resolve_class_values(real_classes: Any, y, labels: list[str]) -> list:
     written to prevent it. Tier 3 now only runs when ``y``'s cardinality
     disagrees with the score-column count, where no sound answer exists and
     a parsed label is at least a guess made from the caller's own spelling.
+
+    All three tiers are reachable, and measured (2026-09-11 close mutation
+    gate): tier 1 on any scikit-learn estimator, tier 2 on a ``classes_``-less
+    model whose ``y`` carries exactly as many distinct values as there are
+    score columns (verified to match sklearn's one-vs-rest AUCs), tier 3 on
+    a ``classes_``-less model whose ``y`` cardinality disagrees with that
+    count. Tier 3's two routes differ in how the unsound values surface:
+    a **binary** curve refuses by name, because
+    :func:`_curve_frames.binary_indicator`'s total-mismatch guard catches
+    comparison values that match no row. A **multiclass** curve has no such
+    guard -- one-vs-rest legitimately tolerates a class no row matches --
+    so it returns all-NaN curves silently instead. That silence is a known
+    gap, tracked with the target-hygiene follow-up (the same "what does
+    ferrum owe a caller whose target and model disagree" question), not a
+    property this function is asserting is correct.
     """
     if real_classes is not None and len(real_classes) == len(labels):
         return _coerce_real_classes(real_classes, y.dtype)

@@ -2046,6 +2046,11 @@ def test_precomputed_roc_all_same_class_does_not_crash():
     aucs = roc["auc"].unique().to_list()
     assert len(aucs) == 1
     assert np.isnan(aucs[0])
+    # The curve is named for the class the data actually holds. A degenerate
+    # target has no second class, so `binary_class_values` puts the one
+    # present class in both slots -- values and labels agreeing is the whole
+    # point of that branch, and only the `class` column shows it to a user.
+    assert roc["class"].unique().to_list() == ["0"]
 
 
 def test_precomputed_roc_all_same_class_chart_renders():
@@ -2056,6 +2061,13 @@ def test_precomputed_roc_all_same_class_chart_renders():
     svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg  # NaN in auc column should not leak to SVG coordinates
+    # Symmetric to the all-zeros case above: an all-ones target labels its
+    # curve "1", not a class absent from the data. The figure builder
+    # renames the legend value to embed the metric ("1 (AUC = nan)"), so
+    # the class name is asserted as the prefix rather than coupling this
+    # check to the metric text.
+    labels = chart._data["class"].unique().to_list()
+    assert len(labels) == 1 and labels[0].startswith("1"), labels
 
 
 # ---------------------------------------------------------------------------
@@ -2074,6 +2086,7 @@ def test_precomputed_pr_all_positive_class():
     aps = pr["ap"].unique().to_list()
     assert len(aps) == 1
     assert abs(aps[0] - 1.0) < 0.01
+    assert pr["class"].unique().to_list() == ["1"]
 
 
 def test_precomputed_pr_all_negative_class():
@@ -2083,6 +2096,7 @@ def test_precomputed_pr_all_negative_class():
     src = _PrecomputedSource(y_true, y_pred)
     pr = src.pr_curve()
     assert pr.height > 0
+    assert pr["class"].unique().to_list() == ["0"]
 
 
 # ---------------------------------------------------------------------------
