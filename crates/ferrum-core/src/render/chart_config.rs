@@ -143,14 +143,18 @@ pub struct BreakAxisSpec {
     pub break_style: String,
 }
 
-/// Inset chart — embeds a pre-rendered SVG at normalized plot-area bounds.
+/// Inset chart — embeds a pre-rendered SVG at plot-area-relative bounds.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InsetSpec {
     /// Pre-rendered SVG string to embed.
     pub svg: String,
-    /// `[left, top, right, bottom]` in normalized coordinates [0, 1] relative
-    /// to the plot area.
-    pub bounds: [f64; 4],
+    /// `[left, top, right, bottom]`, each entry independently a normalized
+    /// `[0, 1]` fraction of the plot area (`InsetCoord::Norm`) or an
+    /// absolute pixel offset from the plot area's origin
+    /// (`InsetCoord::Px`), resolved against the computed plot rect at
+    /// layout time by [`InsetCoord::resolve`]. Mixed kinds within one
+    /// bounds tuple are allowed.
+    pub bounds: [InsetCoord; 4],
     /// Whether to draw a border rect around the inset (default `true`).
     #[serde(default = "default_true")]
     pub border: bool,
@@ -169,6 +173,60 @@ pub struct InsetSpec {
     /// Connector style: `"lines"` (default).
     #[serde(default = "default_connect_style")]
     pub connect_style: String,
+}
+
+/// One `InsetSpec.bounds` entry: a normalized `[0, 1]` fraction of the plot
+/// area, or an absolute pixel offset from the plot area's x/y origin.
+///
+/// Wire shape (2026-09-11 batch-H design, F-L08-08): `{"norm": f}` |
+/// `{"px": f}` | a bare number. The bare-number form is serde back-compat —
+/// every `InsetSpec` serialized before the tagged wire existed carried plain
+/// floats and must keep deserializing identically, so a bare number decodes
+/// as `Norm` (its pre-existing meaning).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InsetCoord {
+    /// Normalized `[0, 1]` fraction of the plot area's width/height.
+    Norm(f64),
+    /// Absolute pixel offset from the plot area's x/y origin.
+    Px(f64),
+}
+
+impl<'de> Deserialize<'de> for InsetCoord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Untagged so a bare JSON number (the pre-existing wire shape) is
+        // tried before either tagged object form — that ordering is what
+        // makes the bare-number back-compat case work without a separate
+        // deserializer path.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Bare(f64),
+            Norm { norm: f64 },
+            Px { px: f64 },
+        }
+        Ok(match Raw::deserialize(deserializer)? {
+            Raw::Bare(f) => InsetCoord::Norm(f),
+            Raw::Norm { norm } => InsetCoord::Norm(norm),
+            Raw::Px { px } => InsetCoord::Px(px),
+        })
+    }
+}
+
+impl InsetCoord {
+    /// Resolve one bounds entry against one axis of the computed plot rect
+    /// (per the 2026-05-24 design: "px/norm resolved against the computed
+    /// plot-area rect at layout time"). `origin`/`span` are `plot_area.x`/
+    /// `plot_area.w` for a horizontal entry, `plot_area.y`/`plot_area.h` for
+    /// a vertical one.
+    pub fn resolve(self, origin: f64, span: f64) -> f64 {
+        match self {
+            InsetCoord::Norm(f) => origin + f * span,
+            InsetCoord::Px(px) => origin + px,
+        }
+    }
 }
 
 fn default_break_size() -> f64 { 12.0 }
@@ -1096,13 +1154,100 @@ mod tests {
         assert_eq!(cfg.structural.len(), 1);
         match &cfg.structural[0] {
             StructuralSpec::Inset(spec) => {
-                assert_eq!(spec.bounds, [0.6, 0.1, 0.95, 0.45]);
+                // Bare numbers deserialize as `Norm` (back-compat wire shape).
+                assert_eq!(
+                    spec.bounds,
+                    [
+                        InsetCoord::Norm(0.6),
+                        InsetCoord::Norm(0.1),
+                        InsetCoord::Norm(0.95),
+                        InsetCoord::Norm(0.45),
+                    ]
+                );
                 assert!(spec.border);
                 assert!(!spec.shadow);
                 assert_eq!(spec.border_color, "#999");
             }
             other => panic!("expected Inset, got {other:?}"),
         }
+    }
+
+    /// H6 wire shape: `bounds` entries may mix `{"px": f}`, `{"norm": f}`, and
+    /// bare numbers within one tuple; each resolves independently at layout
+    /// time (see `render/inset.rs::build_inset_nodes`), so the tag survives
+    /// deserialization unchanged rather than collapsing to one kind.
+    #[test]
+    fn structural_inset_bounds_accepts_mixed_px_norm_and_bare_tags() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "inset",
+                    "svg": "<svg></svg>",
+                    "bounds": [0.6, {"px": 20.0}, {"norm": 0.95}, 0.45]
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        match &cfg.structural[0] {
+            StructuralSpec::Inset(spec) => {
+                assert_eq!(
+                    spec.bounds,
+                    [
+                        InsetCoord::Norm(0.6),
+                        InsetCoord::Px(20.0),
+                        InsetCoord::Norm(0.95),
+                        InsetCoord::Norm(0.45),
+                    ]
+                );
+            }
+            other => panic!("expected Inset, got {other:?}"),
+        }
+    }
+
+    /// A bounds tuple with no tags at all (the pre-2026-09-11 wire shape)
+    /// must still deserialize — this is the serde back-compat guarantee: an
+    /// `InsetSpec` serialized before `InsetCoord` existed carried plain
+    /// floats for every entry, and those specs must keep decoding to the
+    /// same `Norm` meaning they always had.
+    #[test]
+    fn structural_inset_bounds_bare_number_round_trip_back_compat() {
+        let json = r##"{
+            "structural": [
+                {
+                    "type": "inset",
+                    "svg": "<svg></svg>",
+                    "bounds": [0.0, 0.25, 0.5, 0.75]
+                }
+            ]
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        match &cfg.structural[0] {
+            StructuralSpec::Inset(spec) => {
+                assert_eq!(
+                    spec.bounds,
+                    [
+                        InsetCoord::Norm(0.0),
+                        InsetCoord::Norm(0.25),
+                        InsetCoord::Norm(0.5),
+                        InsetCoord::Norm(0.75),
+                    ]
+                );
+            }
+            other => panic!("expected Inset, got {other:?}"),
+        }
+    }
+
+    /// An out-of-range or negative px offset is not rejected at this layer —
+    /// construction-time validation (empty-box / out-of-range refusal) is
+    /// the Python-side H6 responsibility (spec §4); Rust only decodes the
+    /// tag and resolves it. A negative `px` value must still deserialize and
+    /// carry its sign through to `resolve` (an inset positioned outside the
+    /// plot area via `px` is a caller error the Python layer refuses, not a
+    /// Rust-side deserialization failure).
+    #[test]
+    fn structural_inset_bounds_negative_px_deserializes() {
+        let coord: InsetCoord = serde_json::from_str(r#"{"px": -5.0}"#).unwrap();
+        assert_eq!(coord, InsetCoord::Px(-5.0));
     }
 
     #[test]

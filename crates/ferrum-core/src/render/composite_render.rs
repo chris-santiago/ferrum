@@ -4159,14 +4159,19 @@ mod tests {
     }
 
     fn inset_chart_config(svgs: &[String]) -> ChartConfig {
-        use crate::render::chart_config::{InsetSpec, StructuralSpec};
+        use crate::render::chart_config::{InsetCoord, InsetSpec, StructuralSpec};
         ChartConfig {
             structural: svgs
                 .iter()
                 .map(|svg| {
                     StructuralSpec::Inset(InsetSpec {
                         svg: svg.clone(),
-                        bounds: [0.6, 0.1, 0.95, 0.55],
+                        bounds: [
+                            InsetCoord::Norm(0.6),
+                            InsetCoord::Norm(0.1),
+                            InsetCoord::Norm(0.95),
+                            InsetCoord::Norm(0.55),
+                        ],
                         border: true,
                         border_color: "#999999".to_string(),
                         border_dash: None,

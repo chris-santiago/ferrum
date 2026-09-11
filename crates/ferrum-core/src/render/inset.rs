@@ -12,6 +12,10 @@ use ferrum_scene::{FillStroke, RawAnchor, SceneNode, StrokeStyle};
 
 use crate::layout::Rect;
 use crate::render::chart_config::InsetSpec;
+// `InsetCoord` is only named directly in tests below (`resolve` is called
+// through the field, so production code never spells the type out).
+#[cfg(test)]
+use crate::render::chart_config::InsetCoord;
 use crate::render::color::parse_color;
 use crate::render::draw::to_scene_color;
 use crate::render::svg::uniquify_clip_ids_with_prefix;
@@ -38,11 +42,13 @@ use crate::render::svg::uniquify_clip_ids_with_prefix;
 pub fn build_inset_nodes(spec: &InsetSpec, plot_area: &Rect, inset_idx: usize) -> Vec<SceneNode> {
     let [b_left, b_top, b_right, b_bottom] = spec.bounds;
 
-    // Convert normalized [0,1] bounds to pixel coordinates relative to plot_area.
-    let px_left = plot_area.x + b_left * plot_area.w;
-    let px_top = plot_area.y + b_top * plot_area.h;
-    let px_right = plot_area.x + b_right * plot_area.w;
-    let px_bottom = plot_area.y + b_bottom * plot_area.h;
+    // Resolve each bounds entry against the plot rect: a `Norm` entry scales
+    // by the plot area's span, a `Px` entry offsets from its origin
+    // directly. Kinds resolve independently, so a bounds tuple may mix both.
+    let px_left = b_left.resolve(plot_area.x, plot_area.w);
+    let px_top = b_top.resolve(plot_area.y, plot_area.h);
+    let px_right = b_right.resolve(plot_area.x, plot_area.w);
+    let px_bottom = b_bottom.resolve(plot_area.y, plot_area.h);
 
     let px_w = (px_right - px_left).max(1.0);
     let px_h = (px_bottom - px_top).max(1.0);
@@ -238,7 +244,12 @@ mod tests {
     fn basic_spec() -> InsetSpec {
         InsetSpec {
             svg: "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"150\"><circle cx=\"100\" cy=\"75\" r=\"50\"/></svg>".to_string(),
-            bounds: [0.6, 0.1, 0.95, 0.55],
+            bounds: [
+                InsetCoord::Norm(0.6),
+                InsetCoord::Norm(0.1),
+                InsetCoord::Norm(0.95),
+                InsetCoord::Norm(0.55),
+            ],
             border: true,
             border_color: "#999999".to_string(),
             border_dash: None,
@@ -506,7 +517,12 @@ mod tests {
     #[test]
     fn inset_bounds_map_correctly() {
         let spec = InsetSpec {
-            bounds: [0.0, 0.0, 1.0, 1.0], // full plot area
+            bounds: [
+                InsetCoord::Norm(0.0),
+                InsetCoord::Norm(0.0),
+                InsetCoord::Norm(1.0),
+                InsetCoord::Norm(1.0),
+            ], // full plot area
             border: true,
             ..basic_spec()
         };
@@ -527,6 +543,108 @@ mod tests {
         } else {
             panic!("expected a border rect node");
         }
+    }
+
+    // ── build_inset_nodes: px/norm bounds (InsetCoord, H6) ───────────────────
+
+    /// Finds the (single) border rect a `basic_spec()`-derived spec produces,
+    /// used to read back the resolved pixel bounds without duplicating the
+    /// filter-and-match boilerplate at every call site.
+    fn border_rect_of(nodes: &[SceneNode]) -> (f64, f64, f64, f64) {
+        nodes
+            .iter()
+            .find_map(|n| {
+                if let SceneNode::Rect { x, y, w, h, style, .. } = n {
+                    if style.stroke.is_some() && style.fill.is_none() {
+                        return Some((*x, *y, *w, *h));
+                    }
+                }
+                None
+            })
+            .expect("expected a border rect node")
+    }
+
+    #[test]
+    fn inset_px_bounds_resolve_against_plot_area_origin() {
+        // Per the design ("px/norm resolved against the computed plot-area
+        // rect at layout time"): a `Px` entry is `plot_area.{x,y} + px`, not
+        // scaled by the plot span the way `Norm` is.
+        let spec = InsetSpec {
+            bounds: [
+                InsetCoord::Px(10.0),
+                InsetCoord::Px(20.0),
+                InsetCoord::Px(310.0),
+                InsetCoord::Px(220.0),
+            ],
+            border: true,
+            ..basic_spec()
+        };
+        let (x, y, w, h) = border_rect_of(&build_inset_nodes(&spec, &plot(), 0));
+        // plot() == Rect { x: 50, y: 50, w: 300, h: 200 }.
+        assert!((x - 60.0).abs() < 0.1, "px_left = plot.x(50) + px(10); got {x}");
+        assert!((y - 70.0).abs() < 0.1, "px_top = plot.y(50) + px(20); got {y}");
+        assert!((w - 300.0).abs() < 0.1, "width = px_right(360) - px_left(60); got {w}");
+        assert!((h - 200.0).abs() < 0.1, "height = px_bottom(270) - px_top(70); got {h}");
+    }
+
+    #[test]
+    fn inset_norm_bounds_unchanged_and_byte_identical_for_bare_number_wire() {
+        // A bounds tuple built directly with `InsetCoord::Norm` and one
+        // deserialized from the pre-tagged-wire bare-number JSON shape must
+        // resolve to the identical scene — the bare-number back-compat
+        // decode is required to be byte-identical to explicit `Norm`, not
+        // merely equivalent in value.
+        let direct = InsetSpec {
+            bounds: [
+                InsetCoord::Norm(0.6),
+                InsetCoord::Norm(0.1),
+                InsetCoord::Norm(0.95),
+                InsetCoord::Norm(0.55),
+            ],
+            ..basic_spec()
+        };
+        let via_bare_json: InsetSpec = {
+            let json = r##"{
+                "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"150\"><circle cx=\"100\" cy=\"75\" r=\"50\"/></svg>",
+                "bounds": [0.6, 0.1, 0.95, 0.55],
+                "border": true,
+                "border_color": "#999999",
+                "connect_style": "lines"
+            }"##;
+            serde_json::from_str(json).unwrap()
+        };
+        assert_eq!(direct.bounds, via_bare_json.bounds);
+
+        let direct_nodes = build_inset_nodes(&direct, &plot(), 0);
+        let bare_nodes = build_inset_nodes(&via_bare_json, &plot(), 0);
+        assert_eq!(
+            raw_svg_of(&direct_nodes),
+            raw_svg_of(&bare_nodes),
+            "bare-number bounds must render byte-identically to explicit InsetCoord::Norm"
+        );
+        assert_eq!(border_rect_of(&direct_nodes), border_rect_of(&bare_nodes));
+    }
+
+    #[test]
+    fn inset_mixed_px_and_norm_bounds_resolve_independently() {
+        // left/bottom are `Norm` (scaled by plot span); top/right are `Px`
+        // (offset from origin only) — each entry must resolve per its own
+        // kind regardless of its neighbors.
+        let spec = InsetSpec {
+            bounds: [
+                InsetCoord::Norm(0.5), // left:  50 + 0.5 * 300 = 200
+                InsetCoord::Px(20.0),  // top:   50 + 20        = 70
+                InsetCoord::Px(280.0), // right: 50 + 280       = 330
+                InsetCoord::Norm(0.9), // bottom:50 + 0.9 * 200 = 230
+            ],
+            border: true,
+            ..basic_spec()
+        };
+        let (x, y, w, h) = border_rect_of(&build_inset_nodes(&spec, &plot(), 0));
+        assert!((x - 200.0).abs() < 0.1, "left is Norm(0.5); got x={x}");
+        assert!((y - 70.0).abs() < 0.1, "top is Px(20); got y={y}");
+        assert!((w - 130.0).abs() < 0.1, "width = right(330) - left(200); got w={w}");
+        assert!((h - 160.0).abs() < 0.1, "height = bottom(230) - top(70); got h={h}");
     }
 
     // ── build_inset_nodes: connector ─────────────────────────────────────────
@@ -627,7 +745,15 @@ mod tests {
         // left > right in normalized bounds produces a negative pixel span,
         // which `.max(1.0)` clamps to a 1px-wide inset rather than a
         // negative-width Rect.
-        let spec = InsetSpec { bounds: [0.9, 0.1, 0.1, 0.9], ..basic_spec() };
+        let spec = InsetSpec {
+            bounds: [
+                InsetCoord::Norm(0.9),
+                InsetCoord::Norm(0.1),
+                InsetCoord::Norm(0.1),
+                InsetCoord::Norm(0.9),
+            ],
+            ..basic_spec()
+        };
         let nodes = build_inset_nodes(&spec, &plot(), 0);
         let raw = nodes.iter().find_map(|n| {
             if let SceneNode::Raw { svg, .. } = n { Some(svg) } else { None }
