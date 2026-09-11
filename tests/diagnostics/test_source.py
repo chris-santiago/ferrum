@@ -27,6 +27,49 @@ def test_constructor_accepts_numpy_array():
     assert source.feature_names == ["f0", "f1"]
 
 
+def test_class_names_none_when_unresolvable():
+    """No class_names= and no model.classes_ -> None (F-L11-08 / G4)."""
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    source = ferrum.ModelSource(_DuckModel(), df, y=[0, 1])
+    assert source.class_names is None
+
+
+def test_class_names_from_constructor_kwarg():
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    source = ferrum.ModelSource(_DuckModel(), df, y=[0, 1], class_names=["setosa", "versicolor"])
+    assert source.class_names == ["setosa", "versicolor"]
+
+
+def test_class_names_from_model_classes_attribute():
+    class _ClassifierDuck(_DuckModel):
+        classes_ = np.array([0, 1, 2])
+
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    source = ferrum.ModelSource(_ClassifierDuck(), df, y=[0, 1])
+    assert source.class_names == ["0", "1", "2"]
+
+
+def test_class_names_constructor_kwarg_wins_over_model_classes():
+    class _ClassifierDuck(_DuckModel):
+        classes_ = np.array([0, 1])
+
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    source = ferrum.ModelSource(
+        _ClassifierDuck(), df, y=[0, 1], class_names=["negative", "positive"]
+    )
+    assert source.class_names == ["negative", "positive"]
+
+
+def test_class_names_proxied_on_compared_model_source():
+    """ComparedModelSource resolves class_names from its first wrapped
+    source, matching the other read-only BaseSource properties."""
+    df = pl.DataFrame({"a": [1.0, 2.0]})
+    cms = ferrum.ModelSource.compare(
+        {"m": _DuckModel()}, df, [0, 1], class_names=["negative", "positive"]
+    )
+    assert cms.class_names == ["negative", "positive"]
+
+
 def test_capability_detection():
     df = pl.DataFrame({"a": [1.0]})
     source = ferrum.ModelSource(_DuckModel(), df)

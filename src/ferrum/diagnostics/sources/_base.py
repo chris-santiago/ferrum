@@ -208,6 +208,40 @@ class BaseSource:
         return list(self._feature_names)
 
     @property
+    def class_names(self) -> list[str] | None:
+        """Per-class display labels, or ``None`` when unresolvable.
+
+        Resolves the ``class_names=`` supplied at construction time, else
+        the wrapped model's ``classes_`` attribute (stringified). Returns
+        ``None`` when neither is available -- unlike ``probabilities()``,
+        this property cannot complete a positional ``class_{i}`` fallback
+        on its own, since that requires a definite class count (the width
+        of a computed prediction matrix), which is not knowable without
+        running inference.
+
+        These are **display** labels, matching the constructor's
+        ``class_names`` parameter docs -- not guaranteed to be values
+        that appear in ``y``. When ``class_names=`` is an alias (e.g.
+        ``["setosa", "versicolor"]`` against an int-coded ``y``), this
+        property returns the alias, not the underlying comparison value.
+        Code that needs to binarize against ``y`` (as the classification
+        curve methods on this class do) must go through the model's own
+        ``classes_`` coerced into ``y``'s domain, not this property.
+
+        Returns
+        -------
+        list[str] | None
+            Per-class display labels in resolution order, or ``None``
+            when the wrapped model exposes neither ``class_names=`` nor
+            ``classes_``.
+        """
+        if self._class_names is not None:
+            return list(self._class_names)
+        if hasattr(self._model, "classes_"):
+            return [str(c) for c in self._model.classes_]
+        return None
+
+    @property
     def capabilities(self) -> frozenset[str]:
         """Protocol attributes present on the wrapped estimator.
 

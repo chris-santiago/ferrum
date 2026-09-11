@@ -59,12 +59,15 @@ class _SourceState(Protocol):
 
     def _cache_key(self, method: str, **kwargs: Any) -> tuple: ...
 
-    # Cross-mixin methods reached through ``self`` (e.g. the classification
-    # curves read ``self.probabilities()``; declared here so those calls
-    # type-check across the mixin split).
+    # Cross-mixin methods/properties reached through ``self`` (e.g. the
+    # classification curves read ``self.probabilities()``, and
+    # ``probabilities()`` itself reads ``self.class_names``; declared here
+    # so those calls type-check across the mixin split).
     def predictions(self) -> pl.DataFrame: ...
 
     def probabilities(self) -> pl.DataFrame: ...
+
+    class_names: list[str] | None
 
 
 @runtime_checkable

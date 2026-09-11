@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
+import polars as pl
 import pytest
 
 import ferrum
@@ -342,6 +344,333 @@ def test_gain_chart_figure_function(binary_source):
 def test_lift_chart_figure_function(binary_source):
     svg = ferrum.lift_chart(binary_source).to_svg()
     assert "<svg" in svg
+
+
+# --- F-L11-08 / G4: gain/lift show real class names, not a binary rename map ---
+
+
+def _direct_label_texts(svg: str) -> set[str]:
+    """Text content of gain/lift chart direct-label + legend `<text>` nodes,
+    excluding axis-tick text.
+
+    A naive `">0<" in svg` (or any other bare substring) check does NOT
+    discriminate here: axis ticks render digit text too (e.g. the y-axis
+    '0'..'1' gridline labels, the x-axis '0'..'1' percentage labels), so a
+    chart with *zero* digit class labels anywhere (e.g. `class_names=["A",
+    "B", "C"]`) still trips `">0<" in svg` / `">1<" in svg` via its ticks
+    alone -- verified live against the spec reviewer's proof. Direct labels
+    and axis ticks are visually distinguishable by SVG attributes even
+    though both are `<text>`: ticks render in the theme's muted gray
+    (`fill="#6b7280"`), while direct labels/legend text use the dark ink
+    color (`fill="#1f2937"`) at the same `font-size="11"` the chart title
+    and axis titles do NOT share (those are `font-size="13"
+    font-weight="600"`). That combination -- dark fill, tick-sized font,
+    no bold weight -- uniquely selects the direct-label layer.
+    """
+    return {
+        content
+        for attrs, content in re.findall(r"<text([^>]*)>([^<]*)</text>", svg)
+        if 'fill="#1f2937"' in attrs and 'font-size="11"' in attrs
+    }
+
+
+@pytest.mark.parametrize("chart_fn", [ferrum.gain_chart, ferrum.lift_chart])
+def test_gain_lift_binary_shows_real_names_not_class_map(binary_source, chart_fn):
+    """Disclosed behavior change: binary charts now label '0'/'1' (the
+    model's real integer class names) instead of the old hardcoded
+    'Class 0'/'Class 1' rewrite."""
+    svg = chart_fn(binary_source).to_svg()
+    assert _direct_label_texts(svg) == {"0", "1", "Baseline"}
+    assert "Class 0" not in svg
+    assert "Class 1" not in svg
+
+
+@pytest.mark.parametrize("chart_fn", [ferrum.gain_chart, ferrum.lift_chart])
+def test_gain_lift_multiclass_shows_every_real_class_plus_baseline(multi_source, chart_fn):
+    """A 3rd (and beyond) class must show its real name, not fall through
+    as a bare unlabeled digit alongside a stale binary-only rename map."""
+    svg = chart_fn(multi_source).to_svg()
+    assert _direct_label_texts(svg) == {"0", "1", "2", "Baseline"}
+    assert "Class 0" not in svg
+    assert "Class 1" not in svg
+    assert "Class 2" not in svg
+
+
+class _StringClassesModel:
+    """Wraps a fitted binary classifier and presents string ``classes_``.
+
+    Exercises the ``model.classes_`` display-resolution arm specifically
+    (as opposed to the constructor's ``class_names=`` override arm, covered
+    directly by ``test_gain_lift_class_names_kwarg_*`` below), with ``y``
+    and ``classes_`` both string-typed so ``y_true == class_value``
+    binarizes correctly in ``lift_frame``/``gain_frame``.
+    """
+
+    def __init__(self, model, names):
+        self._model = model
+        self.classes_ = np.array(names)
+
+    def predict_proba(self, X):
+        return self._model.predict_proba(X)
+
+
+@pytest.mark.parametrize("chart_fn", [ferrum.gain_chart, ferrum.lift_chart])
+def test_gain_lift_string_class_names_never_rewritten(chart_fn):
+    """A model with real string classes_ (e.g. sklearn's classes_=[...])
+    must show those strings untouched, with no Class-N leakage."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y_str = df["y"].cast(pl.Utf8).replace({"0": "setosa", "1": "versicolor"})
+    source = ferrum.ModelSource(_StringClassesModel(model, ["setosa", "versicolor"]), X, y_str)
+    svg = chart_fn(source).to_svg()
+    assert _direct_label_texts(svg) == {"setosa", "versicolor", "Baseline"}
+    assert "Class 0" not in svg
+    assert "Class 1" not in svg
+
+
+# --- G4 (F-L11-08): constructor `class_names=` must not silently drop or
+# corrupt classes when the alias diverges from y's own encoding -----------
+
+
+@pytest.mark.parametrize("chart_fn", [ferrum.gain_chart, ferrum.lift_chart])
+def test_gain_lift_class_names_kwarg_shows_every_real_class(chart_fn):
+    """Direct regression coverage for the constructor's ``class_names=``
+    override path: an alias that doesn't round-trip back to ``y``'s own
+    encoding (e.g. ``"negative"`` against an int-coded ``y``) must still
+    binarize against the model's real ``classes_``, not the alias
+    itself."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], class_names=["negative", "positive"])
+    svg = chart_fn(source).to_svg()
+    assert _direct_label_texts(svg) == {"negative", "positive", "Baseline"}
+
+
+@pytest.mark.parametrize(
+    "y_transform, class_names",
+    [
+        pytest.param(lambda y: y, None, id="numeric_y_no_names"),
+        pytest.param(lambda y: y.cast(pl.Utf8), None, id="utf8_y_no_names"),
+        pytest.param(
+            lambda y: y.cast(pl.Utf8).cast(pl.Categorical), None, id="categorical_y_no_names"
+        ),
+        pytest.param(lambda y: y.cast(pl.Utf8), ["A", "B", "C"], id="utf8_y_with_class_names"),
+        pytest.param(lambda y: y, ["A", "B", "C"], id="numeric_y_with_class_names"),
+        pytest.param(
+            lambda y: y.cast(pl.Utf8).cast(pl.Enum(["2", "0", "1"])),
+            None,
+            id="enum_y_no_names",
+        ),
+    ],
+)
+def test_gain_lift_class_values_land_in_ys_domain_matrix(y_transform, class_names):
+    """``class_values[i]`` must be coerced into y's domain regardless of
+    which side of the resolution -- the display label, or
+    ``real_classes`` (``model.classes_``) -- supplies the raw value.
+
+    Covers every combination of ``y``'s dtype (numeric / Utf8 /
+    Categorical / Enum) diverging from ``model.classes_``'s own dtype,
+    with and without a ``class_names=`` display alias -- a mismatch on
+    either side must not silently drop a class from ``lift_curve()``,
+    flatline ``cumulative_gain()``, or produce a NaN AUC from
+    ``roc_curve()``/``pr_curve()``.
+
+    ``enum_y_no_names``'s category order (``["2", "0", "1"]``) is
+    deliberately scrambled relative to the natural ``["0", "1", "2"]``
+    value order: a coercion that reinterprets an int ``classes_``'s
+    values as physical dictionary *codes* into that category list
+    (rather than casting them) would silently produce a
+    wrong-but-plausible-looking curve pinned to the wrong classes,
+    instead of an honest failure -- digit-string categories keep
+    ``roc_curve()``'s numeric parsing intact so this row isolates the
+    coercion defect from the unrelated, pre-existing, out-of-scope
+    ``_curve_frames.roc_frame`` binary-branch gap (tracked separately,
+    not fixed here).
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = y_transform(df["y"])
+    kwargs = {} if class_names is None else {"class_names": class_names}
+    source = ferrum.ModelSource(model, X, y, **kwargs)
+
+    gain = source.cumulative_gain()
+    lift = source.lift_curve()
+    gain_real_classes = set(gain["class"].unique().to_list()) - {"baseline"}
+    lift_real_classes = set(lift["class"].unique().to_list()) - {"baseline"}
+    assert len(gain_real_classes) == 3, f"cumulative_gain() lost classes: {gain_real_classes}"
+    assert lift_real_classes == gain_real_classes, (
+        f"lift_curve() {lift_real_classes} disagrees with cumulative_gain() {gain_real_classes}"
+    )
+    for cls in gain_real_classes:
+        assert (gain.filter(pl.col("class") == cls)["gain"] > 0).any(), (
+            f"gain for class {cls!r} is flatlined at 0"
+        )
+        assert (lift.filter(pl.col("class") == cls)["lift"] != 1.0).any(), (
+            f"lift for class {cls!r} is flatlined at 1.0"
+        )
+
+    # roc_curve()/pr_curve() feed the same _resolve_proba binarization, so
+    # a dropped/mismatched class_values entry shows up as NaN AUC there too.
+    roc = source.roc_curve()
+    assert not roc["auc"].is_nan().any(), "roc_curve() produced NaN AUC"
+
+    if class_names is None:
+        # Non-degenerate and non-NaN is not enough: a coercion that
+        # reinterprets values as physical codes instead of casting them
+        # can silently attach a class's real curve to the WRONG label --
+        # still non-degenerate, still non-NaN, just pinned to the wrong
+        # class (exactly the failure mode a scrambled-order Enum column
+        # is built to expose). Pin per-label AUC against a reference
+        # source built from the untransformed int y, whose "0"/"1"/"2"
+        # labels are unambiguous stringified class indices -- correct
+        # coercion must attribute the identical AUC to the identical
+        # label regardless of what dtype y was actually supplied as.
+        reference_roc = ferrum.ModelSource(model, X, df["y"]).roc_curve()
+        reference_auc = dict(zip(reference_roc["class"].to_list(), reference_roc["auc"].to_list()))
+        for cls, auc in zip(roc["class"].to_list(), roc["auc"].to_list()):
+            assert cls in reference_auc, f"unexpected class label {cls!r}"
+            assert auc == pytest.approx(reference_auc[cls], abs=1e-9), (
+                f"class {cls!r} AUC {auc} != reference {reference_auc[cls]} -- "
+                "class values were mispaired, not just coerced"
+            )
+
+    if class_names is not None:
+        # The rendered chart only carries string display labels; string
+        # y-dtype rows (utf8/categorical) still render their raw values
+        # as the "class" discriminator when class_names is None, which
+        # the earlier binary/multiclass/string-classes tests already
+        # cover -- this direct-label check is specific to the
+        # class_names= override rows, where the display alias must
+        # survive to the SVG on both chart functions.
+        for chart_fn in (ferrum.gain_chart, ferrum.lift_chart):
+            svg = chart_fn(source).to_svg()
+            assert _direct_label_texts(svg) == set(class_names) | {"Baseline"}
+
+
+def test_discrimination_threshold_class_names_alias_does_not_zero_the_sweep():
+    """``discrimination_threshold()`` binarizes against the model's real
+    positive class, not a ``class_names=`` display alias -- an alias
+    that never matches ``y``'s own domain must not silently produce an
+    all-zero precision/recall/F1 sweep."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], class_names=["negative", "positive"])
+    dt = source.discrimination_threshold(n_thresholds=20)
+    assert dt["precision"].max() > 0.0
+    assert dt["recall"].max() > 0.0
+
+
+def test_confusion_matrix_class_names_alias_shows_real_counts():
+    """``confusion_matrix()`` encodes against the model's real classes and
+    applies ``class_names=`` as a display-only rename afterward -- an
+    alias that never matches ``y``'s own domain must not silently zero
+    every cell."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], class_names=["negative", "positive"])
+    cm = source.confusion_matrix()
+    assert cm["value"].sum() == df.height
+    assert set(cm["actual"].unique().to_list()) == {"negative", "positive"}
+    assert set(cm["predicted"].unique().to_list()) == {"negative", "positive"}
+
+
+def _fit_fresh_binary_source(y_transform, *, class_names=None):
+    """Fit a brand-new ``LogisticRegression`` on the binary_classification
+    fixture's X with y cast via ``y_transform``, so ``model.classes_``
+    shares y's exact dtype by construction (the pre-fit ``binary_logistic``
+    fixture is always int-coded, so it can't exercise this).
+
+    This is the identity case for the class-value coercion mechanism:
+    the comparison value already lives in y's domain because the model
+    was fit on y itself, so any coercion the source applies must be a
+    no-op that preserves it, not a lossy round-trip that corrupts it.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = y_transform(df["y"])
+    model = LogisticRegression(random_state=0, max_iter=500).fit(X.to_numpy(), y.to_numpy())
+    kwargs = {} if class_names is None else {"class_names": class_names}
+    return ferrum.ModelSource(model, X, y, **kwargs), df.height
+
+
+@pytest.mark.parametrize(
+    "y_transform",
+    [
+        pytest.param(lambda y: y, id="int"),
+        pytest.param(lambda y: y.cast(pl.Float64), id="float"),
+        pytest.param(lambda y: y.cast(pl.Utf8), id="utf8"),
+        pytest.param(lambda y: y.cast(pl.Utf8).cast(pl.Categorical), id="categorical"),
+        pytest.param(lambda y: y.cast(pl.Boolean), id="bool"),
+    ],
+)
+@pytest.mark.parametrize(
+    "class_names",
+    [
+        pytest.param(None, id="no_class_names"),
+        pytest.param(["negative", "positive"], id="with_class_names"),
+    ],
+)
+def test_class_values_dtype_matrix_every_dtype_nondegenerate(y_transform, class_names):
+    """Exhaustive dtype x class_names= matrix across every method that
+    binarizes a class value against y: ``confusion_matrix``,
+    ``discrimination_threshold``, ``cumulative_gain``, ``lift_curve``
+    (plus ``roc_curve`` as a spot AUC check). Every cell must produce
+    non-degenerate output for every dtype y can legally carry -- int,
+    float, Utf8, Categorical, Boolean -- with or without a
+    ``class_names=`` display alias.
+
+    Every row here fits a fresh model directly on y itself, so
+    ``model.classes_`` shares y's domain trivially (the identity case)
+    -- this proves the coercion mechanism is a safe no-op for values
+    already in y's domain. ``Enum`` is deliberately NOT a row here: an
+    Enum y's real class values already round-trip losslessly through
+    this identity design regardless of category order (a same-value
+    cast into any Enum matches by string value, not list position), so
+    it cannot exercise the dictionary-code-reinterpretation defect --
+    see ``test_gain_lift_class_values_land_in_ys_domain_matrix``'s
+    ``enum_y_no_names`` row, which uses a fixed int-fitted model against
+    a differently-typed y precisely to exercise cross-dtype mismatches.
+
+    Guards against a class-value coercion mechanism that only handles a
+    subset of dtypes and silently zeroes the rest -- the recurring
+    all-zero-output defect this module's ``class_names=`` fix has hit
+    at three different call sites (``confusion_matrix``,
+    ``discrimination_threshold``, the ``_resolve_proba`` consumers).
+    """
+    source, n = _fit_fresh_binary_source(y_transform, class_names=class_names)
+
+    cm = source.confusion_matrix()
+    assert cm["value"].sum() == n, f"confusion_matrix() degenerate: sum={cm['value'].sum()}"
+
+    dt = source.discrimination_threshold(n_thresholds=20)
+    assert dt["precision"].max() > 0.0, "discrimination_threshold() precision flatlined at 0"
+    assert dt["recall"].max() > 0.0, "discrimination_threshold() recall flatlined at 0"
+
+    gain = source.cumulative_gain()
+    lift = source.lift_curve()
+    gain_classes = set(gain["class"].unique().to_list()) - {"baseline"}
+    lift_classes = set(lift["class"].unique().to_list()) - {"baseline"}
+    assert len(gain_classes) == 2, f"cumulative_gain() lost classes: {gain_classes}"
+    assert lift_classes == gain_classes, (
+        f"lift_curve() {lift_classes} disagrees with cumulative_gain() {gain_classes}"
+    )
+    for cls in gain_classes:
+        assert (gain.filter(pl.col("class") == cls)["gain"] > 0).any(), (
+            f"gain for class {cls!r} is flatlined at 0"
+        )
+        assert (lift.filter(pl.col("class") == cls)["lift"] != 1.0).any(), (
+            f"lift for class {cls!r} is flatlined at 1.0"
+        )
+
+    roc = source.roc_curve()
+    assert not roc["auc"].is_nan().any(), "roc_curve() produced NaN AUC"
 
 
 def test_discrimination_threshold_chart_figure_function(binary_source):

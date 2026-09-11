@@ -105,13 +105,12 @@ class PredictionsMixin(_MixinBase):
                 f"{type(self._model).__name__!r} which implements neither."
             )
 
-        # Determine class labels.
-        if self._class_names is not None:
-            classes = list(self._class_names)
-        elif hasattr(self._model, "classes_"):
-            classes = [str(c) for c in self._model.classes_]
-        else:
-            classes = [f"class_{i}" for i in range(proba.shape[1])]
+        # Determine class labels: class_names -> model.classes_ (both via
+        # the shared self.class_names property) -> positional fallback,
+        # which needs the prediction matrix width self.class_names can't
+        # see on its own.
+        names = self.class_names
+        classes = list(names) if names is not None else [f"class_{i}" for i in range(proba.shape[1])]
 
         data: dict[str, Any] = {}
         if self._y is not None:

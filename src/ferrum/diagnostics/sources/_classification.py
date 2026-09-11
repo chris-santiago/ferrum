@@ -17,14 +17,28 @@ else:
     _MixinBase = object
 
 
-def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame):
+def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame, real_classes: Any = None):
     """Resolve proba columns and y_true from a probabilities DataFrame.
 
     Returns ``(y_true_np, score_matrix, labels, class_values)`` where:
     - ``y_true_np`` is the ground-truth as a numpy array
     - ``score_matrix`` is ``(n_samples, n_classes)`` float64
-    - ``labels`` is a list of class label strings (stripped ``"proba_"`` prefix)
-    - ``class_values`` is a list of class values coerced to ``y_true``'s dtype
+    - ``labels`` is a list of class label strings (stripped ``"proba_"`` prefix),
+      used for *display* only (the chart's ``class`` discriminator column)
+    - ``class_values`` is a list of values in ``y_true``'s domain, used to
+      binarize ``y_true == class_values[i]`` for each class ``i``
+
+    Parameters
+    ----------
+    real_classes : array-like, optional
+        The wrapped model's ``classes_``, positionally aligned with
+        ``proba_df``'s ``proba_<label>`` columns regardless of what
+        display label each column was given (see
+        :func:`_coerce_real_classes`). When given and its length matches
+        ``labels``, it is coerced into ``y_true``'s domain and used for
+        ``class_values`` instead of parsing the display label. ``None``
+        (the default) falls back to parsing the label itself, the only
+        option left when the model exposes no ``classes_`` at all.
 
     Raises ``ValueError`` when ``y`` is ``None``.
     """
@@ -33,7 +47,10 @@ def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame):
     proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
     y_true = np.asarray(y)
     labels = [c[len("proba_") :] for c in proba_cols]
-    class_values = [_coerce_class_label(c, y_true.dtype) for c in labels]
+    if real_classes is not None and len(real_classes) == len(labels):
+        class_values = _coerce_real_classes(real_classes, y.dtype)
+    else:
+        class_values = [_coerce_class_label(c, y_true.dtype) for c in labels]
     score_matrix = proba_df[proba_cols].to_numpy()
     return y_true, score_matrix, labels, class_values
 
@@ -75,7 +92,9 @@ class ClassificationCurvesMixin(_MixinBase):
         require_sklearn("roc_curve")
 
         proba_df = self.probabilities()
-        y_true, score_matrix, labels, class_values = _resolve_proba("roc_curve", self._y, proba_df)
+        y_true, score_matrix, labels, class_values = _resolve_proba(
+            "roc_curve", self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
+        )
         df = _curve_frames.roc_frame(
             y_true,
             score_matrix,
@@ -119,7 +138,9 @@ class ClassificationCurvesMixin(_MixinBase):
         require_sklearn("pr_curve")
 
         proba_df = self.probabilities()
-        y_true, score_matrix, labels, class_values = _resolve_proba("pr_curve", self._y, proba_df)
+        y_true, score_matrix, labels, class_values = _resolve_proba(
+            "pr_curve", self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
+        )
         df = _curve_frames.pr_frame(
             y_true,
             score_matrix,
@@ -185,7 +206,10 @@ class ClassificationCurvesMixin(_MixinBase):
 
         proba_df = self.probabilities()
         y_true, score_matrix, labels, class_values = _resolve_proba(
-            "cumulative_gain", self._y, proba_df
+            "cumulative_gain",
+            self._y,
+            proba_df,
+            real_classes=getattr(self._model, "classes_", None),
         )
         df = _curve_frames.gain_frame(y_true, score_matrix, class_values, labels)
         self._cache[key] = df
@@ -200,7 +224,9 @@ class ClassificationCurvesMixin(_MixinBase):
             return self._cache[key]
 
         proba_df = self.probabilities()
-        y_true, score_matrix, labels, class_values = _resolve_proba("lift_curve", self._y, proba_df)
+        y_true, score_matrix, labels, class_values = _resolve_proba(
+            "lift_curve", self._y, proba_df, real_classes=getattr(self._model, "classes_", None)
+        )
         df = _curve_frames.lift_frame(y_true, score_matrix, class_values, labels)
         self._cache[key] = df
         return df
@@ -247,10 +273,17 @@ class ClassificationCurvesMixin(_MixinBase):
                 f"got {len(proba_cols)} classes."
             )
         y_true = np.asarray(self._y)
-        positive_class = _coerce_class_label(
-            proba_cols[1][len("proba_") :],
-            y_true.dtype,
-        )
+        real_classes = getattr(self._model, "classes_", None)
+        if real_classes is not None and len(real_classes) == len(proba_cols):
+            # Positionally aligned with proba_cols[1] by the same
+            # probabilities()/predict_proba guarantee _resolve_proba's
+            # real_classes parameter relies on.
+            positive_class = _coerce_real_classes(real_classes, self._y.dtype)[1]
+        else:
+            positive_class = _coerce_class_label(
+                proba_cols[1][len("proba_") :],
+                y_true.dtype,
+            )
         thresholds = np.linspace(0.0, 1.0, n_thresholds)
 
         if cv is None:
@@ -336,14 +369,28 @@ class ClassificationCurvesMixin(_MixinBase):
         y_true = np.asarray(self._y)
         y_pred = np.asarray(self._model.predict(X))
 
-        if self._class_names is not None:
-            labels: list = list(self._class_names)
-        elif hasattr(self._model, "classes_"):
-            labels = list(self._model.classes_)
+        # `encode_values` is the comparison-value list confusion_frame uses
+        # to build its row/col encoding (must live in y's domain); display
+        # aliasing (class_names=) is applied separately below, after
+        # encoding, so a display alias never corrupts the encode/decode
+        # round-trip. This is unconditional regardless of whether the
+        # model exposes `classes_`: when it doesn't, `class_names=` is
+        # still display-only, never the encode key.
+        real_classes = getattr(self._model, "classes_", None)
+        if real_classes is not None:
+            encode_values = _coerce_real_classes(real_classes, self._y.dtype)
         else:
-            labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
+            encode_values = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
 
-        df = _curve_frames.confusion_frame(y_true, y_pred, labels, normalize=normalize)
+        df = _curve_frames.confusion_frame(y_true, y_pred, encode_values, normalize=normalize)
+
+        if self._class_names is not None and len(self._class_names) == len(encode_values):
+            alias_map = {str(v): alias for v, alias in zip(encode_values, self._class_names)}
+            df = df.with_columns(
+                pl.col("actual").replace(alias_map),
+                pl.col("predicted").replace(alias_map),
+            )
+
         self._cache[key] = df
         return df
 
@@ -368,6 +415,65 @@ def _coerce_class_label(label_str: str, target_dtype) -> object:
         except ValueError:
             return label_str
     return label_str
+
+
+def _coerce_real_classes(real_classes: Any, y_dtype: pl.DataType) -> list:
+    """Coerce a model's real class values into ``y``'s own dtype domain.
+
+    Every classification-curve method on this class binarizes
+    ``y_true == comparison_value`` for each class; the comparison value
+    must live in ``y``'s domain regardless of which side of the
+    resolution (a display label, or ``real_classes`` -- typically
+    ``model.classes_``) supplied the raw value. Builds ``real_classes``
+    as a polars Series and casts it to ``y_dtype`` via polars' own cast
+    machinery -- real type conversion, not a hand-rolled per-dtype
+    guess, so it is correct for any dtype ``y`` can legally carry
+    rather than only the ones this function's author thought to
+    enumerate.
+
+    String-backed dtypes (``Categorical``, ``Enum``) are a special
+    case: casting a non-string source directly into an
+    already-materialized dictionary-encoded dtype reinterprets the
+    source's values as physical dictionary *codes* rather than values
+    to encode (a documented polars characteristic, not a bug here) --
+    so any dtype with that property always routes through ``Utf8``
+    first, the same representation any dictionary-encoded column is
+    built from. This check is on the *property* (string-backed,
+    dictionary-encoded), not an enumeration of dtype names, precisely
+    because a name-based list silently excludes the next dtype that
+    shares the property.
+
+    When a value genuinely cannot cast into ``y_dtype`` -- a true
+    value-domain mismatch, e.g. ``classes_=["c0"]`` against a numeric
+    ``y`` -- the cast raises, and this function falls back to
+    ``real_classes`` unconverted: comparing a mismatched value against
+    ``y`` already returns ``False`` for every row today (the
+    documented, out-of-scope behavior for a class set that was never
+    in ``y``'s domain to begin with), so this preserves that instead of
+    raising somewhere the caller doesn't expect it. A malformed
+    ``real_classes`` (e.g. mixed-type values) can raise ``TypeError``
+    while building the intermediate Series, before any cast is
+    attempted; that also falls back rather than propagating.
+
+    Shared by ``_resolve_proba`` (feeding ``roc_curve``, ``pr_curve``,
+    ``cumulative_gain``, ``lift_curve``), ``discrimination_threshold``,
+    and ``confusion_matrix`` -- the three call sites that need this
+    coercion.
+    """
+    # np.asarray(...).tolist() (not list(real_classes)) so numpy scalar
+    # elements (np.bool_, np.int64, ...) become native Python objects --
+    # pl.Series() constructed straight from numpy scalars triggers an
+    # internal polars/numpy deprecation warning ("np.bool scalars ...
+    # interpreted as an index") and native values are what every dtype
+    # arm below expects to compare/serialize anyway.
+    values = np.asarray(real_classes).tolist()
+    try:
+        source = pl.Series(values=values)
+        if y_dtype.base_type() in (pl.Categorical, pl.Enum):
+            source = source.cast(pl.Utf8)
+        return source.cast(y_dtype, strict=True).to_list()
+    except (pl.exceptions.InvalidOperationError, TypeError):
+        return values
 
 
 def _score_fold(model, X_te: np.ndarray) -> np.ndarray:

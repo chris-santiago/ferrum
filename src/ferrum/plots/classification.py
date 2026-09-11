@@ -572,16 +572,17 @@ def _gain_chart_from_source(
     df = source.cumulative_gain()
     color_field = _color_field_for(df, "class")
     if color_field is not None:
+        # Only the synthetic baseline row gets a display rename here --
+        # every real class value already carries the source's resolved
+        # name (`class_names=` -> `model.classes_` -> `class_{i}`, done
+        # upstream in `probabilities()`), so rewriting it again would
+        # DEGRADE that resolution rather than complete it (F-L11-08:
+        # a hardcoded "0"/"1" -> "Class 0"/"Class 1" map clobbered real
+        # string class names and left a 3rd class as a bare digit).
         df = df.with_columns(
             pl.col(color_field)
             .cast(pl.Utf8)
-            .replace(
-                {
-                    "0": "Class 0",
-                    "1": "Class 1",
-                    "baseline": "Baseline",
-                }
-            )
+            .replace({"baseline": "Baseline"})
             .alias(color_field)
         )
     chart = ferrum.Chart(df)
@@ -628,16 +629,13 @@ def _lift_chart_from_source(
     df = source.lift_curve()
     color_field = _color_field_for(df, "class")
     if color_field is not None:
+        # See `_gain_chart_from_source`'s matching comment: only the
+        # synthetic baseline row is renamed for display, real class
+        # values keep the source's resolved names (F-L11-08).
         df = df.with_columns(
             pl.col(color_field)
             .cast(pl.Utf8)
-            .replace(
-                {
-                    "0": "Class 0",
-                    "1": "Class 1",
-                    "baseline": "Baseline",
-                }
-            )
+            .replace({"baseline": "Baseline"})
             .alias(color_field)
         )
     chart = ferrum.Chart(df)
