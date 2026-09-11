@@ -3312,7 +3312,7 @@ chart.to_svg() -> str                         # in-memory SVG markup
 chart.to_png() -> bytes                        # in-memory PNG bytes
 chart.to_html() -> str                         # in-memory interactive HTML
                                                #   (byte-identical to save('.html'))
-chart.to_spec() -> ChartSpec                  # internal dataclass
+chart.to_spec() -> ChartSpec                  # internal dataclass (Chart only)
 chart.to_json(*, indent=None) -> str
 chart.save(path, *, format=None, **render_kwargs)
 chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
@@ -3320,8 +3320,11 @@ chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
 
 These methods exist on `Chart` and on every composition view (`HConcatChart`,
 `VConcatChart`, `LayerChart`, `ConcatChart`, `JointChart`, `RepeatChart`,
-`ClusterMapChart`). On composition views `to_png` is scale-only (it accepts
-`scale=` but no `raster` argument).
+`ClusterMapChart`), with one exception: `to_spec` exists on `Chart` only — a
+`ChartSpec` is leaf-only by construction; composition views expose `to_dict()`/
+`to_json()` for their declaration (see the 2026-09-11 dated note below). On
+composition views `to_png` is scale-only (it accepts `scale=` but no `raster`
+argument).
 
 **Deprecated aliases.** `show_svg()` and `show_png()` are retained as deprecated
 aliases that forward to `to_svg()` / `to_png()` and emit a `DeprecationWarning`.

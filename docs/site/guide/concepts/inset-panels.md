@@ -71,7 +71,7 @@ fm.Inset(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `chart` | `Chart` | required | The sub-chart to embed |
-| `bounds` | `tuple` | required | `(left, top, right, bottom)` in `norm`, `px`, or data coords |
+| `bounds` | `tuple` | required | `(left, top, right, bottom)` — each entry `fm.norm(f)`/bare float (normalized `[0, 1]` fraction) or `fm.px(n)` (pixels from the plot-area origin) |
 | `border` | `bool` | `True` | Draw a border around the inset |
 | `border_color` | `str` | `"#999"` | Border color |
 | `border_dash` | `list[float] | None` | `None` | Border dash pattern |
