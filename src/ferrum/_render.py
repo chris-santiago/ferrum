@@ -49,6 +49,33 @@ def _warn_large_chart(mark_count: int) -> None:
     )
 
 
+def _warn_categorical_color_excluded(mark_count: int, color_field: str | None) -> None:
+    """Emit the specific guidance warning for the permanent categorical-color exclusion.
+
+    Unlike ``_warn_large_chart`` (the generic "ineligible" warning used for
+    the other auto-raster gates), this warning names *why* the chart was
+    excluded -- rasterising a categorical/ordinal/temporal color encoding
+    would collapse it to one pixel color per bin, discarding the category
+    information the chart is meant to show -- and gives the exact manual
+    workaround. Quantitative color is not affected: it substitutes via
+    ``aggregate="mean"`` instead of being excluded (see
+    ``_apply_auto_raster``).
+    """
+    field_desc = f"color field {color_field!r}" if color_field else "the color encoding"
+    warnings.warn(
+        f"Chart has {mark_count:,} marks with a categorical/ordinal/temporal "
+        f"{field_desc}, which is permanently excluded from raster substitution "
+        f"because rasterising would discard categorical information -- there is "
+        f"no pixel aggregate that preserves a non-quantitative color's identity. "
+        f"This exclusion does not apply to quantitative color, which substitutes "
+        f"automatically. To rasterize this chart anyway (accepting that the "
+        f"category collapses to one summary color per pixel), call "
+        f"`.mark_raster(aggregate=..., field=...)` manually.",
+        UserWarning,
+        stacklevel=5,
+    )
+
+
 class _RenderMixin:
     """Rendering, display, and auto-raster methods for ``Chart``.
 
@@ -77,12 +104,45 @@ class _RenderMixin:
         - The chart was produced by a composite/statistical mark (histogram,
           density, hex, etc.) where the row count does not reflect the
           actual SVG element count.
-        - The chart has an active ``color`` encoding (rasterising would
-          silently discard categorical information).
+        - The chart has an active categorical/ordinal/temporal ``color``
+          encoding -- this exclusion is **permanent** (not a "not yet
+          implemented" gap): rasterising would collapse the category to one
+          summary pixel color per bin, discarding the information the color
+          channel exists to show. A quantitative ``color`` encoding is
+          *not* excluded -- see below.
         - Both ``x`` and ``y`` quantitative encodings are not present.
 
         When the chart is over-threshold but ineligible, a guidance warning
-        is emitted suggesting ``mark_raster()`` or ``raster=False``.
+        is emitted. For the categorical-color exclusion specifically, the
+        warning names the exclusion, its reason, and the manual
+        ``mark_raster(aggregate=..., field=...)`` workaround (F-L14-04);
+        every other ineligibility reason gets the generic
+        ``.mark_raster()``/``raster=False`` guidance.
+
+        Quantitative color
+        -------------------
+        An over-threshold chart with a **quantitative** ``color`` encoding
+        *does* get auto-rastered: the substitution uses
+        ``aggregate="mean"``, ``field=<the color field>``, and the color
+        channel's own ``scheme=`` when it declared one (else
+        ``RenderConfig.raster_scheme``) -- so the color information the
+        chart was built to show survives rasterisation as a per-pixel mean,
+        instead of being silently dropped. This keeps the "same chart spec
+        works at every data size" guarantee true for quantitative-color
+        scatters, not just colorless ones.
+
+        An explicit ``RenderConfig(raster_aggregate=..., raster_field=...)``
+        wins wholesale over this color-driven default: the user asked for a
+        specific aggregate, so the color field is not substituted in. "Explicit"
+        is detected by divergence from ``RenderConfig``'s own defaults
+        (``raster_aggregate="count"``, ``raster_field=None``) -- since
+        ``RenderConfig`` is a frozen dataclass with no "was this explicitly
+        passed" sentinel, a user who explicitly passes
+        ``raster_aggregate="count"`` with no ``raster_field`` is
+        indistinguishable from never having set it, and falls through to
+        the color-driven substitution instead. This is a documented edge
+        case, not a bug: both spellings request the same thing (auto-raster's
+        default policy), so they resolve identically.
         """
         from ferrum.render_config import _RASTER_AGGREGATES_NEEDING_FIELD, RenderConfig
 
@@ -113,19 +173,9 @@ class _RenderMixin:
         if self._composite_kind is not None:
             return self
 
-        # Check for active color encoding -- do NOT auto-raster.
-        if "color" in self._encoding:
-            _warn_large_chart(mark_count)
-            return self
-
-        # Check x and y are both present and quantitative.
-        x_enc = self._encoding.get("x")
-        y_enc = self._encoding.get("y")
-        if x_enc is None or y_enc is None:
-            _warn_large_chart(mark_count)
-            return self
-
-        # Determine if both are quantitative.
+        # Determine if an encoding channel is quantitative (explicit `:Q` /
+        # type="quantitative"). Shared by the color-encoding gate below and
+        # the x/y gate further down.
         def _is_quantitative(enc) -> bool:
             if isinstance(enc, ChannelBase):
                 t = enc._kwargs.get("type")
@@ -134,6 +184,23 @@ class _RenderMixin:
             if isinstance(enc, str) and ":Q" in enc:
                 return True
             return False
+
+        # Active color encoding: categorical/ordinal/temporal color keeps the
+        # permanent exclusion. Quantitative color is eligible -- it drives
+        # the substitution's aggregate below instead of blocking it.
+        color_enc = self._encoding.get("color")
+        color_is_quantitative = color_enc is not None and _is_quantitative(color_enc)
+        if color_enc is not None and not color_is_quantitative:
+            color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+            _warn_categorical_color_excluded(mark_count, color_field)
+            return self
+
+        # Check x and y are both present and quantitative.
+        x_enc = self._encoding.get("x")
+        y_enc = self._encoding.get("y")
+        if x_enc is None or y_enc is None:
+            _warn_large_chart(mark_count)
+            return self
 
         if not _is_quantitative(x_enc) or not _is_quantitative(y_enc):
             _warn_large_chart(mark_count)
@@ -156,20 +223,47 @@ class _RenderMixin:
         from ferrum._layer import _PendingMark
         from ferrum.marks.heavy_stat import desugar_raster
 
-        # Only forward raster_field to aggregates that actually consume a value
+        # A quantitative color channel drives the substitution's aggregate
+        # (mean of the color field) unless the user's RenderConfig
+        # explicitly set raster_aggregate/raster_field -- see the docstring
+        # above for the explicitness rule and its documented edge case.
+        user_set_raster_config = cfg.raster_aggregate != "count" or cfg.raster_field is not None
+        if color_is_quantitative and not user_set_raster_config:
+            color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+            aggregate = "mean"
+            field = color_field
+            color_scheme = (
+                color_enc._kwargs.get("scheme") if isinstance(color_enc, ChannelBase) else None
+            )
+            cmap = color_scheme if color_scheme is not None else cfg.raster_scheme
+        else:
+            aggregate = cfg.raster_aggregate
+            field = cfg.raster_field
+            cmap = cfg.raster_scheme
+
+        if color_enc is not None:
+            # The original per-element color channel is superseded by the
+            # raster substitution's own aggregate/field/cmap (whether that
+            # came from the color channel itself or an explicit
+            # RenderConfig) -- leaving it in `_encoding` would have the
+            # image-mark spec carry a now-meaningless color scale/legend
+            # alongside the raster's own colormap.
+            substituted._encoding.pop("color", None)
+
+        # Only forward the field to aggregates that actually consume a value
         # column ("mean"/"sum"). "count"/"density"/"any" need no field, so a
-        # stray raster_field must stay genuinely inert for them -- forwarding
+        # stray field must stay genuinely inert for them -- forwarding
         # it unconditionally would resolve it in the Rust Raster transform
         # regardless of aggregate, surfacing a deferred-to-render
         # "column not found" error for an unused value, which is exactly the
         # deferred-failure shape RenderConfig.__post_init__ exists to remove.
-        needs_field = cfg.raster_aggregate in _RASTER_AGGREGATES_NEEDING_FIELD
+        needs_field = aggregate in _RASTER_AGGREGATES_NEEDING_FIELD
         substituted._pending_stat_mark = _PendingMark(
             "raster",
             {
-                "aggregate": cfg.raster_aggregate,
-                "field": cfg.raster_field if needs_field else None,
-                "cmap": cfg.raster_scheme,
+                "aggregate": aggregate,
+                "field": field if needs_field else None,
+                "cmap": cmap,
                 "resolution": "screen",
                 "blend": "alpha",
                 "min_count": None,

@@ -44,6 +44,23 @@ class RenderConfig:
         since they aggregate a value column rather than counting rows.
         Any other value (e.g. ``"max"``/``"min"``/``"median"``, which are
         not valid raster aggregates) raises ``ValueError`` at construction.
+
+        **Quantitative color and auto-raster.** An over-threshold chart with
+        a *quantitative* ``color`` encoding is eligible for auto-raster: the
+        substitution defaults to ``aggregate="mean"`` over the color field
+        (plus the color channel's own ``scheme=`` when it declared one, else
+        ``raster_scheme``) so the color information survives rasterisation
+        instead of being discarded. Passing ``raster_aggregate``/``raster_field``
+        explicitly here overrides that default wholesale -- the color field
+        is then ignored and this config's values are used as-is. A
+        *categorical*, *ordinal*, or *temporal* ``color`` encoding is
+        excluded from auto-raster **permanently**, not merely "not yet
+        implemented" -- rasterising would collapse the category to one
+        summary pixel color per bin, discarding the information the color
+        channel exists to show. There is no ``RenderConfig`` setting that
+        lifts this exclusion; rasterize such a chart explicitly with
+        ``chart.mark_raster(aggregate=..., field=...)`` instead, accepting
+        that the categories collapse into a chosen numeric aggregate.
     raster_scheme : str or None, default None
         Colormap (color scheme) for the substituted ``mark_raster``.
         ``None`` defers to the built-in ``"viridis"`` default.
