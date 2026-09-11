@@ -228,7 +228,7 @@ Most users use `mark_*()` methods on `Chart` instead of constructing `Layer` dir
 Wraps a fitted estimator and a dataset; exposes derived data sources as Arrow tables.
 
 ```
-ModelSource(model, X, y=None, *, feature_names=None, class_names=None,
+ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
             sample_weight=None, random_state=None)
 ```
 
@@ -241,6 +241,30 @@ ModelSource(model, X, y=None, *, feature_names=None, class_names=None,
 > Methods whose compute is deterministic by construction (predictions, residuals,
 > roc_curve, pr_curve, confusion_matrix, calibration_curve, cumulative_gain,
 > lift_curve, discrimination_threshold, pca_variance, rank1d/rank2d) ignore it.
+
+> **2026-09-10 (batch G, F-L12-01):** `X` is now optional
+> (`ModelSource(model, X=None, y=None, ...)`; back-compatible — every existing
+> positional/keyword call site is unaffected). Diagnostics computed purely
+> from model attributes work with no `X` at all — `pca_variance()` when the
+> model exposes `explained_variance_ratio_`, and `intercluster_distance()`.
+> Every other derived-data method raises `ValueError` naming the diagnostic
+> and the fix when called on an X-less source —
+> `"ModelSource.<method>() requires the training data: ModelSource(model, X)."`
+> — instead of the prior `TypeError: __init__() missing 1 required positional
+> argument: 'X'` (constructing directly) or a leaked
+> `Chart(data=None) requires per-layer data...` error (routed through a
+> figure function's own `X=None` default, e.g. `silhouette_chart(model)`).
+>
+> A public, read-only `ModelSource.class_names -> list[str] | None` property
+> is added alongside `.X`/`.y`/`.feature_names`, proxied on
+> `ComparedModelSource`. Resolution is two arms only — the constructor's
+> `class_names=` if set, else `model.classes_` (stringified) if the model
+> exposes it, else `None`. It deliberately does **not** attempt a third,
+> positional `class_{i}` fallback: that arm needs a definite class count (the
+> width of a computed prediction matrix), which isn't knowable from
+> constructor state alone without running inference. The internal
+> `class_{i}` fallback that `probabilities()`/`confusion_matrix()`/etc.
+> complete after inference is unaffected and unrelated to this property.
 
 **Methods** (all return `polars.DataFrame` unless noted)
 - `.predictions()` — `y_true`, `y_pred`, `residual`, `studentized_residual`
@@ -276,6 +300,55 @@ ModelSource(model, X, y=None, *, feature_names=None, class_names=None,
 **Class method**
 - `ModelSource.compare(models: dict[str, estimator], X, y, **kwargs)` → `ComparedModelSource`
   - All derived methods return the same schemas with an additional `model` column.
+
+> **2026-09-10 (batch G, F-L12-08 — `.partial_dependence`/`.importances` stop
+> leaking sklearn feature-name warnings):** when the model exposes
+> `feature_names_in_` (i.e. it was fit on a named frame) and pandas is
+> importable, `.partial_dependence(...)` and `.importances(method=
+> "permutation")` now hand sklearn a pandas DataFrame rebuilt from the
+> numpy feature matrix with those exact names, so sklearn receives what it
+> was fit on and emits zero `UserWarning`s; numeric output is identical to
+> the numpy path to machine precision. A model without `feature_names_in_`
+> is unaffected (the numpy path, which never warned). Provenance — whether
+> the caller's `X` genuinely carries no real names, vs. merely inherited
+> synthetic ones — is captured once, structurally, at `ModelSource`
+> construction time (a bare `numpy.ndarray`, or a pandas `DataFrame` whose
+> `.columns` is a default `RangeIndex`, are both detected as nameless; a
+> pandas frame with a real column index, or any polars `DataFrame`, is
+> genuinely named), not guessed later from column-name strings. **Disclosed
+> residual:** a bare-array **polars** `DataFrame` the caller builds directly
+> with no `schema=` (`pl.DataFrame(array)`, which auto-generates
+> `column_0, column_1, ...` labels) is treated as genuinely named — polars
+> exposes no structural marker distinguishing this from a deliberately
+> user-named frame — so passing one to a source whose model was fit under
+> different real names now raises sklearn's own feature-name-mismatch
+> `ValueError` where it previously computed a silently positionally-correct
+> result with a warning. This is a deliberate trade (a loud, actionable
+> error beats a silent guess), and it affects only this one specific input
+> shape: a bare `numpy.ndarray` and `pd.DataFrame(array)` — the two most
+> common ways to hand over a nameless feature matrix — are both detected
+> structurally and compute correctly with zero warnings.
+
+> **2026-09-10 (batch G, F-L12-02 — t-SNE perplexity clamp corrected):**
+> `.intercluster_distance(k, method="tsne")`'s perplexity clamp is
+> `min(5, k - 2)`, not `min(5, k - 1)` as previously documented — t-SNE's
+> kNN size for `k` embedded cluster centers is `k - 1` (each center's
+> `k - 1` co-embedded peers), and perplexity must be strictly less than
+> that. Under the old (wrong) clamp, `k` in `{4, 5, 6}` raised
+> `tsne_embedding failed: perplexity (n) must be strictly less than the kNN
+> size (n)` — every documented-supported `k` except 7+. Every `k >= 4` now
+> renders; `k < 4` keeps its existing typed refusal, unchanged.
+
+> **2026-09-10 (batch G, F-L12-03 — `rank1d(algorithm="covariance")` raw
+> routing):** `rank1d_chart(df, y=y, algorithm="covariance")` on a raw
+> DataFrame/2-D array now renders — previously it unconditionally routed
+> through `ModelSource(model=df, X=None, y=y)` (treating the raw frame as a
+> fitted estimator to wrap), which always hit the `X`-required typed
+> refusal. Raw tabular input (`polars.DataFrame`, a 2-D `numpy.ndarray`, or
+> a `pandas.DataFrame`) now routes to the same Rust covariance entry the
+> `Rank1DVisualizer` raw-input path already used; a fitted estimator input
+> (`ModelSource`, or a bare fitted model) is unaffected and keeps its exact
+> prior code path. `algorithm="covariance"` still requires `y`.
 
 ---
 
@@ -794,6 +867,38 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > from a single source — the metric-kind table in `ferrum._metric_labels`
 > (`_METRIC_LABEL_SPECS`), shared by both the direct-mark `AUCLabel`/`APLabel`/
 > `BrierLabel` `__radd__` path and the figure-function explicit-field path.
+
+> **2026-09-10 (batch G, F-L11-01):** every AUC/AP a user sees — the
+> `roc_chart`/`pr_chart` title, `_inject_metric_into_legend_labels`'s legend
+> text, and the mark-level `AUCLabel`/`APLabel` overlay — now reads the same
+> number, sourced from one place. `roc_chart`/`pr_chart`'s title and legend
+> read the frame's Rust-kernel-computed `auc`/`ap` column (one value per
+> curve/group, already broadcast) instead of re-integrating the curve in
+> Python; for `per_class=False` (averaged) titles the column value is the
+> **weighted mean of per-class AUCs/APs** (sklearn parity), not a trapezoid
+> over the interpolated averaged curve — a different, and in general
+> different-valued, computation. `_trapezoid_auc`/`_ap_step` (the composable
+> `+ AUCLabel()`/`+ APLabel()` path on arbitrary user data, which has no
+> metric column to read) now sort with `kind="stable"`; ROC/PR curves
+> routinely repeat one x/recall value across several rows, and an unstable
+> sort's within-tie permutation previously changed the integral (observed:
+> AUC 0.8571 unstable vs. 0.8543 stable on a tie-heavy fixture). The other
+> unstable `np.argsort` sites in diagnostics frame assembly — PR macro
+> interpolation, gain/lift score ordering — are stable too, so tied-score
+> curves no longer depend on sort internals.
+>
+> Separately: `mark_roc(annotate_auc=True)`/`mark_pr(annotate_ap=True)` now
+> render their metric label instead of raising. `_inject_curve_annotation`
+> (previously dead code with zero `src/` callers) is wired as the injector
+> the mark desugar path calls when the `_auc_label_*`/`_ap_label_*` columns
+> its text layer binds are absent: it reads the frame's `auc`/`ap` column
+> when present, else computes via the same stable-sorted helper, on raw user
+> data. Before this fix, `mark_roc(annotate_auc=True)` on user data raised
+> `layer N: unknown column '_auc_label_x'` under the batch-F layer gate
+> (silently rendered nothing before that gate existed). Disclosed: AUC/AP
+> values move wherever the old unstable re-derivation was wrong — verified
+> against the kernel column independently on the phase-10 golden fixtures
+> (seven goldens regenerated and PNG-inspected).
 
 > **2026-08-27 (P9 remediation, findings-remediation batch):** three
 > mark-level parameters listed above were accepted and silently dropped
@@ -2539,7 +2644,46 @@ ferrum.pr_chart(model_or_source=None, X=None, y=None, *,
 
 ferrum.confusion_matrix_chart(model_or_source=None, X=None, y=None, *,
                                y_true=None, y_pred=None,   # precomputed path (1-D hard labels)
-                               normalize="true", cmap="blues", theme=None)
+                               normalize="true", annotate=True, theme=None)
+# **2026-09-10 (batch G doc pass, adjacent transcription fix, pre-existing
+# drift, not a batch G behavior change):** corrected to match the live
+# signature — the prior listing showed a `cmap="blues"` parameter that does
+# not exist on this function and omitted the real `annotate=True` kwarg
+# (per-cell text annotations, already documented separately in the
+# Schwabish SB3 note below as "docstring already specified `annotate=True`
+# default").
+
+ferrum.classification_report_chart(model=None, X=None, y=None, *,
+                                    y_true=None, y_pred=None,   # precomputed path (1-D hard labels)
+                                    random_state=None, theme=None)
+# **2026-09-10 (batch G, F-L11-05 + F-L11-09):** joins the precomputed
+# family — eleven `y_true=`/`y_pred=` figure functions now, counting
+# `prediction_error_chart` (see the dated note below: the prior "nine"
+# framing already undercounted by one before this batch, since
+# `prediction_error_chart` documents and renders on this path too and was
+# never enumerated in the list). Renders
+# a rect-plus-text heatmap: rows are class labels, columns are
+# precision/recall/f1-score, color encodes the value, and each cell is
+# annotated with its value to two decimal places — no `support` row (a
+# deliberate, disclosed non-parity with sklearn's own
+# `classification_report`, which does report support counts; adding one
+# here would require inventing a count from confusion data that would not
+# reconcile with sklearn's on the model path, defeating the parity the
+# precomputed and model paths otherwise guarantee). The chart carries a
+# bare title, `"Classification Report"` — the family's title-only shape (no
+# `subtitle=` parameter), matching `confusion_matrix_chart`. On the
+# precomputed path, `y_true=`/`y_pred=` (hard labels) resolve metrics from
+# confusion counts with **no sklearn import**; class labels are
+# `sorted(set(y_true) | set(y_pred), key=str)`. On the model path, `X`/`y`
+# are both required — an X-less or y-less `ModelSource` (or a bare
+# `classification_report_chart(model)` call) raises a typed `ValueError`
+# naming the diagnostic and the fix, replacing what used to be a leaked
+# sklearn shape error (`"Expected 2D array, got scalar array instead"`) or
+# a foreign `InvalidParameterError` naming `y_true`. Class-axis order can
+# diverge between the two paths at 10+ numeric classes — the model path
+# orders via sklearn's numeric `unique_labels`, the precomputed path via
+# `sorted(..., key=str)` (`confusion_matrix`'s own convention) — the two
+# agree below that count.
 
 ferrum.calibration_chart(model_or_source=None, X=None, y=None, *,
                           y_true=None, y_pred=None,  # precomputed path (1-D positive-class proba)
@@ -2552,6 +2696,18 @@ ferrum.gain_chart(model_or_source=None, X=None, y=None, *,
 ferrum.lift_chart(model_or_source=None, X=None, y=None, *,
                   y_true=None, y_pred=None,          # precomputed path (soft scores)
                   compare=None, theme=None)
+# **2026-09-10 (batch G, F-L11-08):** `gain_chart`/`lift_chart` now show the
+# model's real class names for every class, not just a synthetic
+# `"Class N"` rename for the first two. **Disclosed change:** binary charts
+# label classes `"0"`/`"1"` (the stringified real value) instead of
+# `"Class 0"`/`"Class 1"`; a 3rd-and-later class, which previously rendered
+# unlabeled relative to its siblings, now renders with its own real name
+# too. String-named classes (e.g. `classes_=["setosa", "versicolor"]`) were
+# already rendered as-is and are unaffected. The only remaining display
+# rename is the synthetic baseline row (`gain_frame`/`lift_frame`'s own
+# reference-line data) → `"Baseline"`. See the `ModelSource.class_names`
+# dated note under §3.1 for the underlying resolution rule
+# (`class_names=` → `model.classes_` → real value, never invented).
 
 ferrum.residuals_chart(model_or_source=None, X=None, y=None, *,
                         y_true=None, y_pred=None,    # precomputed path (fitted values); residuals = y_true − y_pred
@@ -2681,20 +2837,25 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
                         kind="box", split="both", theme=None)
 ```
 
-> **2026-05-15 — Precomputed input path.** The nine prediction-evaluation
-> figure functions that appear above — `roc_chart`, `pr_chart`,
-> `calibration_chart`, `gain_chart`, `lift_chart`,
+> **2026-05-15 — Precomputed input path** (corrected count, **2026-09-10,
+> batch G, F-L11-05**: eleven members, not ten or nine — the original note
+> undercounted by omitting `prediction_error_chart`, which already
+> documented and rendered on this path before this batch). The
+> prediction-evaluation figure functions that appear above — `roc_chart`,
+> `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`,
 > `discrimination_threshold_chart`, `confusion_matrix_chart`,
-> `class_prediction_error_chart`, and `residuals_chart` — each accept
-> `y_true=` and `y_pred=` as keyword-only arguments, bypassing the fitted
-> model entirely. Callers supply arrays they have already computed; the
-> function returns a chart visually identical to the model-backed path.
-> Exactly one of {model path, precomputed path} must be active — supplying
-> both, neither, or only one of `y_true`/`y_pred` raises `ValueError`.
-> `compare=` is incompatible with the precomputed path. `y_pred` semantics
-> vary by function: soft scores/probabilities for curve functions, hard
-> labels for matrix functions, fitted values for `residuals_chart`. See each
-> function's docstring for the exact expected shape.
+> `class_prediction_error_chart`, `residuals_chart`, `prediction_error_chart`,
+> and (batch G) `classification_report_chart` — each accept `y_true=` and
+> `y_pred=` as keyword-only arguments, bypassing the fitted model entirely.
+> Callers supply arrays they have already computed; the function returns a
+> chart visually identical to the model-backed path. Exactly one of {model
+> path, precomputed path} must be active — supplying both, neither, or only
+> one of `y_true`/`y_pred` raises `ValueError`. `compare=` is incompatible
+> with the precomputed path. `y_pred` semantics vary by function: soft
+> scores/probabilities for curve functions, hard labels for matrix functions
+> and `classification_report_chart`, fitted values for `residuals_chart` and
+> `prediction_error_chart`. See each function's docstring for the exact
+> expected shape.
 
 > **Schwabish SB3 — 2026-05-11 — figure-function defaults.** Eight
 > Group-B functions adopt the Schwabish defaults from §3.19's principles doc:
@@ -2709,9 +2870,35 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
 >   always visible.
 > - `calibration_chart`: new `annotate_brier=True` kwarg (default on).
 >   Single-model charts get an active title carrying the per-sample Brier
->   score computed from `model.predict_proba` plus a corner `BrierLabel`;
->   multi-model charts get one `BrierLabel` per model from the bin-level
->   reliability data.
+>   score computed from `model.predict_proba` plus a corner `BrierLabel`
+>   showing the identical number (see the 2026-09-10 dated note immediately
+>   below — this bullet's original text, "multi-model charts get one
+>   `BrierLabel` per model from the bin-level reliability data," is
+>   superseded).
+
+> **2026-09-10 (batch G, F-L11-04 — supersedes the bin-level compared-path
+> text above):** the `BrierLabel` overlay and the title now show the exact
+> same per-sample Brier score, invariant to `n_bins=`/`strategy=`. Before
+> this fix, the title computed the true per-sample Brier from
+> `model.predict_proba`, but the overlay independently integrated the
+> chart's own *binned* reliability-diagram data — not the Brier score at
+> all, and a number that moved with `n_bins=`/`strategy=` even though the
+> real Brier score never does (observed: 0.078 → 0.028 on `strategy=` alone
+> while the true value held at 0.096). `_apply_metric_label_explicit` gains
+> `precomputed_value: float | dict[str, float] | None` — when set, the
+> overlay renders this value directly and `metric_fn`/`metric_field` are
+> never consulted; the calibration builder passes the per-sample Brier it
+> already computes for the title, so overlay and title cannot disagree.
+> **Compared-path (`compare=`) semantics change, disclosed:** each model's
+> label now shows **its own true per-sample Brier** (a `{model_name: brier}`
+> dict passed as `precomputed_value=`), replacing the bin-level number every
+> model previously shared. The compared-path title stays the plain
+> `"Calibration Curve"` — no single number describes several models.
+> **Precomputed path** (`calibration_chart(y_true=, y_pred=)`): the title
+> now carries the Brier too (computed from the held `y_true`/`y_prob`
+> arrays via `_PrecomputedSource.brier_score()`, the same formula as every
+> other path — one Brier formula, `ferrum._metric_labels._brier_score`, used
+> everywhere), where previously it stayed blank.
 > - `residuals_chart`: new `annotate_metrics=True` kwarg (default on).
 >   Overlays a top-right corner annotation with `R²` / `RMSE` / `MAE` on
 >   the residuals-vs-fitted view in both the single-panel and the 4-panel
@@ -2785,34 +2972,85 @@ class FerrumVisualizer:
 
 | Class | Wraps |
 |---|---|
-| `ROCVisualizer(model, *, micro=True, macro=True, per_class=True, theme=None)` | ROC chart |
-| `PRVisualizer(model, *, theme=None)` | PR chart |
-| `ConfusionMatrixVisualizer(model, *, normalize="true", theme=None)` | Confusion matrix |
-| `ClassificationReportVisualizer(model, *, theme=None)` | Heatmap of precision/recall/F1 per class |
-| `CalibrationVisualizer(*models, *, n_bins=10, theme=None)` | Calibration chart |
-| `ResidualsVisualizer(model, *, kind="studentized", theme=None)` | Residuals diagnostic |
-| `PredictionErrorVisualizer(model, *, identity_line=True, theme=None)` | Prediction error |
-| `FeatureImportancesVisualizer(model, *, method="builtin", top_k=20, theme=None)` | Importance chart |
-| `LearningCurveVisualizer(model, *, cv=5, scoring=None, train_sizes=None, theme=None)` | Learning curve |
-| `ValidationCurveVisualizer(model, param, values, *, cv=5, scoring=None, theme=None)` | Validation curve |
-| `SilhouetteVisualizer(model, *, theme=None)` | Silhouette chart (clusterers) |
-| `ElbowVisualizer(model_class, *, ks, metric="distortion", theme=None)` | Elbow chart |
-| `ManifoldVisualizer(model, *, method="umap", theme=None)` | Embedding projection |
-| `ClassBalanceVisualizer(*, theme=None)` | Class frequency bar chart |
-| `CooksDistanceVisualizer(model, *, threshold=None, theme=None)` | Cook's distance |
-| `SHAPVisualizer(model, *, kind="beeswarm", background=None, theme=None)` | SHAP chart — **deprecated** since 2026-05-12 (P3.6); use the three sibling classes below. |
-| `SHAPBeeswarmVisualizer(model, *, max_display=20, order="abs_mean", background=None, theme=None)` | SHAP beeswarm |
-| `SHAPBarVisualizer(model, *, max_display=20, order="abs_mean", background=None, theme=None)` | SHAP mean-absolute bar |
-| `SHAPWaterfallVisualizer(model, *, sample_idx, max_display=20, order="abs_mean", background=None, theme=None)` | SHAP single-sample waterfall |
-| `DiscriminationThresholdVisualizer(model, *, n_thresholds=50, scoring=None, cv=None, theme=None)` | Discrimination threshold chart (binary classifiers only) |
-| `ParallelCoordinatesVisualizer(*, features=None, hue=None, rescale="minmax", theme=None)` | Parallel coordinates. No model required; `fit(X, y)` accepts raw feature matrix. `hue` applied from `y` if provided. |
-| `ClassPredictionErrorVisualizer(model, *, normalize=False, theme=None)` | Class prediction error chart |
-| `PCAVarianceVisualizer(model, *, n_components=None, theme=None)` | PCA scree plot. Model must expose `explained_variance_ratio_` attribute (sklearn PCA, TruncatedSVD, or compatible). |
-| `Rank1DVisualizer(*, algorithm="shapiro", top_k=None, theme=None)` | Univariate feature ranking bar chart. No model required. |
-| `Rank2DVisualizer(*, algorithm="pearson", theme=None)` | Pairwise feature correlation heatmap. No model required. |
-| `AlphaSelectionVisualizer(model, alphas, *, cv=5, scoring=None, theme=None)` | Regularization parameter selection curve |
-| `InterclusterDistanceVisualizer(model, *, method="mds", theme=None)` | Intercluster distance map |
-| `CVScoresVisualizer(model, *, cv=5, scoring=None, kind="box", theme=None)` | Cross-validation score distribution |
+| `ROCVisualizer(model, *, micro=True, macro=True, per_class=True, annotate_auc=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | ROC chart |
+| `PRVisualizer(model, *, per_class=True, average="macro", annotate_ap=True, iso_lines=False, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | PR chart |
+| `ConfusionMatrixVisualizer(model, *, normalize="true", annotate=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Confusion matrix |
+| `ClassificationReportVisualizer(model, *, mark=None, encode=None, properties=None, layers=None, theme=None)` | Heatmap of precision/recall/F1 per class |
+| `CalibrationVisualizer(*models, n_bins=10, strategy="uniform", annotate_brier=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Calibration chart |
+| `ResidualsVisualizer(model, *, kind="studentized", cook_threshold=None, panels=None, annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Residuals diagnostic |
+| `PredictionErrorVisualizer(model, *, reference_line=True, ci=None, reference_band=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | Prediction error |
+| `FeatureImportancesVisualizer(model, *, method="builtin", top_k=20, orient="horizontal", error_bars=True, show_values=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Importance chart |
+| `LearningCurveVisualizer(model, *, cv=5, scoring=None, train_sizes=None, ci_style="band", subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Learning curve |
+| `ValidationCurveVisualizer(model, param, values, *, cv=5, scoring=None, log_scale="auto", ci_style="band", subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Validation curve |
+| `SilhouetteVisualizer(model, *, k=None, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Silhouette chart (clusterers) |
+| `ElbowVisualizer(model_class, *, ks, metric="distortion", mark=None, encode=None, properties=None, layers=None, theme=None)` | Elbow chart |
+| `ManifoldVisualizer(model=None, *, method="umap", mark=None, encode=None, properties=None, layers=None, theme=None)` | Embedding projection |
+| `ClassBalanceVisualizer(*, mark=None, encode=None, properties=None, layers=None, theme=None)` | Class frequency bar chart |
+| `CooksDistanceVisualizer(model, *, threshold=None, kind="studentized", panels=("residuals_vs_leverage",), annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Cook's distance |
+| `SHAPVisualizer(model, *, kind="beeswarm", max_display=20, sample_idx=None, order="abs_mean", background=None, per_class=False, zero_line=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP chart — **deprecated** since 2026-05-12 (P3.6); use the three sibling classes below. |
+| `SHAPBeeswarmVisualizer(model, *, max_display=20, order="abs_mean", background=None, per_class=False, zero_line=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP beeswarm |
+| `SHAPBarVisualizer(model, *, max_display=20, order="abs_mean", background=None, per_class=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP mean-absolute bar |
+| `SHAPWaterfallVisualizer(model, *, sample_idx, max_display=20, order="abs_mean", background=None, per_class=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | SHAP single-sample waterfall |
+| `DiscriminationThresholdVisualizer(model, *, n_thresholds=50, metrics=("precision", "recall", "f1", "queue_rate"), cv=None, threshold_line=False, optimum_label=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Discrimination threshold chart (binary classifiers only) |
+| `ParallelCoordinatesVisualizer(*, features=None, hue=None, rescale="minmax", alpha=0.5, mark=None, encode=None, properties=None, layers=None, theme=None)` | Parallel coordinates. No model required; `fit(X, y)` accepts raw feature matrix. `hue` applied from `y` if provided. |
+| `ClassPredictionErrorVisualizer(model, *, normalize=False, show_counts=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Class prediction error chart |
+| `PCAVarianceVisualizer(model, *, n_components=None, cumulative_line=True, threshold=0.95, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | PCA scree plot. Model must expose `explained_variance_ratio_` attribute (sklearn PCA, TruncatedSVD, or compatible). |
+| `Rank1DVisualizer(*, algorithm="shapiro", orient="horizontal", top_k=None, color_field=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Univariate feature ranking bar chart. No model required. |
+| `Rank2DVisualizer(*, algorithm="pearson", annot=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Pairwise feature correlation heatmap. No model required. |
+| `AlphaSelectionVisualizer(model, alphas, *, cv=5, scoring=None, log_scale=True, highlight_best=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Regularization parameter selection curve |
+| `InterclusterDistanceVisualizer(model, *, method="mds", k=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Intercluster distance map |
+| `CVScoresVisualizer(model, *, cv=5, scoring=None, kind="box", split="both", mark=None, encode=None, properties=None, layers=None, theme=None)` | Cross-validation score distribution |
+
+> **2026-09-10 (batch G, F-L11-06 + F-L12-09 + F-L10-07 — full
+> visualizer↔chart signature parity):** every visualizer above gained, as
+> explicit keyword-only constructor parameters, every kwarg its underlying
+> chart builder documents — including the uniform override quartet
+> `mark=`/`encode=`/`properties=`/`layers=` on every single visualizer in
+> the family (checkpoint decision: no quartet exemptions). This closes the
+> gap where `PredictionErrorVisualizer` was the family's only fully-threaded
+> member and every other visualizer silently dropped documented builder
+> kwargs, with no `mark=`/`encode=`/`properties=`/`layers=` override
+> reachable from any visualizer at all. `FerrumVisualizer.__init__`'s prior
+> `**_extra: Any` silent swallow is removed — an unknown constructor kwarg
+> on any visualizer now raises `TypeError` naming it, instead of being
+> silently accepted and discarded. `ResidualsVisualizer(panels="auto")`
+> renders the canonical 4-panel grid identical to
+> `residuals_chart(panels="auto")` (a shared helper now owns the
+> `"auto"` → 4-panel-list expansion, consumed by both callers — a naive
+> per-caller forward previously fell back to single-panel, since the
+> builder's own vocabulary is `None`/`"single"`/an explicit list, never
+> `"auto"`). `CooksDistanceVisualizer`'s new `panels=` defaults to exactly
+> its historical `("residuals_vs_leverage",)` tuple — unchanged output for
+> every existing call. Three pre-existing spelling drifts are kept for
+> backward compatibility, not unified (spelling unification is a logged
+> follow-up, not this batch): `ROCVisualizer.micro=`/`macro=` vs. the
+> builder's `average=`; `CooksDistanceVisualizer.threshold=` vs. the
+> builder's `cook_threshold=`; `CalibrationVisualizer`'s variadic `*models`
+> vs. the public `calibration_chart`'s `compare=`. A mechanical parity test
+> (`inspect.signature` diff against each visualizer's actual `_build_chart`
+> target, patterned on `test_core_stub_parity.py`) enforces every
+> visualizer's keyword-only surface against its builder's, with an
+> explicit, rationale-carrying skip-map for exactly those three drifts —
+> an empty-rationale or stale skip-map entry fails the test, as does any
+> `FerrumVisualizer` subclass missing from the test's own completeness
+> registry. No existing kwarg was renamed or removed on any visualizer.
+>
+> **`compare=` metric semantics (F-L10-07).** `ROCVisualizer`, `PRVisualizer`,
+> and `DiscriminationThresholdVisualizer` accept `compare=` per the drift
+> map above; their derived metrics (`auc_mean`, `ap_mean`,
+> `best_threshold`/`best_f1`, and `__repr__`'s summary) always describe the
+> **base model** (the visualizer's own `model=` argument), consistent with
+> `.score()` — never a value pooled across every compared model, and never
+> silently substituted with a stronger/weaker rival's number. Before this
+> fix, e.g. `DiscriminationThresholdVisualizer._metrics` searched the
+> concatenated per-model frame for the best F1 regardless of which model it
+> came from, so the object could report one model's `.score()` and a
+> different model's derived metrics simultaneously.
+> `CalibrationVisualizer`'s own genuinely-symmetric multi-model shape
+> (`has_score=False`, `score()=0.0`, no distinguished base) is unaffected —
+> `compare=` on the other three has one distinguished base model (the
+> primary `model=` argument) where `CalibrationVisualizer`'s `*models` does
+> not.
 
 > **2026-05-11 (Phase 10 — Model Diagnostics):** Every visualizer constructor
 > documented above accepts `random_state: int | None = None` as an additional

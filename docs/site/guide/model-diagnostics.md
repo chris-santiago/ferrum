@@ -159,7 +159,7 @@ report
 
 ## Precomputed scores (no model required)
 
-Every classification and regression helper also accepts raw `y_true=` / `y_pred=` arrays instead of a fitted model. This is useful when you already have predictions — from a saved CSV, a batch inference job, a non-sklearn framework, or an evaluation pipeline that separates prediction from visualization. This path is **fully sklearn-free**: ROC, precision-recall, calibration, confusion-matrix, and threshold-sweep metrics are computed by Ferrum's native Rust kernels, so no `[models]` extra is required.
+Every classification and regression helper also accepts raw `y_true=` / `y_pred=` arrays instead of a fitted model — eleven helpers in total: `roc_chart`, `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`, `discrimination_threshold_chart`, `confusion_matrix_chart`, `class_prediction_error_chart`, `classification_report_chart`, `residuals_chart`, and `prediction_error_chart`. This is useful when you already have predictions — from a saved CSV, a batch inference job, a non-sklearn framework, or an evaluation pipeline that separates prediction from visualization. This path is **fully sklearn-free**: ROC, precision-recall, calibration, and threshold-sweep metrics are computed by Ferrum's native Rust kernels; confusion-matrix and classification-report metrics are computed from confusion counts in pure Python/polars. No `[models]` extra is required for any of it.
 
 ```python
 import ferrum as fm
@@ -190,7 +190,7 @@ The interpretation of `y_pred` depends on the chart:
 | Chart needs | What to pass as `y_pred` | Helpers |
 |---|---|---|
 | Soft scores / probabilities | `predict_proba(X)` (1-D binary or 2-D multiclass) | `roc_chart`, `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`, `discrimination_threshold_chart` |
-| Hard class labels | `predict(X)` (1-D) | `confusion_matrix_chart`, `class_prediction_error_chart` |
+| Hard class labels | `predict(X)` (1-D) | `confusion_matrix_chart`, `class_prediction_error_chart`, `classification_report_chart` |
 | Fitted values | `predict(X)` (1-D continuous) | `residuals_chart`, `prediction_error_chart` |
 
 ### Limitations of the precomputed path

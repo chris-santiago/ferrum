@@ -792,8 +792,10 @@ _DISPOSITIONED: dict[tuple[str, str, str], str] = {
         "column is Python's own."
     ),
     ("src/ferrum/plots/classification.py", "_classification_report_chart", "value"): (
-        "Reads the `pl.DataFrame(rows)` built in the same function, whose rows "
-        "carry literal metric/class/value/value_fmt keys."
+        "Reads the frame built by the shared "
+        "`_curve_frames.classification_report_frame` helper (both the model "
+        "and precomputed paths call it), whose rows carry literal "
+        "metric/class/value/value_fmt keys."
     ),
     ("src/ferrum/plots/classification.py", "_class_balance_chart_from_dataframe", "count"): (
         "Reads the counts frame built two lines above by "
