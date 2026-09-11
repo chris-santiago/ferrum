@@ -1,7 +1,10 @@
+import re
+
 import polars as pl
 import pytest
 
 from ferrum import Chart
+from ferrum.annotation.coords import norm
 from ferrum.annotations import (
     annotate_arrow,
     annotate_hline,
@@ -9,6 +12,7 @@ from ferrum.annotations import (
     annotate_text,
     annotate_vline,
 )
+from tests._svg_rects import svg_elements
 
 
 def test_annotate_hline_returns_chart_with_rule_mark():
@@ -129,6 +133,44 @@ def test_annotate_vline_label_survives_plus_overlay():
     composed = scatter + annotate_vline(x=1, label="cutoff")
     svg = composed.to_svg()
     assert ">cutoff<" in svg
+
+
+# ---------------------------------------------------------------------------
+# F-L08-02 — annotate_vline's docstring promises the label sits "near the
+# top" of the line, but `label_y` was wired to `norm(1)`.  `NormCoord`'s
+# corrected semantics (0.0 = top edge, 1.0 = bottom edge, matching SVG's
+# downward-increasing y) resolve `norm(1)` to the plot area's *bottom* edge,
+# so the label rendered at the bottom, not the top.  Fixed by wiring
+# `label_y=norm(0)`.
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_vline_label_renders_near_top_not_bottom():
+    """Pin the label's rendered pixel-y to the top half of the plot area.
+
+    The plot's vertical pixel extent is bounded by its horizontal gridlines
+    (`<line y1=... y2=...>` with `y1 == y2`, spanning the full plot width);
+    the label's `<text y=...>` must sit closer to the smallest of those y
+    values (the top, per SVG's downward-increasing y convention) than the
+    largest (the bottom).
+    """
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    scatter = Chart(df).mark_point().encode(x="a", y="b")
+    svg = (scatter + annotate_vline(x=1.5, label="cutoff")).to_svg()
+
+    horizontal_gridlines = svg_elements(svg, "line", lambda a: a.get("y1") == a.get("y2"))
+    grid_ys = [float(a["y1"]) for a in horizontal_gridlines]
+    top, bottom = min(grid_ys), max(grid_ys)
+    mid = (top + bottom) / 2
+
+    m = re.search(r'<text[^>]*y="([\d.]+)"[^>]*>cutoff</text>', svg)
+    assert m is not None, "label text element not found"
+    label_y = float(m.group(1))
+    assert label_y < mid, (
+        f"label y={label_y} must be in the top half of the plot area "
+        f"(top={top}, bottom={bottom}, mid={mid}) -- the docstring promises "
+        "the label sits near the top of the line"
+    )
     assert "<line" in svg
 
 
@@ -200,6 +242,40 @@ def test_annotations_from_primitive_single_primitive_matches_prior_wrapping():
 
 
 # ---------------------------------------------------------------------------
+# F-L08-01 — mark_segment(arrow=True) grows a real arrowhead (batch H Task 1
+# landed the Rust geometry; this pins the Python-side kwarg wiring).
+# ---------------------------------------------------------------------------
+
+
+def test_mark_segment_accepts_arrow_kwargs():
+    """`arrow=`/`arrow_size=` must reach `MarkKwargsSpec` unmangled -- both
+    the construction-time validator (`_VALID_MARK_KWARGS`) and the
+    kwargs-dict forwarding (`MarkBase.to_mark_kwargs_dict`) must carry them
+    through, and the rendered SVG must contain a filled triangle `<path>`
+    (the arrowhead) in addition to the shaft `<line>`."""
+    df = pl.DataFrame({"x1": [0.0], "y1": [0.0], "x2": [1.0], "y2": [1.0]})
+    chart = Chart(df).mark_segment(arrow=True, arrow_size=8).encode(
+        x="x1", y="y1", x2="x2", y2="y2"
+    )
+    assert chart._mark_kwargs.get("arrow") is True
+    assert chart._mark_kwargs.get("arrow_size") == 8
+    svg = chart.to_svg()
+    assert "<line" in svg, "arrow shaft must still render as a <line>"
+    assert "<path" in svg, "arrow=True must render a filled triangle <path> head"
+
+
+def test_mark_segment_without_arrow_is_byte_unchanged():
+    """`arrow=False` (the default) must render no `<path>` head -- byte
+    stability for every existing `mark_segment` caller that never passed
+    `arrow=`."""
+    df = pl.DataFrame({"x1": [0.0], "y1": [0.0], "x2": [1.0], "y2": [1.0]})
+    chart = Chart(df).mark_segment().encode(x="x1", y="y1", x2="x2", y2="y2")
+    svg = chart.to_svg()
+    assert "<line" in svg
+    assert "<path" not in svg
+
+
+# ---------------------------------------------------------------------------
 # GH #84 — annotate_arrow(label=...) composed via `&`, so the labelled form
 # returned a VConcatChart instead of a Chart: `scatter + annotate_arrow(...,
 # label=...)` raised TypeError, and standalone rendering put the label in a
@@ -254,7 +330,10 @@ def test_annotate_arrow_unlabeled_overlay_unchanged():
     """Unlabelled `chart + annotate_arrow(...)` must still render successfully
     and contain the arrow's segment/line element -- the unlabelled path is
     untouched by the #84 fix (no `_annotation_primitive` is attached, so it
-    still merges as a plain `mark_segment` layer)."""
+    still merges as a plain `mark_segment` layer). F-L08-01: that
+    `mark_segment` layer now draws an arrowhead too (`arrow=True,
+    arrow_size=8`), so a filled triangle `<path>` must render alongside the
+    shaft `<line>`."""
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     scatter = Chart(df).mark_point().encode(x="a", y="b")
     arrow = annotate_arrow(1, 1, 2, 2)
@@ -262,39 +341,34 @@ def test_annotate_arrow_unlabeled_overlay_unchanged():
     composed = scatter + arrow
     svg = composed.to_svg()
     assert "NaN" not in svg
-    assert "<line" in svg
+    assert "<line" in svg, "arrow shaft must still render as a <line>"
+    assert "<path" in svg, "unlabelled overlay arrow must render an arrowhead"
 
 
-def test_annotate_arrow_labeled_overlay_matches_standalone_headless():
-    """S3 regression: the labelled `AnnotationArrow` primitive rendered a
-    filled `<path>` arrowhead triangle (`head_size=8`) while standalone and
-    unlabelled-overlay rendering both used the headless `mark_segment` (a
-    bare `<line>`, no head) -- the arrowhead appeared in exactly one of the
-    three render paths. Ferrum arrows are deliberately headless everywhere
-    until `arrow=True` lands on `mark_segment`'s validator (see the spec
-    Sec 3.3 note in `annotate_arrow`), so the labelled-overlay primitive
-    must render headless too: a `<line>` shaft and no arrowhead `<path>`
-    triangle, in BOTH the standalone and the `+`-overlay render, with the
-    label rendered exactly once in each.
+def test_annotate_arrow_draws_head_on_all_three_render_paths():
+    """F-L08-01: `annotate_arrow` must draw shaft + arrowhead on all three
+    render paths -- standalone (labelled `.to_svg()`, which renders through
+    the chart's own `mark_segment` layer), unlabelled `+` overlay (same
+    `mark_segment` layer, merged), and labelled `+` overlay (the
+    `AnnotationArrow` primitive, which discards the mark layer). Before this
+    fix all three were headless (`head_size=0.0` on the primitive; no
+    `arrow=` kwarg on the mark path at all -- `mark_segment` didn't accept
+    it). Every path must now render a filled triangle `<path>` alongside
+    the shaft `<line>`, with the label rendered exactly once where present.
     """
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     scatter = Chart(df).mark_point().encode(x="a", y="b")
 
     standalone_svg = annotate_arrow(1, 1, 2, 2, label="peak").to_svg()
-    overlay_svg = (scatter + annotate_arrow(1, 1, 2, 2, label="peak")).to_svg()
+    unlabelled_overlay_svg = (scatter + annotate_arrow(1, 1, 2, 2)).to_svg()
+    labelled_overlay_svg = (scatter + annotate_arrow(1, 1, 2, 2, label="peak")).to_svg()
 
-    for svg in (standalone_svg, overlay_svg):
+    for svg in (standalone_svg, labelled_overlay_svg):
         assert svg.count(">peak<") == 1, "label must render exactly once"
+
+    for svg in (standalone_svg, unlabelled_overlay_svg, labelled_overlay_svg):
         assert "<line" in svg, "arrow shaft must still render as a <line>"
-        # AnnotationArrow's arrowhead is the only element that would emit a
-        # filled <path> triangle in either chart: Rust's `emit_arrow` (see
-        # crates/ferrum-core/src/render/annotation.rs) pushes a
-        # `SceneNode::Path` for the head only when `head_size > 0.0`, and a
-        # `SceneNode::Line` for the shaft unconditionally. `mark_point`'s
-        # default shape renders as `<circle>`, not `<path>`, so this
-        # discriminates "no arrowhead" rather than merely "no other
-        # path-based marks in the chart".
-        assert "<path" not in svg, "labelled arrow overlay must not render an arrowhead"
+        assert "<path" in svg, "every annotate_arrow render path must render an arrowhead"
 
 
 # ---------------------------------------------------------------------------

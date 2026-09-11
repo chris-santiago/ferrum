@@ -267,7 +267,7 @@ def annotate_vline(
         prim,
         label=label,
         label_x=x_coord,
-        label_y=norm(1),
+        label_y=norm(0),
         label_dx=6,
         label_dy=6,
         label_align="left",
@@ -585,7 +585,9 @@ def annotate_arrow(
     Returns a single ``mark_segment`` (the arrow shaft) ``Chart``, with an
     optional ``annotate_text`` label placed at the ``label_side`` endpoint.
     Renders both standalone (``.to_svg()``) and when layered with ``+`` onto
-    another chart; when omitted, no text is rendered.
+    another chart; when omitted, no text is rendered. A filled triangle
+    arrowhead is drawn at the tip ``(x2, y2)`` by default, sized 8 pixels
+    (matching ``ann.arrow()``'s own default), on every render path.
 
     Parameters
     ----------
@@ -626,8 +628,6 @@ def annotate_arrow(
     """
     from ferrum.annotation.primitives import AnnotationArrow
 
-    # Spec §3.3 lists `arrow=True` for mark_segment but the validator does
-    # not yet accept it; emit a plain segment for now.
     x1_coord, y1_coord = _coerce_coord(x1), _coerce_coord(y1)
     x2_coord, y2_coord = _coerce_coord(x2), _coerce_coord(y2)
     x1_num = _coerce_coord_to_numeric(x1_coord)
@@ -635,7 +635,10 @@ def annotate_arrow(
     x2_num = _coerce_coord_to_numeric(x2_coord)
     y2_num = _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_y1": [y1_num], "_x2": [x2_num], "_y2": [y2_num]})
-    seg_kwargs: dict = {}
+    # `arrow=True, arrow_size=8` matches AnnotationArrow's own head_size
+    # default below, so the mark path and the primitive path grow the same
+    # arrowhead (batch H Task 1 landed the shared Rust triangle geometry).
+    seg_kwargs: dict = {"arrow": True, "arrow_size": 8}
     if stroke is not None:
         seg_kwargs["stroke"] = stroke
     arrow_chart = (
@@ -669,12 +672,7 @@ def annotate_arrow(
         y2=y2_coord,
         stroke=stroke or "#333",
         stroke_width=1.5,
-        # Headless to match the mark_segment path above (spec §3.3 note):
-        # ferrum arrows have no head anywhere until `arrow=True` lands on
-        # mark_segment's validator. When that ships, revisit so all three
-        # render paths (standalone, unlabelled overlay, labelled overlay)
-        # grow arrowheads together.
-        head_size=0.0,
+        head_size=8.0,
     )
     return _attach_primitive_with_label(
         arrow_chart,

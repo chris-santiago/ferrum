@@ -46,7 +46,9 @@ class NormCoord:
     Parameters
     ----------
     value : float
-        0.0 is the left/bottom edge, 1.0 is the right/top edge.
+        0.0 is the left/top edge, 1.0 is the right/bottom edge. The y axis
+        follows SVG's downward-increasing convention (top = 0.0, bottom =
+        1.0); the x axis is unaffected (left = 0.0, right = 1.0).
     """
 
     value: float

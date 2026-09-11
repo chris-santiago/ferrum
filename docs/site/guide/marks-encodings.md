@@ -616,6 +616,8 @@ This section is the canonical reference for that allowlist. Docstrings across th
 | `band_size` | `mark_tick`/`mark_rect`: extent of the tick/band along its cross axis. On an ordinal `mark_tick` this is still a fraction of the category band width (default `0.6`, unchanged); on a rug `mark_tick` (a single quantitative axis, no categorical channel) it is now a fraction of the panel's cross-extent instead of being silently ignored — unset keeps the old fixed tick length. |
 | `line` | `mark_area`: whether to draw the top boundary as a line. Default `False`. |
 | `borders` | `mark_area`/`mark_errorband`: whether to draw border lines at the band edges. |
+| `arrow` | `mark_segment`: draw a filled triangle arrowhead at each segment's `(x2, y2)` end. Default `False`. |
+| `arrow_size` | `mark_segment`: arrowhead size in pixels when `arrow=True`. Default `8.0`. |
 
 ### Statistical mark kwargs (forwarded to the transform)
 

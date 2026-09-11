@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import polars as pl
 import pytest
 
@@ -64,6 +66,40 @@ class TestNormCoord:
         coord = norm(0.5)
         with pytest.raises((TypeError, AttributeError)):
             coord.value = 0.9  # type: ignore[misc]
+
+
+class TestNormCoordYDirection:
+    """F-L08-03: pin `NormCoord`'s documented y semantics end to end.
+
+    The docstring reads "0.0 is the left/top edge, 1.0 is the right/bottom
+    edge" -- this renders two text annotations at the y extremes and
+    compares their pixel positions, rather than just asserting the stored
+    dataclass value, so a regression in the render-side resolution (not just
+    the docs) would be caught. SVG's y axis increases downward, so
+    `norm(0)`'s `<text y=...>` must be numerically smaller (higher on the
+    page) than `norm(1)`'s.
+    """
+
+    def _scatter(self) -> "Chart":  # type: ignore[name-defined]  # noqa: F821
+        from ferrum import Chart
+
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        return Chart(df).mark_point().encode(x="x", y="y")
+
+    def test_norm_zero_y_renders_above_norm_one_y(self):
+        top = text(norm(0.5), norm(0.0), "TOPLBL")
+        bottom = text(norm(0.5), norm(1.0), "BOTLBL")
+        svg = (self._scatter() + top + bottom).to_svg()
+
+        top_m = re.search(r'<text[^>]*y="([\d.]+)"[^>]*>TOPLBL</text>', svg)
+        bottom_m = re.search(r'<text[^>]*y="([\d.]+)"[^>]*>BOTLBL</text>', svg)
+        assert top_m is not None, "norm(0)-positioned label not found in SVG"
+        assert bottom_m is not None, "norm(1)-positioned label not found in SVG"
+        top_y, bottom_y = float(top_m.group(1)), float(bottom_m.group(1))
+        assert top_y < bottom_y, (
+            f"norm(0) (y={top_y}) must render above norm(1) (y={bottom_y}) -- "
+            "SVG y increases downward, so a smaller y is higher on the page"
+        )
 
 
 # ---------------------------------------------------------------------------

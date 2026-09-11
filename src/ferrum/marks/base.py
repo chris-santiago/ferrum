@@ -130,6 +130,8 @@ _VALID_MARK_KWARGS = frozenset(
         "blend",  # layer blend mode ("normal", "additive")
         "leader_line",  # label: draw thin leader line from data point to label
         "zero",  # mark_bar: suppress the y-scale zero-anchor (zero=False)
+        "arrow",  # segment: draw a filled triangle arrowhead at (x2, y2)
+        "arrow_size",  # segment: arrowhead size in pixels (default 8.0)
     ]
 )
 
@@ -329,6 +331,9 @@ class MarkBase:
             "blend",
             # S12: leader_line (label)
             "leader_line",
+            # Batch H T1/T2: arrow / arrow_size (segment)
+            "arrow",
+            "arrow_size",
         ):
             if k in self._kwargs:
                 out[k] = self._kwargs[k]
