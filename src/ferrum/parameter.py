@@ -94,6 +94,30 @@ class Parameter:
         raise NotImplementedError(f"{type(self).__name__} must implement to_param_spec_dict()")
 
 
+def _decode_param_ref(value: Any) -> str | None:
+    """Decode a ``Parameter.ref()`` marker dict to its parameter name.
+
+    The one decoder shared by every ``.ref()`` consumer site (F-L13-01):
+    scale domain (:func:`ferrum.encoding._scale._scale_to_dict`),
+    ``transform_filter`` (:mod:`ferrum.transforms`), and conditional
+    encoding values (:func:`ferrum.selection._resolve_encoding_value`).
+
+    Returns
+    -------
+    str or None
+        The parameter name when *value* is exactly the ``{"param": <str>}``
+        shape ``Parameter.ref()`` returns. Anything else -- a dict with
+        extra/missing keys, a non-string ``"param"`` value, or a non-dict --
+        returns ``None`` so the caller falls through to its existing
+        handling for that value.
+    """
+    if isinstance(value, dict) and set(value) == {"param"}:
+        name = value["param"]
+        if isinstance(name, str):
+            return name
+    return None
+
+
 def _normalize_bind(bind: Any) -> Any:
     """Normalize a bind argument to its canonical form, or None.
 

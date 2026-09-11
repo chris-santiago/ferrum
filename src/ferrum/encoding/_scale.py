@@ -142,9 +142,12 @@ def _scale_to_dict(scale: Any) -> Any:
     If ``scale`` is already a dict:
 
     - When ``domain`` is a :class:`~ferrum.parameter.Parameter` (a reactive
-      scale domain), the literal ``domain`` key is dropped and a sibling
+      scale domain) *or* its ``.ref()`` marker dict (``{"param": name}``,
+      F-L13-01), the literal ``domain`` key is dropped and a sibling
       ``domainParam`` carrying the parameter's name is emitted instead (D6
-      reactive rescale).
+      reactive rescale). The two forms are equivalent -- ``.ref()`` is the
+      by-name spelling for when only the name, not the ``Parameter``
+      object, is in hand.
     - When the dict's ``"type"`` is ``"time"``/``"utc"`` and ``domain`` is a
       list/tuple, every ``date``/``datetime``/ISO-string element is
       converted to epoch-ms via :func:`_convert_temporal_domain_elements`
@@ -161,13 +164,16 @@ def _scale_to_dict(scale: Any) -> Any:
     if scale is None:
         return scale
     if isinstance(scale, dict):
-        from ferrum.parameter import Parameter
+        from ferrum.parameter import Parameter, _decode_param_ref
 
         domain = scale.get("domain")
-        if isinstance(domain, Parameter):
+        domain_ref_name = _decode_param_ref(domain)
+        if isinstance(domain, Parameter) or domain_ref_name is not None:
+            # A raw Parameter and its `.ref()` marker (F-L13-01) are
+            # equivalent here -- both resolve to `domainParam` by name.
             out = {k: v for k, v in scale.items() if k != "domain"}
             out.setdefault("type", "linear")
-            out["domainParam"] = domain.name
+            out["domainParam"] = domain.name if isinstance(domain, Parameter) else domain_ref_name
             return out
         scale_type = scale.get("type")
         if (

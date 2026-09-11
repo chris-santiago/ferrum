@@ -380,10 +380,19 @@ def transform_filter(predicate: "str | dict | Parameter") -> dict:
     >>> fm.transform_filter(brush)
     {'type': 'filter', 'predicate': 'true', 'param': 'brush'}
     """
-    from ferrum.parameter import Parameter
+    from ferrum.parameter import Parameter, _decode_param_ref
 
     if isinstance(predicate, Parameter):
         return {"type": "filter", "predicate": "true", "param": predicate.name}
+    # A `.ref()` marker (F-L13-01) is the by-name spelling of the same
+    # reference -- checked BEFORE the constraint-dict branch below, which
+    # would otherwise silently mangle `{"param": "qmax"}` into the garbage
+    # predicate `datum.param == "qmax"` (a dict with a "param" key looks,
+    # to the constraint-dict branch, like a field named "param" constrained
+    # to the string "qmax").
+    ref_name = _decode_param_ref(predicate)
+    if ref_name is not None:
+        return {"type": "filter", "predicate": "true", "param": ref_name}
     if isinstance(predicate, dict):
         # Dict predicates are serialized as the expression string representation.
         # Convert common dict shapes to an expression string.

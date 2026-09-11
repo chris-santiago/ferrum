@@ -2713,19 +2713,27 @@ class Chart(
         if resolved._description:
             kw["chart_description"] = resolved._description
 
-        # --- Conditional / selection injection ---
-        if resolved._selections:
-            kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
-            self._inject_selection_tooltips(kw, resolved._selections)
-        if resolved._conditionals:
-            kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
-
         # --- Reactive-parameter (D6) params section ---
         # Unified declaration: registered selections (auto-promoted),
         # explicit fm.param() variables, and any Parameter referenced as a
         # scale domain. Deduped by name (first-seen wins); omitted entirely
         # when empty so param-free specs stay byte-identical to before.
+        # Collected here (ahead of conditional serialization below) because
+        # the same name-keyed registry resolves a Parameter.ref() at a
+        # conditional value site (F-L13-01) -- the chart's registered
+        # params must be available before conditionals are serialized.
         params_list = self._collect_params(resolved, enc)
+        param_registry = {p.name: p for p in params_list}
+
+        # --- Conditional / selection injection ---
+        if resolved._selections:
+            kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
+            self._inject_selection_tooltips(kw, resolved._selections)
+        if resolved._conditionals:
+            kw["conditionals"] = json.dumps(
+                [c.to_spec_dict(params=param_registry) for c in resolved._conditionals]
+            )
+
         if params_list:
             self._validate_params_finite(params_list)
             kw["params"] = json.dumps([p.to_param_spec_dict() for p in params_list])

@@ -25,7 +25,7 @@ from functools import partial
 from typing import Any, Literal
 
 from ferrum._validate import is_none_color_sentinel
-from ferrum.parameter import Parameter, _normalize_bind
+from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
 
 
 @dataclass(frozen=True)
@@ -245,20 +245,33 @@ class ConditionalSpec:
     channel: str | None = None
     selection: Selection | None = None
 
-    def to_spec_dict(self) -> dict:
+    def to_spec_dict(self, *, params: dict[str, Parameter] | None = None) -> dict:
         """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape.
 
         When ``self.channel`` is set (the ``encode(<channel>=cond)`` path) it is
         used as both the wire ``channel`` and the value-kind hint for
         ``if_selected``/``if_not``. Otherwise the channel is inferred from
         ``if_selected`` (the ``.conditional(...)`` path with an encoding object).
+
+        Parameters
+        ----------
+        params:
+            Name-keyed registry of the chart's registered reactive parameters
+            (selections and ``fm.param()`` variables), used to resolve a
+            ``Parameter.ref()`` value at ``if_selected``/``if_not`` (F-L13-01).
+            ``Chart.to_spec()`` supplies this at spec-build time. ``None``
+            (the default, used by every other caller of this method) means no
+            registry is available -- see :func:`_resolve_encoding_value` for
+            what that means for an unresolved ref.
         """
         channel = self.channel if self.channel is not None else _resolve_channel(self.if_selected)
         return {
             "selection_name": self.selection_name,
             "channel": channel,
-            "if_selected": _resolve_encoding_value(self.if_selected, channel=channel),
-            "if_not": _resolve_encoding_value(self.if_not, channel=channel),
+            "if_selected": _resolve_encoding_value(
+                self.if_selected, channel=channel, params=params
+            ),
+            "if_not": _resolve_encoding_value(self.if_not, channel=channel, params=params),
         }
 
 
@@ -793,19 +806,97 @@ def _resolve_channel(enc: Any) -> str:
     return "color"
 
 
-def _resolve_encoding_value(enc: Any, *, channel: str | None = None) -> dict:
+def _resolve_param_ref(
+    name: str, *, channel: str | None, params: dict[str, Parameter] | None
+) -> dict:
+    """Resolve a decoded ``Parameter.ref()`` name to its wire literal (F-L13-01).
+
+    ``params`` is the chart's registered-parameter registry (name -> the
+    registered ``Selection``/``VariableParameter``), supplied by
+    ``Chart.to_spec()`` at spec-build time -- the D6 static-resolver
+    semantics: only an ``fm.param()`` variable carries a static value to
+    resolve as a literal; a ``Selection`` (or any other non-
+    ``VariableParameter``) has none.
+
+    Every failure to resolve -- no registry at all, an unregistered name, a
+    registered-but-non-``VariableParameter`` name, or a registered variable
+    with no static value -- raises the same typed-``ValueError`` family
+    rather than emitting a placeholder. There is no wire value that is safe
+    to fabricate here: every ``EncodingValue`` numeric variant *replaces*
+    the targeted channel on the instance (e.g. ``Opacity{1.0}`` overwrites
+    ``opacity`` unconditionally -- see ``ferrum-wasm``'s
+    ``apply_value_common``, which is a `*view.opacity = *o` assignment, not
+    a no-op), so any fabricated value would silently change the render of
+    marks whose real value differs from the placeholder. (This helper
+    previously fabricated ``{"kind": "opacity", "value": 1.0}`` for the
+    no-registry case on the mistaken belief that arm was inert for every
+    channel; it is not, and the mistake is corrected here.)
+
+    Raises
+    ------
+    ValueError
+        Always, unless *params* is supplied and *name* resolves to a
+        registered ``VariableParameter`` with a non-``None`` static value.
+    """
+    if params is None:
+        # This helper reached outside spec-build -- e.g.
+        # ConditionalSpec.to_spec_dict() invoked directly, as every call
+        # site that predates .ref() support still does -- so there is no
+        # registry to resolve against at all. Chart.to_spec() always
+        # supplies *params*, so a real chart never takes this branch.
+        raise ValueError(
+            f"parameter reference {{'param': {name!r}}} cannot be resolved without "
+            f"the chart's registered parameters -- attach the parameter via "
+            f"Chart.add_params() and resolve this conditional through "
+            f"Chart.to_spec() (e.g. Chart.to_dict()/to_json()), not by calling "
+            f"to_spec_dict() directly"
+        )
+    resolved = params.get(name)
+    if resolved is None:
+        raise ValueError(
+            f"conditional encoding references unregistered parameter {name!r}; "
+            f"register it via Chart.add_params()/add_selection() before referencing "
+            f"it with .ref()"
+        )
+    if not isinstance(resolved, VariableParameter):
+        raise ValueError(
+            f"conditional encoding references parameter {name!r}, which is already "
+            f"registered as a {type(resolved).__name__}, not an fm.param() variable; "
+            f"only an fm.param() variable carries a static value to resolve at a "
+            f"conditional site -- {name!r} has none, so add_params() would not help"
+        )
+    if resolved.value is None:
+        raise ValueError(
+            f"conditional encoding references parameter {name!r}, which has no static "
+            f"value (fm.param({name!r}, value=None)); give it a literal value to use "
+            f"at a conditional site"
+        )
+    return _resolve_encoding_value(_LiteralValue(resolved.value), channel=channel)
+
+
+def _resolve_encoding_value(
+    enc: Any, *, channel: str | None = None, params: dict[str, Parameter] | None = None
+) -> dict:
     """Serialize a conditional encoding value to the Rust wire dict.
 
     Parameters
     ----------
     enc:
-        A ``_LiteralValue`` (from ``fm.value(...)``) or a ``ChannelBase`` subclass.
+        A ``_LiteralValue`` (from ``fm.value(...)``), a ``ChannelBase``
+        subclass, or a ``Parameter.ref()`` marker dict (F-L13-01).
     channel:
         The resolved channel string (e.g. ``"size"``, ``"opacity"``).  Used to
         tag numeric literals correctly so the Rust resolver maps them to the right
         ``EncodingValue`` variant.  When ``None``, numeric literals fall back to
         the ``"opacity"`` tag (backward-compatible default).
+    params:
+        The chart's registered-parameter registry, forwarded to
+        :func:`_resolve_param_ref` when *enc* is a ``Parameter.ref()``
+        marker. See that function for what ``None`` means here.
     """
+    ref_name = _decode_param_ref(enc)
+    if ref_name is not None:
+        return _resolve_param_ref(ref_name, channel=channel, params=params)
     if isinstance(enc, _LiteralValue):
         v = enc.val
         if isinstance(v, str):
