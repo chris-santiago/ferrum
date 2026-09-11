@@ -295,3 +295,61 @@ def test_composite_save_html_accepts_csp_nonce(composite, tmp_path):
     out = tmp_path / "comp_nonce.html"
     composite.save(str(out), csp_nonce="ghi789")
     assert 'nonce="ghi789"' in out.read_text()
+
+
+# ── H8 (F-L13-02): InteractiveChart.to_html() ──────────────────────────────
+
+
+def test_interactive_to_html_matches_save_html(chart, tmp_path):
+    """InteractiveChart.to_html() must return the byte-identical string twin
+    of what .interactive().save("x.html") writes to disk, as the guide
+    (docs/site/guide/interactive.md:309-313) promises."""
+    ic = chart.interactive()
+    out = tmp_path / "via_save.html"
+    ic.save(str(out))
+    saved = out.read_text()
+
+    html = ic.to_html()
+    assert html == saved
+
+
+def test_interactive_to_html_matches_save_html_toolbar_false(chart, tmp_path):
+    """The toolbar=False flag captured at construction must be carried into
+    to_html() identically to how it is carried into save()."""
+    ic = chart.interactive(toolbar=False)
+    out = tmp_path / "via_save_no_toolbar.html"
+    ic.save(str(out))
+    saved = out.read_text()
+
+    html = ic.to_html()
+    assert html == saved
+    assert '"toolbar":false' in html.replace(" ", "")
+
+
+def test_interactive_to_html_accepts_csp_nonce(chart):
+    """InteractiveChart.to_html must accept csp_nonce for parity with the
+    Chart / composite to_html paths."""
+    html = chart.interactive().to_html(csp_nonce="jkl012")
+    assert 'nonce="jkl012"' in html
+
+
+def test_interactive_to_html_does_not_construct_widget(chart, monkeypatch):
+    """InteractiveChart.to_html must not construct a second InteractiveChart
+    widget internally; it should route through the same widget-free
+    html_string helper as Chart.to_html / composite.to_html."""
+    import ferrum._interactive as interactive_mod
+
+    ic = chart.interactive()
+
+    constructed = []
+    real_init = interactive_mod.InteractiveChart.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        constructed.append(self)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(interactive_mod.InteractiveChart, "__init__", _tracking_init)
+
+    html = ic.to_html()
+    assert html.lstrip().startswith("<!")
+    assert not constructed, "InteractiveChart.to_html must not construct another widget"

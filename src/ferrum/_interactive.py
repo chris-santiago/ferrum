@@ -285,6 +285,52 @@ class InteractiveChart:
             toolbar=self._toolbar,
         )
 
+    def to_html(
+        self,
+        *,
+        embed_wasm: bool = True,
+        csp_nonce: str | None = None,
+    ) -> str:
+        """Return the underlying chart as a self-contained interactive HTML document.
+
+        This **returns** the HTML markup; it does not display the chart or
+        write it to disk.  The returned string is byte-identical to what
+        ``save(path)`` writes for an ``.html`` destination.
+
+        Routes through :func:`ferrum.display.html_string` — the same
+        HTML-assembly path used by ``Chart.to_html`` and the composition
+        ``to_html`` methods — so HTML assembly and tab-title resolution stay
+        identical across every entry point.  It does **not** construct a
+        second ``InteractiveChart`` widget, so it works in environments
+        without ``anywidget`` installed.  The interactive ``toolbar`` flag
+        captured at construction time is carried into the output, mirroring
+        :meth:`save`.
+
+        Parameters
+        ----------
+        embed_wasm : bool, default True
+            When True, the WASM binary is base64-inlined for single-file
+            distribution.  When False, the document references an adjacent
+            ``ferrum_wasm_bg.wasm`` sidecar that must be served alongside it.
+        csp_nonce : str, optional
+            When provided, both the ``<style>`` and ``<script type="module">``
+            tags receive a ``nonce="..."`` attribute so they pass strict
+            Content-Security-Policy headers.
+
+        Returns
+        -------
+        str
+            A complete, self-contained interactive HTML document.
+        """
+        from ferrum.display import html_string
+
+        return html_string(
+            self._chart,
+            embed_wasm=embed_wasm,
+            csp_nonce=csp_nonce,
+            toolbar=self._toolbar,
+        )
+
     def _repr_mimebundle_(self, **kwargs: Any) -> dict | None:
         if self._widget is None:
             return None
