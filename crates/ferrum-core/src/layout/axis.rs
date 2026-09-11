@@ -3387,7 +3387,7 @@ mod tests {
         let band = compute_y_label_band_width(&input, font_size, &m, tick_size, true);
 
         let theme = crate::layout::ThemeInputs::default();
-        let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None);
+        let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None).into_nodes();
         // Left orient anchors text at its right edge (`TextAnchor::End`), so the
         // label's leftward reach from the axis line is `(axis_line.x - node.x)
         // + measured_width`.
@@ -3448,7 +3448,7 @@ mod tests {
             estimate_x_label_band(&input.tick_labels, font_size, None, &m, 100.0, 0, None, tick_size, true);
 
         let theme = crate::layout::ThemeInputs::default();
-        let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None);
+        let nodes = crate::render::marks::axis::build_axis(&axis, &theme, None).into_nodes();
         // Bottom orient's flat baseline is `y`; the vertical drop from the axis
         // line to that baseline is the render's own ground truth.
         let max_drop = nodes

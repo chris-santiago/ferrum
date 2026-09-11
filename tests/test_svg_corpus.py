@@ -197,6 +197,10 @@ def test_break_sentinel_matches_the_rust_constant_it_mirrors():
 
     The Python value is only an allow-list-free explanation of an off-canvas
     coordinate as long as it is the value the renderer actually parks marks at.
+
+    The constant lives in ``render/break_axis.rs`` (batch H T3, which moved the
+    scene-remapping code next to the piecewise scale it remaps through); it was
+    previously declared in ``render/scene_build.rs``.
     """
     rust = (
         Path(__file__).resolve().parent.parent
@@ -204,10 +208,10 @@ def test_break_sentinel_matches_the_rust_constant_it_mirrors():
         / "ferrum-core"
         / "src"
         / "render"
-        / "scene_build.rs"
+        / "break_axis.rs"
     ).read_text()
     assert corpus.BREAK_HIDDEN == -99999.0
-    assert "const BREAK_HIDDEN: f64 = -99999.0;" in rust
+    assert "pub const BREAK_HIDDEN: f64 = -99999.0;" in rust
 
 
 def test_off_viewport_respects_the_break_sentinel(tmp_path):

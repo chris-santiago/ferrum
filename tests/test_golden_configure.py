@@ -165,6 +165,30 @@ class TestStructuralGoldens:
         )
         _check_or_update("structural_break_axis_wave.svg", chart.to_svg())
 
+    def test_break_axis_bar_clipped_into_segments(self):
+        """Extent clipping (spec §4 H4): the crossing bar renders as two rects.
+
+        The guide's worked example — a bar to 900 under a ``(150, 850)`` gap is
+        drawn 0–150 and 850–900 — rather than the single full-plot rect that
+        stretched through the break before. Point-mark break goldens above stay
+        byte-identical; this golden is where the clipped geometry lives.
+        """
+        df = pl.DataFrame(
+            {"category": ["A", "B", "C", "D", "E"], "value": [72.0, 68.0, 75.0, 900.0, 81.0]}
+        )
+        chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q") + BreakAxis(
+            axis="y", gap=(150, 850)
+        )
+        _check_or_update("structural_break_axis_bar.svg", chart.to_svg())
+
+    def test_break_axis_area_clipped_into_segments(self):
+        """An area spanning the break is clipped into one band per segment."""
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "value": [50.0, 900.0, 950.0, 60.0]})
+        chart = fm.Chart(df).mark_area().encode(x="x:Q", y="value:Q") + BreakAxis(
+            axis="y", gap=(150, 850)
+        )
+        _check_or_update("structural_break_axis_area.svg", chart.to_svg())
+
     def test_inset(self, sample_df):
         inset_chart = fm.Chart(sample_df).mark_point().encode(x="x", y="revenue")
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + Inset(

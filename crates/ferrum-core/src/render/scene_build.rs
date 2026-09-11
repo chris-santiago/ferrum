@@ -234,11 +234,44 @@ pub fn build_scene(
         let panel_y_axis: Option<&AxisLayout> =
             panel_axes.independent_y.as_ref().or(panel_y_axis_global);
 
+        // Structural features: axis breaks, insets. Only applied to the first
+        // panel (non-faceted charts). Resolved BEFORE the axes and gridlines
+        // are built so they can be placed on the broken scale as they are
+        // built, while the axis title is still distinguishable from the
+        // tick-positioned chrome around it.
+        let StructuralOutput {
+            extra_annotations: structural_annotations,
+            break_results,
+        } = if panel_idx == 0 && !chart_config.structural.is_empty() {
+            build_structural_nodes(&chart_config.structural, &scales, &panel.plot_area, theme)
+        } else {
+            StructuralOutput {
+                extra_annotations: Vec::new(),
+                break_results: Vec::new(),
+            }
+        };
+        // Resolve each break against the unbroken scale it replaces. A scale
+        // with no continuous domain (ordinal) has nothing to reverse-map
+        // through, so it contributes no remap and its marks stay put.
+        let break_remaps: Vec<break_axis::BreakRemap<'_>> = break_results
+            .iter()
+            .filter_map(|(axis, result)| {
+                let scale = if axis == "y" { &scales.y } else { &scales.x };
+                let domain = scale.data_domain()?;
+                Some(break_axis::BreakRemap::new(
+                    axis,
+                    domain,
+                    scale.pixel_range(),
+                    result,
+                ))
+            })
+            .collect();
+
         // Grid + axis build and above/below routing (MOD-09).
         let PanelAxisGrid {
-            axes_below: mut axes_nodes,
+            axes_below: axes_nodes,
             axes_above: axes_above_nodes,
-            grid: mut grid_nodes,
+            grid: grid_nodes,
             grid_above,
         } = route_panel_axes_and_grid(
             spec,
@@ -253,6 +286,7 @@ pub fn build_scene(
             panel_axes.y_independent,
             theme,
             chart_config,
+            &break_remaps,
         );
 
         // Per-layer mark batches (MOD-09).
@@ -396,57 +430,11 @@ pub fn build_scene(
             }
         };
 
-        // Structural features: axis breaks, insets.
-        // Only applied to the first panel (non-faceted charts).
-        let StructuralOutput {
-            extra_annotations: structural_annotations,
-            break_results,
-        } = if panel_idx == 0 && !chart_config.structural.is_empty() {
-            build_structural_nodes(&chart_config.structural, &scales, &panel.plot_area, theme)
-        } else {
-            StructuralOutput {
-                extra_annotations: Vec::new(),
-                break_results: Vec::new(),
-            }
-        };
-
-        // Remap mark, axis, and grid pixel coordinates through any broken scales
-        // so that elements inside a gap are hidden and elements outside the gap
-        // are repositioned to their compressed pixel positions.
-        for (axis, break_result) in &break_results {
-            let (data_domain, pixel_range) = if axis == "y" {
-                (scales.y.data_domain(), scales.y.pixel_range())
-            } else {
-                (scales.x.data_domain(), scales.x.pixel_range())
-            };
-            if let Some((d_lo, d_hi)) = data_domain {
-                let (px_lo, px_hi) = pixel_range;
-                for batch in &mut mark_batches {
-                    remap_mark_batch_through_break(
-                        &mut batch.nodes,
-                        axis,
-                        d_lo,
-                        d_hi,
-                        px_lo,
-                        px_hi,
-                        break_result,
-                    );
-                }
-                // Remap axis nodes whose coordinate falls within the
-                // broken axis's pixel range.  Cross-axis elements (e.g.
-                // x-axis labels below the plot for a y-break) have
-                // coordinates outside this range and are left untouched.
-                let (range_lo, range_hi) = (px_lo.min(px_hi), px_lo.max(px_hi));
-                for node in axes_nodes.iter_mut() {
-                    if node_coord_in_range(node, axis, range_lo, range_hi) {
-                        remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
-                    }
-                }
-                // Grid lines within the plot area are remapped so they
-                // align with the compressed scale segments.
-                for node in grid_nodes.iter_mut() {
-                    remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
-                }
+        // Re-place the marks on any broken scale. Axis chrome and gridlines
+        // were already placed by `route_panel_axes_and_grid` above.
+        for remap in &break_remaps {
+            for batch in &mut mark_batches {
+                remap_mark_batch_through_break(batch, remap);
             }
         }
 
@@ -1003,6 +991,11 @@ fn route_panel_axes_and_grid(
     y_independent: bool,
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
+    // Axis breaks resolved for this panel (spec §4 H4). Chrome is placed on
+    // the broken scale HERE, as it is built, because this is the only place
+    // that still knows which nodes a tick value positioned and which one is
+    // the axis title — see `marks::axis::AxisNodes`.
+    breaks: &[break_axis::BreakRemap<'_>],
 ) -> PanelAxisGrid {
     // Polar and Geo coordinates suppress Cartesian axes and gridlines.
     let suppress_axes = matches!(
@@ -1016,7 +1009,7 @@ fn route_panel_axes_and_grid(
         .as_ref()
         .and_then(|g| g.band_colors.as_deref())
         .unwrap_or(&[]);
-    let grid = if suppress_axes {
+    let mut grid = if suppress_axes {
         Vec::new()
     } else {
         marks::axis::build_grid(
@@ -1027,6 +1020,14 @@ fn route_panel_axes_and_grid(
             grid_band_colors,
         )
     };
+    // Gridlines sit at tick values, so a broken scale moves them (or hides the
+    // ones inside a gap) exactly as it moves the marks. Grid band fills are
+    // extent geometry, so they clip per segment rather than stretching across
+    // the gap; the rebuild is free here because gridlines carry no per-node
+    // sidecars.
+    for remap in breaks {
+        grid = remap.clip_nodes(grid).nodes;
+    }
     // zindex (B5): gridlines follow their axis above/below the marks. When a
     // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
     // above the marks (into the annotation list) alongside that axis. Computed
@@ -1050,10 +1051,23 @@ fn route_panel_axes_and_grid(
     // behavior, so default output is byte-identical.
     let mut axes_below: Vec<SceneNode> = Vec::new();
     let mut axes_above: Vec<SceneNode> = Vec::new();
+    // Place this axis's data-positioned chrome on every broken scale that
+    // applies to it, leaving the title where the layout put it. A secondary-y
+    // axis (`y_slot >= 1`) is labelled from its own scale, so a break on the
+    // primary y scale is not its break (spec §4 H4).
+    let break_axis_nodes = |mut nodes: marks::axis::AxisNodes, y_slot: usize| {
+        for remap in breaks {
+            if y_slot != 0 && remap.axis() == "y" {
+                continue;
+            }
+            remap.remap_axis_chrome(&mut nodes.data_positioned);
+        }
+        nodes.into_nodes()
+    };
     let route_axis = |axis: &AxisLayout, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
         // Untagged: x-axes and y-axes on the byte-stable single-slot default
         // path never carry a `slot` tag on their tick-label text nodes.
-        let nodes = marks::axis::build_axis(axis, theme, None);
+        let nodes = break_axis_nodes(marks::axis::build_axis(axis, theme, None), 0);
         if axis.draws_above_marks() {
             above.extend(nodes);
         } else {
@@ -1079,7 +1093,7 @@ fn route_panel_axes_and_grid(
             // attr — including slot 0 (primary), for a uniform contract where
             // "this panel has 2+ y-slots" implies every y-axis tick label is
             // slot-tagged, not just the secondary ones.
-            let nodes = marks::axis::build_axis(axis, theme, Some(slot));
+            let nodes = break_axis_nodes(marks::axis::build_axis(axis, theme, Some(slot)), slot);
             let tagged = vec![SceneNode::Group {
                 attrs: vec![("y_slot".to_string(), slot.to_string())],
                 children: nodes,
@@ -2431,236 +2445,52 @@ fn build_structural_nodes(
 
 // ── Break-axis mark remapping ────────────────────────────────────────────────
 
-/// Coordinate used to hide marks that fall inside a break gap.
-/// Using a large off-screen value instead of NaN avoids panics in the SVG serializer.
-const BREAK_HIDDEN: f64 = -99999.0;
-
-/// Remap the pixel coordinates of all nodes in a mark batch through a broken scale.
+/// Re-place one mark batch's geometry onto a broken axis.
 ///
-/// Marks whose data-space position falls inside a gap are hidden by moving them
-/// far outside the viewport (rather than removed, to preserve data_indices alignment).
-/// All other marks are repositioned to their compressed pixel coordinates.
+/// The batch's `kind` picks the placement model (`break_axis::BreakPlacement`),
+/// because what "inside the gap" means depends on what the mark's pixels
+/// encode: a bar's height is data and clips per visible segment, a point glyph
+/// is a fixed-size symbol at one data position and moves or hides whole, a
+/// line's every vertex is its own data position. Only the clip can change the
+/// node count, and only then are the batch's per-node sidecars rebuilt — a
+/// batch nothing clipped keeps its sidecars untouched, and its bytes unchanged.
 ///
-/// `axis` — `"x"` or `"y"`, selects which coordinate axis is remapped.
-/// Returns true when the node's primary coordinate on `axis` falls
-/// within `[lo, hi]` (inclusive with 1px margin).  Used to distinguish
-/// same-axis elements (y-axis ticks for a y-break) from cross-axis
-/// elements (x-axis labels below the plot area) so that only same-axis
-/// nodes are remapped through the broken scale.
-fn node_coord_in_range(node: &SceneNode, axis: &str, lo: f64, hi: f64) -> bool {
-    let margin = 1.0;
-    let coord = match node {
-        SceneNode::Text { x, y, .. } => {
-            if axis == "y" {
-                *y
-            } else {
-                *x
-            }
-        }
-        SceneNode::Line { x1, y1, x2, y2, .. } => {
-            if axis == "y" {
-                (*y1).min(*y2)
-            } else {
-                (*x1).min(*x2)
-            }
-        }
-        SceneNode::Rect { x, y, w, h, .. } => {
-            if axis == "y" {
-                *y
-            } else {
-                *x
-            }
-        }
-        SceneNode::Group { children, .. } => {
-            return children
-                .iter()
-                .any(|c| node_coord_in_range(c, axis, lo, hi));
-        }
-        _ => return false,
-    };
-    coord >= lo - margin && coord <= hi + margin
-}
-
-/// `d_lo`/`d_hi` — data domain of the unbroken scale.
-/// `px_lo`/`px_hi` — pixel range of the unbroken scale.
-/// `break_result` — piecewise mapping from `apply_break_to_scale`.
-fn remap_mark_batch_through_break(
-    nodes: &mut [SceneNode],
-    axis: &str,
-    d_lo: f64,
-    d_hi: f64,
-    px_lo: f64,
-    px_hi: f64,
-    break_result: &break_axis::BreakResult,
-) {
-    for node in nodes.iter_mut() {
-        remap_node(node, axis, d_lo, d_hi, px_lo, px_hi, break_result);
+/// Secondary-y batches are exempt from a primary-axis break: a layer resolved
+/// against an `independent_y` slot maps through its own scale, which the break
+/// was never applied to (spec §4 H4).
+fn remap_mark_batch_through_break(batch: &mut MarkBatch, remap: &break_axis::BreakRemap<'_>) {
+    if batch.y_slot != 0 && remap.axis() == "y" {
+        return;
     }
-}
-
-/// Remap a single node's coordinates along the broken axis. Recurses into Group children.
-fn remap_node(
-    node: &mut SceneNode,
-    axis: &str,
-    d_lo: f64,
-    d_hi: f64,
-    px_lo: f64,
-    px_hi: f64,
-    br: &break_axis::BreakResult,
-) {
-    match node {
-        SceneNode::Circle { cx, cy, .. } => {
-            let coord = if axis == "y" { cy } else { cx };
-            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+    match break_axis::BreakPlacement::for_kind(batch.kind) {
+        break_axis::BreakPlacement::ClipExtent => {
+            let clipped = remap.clip_nodes(std::mem::take(&mut batch.nodes));
+            if clipped.is_reindexed() {
+                batch.data_indices = clipped.realign(batch.data_indices.take());
+                batch.tooltips = clipped.realign(batch.tooltips.take());
+                batch.hrefs = clipped.realign(batch.hrefs.take());
+                batch.descriptions = clipped.realign(batch.descriptions.take());
+                batch.keys = clipped.realign(batch.keys.take());
+                batch.polar_spans = clipped.realign(batch.polar_spans.take());
+            }
+            batch.nodes = clipped.nodes;
         }
-        SceneNode::Rect { x, y, w, h, .. } => {
-            if axis == "y" {
-                let top = remap_coord(*y, d_lo, d_hi, px_lo, px_hi, br);
-                let bottom = remap_coord(*y + *h, d_lo, d_hi, px_lo, px_hi, br);
-                match (top, bottom) {
-                    (Some(t), Some(b)) => {
-                        *y = t.min(b);
-                        *h = (b - t).abs();
-                    }
-                    _ => {
-                        *h = 0.0;
-                    }
-                }
-            } else {
-                let left = remap_coord(*x, d_lo, d_hi, px_lo, px_hi, br);
-                let right = remap_coord(*x + *w, d_lo, d_hi, px_lo, px_hi, br);
-                match (left, right) {
-                    (Some(l), Some(r)) => {
-                        *x = l.min(r);
-                        *w = (r - l).abs();
-                    }
-                    _ => {
-                        *w = 0.0;
-                    }
-                }
+        break_axis::BreakPlacement::MoveGlyph => {
+            for node in batch.nodes.iter_mut() {
+                remap.remap_glyph_node(node);
             }
         }
-        SceneNode::Line { x1, y1, x2, y2, .. } => {
-            if axis == "y" {
-                *y1 = remap_coord(*y1, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
-                *y2 = remap_coord(*y2, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
-            } else {
-                *x1 = remap_coord(*x1, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
-                *x2 = remap_coord(*x2, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
+        break_axis::BreakPlacement::MoveGlyphAndConnector => {
+            for node in batch.nodes.iter_mut() {
+                remap.remap_label_node(node);
             }
         }
-        SceneNode::Path { commands, .. } => {
-            for cmd in commands.iter_mut() {
-                remap_path_cmd(cmd, axis, d_lo, d_hi, px_lo, px_hi, br);
+        break_axis::BreakPlacement::MoveVertices => {
+            for node in batch.nodes.iter_mut() {
+                remap.remap_node(node);
             }
         }
-        SceneNode::Text { x, y, .. } => {
-            let coord = if axis == "y" { y } else { x };
-            *coord = remap_coord(*coord, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
-        }
-        SceneNode::Group { children, .. } => {
-            for child in children.iter_mut() {
-                remap_node(child, axis, d_lo, d_hi, px_lo, px_hi, br);
-            }
-        }
-        // Polyline, Polygon, Image, Raw, Arc — leave untouched.
-        _ => {}
     }
-}
-
-/// Remap a single PathCmd coordinate along the broken axis.
-fn remap_path_cmd(
-    cmd: &mut ferrum_scene::PathCmd,
-    axis: &str,
-    d_lo: f64,
-    d_hi: f64,
-    px_lo: f64,
-    px_hi: f64,
-    br: &break_axis::BreakResult,
-) {
-    use ferrum_scene::PathCmd;
-    let remap = |v: &mut f64| {
-        *v = remap_coord(*v, d_lo, d_hi, px_lo, px_hi, br).unwrap_or(BREAK_HIDDEN);
-    };
-    match cmd {
-        PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => {
-            if axis == "y" {
-                remap(y);
-            } else {
-                remap(x);
-            }
-        }
-        PathCmd::QuadTo { cx, cy, x, y } => {
-            if axis == "y" {
-                remap(cy);
-                remap(y);
-            } else {
-                remap(cx);
-                remap(x);
-            }
-        }
-        PathCmd::CubicTo {
-            c1x,
-            c1y,
-            c2x,
-            c2y,
-            x,
-            y,
-        } => {
-            if axis == "y" {
-                remap(c1y);
-                remap(c2y);
-                remap(y);
-            } else {
-                remap(c1x);
-                remap(c2x);
-                remap(x);
-            }
-        }
-        PathCmd::ArcTo { x, y, .. } => {
-            if axis == "y" {
-                remap(y);
-            } else {
-                remap(x);
-            }
-        }
-        PathCmd::HLineTo { x } => {
-            if axis != "y" {
-                remap(x);
-            }
-        }
-        PathCmd::VLineTo { y } => {
-            if axis == "y" {
-                remap(y);
-            }
-        }
-        PathCmd::Close => {}
-    }
-}
-
-/// Reverse-map a pixel coordinate to data-space, then forward-map through the
-/// broken scale.  Returns `None` when the data value falls in a gap.
-///
-/// The reverse-map uses the unbroken (primary) scale's linear interpolation:
-/// `data = d_lo + (px - px_lo) / (px_hi - px_lo) * (d_hi - d_lo)`.
-/// This is correct for all continuous scale types when the underlying scale is
-/// linear in pixel space (which is the case — all ferrum scales produce a linear
-/// pixel mapping; the non-linearity lives in the data transform, not the range).
-fn remap_coord(
-    px: f64,
-    d_lo: f64,
-    d_hi: f64,
-    px_lo: f64,
-    px_hi: f64,
-    br: &break_axis::BreakResult,
-) -> Option<f64> {
-    let span = px_hi - px_lo;
-    if span.abs() < f64::EPSILON {
-        return Some(px);
-    }
-    let data_val = d_lo + (px - px_lo) / span * (d_hi - d_lo);
-    let data_val = data_val.clamp(d_lo.min(d_hi), d_lo.max(d_hi));
-    break_axis::broken_scale_map(data_val, br)
 }
 
 // The per-panel independent-axis `TickProjection` rebuild (formerly the
@@ -5561,6 +5391,7 @@ mod tests {
             false,
             &theme,
             &chart_config,
+            &[],
         );
         // With the secondary axis routed in alongside the primary (slot 1).
         let with_secondary = route_panel_axes_and_grid(
@@ -5576,6 +5407,7 @@ mod tests {
             false,
             &theme,
             &chart_config,
+            &[],
         );
 
         assert_eq!(
@@ -6992,137 +6824,10 @@ mod tests {
         }
     }
 
-    // ── R1 port (bug_hunt_draw.rs / bug_hunt_render_pipeline.rs): break-axis
-    //    coordinate remapping (remap_coord/remap_node/remap_path_cmd) and the
-    //    polar outer-radius helper. Zero prior in-src coverage of these fns.
-
-    fn one_segment_break(d_lo: f64, d_hi: f64, px_lo: f64, px_hi: f64) -> break_axis::BreakResult {
-        break_axis::apply_break_to_scale((d_lo, d_hi), &[], (px_lo, px_hi), 12.0)
-    }
-
-    fn two_segment_break() -> break_axis::BreakResult {
-        // Domain [0,100] with a gap [40,60] -> two retained segments.
-        break_axis::apply_break_to_scale((0.0, 100.0), &[[40.0, 60.0]], (50.0, 350.0), 12.0)
-    }
-
-    #[test]
-    fn remap_coord_identity_maps_pixel_to_pixel() {
-        let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
-        let px = remap_coord(200.0, 0.0, 100.0, 50.0, 350.0, &br).unwrap();
-        assert!(
-            (px - 200.0).abs() < 1e-6,
-            "single-segment remap must be identity; got {px}"
-        );
-    }
-
-    #[test]
-    fn remap_coord_pixel_in_gap_returns_none() {
-        let br = two_segment_break();
-        // Pixel 200 maps back to data value 50, which falls inside the gap [40, 60].
-        let result = remap_coord(200.0, 0.0, 100.0, 50.0, 350.0, &br);
-        assert!(
-            result.is_none(),
-            "a pixel that reverse-maps into the gap must return None"
-        );
-    }
-
-    #[test]
-    fn remap_coord_nan_pixel_returns_none() {
-        let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
-        assert!(remap_coord(f64::NAN, 0.0, 100.0, 50.0, 350.0, &br).is_none());
-    }
-
-    #[test]
-    fn remap_node_circle_hides_at_break_hidden_when_in_gap() {
-        let br = two_segment_break();
-        let mut node = SceneNode::Circle {
-            cx: 200.0,
-            cy: 100.0,
-            r: 4.0,
-            style: default_fill_stroke(),
-        };
-        remap_node(&mut node, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let SceneNode::Circle { cx, .. } = node else {
-            panic!("expected Circle")
-        };
-        assert_eq!(
-            cx, BREAK_HIDDEN,
-            "a mark inside the break gap must be hidden off-screen"
-        );
-    }
-
-    /// Discriminating fixture (quality-review kill-switch finding, cycle 2):
-    /// `one_segment_break()` has no gaps, so remapping through it is the
-    /// identity — an assertion of "unchanged" is satisfied whether or not the
-    /// real remap dispatch runs at all, which is exactly how the reviewer's
-    /// mutation (deleting the x-axis remap call) survived undetected the first
-    /// time. `two_segment_break()`'s gap `[40,60]` makes `cx: 110.0` reverse-map
-    /// to data value 20.0 (inside the retained segment `[0,40]`), which the
-    /// broken scale compresses to pixel 122.0 — verified independently:
-    /// `remap_coord(110.0, 0.0, 100.0, 50.0, 350.0, &two_segment_break())
-    /// == Some(122.0)`. A disabled remap would leave `cx` at 110.0 instead.
-    #[test]
-    fn remap_node_circle_moves_to_compressed_pixel_across_a_gap() {
-        let br = two_segment_break();
-        let mut node = SceneNode::Circle {
-            cx: 110.0,
-            cy: 100.0,
-            r: 4.0,
-            style: default_fill_stroke(),
-        };
-        remap_node(&mut node, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let SceneNode::Circle { cx, .. } = node else {
-            panic!("expected Circle")
-        };
-        assert!(
-            (cx - 122.0).abs() < 1e-6,
-            "expected cx compressed to 122.0 across the break gap; got {cx}"
-        );
-    }
-
-    #[test]
-    fn remap_path_cmd_hlineto_only_remapped_on_x_axis() {
-        // Same 110.0 -> 122.0 discriminating fixture as the Circle test above.
-        let br = two_segment_break();
-        let mut on_x = PathCmd::HLineTo { x: 110.0 };
-        remap_path_cmd(&mut on_x, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::HLineTo { x } = on_x else {
-            panic!()
-        };
-        assert!(
-            (x - 122.0).abs() < 1e-6,
-            "HLineTo.x must compress to 122.0 through the broken scale when axis == x; got {x}"
-        );
-
-        let mut on_y = PathCmd::HLineTo { x: 110.0 };
-        remap_path_cmd(&mut on_y, "y", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::HLineTo { x } = on_y else {
-            panic!()
-        };
-        assert_eq!(x, 110.0, "HLineTo.x must NOT be touched when axis == y");
-    }
-
-    #[test]
-    fn remap_path_cmd_vlineto_only_remapped_on_y_axis() {
-        // Same 110.0 -> 122.0 discriminating fixture as the Circle test above.
-        let br = two_segment_break();
-        let mut on_y = PathCmd::VLineTo { y: 110.0 };
-        remap_path_cmd(&mut on_y, "y", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::VLineTo { y } = on_y else {
-            panic!()
-        };
-        assert!(
-            (y - 122.0).abs() < 1e-6,
-            "VLineTo.y must compress to 122.0 through the broken scale when axis == y; got {y}"
-        );
-
-        let mut on_x = PathCmd::VLineTo { y: 110.0 };
-        remap_path_cmd(&mut on_x, "x", 0.0, 100.0, 50.0, 350.0, &br);
-        let PathCmd::VLineTo { y } = on_x else {
-            panic!()
-        };
-        assert_eq!(y, 110.0, "VLineTo.y must NOT be touched when axis == x");
-    }
+    // ── R1 port (bug_hunt_render_pipeline.rs): the polar outer-radius helper.
+    //    The break-axis coordinate-remap tests that used to sit here moved to
+    //    `render::break_axis`'s own test module along with the code they
+    //    cover (`BreakRemap`).
 
     #[test]
     fn polar_outer_radius_uses_smaller_dimension() {

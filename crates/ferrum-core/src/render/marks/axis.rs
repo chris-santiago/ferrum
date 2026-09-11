@@ -4,6 +4,33 @@ use crate::layout::{AxisLayout, AxisOrient, Rect, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_stroke, to_scene_text_style};
 use ferrum_scene::SceneNode;
 
+/// An axis's scene nodes, split by what positions them.
+///
+/// The split exists for the break-axis remap (spec §4 H4): re-placing an axis
+/// onto a broken scale means reverse-mapping each node's pixel coordinate into
+/// a data value, which is only meaningful for nodes a data value put there.
+/// The title is positioned from the axis's own midpoint, so reverse-mapping it
+/// asks a question it has no answer to — and when that midpoint happened to
+/// land inside a gap, the answer was "hidden", which is how a broken chart used
+/// to lose its axis title entirely.
+pub struct AxisNodes {
+    /// Domain line, tick marks and tick labels — every node placed from a tick
+    /// value, and the only nodes a broken scale may move or hide.
+    pub data_positioned: Vec<SceneNode>,
+    /// The axis title, placed from the axis geometry rather than from data.
+    pub title: Option<SceneNode>,
+}
+
+impl AxisNodes {
+    /// Flatten back into paint order: data-positioned chrome first, title last
+    /// — the order `build_axis` emits them in.
+    pub fn into_nodes(self) -> Vec<SceneNode> {
+        let mut nodes = self.data_positioned;
+        nodes.extend(self.title);
+        nodes
+    }
+}
+
 /// Build an axis's scene nodes (domain line, ticks, tick labels, title).
 ///
 /// `tick_slot` (secondary-y-axis, GH #60/#73): when `Some(k)`, every emitted
@@ -15,7 +42,7 @@ use ferrum_scene::SceneNode;
 /// `scene_build::route_panel_axes_and_grid`); every other caller (x-axes, and
 /// y-axes on the byte-stable single-slot default path) passes `None`, leaving
 /// tick-label nodes untagged exactly as before this field existed.
-pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usize>) -> Vec<SceneNode> {
+pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usize>) -> AxisNodes {
     let mut nodes = Vec::new();
     let r = axis.axis_line;
 
@@ -279,7 +306,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         }
     }
 
-    if let Some(t) = &axis.title {
+    let title = axis.title.as_ref().map(|t| {
         let title_fw: Option<&str> = if theme.typography.title_font_weight == "normal" {
             None
         } else {
@@ -290,7 +317,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             .map(|[r, g, b, a]| palette::Srgba::new(r, g, b, a))
             .unwrap_or(theme.colors.title_color);
         let effective_title_font_size = axis.title_font_size.unwrap_or(theme.typography.title_font_size);
-        nodes.push(SceneNode::Text {
+        SceneNode::Text {
             x: t.anchor_x,
             y: t.anchor_y,
             content: t.text.clone(),
@@ -305,14 +332,15 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                 None,
                 1.0,
             ),
-        });
-    }
+        }
+    });
 
     // `translate` + `offset` (B5): shift the whole axis group
     // (line/ticks/labels/title) perpendicular to its line, outward positive. Both
     // are perpendicular shifts away from the plot edge and **compose additively**
     // (`translate` is Vega's axis translate, `offset` its axis offset). `None`/`0`
     // on both is a no-op so default output is byte-identical.
+    let mut out = AxisNodes { data_positioned: nodes, title };
     let shift = axis.translate.unwrap_or(0.0) + axis.offset.unwrap_or(0.0);
     if shift != 0.0 {
         let (dx, dy) = match axis.orient {
@@ -321,12 +349,12 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             AxisOrient::Left => (-shift, 0.0),   // outward = left
             AxisOrient::Right => (shift, 0.0),   // outward = right
         };
-        for node in &mut nodes {
+        for node in out.data_positioned.iter_mut().chain(out.title.iter_mut()) {
             offset_axis_node(node, dx, dy);
         }
     }
 
-    nodes
+    out
 }
 
 /// Translate an axis scene node (`Line`/`Text`) by `(dx, dy)`. Only the node
@@ -612,8 +640,8 @@ mod tests {
         let mut shifted = base.clone();
         shifted.translate = Some(10.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme, None);
-        let shifted_nodes = build_axis(&shifted, &theme, None);
+        let base_nodes = build_axis(&base, &theme, None).into_nodes();
+        let shifted_nodes = build_axis(&shifted, &theme, None).into_nodes();
         assert_eq!(base_nodes.len(), shifted_nodes.len());
         // Compare each Line's y by 10px shift.
         for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
@@ -634,8 +662,8 @@ mod tests {
         let mut shifted = base.clone();
         shifted.translate = Some(8.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme, None);
-        let shifted_nodes = build_axis(&shifted, &theme, None);
+        let base_nodes = build_axis(&base, &theme, None).into_nodes();
+        let shifted_nodes = build_axis(&shifted, &theme, None).into_nodes();
         for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
             if let (SceneNode::Line { x1: bx1, .. }, SceneNode::Line { x1: sx1, .. }) = (b, s) {
                 assert!((sx1 - (bx1 - 8.0)).abs() < 1e-9, "left translate must shift line left 8px");
@@ -753,7 +781,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         // 1 domain line + 2 tick lines + 2 tick labels + 1 title = 6 nodes
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         let text_count = nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count();
@@ -802,7 +830,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, Some(2));
+        let nodes = build_axis(&axis, &theme, Some(2)).into_nodes();
         let texts: Vec<&SceneNode> = nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).collect();
         assert_eq!(texts.len(), 3, "2 tick labels + 1 title");
         // Tick labels (first two Text nodes, emitted before the title) carry
@@ -855,7 +883,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
 
         // Both ticks should emit a tick mark line.
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
@@ -909,7 +937,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
 
         // One tick line + two text nodes (one per line).
         let text_contents: Vec<_> = nodes.iter().filter_map(|n| {
@@ -973,7 +1001,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default(); // theme.typography.label_font_size == 11.0
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
 
         // The text node should use font_size 9.0, not the theme default.
         let text_node = nodes.iter().find(|n| matches!(n, SceneNode::Text { .. }));
@@ -1174,7 +1202,7 @@ mod tests {
         // have anchor == End and the stored angle must equal -45.
         let axis = bottom_axis_with_angle(-45.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, angle) in &texts {
@@ -1188,7 +1216,7 @@ mod tests {
         // Regression guard: the common flat (angle == 0) case must keep Middle.
         let axis = bottom_axis_with_angle(0.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, _) in &texts {
@@ -1210,7 +1238,7 @@ mod tests {
         let font_size = theme.typography.label_font_size; // 11.0
 
         let label_y_at = |angle: f64| -> f64 {
-            build_axis(&bottom_axis_with_angle(angle), &theme, None)
+            build_axis(&bottom_axis_with_angle(angle), &theme, None).into_nodes()
                 .into_iter()
                 .find_map(|n| if let SceneNode::Text { y, .. } = n { Some(y) } else { None })
                 .expect("axis must have a text node")
@@ -1258,7 +1286,7 @@ mod tests {
         // Top axis with label_angle = -45: every tick-label must use Start anchor.
         let axis = top_axis_with_angle(-45.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, _) in &texts {
@@ -1271,7 +1299,7 @@ mod tests {
         // Regression guard: flat top ticks must keep Middle.
         let axis = top_axis_with_angle(0.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, _) in &texts {
@@ -1291,7 +1319,7 @@ mod tests {
             angle: 0.0,
         });
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
 
         let title_node = nodes.iter().find(|n| {
             if let SceneNode::Text { content, .. } = n { content == "My Axis Title" } else { false }
@@ -1318,8 +1346,8 @@ mod tests {
         };
         let theme = ThemeInputs::default();
 
-        let left_texts  = text_anchors_and_angles(&build_axis(&left_axis,  &theme, None));
-        let right_texts = text_anchors_and_angles(&build_axis(&right_axis, &theme, None));
+        let left_texts  = text_anchors_and_angles(&build_axis(&left_axis,  &theme, None).into_nodes());
+        let right_texts = text_anchors_and_angles(&build_axis(&right_axis, &theme, None).into_nodes());
 
         assert_eq!(left_texts.len(),  2, "expected 2 left tick-label nodes");
         assert_eq!(right_texts.len(), 2, "expected 2 right tick-label nodes");
@@ -1349,7 +1377,7 @@ mod tests {
             ..bottom_axis_with_angle(-45.0)
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, angle) in &texts {
@@ -1365,7 +1393,7 @@ mod tests {
             ..bottom_axis_with_angle(-45.0)
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, angle) in &texts {
@@ -1384,11 +1412,11 @@ mod tests {
         let rotated = AxisLayout { orient: AxisOrient::Left, ..bottom_axis_with_angle(-30.0) };
         let theme = ThemeInputs::default();
 
-        let flat_positions: Vec<(f64, f64)> = build_axis(&flat, &theme, None)
+        let flat_positions: Vec<(f64, f64)> = build_axis(&flat, &theme, None).into_nodes()
             .into_iter()
             .filter_map(|n| if let SceneNode::Text { x, y, .. } = n { Some((x, y)) } else { None })
             .collect();
-        let rotated_positions: Vec<(f64, f64)> = build_axis(&rotated, &theme, None)
+        let rotated_positions: Vec<(f64, f64)> = build_axis(&rotated, &theme, None).into_nodes()
             .into_iter()
             .filter_map(|n| if let SceneNode::Text { x, y, .. } = n { Some((x, y)) } else { None })
             .collect();
@@ -1437,7 +1465,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme, None);
+        let nodes = build_axis(&axis, &theme, None).into_nodes();
         let title_node = nodes.iter().find(|n| {
             if let SceneNode::Text { content, .. } = n { content == "My Title" } else { false }
         });
@@ -1460,8 +1488,8 @@ mod tests {
         let mut shifted = base.clone();
         shifted.offset = Some(30.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme, None);
-        let shifted_nodes = build_axis(&shifted, &theme, None);
+        let base_nodes = build_axis(&base, &theme, None).into_nodes();
+        let shifted_nodes = build_axis(&shifted, &theme, None).into_nodes();
         for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
             if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
                 assert!((sy1 - (by1 + 30.0)).abs() < 1e-9, "offset must shift line down 30px");
@@ -1477,8 +1505,8 @@ mod tests {
         both.offset = Some(10.0);
         both.translate = Some(10.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme, None);
-        let both_nodes = build_axis(&both, &theme, None);
+        let base_nodes = build_axis(&base, &theme, None).into_nodes();
+        let both_nodes = build_axis(&both, &theme, None).into_nodes();
         for (b, s) in base_nodes.iter().zip(both_nodes.iter()) {
             if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
                 assert!(
@@ -1494,8 +1522,8 @@ mod tests {
         // Regression guard: no offset/translate → unchanged geometry.
         let base = bottom_axis_with_angle(0.0);
         let theme = ThemeInputs::default();
-        let a = build_axis(&base, &theme, None);
-        let b = build_axis(&base, &theme, None);
+        let a = build_axis(&base, &theme, None).into_nodes();
+        let b = build_axis(&base, &theme, None).into_nodes();
         assert_eq!(a, b);
     }
 
@@ -1537,7 +1565,7 @@ mod tests {
         let mut axis = three_tick_bottom_axis();
         axis.label_flush = Some(true);
         let theme = ThemeInputs::default();
-        let anchors = label_anchors(&build_axis(&axis, &theme, None));
+        let anchors = label_anchors(&build_axis(&axis, &theme, None).into_nodes());
         assert_eq!(anchors.len(), 3);
         assert_eq!(anchors[0], ("left".into(), ferrum_scene::TextAnchor::Start));
         assert_eq!(anchors[1], ("mid".into(), ferrum_scene::TextAnchor::Middle));
@@ -1549,7 +1577,7 @@ mod tests {
         // Regression guard: no flush → every bottom label stays Middle.
         let axis = three_tick_bottom_axis();
         let theme = ThemeInputs::default();
-        let anchors = label_anchors(&build_axis(&axis, &theme, None));
+        let anchors = label_anchors(&build_axis(&axis, &theme, None).into_nodes());
         for (_, a) in &anchors {
             assert_eq!(*a, ferrum_scene::TextAnchor::Middle, "flush off keeps Middle");
         }
@@ -1563,7 +1591,7 @@ mod tests {
         axis.label_flush = Some(true);
         axis.ticks[0].culled = true;
         let theme = ThemeInputs::default();
-        let anchors = label_anchors(&build_axis(&axis, &theme, None));
+        let anchors = label_anchors(&build_axis(&axis, &theme, None).into_nodes());
         // Culled tick emits no label; 2 labels remain: mid (now first→Start),
         // right (last→End).
         assert_eq!(anchors.len(), 2);
@@ -1582,9 +1610,9 @@ mod tests {
         let base = {
             let mut no_flush = axis.clone();
             no_flush.label_flush = None;
-            build_axis(&no_flush, &theme, None)
+            build_axis(&no_flush, &theme, None).into_nodes()
         };
-        let flushed = build_axis(&axis, &theme, None);
+        let flushed = build_axis(&axis, &theme, None).into_nodes();
         let ys = |nodes: &[SceneNode]| -> Vec<f64> {
             nodes.iter().filter_map(|n| {
                 if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
@@ -1618,9 +1646,9 @@ mod tests {
         let no_flush = {
             let mut a = axis.clone();
             a.label_flush = None;
-            build_axis(&a, &theme, None)
+            build_axis(&a, &theme, None).into_nodes()
         };
-        let flushed = build_axis(&axis, &theme, None);
+        let flushed = build_axis(&axis, &theme, None).into_nodes();
 
         let ys = |nodes: &[SceneNode]| -> Vec<f64> {
             nodes.iter().filter_map(|n| {
@@ -1668,9 +1696,9 @@ mod tests {
         let no_flush = {
             let mut a = axis.clone();
             a.label_flush = None;
-            build_axis(&a, &theme, None)
+            build_axis(&a, &theme, None).into_nodes()
         };
-        let flushed = build_axis(&axis, &theme, None);
+        let flushed = build_axis(&axis, &theme, None).into_nodes();
 
         // Flush must be a no-op under Bottom/Top rotation: byte-identical
         // anchor/angle pairs AND identical label positions to the no-flush case.
@@ -1727,7 +1755,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let label_y = |label_padding: Option<f64>| -> f64 {
             let axis = base(label_padding);
-            let nodes = build_axis(&axis, &theme, None);
+            let nodes = build_axis(&axis, &theme, None).into_nodes();
             nodes
                 .iter()
                 .find_map(|n| if let SceneNode::Text { y, .. } = n { Some(*y) } else { None })
