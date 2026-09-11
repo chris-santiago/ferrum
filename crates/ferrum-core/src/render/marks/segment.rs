@@ -1,7 +1,10 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{col_as_f64, resolve_stroke_color, x_field, y_field, DrawCtx};
+use crate::render::draw::{
+    arrowhead_path_with_opacity, arrowhead_triangle, col_as_f64, resolve_stroke_color, x_field, y_field,
+    DrawCtx,
+};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::row_colors_from_scale;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
@@ -32,16 +35,16 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return Ok(empty()) };
     let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return Ok(empty()) };
 
-    // Per-row `opacity` AND `stroke_opacity` via the shared OpacityResolver
-    // (C7); stroke_width stays local. `fill_opacity` is the one slot genuinely
-    // unused — segment emits only `SceneNode::Line`, which has no fill
-    // component `to_scene_stroke` could ever consume. This mirrors `tick.rs`'s
-    // `row_stroke`, whose module doc carries the full enumeration against
-    // `rule.rs`: `stroke_opacity` is a generic `RENDERER_HONORED` encoding
-    // channel that resolves its own `OpacityScale` regardless of mark, so the
-    // former claim here that segment has "no stroke_opacity column" was copied
-    // from a doc that had already drifted, and the third `at_row` slot was
-    // being discarded.
+    // Per-row `opacity`, `fill_opacity`, and `stroke_opacity` via the shared
+    // OpacityResolver (C7); stroke_width stays local. The shaft `Line` only
+    // ever consumes `opacity`/`stroke_opacity` (`StrokeStyle` has no fill
+    // component `to_scene_stroke` could apply `fill_opacity` to) — that part
+    // mirrors `tick.rs`'s `row_stroke`, whose module doc carries the full
+    // enumeration against `rule.rs`. `fill_opacity` WAS genuinely unused here
+    // (discarded via `_`) before batch H Task 1: `arrow=True`'s arrowhead is
+    // segment's first FILLED node, so it reads this same per-row resolver's
+    // `fill_opacity` slot too, rather than a second independently-resolved
+    // value.
     let opacity_res =
         OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
@@ -56,6 +59,14 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     let meta = MetadataColumns::from_ctx(ctx);
+
+    // Batch H Task 1: `mark_segment(arrow=True)` draws a filled triangle
+    // arrowhead at each row's (x2, y2) end, colored by that row's resolved
+    // stroke. `arrow_size` is a constant mark kwarg (not per-row), mirroring
+    // `annotate_arrow`'s `head_size`. `None`/unset `arrow` is `false` —
+    // byte-identical to every segment rendered before this field existed.
+    let arrow_enabled = ctx.mark_style.segment.arrow.unwrap_or(false);
+    let arrow_size = ctx.mark_style.segment.arrow_size.unwrap_or(8.0);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
@@ -76,7 +87,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         let xo = x_offsets.get(i).copied().unwrap_or(0.0);
         let yo = y_offsets.get(i).copied().unwrap_or(0.0);
 
-        let (row_opacity, _, row_stroke_opacity) = opacity_res.at_row(i);
+        let (row_opacity, row_fill_opacity, row_stroke_opacity) = opacity_res.at_row(i);
         let row_stroke_width = stroke_width_values.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(ctx.mark_style.paint.stroke_width);
@@ -103,13 +114,39 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         // binds a DISTINCT `stroke_opacity=` observes any change.
         row_style.stroke_opacity *= row_stroke_opacity;
 
-        acc.push(SceneNode::Line {
-            x1: p1x + xo,
-            y1: p1y + yo,
-            x2: p2x + xo,
-            y2: p2y + yo,
-            style: row_style,
-        }, i);
+        let (line_x1, line_y1, line_x2, line_y2) = (p1x + xo, p1y + yo, p2x + xo, p2y + yo);
+        let line_color = row_style.color;
+        // Captured before `row_style` moves into the `Line` node below, so
+        // the arrowhead can inherit the SAME resolved opacity/stroke_opacity
+        // the shaft carries — not the annotation path's fixed 1.0 (batch H
+        // Task 1 quality-review fix). `line_opacity` is `row_style.opacity`
+        // itself (set verbatim by `to_scene_stroke`); `line_stroke_opacity`
+        // is the post-multiply value (`row_style.stroke_opacity`), not the
+        // raw `row_stroke_opacity`, so this reflects exactly what the shaft
+        // renders.
+        let line_opacity = row_style.opacity;
+        let line_stroke_opacity = row_style.stroke_opacity;
+        let line_node = SceneNode::Line { x1: line_x1, y1: line_y1, x2: line_x2, y2: line_y2, style: row_style };
+
+        if arrow_enabled {
+            // `arrowhead_triangle` returns `None` for a zero-length segment
+            // (no direction to point in) — that row still renders its shaft,
+            // just without a head, rather than a NaN-coordinate triangle.
+            match arrowhead_triangle(line_x1, line_y1, line_x2, line_y2, arrow_size) {
+                Some(points) => acc.push_many(
+                    [
+                        line_node,
+                        arrowhead_path_with_opacity(
+                            points, line_color, line_opacity, line_stroke_opacity, row_fill_opacity,
+                        ),
+                    ],
+                    i,
+                ),
+                None => acc.push(line_node, i),
+            }
+        } else {
+            acc.push(line_node, i);
+        }
     }
 
     let (nodes, data_indices) = acc.finalize();
@@ -688,6 +725,235 @@ mod tests {
             vec![0.2, 0.5, 0.9],
             "with no stroke_opacity encoding, StrokeStyle.stroke_opacity must equal the \
              resolved opacity value unchanged (the pre-fix behavior, bit-for-bit)"
+        );
+    }
+
+    // ── Batch H Task 1: mark_segment(arrow=) ─────────────────────────────────
+
+    /// Single-row x/y/x2/y2 segment spec + batch + resolved `DrawCtx`, with the
+    /// given `arrow`/`arrow_size` mark-kwargs override. Domain/range are both
+    /// `(0.0, 100.0)`, so `resolve_scales` need not be re-derived by hand in
+    /// each test — callers instead ask `ctx.scales` for the same pixel
+    /// endpoints the production path used, keeping the geometry-equality test
+    /// robust to whatever scale-padding `resolve_scales` applies.
+    fn arrow_test_build(
+        x2: f64,
+        y2: f64,
+        arrow: Option<bool>,
+        arrow_size: Option<f64>,
+    ) -> (crate::render::draw::MarkBuildResult, crate::render::scale_resolve::ResolvedScales) {
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64])),
+            Arc::new(Float64Array::from(vec![0.0_f64])),
+            Arc::new(Float64Array::from(vec![x2])),
+            Arc::new(Float64Array::from(vec![y2])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { arrow, arrow_size, ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Segment).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+        (result, scales)
+    }
+
+    /// `arrow=true` on a non-degenerate segment emits exactly one arrowhead
+    /// `Path` alongside the shaft `Line`. Fails to compile pre-change:
+    /// `MarkKwargsSpec::arrow` did not exist before this task.
+    #[test]
+    fn segment_arrow_true_emits_arrowhead_path() {
+        let (result, _) = arrow_test_build(10.0, 5.0, Some(true), Some(6.0));
+        let lines = result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count();
+        let paths = result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).count();
+        assert_eq!(lines, 1, "shaft line must still be emitted");
+        assert_eq!(paths, 1, "arrow=true must emit exactly one arrowhead path");
+    }
+
+    /// `arrow` unset (`None`, the default) emits only the shaft — no
+    /// arrowhead `Path` — the byte-stable no-op every segment rendered
+    /// before this field existed.
+    #[test]
+    fn segment_arrow_unset_is_byte_identical_no_arrowhead() {
+        let (result, _) = arrow_test_build(10.0, 5.0, None, None);
+        assert_eq!(result.nodes.len(), 1, "no arrow override must emit only the shaft Line");
+        assert!(matches!(result.nodes[0], ferrum_scene::SceneNode::Line { .. }));
+    }
+
+    /// `arrow=false` explicitly is identical to unset: only the shaft.
+    #[test]
+    fn segment_arrow_false_emits_no_arrowhead() {
+        let (result, _) = arrow_test_build(10.0, 5.0, Some(false), None);
+        assert_eq!(result.nodes.len(), 1);
+        assert!(matches!(result.nodes[0], ferrum_scene::SceneNode::Line { .. }));
+    }
+
+    /// A zero-length segment (`x2 == x`, `y2 == y`) has no direction to point
+    /// an arrowhead in. `arrow=true` on that row must still emit its shaft
+    /// (a zero-length line, matching every other zero-length segment ferrum
+    /// already renders) with no arrowhead — never a NaN-coordinate triangle
+    /// or a panic.
+    #[test]
+    fn segment_arrow_true_zero_length_segment_emits_only_line() {
+        let (result, _) = arrow_test_build(0.0, 0.0, Some(true), Some(8.0));
+        assert_eq!(
+            result.nodes.len(), 1,
+            "zero-length segment with arrow=true must emit only its (zero-length) shaft"
+        );
+        assert!(matches!(result.nodes[0], ferrum_scene::SceneNode::Line { .. }));
+        if let ferrum_scene::SceneNode::Line { x1, y1, x2, y2, .. } = result.nodes[0] {
+            assert!(x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite(),
+                "no NaN coordinates from the degenerate direction");
+        }
+    }
+
+    /// `arrow=true` with no `arrow_size` override resolves to `8.0` — the
+    /// same default `annotate_arrow`'s unlabelled overlay uses.
+    #[test]
+    fn segment_arrow_true_default_size_is_eight() {
+        let (result, scales) = arrow_test_build(50.0, 0.0, Some(true), None);
+        let path = result.nodes.iter().find_map(|n| match n {
+            ferrum_scene::SceneNode::Path { commands, .. } => Some(commands.clone()),
+            _ => None,
+        }).expect("arrow=true must emit an arrowhead path");
+
+        let p1x = scales.x.to_pixel_f64(0.0).unwrap();
+        let p1y = scales.y.to_pixel_f64(0.0).unwrap();
+        let p2x = scales.x.to_pixel_f64(50.0).unwrap();
+        let p2y = scales.y.to_pixel_f64(0.0).unwrap();
+        let expected = arrowhead_triangle(p1x, p1y, p2x, p2y, 8.0)
+            .expect("non-degenerate segment must yield a triangle");
+        let got: Vec<(f64, f64)> = path.iter().filter_map(|c| match c {
+            ferrum_scene::PathCmd::MoveTo { x, y } | ferrum_scene::PathCmd::LineTo { x, y } => Some((*x, *y)),
+            _ => None,
+        }).collect();
+        assert_eq!(got, vec![expected[0], expected[1], expected[2]]);
+    }
+
+    /// Geometry-equality proof (task requirement): `segment.rs`'s emitted
+    /// arrowhead triangle for a row must equal EXACTLY what
+    /// `draw::arrowhead_triangle` computes from that row's own resolved
+    /// pixel endpoints — the same shared function `annotation::emit_arrow`
+    /// calls (pinned by `emit_arrow_triangle_matches_shared_arrowhead_triangle_helper`
+    /// in `annotation.rs`), so `mark_segment(arrow=True)` and
+    /// `annotate_arrow`'s unlabelled overlay draw byte-identical arrowheads
+    /// for the same endpoints/size, by construction rather than by
+    /// coincidence.
+    #[test]
+    fn segment_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
+        let (result, scales) = arrow_test_build(30.0, 70.0, Some(true), Some(5.0));
+        let path = result.nodes.iter().find_map(|n| match n {
+            ferrum_scene::SceneNode::Path { commands, .. } => Some(commands.clone()),
+            _ => None,
+        }).expect("arrow=true must emit an arrowhead path");
+
+        let p1x = scales.x.to_pixel_f64(0.0).unwrap();
+        let p1y = scales.y.to_pixel_f64(0.0).unwrap();
+        let p2x = scales.x.to_pixel_f64(30.0).unwrap();
+        let p2y = scales.y.to_pixel_f64(70.0).unwrap();
+        let expected = arrowhead_triangle(p1x, p1y, p2x, p2y, 5.0)
+            .expect("non-degenerate segment must yield a triangle");
+        let got: Vec<(f64, f64)> = path.iter().filter_map(|c| match c {
+            ferrum_scene::PathCmd::MoveTo { x, y } | ferrum_scene::PathCmd::LineTo { x, y } => Some((*x, *y)),
+            _ => None,
+        }).collect();
+        assert_eq!(
+            got,
+            vec![expected[0], expected[1], expected[2]],
+            "segment's arrowhead vertices must equal arrowhead_triangle's output exactly"
+        );
+    }
+
+    /// Quality-review fix: the arrowhead must inherit the SAME resolved
+    /// `opacity`/`stroke_opacity` the shaft `Line` carries — not the
+    /// annotation path's fixed `1.0`. Before this fix, `arrow=True` with a
+    /// non-default `opacity` rendered a translucent shaft with a fully
+    /// opaque triangle glued to its tip.
+    #[test]
+    fn segment_arrow_true_arrowhead_opacity_matches_shaft_constant_opacity() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64])),
+            Arc::new(Float64Array::from(vec![0.0_f64])),
+            Arc::new(Float64Array::from(vec![10.0_f64])),
+            Arc::new(Float64Array::from(vec![5.0_f64])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec {
+            arrow: Some(true),
+            arrow_size: Some(6.0),
+            opacity: Some(0.4),
+            ..Default::default()
+        };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Segment).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).unwrap();
+
+        let shaft = result.nodes.iter().find_map(|n| match n {
+            ferrum_scene::SceneNode::Line { style, .. } => Some((style.opacity, style.stroke_opacity)),
+            _ => None,
+        }).expect("shaft Line must be present");
+        let head_style = result.nodes.iter().find_map(|n| match n {
+            ferrum_scene::SceneNode::Path { style, .. } => Some(style.clone()),
+            _ => None,
+        }).expect("arrowhead Path must be present");
+
+        assert_eq!(shaft.0, 0.4, "test sanity: shaft opacity must be the overridden 0.4, not the 1.0 default");
+        assert_eq!(
+            head_style.opacity, shaft.0,
+            "arrowhead opacity must match the shaft's resolved opacity ({}), not a fixed 1.0; got {}",
+            shaft.0, head_style.opacity,
+        );
+        assert_eq!(
+            head_style.stroke_opacity, shaft.1,
+            "arrowhead stroke_opacity must match the shaft's resolved stroke_opacity"
         );
     }
 }

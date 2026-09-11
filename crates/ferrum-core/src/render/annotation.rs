@@ -5,13 +5,13 @@
 //! coordinates) or directly against the pixel/normalized plot-area extent.
 
 use ferrum_scene::{
-    Color, FillStroke, FontWeight, PathCmd, RawAnchor, SceneNode, StrokeStyle, TextAnchor,
-    TextBaseline, TextStyle,
+    Color, FillStroke, FontWeight, RawAnchor, SceneNode, StrokeStyle, TextAnchor, TextBaseline,
+    TextStyle,
 };
 use serde::Deserialize;
 
 use super::color::parse_color as parse_color_str;
-use super::draw::to_scene_color;
+use super::draw::{arrowhead_path, arrowhead_triangle, to_scene_color};
 use super::scale_resolve::ScaleKind;
 use crate::layout::geometry::Rect;
 
@@ -617,53 +617,12 @@ fn emit_arrow(
         },
     });
 
-    // Arrowhead: a small triangle at (x2, y2) pointing in the direction of travel.
-    if head_size > 0.0 {
-        let dx = x2 - x1;
-        let dy = y2 - y1;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len > 0.0 {
-            let ux = dx / len;
-            let uy = dy / len;
-            let px = -uy;
-            let py = ux;
-            // Clamp head_size to the shaft length so an epsilon-length arrow
-            // does not produce an arrowhead that vastly overshoots the start point.
-            let head_size = head_size.min(len);
-            let half = head_size * 0.5;
-            let tip_x = x2;
-            let tip_y = y2;
-            let left_x = x2 - ux * head_size + px * half;
-            let left_y = y2 - uy * head_size + py * half;
-            let right_x = x2 - ux * head_size - px * half;
-            let right_y = y2 - uy * head_size - py * half;
-
-            out.push(SceneNode::Path {
-                commands: vec![
-                    PathCmd::MoveTo { x: tip_x, y: tip_y },
-                    PathCmd::LineTo {
-                        x: left_x,
-                        y: left_y,
-                    },
-                    PathCmd::LineTo {
-                        x: right_x,
-                        y: right_y,
-                    },
-                    PathCmd::Close,
-                ],
-                style: FillStroke {
-                    fill: Some(color),
-                    stroke: None,
-                    stroke_width: 0.0,
-                    opacity: 1.0,
-                    stroke_dash: None,
-                    stroke_opacity: 1.0,
-                    fill_opacity: 1.0,
-                    angle: 0.0,
-                },
-                closed: true,
-            });
-        }
+    // Arrowhead: a small filled triangle at (x2, y2) pointing in the
+    // direction of travel. Geometry lives in `draw::arrowhead_triangle` —
+    // shared with `marks::segment::build`'s `arrow=true` path (spec §4 H1) —
+    // so this stays byte-identical to the pre-extraction inline math.
+    if let Some(points) = arrowhead_triangle(x1, y1, x2, y2, head_size) {
+        out.push(arrowhead_path(points, color));
     }
 }
 
@@ -949,6 +908,11 @@ mod tests {
     use super::*;
     use crate::render::scale_resolve::ScaleKind;
     use crate::scale::linear::LinearScale;
+    // Batch H Task 1 fix: `PathCmd` is only referenced by test assertions
+    // (production code now goes through `draw::arrowhead_path`, which builds
+    // its own `PathCmd` variants internally) — scoped here rather than at
+    // module scope so a module-wide `use` doesn't go stale/unused again.
+    use ferrum_scene::PathCmd;
 
     /// Create a simple linear scale context for testing.
     /// Domain [0, 100], x pixel range [50, 550], y pixel range [20, 320].
@@ -1428,6 +1392,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Batch H Task 1: `emit_arrow`'s arrowhead Path must carry EXACTLY the
+    /// vertices `draw::arrowhead_triangle` computes for the same
+    /// endpoints/head_size — proving the annotation path and
+    /// `marks::segment::build`'s new `arrow=true` path (segment.rs) share one
+    /// geometry function rather than two independently-typed copies that
+    /// could silently drift. Fails to compile against the pre-extraction
+    /// surface: `draw::arrowhead_triangle` did not exist before this task.
+    #[test]
+    fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
+        let (x1, y1, x2, y2, head_size) = (10.0, 20.0, 130.0, 65.0, 8.0);
+        let mut out = Vec::new();
+        emit_arrow(x1, y1, x2, y2, "#123456", 1.0, head_size, &mut out);
+        let SceneNode::Path { commands, .. } = &out[1] else {
+            panic!("expected arrowhead Path node");
+        };
+        let emitted: Vec<(f64, f64)> = commands
+            .iter()
+            .filter_map(|c| match c {
+                PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+
+        let expected = arrowhead_triangle(x1, y1, x2, y2, head_size)
+            .expect("non-degenerate segment must yield a triangle");
+
+        assert_eq!(
+            emitted,
+            vec![expected[0], expected[1], expected[2]],
+            "emit_arrow's triangle vertices must equal arrowhead_triangle's output exactly"
+        );
     }
 
     /// R1 port: an unrecognized bracket `direction` defaults to "up" (matching

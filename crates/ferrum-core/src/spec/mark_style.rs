@@ -136,6 +136,23 @@ pub struct MarkKwargsSpec {
     /// does not change and was never meant to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zero: Option<bool>,
+    // ── Batch H Task 1: arrow / arrow_size (segment) ─────────────────────────
+    /// When `true`, `mark_segment` draws a filled triangle arrowhead at each
+    /// segment's `(x2, y2)` end, colored by the segment's resolved stroke and
+    /// sized by `arrow_size` (spec §4 H1, `ferrum-spec.md:690`). `None`/unset
+    /// resolves to `false` at `render::draw::resolve_mark_style` — byte-stable,
+    /// matching every segment rendered before this field existed. The
+    /// triangle geometry is shared with `annotate_arrow`'s unlabelled overlay
+    /// path (`render::draw::arrowhead_triangle`), extracted from
+    /// `render::annotation::emit_arrow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrow: Option<bool>,
+    /// Arrowhead size in pixels when `arrow=true`. `None`/unset resolves to
+    /// `8.0` — the same default `annotate_arrow`'s unlabelled overlay uses —
+    /// at the draw site, clamped to the segment's own pixel length so a very
+    /// short segment cannot produce a head that overshoots its start point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrow_size: Option<f64>,
 }
 
 impl MarkKwargsSpec {
@@ -279,5 +296,40 @@ mod tests {
         let m: MarkKwargsSpec = serde_json::from_str(json).unwrap();
         assert_eq!(m.zero, None);
         assert_eq!(m.size, Some(50.0));
+    }
+
+    // ── Batch H Task 1: arrow / arrow_size (segment) ─────────────────────────
+
+    #[test]
+    fn mark_kwargs_default_arrow_fields_are_none_and_omitted() {
+        // Covered by `mark_kwargs_default_omits_all_fields` too, but this
+        // pins the specific fields so a future refactor of that test can't
+        // silently stop covering them.
+        let m = MarkKwargsSpec::default();
+        assert_eq!(m.arrow, None);
+        assert_eq!(m.arrow_size, None);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("arrow"), "unset arrow/arrow_size must be omitted: {json}");
+    }
+
+    #[test]
+    fn mark_kwargs_round_trip_with_arrow_true_and_size() {
+        let m = MarkKwargsSpec { arrow: Some(true), arrow_size: Some(12.0), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"arrow":true,"arrow_size":12.0}"#);
+        let parsed: MarkKwargsSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn mark_kwargs_pre_existing_layer_json_without_arrow_keys_deserializes_default() {
+        // Same wire back-compat guarantee as `zero`: a `mark_style` dict from
+        // before this field existed must deserialize to `arrow: None`,
+        // `arrow_size: None`, not an error and not spurious `Some(_)`.
+        let json = r##"{"stroke":"#ff0000"}"##;
+        let m: MarkKwargsSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(m.arrow, None);
+        assert_eq!(m.arrow_size, None);
+        assert_eq!(m.stroke.as_deref(), Some("#ff0000"));
     }
 }
