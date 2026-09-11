@@ -90,6 +90,7 @@ from ferrum.selection import ConditionalSpec
 
 from ferrum.composition import (
     _expand_layers,
+    _is_chart_or_composite,
     _merge_top_transforms,
     _promote_layer_color,
     _validate_share_modes,
@@ -1914,7 +1915,13 @@ class Chart(
         >>> right = fm.Chart(df).mark_bar().encode(x="x", y="y")
         >>> left | right
         HConcatChart(n=2)
+
+        Returns ``NotImplemented`` for a non-chart *other* (batch H, H17) so
+        ``chart | 3`` raises Python's own operator ``TypeError`` rather than
+        constructing an ``HConcatChart`` around an invalid child.
         """
+        if not _is_chart_or_composite(other):
+            return NotImplemented
         from ferrum.composition import HConcatChart
 
         return HConcatChart([self, other])
@@ -1945,7 +1952,13 @@ class Chart(
         >>> bottom = fm.Chart(df).mark_bar().encode(x="x", y="y")
         >>> top & bottom
         VConcatChart(n=2)
+
+        Returns ``NotImplemented`` for a non-chart *other* (batch H, H17) so
+        ``chart & 3`` raises Python's own operator ``TypeError`` rather than
+        constructing a ``VConcatChart`` around an invalid child.
         """
+        if not _is_chart_or_composite(other):
+            return NotImplemented
         from ferrum.composition import VConcatChart
 
         return VConcatChart([self, other])
@@ -2849,6 +2862,37 @@ class Chart(
         'point'
         """
         return json.loads(self.to_json())
+
+    def pipe(self, fn, *args, **kwargs) -> Any:
+        """Apply *fn* to this chart and return its result.
+
+        Equivalent to ``fn(self, *args, **kwargs)`` -- lets a chart
+        participate in a fluent pipeline (e.g. a third-party post-processing
+        function) without breaking method chaining (ferrum-spec §3.16,
+        batch H F-L14-02).
+
+        Parameters
+        ----------
+        fn : Callable[..., Any]
+            Function to apply; receives this chart as its first argument.
+        *args, **kwargs
+            Additional arguments forwarded to *fn*.
+
+        Returns
+        -------
+        Any
+            Whatever *fn* returns.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1], "y": [2]})
+        >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
+        >>> chart.pipe(lambda c: type(c).__name__)
+        'Chart'
+        """
+        return fn(self, *args, **kwargs)
 
     # ---- Selections / interactivity (spec §3.10) ----
 

@@ -7,7 +7,7 @@ import json as _json
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
@@ -18,10 +18,70 @@ _SHARE_MODES = ("shared", "independent")
 
 
 def _embed_chart_spec(c) -> Optional[dict]:
-    """Convert a Chart's ``.to_spec()`` output to an embedded JSON dict."""
-    if c is None or not hasattr(c, "to_spec"):
+    """Embed a composite child as a declaration dict (ferrum-spec §3.16 ``to_dict``).
+
+    ``None`` (an absent optional slot such as a marginal or dendrogram)
+    stays ``None``. A nested composition (any :class:`_ChartLike` instance)
+    embeds *recursively* via its own :meth:`_ChartLike.to_dict` -- a
+    composite-of-composites round-trips through the whole tree, not just one
+    level (batch H, F-L14-01: the pre-fix version returned ``None`` for a
+    nested composite, discarding it). A leaf ``Chart`` embeds as its
+    ``ChartSpec`` JSON dict (round-trippable through ``ChartSpec.from_json``).
+    Anything else (no ``to_spec``, not a composition) returns ``None`` --
+    this is the introspection dict, not construction-time validation (see
+    :func:`_validate_composite_children` for that).
+
+    This is the single embedding helper shared by every composite's
+    ``to_dict()`` *and* by the pre-existing ``JointChart.spec`` /
+    ``RepeatChart.spec`` / ``ClusterMapChart.spec`` properties, so both
+    surfaces stay recursive-consistent by construction.
+    """
+    if c is None:
+        return None
+    if isinstance(c, _ChartLike):
+        return c.to_dict()
+    if not hasattr(c, "to_spec"):
         return None
     return _json.loads(c.to_spec().to_json())
+
+
+def _is_chart_or_composite(obj) -> bool:
+    """Return True when *obj* is a valid composition operand or child.
+
+    A plain ``Chart`` (including one already merged via ``+``) is
+    duck-typed via ``_render_inputs`` -- the same test :func:`_is_leaf_chart`
+    uses to identify a leaf.  Any composition wrapper (``HConcatChart``,
+    ``VConcatChart``, ``ConcatChart``, ``LayerChart``, ``JointChart``,
+    ``RepeatChart``, ``ClusterMapChart``) is an instance of
+    :class:`_ChartLike`.  Shared by the composite constructors'
+    construction-time child validation and by ``__or__``/``__and__`` on both
+    ``Chart`` and ``_ChartLike`` (batch H, H17).
+    """
+    return isinstance(obj, _ChartLike) or hasattr(obj, "_render_inputs")
+
+
+def _validate_composite_children(children, cls_name: str) -> None:
+    """Raise ``TypeError`` if any of *children* is not a Chart or composition object.
+
+    Construction-time backstop for composite constructors (batch H, H17,
+    F-L06-04) -- replaces the previous silent construction followed by a
+    late, vague ``ValueError: unrecognized node kind '...'`` from
+    :func:`_lower_any` at render time.  *children* is exactly the sequence
+    to check -- ``None`` is **not** special-cased here, so a required slot
+    (e.g. ``JointChart.center``) that receives ``None`` raises just like any
+    other non-Chart, non-composition value.  A caller with a genuinely
+    optional slot (``JointChart.top``/``.right``, ``RepeatChart.diagonal``,
+    ``ClusterMapChart.row_dendrogram``/``.col_dendrogram``) filters that
+    slot's ``None`` out of *children* itself before calling, rather than
+    this helper silently exempting every ``None`` regardless of which
+    parameter it came from.
+    """
+    for child in children:
+        if not _is_chart_or_composite(child):
+            raise TypeError(
+                f"{cls_name} children must be Chart or composition objects, "
+                f"got {type(child).__name__}"
+            )
 
 
 def _copy_configure_layers(src: "_ChartLike", dst: "_ChartLike") -> None:
@@ -1226,10 +1286,53 @@ class _ChartLike(ConfigureMixin):
     def to_svg(self) -> str:  # pragma: no cover - abstract
         raise NotImplementedError(f"{type(self).__name__} must implement to_svg")
 
+    def to_dict(self) -> dict:  # pragma: no cover - abstract
+        """Return a recursive declaration dict (ferrum-spec §3.16 ``to_dict`` contract).
+
+        Subclasses must implement this -- see :func:`_embed_chart_spec` for
+        the shared child-embedding rule every composite follows.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement to_dict")
+
+    def to_json(self, *, indent: Optional[int] = None) -> str:
+        """Return this composition's declaration as a JSON string.
+
+        ``json.dumps`` of :meth:`to_dict`, mirroring ``Chart.to_json``'s
+        ``indent=`` surface: compact single-line JSON by default, pretty-
+        printed when *indent* is given (ferrum-spec §3.16, batch H F-L14-01).
+        """
+        return _json.dumps(self.to_dict(), indent=indent)
+
+    def pipe(self, fn, *args, **kwargs) -> Any:
+        """Apply *fn* to this composition and return its result.
+
+        Equivalent to ``fn(self, *args, **kwargs)`` -- lets a composition
+        participate in a fluent pipeline without breaking method chaining
+        (ferrum-spec §3.16, batch H F-L14-02).
+
+        Parameters
+        ----------
+        fn : Callable[..., Any]
+            Function to apply; receives this composition as its first
+            argument.
+        *args, **kwargs
+            Additional arguments forwarded to *fn*.
+
+        Returns
+        -------
+        Any
+            Whatever *fn* returns.
+        """
+        return fn(self, *args, **kwargs)
+
     def __or__(self, other):
+        if not _is_chart_or_composite(other):
+            return NotImplemented
         return HConcatChart([self, other])
 
     def __and__(self, other):
+        if not _is_chart_or_composite(other):
+            return NotImplemented
         return VConcatChart([self, other])
 
     def interactive(self, *, toolbar: bool = True):
@@ -1678,6 +1781,7 @@ class _CompositeBase(_ChartLike):
         resolve: ResolveArg = None,
     ) -> None:
         _validate_resolve(resolve, type(self).__name__)
+        _validate_composite_children(charts, type(self).__name__)
         self.charts = list(charts)
         self.spacing = spacing
         self._resolve = resolve
@@ -1805,6 +1909,26 @@ class _CompositeBase(_ChartLike):
         composite class.
         """
         return {}
+
+    def to_dict(self) -> dict:
+        """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
+
+        ``{"kind": <layout>, "children": [...], "spacing": ..., "resolve": ...}``
+        -- the linear-layout shape shared by HConcat/VConcat/ConcatChart
+        (``<layout>`` is the wire ``_composite_layout`` string:
+        ``"hconcat"``/``"vconcat"``/``"wrap"``). Each child embeds via
+        :func:`_embed_chart_spec`: a leaf ``Chart`` as its ``ChartSpec`` JSON
+        dict (round-trippable through ``ChartSpec.from_json``), a nested
+        composite recursively via its own ``to_dict()``.
+        :class:`ConcatChart` extends this shape with its ``columns`` field
+        (see its own ``to_dict`` override).
+        """
+        return {
+            "kind": self._composite_layout,
+            "children": [_embed_chart_spec(c) for c in self.charts],
+            "spacing": self.spacing,
+            "resolve": _resolve_wire_dict(getattr(self, "_resolve", None)),
+        }
 
     def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         new = type(self)(
@@ -1971,6 +2095,12 @@ class JointChart(_CompositeBase):
     ) -> None:
         if ratio <= 0:
             raise ValueError(f"ratio must be > 0; got {ratio}")
+        # center is required (None there is invalid, like any other bad
+        # type); top/right are genuinely optional slots, so their None is
+        # filtered out here rather than reaching _validate_composite_children.
+        _validate_composite_children(
+            [center, *(c for c in (top, right) if c is not None)], "JointChart"
+        )
         self.center = center
         self.top = top
         self.right = right
@@ -1998,9 +2128,15 @@ class JointChart(_CompositeBase):
 
     @property
     def spec(self) -> dict:
-        """Dict : Serializable layout introspection (ferrum-spec §3.12 contract).
+        """Dict : Serializable layout introspection (ferrum-spec §3.12/§3.16 contract).
 
-        Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
+        A leaf ``Chart`` child (``center``/``top``/``right``) embeds as its
+        ``ChartSpec`` JSON dict, round-trippable through
+        ``ChartSpec.from_json``; a nested composite child embeds
+        *recursively* via its own ``to_dict()`` instead of ``None`` (batch H,
+        F-L14-01) -- both through the one shared :func:`_embed_chart_spec`
+        helper, so this property is always recursive-consistent with
+        :meth:`to_dict`, which just returns this same dict. Purely an
         introspection/serialization surface — rendering goes through the
         composite spec tree (``_composite_tree``), not this dict.
         """
@@ -2019,6 +2155,16 @@ class JointChart(_CompositeBase):
             "spacing": self.spacing,
             "share": {"x": share_x, "y": share_y},
         }
+
+    def to_dict(self) -> dict:
+        """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
+
+        Identical to :attr:`spec` -- :attr:`spec` already returns the
+        recursive shape :meth:`_ChartLike.to_dict` promises (see
+        :func:`_embed_chart_spec`); ``to_dict`` is the generalized name
+        every composition view now carries.
+        """
+        return self.spec
 
     def _forward_child_properties(self, kwargs: dict) -> "JointChart":
         """Route non-chrome ``properties`` kwargs to the center chart only.
@@ -2301,6 +2447,11 @@ class RepeatChart(_CompositeBase):
         if columns is not None and columns <= 0:
             raise ValueError(f"RepeatChart: columns must be > 0; got {columns}")
         _validate_resolve(resolve, "RepeatChart")
+        # template is required; diagonal is a genuinely optional slot, so its
+        # None is filtered out here rather than reaching the validator.
+        _validate_composite_children(
+            [template, *([diagonal] if diagonal is not None else [])], "RepeatChart"
+        )
         self.template = template
         self.row = list(row) if row is not None else None
         self.column = list(column) if column is not None else None
@@ -2333,11 +2484,16 @@ class RepeatChart(_CompositeBase):
 
     @property
     def spec(self) -> dict:
-        """Dict : Serializable layout introspection (ferrum-spec §3.12 contract).
+        """Dict : Serializable layout introspection (ferrum-spec §3.12/§3.16 contract).
 
-        Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
-        introspection/serialization surface — rendering goes through the
-        composite spec tree (``_composite_tree``), not this dict.
+        ``template``/``diagonal`` embed via :func:`_embed_chart_spec`: a leaf
+        ``Chart`` as its ``ChartSpec`` JSON dict (round-trippable through
+        ``ChartSpec.from_json``), a nested composite recursively via its own
+        ``to_dict()`` (batch H, F-L14-01) -- so this property stays
+        recursive-consistent with :meth:`to_dict`, which just returns this
+        same dict. Purely an introspection/serialization surface —
+        rendering goes through the composite spec tree (``_composite_tree``),
+        not this dict.
         """
         return {
             "kind": "repeat",
@@ -2351,6 +2507,14 @@ class RepeatChart(_CompositeBase):
             "resolve": _resolve_wire_dict(self.resolve),
             "spacing": self.spacing,
         }
+
+    def to_dict(self) -> dict:
+        """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
+
+        Identical to :attr:`spec` -- see :class:`JointChart`'s ``to_dict``
+        for the rationale.
+        """
+        return self.spec
 
     def expand(self) -> list:
         """Materialize the template into fully-resolved chart panels.
@@ -2721,6 +2885,12 @@ class ClusterMapChart(_CompositeBase):
     ) -> None:
         if not (0.0 < dendrogram_ratio < 1.0):
             raise ValueError(f"dendrogram_ratio must be in (0, 1); got {dendrogram_ratio}")
+        # heatmap is required; the dendrograms are genuinely optional slots,
+        # so their None is filtered out here rather than reaching the validator.
+        _validate_composite_children(
+            [heatmap, *(c for c in (row_dendrogram, col_dendrogram) if c is not None)],
+            "ClusterMapChart",
+        )
         self.heatmap = heatmap
         self.row_dendrogram = row_dendrogram
         self.col_dendrogram = col_dendrogram
@@ -2739,11 +2909,16 @@ class ClusterMapChart(_CompositeBase):
 
     @property
     def spec(self) -> dict:
-        """Dict : Serializable layout introspection (ferrum-spec §3.12 contract).
+        """Dict : Serializable layout introspection (ferrum-spec §3.12/§3.16 contract).
 
-        Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
-        introspection/serialization surface — rendering goes through the
-        composite spec tree (``_composite_tree``), not this dict.
+        ``heatmap``/``row_dendrogram``/``col_dendrogram`` embed via
+        :func:`_embed_chart_spec`: a leaf ``Chart`` as its ``ChartSpec`` JSON
+        dict (round-trippable through ``ChartSpec.from_json``), a nested
+        composite recursively via its own ``to_dict()`` (batch H, F-L14-01)
+        -- so this property stays recursive-consistent with :meth:`to_dict`,
+        which just returns this same dict. Purely an introspection/
+        serialization surface — rendering goes through the composite spec
+        tree (``_composite_tree``), not this dict.
         """
         return {
             "kind": "cluster_map",
@@ -2753,6 +2928,14 @@ class ClusterMapChart(_CompositeBase):
             "dendrogram_ratio": self.dendrogram_ratio,
             "spacing": self.spacing,
         }
+
+    def to_dict(self) -> dict:
+        """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
+
+        Identical to :attr:`spec` -- see :class:`JointChart`'s ``to_dict``
+        for the rationale.
+        """
+        return self.spec
 
     def _forward_child_properties(self, kwargs: dict) -> "ClusterMapChart":
         """Route non-chrome ``properties`` kwargs to the heatmap chart only.
@@ -3038,6 +3221,7 @@ class LayerChart(_ChartLike):
             raise ValueError("LayerChart requires at least one chart")
         _validate_resolve(resolve, "LayerChart")
         _validate_layer_resolve(resolve)
+        _validate_composite_children(charts, "LayerChart")
         self._charts = list(charts)
         self._resolve = resolve
         self._title = title
@@ -3054,6 +3238,24 @@ class LayerChart(_ChartLike):
     def charts(self) -> list:
         """List of Chart : All member charts in layer order (bottom to top)."""
         return list(self._charts)
+
+    def to_dict(self) -> dict:
+        """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
+
+        ``{"kind": "overlay", "children": [...], "resolve": ..., "title": ...}``.
+        Each layer embeds via :func:`_embed_chart_spec`: a leaf ``Chart`` as
+        its ``ChartSpec`` JSON dict (round-trippable through
+        ``ChartSpec.from_json``), a nested composite recursively via its own
+        ``to_dict()``. Layer members are ordinarily plain leaf charts (render
+        time further restricts this in :meth:`_composite_tree`), but this
+        introspection dict embeds whatever was actually constructed.
+        """
+        return {
+            "kind": "overlay",
+            "children": [_embed_chart_spec(c) for c in self._charts],
+            "resolve": _resolve_wire_dict(self._resolve),
+            "title": self._title,
+        }
 
     def _composite_tree(self, *, auto_tooltips: bool, is_root: bool = True) -> _LoweredTree:
         """Lower this overlay to a composite overlay tree.
@@ -3469,6 +3671,18 @@ class ConcatChart(_CompositeBase):
     def _composite_node_fields(self) -> dict:
         """Emit the ``wrap`` layout's ``ncols`` for the composite render-tree."""
         return {"ncols": self._wrap_ncols()}
+
+    def to_dict(self) -> dict:
+        """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
+
+        Extends :meth:`_CompositeBase.to_dict`'s linear-layout shape with
+        the user-facing ``columns`` field (``None`` when unset, unlike
+        :meth:`_composite_node_fields`'s already-resolved ``ncols`` used at
+        render time).
+        """
+        out = super().to_dict()
+        out["columns"] = self._columns
+        return out
 
     def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         new = ConcatChart(
