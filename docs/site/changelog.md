@@ -4,6 +4,12 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
+*No unreleased changes.*
+
+## 0.23.0 — 2026-09-11
+
+Three api-contract-audit remediation batches land at once: the figure-helpers batch ([#202](https://github.com/chris-santiago/ferrum/issues/202) — catplot's estimating kinds aggregate for real over seeded-bootstrap CIs, `native_scale=` works both ways, the lmplot/regplot family stops corrupting its own scatter, displot's KDE overlay scales and colors correctly, clustermap dendrograms stop blanking), the diagnostics-correctness batch ([#225](https://github.com/chris-santiago/ferrum/issues/225) — every metric number a diagnostic chart displays now comes from one source of truth: stable-sort AUC/AP, per-sample Brier everywhere, real class names, binary targets outside `{0, 1}` finally computed correctly, string-labeled confusion matrices un-zeroed), and the annotations-interactivity batch ([#246](https://github.com/chris-santiago/ferrum/issues/246) — segment arrows and `annotate_arrow` heads become real, the full `BreakAxis` clipping/placement/suppression contract ships, `Inset` validates and honors `px()`, `Parameter.ref()` and channel `condition=` reach real pipelines under one typed vocabulary, and every composition view learns `to_dict()`/`to_json()`/`pipe()` with lossless figure chrome). Silent parameter drops die loudly throughout; the per-batch sections below carry the full contracts.
+
 Batch F closes eight open api-contract-audit findings (F-L09-01/02/03/04/08/10, F-L10-04/09) plus the F-L10-01 layer-render-robustness rider surfaced along the way. Silent parameter drops in the figure-level helpers die loudly throughout.
 
 ### Added

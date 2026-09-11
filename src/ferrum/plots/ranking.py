@@ -962,8 +962,7 @@ def _decision_boundary_chart_from_source(
 
     if source.X is None:
         raise ValueError(
-            "decision_boundary_chart() requires the training data: "
-            "ModelSource(model, X)."
+            "decision_boundary_chart() requires the training data: ModelSource(model, X)."
         )
     feat_idx = _resolve_decision_boundary_features(source, features)
     grid_info = _build_decision_boundary_grid(

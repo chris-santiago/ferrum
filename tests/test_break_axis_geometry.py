@@ -487,12 +487,8 @@ def test_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
 
     assert "inside the break" not in svg, "the suppressed label must not render"
     messages = [str(w.message) for w in caught]
-    matches = [
-        m for m in messages if "break" in m.lower() and "y=500" in m and "(150, 850)" in m
-    ]
-    assert matches, (
-        f"expected a warning naming the annotation's axis/value/gap; got {messages}"
-    )
+    matches = [m for m in messages if "break" in m.lower() and "y=500" in m and "(150, 850)" in m]
+    assert matches, f"expected a warning naming the annotation's axis/value/gap; got {messages}"
 
 
 def test_boundary_value_annotation_is_not_suppressed():
@@ -722,9 +718,7 @@ def test_two_same_axis_breaks_fold_annotations_and_marks_to_the_same_position():
 
     horiz_line_ys = {
         float(m.group(1))
-        for m in re.finditer(
-            r'<line x1="-?[\d.]+" y1="(-?[\d.]+)" x2="-?[\d.]+" y2="\1"', svg
-        )
+        for m in re.finditer(r'<line x1="-?[\d.]+" y1="(-?[\d.]+)" x2="-?[\d.]+" y2="\1"', svg)
     }
     assert any(abs(y450_cy - ly) < 1e-6 for ly in horiz_line_ys), (
         f"the annotation must land at the mark's FULLY-FOLDED position {y450_cy} "
@@ -736,9 +730,7 @@ def test_x_axis_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
     """The x-axis mirror of the y-axis suppression pin (finding #3): every
     pin so far was y-only, leaving the `find(axis == "x")` wiring unpinned.
     """
-    df = pl.DataFrame(
-        {"x": [10.0, 20.0, 30.0, 900.0, 50.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
-    )
+    df = pl.DataFrame({"x": [10.0, 20.0, 30.0, 900.0, 50.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
     chart = (
         fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
         + fm.BreakAxis(axis="x", gap=(150, 850))
@@ -750,12 +742,8 @@ def test_x_axis_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
 
     assert "inside the break" not in svg, "the suppressed label must not render"
     messages = [str(w.message) for w in caught]
-    matches = [
-        m for m in messages if "break" in m.lower() and "x=500" in m and "(150, 850)" in m
-    ]
-    assert matches, (
-        f"expected a warning naming the annotation's axis/value/gap; got {messages}"
-    )
+    matches = [m for m in messages if "break" in m.lower() and "x=500" in m and "(150, 850)" in m]
+    assert matches, f"expected a warning naming the annotation's axis/value/gap; got {messages}"
 
 
 def _vert_line_xs(svg: str) -> collections.Counter:
@@ -767,8 +755,7 @@ def _vert_line_xs(svg: str) -> collections.Counter:
     added at all."
     """
     return collections.Counter(
-        float(m.group(1))
-        for m in re.finditer(r'<line x1="(-?[\d.]+)" y1="-?[\d.]+" x2="\1"', svg)
+        float(m.group(1)) for m in re.finditer(r'<line x1="(-?[\d.]+)" y1="-?[\d.]+" x2="\1"', svg)
     )
 
 
@@ -880,9 +867,7 @@ def test_out_of_domain_annotation_clamps_to_the_correct_edge_under_a_break():
         # line — a set-difference would miss it if it coincides with an
         # existing gridline's y (see `_horiz_line_ys`'s docstring).
         added = [
-            y
-            for y in counts_with
-            if _count_at(counts_with, y) == _count_at(counts_without, y) + 1
+            y for y in counts_with if _count_at(counts_with, y) == _count_at(counts_without, y) + 1
         ]
         assert len(added) == 1, (
             f"expected exactly one horizontal line whose count grew by one "

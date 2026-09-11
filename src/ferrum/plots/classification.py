@@ -523,10 +523,7 @@ def _gain_chart_from_source(
         # a hardcoded "0"/"1" -> "Class 0"/"Class 1" map clobbered real
         # string class names and left a 3rd class as a bare digit).
         df = df.with_columns(
-            pl.col(color_field)
-            .cast(pl.Utf8)
-            .replace({"baseline": "Baseline"})
-            .alias(color_field)
+            pl.col(color_field).cast(pl.Utf8).replace({"baseline": "Baseline"}).alias(color_field)
         )
     chart = ferrum.Chart(df)
     if color_field is not None:
@@ -576,10 +573,7 @@ def _lift_chart_from_source(
         # synthetic baseline row is renamed for display, real class
         # values keep the source's resolved names (F-L11-08).
         df = df.with_columns(
-            pl.col(color_field)
-            .cast(pl.Utf8)
-            .replace({"baseline": "Baseline"})
-            .alias(color_field)
+            pl.col(color_field).cast(pl.Utf8).replace({"baseline": "Baseline"}).alias(color_field)
         )
     chart = ferrum.Chart(df)
     if color_field is not None:

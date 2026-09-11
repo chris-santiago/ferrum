@@ -174,9 +174,7 @@ def test_rank1d_chart_covariance_raw_dataframe_null_y_matches_model_source():
     from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
 
     raw_df = rank1d_compute_with_y(df, y_null, algorithm="covariance").sort("feature")
-    model_df = ferrum.ModelSource(model, df, y_null).rank1d(algorithm="covariance").sort(
-        "feature"
-    )
+    model_df = ferrum.ModelSource(model, df, y_null).rank1d(algorithm="covariance").sort("feature")
     assert not raw_df["score"].is_nan().any()
     assert raw_df["score"].to_list() == pytest.approx(model_df["score"].to_list())
 
@@ -271,9 +269,7 @@ def test_rank1d_chart_covariance_fitted_estimator_with_x_matches_model_source_pa
     model = load_fixture("regression_ridge")
 
     chart = ferrum.rank1d_chart(model, df, y, algorithm="covariance")
-    via_model_source = ferrum.rank1d_chart(
-        ferrum.ModelSource(model, df, y), algorithm="covariance"
-    )
+    via_model_source = ferrum.rank1d_chart(ferrum.ModelSource(model, df, y), algorithm="covariance")
     assert chart.to_svg() == via_model_source.to_svg()
 
 

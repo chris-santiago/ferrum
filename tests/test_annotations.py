@@ -254,8 +254,8 @@ def test_mark_segment_accepts_arrow_kwargs():
     through, and the rendered SVG must contain a filled triangle `<path>`
     (the arrowhead) in addition to the shaft `<line>`."""
     df = pl.DataFrame({"x1": [0.0], "y1": [0.0], "x2": [1.0], "y2": [1.0]})
-    chart = Chart(df).mark_segment(arrow=True, arrow_size=8).encode(
-        x="x1", y="y1", x2="x2", y2="y2"
+    chart = (
+        Chart(df).mark_segment(arrow=True, arrow_size=8).encode(x="x1", y="y1", x2="x2", y2="y2")
     )
     assert chart._mark_kwargs.get("arrow") is True
     assert chart._mark_kwargs.get("arrow_size") == 8

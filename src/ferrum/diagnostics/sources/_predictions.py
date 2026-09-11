@@ -110,7 +110,9 @@ class PredictionsMixin(_MixinBase):
         # which needs the prediction matrix width self.class_names can't
         # see on its own.
         names = self.class_names
-        classes = list(names) if names is not None else [f"class_{i}" for i in range(proba.shape[1])]
+        classes = (
+            list(names) if names is not None else [f"class_{i}" for i in range(proba.shape[1])]
+        )
 
         data: dict[str, Any] = {}
         if self._y is not None:
