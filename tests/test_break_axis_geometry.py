@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import collections
 import re
+import warnings
 
 import numpy as np
 import polars as pl
 import pytest
 
 import ferrum as fm
+import ferrum.annotation as ann
 
 
 # --------------------------------------------------------------------------
@@ -453,3 +455,400 @@ def test_break_indicator_styles_still_render_with_clipped_bars(style):
         + fm.BreakAxis(axis="y", gap=(150, 850), break_style=style)
     ).to_svg()
     assert len(_rects(svg)) == 3, "one short bar + the crossing bar's two pieces"
+
+
+# --------------------------------------------------------------------------
+# annotation suppression + remap (spec §4 H5, F-L08-07)
+# --------------------------------------------------------------------------
+#
+# The guide (docs/site/guide/concepts/break-axes.md) promises: "Annotations
+# whose positions fall within a break region are suppressed with a warning.
+# The warning names the annotation and its position." Pre-fix, the annotation
+# rendered anyway with no warning, and a SURVIVING annotation was not even
+# position-remapped through the break — it pointed at the wrong data.
+
+
+def test_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
+    """The finding's exact repro: a labelled hline inside the gap is dropped.
+
+    Pre-fix: "inside the break" rendered in the SVG and no warning fired.
+    """
+    df = pl.DataFrame(
+        {"category": ["A", "B", "C", "D", "E"], "value": [72.0, 68.0, 75.0, 900.0, 81.0]}
+    )
+    chart = (
+        fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
+        + fm.BreakAxis(axis="y", gap=(150, 850))
+        + fm.annotate_hline(y=500.0, label="inside the break")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+
+    assert "inside the break" not in svg, "the suppressed label must not render"
+    messages = [str(w.message) for w in caught]
+    matches = [
+        m for m in messages if "break" in m.lower() and "y=500" in m and "(150, 850)" in m
+    ]
+    assert matches, (
+        f"expected a warning naming the annotation's axis/value/gap; got {messages}"
+    )
+
+
+def test_boundary_value_annotation_is_not_suppressed():
+    """Gaps are open intervals: a value exactly on the gap edge survives."""
+    df = pl.DataFrame({"category": ["A", "B"], "value": [72.0, 900.0]})
+    chart = (
+        fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
+        + fm.BreakAxis(axis="y", gap=(150, 850))
+        + fm.annotate_hline(y=150.0, label="on the edge")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+
+    assert "on the edge" in svg, "a boundary value must not be suppressed"
+    assert not any("break" in str(w.message).lower() for w in caught), (
+        f"no suppression warning expected for a boundary value; got "
+        f"{[str(w.message) for w in caught]}"
+    )
+
+
+def test_span_inside_a_gap_is_suppressed():
+    """A `Span` whose range lies inside a gap suppresses (spec §4 H5's rider)."""
+    df = pl.DataFrame({"category": ["A", "B"], "value": [72.0, 900.0]})
+    chart = (
+        fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
+        + fm.BreakAxis(axis="y", gap=(150, 850))
+        + fm.Annotate(ann.span("y", 300.0, 700.0, fill="#eeeeee"))
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+
+    assert 'fill="#eeeeee"' not in svg, "the suppressed span must not render its rect"
+    messages = [str(w.message) for w in caught]
+    assert any("'span'" in m and "break" in m.lower() for m in messages), (
+        f"expected a span-kind suppression warning; got {messages}"
+    )
+
+
+def _horiz_line_ys(svg: str) -> collections.Counter:
+    """Multiset of y-values shared by a horizontal `<line>`'s two endpoints.
+
+    A `Counter`, not a `set`: the annotation's compressed position can — and,
+    in the pass cases here, DOES — land exactly on an existing gridline's y,
+    so a set-difference against the no-annotation render is always empty
+    even when the annotation is genuinely present and correctly placed.
+    Only a per-position COUNT can tell "one more line at this y" apart from
+    "no new line at all."
+    """
+    return collections.Counter(
+        float(m.group(1))
+        for m in re.finditer(r'<line x1="-?[\d.]+" y1="(-?[\d.]+)" x2="-?[\d.]+" y2="\1"', svg)
+    )
+
+
+def _count_at(counts: collections.Counter, target: float) -> int:
+    """The `Counter` entry whose key is within float noise of `target`."""
+    for key, n in counts.items():
+        if abs(key - target) < 1e-6:
+            return n
+    return 0
+
+
+def test_surviving_annotation_lands_at_the_marks_compressed_position():
+    """A surviving data-space annotation moves exactly like a mark does.
+
+    Pre-fix, a surviving annotation was never remapped at all and stayed at
+    the unbroken linear pixel. Discriminates via a per-position COUNT delta
+    against the same broken chart rendered WITHOUT the annotation
+    (quality-review cycle-3): a bare `any(mark_cy in <all horizontal
+    lines>)` membership check is vacuous here, and even a SET-difference
+    delta is — the annotation's correct, compressed position lands EXACTLY
+    on an existing gridline's y, so both shapes pass with the annotation
+    deleted entirely (the set of distinct y-values doesn't change; only the
+    COUNT at that one y-value does).
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [100.0, 900.0]})
+    brk = fm.BreakAxis(axis="y", gap=(150, 850))
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    ref = fm.annotate_hline(y=100.0)  # unlabelled: one AnnotationLine, "line" kind
+
+    broken_with = (points + ref + brk).to_svg()
+    broken_without = (points + brk).to_svg()
+    counts_with = _horiz_line_ys(broken_with)
+    counts_without = _horiz_line_ys(broken_without)
+
+    pairs = [
+        (float(m.group(1)), float(m.group(2)))
+        for m in re.finditer(r'<circle cx="(-?[\d.]+)" cy="(-?[\d.]+)"', broken_with)
+    ]
+    assert len(pairs) == 2, f"expected both point marks; got {pairs}"
+    # x=1.0 has the smaller cx on this quantitative x scale.
+    y100_cy = min(pairs, key=lambda p: p[0])[1]
+
+    assert _count_at(counts_with, y100_cy) == _count_at(counts_without, y100_cy) + 1, (
+        f"adding the annotation must add exactly one horizontal line at the "
+        f"mark's compressed position {y100_cy}; with={dict(counts_with)} "
+        f"without={dict(counts_without)}"
+    )
+
+    # Discriminate against a second pre-fix bug: without the break, the
+    # mark's own position is different (the unbroken linear position) —
+    # proving the break actually moved both the mark and the annotation.
+    plain_svg = (points + ref).to_svg()
+    plain_pairs = [
+        (float(m.group(1)), float(m.group(2)))
+        for m in re.finditer(r'<circle cx="(-?[\d.]+)" cy="(-?[\d.]+)"', plain_svg)
+    ]
+    plain_y100_cy = min(plain_pairs, key=lambda p: p[0])[1]
+    assert abs(y100_cy - plain_y100_cy) > 1.0, (
+        "the break must move the mark (and the annotation with it); "
+        f"broken={y100_cy} unbroken={plain_y100_cy}"
+    )
+
+
+def test_norm_coordinate_annotation_is_untouched_by_a_break():
+    """Norm/px annotation coordinates are plot-area-relative, never remapped."""
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [100.0, 900.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    label = fm.annotate_text(fm.norm(0.5), fm.norm(0.5), "center")
+
+    def text_pos(svg: str) -> tuple[float, float]:
+        m = re.search(r'<text x="(-?[\d.]+)" y="(-?[\d.]+)"[^>]*>center</text>', svg)
+        assert m, f"expected the annotation text in the SVG; got: {svg[:500]}"
+        return (float(m.group(1)), float(m.group(2)))
+
+    plain_pos = text_pos((chart + label).to_svg())
+    broken_pos = text_pos((chart + label + fm.BreakAxis(axis="y", gap=(150, 850))).to_svg())
+    assert plain_pos == broken_pos, (
+        f"a norm-coordinate annotation must not move under a break; "
+        f"plain={plain_pos} broken={broken_pos}"
+    )
+
+
+# --------------------------------------------------------------------------
+# cycle-2 fixes: ordinal-axis filtering, multi-break fold, x-axis parity
+# (quality-review cycle-2, .sdd/task-4-rust-quality-reviewer.md)
+# --------------------------------------------------------------------------
+
+
+def test_ordinal_axis_break_leaves_annotations_and_bars_unmoved():
+    """An ordinal axis has no continuous domain, so its `BreakAxis` is a
+    documented no-op for marks; annotations must agree (finding #1).
+
+    Pre-fix (measured by the reviewer): a categorical-x bar chart's
+    `annotate_vline` moved 123px under `BreakAxis(axis="x")` while the bars
+    stayed put, and an in-"gap" vline was silently suppressed against a
+    fabricated `(0.0, 1.0)` domain the ordinal scale never had.
+    """
+    df = pl.DataFrame({"c": ["A", "B", "C", "D", "E"], "v": [72.0, 68.0, 75.0, 90.0, 81.0]})
+    base = fm.Chart(df).mark_bar().encode(x="c:N", y="v:Q")
+    labelled = base + fm.annotate_vline(x=0.8, label="L") + fm.annotate_vline(x=0.45, label="M")
+
+    plain_svg = labelled.to_svg()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        broken_svg = (labelled + fm.BreakAxis(axis="x", gap=(0.3, 0.6))).to_svg()
+
+    assert not any("break" in str(w.message).lower() for w in caught), (
+        f"an ordinal-axis BreakAxis must not suppress annotations; got "
+        f"{[str(w.message) for w in caught]}"
+    )
+    for label in ("L", "M"):
+        assert re.search(rf'<text x="-?[\d.]+" y="-?[\d.]+"[^>]*>{label}</text>', broken_svg), (
+            f"label {label!r} must render (not suppressed) on an ordinal-axis break"
+        )
+
+    plain_bar_x = sorted(r[0] for r in _rects(plain_svg))
+    broken_bar_x = sorted(r[0] for r in _rects(broken_svg))
+    assert plain_bar_x == broken_bar_x, "bars must not move on an ordinal-axis break"
+
+    def label_x(svg: str, label: str) -> float:
+        m = re.search(rf'<text x="(-?[\d.]+)"[^>]*>{label}</text>', svg)
+        assert m, f"expected the {label!r} label; got: {svg[:500]}"
+        return float(m.group(1))
+
+    for label in ("L", "M"):
+        assert label_x(plain_svg, label) == label_x(broken_svg, label), (
+            f"the {label!r} annotation must not move on an ordinal-axis break either"
+        )
+
+
+def test_two_same_axis_breaks_fold_annotations_and_marks_to_the_same_position():
+    """Two same-axis breaks compose identically for marks and annotations
+    (finding #2).
+
+    Pre-fix (measured by the reviewer): the annotation remap took only the
+    FIRST same-axis break (`.find`) while marks folded through every one, a
+    52px divergence with no warning for `annotate_hline(y=450)` under two
+    `BreakAxis(axis="y")` gaps.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [50.0, 450.0, 900.0]})
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    ref = fm.annotate_hline(y=450.0)  # unlabelled: one AnnotationLine, "line" kind
+    chart = (
+        points
+        + ref
+        + fm.BreakAxis(axis="y", gap=(150, 400))
+        + fm.BreakAxis(axis="y", gap=(500, 850))
+    )
+    svg = chart.to_svg()
+
+    pairs = [
+        (float(m.group(1)), float(m.group(2)))
+        for m in re.finditer(r'<circle cx="(-?[\d.]+)" cy="(-?[\d.]+)"', svg)
+    ]
+    assert len(pairs) == 3, f"expected all three point marks; got {pairs}"
+    pairs.sort(key=lambda p: p[0])
+    y450_cy = pairs[1][1]  # x=2.0 is the middle cx on this quantitative x scale
+
+    horiz_line_ys = {
+        float(m.group(1))
+        for m in re.finditer(
+            r'<line x1="-?[\d.]+" y1="(-?[\d.]+)" x2="-?[\d.]+" y2="\1"', svg
+        )
+    }
+    assert any(abs(y450_cy - ly) < 1e-6 for ly in horiz_line_ys), (
+        f"the annotation must land at the mark's FULLY-FOLDED position {y450_cy} "
+        f"(both breaks applied, not just the first); got line ys {horiz_line_ys}"
+    )
+
+
+def test_x_axis_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
+    """The x-axis mirror of the y-axis suppression pin (finding #3): every
+    pin so far was y-only, leaving the `find(axis == "x")` wiring unpinned.
+    """
+    df = pl.DataFrame(
+        {"x": [10.0, 20.0, 30.0, 900.0, 50.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    )
+    chart = (
+        fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+        + fm.BreakAxis(axis="x", gap=(150, 850))
+        + fm.annotate_vline(x=500.0, label="inside the break")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+
+    assert "inside the break" not in svg, "the suppressed label must not render"
+    messages = [str(w.message) for w in caught]
+    matches = [
+        m for m in messages if "break" in m.lower() and "x=500" in m and "(150, 850)" in m
+    ]
+    assert matches, (
+        f"expected a warning naming the annotation's axis/value/gap; got {messages}"
+    )
+
+
+def _vert_line_xs(svg: str) -> collections.Counter:
+    """Multiset of x-values shared by a vertical `<line>`'s two endpoints.
+
+    A `Counter`, not a `set` — see `_horiz_line_ys`'s docstring for why: the
+    annotation's correct position can coincide exactly with an existing
+    gridline's x, which a set-difference can't distinguish from "no line
+    added at all."
+    """
+    return collections.Counter(
+        float(m.group(1))
+        for m in re.finditer(r'<line x1="(-?[\d.]+)" y1="-?[\d.]+" x2="\1"', svg)
+    )
+
+
+def test_x_axis_surviving_annotation_lands_at_the_marks_compressed_position():
+    """The x-axis mirror of the y-axis remap pin (finding #3).
+
+    Same per-position COUNT-delta discrimination as the y-axis pin above
+    (quality-review cycle-3): a vertical gridline already sits at the mark's
+    compressed x even with the annotation removed, so neither a bare
+    membership check nor a set-difference catches a missing annotation here.
+    """
+    df = pl.DataFrame({"x": [100.0, 900.0], "y": [1.0, 2.0]})
+    brk = fm.BreakAxis(axis="x", gap=(150, 850))
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    ref = fm.annotate_vline(x=100.0)  # unlabelled: one AnnotationLine, "line" kind
+
+    broken_with = (points + ref + brk).to_svg()
+    broken_without = (points + brk).to_svg()
+    counts_with = _vert_line_xs(broken_with)
+    counts_without = _vert_line_xs(broken_without)
+
+    cxs = [float(m) for m in re.findall(r'<circle cx="(-?[\d.]+)"', broken_with)]
+    assert len(cxs) == 2, f"expected both point marks; got {cxs}"
+    x100_cx = min(cxs)  # x=100 is the smaller data value on this quantitative x scale
+
+    assert _count_at(counts_with, x100_cx) == _count_at(counts_without, x100_cx) + 1, (
+        f"adding the annotation must add exactly one vertical line at the "
+        f"mark's compressed position {x100_cx}; with={dict(counts_with)} "
+        f"without={dict(counts_without)}"
+    )
+
+    # Discriminate against a second pre-fix bug: without the break, the
+    # mark's own position is different (the unbroken linear position).
+    plain_svg = (points + ref).to_svg()
+    plain_cxs = [float(m) for m in re.findall(r'<circle cx="(-?[\d.]+)"', plain_svg)]
+    plain_x100_cx = min(plain_cxs)
+    assert abs(x100_cx - plain_x100_cx) > 1.0, (
+        "the break must move the mark (and the annotation with it); "
+        f"broken={x100_cx} unbroken={plain_x100_cx}"
+    )
+
+
+def test_out_of_domain_annotation_clamps_to_the_correct_edge_under_a_break():
+    """quality-review cycle-3 (S1 follow-up to F-L08-07's `None`-arm comment
+    fix): a continuous y axis's out-of-domain fallback formula was un-flipped
+    relative to the real (SVG-down, domain-max-at-top) scale. Invisible
+    pre-fix (an out-of-domain value's naive linear position was always far
+    off-canvas either way), but a `BreakAxis`'s clamp-to-domain-edge makes it
+    VISIBLE — and on the wrong side: a value above the domain max used to
+    clamp to the plot BOTTOM instead of the TOP. Fixed in `resolve_y`'s
+    fallback; pinned here on both sides via the same delta-vs-no-annotation
+    shape as the position pins above.
+    """
+    df = pl.DataFrame(
+        {"category": ["A", "B", "C", "D", "E"], "value": [72.0, 68.0, 75.0, 900.0, 81.0]}
+    )
+    chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q") + fm.BreakAxis(
+        axis="y", gap=(150, 850)
+    )
+    without = chart.to_svg()
+    counts_without = _horiz_line_ys(without)
+
+    def hline_y(value: float) -> float:
+        with_ref = (chart + fm.annotate_hline(y=value)).to_svg()
+        counts_with = _horiz_line_ys(with_ref)
+        # The one y whose count grew by exactly one is the annotation's own
+        # line — a set-difference would miss it if it coincides with an
+        # existing gridline's y (see `_horiz_line_ys`'s docstring).
+        added = [
+            y
+            for y in counts_with
+            if _count_at(counts_with, y) == _count_at(counts_without, y) + 1
+        ]
+        assert len(added) == 1, (
+            f"expected exactly one horizontal line whose count grew by one "
+            f"for y={value}; with={dict(counts_with)} without={dict(counts_without)}"
+        )
+        return added[0]
+
+    above_max = hline_y(5000.0)  # far above the domain max (~900-ish, padded)
+    below_min = hline_y(-500.0)  # far below the domain min (0)
+
+    assert above_max < below_min, (
+        "a value ABOVE the domain max must clamp to a SMALLER pixel (nearer "
+        f"the plot top) than a value BELOW the domain min; got "
+        f"above_max={above_max} below_min={below_min}"
+    )
+
+    rects = _rects(without)
+    plot_top = min(r[1] for r in rects)
+    plot_bottom = max(r[1] + r[3] for r in rects)
+    assert plot_top - 5.0 <= above_max <= plot_top + 5.0, (
+        f"above_max={above_max} should clamp to the plot's top edge "
+        f"(plot_top={plot_top}, plot_bottom={plot_bottom})"
+    )
+    assert plot_bottom - 5.0 <= below_min <= plot_bottom + 5.0, (
+        f"below_min={below_min} should clamp to the plot's bottom edge "
+        f"(plot_top={plot_top}, plot_bottom={plot_bottom})"
+    )

@@ -639,6 +639,22 @@ pub enum RenderWarning {
     /// precedence already answers it.) `channel` is `"x"`/`"y"`/`"y2"`;
     /// `fields` names the subset the caller actually set, in schema order.
     ScaleDomainConfigOnOrdinalAxis { channel: String, fields: Vec<String> },
+    /// An annotation's data-space coordinate on a broken axis fell inside
+    /// that axis's `BreakAxis` gap (spec §4 H5, F-L08-07). The whole
+    /// annotation is dropped — not just the offending coordinate — because a
+    /// partially-suppressed annotation (a callout whose text moved but whose
+    /// leader line vanished, say) is worse than none. `kind` is the
+    /// annotation's wire `type` tag (`"text"`, `"line"`, `"span"`, …); `axis`
+    /// is `"x"` or `"y"`; `value` is the offending data value; `gap` is the
+    /// `(lo, hi)` data-space band that swallowed it. A surviving annotation
+    /// (no coordinate in any gap) is remapped through the break like marks
+    /// are, and pushes no warning.
+    AnnotationSuppressedByBreak {
+        kind: String,
+        axis: String,
+        value: f64,
+        gap: [f64; 2],
+    },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -746,6 +762,12 @@ impl std::fmt::Display for RenderWarning {
                 if fields.len() == 1 { "ies" } else { "y" },
                 if fields.len() == 1 { "it was" } else { "they were" },
             ),
+            RenderWarning::AnnotationSuppressedByBreak { kind, axis, value, gap } => write!(
+                f,
+                "annotation '{kind}' at {axis}={value} falls inside BreakAxis gap \
+                 ({}, {}); suppressed",
+                gap[0], gap[1]
+            ),
         }
     }
 }
@@ -809,6 +831,12 @@ mod tests {
             RenderWarning::ScaleDomainConfigOnOrdinalAxis {
                 channel: "x".into(),
                 fields: vec!["domain_min".into(), "nice".into()],
+            },
+            RenderWarning::AnnotationSuppressedByBreak {
+                kind: "text".into(),
+                axis: "y".into(),
+                value: 500.0,
+                gap: [150.0, 850.0],
             },
         ] {
             let json = serde_json::to_string(&w).unwrap();
@@ -874,6 +902,25 @@ mod tests {
         assert!(unknown_text.contains("zulu, yankee"), "{unknown_text}");
         assert!(unknown_text.contains("match no legend entry"), "{unknown_text}");
         assert!(!unknown_text.contains("LegendValuesUnknown"), "{unknown_text}");
+
+        // F-L08-07 (spec §4 H5): names the annotation kind, axis, offending
+        // value, and gap — the guide's promise ("names the annotation and
+        // its position").
+        let suppressed = RenderWarning::AnnotationSuppressedByBreak {
+            kind: "text".into(),
+            axis: "y".into(),
+            value: 500.0,
+            gap: [150.0, 850.0],
+        };
+        let suppressed_text = format!("{suppressed}");
+        assert!(suppressed_text.contains("'text'"), "{suppressed_text}");
+        assert!(suppressed_text.contains("y=500"), "{suppressed_text}");
+        assert!(suppressed_text.contains("(150, 850)"), "{suppressed_text}");
+        assert!(suppressed_text.contains("suppressed"), "{suppressed_text}");
+        assert!(
+            !suppressed_text.contains("AnnotationSuppressedByBreak"),
+            "{suppressed_text}"
+        );
     }
 
     /// `UnsupportedColorScaleOnMark`'s Display must not claim a legend was

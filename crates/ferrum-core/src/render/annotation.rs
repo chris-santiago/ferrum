@@ -10,6 +10,7 @@ use ferrum_scene::{
 };
 use serde::Deserialize;
 
+use super::break_axis;
 use super::color::parse_color as parse_color_str;
 use super::draw::{arrowhead_path, arrowhead_triangle, to_scene_color};
 use super::scale_resolve::ScaleKind;
@@ -230,6 +231,15 @@ pub struct ScaleContext<'a> {
     pub plot_area: Rect,
     pub x_scale: &'a ScaleKind,
     pub y_scale: &'a ScaleKind,
+    /// Every `BreakAxis` remap active on this panel, x and y mixed together —
+    /// the SAME list `scene_build`'s mark pass folds through (spec §4 H5's
+    /// "same mapping as marks" contract), already filtered to axes whose
+    /// resolved scale has a continuous `data_domain()` (an ordinal axis has
+    /// nothing to reverse-map through, so it contributes no remap there
+    /// either — see `remap_mark_batch_through_break`'s caller in
+    /// `scene_build.rs`). Empty for every chart without an active break — the
+    /// byte-identical default.
+    pub breaks: &'a [break_axis::BreakRemap<'a>],
 }
 
 impl<'a> ScaleContext<'a> {
@@ -237,8 +247,12 @@ impl<'a> ScaleContext<'a> {
     pub fn resolve_x(&self, v: &CoordValue) -> f64 {
         match v {
             CoordValue::Data(d) => {
-                self.x_scale.to_pixel_f64(*d).unwrap_or_else(|| {
-                    // Fallback: linear interpolation using data domain.
+                let base = self.x_scale.to_pixel_f64(*d).unwrap_or_else(|| {
+                    // Fallback: linear interpolation using data domain. Unlike
+                    // `resolve_y`'s fallback, this needs no flip: `axis_pixel_
+                    // range` only swaps the pixel range for the y channel
+                    // (`channel == "y"`), so a continuous x axis's domain[0]
+                    // already maps to the LEFT pixel, matching `frac` directly.
                     if let Some((lo, hi)) = self.x_scale.data_domain() {
                         let frac = if (hi - lo).abs() < f64::EPSILON {
                             0.5
@@ -250,7 +264,8 @@ impl<'a> ScaleContext<'a> {
                         // Ordinal: cannot resolve numeric data to ordinal scale; center.
                         self.plot_area.x + self.plot_area.w * 0.5
                     }
-                })
+                });
+                self.fold_breaks("x", base)
             }
             CoordValue::Pixel { px } => self.plot_area.x + px,
             CoordValue::Norm { norm } => self.plot_area.x + norm * self.plot_area.w,
@@ -265,25 +280,159 @@ impl<'a> ScaleContext<'a> {
     pub fn resolve_y(&self, v: &CoordValue) -> f64 {
         match v {
             CoordValue::Data(d) => {
-                self.y_scale.to_pixel_f64(*d).unwrap_or_else(|| {
-                    // Fallback: linear interpolation using data domain.
-                    // Scale range is [top, bottom], so frac maps top-to-bottom.
+                let base = self.y_scale.to_pixel_f64(*d).unwrap_or_else(|| {
+                    // Fallback: linear interpolation using data domain, for a
+                    // continuous y scale's OUT-OF-DOMAIN value (`to_pixel_f64`
+                    // returns `None` there by design, not only for ordinal
+                    // scales — see its doc comment).
+                    //
+                    // Every non-ordinal y axis's pixel RANGE is flipped
+                    // relative to its domain, unconditionally
+                    // (`scale_resolve::positional::axis_pixel_range`:
+                    // domain[0] -> the BOTTOM pixel, domain[1] -> the TOP —
+                    // `reverse=` only swaps which value sits at domain[0] vs
+                    // domain[1], never which pixel each endpoint maps to, so
+                    // `data_domain()`'s `(lo, hi)` already encodes `reverse=`
+                    // and this flip composes with it for free). `frac` is the
+                    // fraction of the domain span past `lo`, so `(1.0 -
+                    // frac)` is that SAME flip: frac=0 (at `lo`) lands at the
+                    // bottom, frac=1 (at `hi`) at the top — matching every
+                    // in-domain annotation and every mark on this axis.
+                    //
+                    // Before this fix the formula used `frac` directly (no
+                    // flip), so an out-of-domain value landed on the WRONG
+                    // side once a `BreakAxis` clamped it back onto the
+                    // visible canvas (quality-review cycle-3 finding: y=5000
+                    // above a domain max of 1000 rendered at the plot BOTTOM
+                    // instead of the TOP). Not separately audited under
+                    // `CoordFlip` — that swap happens upstream of
+                    // `ScaleContext`, which this module does not trace, and
+                    // this fallback only fires for the narrow
+                    // out-of-domain-annotation edge case.
                     if let Some((lo, hi)) = self.y_scale.data_domain() {
                         let frac = if (hi - lo).abs() < f64::EPSILON {
                             0.5
                         } else {
                             (d - lo) / (hi - lo)
                         };
-                        self.plot_area.y + frac * self.plot_area.h
+                        self.plot_area.y + (1.0 - frac) * self.plot_area.h
                     } else {
                         self.plot_area.y + self.plot_area.h * 0.5
                     }
-                })
+                });
+                self.fold_breaks("y", base)
             }
             CoordValue::Pixel { px } => self.plot_area.y + px,
             CoordValue::Norm { norm } => self.plot_area.y + norm * self.plot_area.h,
         }
     }
+
+    /// Fold `base` (a pixel already resolved against the UNBROKEN `x_scale`/
+    /// `y_scale`) through every `axis`-matching break, in declaration order.
+    ///
+    /// This is exactly `remap_mark_batch_through_break`'s sequential
+    /// composition (`for remap in &break_remaps { ... remap.coord(px) ... }`)
+    /// applied to one coordinate — reused here rather than re-derived, so two
+    /// same-axis breaks move a surviving annotation and a mark to the same
+    /// pixel instead of the annotation silently picking only the first one.
+    /// A step that cannot place `base` (it round-trips to that break's own
+    /// gap) hides the coordinate at `BREAK_HIDDEN` — the same fallback a
+    /// mark's `Circle`/`Text` node gets from `BreakRemap::remap_node` —
+    /// rather than silently reverting to the unbroken position. This also
+    /// covers a genuinely out-of-domain data value (not just an in-gap one):
+    /// `BreakRemap::coord` clamps its reverse-mapped data value to the
+    /// unbroken domain before forward-mapping, so an out-of-domain
+    /// coordinate lands at the compressed domain edge rather than at its
+    /// (silently wrong) unbroken linear position.
+    fn fold_breaks(&self, axis: &str, base: f64) -> f64 {
+        self.breaks
+            .iter()
+            .filter(|remap| remap.axis() == axis)
+            .fold(base, |px, remap| {
+                remap.coord(px).unwrap_or(break_axis::BREAK_HIDDEN)
+            })
+    }
+}
+
+// ── Break-axis suppression support (spec §4 H5, F-L08-07) ───────────────────
+
+/// The wire `type` tag for `spec` — the annotation "kind" named in
+/// `RenderWarning::AnnotationSuppressedByBreak`.
+///
+/// Mirrors the `#[serde(tag = "type")]` discriminant on `AnnotationSpec`
+/// above via an exhaustive match, so a new spec variant is a compile error
+/// here rather than silently falling through to an untagged warning.
+pub fn kind_name(spec: &AnnotationSpec) -> &'static str {
+    match spec {
+        AnnotationSpec::Text { .. } => "text",
+        AnnotationSpec::Arrow { .. } => "arrow",
+        AnnotationSpec::Rect { .. } => "rect",
+        AnnotationSpec::Line { .. } => "line",
+        AnnotationSpec::Span { .. } => "span",
+        AnnotationSpec::Bracket { .. } => "bracket",
+        AnnotationSpec::Callout { .. } => "callout",
+        AnnotationSpec::Image { .. } => "image",
+    }
+}
+
+/// The data-space (`CoordValue::Data`) coordinate values `spec` carries along
+/// `axis` (`"x"` or `"y"`).
+///
+/// Pixel/norm coordinates are plot-area-relative, not data positions, so a
+/// `BreakAxis` gap never suppresses them — they are excluded here rather than
+/// filtered by the caller, so every caller gets that rule for free.
+///
+/// Exhaustive over `AnnotationSpec`'s 8 shapes, enumerated from this file's
+/// own field list (spec §4 H5's coordinate table), so a new spec variant is a
+/// compile error here rather than silently skipping break suppression for it.
+pub fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> Vec<f64> {
+    // Branches on `axis == "y"` with x as the fallback, matching every other
+    // break-axis consumer's convention (`break_axis.rs`'s `is_y()`,
+    // `scene_build.rs`'s `if axis == "y" { &scales.y } else { &scales.x }`) —
+    // not S2 today (`BreakAxis.axis` is validated to `("x", "y")` in Python),
+    // but keeping one direction crate-wide means a future third axis value
+    // can't be suppressed as one axis and remapped as the other.
+    let is_y = axis == "y";
+    let fields: Vec<&CoordValue> = match spec {
+        AnnotationSpec::Text { x, y, .. } => vec![if is_y { y } else { x }],
+        AnnotationSpec::Arrow { x, y, x2, y2, .. } => {
+            if is_y { vec![y, y2] } else { vec![x, x2] }
+        }
+        AnnotationSpec::Rect { x1, y1, x2, y2, .. } => {
+            if is_y { vec![y1, y2] } else { vec![x1, x2] }
+        }
+        AnnotationSpec::Line { x1, y1, x2, y2, .. } => {
+            if is_y { vec![y1, y2] } else { vec![x1, x2] }
+        }
+        // A `Span`'s `start`/`end` are values on its OWN `axis` field, which
+        // may differ from the axis under test — an x-span is untouched by a
+        // y-break, and vice versa.
+        AnnotationSpec::Span { axis: span_axis, start, end, .. } => {
+            if span_axis == axis { vec![start, end] } else { Vec::new() }
+        }
+        AnnotationSpec::Bracket { x1, y1, x2, y2, .. } => {
+            if is_y { vec![y1, y2] } else { vec![x1, x2] }
+        }
+        AnnotationSpec::Callout { x, y, text_x, text_y, .. } => {
+            let mut v = vec![if is_y { y } else { x }];
+            if is_y {
+                if let Some(ty) = text_y {
+                    v.push(ty);
+                }
+            } else if let Some(tx) = text_x {
+                v.push(tx);
+            }
+            v
+        }
+        AnnotationSpec::Image { x, y, .. } => vec![if is_y { y } else { x }],
+    };
+    fields
+        .into_iter()
+        .filter_map(|v| match v {
+            CoordValue::Data(d) => Some(*d),
+            _ => None,
+        })
+        .collect()
 }
 
 // ── Color helpers ───────────────────────────────────────────────────────────
@@ -945,6 +1094,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         // Data value 50 should map to the center of the x pixel range.
         let px = ctx.resolve_x(&CoordValue::Data(50.0));
@@ -958,6 +1108,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let px = ctx.resolve_x(&CoordValue::Pixel { px: 100.0 });
         assert!((px - 150.0).abs() < f64::EPSILON, "expected 150, got {px}");
@@ -970,6 +1121,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let px = ctx.resolve_x(&CoordValue::Norm { norm: 0.5 });
         assert!((px - 300.0).abs() < f64::EPSILON, "expected 300, got {px}");
@@ -982,6 +1134,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let specs = vec![AnnotationSpec::Text {
             x: CoordValue::Norm { norm: 0.5 },
@@ -1025,6 +1178,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let specs = vec![AnnotationSpec::Line {
             x1: CoordValue::Norm { norm: 0.0 },
@@ -1065,6 +1219,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         // `curve` is no longer a field on AnnotationSpec::Arrow (dropped as dead code).
         let specs = vec![AnnotationSpec::Arrow {
@@ -1092,6 +1247,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let specs = vec![AnnotationSpec::Span {
             axis: "x".to_string(),
@@ -1138,6 +1294,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let ann = build_annotations(&[], &ctx);
         assert!(ann.below_marks.is_empty());
@@ -1158,6 +1315,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
 
         let mk_text = |z: &str| AnnotationSpec::Text {
@@ -1210,6 +1368,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
 
         let specs = vec![AnnotationSpec::Text {
@@ -1242,6 +1401,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
 
         let specs = vec![
@@ -1284,6 +1444,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let specs = vec![AnnotationSpec::Image {
             x: CoordValue::Norm { norm: 0.5 },
@@ -1338,6 +1499,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let mut out = Vec::new();
         emit_span(
@@ -1492,6 +1654,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let ascii = "resume"; // 6 chars, 6 bytes
         let unicode = "r\u{00e9}sum\u{00e9}"; // 6 chars, 8 bytes
@@ -1534,6 +1697,7 @@ mod tests {
             plot_area,
             x_scale: &x_scale,
             y_scale: &y_scale,
+            breaks: &[],
         };
         let count_lines = |arrow: &str| {
             let mut out = Vec::new();
@@ -1566,5 +1730,477 @@ mod tests {
             "empty string is not 'none' — leader line still drawn"
         );
         assert_eq!(count_lines("curved"), 1);
+    }
+
+    // ── kind_name / data_coords_on_axis (spec §4 H5, F-L08-07) ──────────────
+
+    #[test]
+    fn kind_name_covers_every_shape() {
+        let cases: Vec<(AnnotationSpec, &str)> = vec![
+            (
+                AnnotationSpec::Text {
+                    x: CoordValue::Data(1.0),
+                    y: CoordValue::Data(2.0),
+                    text: "t".into(),
+                    font_size: 12.0,
+                    color: "#000".into(),
+                    anchor: "middle".into(),
+                    baseline: "middle".into(),
+                    angle: 0.0,
+                    dx: 0.0,
+                    dy: 0.0,
+                    z: "above_marks".into(),
+                },
+                "text",
+            ),
+            (
+                AnnotationSpec::Arrow {
+                    x: CoordValue::Data(1.0),
+                    y: CoordValue::Data(2.0),
+                    x2: CoordValue::Data(3.0),
+                    y2: CoordValue::Data(4.0),
+                    stroke: "#000".into(),
+                    stroke_width: 1.5,
+                    head_size: 8.0,
+                },
+                "arrow",
+            ),
+            (
+                AnnotationSpec::Rect {
+                    x1: CoordValue::Data(1.0),
+                    y1: CoordValue::Data(2.0),
+                    x2: CoordValue::Data(3.0),
+                    y2: CoordValue::Data(4.0),
+                    fill: "#ccc".into(),
+                    opacity: 0.3,
+                    corner_radius: 0.0,
+                    stroke: None,
+                },
+                "rect",
+            ),
+            (
+                AnnotationSpec::Line {
+                    x1: CoordValue::Data(1.0),
+                    y1: CoordValue::Data(2.0),
+                    x2: CoordValue::Data(3.0),
+                    y2: CoordValue::Data(4.0),
+                    stroke: "#000".into(),
+                    stroke_width: 1.5,
+                    dash: None,
+                },
+                "line",
+            ),
+            (
+                AnnotationSpec::Span {
+                    axis: "x".into(),
+                    start: CoordValue::Data(1.0),
+                    end: CoordValue::Data(2.0),
+                    fill: "#ccc".into(),
+                    opacity: 0.2,
+                    label_position: "center".into(),
+                    label: None,
+                },
+                "span",
+            ),
+            (
+                AnnotationSpec::Bracket {
+                    x1: CoordValue::Data(1.0),
+                    y1: CoordValue::Data(2.0),
+                    x2: CoordValue::Data(3.0),
+                    y2: CoordValue::Data(4.0),
+                    label: "".into(),
+                    direction: "up".into(),
+                    stroke: "#000".into(),
+                    tip_length: 6.0,
+                },
+                "bracket",
+            ),
+            (
+                AnnotationSpec::Callout {
+                    x: CoordValue::Data(1.0),
+                    y: CoordValue::Data(2.0),
+                    text: "c".into(),
+                    arrow: "curved".into(),
+                    padding: 4.0,
+                    background: "#fff".into(),
+                    border_color: "#333".into(),
+                    border_radius: 0.0,
+                    text_x: None,
+                    text_y: None,
+                },
+                "callout",
+            ),
+            (
+                AnnotationSpec::Image {
+                    x: CoordValue::Data(1.0),
+                    y: CoordValue::Data(2.0),
+                    src: "s".into(),
+                    width: 10.0,
+                    height: 10.0,
+                    anchor: "middle".into(),
+                },
+                "image",
+            ),
+        ];
+        for (spec, expected) in cases {
+            assert_eq!(kind_name(&spec), expected);
+        }
+    }
+
+    #[test]
+    fn data_coords_on_axis_text() {
+        let spec = AnnotationSpec::Text {
+            x: CoordValue::Data(10.0),
+            y: CoordValue::Data(20.0),
+            text: "t".into(),
+            font_size: 12.0,
+            color: "#000".into(),
+            anchor: "middle".into(),
+            baseline: "middle".into(),
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            z: "above_marks".into(),
+        };
+        assert_eq!(data_coords_on_axis(&spec, "x"), vec![10.0]);
+        assert_eq!(data_coords_on_axis(&spec, "y"), vec![20.0]);
+    }
+
+    #[test]
+    fn data_coords_on_axis_excludes_px_and_norm() {
+        let spec = AnnotationSpec::Text {
+            x: CoordValue::Pixel { px: 5.0 },
+            y: CoordValue::Norm { norm: 0.5 },
+            text: "t".into(),
+            font_size: 12.0,
+            color: "#000".into(),
+            anchor: "middle".into(),
+            baseline: "middle".into(),
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            z: "above_marks".into(),
+        };
+        assert!(data_coords_on_axis(&spec, "x").is_empty());
+        assert!(data_coords_on_axis(&spec, "y").is_empty());
+    }
+
+    #[test]
+    fn data_coords_on_axis_arrow_both_endpoints() {
+        let spec = AnnotationSpec::Arrow {
+            x: CoordValue::Data(1.0),
+            y: CoordValue::Data(2.0),
+            x2: CoordValue::Data(3.0),
+            y2: CoordValue::Data(4.0),
+            stroke: "#000".into(),
+            stroke_width: 1.5,
+            head_size: 8.0,
+        };
+        assert_eq!(data_coords_on_axis(&spec, "x"), vec![1.0, 3.0]);
+        assert_eq!(data_coords_on_axis(&spec, "y"), vec![2.0, 4.0]);
+    }
+
+    #[test]
+    fn data_coords_on_axis_rect_line_bracket_share_shape() {
+        let specs = [
+            AnnotationSpec::Rect {
+                x1: CoordValue::Data(1.0),
+                y1: CoordValue::Data(2.0),
+                x2: CoordValue::Data(3.0),
+                y2: CoordValue::Data(4.0),
+                fill: "#ccc".into(),
+                opacity: 0.3,
+                corner_radius: 0.0,
+                stroke: None,
+            },
+            AnnotationSpec::Line {
+                x1: CoordValue::Data(1.0),
+                y1: CoordValue::Data(2.0),
+                x2: CoordValue::Data(3.0),
+                y2: CoordValue::Data(4.0),
+                stroke: "#000".into(),
+                stroke_width: 1.5,
+                dash: None,
+            },
+            AnnotationSpec::Bracket {
+                x1: CoordValue::Data(1.0),
+                y1: CoordValue::Data(2.0),
+                x2: CoordValue::Data(3.0),
+                y2: CoordValue::Data(4.0),
+                label: "".into(),
+                direction: "up".into(),
+                stroke: "#000".into(),
+                tip_length: 6.0,
+            },
+        ];
+        for spec in &specs {
+            assert_eq!(data_coords_on_axis(spec, "x"), vec![1.0, 3.0]);
+            assert_eq!(data_coords_on_axis(spec, "y"), vec![2.0, 4.0]);
+        }
+    }
+
+    #[test]
+    fn data_coords_on_axis_span_gated_by_its_own_axis_field() {
+        let x_span = AnnotationSpec::Span {
+            axis: "x".into(),
+            start: CoordValue::Data(1.0),
+            end: CoordValue::Data(2.0),
+            fill: "#ccc".into(),
+            opacity: 0.2,
+            label_position: "center".into(),
+            label: None,
+        };
+        assert_eq!(data_coords_on_axis(&x_span, "x"), vec![1.0, 2.0]);
+        assert!(data_coords_on_axis(&x_span, "y").is_empty());
+
+        let y_span = AnnotationSpec::Span {
+            axis: "y".into(),
+            start: CoordValue::Data(5.0),
+            end: CoordValue::Data(6.0),
+            fill: "#ccc".into(),
+            opacity: 0.2,
+            label_position: "center".into(),
+            label: None,
+        };
+        assert_eq!(data_coords_on_axis(&y_span, "y"), vec![5.0, 6.0]);
+        assert!(data_coords_on_axis(&y_span, "x").is_empty());
+    }
+
+    #[test]
+    fn data_coords_on_axis_callout_includes_optional_text_position() {
+        let with_text_pos = AnnotationSpec::Callout {
+            x: CoordValue::Data(1.0),
+            y: CoordValue::Data(2.0),
+            text: "c".into(),
+            arrow: "curved".into(),
+            padding: 4.0,
+            background: "#fff".into(),
+            border_color: "#333".into(),
+            border_radius: 0.0,
+            text_x: Some(CoordValue::Data(11.0)),
+            text_y: Some(CoordValue::Data(12.0)),
+        };
+        assert_eq!(data_coords_on_axis(&with_text_pos, "x"), vec![1.0, 11.0]);
+        assert_eq!(data_coords_on_axis(&with_text_pos, "y"), vec![2.0, 12.0]);
+
+        // text_x/text_y omitted: only the anchor coordinate is reported.
+        let no_text_pos = AnnotationSpec::Callout {
+            x: CoordValue::Data(1.0),
+            y: CoordValue::Data(2.0),
+            text: "c".into(),
+            arrow: "curved".into(),
+            padding: 4.0,
+            background: "#fff".into(),
+            border_color: "#333".into(),
+            border_radius: 0.0,
+            text_x: None,
+            text_y: None,
+        };
+        assert_eq!(data_coords_on_axis(&no_text_pos, "x"), vec![1.0]);
+        assert_eq!(data_coords_on_axis(&no_text_pos, "y"), vec![2.0]);
+    }
+
+    #[test]
+    fn data_coords_on_axis_image_single_anchor() {
+        let spec = AnnotationSpec::Image {
+            x: CoordValue::Data(7.0),
+            y: CoordValue::Data(8.0),
+            src: "s".into(),
+            width: 10.0,
+            height: 10.0,
+            anchor: "middle".into(),
+        };
+        assert_eq!(data_coords_on_axis(&spec, "x"), vec![7.0]);
+        assert_eq!(data_coords_on_axis(&spec, "y"), vec![8.0]);
+    }
+
+    // ── break-aware resolve_x/resolve_y (spec §4 H5, F-L08-07) ──────────────
+
+    #[test]
+    fn resolve_x_data_coord_routes_through_break_when_present() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let result = crate::render::break_axis::apply_break_to_scale(
+            (0.0, 100.0),
+            &[[40.0, 60.0]],
+            (50.0, 550.0),
+            10.0,
+        );
+        let remap = crate::render::break_axis::BreakRemap::new(
+            "x",
+            (0.0, 100.0),
+            (50.0, 550.0),
+            &result,
+        );
+        let breaks = [remap];
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: &breaks,
+        };
+        let broken_px = ctx.resolve_x(&CoordValue::Data(20.0));
+        let expected = crate::render::break_axis::broken_scale_map(20.0, &result).unwrap();
+        assert!((broken_px - expected).abs() < f64::EPSILON);
+
+        // Without the break, the same value maps to the plain linear
+        // position — proving the break actually moved something.
+        let unbroken_ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: &[],
+        };
+        let unbroken_px = unbroken_ctx.resolve_x(&CoordValue::Data(20.0));
+        assert!(
+            (broken_px - unbroken_px).abs() > 1.0,
+            "the break must move the compressed position away from the unbroken one"
+        );
+    }
+
+    /// Two x-axis breaks fold in sequence — the same composition
+    /// `remap_mark_batch_through_break`'s `for remap in &break_remaps` loop
+    /// applies to marks (spec §4 H5 parity, quality-review cycle-2 finding
+    /// #2). A `.find`-first implementation would stop at the first break and
+    /// diverge from this.
+    #[test]
+    fn resolve_x_folds_through_multiple_same_axis_breaks() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let result_a = crate::render::break_axis::apply_break_to_scale(
+            (0.0, 100.0),
+            &[[20.0, 30.0]],
+            (50.0, 550.0),
+            10.0,
+        );
+        let result_b = crate::render::break_axis::apply_break_to_scale(
+            (0.0, 100.0),
+            &[[70.0, 80.0]],
+            (50.0, 550.0),
+            10.0,
+        );
+        let remap_a =
+            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), (50.0, 550.0), &result_a);
+        let remap_b =
+            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), (50.0, 550.0), &result_b);
+        // A second, independent handle on the same first break, so it can be
+        // compared against the two-break fold without fighting the borrow
+        // checker over `remap_a` (`BreakRemap` is not `Copy`/`Clone`).
+        let remap_a_only =
+            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), (50.0, 550.0), &result_a);
+
+        let folded_ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: &[remap_a, remap_b],
+        };
+        let single_ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: std::slice::from_ref(&remap_a_only),
+        };
+        let folded_px = folded_ctx.resolve_x(&CoordValue::Data(90.0));
+        let single_px = single_ctx.resolve_x(&CoordValue::Data(90.0));
+        assert!(
+            (folded_px - single_px).abs() > 1.0,
+            "the second break must further move a coordinate the first break \
+             already moved, not be ignored: folded={folded_px} single_only={single_px}"
+        );
+    }
+
+    #[test]
+    fn resolve_y_pixel_and_norm_coords_are_unaffected_by_a_break() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let result = crate::render::break_axis::apply_break_to_scale(
+            (0.0, 100.0),
+            &[[40.0, 60.0]],
+            (20.0, 320.0),
+            10.0,
+        );
+        let remap = crate::render::break_axis::BreakRemap::new(
+            "y",
+            (0.0, 100.0),
+            (20.0, 320.0),
+            &result,
+        );
+        let broken_ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: &[remap],
+        };
+        let plain_ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: &[],
+        };
+        // Plot-area-relative coordinates are identical with or without an
+        // active break on this axis — only `CoordValue::Data` routes through
+        // the piecewise mapping.
+        assert_eq!(
+            broken_ctx.resolve_y(&CoordValue::Pixel { px: 42.0 }),
+            plain_ctx.resolve_y(&CoordValue::Pixel { px: 42.0 }),
+        );
+        assert_eq!(
+            broken_ctx.resolve_y(&CoordValue::Norm { norm: 0.25 }),
+            plain_ctx.resolve_y(&CoordValue::Norm { norm: 0.25 }),
+        );
+    }
+
+    /// quality-review cycle-3: `resolve_y`'s out-of-domain fallback used
+    /// `frac` directly (no flip), which is backwards relative to how every
+    /// non-ordinal y axis actually maps its domain onto pixels
+    /// (`scale_resolve::positional::axis_pixel_range` flips domain[0] to the
+    /// BOTTOM pixel and domain[1] to the TOP, unconditionally). This test
+    /// builds a `y_scale` with that SAME flipped range (`[320.0, 20.0]` —
+    /// domain min -> bottom, domain max -> top), the shape a real chart's y
+    /// scale actually has, rather than `test_ctx`'s simplified direct range —
+    /// so it exercises the fallback against the real invariant it depends on,
+    /// not just the formula in isolation.
+    #[test]
+    fn resolve_y_out_of_domain_value_clamps_to_the_correct_side() {
+        use crate::scale::linear::LinearScale;
+
+        let (x_scale, _, plot_area) = test_ctx();
+        let y_scale = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 100.0],
+            vec![320.0, 20.0],
+            false,
+            false,
+        ));
+        let ctx = ScaleContext {
+            plot_area,
+            x_scale: &x_scale,
+            y_scale: &y_scale,
+            breaks: &[],
+        };
+
+        // Domain is [0, 100]; both values are out of domain, so `to_pixel_f64`
+        // returns `None` and the fallback fires (verified separately below).
+        let above_max = ctx.resolve_y(&CoordValue::Data(150.0));
+        let below_min = ctx.resolve_y(&CoordValue::Data(-50.0));
+
+        assert!(
+            y_scale.to_pixel_f64(150.0).is_none() && y_scale.to_pixel_f64(-50.0).is_none(),
+            "this test must exercise the out-of-domain fallback, not to_pixel_f64's happy path"
+        );
+
+        // A value ABOVE the domain max must land on the TOP side (smaller
+        // pixel) of a value BELOW the domain min (BOTTOM side, larger
+        // pixel) — matching the real y scale's domain-max-at-top convention.
+        // Pre-fix this assertion failed: above_max (470) was LARGER than
+        // below_min (-130), the sides swapped.
+        assert!(
+            above_max < below_min,
+            "above_max={above_max} must be nearer the top (smaller) than \
+             below_min={below_min}"
+        );
+        // Exact values, hand-computed from the flipped formula:
+        // plot_area.y=20, h=300. above_max: frac=(150-0)/100=1.5 ->
+        // 20 + (1-1.5)*300 = -130. below_min: frac=(-50-0)/100=-0.5 ->
+        // 20 + (1-(-0.5))*300 = 470.
+        assert!((above_max - (-130.0)).abs() < 1e-6, "got {above_max}");
+        assert!((below_min - 470.0).abs() < 1e-6, "got {below_min}");
     }
 }

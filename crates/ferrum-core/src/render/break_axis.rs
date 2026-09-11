@@ -233,6 +233,28 @@ pub fn broken_scale_map(value: f64, result: &BreakResult) -> Option<f64> {
         .map(|seg| seg.pixel_for(value))
 }
 
+/// The gap in `result` that contains `value`, as a `(lo, hi)` data-space
+/// pair — the band between two consecutive visible segments.
+///
+/// `None` when `value` maps onto a visible segment (including exactly on a
+/// gap boundary, which belongs to its adjacent segment — [`ScaleSegment`]'s
+/// bounds are inclusive, so gaps are open intervals) or lies outside the
+/// domain entirely.
+///
+/// Consumed by the BreakAxis annotation-suppression pass (spec §4 H5,
+/// F-L08-07) to name the offending gap in
+/// `RenderWarning::AnnotationSuppressedByBreak`.
+pub fn gap_containing(value: f64, result: &BreakResult) -> Option<(f64, f64)> {
+    if broken_scale_map(value, result).is_some() {
+        return None;
+    }
+    result.segments.windows(2).find_map(|w| {
+        let (_, hi0) = w[0].ordered_data();
+        let (lo1, _) = w[1].ordered_data();
+        (value > hi0 && value < lo1).then_some((hi0, lo1))
+    })
+}
+
 // ── Indicator rendering ───────────────────────────────────────────────────────
 
 /// Render break indicators at `result.indicator_pixels` for the given axis and style.
@@ -627,6 +649,19 @@ impl<'a> BreakRemap<'a> {
     /// `"x"` or `"y"` — the axis this break moves.
     pub fn axis(&self) -> &str {
         self.axis
+    }
+
+    /// The break's underlying [`BreakResult`] — its segments and indicator
+    /// positions, independent of this remap's axis/domain/pixel context.
+    ///
+    /// Exposed so a caller holding `&[BreakRemap]` (already filtered to axes
+    /// with a continuous domain — the canonical list marks fold through) can
+    /// run a DATA-SPACE query — e.g. the annotation-suppression pass's
+    /// `gap_containing` check — against the same list, rather than keeping a
+    /// second, independently-filtered `(axis, BreakResult)` copy that could
+    /// drift from it.
+    pub fn result(&self) -> &BreakResult {
+        self.result
     }
 
     fn is_y(&self) -> bool {
@@ -1312,6 +1347,56 @@ mod tests {
         assert!(p900 < p1000, "p900={p900} should be < p1000={p1000}");
         // Second segment starts after the break (past first segment end).
         assert!(p800 > p200, "second segment should start after first ends");
+    }
+
+    // ── gap_containing tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn gap_containing_value_inside_gap() {
+        let result = apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (50.0, 350.0), 12.0);
+        assert_eq!(gap_containing(500.0, &result), Some((150.0, 850.0)));
+    }
+
+    #[test]
+    fn gap_containing_visible_value_is_none() {
+        let result = apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (50.0, 350.0), 12.0);
+        assert_eq!(gap_containing(100.0, &result), None);
+        assert_eq!(gap_containing(900.0, &result), None);
+    }
+
+    #[test]
+    fn gap_containing_boundary_value_is_none() {
+        // Gaps are open intervals: a value exactly on the gap edge belongs to
+        // the adjacent segment, per `ScaleSegment::contains`'s inclusive bounds.
+        let result = apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (50.0, 350.0), 12.0);
+        assert_eq!(gap_containing(150.0, &result), None);
+        assert_eq!(gap_containing(850.0, &result), None);
+    }
+
+    #[test]
+    fn gap_containing_picks_the_right_gap_among_several() {
+        let result = apply_break_to_scale(
+            (0.0, 1000.0),
+            &[[100.0, 200.0], [700.0, 800.0]],
+            (50.0, 350.0),
+            12.0,
+        );
+        assert_eq!(gap_containing(150.0, &result), Some((100.0, 200.0)));
+        assert_eq!(gap_containing(750.0, &result), Some((700.0, 800.0)));
+    }
+
+    #[test]
+    fn gap_containing_value_outside_domain_is_none() {
+        let result = apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (50.0, 350.0), 12.0);
+        // Outside the domain entirely — not a gap, just out of range.
+        assert_eq!(gap_containing(-50.0, &result), None);
+        assert_eq!(gap_containing(1500.0, &result), None);
+    }
+
+    #[test]
+    fn gap_containing_no_gaps_is_always_none() {
+        let result = apply_break_to_scale((0.0, 1000.0), &[], (50.0, 350.0), 12.0);
+        assert_eq!(gap_containing(500.0, &result), None);
     }
 
     // ── apply_break_to_scale tests ───────────────────────────────────────────
