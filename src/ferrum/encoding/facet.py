@@ -7,7 +7,7 @@ kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 
 from __future__ import annotations
 
-from ferrum.encoding._honored import FACET
+from ferrum.encoding._honored import FACET, FACET_WRAP
 from ferrum.encoding.base import ChannelBase
 
 
@@ -29,23 +29,21 @@ class Facet(ChannelBase):
         Facet strip title.  When set, the strip text renders
         ``"{title}: {value}"``; when omitted, the strip shows the bare
         value (not the field name).
-
-    Notes
-    -----
-    ``columns`` (number of facets per row) is accepted as a kwarg but is
-    reserved for future use (no-op today) — it triggers a one-time
-    deprecation warning.  If you need column-wrap control today, use
-    ``Chart.facet(ncols=N)`` directly.
+    columns : int, optional
+        Maximum number of panels per row (wrap-count).  Writes the same
+        sink as ``Chart.facet(ncols=N)``; when both are used, whichever is
+        called last wins.  ``None`` lets the renderer choose.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", facet=fm.Facet("species")).mark_point()
+    >>> fm.Chart(df).encode(x="hp", y="mpg", facet=fm.Facet("species", columns=3)).mark_point()
     >>> fm.Chart(df).encode(x="hp", y="mpg").mark_point().facet("species", ncols=3)
     """
 
     _channel_name = "facet"
-    _honored_kwargs = FACET
+    _honored_kwargs = FACET_WRAP
 
 
 class FacetRow(ChannelBase):

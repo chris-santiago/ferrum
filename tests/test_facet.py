@@ -1,10 +1,14 @@
 """Tests for Chart.facet() fluent method."""
 
+import re
+import warnings
+
 import polars as pl
 import pytest
 
 import ferrum as fm
 from ferrum import Chart
+from ferrum._warn import reset_warnings
 
 
 def test_facet_with_col_only():
@@ -406,3 +410,154 @@ def test_chart_facet_method_title_kwarg():
 
     no_title_chart = Chart(df).mark_point().encode(x="x", y="y").facet(field="grp")
     assert "title" not in json.loads(no_title_chart.to_json())["facet"]
+
+
+# ---------------------------------------------------------------------------
+# F-L06-02: Facet(field, columns=N) writes the same ncols sink
+# Chart.facet(ncols=N) already honors, instead of warning and dropping it.
+# ---------------------------------------------------------------------------
+
+
+def _panel_x_positions(svg: str) -> set[float]:
+    """Return the distinct x-coordinates of every panel `<clipPath><rect .../>`.
+
+    Real panel geometry, not just the serialized ncols value: proves
+    `columns=` actually moves panels, not merely that the field round-trips.
+    """
+    xs = re.findall(r'<clipPath id="[^"]+"><rect x="([0-9.]+)"', svg)
+    assert xs, "expected panel clipPath rects in the rendered SVG"
+    return {float(x) for x in xs}
+
+
+def _facet_columns_test_data():
+    import pyarrow as pa
+
+    tbl = pa.table(
+        {
+            "x": pa.array([1, 2, 3, 4, 5, 6, 7, 8], type=pa.int64()),
+            "y": pa.array([1, 2, 3, 4, 5, 6, 7, 8], type=pa.int64()),
+            "grp": pa.array(["a", "a", "b", "b", "c", "c", "d", "d"], type=pa.string()),
+        }
+    )
+    return tbl, pl.from_arrow(tbl)
+
+
+def test_encode_facet_columns_no_longer_warns():
+    """Facet(field, columns=N) must not trigger the accept-but-ignore warning."""
+    _, df = _facet_columns_test_data()
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        Chart(df).mark_point().encode(x="x", y="y", facet=fm.Facet("grp", columns=2))
+    assert not any("columns" in str(rec.message) for rec in w), (
+        f"Facet(columns=...) must not warn; got: {[str(rec.message) for rec in w]}"
+    )
+
+
+def test_encode_facet_columns_sets_ncols():
+    """Facet(field, columns=N) writes `_facet.ncols`, the same sink `.facet(ncols=N)` uses."""
+    _, df = _facet_columns_test_data()
+    c = Chart(df).mark_point().encode(x="x", y="y", facet=fm.Facet("grp", columns=2))
+    assert c._facet.ncols == 2
+
+
+def test_encode_facet_columns_changes_rendered_panel_layout():
+    """Facet(field, columns=N) changes real panel geometry in the rendered SVG.
+
+    Post-fix discriminator for F-L06-02: pre-fix, `columns=2` was a byte-
+    identical noop against the no-columns render (RED-proven against the
+    real render path before this fix landed). A generic `facet(field=...)`
+    wrap with no explicit `columns=`/`ncols=` lowers to a single-column
+    vertical stack (KG-6); `columns=2` must produce two distinct panel
+    x-positions instead of one.
+    """
+    from ferrum._core import render_svg
+
+    tbl, df = _facet_columns_test_data()
+    no_columns = Chart(df).mark_point().encode(x="x", y="y", facet=fm.Facet("grp"))
+    with_columns = Chart(df).mark_point().encode(x="x", y="y", facet=fm.Facet("grp", columns=2))
+
+    svg_no_columns = render_svg(no_columns.to_spec(), tbl, viewport=(900.0, 600.0), theme={})
+    svg_with_columns = render_svg(with_columns.to_spec(), tbl, viewport=(900.0, 600.0), theme={})
+
+    assert svg_no_columns != svg_with_columns
+    xs_no_columns = _panel_x_positions(svg_no_columns)
+    xs_with_columns = _panel_x_positions(svg_with_columns)
+    assert len(xs_no_columns) == 1, f"expected a 1-column stack, got x-positions {xs_no_columns}"
+    assert len(xs_with_columns) == 2, (
+        f"expected columns=2 to produce 2 panel x-positions, got {xs_with_columns}"
+    )
+
+
+def test_encode_facet_columns_overrides_prior_facet_ncols():
+    """A `columns=` on the channel wins over a pre-existing `.facet(ncols=)` value.
+
+    Precedence direction 1 of F-L06-02 / spec H16: last writer wins.
+    """
+    _, df = _facet_columns_test_data()
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(field="grp", ncols=3)
+        .encode(facet=fm.Facet("grp", columns=5))
+    )
+    assert c._facet.ncols == 5
+
+
+def test_facet_ncols_overrides_prior_encode_facet_columns():
+    """A LATER `.facet(ncols=N)` call wins over an earlier channel `columns=`.
+
+    Precedence direction 2 of F-L06-02 / spec H16: last writer wins.
+    """
+    _, df = _facet_columns_test_data()
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y", facet=fm.Facet("grp", columns=5))
+        .facet(field="grp", ncols=3)
+    )
+    assert c._facet.ncols == 3
+
+
+def test_encode_facet_bare_without_columns_still_preserves_prior_ncols():
+    """No `columns=` on the channel: the pre-existing `.facet(ncols=)` value survives.
+
+    Companion to `test_encode_facet_preserves_ncols_from_prior_facet_call`
+    (which covers the `facet_col=` branch) for the bare `facet=` branch.
+    """
+    _, df = _facet_columns_test_data()
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(field="grp", ncols=3)
+        .encode(facet=fm.Facet("grp"))
+    )
+    assert c._facet.ncols == 3
+
+
+def test_facet_row_columns_still_warns_and_drops():
+    """FacetRow(columns=...) stays a warn-and-noop: F-L06-02 scopes `columns` to Facet only."""
+    _, df = _facet_columns_test_data()
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        c = Chart(df).mark_point().encode(x="x", y="y", facet_row=fm.FacetRow("grp", columns=2))
+    assert any("columns" in str(rec.message) for rec in w), (
+        "FacetRow(columns=...) must still warn (grid-mode channels don't honor columns)"
+    )
+    assert c._facet.ncols is None
+
+
+def test_facet_col_columns_still_warns_and_drops():
+    """FacetCol(columns=...) stays a warn-and-noop: F-L06-02 scopes `columns` to Facet only."""
+    _, df = _facet_columns_test_data()
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        c = Chart(df).mark_point().encode(x="x", y="y", facet_col=fm.FacetCol("grp", columns=2))
+    assert any("columns" in str(rec.message) for rec in w), (
+        "FacetCol(columns=...) must still warn (grid-mode channels don't honor columns)"
+    )
+    assert c._facet.ncols is None

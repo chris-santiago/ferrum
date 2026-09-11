@@ -138,3 +138,9 @@ TEXT_FORMATTED_TITLED = TEXT_FORMATTED | {"title"}
 
 #: Facet channels (Facet, FacetRow, FacetCol): data type + panel title.
 FACET = frozenset({"type", "title"})
+
+#: Facet only (wrap mode via ``encode(facet=...)``): adds ``columns``, the
+#: wrap-count sink also written by ``Chart.facet(ncols=N)`` (F-L06-02).
+#: FacetRow/FacetCol keep the base ``FACET`` set -- ``columns`` is
+#: grid-mode-inapplicable and stays a warn-and-drop there.
+FACET_WRAP = FACET | {"columns"}

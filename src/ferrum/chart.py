@@ -1422,10 +1422,17 @@ class Chart(
             ncols = existing.ncols if existing is not None else None
             nrows = existing.nrows if existing is not None else None
             if facet_enc is not None:
+                # F-L06-02: Facet(field, columns=N) writes the same ncols
+                # sink Chart.facet(ncols=N) honors. Precedence is last-writer-
+                # wins: an explicit `columns=` on this channel overrides an
+                # ncols carried over from an earlier .facet() call. Scoped to
+                # Facet only -- FacetRow/FacetCol (grid mode, below) don't
+                # honor `columns` (not in their `_honored_kwargs`).
+                facet_columns = facet_enc.option("columns")
                 new._facet = _Facet(
                     mode_kind="wrap",
                     field=facet_enc.field,
-                    ncols=ncols,
+                    ncols=facet_columns if facet_columns is not None else ncols,
                     nrows=nrows,
                     title=facet_enc.option("title"),
                 )
