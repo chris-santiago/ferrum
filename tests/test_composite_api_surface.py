@@ -304,6 +304,28 @@ class TestToDictFigureChrome:
         "subtitle_color": "#654321",
     }
 
+    def test_title_style_fields_registry_matches_independent_expectation(self):
+        """``_TITLE_STYLE_FIELDS``'s membership is checked against an
+        INDEPENDENT, hardcoded expectation, not one derived from the
+        registry itself (2026-09-11, batch-H close mutation-pin round).
+
+        The parametrize below (``test_composite_chrome_unsupported_title_field_refuses_typed``)
+        derives its own field list FROM ``_TITLE_STYLE_FIELDS``
+        (``[name for name, _ in _TITLE_STYLE_FIELDS]``), which protects
+        against an ADDITION to the registry but is blind to a REMOVAL: a
+        mutant that shrinks the registry (e.g. adds ``"anchor"`` to
+        ``composition.py``'s ``("text", "subtitle")`` exclusion tuple, so
+        ``anchor`` silently stops being refused) deletes its own
+        parametrize case along with the defect it was covering, and the
+        full suite passes with one fewer test collected. ``_NON_DEFAULT_VALUES``
+        above already hardcodes the correct seven keys independently (it
+        has to, to supply a real value per field), so asserting the two
+        SETS agree -- both directions, via ``==`` -- costs no new data and
+        closes the gap: a registry shrink now fails this assertion instead
+        of vanishing.
+        """
+        assert {name for name, _ in _TITLE_STYLE_FIELDS} == set(self._NON_DEFAULT_VALUES)
+
     @pytest.mark.parametrize("field", [name for name, _ in _TITLE_STYLE_FIELDS])
     def test_composite_chrome_unsupported_title_field_refuses_typed(self, c1, c2, df, field):
         """A ``Title`` style field with no composite-chrome slot at all
@@ -319,6 +341,32 @@ class TestToDictFigureChrome:
             for key in ("title", "subtitle", "caption"):
                 with pytest.raises(ValueError, match=field):
                     node.properties(**{key: rich_title})
+
+    def test_subtitle_slot_refuses_a_title_carrying_its_own_nested_subtitle(self, c1, c2):
+        """``.properties(subtitle=fm.Title("T", subtitle="X"))`` refuses
+        typed (2026-09-11, batch-H close mutation-pin round).
+
+        A nested ``subtitle`` is exactly the field
+        ``_normalize_composite_text``'s ``include_subtitle=True`` exists to
+        catch on the ``subtitle=``/``caption=`` slots -- but nothing
+        exercised that input shape: ``_TITLE_STYLE_FIELDS`` deliberately
+        excludes ``"subtitle"`` (it is sometimes routable, on ``title=``),
+        so the parametrized sweep above never reaches the one slot where a
+        nested ``subtitle`` is NOT routable. Mutating
+        ``_normalize_composite_text``'s ``include_subtitle=True`` to
+        ``False`` survived the full 10k-test suite before this pin --
+        without it, ``fm.Title("T", subtitle="X")`` passed to ``subtitle=``
+        built silently with ``"X"`` dropped and no trace.
+        """
+        with pytest.raises(ValueError, match="subtitle"):
+            (c1 | c2).properties(subtitle=fm.Title("T", subtitle="X"))
+
+    def test_caption_slot_refuses_a_title_carrying_its_own_nested_subtitle(self, c1, c2):
+        """Same as :meth:`test_subtitle_slot_refuses_a_title_carrying_its_own_nested_subtitle`
+        for ``caption=`` -- the other consumer of
+        ``_normalize_composite_text``'s ``include_subtitle=True``."""
+        with pytest.raises(ValueError, match="subtitle"):
+            (c1 | c2).properties(caption=fm.Title("T", subtitle="X"))
 
     def test_composite_chrome_render_matches_declaration(self, c1, c2, df):
         """H3-4 acceptance-parity, widened to all three chrome keys x all
