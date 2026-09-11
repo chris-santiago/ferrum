@@ -45,6 +45,18 @@ class FeatureImportancesVisualizer(FerrumVisualizer):
     error_bars : bool, default True
         Whether to draw ±1 std error bars. Has no visual effect when
         ``method="builtin"`` because std is always 0 in that case.
+    show_values : bool, default True
+        Overlay the formatted importance value at the end of each bar.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the "Feature importance" title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``importance_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int or None, optional
         RNG seed forwarded to ``permutation_importance``. Ignored when
         ``method="builtin"``.
@@ -69,6 +81,12 @@ class FeatureImportancesVisualizer(FerrumVisualizer):
         top_k: int | None = 20,
         orient: str = "horizontal",
         error_bars: bool = True,
+        show_values: bool = True,
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -77,6 +95,12 @@ class FeatureImportancesVisualizer(FerrumVisualizer):
         self.top_k = top_k
         self.orient = orient
         self.error_bars = error_bars
+        self.show_values = show_values
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.importances(
@@ -95,7 +119,13 @@ class FeatureImportancesVisualizer(FerrumVisualizer):
             top_k=self.top_k,
             orient=self.orient,
             error_bars=self.error_bars,
+            show_values=self.show_values,
+            subtitle=self.subtitle,
             random_state=self.random_state,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -143,9 +173,26 @@ class SHAPVisualizer(FerrumVisualizer):
         Background dataset passed to the SHAP explainer for models that
         require a reference distribution (e.g. kernel SHAP). Pass ``None``
         to use the explainer's default.
+    per_class : bool, default False
+        Facet by class on multi-class classifiers. Applies to all three
+        ``kind`` values (matches ``SHAPBeeswarmVisualizer`` /
+        ``SHAPBarVisualizer`` / ``SHAPWaterfallVisualizer``).
+    zero_line : bool, default True
+        Overlay a dashed vertical rule at ``shap_value == 0``. Only
+        meaningful for ``kind="beeswarm"`` -- the ``"bar"``/``"waterfall"``
+        builders have no ``zero_line=`` parameter to forward it to, same as
+        their dedicated-visualizer siblings.
     random_state : int or None, optional
         RNG seed forwarded to the underlying ``ModelSource``. Ignored when
         SHAP computation is deterministic.
+    mark : dict, optional
+        Per-layer mark overrides. See the ``shap_*_chart`` family.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme or None, optional
         Per-chart theme override. Falls back to the global default when
         ``None``.
@@ -168,6 +215,12 @@ class SHAPVisualizer(FerrumVisualizer):
         sample_idx: int | None = None,
         order: str = "abs_mean",
         background: Any = None,
+        per_class: bool = False,
+        zero_line: bool = True,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -186,6 +239,12 @@ class SHAPVisualizer(FerrumVisualizer):
         self.sample_idx = sample_idx
         self.order = order
         self.background = background
+        self.per_class = per_class
+        self.zero_line = zero_line
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         sv = self._source.shap_values(background=self.background)
@@ -209,6 +268,12 @@ class SHAPVisualizer(FerrumVisualizer):
                 max_display=self.max_display,
                 order=self.order,
                 background=self.background,
+                per_class=self.per_class,
+                zero_line=self.zero_line,
+                mark=self.mark,
+                encode=self.encode,
+                properties=self.properties,
+                layers=self.layers,
                 theme=self.theme,
             )
         if self.kind == "bar":
@@ -217,6 +282,11 @@ class SHAPVisualizer(FerrumVisualizer):
                 max_display=self.max_display,
                 order=self.order,
                 background=self.background,
+                per_class=self.per_class,
+                mark=self.mark,
+                encode=self.encode,
+                properties=self.properties,
+                layers=self.layers,
                 theme=self.theme,
             )
         # kind == "waterfall" (validated above)
@@ -228,6 +298,11 @@ class SHAPVisualizer(FerrumVisualizer):
             max_display=self.max_display,
             order=self.order,
             background=self.background,
+            per_class=self.per_class,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -314,6 +389,16 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         SHAP models.  Tree SHAP ignores this.
     per_class : bool, default False
         Facet by class on multi-class classifiers.
+    zero_line : bool, default True
+        Overlay a dashed vertical rule at ``shap_value == 0``.
+    mark : dict, optional
+        Per-layer mark overrides. See ``shap_beeswarm_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state, theme : forwarded to ``FerrumVisualizer``.
 
     Examples
@@ -331,6 +416,11 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         order: str = "abs_mean",
         background: Any = None,
         per_class: bool = False,
+        zero_line: bool = True,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -339,6 +429,11 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.order = order
         self.background = background
         self.per_class = per_class
+        self.zero_line = zero_line
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         self._record_top_abs_shap()
@@ -350,6 +445,11 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
             order=self.order,
             background=self.background,
             per_class=self.per_class,
+            zero_line=self.zero_line,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -357,8 +457,9 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
 class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
     """Mean-absolute SHAP per feature as a horizontal bar chart.
 
-    Parameters mirror [SHAPBeeswarmVisualizer][ferrum.SHAPBeeswarmVisualizer]; see that class
-    for the full parameter list.
+    Parameters mirror [SHAPBeeswarmVisualizer][ferrum.SHAPBeeswarmVisualizer]
+    (minus ``zero_line``, which has no meaning for a bar chart); see that
+    class for the full parameter list.
 
     Examples
     --------
@@ -376,6 +477,10 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         order: str = "abs_mean",
         background: Any = None,
         per_class: bool = False,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -384,6 +489,10 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.order = order
         self.background = background
         self.per_class = per_class
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         self._record_top_abs_shap()
@@ -395,6 +504,10 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
             order=self.order,
             background=self.background,
             per_class=self.per_class,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -420,6 +533,14 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         Background dataset passed to the SHAP explainer.
     per_class : bool, default False
         Facet by class on multi-class classifiers.
+    mark : dict, optional
+        Per-layer mark overrides. See ``shap_waterfall_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state, theme : forwarded to ``FerrumVisualizer``.
 
     Raises
@@ -443,6 +564,10 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         order: str = "abs_mean",
         background: Any = None,
         per_class: bool = False,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -454,6 +579,10 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.order = order
         self.background = background
         self.per_class = per_class
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         self._record_top_abs_shap(sample_idx=self.sample_idx)
@@ -466,5 +595,9 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
             order=self.order,
             background=self.background,
             per_class=self.per_class,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )

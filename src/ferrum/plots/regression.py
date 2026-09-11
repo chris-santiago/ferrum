@@ -140,6 +140,30 @@ def _smooth_degree_kwargs(method: str, order: int | None, func_name: str = "lmpl
 # ---------------------------------------------------------------------------
 
 
+def _resolve_residuals_panels(panels: Any) -> list[str] | None:
+    """Expand ``panels=`` into what ``_residuals_chart_from_source`` expects.
+
+    Shared by ``residuals_chart`` and ``ResidualsVisualizer`` so
+    ``"auto"`` always expands to the canonical 4-panel list ---
+    ``residuals_vs_fitted``, ``qq``, ``scale_location``,
+    ``residuals_vs_leverage``. The builder's own fallback for an
+    unrecognized value (anything that is not ``None``/``"single"`` and
+    not already a list) is single-panel, so forwarding ``"auto"`` to it
+    raw would silently render one panel instead of four -- the trap this
+    closes (batch G T9).
+    """
+    if panels in (None, "single"):
+        return None
+    if panels == "auto":
+        return [
+            "residuals_vs_fitted",
+            "qq",
+            "scale_location",
+            "residuals_vs_leverage",
+        ]
+    return list(panels)
+
+
 def _residuals_chart_from_source(
     source: Any,
     *,
@@ -1705,17 +1729,7 @@ def residuals_chart(
     source = _resolve_source(
         model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare
     )
-    if panels in (None, "single"):
-        panel_list: Any = None
-    elif panels == "auto":
-        panel_list = [
-            "residuals_vs_fitted",
-            "qq",
-            "scale_location",
-            "residuals_vs_leverage",
-        ]
-    else:
-        panel_list = list(panels)
+    panel_list = _resolve_residuals_panels(panels)
     # Both the compose path and the single-model fall-through pass identical
     # kwargs to the same builder (``panels=panel_list`` in both); only the
     # routing condition differs. Spell the kwargs once and route both paths

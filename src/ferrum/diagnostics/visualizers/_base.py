@@ -7,7 +7,8 @@ Two override patterns:
 
 1. **Model-backed visualizers (the common case)** — override
    ``_materialize`` and ``_build_chart``; the inherited ``fit``
-   constructs a ``ModelSource`` and calls both hooks in order.
+   constructs a ``ModelSource`` (via ``_build_source``) and calls both
+   hooks in order.
 2. **No-model / non-standard visualizers** — override ``fit`` directly
    and skip ``ModelSource`` construction.  ``ClassBalanceVisualizer``,
    ``Rank1DVisualizer`` / ``Rank2DVisualizer`` /
@@ -19,6 +20,13 @@ subclasses don't need to provide trivial stubs.  Calling ``show()``
 on a fitted-but-unbuilt visualizer simply returns ``None`` instead
 of raising; that's a programming error in the subclass, not a
 runtime condition to guard against.
+
+A third, narrower hook — ``_build_source`` — lets an option-1 subclass
+customize *how* the ``ModelSource`` is constructed (e.g. routing a
+``compare=`` kwarg through ``_resolve_source`` to build a
+``ComparedModelSource``) without duplicating the rest of ``fit``.
+``ROCVisualizer``, ``PRVisualizer``, and
+``DiscriminationThresholdVisualizer`` use this.
 """
 
 from __future__ import annotations
@@ -83,7 +91,6 @@ class FerrumVisualizer:
         *,
         random_state: int | None = None,
         theme: Any = None,
-        **_extra: Any,
     ):
         self.model = model
         self.random_state = random_state
@@ -96,9 +103,10 @@ class FerrumVisualizer:
     def fit(self, X: Any, y: Any = None) -> "FerrumVisualizer":
         """Materialize derived data from ``X`` / ``y`` and build the chart.
 
-        Constructs a ``ModelSource`` from the wrapped ``model``, calls
-        ``_materialize`` to populate ``_metrics``, then ``_build_chart`` to
-        assemble the ferrum ``Chart``. Returns ``self`` for method chaining.
+        Constructs a ``ModelSource`` from the wrapped ``model`` (via
+        ``_build_source``), calls ``_materialize`` to populate
+        ``_metrics``, then ``_build_chart`` to assemble the ferrum
+        ``Chart``. Returns ``self`` for method chaining.
 
         Parameters
         ----------
@@ -113,13 +121,24 @@ class FerrumVisualizer:
         FerrumVisualizer
             ``self`` — the fitted visualizer instance.
         """
-        import ferrum
-
-        self._source = ferrum.ModelSource(self.model, X, y, random_state=self.random_state)
+        self._source = self._build_source(X, y)
         self._materialize()
         self._chart = self._build_chart()
         self._fitted = True
         return self
+
+    def _build_source(self, X: Any, y: Any) -> Any:
+        """Construct the ``ModelSource`` wrapping ``self.model``.
+
+        Default implementation for the standard model-backed flow.
+        Subclasses that support additional source-construction options
+        (e.g. a ``compare=`` kwarg that should build a
+        ``ComparedModelSource``) override this hook instead of
+        duplicating the rest of ``fit``.
+        """
+        import ferrum
+
+        return ferrum.ModelSource(self.model, X, y, random_state=self.random_state)
 
     def _materialize(self) -> None:
         """Compute derived data and populate ``_metrics``.

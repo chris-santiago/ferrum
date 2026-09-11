@@ -45,6 +45,16 @@ class LearningCurveVisualizer(FerrumVisualizer):
         How to render the cross-validation confidence interval.
         ``"band"`` draws a shaded ribbon; ``"errorbar"`` draws a vertical
         rule per point.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the "Learning curve" title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``learning_curve_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` and from there to
         ``learning_curve`` for reproducible CV splits (ChaCha8 RNG).
@@ -70,6 +80,11 @@ class LearningCurveVisualizer(FerrumVisualizer):
         scoring: Any = None,
         train_sizes: Any = None,
         ci_style: str = "band",
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -78,6 +93,11 @@ class LearningCurveVisualizer(FerrumVisualizer):
         self.scoring = scoring
         self.train_sizes = train_sizes
         self.ci_style = ci_style
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.learning_curve(
@@ -107,6 +127,11 @@ class LearningCurveVisualizer(FerrumVisualizer):
             scoring=self.scoring,
             train_sizes=self.train_sizes,
             ci_style=self.ci_style,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -145,6 +170,16 @@ class ValidationCurveVisualizer(FerrumVisualizer):
         How to render the cross-validation confidence interval.
         ``"band"`` draws a shaded ribbon; ``"errorbar"`` draws a vertical
         rule per point.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the "Validation curve" title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``validation_curve_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for reproducible CV splits
         (ChaCha8 RNG).
@@ -173,6 +208,11 @@ class ValidationCurveVisualizer(FerrumVisualizer):
         scoring: Any = None,
         log_scale: Any = "auto",
         ci_style: str = "band",
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -183,6 +223,11 @@ class ValidationCurveVisualizer(FerrumVisualizer):
         self.scoring = scoring
         self.log_scale = log_scale
         self.ci_style = ci_style
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.validation_curve(
@@ -215,6 +260,11 @@ class ValidationCurveVisualizer(FerrumVisualizer):
             scoring=self.scoring,
             log_scale=self.log_scale,
             ci_style=self.ci_style,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -242,6 +292,14 @@ class CVScoresVisualizer(FerrumVisualizer):
         Which CV splits to include in the chart.  ``"both"`` shows train
         and test folds side by side; ``"test"`` or ``"train"`` shows
         only one.
+    mark : dict, optional
+        Per-layer mark overrides. See ``cv_scores_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for reproducible CV splits
         (ChaCha8 RNG).
@@ -267,6 +325,10 @@ class CVScoresVisualizer(FerrumVisualizer):
         scoring: Any = None,
         kind: str = "box",
         split: str = "both",
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -275,6 +337,10 @@ class CVScoresVisualizer(FerrumVisualizer):
         self.scoring = scoring
         self.kind = kind
         self.split = split
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.cv_scores(cv=self.cv, scoring=self.scoring)
@@ -293,6 +359,10 @@ class CVScoresVisualizer(FerrumVisualizer):
             scoring=self.scoring,
             kind=self.kind,
             split=self.split,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -331,6 +401,14 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
     highlight_best : bool, default True
         When ``True``, draws a vertical rule at the alpha value that
         maximises the mean test score.
+    mark : dict, optional
+        Per-layer mark overrides. See ``alpha_selection_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for reproducible CV splits
         (ChaCha8 RNG).
@@ -358,6 +436,10 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
         scoring: Any = None,
         log_scale: bool = True,
         highlight_best: bool = True,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -367,6 +449,10 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
         self.scoring = scoring
         self.log_scale = log_scale
         self.highlight_best = highlight_best
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.alpha_selection(
@@ -393,5 +479,9 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
             scoring=self.scoring,
             log_scale=self.log_scale,
             highlight_best=self.highlight_best,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )

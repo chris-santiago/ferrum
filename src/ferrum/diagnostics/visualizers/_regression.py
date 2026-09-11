@@ -9,8 +9,18 @@ from typing import Any
 from ferrum.plots.regression import (
     _prediction_error_chart_from_source,
     _residuals_chart_from_source,
+    _resolve_residuals_panels,
 )
 from ._base import FerrumVisualizer
+
+# CooksDistanceVisualizer's historical default -- exactly the leverage panel,
+# regardless of what `_resolve_residuals_panels` would do with `None`/"single"
+# (which mean "just residuals_vs_fitted" for `ResidualsVisualizer`). Kept as
+# an immutable sentinel so a caller who explicitly passes `panels=` (e.g.
+# `panels="auto"` or an explicit list) still routes through the shared
+# expansion helper, while the unset default stays byte-identical to the
+# pre-batch-G behavior.
+_COOKS_DEFAULT_PANELS: tuple[str, ...] = ("residuals_vs_leverage",)
 
 
 class ResidualsVisualizer(FerrumVisualizer):
@@ -29,6 +39,31 @@ class ResidualsVisualizer(FerrumVisualizer):
         leverage-aware hat-matrix form when ``model`` exposes
         ``coef_``; otherwise falls back to internally-studentized
         (residual / std).
+    cook_threshold : float, "auto", or None, default None
+        Cook's-distance threshold for outlier highlighting on the
+        residuals-vs-fitted (and, in a multi-panel layout,
+        residuals-vs-leverage) view. See ``residuals_chart``.
+    panels : "auto", None, "single", or list of str, default None
+        Panel selection, matching ``residuals_chart(panels=...)``.
+        ``"auto"`` renders the canonical 4-panel diagnostic grid
+        (residuals-vs-fitted, QQ, scale-location, residuals-vs-leverage);
+        ``None`` or ``"single"`` (the default) renders just the
+        residuals-vs-fitted panel. The ``"auto"`` expansion is shared
+        with ``residuals_chart`` via ``_resolve_residuals_panels`` so
+        ``ResidualsVisualizer(panels="auto")`` renders the same 4-panel
+        grid.
+    annotate_metrics : bool, default True
+        Overlay a top-right corner annotation showing R^2/RMSE/MAE.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``residuals_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Forwarded to the underlying ``ModelSource``.
     theme : Theme, optional
@@ -40,6 +75,11 @@ class ResidualsVisualizer(FerrumVisualizer):
     >>> viz._metrics["rmse"]
     1.234
     >>> viz.show()
+
+    Canonical 4-panel diagnostic grid, matching
+    ``residuals_chart(panels="auto")``:
+
+    >>> fm.ResidualsVisualizer(model, panels="auto").fit(X, y).show()
     """
 
     def __init__(
@@ -47,11 +87,27 @@ class ResidualsVisualizer(FerrumVisualizer):
         model: Any,
         *,
         kind: str = "studentized",
+        cook_threshold: float | str | None = None,
+        panels: Any = None,
+        annotate_metrics: bool = True,
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.kind = kind
+        self.cook_threshold = cook_threshold
+        self.panels = panels
+        self.annotate_metrics = annotate_metrics
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.predictions()
@@ -63,6 +119,14 @@ class ResidualsVisualizer(FerrumVisualizer):
         return _residuals_chart_from_source(
             self._source,
             kind=self.kind,
+            cook_threshold=self.cook_threshold,
+            panels=_resolve_residuals_panels(self.panels),
+            annotate_metrics=self.annotate_metrics,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -87,6 +151,14 @@ class PredictionErrorVisualizer(FerrumVisualizer):
     reference_band : bool, default False
         When ``True`` (and ``ci`` is None), overlays a ±1 RMSE ribbon
         around the reference line.
+    mark : dict, optional
+        Per-layer mark overrides. See ``prediction_error_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
     theme : Theme, optional
 
@@ -104,6 +176,10 @@ class PredictionErrorVisualizer(FerrumVisualizer):
         reference_line: bool = True,
         ci: float | None = None,
         reference_band: bool = False,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -111,6 +187,10 @@ class PredictionErrorVisualizer(FerrumVisualizer):
         self.reference_line = reference_line
         self.ci = ci
         self.reference_band = reference_band
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.predictions()
@@ -123,6 +203,10 @@ class PredictionErrorVisualizer(FerrumVisualizer):
             reference_line=self.reference_line,
             ci=self.ci,
             reference_band=self.reference_band,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -151,6 +235,29 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         (keyed on leverage and the studentized residual) and the
         leverage panel renders them as a red-filled overlay layer.
         ``"auto"`` uses the conventional ``4 / n`` rule (Hair et al.).
+        Kept as ``threshold=`` (not ``cook_threshold=``, the builder's own
+        spelling) for back-compat -- an adjudicated shape drift, not
+        unified (batch G decision doc, G5).
+    kind : {"studentized", "raw", "scaled"}, default "studentized"
+        Residual variant underlying the leverage panel's y axis.
+    panels : "auto", None, "single", or list of str, default the leverage panel alone
+        Panel selection, matching ``residuals_chart(panels=...)``. The
+        default renders just ``residuals_vs_leverage`` (this
+        visualizer's historical behavior); pass ``"auto"`` for the
+        canonical 4-panel grid or an explicit list to customize it.
+    annotate_metrics : bool, default True
+        Overlay a top-right corner annotation showing R^2/RMSE/MAE on
+        the residuals-vs-fitted panel, when present.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``cooks_distance_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
     theme : Theme, optional
 
@@ -167,11 +274,27 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         model: Any,
         *,
         threshold: float | str | None = None,
+        kind: str = "studentized",
+        panels: Any = _COOKS_DEFAULT_PANELS,
+        annotate_metrics: bool = True,
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.threshold = threshold
+        self.kind = kind
+        self.panels = panels
+        self.annotate_metrics = annotate_metrics
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         df = self._source.predictions()
@@ -179,10 +302,20 @@ class CooksDistanceVisualizer(FerrumVisualizer):
         self._metrics["max_studentized"] = float(stud.abs().max())
 
     def _build_chart(self) -> Any:
+        panels = self.panels
+        panel_list = (
+            list(panels) if isinstance(panels, (list, tuple)) else _resolve_residuals_panels(panels)
+        )
         return _residuals_chart_from_source(
             self._source,
-            kind="studentized",
+            kind=self.kind,
             cook_threshold=self.threshold,
-            panels=["residuals_vs_leverage"],
+            panels=panel_list,
+            annotate_metrics=self.annotate_metrics,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )

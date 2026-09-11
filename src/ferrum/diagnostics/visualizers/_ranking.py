@@ -52,6 +52,14 @@ class Rank1DVisualizer(FerrumVisualizer):
     color_field : str, optional
         Column name forwarded to the chart's color encoding.  ``None``
         produces a single-color chart.
+    mark : dict, optional
+        Per-layer mark overrides. See ``rank1d_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Accepted for API symmetry with model-backed visualizers but
         intentionally never consumed — this visualizer bypasses
@@ -85,6 +93,10 @@ class Rank1DVisualizer(FerrumVisualizer):
         orient: str = "horizontal",
         top_k: int | None = None,
         color_field: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -93,6 +105,10 @@ class Rank1DVisualizer(FerrumVisualizer):
         self.orient = orient
         self.top_k = top_k
         self.color_field = color_field
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def fit(self, X: Any, y: Any = None) -> "Rank1DVisualizer":
         if self.algorithm == "covariance":
@@ -108,6 +124,10 @@ class Rank1DVisualizer(FerrumVisualizer):
             orient=self.orient,
             top_k=self.top_k,
             color_field=self.color_field,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
         self._fitted = True
@@ -141,6 +161,14 @@ class Rank2DVisualizer(FerrumVisualizer):
         - ``"covariance"`` — raw covariance (not normalized to [-1, 1]).
     annot : bool, default True
         Whether to annotate each heatmap cell with its numeric value.
+    mark : dict, optional
+        Per-layer mark overrides. See ``rank2d_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Accepted for API symmetry with model-backed visualizers but
         intentionally never consumed — this visualizer bypasses
@@ -166,12 +194,20 @@ class Rank2DVisualizer(FerrumVisualizer):
         *,
         algorithm: str = "pearson",
         annot: bool = True,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model=None, random_state=random_state, theme=theme)
         self.algorithm = algorithm
         self.annot = annot
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def fit(self, X: Any, y: Any = None) -> "Rank2DVisualizer":
         del y
@@ -185,6 +221,10 @@ class Rank2DVisualizer(FerrumVisualizer):
             df,
             algorithm=self.algorithm,
             annot=self.annot,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
         self._fitted = True
@@ -220,6 +260,14 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         - ``None`` — no rescaling; raw values are plotted.
     alpha : float, default 0.5
         Opacity of each sample line (0 = fully transparent, 1 = opaque).
+    mark : dict, optional
+        Per-layer mark overrides. See ``parallel_coordinates_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Accepted for API symmetry with model-backed visualizers but
         intentionally never consumed — this visualizer bypasses
@@ -247,6 +295,10 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         hue: str | None = None,
         rescale: str | None = "minmax",
         alpha: float = 0.5,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -255,6 +307,10 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
         self.hue = hue
         self.rescale = rescale
         self.alpha = alpha
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def fit(self, X: Any, y: Any = None) -> "ParallelCoordinatesVisualizer":
         # When the caller passes y but didn't set hue, route y as the
@@ -289,6 +345,10 @@ class ParallelCoordinatesVisualizer(FerrumVisualizer):
             hue=effective_hue,
             rescale=self.rescale,
             alpha=self.alpha,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
         self._fitted = True

@@ -26,6 +26,71 @@ from ferrum.plots.classification import (
 from ._base import FerrumVisualizer
 
 
+def _build_compare_source(
+    model: Any,
+    X: Any,
+    y: Any,
+    compare: dict[str, Any] | None,
+    *,
+    random_state: int | None,
+) -> Any:
+    """Resolve ``model`` (+ optional ``compare=``) into a ``ModelSource`` or
+    ``ComparedModelSource``.
+
+    Shared ``_build_source`` override for the three visualizers that gained
+    ``compare=`` in the G5 parity sweep (``ROCVisualizer``, ``PRVisualizer``,
+    ``DiscriminationThresholdVisualizer``) -- one local home rather than
+    three copies of the reserved-``"base"``-key check. This mirrors
+    ``ferrum.plots._helpers._resolve_source``'s own compare-merge branch
+    (the figure-function entry point for the same ``compare=`` contract);
+    diagnostics modules may not import ``plots._helpers`` (a plots-private
+    module, enforced by ``test_finding_p5.py``), so the logic is duplicated
+    here rather than imported -- DUPLICATION-PENDING: hoist both into one
+    shared home (e.g. a classmethod on ``ferrum.diagnostics.source
+    .ModelSource``) once a maintainer owns that cross-package move.
+    """
+    import ferrum
+
+    if compare is None:
+        return ferrum.ModelSource(model, X, y, random_state=random_state)
+    if not isinstance(compare, dict):
+        raise TypeError(f"compare= must be dict[str, model] or None; got {type(compare).__name__}.")
+    if "base" in compare:
+        raise ValueError(
+            "compare= must not use the key 'base' -- it is reserved for the "
+            "primary model= argument. A compare={'base': ...} entry would "
+            "silently overwrite the primary model with no error (GH #76); "
+            "rename this entry (e.g. compare={'rival': ...}) instead."
+        )
+    models = {"base": model, **compare}
+    return ferrum.ModelSource.compare(models, X, y, random_state=random_state)
+
+
+def _base_model_rows(df: pl.DataFrame) -> pl.DataFrame:
+    """Restrict a derived-data frame to the base model's rows when the
+    source is a ``ComparedModelSource`` built by ``_build_compare_source``.
+
+    ``compare=`` (unlike ``CalibrationVisualizer``'s symmetric ``*models``)
+    always has one distinguished base model -- the primary ``model=``
+    argument, stamped ``"base"`` in the ``model`` column. Quality review
+    finding (batch G T9 cycle 3): with the full compared frame,
+    ``ROCVisualizer``/``PRVisualizer``/``DiscriminationThresholdVisualizer``'s
+    headline ``_metrics`` (and therefore ``__repr__``) silently described
+    *some unnamed model's* pooled aggregate or argmax while ``.score()``
+    (which always scores ``self.model``, the base) kept reporting the base
+    model's own number -- the two disagreeing about which model they
+    describe. Filtering to the base model's rows before computing any
+    headline metric keeps ``_metrics``/``__repr__``/``.score()`` consistent,
+    and reproduces exactly what a plain (non-compared) ``ModelSource`` would
+    have computed, since ``ComparedModelSource`` dispatches per-model
+    through the same underlying computation. A no-op when ``df`` carries no
+    ``model`` column (the default, non-compared path).
+    """
+    if "model" in df.columns:
+        return df.filter(pl.col("model") == "base")
+    return df
+
+
 class ROCVisualizer(FerrumVisualizer):
     """ROC curve(s) for binary or multiclass classifiers.
 
@@ -39,7 +104,9 @@ class ROCVisualizer(FerrumVisualizer):
         Fitted classifier (must implement ``predict_proba`` or
         ``decision_function``).
     micro : bool, default True
-        Compute the micro-averaged AUC.
+        Compute the micro-averaged AUC. Kept as a boolean flag (not the
+        builder's own ``average=`` spelling) for back-compat -- an
+        adjudicated shape drift, not unified (batch G decision doc, G5).
     macro : bool, default True
         Compute the macro-averaged AUC. Takes precedence over ``micro``
         when choosing which averaged curve to plot at
@@ -47,6 +114,27 @@ class ROCVisualizer(FerrumVisualizer):
     per_class : bool, default True
         Render one curve per class. When False, only the averaged
         curve is rendered.
+    annotate_auc : bool, default True
+        Overlay one text label per curve showing the AUC value.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
+    compare : dict of str -> estimator or None, default None
+        Additional estimators to overlay against ``model``. Routes
+        through ``_resolve_source`` (the same path ``roc_chart`` uses)
+        at ``fit`` time, so ``model`` is treated as the base curve
+        (label ``"base"``). ``_metrics["auc_mean"]`` and ``.score()``
+        always describe the base model, never a compared rival --
+        ``compare=`` always has one distinguished base model (unlike
+        ``CalibrationVisualizer``'s symmetric ``*models``), so the
+        headline metric is restricted to its rows.
+    mark : dict, optional
+        Per-layer mark overrides. See ``roc_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
     theme : Theme, optional
 
@@ -65,6 +153,13 @@ class ROCVisualizer(FerrumVisualizer):
         micro: bool = True,
         macro: bool = True,
         per_class: bool = True,
+        annotate_auc: bool = True,
+        subtitle: str | None = None,
+        compare: dict[str, Any] | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -72,10 +167,20 @@ class ROCVisualizer(FerrumVisualizer):
         self.micro = micro
         self.macro = macro
         self.per_class = per_class
+        self.annotate_auc = annotate_auc
+        self.subtitle = subtitle
+        self.compare = compare
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
+
+    def _build_source(self, X: Any, y: Any) -> Any:
+        return _build_compare_source(self.model, X, y, self.compare, random_state=self.random_state)
 
     def _materialize(self) -> None:
         avg = "macro" if self.macro else ("micro" if self.micro else None)
-        roc = self._source.roc_curve(average=avg)
+        roc = _base_model_rows(self._source.roc_curve(average=avg))
         aucs = roc["auc"].drop_nulls().unique().to_list()
         self._metrics["auc_mean"] = float(np.nanmean(aucs)) if aucs else float("nan")
 
@@ -85,6 +190,12 @@ class ROCVisualizer(FerrumVisualizer):
             self._source,
             per_class=self.per_class,
             average=avg,
+            annotate_auc=self.annotate_auc,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -123,6 +234,34 @@ class PRVisualizer(FerrumVisualizer):
     model : Any
         Fitted classifier exposing ``predict_proba`` or
         ``decision_function``.
+    per_class : bool, default True
+        Render one curve per class. When False, only the averaged
+        curve is rendered.
+    average : {"macro", "micro", "weighted"} or None, default "macro"
+        Averaging method used when ``per_class=False``.
+    annotate_ap : bool, default True
+        Overlay one text label per curve showing the AP value.
+    iso_lines : bool, default False
+        Overlay F1-score iso-contour lines.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
+    compare : dict of str -> estimator or None, default None
+        Additional estimators to overlay against ``model``. Routes
+        through ``_resolve_source`` (the same path ``pr_chart`` uses)
+        at ``fit`` time, so ``model`` is treated as the base curve
+        (label ``"base"``). ``_metrics["ap_mean"]`` and ``.score()``
+        always describe the base model, never a compared rival --
+        ``compare=`` always has one distinguished base model (unlike
+        ``CalibrationVisualizer``'s symmetric ``*models``), so the
+        headline metric is restricted to its rows.
+    mark : dict, optional
+        Per-layer mark overrides. See ``pr_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
     theme : Theme, optional
 
@@ -138,18 +277,53 @@ class PRVisualizer(FerrumVisualizer):
         self,
         model: Any,
         *,
+        per_class: bool = True,
+        average: str | None = "macro",
+        annotate_ap: bool = True,
+        iso_lines: bool = False,
+        subtitle: str | None = None,
+        compare: dict[str, Any] | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
+        self.per_class = per_class
+        self.average = average
+        self.annotate_ap = annotate_ap
+        self.iso_lines = iso_lines
+        self.subtitle = subtitle
+        self.compare = compare
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
+
+    def _build_source(self, X: Any, y: Any) -> Any:
+        return _build_compare_source(self.model, X, y, self.compare, random_state=self.random_state)
 
     def _materialize(self) -> None:
-        pr = self._source.pr_curve()
+        pr = _base_model_rows(self._source.pr_curve())
         aps = pr["ap"].drop_nulls().unique().to_list()
         self._metrics["ap_mean"] = float(np.nanmean(aps)) if aps else float("nan")
 
     def _build_chart(self) -> Any:
-        return _pr_chart_from_source(self._source, theme=self.theme)
+        return _pr_chart_from_source(
+            self._source,
+            per_class=self.per_class,
+            average=self.average,
+            annotate_ap=self.annotate_ap,
+            iso_lines=self.iso_lines,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
+            theme=self.theme,
+        )
 
 
 class CalibrationVisualizer(FerrumVisualizer):
@@ -170,6 +344,18 @@ class CalibrationVisualizer(FerrumVisualizer):
         Number of bins for the calibration histogram.
     strategy : {"uniform", "quantile"}, default "uniform"
         Bin-edge strategy (matches ``sklearn.calibration``).
+    annotate_brier : bool, default True
+        Overlay a per-series Brier-score text label.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``calibration_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
     theme : Theme, optional
 
@@ -185,6 +371,12 @@ class CalibrationVisualizer(FerrumVisualizer):
         *models: Any,
         n_bins: int = 10,
         strategy: str = "uniform",
+        annotate_brier: bool = True,
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -198,6 +390,12 @@ class CalibrationVisualizer(FerrumVisualizer):
         self._models = models
         self.n_bins = n_bins
         self.strategy = strategy
+        self.annotate_brier = annotate_brier
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     @property
     def _is_multi_model(self) -> bool:
@@ -289,6 +487,12 @@ class CalibrationVisualizer(FerrumVisualizer):
             self._source,
             n_bins=self.n_bins,
             strategy=self.strategy,
+            annotate_brier=self.annotate_brier,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -309,6 +513,16 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
         ``"true"`` normalizes each row by the true-class total (recall
         fractions); ``"pred"`` by the predicted-class total (precision
         fractions); ``"all"`` by the grand total; ``None`` shows raw counts.
+    annotate : bool, default True
+        Whether to overlay per-cell numeric text on the heatmap.
+    mark : dict, optional
+        Per-layer mark overrides. See ``confusion_matrix_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for reproducible train/test splits.
     theme : Theme, optional
@@ -328,11 +542,21 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
         model: Any,
         *,
         normalize: str | None = "true",
+        annotate: bool = True,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.normalize = normalize
+        self.annotate = annotate
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         # accuracy is a per-sample headline metric and must be computed
@@ -351,6 +575,11 @@ class ConfusionMatrixVisualizer(FerrumVisualizer):
         return _confusion_chart_from_source(
             self._source,
             normalize=self.normalize,
+            annotate=self.annotate,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -367,6 +596,14 @@ class ClassificationReportVisualizer(FerrumVisualizer):
     ----------
     model : Any
         Fitted classifier implementing ``predict``.
+    mark : dict, optional
+        Per-layer mark overrides. See ``classification_report_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for reproducible train/test splits.
     theme : Theme, optional
@@ -385,10 +622,18 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         self,
         model: Any,
         *,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         from .._internal.deps import require_sklearn
@@ -408,8 +653,7 @@ class ClassificationReportVisualizer(FerrumVisualizer):
             # ``plots/classification.py``'s own ``classification_report_chart``
             # leak site), so it closes the visualizer's path independently.
             raise ValueError(
-                "ClassificationReportVisualizer.fit() requires the "
-                "training data: fit(X, y)."
+                "ClassificationReportVisualizer.fit() requires the training data: fit(X, y)."
             )
         y_true = self._source.y
         y_pred = self._source.model.predict(self._source.X)
@@ -418,7 +662,14 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         )
 
     def _build_chart(self) -> Any:
-        return _classification_report_chart(self._source, theme=self.theme)
+        return _classification_report_chart(
+            self._source,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
+            theme=self.theme,
+        )
 
 
 class DiscriminationThresholdVisualizer(FerrumVisualizer):
@@ -446,6 +697,28 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         When ``True``, overlays a vertical rule at the F1-maximising
         threshold (matches the figure-level
         ``discrimination_threshold_chart(threshold_line=True)``).
+    optimum_label : bool, default True
+        Overlay a text label naming the F1-maximising threshold.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
+    compare : dict of str -> estimator or None, default None
+        Additional estimators to overlay against ``model``. Routes
+        through ``_resolve_source`` (the same path
+        ``discrimination_threshold_chart`` uses) at ``fit`` time, so
+        ``model`` is treated as the base curve (label ``"base"``).
+        ``_metrics["best_threshold"]``/``["best_f1"]`` and ``.score()``
+        always describe the base model, never a compared rival's
+        threshold sweep -- ``compare=`` always has one distinguished
+        base model (unlike ``CalibrationVisualizer``'s symmetric
+        ``*models``), so the headline metric is restricted to its rows.
+    mark : dict, optional
+        Per-layer mark overrides. See ``discrimination_threshold_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for any randomness in CV splits.
     theme : Theme, optional
@@ -467,6 +740,13 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
         cv: Any = None,
         threshold_line: bool = False,
+        optimum_label: bool = True,
+        subtitle: str | None = None,
+        compare: dict[str, Any] | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -475,11 +755,23 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         self.metrics = metrics
         self.cv = cv
         self.threshold_line = threshold_line
+        self.optimum_label = optimum_label
+        self.subtitle = subtitle
+        self.compare = compare
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
+
+    def _build_source(self, X: Any, y: Any) -> Any:
+        return _build_compare_source(self.model, X, y, self.compare, random_state=self.random_state)
 
     def _materialize(self) -> None:
-        dt = self._source.discrimination_threshold(
-            n_thresholds=self.n_thresholds,
-            cv=self.cv,
+        dt = _base_model_rows(
+            self._source.discrimination_threshold(
+                n_thresholds=self.n_thresholds,
+                cv=self.cv,
+            )
         )
         f1 = dt["f1"]
         idx = f1.arg_max() if f1.len() else 0
@@ -493,6 +785,12 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
             metrics=self.metrics,
             cv=self.cv,
             threshold_line=self.threshold_line,
+            optimum_label=self.optimum_label,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -517,6 +815,16 @@ class ClassPredictionErrorVisualizer(FerrumVisualizer):
     normalize : bool, default False
         When ``True``, each predicted-class bar is scaled to sum to 1
         (100 % stacked view). When ``False``, bars show absolute counts.
+    show_counts : bool, default True
+        Overlay per-segment count (or percentage) text on each bar.
+    mark : dict, optional
+        Per-layer mark overrides. See ``class_prediction_error_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to ``ModelSource`` for any randomness in data prep.
     theme : Theme, optional
@@ -535,11 +843,21 @@ class ClassPredictionErrorVisualizer(FerrumVisualizer):
         model: Any,
         *,
         normalize: bool = False,
+        show_counts: bool = True,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.normalize = normalize
+        self.show_counts = show_counts
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         cm = self._source.confusion_matrix(normalize=None)
@@ -551,6 +869,11 @@ class ClassPredictionErrorVisualizer(FerrumVisualizer):
         return _class_prediction_error_chart_from_source(
             self._source,
             normalize=self.normalize,
+            show_counts=self.show_counts,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -579,6 +902,14 @@ class ClassBalanceVisualizer(FerrumVisualizer):
         ``fit()`` and never constructs a ``ModelSource``. Documented as
         a permanent no-op so callers that script over visualizers don't
         have to special-case which ones accept the kwarg.
+    mark : dict, optional
+        Per-layer mark overrides. See ``class_balance_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme, optional
         Per-chart theme override. Falls back to the global default when ``None``.
 
@@ -593,10 +924,18 @@ class ClassBalanceVisualizer(FerrumVisualizer):
     def __init__(
         self,
         *,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model=None, random_state=random_state, theme=theme)
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
         self._y: pl.Series | None = None
 
     def fit(self, X: Any, y: Any = None) -> "ClassBalanceVisualizer":
@@ -622,6 +961,10 @@ class ClassBalanceVisualizer(FerrumVisualizer):
 
         self._chart = _class_balance_chart_from_dataframe(
             self._y,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
         self._fitted = True

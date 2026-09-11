@@ -33,6 +33,21 @@ class SilhouetteVisualizer(FerrumVisualizer):
     model : Any
         Fitted clustering estimator (e.g. ``sklearn.cluster.KMeans`` instance)
         that exposes ``labels_`` (and optionally ``cluster_centers_``).
+    k : int, optional
+        Restrict the silhouette computation to this many clusters. ``None``
+        (default) uses every cluster the fitted model produced.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the ``"Silhouette Plot"`` title.
+        Leaves the chart title-less when ``None`` (the default), matching
+        ``silhouette_chart``.
+    mark : dict, optional
+        Per-layer mark overrides. See ``silhouette_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to the underlying ``ModelSource``. Ignored when the
         silhouette computation is deterministic.
@@ -54,13 +69,25 @@ class SilhouetteVisualizer(FerrumVisualizer):
         self,
         model: Any,
         *,
+        k: int | None = None,
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
+        self.k = k
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
-        sil = self._source.silhouette()
+        sil = self._source.silhouette(k=self.k)
         self._metrics["mean_silhouette"] = float(sil["silhouette_value"].mean())
 
     def _build_chart(self) -> Any:
@@ -68,6 +95,12 @@ class SilhouetteVisualizer(FerrumVisualizer):
 
         return _silhouette_chart_from_source(
             self._source,
+            k=self.k,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -107,6 +140,14 @@ class ElbowVisualizer(FerrumVisualizer):
     random_state : int, optional
         Integer seed passed as ``random_state`` to every per-k model
         instantiation. When ``None``, seed ``0`` is used.
+    mark : dict, optional
+        Per-layer mark overrides. See ``elbow_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme, optional
         Per-chart theme override. Falls back to the global default when
         ``None``.
@@ -126,6 +167,10 @@ class ElbowVisualizer(FerrumVisualizer):
         *,
         ks: Sequence[int],
         metric: str = "distortion",
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
@@ -137,6 +182,10 @@ class ElbowVisualizer(FerrumVisualizer):
         self.model_class = model_class
         self.ks = list(ks)
         self.metric = metric
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def fit(self, X: Any, y: Any = None) -> "ElbowVisualizer":
         del y
@@ -154,7 +203,14 @@ class ElbowVisualizer(FerrumVisualizer):
             scores["score"].arg_min() if self.metric == "distortion" else scores["score"].arg_max()
         )
         self._metrics["best_k"] = float(scores["k"][idx])
-        self._chart = _elbow_chart_from_source(scores, theme=self.theme)
+        self._chart = _elbow_chart_from_source(
+            scores,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
+            theme=self.theme,
+        )
         self._fitted = True
         return self
 
@@ -186,6 +242,14 @@ class ManifoldVisualizer(FerrumVisualizer):
     random_state : int, optional
         Seed forwarded to the underlying ``ModelSource``. Controls
         reproducibility for stochastic embeddings such as UMAP and t-SNE.
+    mark : dict, optional
+        Per-layer mark overrides. See ``manifold_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme, optional
         Per-chart theme override. Falls back to the global default when
         ``None``.
@@ -205,11 +269,19 @@ class ManifoldVisualizer(FerrumVisualizer):
         model: Any = None,
         *,
         method: str = "umap",
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.method = method
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         # ModelSource.embeddings() memoizes via BaseSource._cache, so the
@@ -223,6 +295,10 @@ class ManifoldVisualizer(FerrumVisualizer):
         return _manifold_chart_from_source(
             self._source,
             method=self.method,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -251,9 +327,21 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
         Dimensionality-reduction algorithm forwarded to
         ``ModelSource.intercluster_distance``. Typical values include
         ``"mds"`` and ``"tsne"``.
+    k : int, optional
+        Number of clusters to embed. ``None`` (default) infers it from
+        the wrapped model's ``n_clusters`` or ``cluster_centers_``
+        attribute; an explicit value overrides that inference.
     random_state : int, optional
         Seed forwarded to the underlying ``ModelSource``. Controls
         reproducibility for stochastic layout algorithms.
+    mark : dict, optional
+        Per-layer mark overrides. See ``intercluster_distance_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     theme : Theme, optional
         Per-chart theme override. Falls back to the global default when
         ``None``.
@@ -273,11 +361,21 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
         model: Any,
         *,
         method: str = "mds",
+        k: int | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.method = method
+        self.k = k
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         k = self._infer_k()
@@ -290,22 +388,28 @@ class InterclusterDistanceVisualizer(FerrumVisualizer):
         )
 
     def _infer_k(self) -> int:
+        if self.k is not None:
+            return int(self.k)
         if hasattr(self.model, "n_clusters"):
             return int(self.model.n_clusters)
         if hasattr(self.model, "cluster_centers_"):
             return int(self.model.cluster_centers_.shape[0])
         raise AttributeError(
             "InterclusterDistanceVisualizer requires the wrapped model "
-            "to expose n_clusters or cluster_centers_."
+            "to expose n_clusters or cluster_centers_, or an explicit k=."
         )
 
     def _build_chart(self) -> Any:
-        import ferrum
+        from ferrum.plots.clustering import _intercluster_distance_chart_from_source
 
-        return ferrum.intercluster_distance_chart(
+        return _intercluster_distance_chart_from_source(
             self._source,
             k=self._infer_k(),
             method=self.method,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
 
@@ -332,6 +436,22 @@ class PCAVarianceVisualizer(FerrumVisualizer):
     n_components : int, optional
         Number of components to display in the scree plot. When ``None``,
         all components present in the model are shown.
+    cumulative_line : bool, default True
+        Overlay a cumulative-explained-variance line.
+    threshold : float, optional, default 0.95
+        Horizontal reference rule at this target cumulative-variance
+        fraction. ``None`` omits the rule.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the ``"PCA Explained
+        Variance"`` title.
+    mark : dict, optional
+        Per-layer mark overrides. See ``pca_scree_chart``.
+    encode : dict, optional
+        Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+    properties : dict, optional
+        Chart properties merged via ``Chart.properties(**properties)``.
+    layers : list, optional
+        Extra layers appended via ``Chart.layer(*layers)``.
     random_state : int, optional
         Seed forwarded to the underlying ``ModelSource``. Ignored when
         the PCA variance computation is deterministic.
@@ -354,21 +474,42 @@ class PCAVarianceVisualizer(FerrumVisualizer):
         model: Any,
         *,
         n_components: int | None = None,
+        cumulative_line: bool = True,
+        threshold: float | None = 0.95,
+        subtitle: str | None = None,
+        mark: dict | None = None,
+        encode: dict | None = None,
+        properties: dict | None = None,
+        layers: list | None = None,
         random_state: int | None = None,
         theme: Any = None,
     ):
         super().__init__(model, random_state=random_state, theme=theme)
         self.n_components = n_components
+        self.cumulative_line = cumulative_line
+        self.threshold = threshold
+        self.subtitle = subtitle
+        self.mark = mark
+        self.encode = encode
+        self.properties = properties
+        self.layers = layers
 
     def _materialize(self) -> None:
         pca = self._source.pca_variance(n_components=self.n_components)
         self._metrics["first_component_var"] = float(pca["explained_variance_ratio"][0])
 
     def _build_chart(self) -> Any:
-        import ferrum
+        from ferrum.plots.clustering import _pca_scree_chart_from_source
 
-        return ferrum.pca_scree_chart(
+        return _pca_scree_chart_from_source(
             self._source,
             n_components=self.n_components,
+            cumulative_line=self.cumulative_line,
+            threshold=self.threshold,
+            subtitle=self.subtitle,
+            mark=self.mark,
+            encode=self.encode,
+            properties=self.properties,
+            layers=self.layers,
             theme=self.theme,
         )
