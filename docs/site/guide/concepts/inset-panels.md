@@ -92,10 +92,23 @@ fm.Inset(
 The `bounds` tuple `(left, top, right, bottom)` defines the inset position and size
 within the parent's plot area. Each element can be:
 
-- A plain `float` (data-space coordinate) — useful when you want the inset at a
-  specific data location.
+- A plain `float` — a normalized `[0, 1]` fraction of the plot area, same as `fm.norm(f)`.
 - `fm.norm(f)` — fraction of the plot-area width or height (0.0 to 1.0).
 - `fm.px(n)` — absolute pixels from the plot-area origin.
+
+Mixed kinds within one `bounds` tuple are allowed; each entry resolves independently. A
+normalized entry outside `[0, 1]`, a negative `fm.px(...)` entry, or an empty box
+(`left >= right` or `top >= bottom`, compared only within like kinds) raises
+`ValueError` at construction time.
+
+!!! note "Dated note (2026-09-11, batch H, F-L08-08)"
+    Earlier revisions of this guide described a plain `float` as a *data-space*
+    coordinate and implied `fm.px(...)` was unsupported here (it previously raised
+    `TypeError`). Neither was ever true of the design this feature shipped from — the
+    2026-05-24 inset-panels design fixed bounds as normalized-or-pixel, never
+    data-space — so both are corrected above: a plain `float` is a normalized
+    fraction, and `fm.px(...)` now resolves correctly (the worked example below has
+    always been valid code and now renders as shown).
 
 Most use cases call for `fm.norm(...)`:
 

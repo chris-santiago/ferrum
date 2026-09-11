@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 import polars as pl
 
 import ferrum as fm
+from ferrum.annotation.coords import norm, px
 from ferrum.structural import BreakAxis, Inset, SecondaryY
+
+
+def _nested_svg_rects(svg: str) -> list[dict[str, str]]:
+    """Return the attribute dict of every ``<svg ...>`` tag in *svg*, root first.
+
+    An inset embeds its rendered sub-chart as a nested ``<svg x=... y=...
+    width=... height=...>`` element positioned against the parent plot rect
+    (``ferrum-core``'s ``build_inset_nodes``). Unlike ``tests/_svg_rects.py``'s
+    ``svg_elements`` (which only matches self-closed ``<tag .../>`` elements),
+    ``<svg>`` opens a block, so this helper matches the opening tag directly.
+    """
+    return [
+        dict(re.findall(r'([\w-]+)="([^"]+)"', m.group(1)))
+        for m in re.finditer(r"<svg([^>]*)>", svg)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +210,82 @@ class TestInset:
         inset = Inset(chart=object(), bounds=(0, 0, 1, 1), connect_to=(0.5, 0.5))
         assert inset.connect_to == (0.5, 0.5)
 
+    def test_px_bounds_accepted_at_construction(self):
+        """PixelCoord no longer raises; it is accepted at construction time
+        (the old TypeError happened downstream, at serialization)."""
+        inset = Inset(chart=object(), bounds=(px(10), px(10), px(220), px(160)))
+        assert inset.bounds == (px(10), px(10), px(220), px(160))
+
+    def test_norm_and_px_mixed_bounds_accepted(self):
+        inset = Inset(chart=object(), bounds=(px(10), norm(0.1), px(220), norm(0.9)))
+        assert inset.bounds == (px(10), norm(0.1), px(220), norm(0.9))
+
+
+# ---------------------------------------------------------------------------
+# Inset bounds construction-time refusal matrix (F-L08-08, batch H T6)
+# ---------------------------------------------------------------------------
+
+
+class TestInsetBoundsValidation:
+    """Construction-time typed refusals replace the old silent off-canvas
+    render (spec §4 H6): out-of-[0, 1] normalized entries, negative px
+    entries, and an empty box (left >= right or top >= bottom, compared only
+    within like kinds) all raise ``ValueError`` naming the bad entry.
+    """
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.1, float("nan")])
+    def test_bare_float_out_of_range_raises(self, bad):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[0\] \(left\)"):
+            Inset(chart=object(), bounds=(bad, 0.1, 0.9, 0.9))
+
+    @pytest.mark.parametrize("bad", [-0.1, 1.1])
+    def test_normcoord_out_of_range_raises(self, bad):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[2\] \(right\)"):
+            Inset(chart=object(), bounds=(0.1, 0.1, norm(bad), 0.9))
+
+    def test_negative_px_raises(self):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[1\] \(top\)"):
+            Inset(chart=object(), bounds=(px(10), px(-5), px(220), px(160)))
+
+    def test_negative_px_message_names_the_field(self):
+        with pytest.raises(ValueError, match=r"Inset\.bounds\[3\] \(bottom\)"):
+            Inset(chart=object(), bounds=(px(10), px(10), px(220), px(-1)))
+
+    def test_empty_box_left_right_same_kind_norm_raises(self):
+        with pytest.raises(ValueError, match="empty box"):
+            Inset(chart=object(), bounds=(0.9, 0.1, 0.1, 0.9))
+
+    def test_empty_box_top_bottom_same_kind_norm_raises(self):
+        with pytest.raises(ValueError, match="empty box"):
+            Inset(chart=object(), bounds=(0.1, 0.9, 0.9, 0.1))
+
+    def test_empty_box_left_right_same_kind_px_raises(self):
+        with pytest.raises(ValueError, match="empty box"):
+            Inset(chart=object(), bounds=(px(220), px(10), px(10), px(160)))
+
+    def test_empty_box_equal_bounds_raises(self):
+        """``left == right`` is refused too (a zero-width box), not just ``>``."""
+        with pytest.raises(ValueError, match="empty box"):
+            Inset(chart=object(), bounds=(0.5, 0.1, 0.5, 0.9))
+
+    def test_mixed_kind_pair_not_compared_for_emptiness(self):
+        """A norm/px pair on the same side is not directly comparable, so it
+        is never refused as an empty box -- only same-kind pairs are checked
+        (spec §4 H6: "compared within like kinds")."""
+        # left is px(220), right is norm(0.1) -- numerically "left > right" if
+        # compared naively, but different kinds means no emptiness check fires.
+        inset = Inset(chart=object(), bounds=(px(220), 0.1, norm(0.1), 0.9))
+        assert inset.bounds == (px(220), 0.1, norm(0.1), 0.9)
+
+    def test_wrong_length_bounds_raises(self):
+        with pytest.raises(ValueError, match="exactly 4 entries"):
+            Inset(chart=object(), bounds=(0.1, 0.1, 0.9))
+
+    def test_valid_bounds_construct_without_error(self):
+        Inset(chart=object(), bounds=(0.1, 0.1, 0.9, 0.9))
+        Inset(chart=object(), bounds=(px(0), px(0), px(200), px(150)))
+        Inset(chart=object(), bounds=(px(10), norm(0.1), px(220), norm(0.9)))
+
 
 # ---------------------------------------------------------------------------
 # Serialization tests (_resolve_chart_config)
@@ -271,6 +365,45 @@ class TestStructuralSerialization:
         assert "border_dash" not in s
         assert "connect_to" not in s
 
+    def test_inset_px_bounds_serialize_to_tagged_wire(self, base_chart, dual_field_df):
+        """F-L08-08: PixelCoord bounds emit ``{"px": f}`` on the wire (Task 5's
+        tagged ``InsetCoord`` contract), not the old ``TypeError`` stopgap."""
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        chart = base_chart + Inset(chart=inset_chart, bounds=(px(10), px(15), px(220), px(165)))
+        cfg = chart._resolve_chart_config()
+        s = cfg["structural"][0]
+        assert s["bounds"] == [
+            {"px": 10.0},
+            {"px": 15.0},
+            {"px": 220.0},
+            {"px": 165.0},
+        ]
+
+    def test_inset_bare_float_and_normcoord_serialize_identically(self, base_chart, dual_field_df):
+        """Byte-stability: a bare float and the equivalent ``fm.norm(f)`` must
+        produce the identical wire entry (both are the pre-2026-09-11 back-compat
+        bare-number shape, never data-space — spec §4 H6)."""
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        bare_chart = base_chart + Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45))
+        norm_chart = base_chart + Inset(
+            chart=inset_chart,
+            bounds=(norm(0.6), norm(0.1), norm(0.95), norm(0.45)),
+        )
+        bare_bounds = bare_chart._resolve_chart_config()["structural"][0]["bounds"]
+        norm_bounds = norm_chart._resolve_chart_config()["structural"][0]["bounds"]
+        assert bare_bounds == norm_bounds == [0.6, 0.1, 0.95, 0.45]
+
+    def test_inset_mixed_px_and_norm_bounds_serialize_independently(
+        self, base_chart, dual_field_df
+    ):
+        """Mixed kinds within one bounds tuple resolve independently (spec §4 H6)."""
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        chart = base_chart + Inset(
+            chart=inset_chart, bounds=(px(10), norm(0.1), px(220), norm(0.9))
+        )
+        s = chart._resolve_chart_config()["structural"][0]
+        assert s["bounds"] == [{"px": 10.0}, 0.1, {"px": 220.0}, 0.9]
+
     def test_inset_optional_fields(self, base_chart, dual_field_df):
         inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
         chart = base_chart + Inset(
@@ -342,6 +475,60 @@ class TestStructuralRendering:
         chart = base_chart + Configure(axis=AxisConfig(grid=True)) + SecondaryY("revenue")
         svg = chart.to_svg()
         assert svg.startswith("<svg")
+
+    def test_inset_px_bounds_render_at_expected_rect(self, base_chart, dual_field_df):
+        """F-L08-08: a px() inset places its nested ``<svg>`` at exactly the plot
+        rect's origin plus the given pixel offsets — no scaling, unlike norm.
+
+        Derives the parent's own plot-rect origin/span from a full-plot-area
+        norm(0)/norm(1) inset (rather than hardcoding chrome margins), then
+        asserts a px-bounded inset's nested ``<svg>`` rect equals
+        ``origin + px`` for each side — the exact contract Task 5 wired in
+        ``build_inset_nodes`` (``InsetCoord::Px.resolve``).
+        """
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+
+        full_plot_chart = base_chart + Inset(
+            chart=inset_chart, bounds=(norm(0.0), norm(0.0), norm(1.0), norm(1.0))
+        )
+        origin_rect = _nested_svg_rects(full_plot_chart.to_svg())[1]
+        origin_x = float(origin_rect["x"])
+        origin_y = float(origin_rect["y"])
+
+        left_px, top_px, right_px, bottom_px = 10.0, 15.0, 220.0, 165.0
+        px_chart = base_chart + Inset(
+            chart=inset_chart,
+            bounds=(px(left_px), px(top_px), px(right_px), px(bottom_px)),
+        )
+        inset_rect = _nested_svg_rects(px_chart.to_svg())[1]
+
+        assert float(inset_rect["x"]) == pytest.approx(origin_x + left_px)
+        assert float(inset_rect["y"]) == pytest.approx(origin_y + top_px)
+        assert float(inset_rect["width"]) == pytest.approx(right_px - left_px)
+        assert float(inset_rect["height"]) == pytest.approx(bottom_px - top_px)
+
+    def test_inset_bare_float_and_normcoord_render_byte_identically(
+        self, base_chart, dual_field_df
+    ):
+        """Byte-stability (spec §7): in-range bare-float and NormCoord bounds
+        render byte-identically."""
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        bare_svg = (base_chart + Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45))).to_svg()
+        norm_svg = (
+            base_chart
+            + Inset(chart=inset_chart, bounds=(norm(0.6), norm(0.1), norm(0.95), norm(0.45)))
+        ).to_svg()
+        assert bare_svg == norm_svg
+
+    def test_inset_mixed_px_and_norm_bounds_renders(self, base_chart, dual_field_df):
+        """Mixed px/norm bounds in one tuple render without error (spec §4 H6)."""
+        inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
+        chart = base_chart + Inset(
+            chart=inset_chart, bounds=(px(10), norm(0.1), px(220), norm(0.6))
+        )
+        svg = chart.to_svg()
+        assert svg.startswith("<svg")
+        assert len(_nested_svg_rects(svg)) == 2
 
 
 # ---------------------------------------------------------------------------

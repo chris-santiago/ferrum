@@ -324,10 +324,16 @@ def test_inset_invalid_connect_style_raises():
         Inset(chart=c, bounds=(0.1, 0.1, 0.9, 0.9), connect_style="arrows")
 
 
-def test_inset_pixel_coord_bounds_raises_type_error():
-    """Inset bounds with PixelCoord should raise TypeError.
+def test_inset_pixel_coord_bounds_renders():
+    """Inset bounds with PixelCoord render successfully (F-L08-08, batch H T6).
 
-    Targets _render.py _serialize_structural -> _inset_coord lines 341-345.
+    Superseded finding: PixelCoord bounds previously raised a stopgap
+    ``TypeError`` here (see ``_render.py``'s prior ``_inset_coord``). The
+    batch-H fix threads px() through the Rust wire's ``{"px": f}`` tag,
+    resolved against the computed plot rect at layout time — the design
+    this feature always specified (2026-05-24 inset-panels design).
+
+    Targets _render.py _serialize_structural -> _inset_coord.
     """
     from ferrum.annotation.coords import px
 
@@ -336,8 +342,8 @@ def test_inset_pixel_coord_bounds_raises_type_error():
     c = Chart(df).mark_point().encode(x="x", y="y") + Inset(
         chart=inset_chart, bounds=(px(10), px(10), px(100), px(100))
     )
-    with pytest.raises(TypeError, match="px"):
-        c.to_svg()
+    svg = c.to_svg()
+    _assert_valid_svg(svg)
 
 
 def test_inset_norm_coord_bounds_accepted():

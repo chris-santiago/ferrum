@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ferrum._validate import validate_choice
+from ferrum._validate import validate_choice, validate_fraction_value, validate_pixel_value
 
 _VALID_BREAK_STYLES = frozenset({"slash", "zigzag", "wave", "gap"})
 _VALID_CONNECT_STYLES = frozenset({"bracket", "lines", "none"})
+_INSET_BOUNDS_NAMES = ("left", "top", "right", "bottom")
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,69 @@ class BreakAxis:
         )
 
 
+def _inset_bound_kind_and_value(entry: Any) -> tuple[str, float]:
+    """Classify one ``Inset.bounds`` entry as ``("norm", value)`` or ``("px", value)``.
+
+    Mirrors the wire contract emitted by ``ferrum._render._inset_coord``:
+    [NormCoord][ferrum.NormCoord] and bare numbers are normalized-fraction
+    bounds (a bare number is *never* data-space, per the 2026-05-24
+    inset-panels design); [PixelCoord][ferrum.PixelCoord] is a pixel-offset
+    bound. See the batch-H design spec §4 H6 / §6.
+    """
+    from ferrum.annotation.coords import NormCoord, PixelCoord
+
+    if isinstance(entry, NormCoord):
+        return "norm", entry.value
+    if isinstance(entry, PixelCoord):
+        return "px", entry.value
+    return "norm", float(entry)
+
+
+def _validate_inset_bounds(bounds: tuple) -> None:
+    """Raise ``ValueError`` for an out-of-range, negative-px, or empty inset box.
+
+    Each of the four ``bounds`` entries (``left``, ``top``, ``right``,
+    ``bottom``) is classified via :func:`_inset_bound_kind_and_value`, then
+    checked against its own kind's contract: a normalized entry must be a
+    finite fraction in ``[0, 1]`` (:func:`ferrum._validate.validate_fraction_value`);
+    a pixel entry must be a finite, non-negative pixel value
+    (:func:`ferrum._validate.validate_pixel_value`). The box is additionally
+    refused as empty when a coordinate pair is of the *same* kind and has
+    zero or negative extent (``left >= right`` or ``top >= bottom``) — a
+    mixed-kind pair (one normalized, one pixel) is not directly comparable
+    on a shared scale, so it is not checked for emptiness (spec §4 H6:
+    "compared within like kinds").
+    """
+    if len(bounds) != 4:
+        raise ValueError(
+            "Inset.bounds must have exactly 4 entries (left, top, right, bottom); "
+            f"got {len(bounds)}"
+        )
+    kinds: list[str] = []
+    values: list[float] = []
+    for i, entry in enumerate(bounds):
+        kind, value = _inset_bound_kind_and_value(entry)
+        label = f"Inset.bounds[{i}] ({_INSET_BOUNDS_NAMES[i]})"
+        if kind == "norm":
+            validate_fraction_value(label, value)
+        else:
+            validate_pixel_value(label, value)
+        kinds.append(kind)
+        values.append(value)
+
+    left, top, right, bottom = values
+    if kinds[0] == kinds[2] and left >= right:
+        raise ValueError(
+            f"Inset.bounds: empty box — left ({left!r}) must be less than "
+            f"right ({right!r}); got bounds={bounds!r}"
+        )
+    if kinds[1] == kinds[3] and top >= bottom:
+        raise ValueError(
+            f"Inset.bounds: empty box — top ({top!r}) must be less than "
+            f"bottom ({bottom!r}); got bounds={bounds!r}"
+        )
+
+
 @dataclass(frozen=True)
 class Inset:
     """An inset chart embedded within a parent chart's plot area.
@@ -106,9 +170,30 @@ class Inset:
         The chart to embed as an inset.
     bounds : tuple
         ``(left, top, right, bottom)`` boundary coordinates for the inset
-        within the parent plot area.  Each coordinate may be a ``float``
-        (data-space), [PixelCoord][ferrum.PixelCoord], or
-        [NormCoord][ferrum.NormCoord].
+        within the parent plot area.  Each coordinate may be a bare
+        ``float`` (a normalized ``[0, 1]`` fraction of the plot area — the
+        same as [NormCoord][ferrum.NormCoord]), [NormCoord][ferrum.NormCoord]
+        itself, or [PixelCoord][ferrum.PixelCoord] (an absolute pixel offset
+        from the plot area's origin, resolved in Rust against the computed
+        plot rect at layout time). Mixed kinds within one ``bounds`` tuple
+        are allowed; each entry resolves independently. A normalized entry
+        outside ``[0, 1]``, a negative pixel entry, or an empty box (``left
+        >= right`` or ``top >= bottom``, compared only within like kinds)
+        raises ``ValueError`` at construction time.
+
+        .. note::
+           **Dated note (2026-09-11, batch H, F-L08-08):** earlier revisions
+           of this docstring described a bare ``float`` as a *data-space*
+           coordinate and stated that [PixelCoord][ferrum.PixelCoord] was
+           unsupported for inset bounds. Neither was ever true of the
+           design this feature shipped from (the 2026-05-24 inset-panels
+           design fixed bounds as normalized-or-pixel, never data-space) —
+           the docstring claim was same-commit authorship drift, and
+           passing ``fm.px(...)`` previously raised ``TypeError`` as a
+           stopgap rather than being resolved. Both are corrected here:
+           bare floats and [NormCoord][ferrum.NormCoord] are normalized
+           fractions, and [PixelCoord][ferrum.PixelCoord] now resolves
+           correctly.
     border : bool, default True
         Draw a border around the inset.
     border_color : str, default "#999"
@@ -141,3 +226,4 @@ class Inset:
         validate_choice(
             "Inset.connect_style", "connect_style", self.connect_style, _VALID_CONNECT_STYLES
         )
+        _validate_inset_bounds(self.bounds)

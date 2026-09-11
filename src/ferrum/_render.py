@@ -281,21 +281,21 @@ class _RenderMixin:
         elif isinstance(feat, Inset):
             from ferrum.annotation.coords import NormCoord, PixelCoord
 
-            def _inset_coord(c: object) -> float:
-                """Convert a bound coordinate to a normalized float for InsetSpec.
+            def _inset_coord(c: object) -> float | dict:
+                """Convert one bound coordinate to its Rust wire representation.
 
-                NormCoord and plain floats are passed as-is (both already in [0,1]).
-                PixelCoord is not supported for Inset bounds because the Rust side
-                expects normalized coordinates and has no access to plot dimensions
-                at serialization time.
+                ``NormCoord`` and bare numbers emit a bare float — Rust's
+                back-compat alias for ``{"norm": f}``, a normalized [0, 1]
+                fraction of the plot area. ``PixelCoord`` emits ``{"px": f}``,
+                resolved in Rust against the computed plot rect's origin (no
+                scaling). Range/kind validation happens at ``Inset``
+                construction time (``ferrum.structural._validate_inset_bounds``)
+                — by the time a bound reaches here, it is already valid.
                 """
+                if isinstance(c, PixelCoord):
+                    return {"px": c.value}
                 if isinstance(c, NormCoord):
                     return c.value
-                if isinstance(c, PixelCoord):
-                    raise TypeError(
-                        "Inset bounds do not support px() coordinates. "
-                        "Use fm.norm(f) (normalized [0, 1]) or plain floats instead."
-                    )
                 return float(c)
 
             inset_svg = feat.chart.to_svg()
