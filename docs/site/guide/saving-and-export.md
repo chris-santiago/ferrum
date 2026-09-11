@@ -26,7 +26,7 @@ All of these methods are available on every chart object — base `Chart`, compo
 | SVG | [`.to_svg()`][ferrum.Chart.to_svg] | `.svg` | Vector graphics. Default render path. |
 | PNG | [`.to_png()`][ferrum.Chart.to_png] | `.png` | Rasterized via `resvg` in Rust. No Cairo/Pillow needed. |
 | HTML | [`.to_html()`][ferrum.Chart.to_html] | `.html` | Self-contained interactive page with inlined WASM renderer. |
-| JSON | [`.save("out.json")`][ferrum.Chart.save] | `.json` | Chart spec as JSON — the same format as `.to_json()`. |
+| JSON | [`.save("out.json")`][ferrum.Chart.save] | `.json` | The rendered scene graph — the same JSON the HTML export embeds and the WASM `loadScene` consumes. For the chart's declaration instead, use [`.to_json()`][ferrum.Chart.to_json] / [`.to_dict()`][ferrum.Chart.to_dict]. |
 | PDF | [`.save("out.pdf")`][ferrum.Chart.save] | `.pdf` | Rasterized PNG (Rust `resvg`) wrapped in a PDF page. No Ghostscript or Cairo needed. |
 
 ## Saving to disk
@@ -43,7 +43,7 @@ chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 chart.save("scatter.svg")   # vector
 chart.save("scatter.png")   # raster
 chart.save("scatter.html")  # interactive (WASM inlined)
-chart.save("scatter.json")  # spec
+chart.save("scatter.json")  # rendered scene graph
 ```
 
 Pass `format=` explicitly to override the extension:

@@ -179,9 +179,9 @@ combined
 
 `.share_scale()` accepts keyword arguments where each key is a channel name and the value is `"shared"` or `"independent"`. Channels not listed default to `"independent"`. When `"shared"`, the union domain across all member charts is computed and injected into every panel, locking their axes to the same range and ticks.
 
-The full channel set (`x`, `y`, `color`, `size`) is supported on composition objects (`HConcatChart`, `VConcatChart`, `JointChart`, `RepeatChart`). The base [`Chart.share_scale`][ferrum.Chart.share_scale] method supports `x` and `y` only; call `.share_scale(color=..., size=...)` on a composition, not on a single `Chart`.
+The full channel set (`x`, `y`, `color`, `size`) is supported on composition objects (`HConcatChart`, `VConcatChart`, `ConcatChart`, `RepeatChart`, `LayerChart`). The base [`Chart.share_scale`][ferrum.Chart.share_scale] method supports `x` and `y` only; call `.share_scale(color=..., size=...)` on a composition, not on a single `Chart`. `JointChart` does not support `.share_scale()` — its center/marginal axes are already structurally linked by the ratio-grid layout, not by scale resolution; native `resolve=` support for `JointChart`/`ClusterMapChart` is tracked separately ([GH #53](https://github.com/chris-santiago/ferrum/issues/53)).
 
-The method returns a new composition of the same type — it works on [`HConcatChart`][ferrum.HConcatChart], [`VConcatChart`][ferrum.VConcatChart], [`JointChart`][ferrum.JointChart], and [`RepeatChart`][ferrum.RepeatChart].
+The method returns a new composition of the same type — it works on [`HConcatChart`][ferrum.HConcatChart], [`VConcatChart`][ferrum.VConcatChart], [`ConcatChart`][ferrum.ConcatChart], [`RepeatChart`][ferrum.RepeatChart], and [`LayerChart`][ferrum.LayerChart].
 
 ## Joint distribution with marginals
 
