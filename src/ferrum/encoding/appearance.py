@@ -42,8 +42,11 @@ class Color(ChannelBase):
     ``legend`` is honored: passing ``legend={"disabled": True}``,
     ``legend=None``, or ``legend=False`` suppresses the color legend in the
     rendered SVG.  ``sort`` is honored: pass a list of strings to set the
-    explicit domain order for the color scale.  ``condition`` is accepted but
-    reserved for future use.
+    explicit domain order for the color scale.  ``condition`` is honored:
+    pass a ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
+    ``fm.when(sel).then(...).otherwise(...)``) to switch color based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -81,8 +84,11 @@ class Size(ChannelBase):
     the size legend in the rendered SVG.  ``legend=Legend(title=..., format=...)``
     customizes the legend title and numeric format string.  When ``legend`` is
     omitted, a graduated size legend is rendered automatically showing ~5 round
-    representative values from the field's domain.  ``condition`` is accepted but
-    reserved for future use.
+    representative values from the field's domain.  ``condition`` is honored:
+    pass a ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
+    ``fm.when(sel).then(...).otherwise(...)``) to switch size based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     When ``size`` and ``color`` are both mapped to the same field, ferrum merges
     them into a single combined legend block.
@@ -125,8 +131,11 @@ class Shape(ChannelBase):
     legend is rendered automatically showing one glyph per distinct category value.
     ``sort`` is honored: pass ``"ascending"``, ``"descending"``, a list of strings
     for an explicit domain order, or a channel shorthand such as ``"-y"`` to sort
-    by the per-category aggregate of another channel.  ``condition`` is accepted
-    but reserved for future use.
+    by the per-category aggregate of another channel.  ``condition`` is
+    honored: pass a ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)``
+    (or ``fm.when(sel).then(...).otherwise(...)``) to switch shape based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -195,7 +204,10 @@ class Fill(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend={"disabled": True}``, ``legend=None``,
     or ``legend=False`` suppresses the fill legend in the rendered SVG.
-    ``condition`` is accepted but reserved for future use.
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch fill based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -232,7 +244,10 @@ class Stroke(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend={"disabled": True}``, ``legend=None``,
     or ``legend=False`` suppresses the stroke legend in the rendered SVG.
-    ``condition`` is accepted but reserved for future use.
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch stroke based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -364,7 +379,10 @@ class StrokeDash(ChannelBase):
     order, or a channel shorthand such as ``"-y"`` to sort by the per-category
     aggregate of another channel — mirroring ``Shape``, since the Rust
     ``build_stroke_dash_scale`` domain builder already reads it.  ``condition``
-    is accepted but reserved for future use.
+    is honored: pass a ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)``
+    (or ``fm.when(sel).then(...).otherwise(...)``) to switch stroke dash based
+    on selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------

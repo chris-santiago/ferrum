@@ -1803,21 +1803,59 @@ Selections define interactive state. They are declared in the spec and resolved 
 
 **Using selections in encodings:**
 
+There are two working forms, both driven through the same conditional
+pipeline. `encode(<channel>=<ConditionalSpec>)` is the more common one; the
+wire channel is taken from the encode key itself:
+
 ```
-Color(field="category", condition=selection.when(Color("category")).otherwise(value("#aaa")))
+chart.encode(color=selection.when(Color("category")).otherwise(value("#aaa")))
 ```
 
-Or via chart-level `.conditional(sel, color=..., else_color=...)`.
+The second form embeds the conditional directly on the channel object, for
+when the base field encoding needs its own kwargs (`type`, `scale`, `title`,
+...) alongside the conditional — `encode()` translates it into the chart's
+conditionals list the same way, stamping the channel from the encode key and
+keeping the base field encoding:
 
-> **Note (2026-06-01):** A conditional built by `sel.when(...).otherwise(...)`
-> or `fm.when(sel).then(...).otherwise(...)` may be passed directly to
-> `encode(<channel>=cond)`. The wire channel is taken from the encode key
-> (so `encode(opacity=fm.when(sel).then(1.0).otherwise(0.2))` resolves the
-> numeric branches as opacity, not colour), and the conditional's source
-> selection is auto-registered — no separate `.add_selection()` is required.
-> `Chart.conditional(spec)` likewise auto-registers the spec's source selection
-> when it carries one. A bare number with no channel context (e.g. via
-> `fm.value(0.5)` outside an `encode` key) defaults to the `opacity` channel.
+```
+chart.encode(color=Color("category", type="N", condition=selection.when(Color("category")).otherwise(value("#aaa"))))
+```
+
+A pre-built `ConditionalSpec` can also be applied without going through
+`encode()` at all, via `Chart.conditional(spec)` — the chart-level sugar for
+a spec already carrying its own selection.
+
+> **2026-06-01, superseded 2026-09-11 (batch H, F-L13-03/F-L15-01):** a
+> conditional built by `sel.when(...).otherwise(...)` or
+> `fm.when(sel).then(...).otherwise(...)` may be passed directly to
+> `encode(<channel>=cond)` — the first working form above. The wire channel
+> is taken from the encode key (so `encode(opacity=fm.when(sel).then(1.0)
+> .otherwise(0.2))` resolves the numeric branches as opacity, not colour),
+> and the conditional's source selection is auto-registered — no separate
+> `.add_selection()` is required. `Chart.conditional(spec)` likewise
+> auto-registers the spec's source selection when it carries one. A bare
+> number with no channel context (e.g. via `fm.value(0.5)` outside an
+> `encode` key) defaults to the `opacity` channel.
+>
+> Batch H closed the gap this note left open: the second working form —
+> `ChannelClass(field=..., condition=<ConditionalSpec>)` — previously
+> serialized into the per-channel `EncodingSpec.condition` field, a nested
+> blob the wire accepted but no renderer consumed. `encode()` now intercepts
+> it the same way: the conditional is appended to the chart's conditionals
+> list (channel stamped from the encode key, selection auto-registered), and
+> the channel itself encodes normally minus the `condition` kwarg. A
+> `condition=` value that is not a `ConditionalSpec` raises `TypeError` at
+> encode time, naming both working forms. (This supersedes the stale example
+> and the `.conditional(sel, color=..., else_color=...)` sentence that used
+> to sit above this note — `Chart.conditional()` never took per-channel
+> kwargs; it takes a single pre-built `spec`.)
+>
+> Separately, `sel.when(...)`/`.otherwise(...)` branch values now accept a
+> bare `str` as field shorthand (parsed with the same grammar `encode()`
+> uses) — a bare string means a **field** everywhere in ferrum; a literal
+> still requires `fm.value(...)`. This is what makes
+> `brush.when("category:N").otherwise(fm.value("lightgray"))` (the Altair
+> migration guide's example) work as printed.
 
 > **2026-09-02 (batch A):** selection styling (`SelectionMark(fill=...)` and
 > `fm.value(<string>)` used as a color) now routes color strings through the

@@ -1351,6 +1351,33 @@ class Chart(
 
             if isinstance(value, ChannelBase):
                 channel = value
+                cond = channel._kwargs.get("condition")
+                if cond is not None:
+                    # ChannelClass(field=..., condition=<ConditionalSpec>): the
+                    # H9 sibling of the encode(<channel>=cond) form above --
+                    # same translation (stamp the channel from the encode key,
+                    # append to _conditionals, auto-register the selection),
+                    # except the base field encoding also has to be preserved.
+                    # Rebuild the channel without `condition` in its kwargs so
+                    # it no longer round-trips through _emit_condition's inert
+                    # nested EncodingSpec.condition blob -- the real
+                    # conditional now lives only in _conditionals.
+                    if not isinstance(cond, ConditionalSpec):
+                        raise TypeError(
+                            f"{cls.__name__}(condition=...) must be a ConditionalSpec built "
+                            f"via sel.when(...).otherwise(...) (or fm.when(sel).then(...)"
+                            f".otherwise(...)); got {type(cond).__name__}. Use one of the two "
+                            f"working forms: encode({name}=<ConditionalSpec>) or "
+                            f"{cls.__name__}(field=..., condition=<ConditionalSpec>)."
+                        )
+                    new._conditionals.append(replace(cond, channel=name))
+                    sel = cond.selection
+                    if sel is not None:
+                        _append_unique_by_name(new._selections, sel)
+                    remaining_kwargs = {
+                        k: v for k, v in channel._kwargs.items() if k != "condition"
+                    }
+                    channel = channel.__class__(channel.field, **remaining_kwargs)
             elif isinstance(value, str):
                 field, type_, agg = parse_shorthand(value)
                 kw = {}

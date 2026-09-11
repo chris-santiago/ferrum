@@ -25,6 +25,17 @@ constructor. Two keys had drifted between the two paths:
   the same "wire key vanishes" bug class F-L09-08 fixed for ``title=""``,
   just a different key.
 
+.. note::
+   ``test_layer_condition_reaches_the_wire`` originally pinned ``condition=``
+   reaching the per-layer ``EncodingSpec.condition`` nested blob. Batch H
+   (F-L13-03/F-L15-01) retired that blob from the Python path: ``encode()``
+   now translates a channel-carried ``condition=<ConditionalSpec>`` into the
+   chart's top-level ``_conditionals`` (channel stamped from the encode key),
+   the same real pipeline ``encode(<channel>=cond)`` already used -- so the
+   test below now pins the translated shape instead of the inert one. A
+   non-``ConditionalSpec`` ``condition=`` value (e.g. a raw dict) raises
+   ``TypeError`` at encode time, naming the two working forms.
+
 Both tests use ``resolve={"y": "independent"}`` so the assertion exercises
 the real public ``.to_svg()``/``.to_json()`` path: default (shared-y)
 ``LayerChart`` renders statically through the Rust composite overlay tree,
@@ -72,24 +83,35 @@ def test_layer_format_percent_forwards_camel_case_format_type():
 
 
 def test_layer_condition_reaches_the_wire():
-    """A non-primary layer's ``condition=`` kwarg must reach that layer's
-    own wire encoding dict, matching the chart-level path (finding 2)."""
-    cond = {
-        "selection_name": "sel_g",
-        "channel": "color",
-        "if_selected": {"value": "#ff0000"},
-        "if_not": {"value": "#cccccc"},
-    }
+    """A non-primary layer's channel-carried ``condition=`` kwarg
+    (``fm.Color(field, condition=<ConditionalSpec>)``) must reach the *real*
+    conditional pipeline: translated at encode time into the merged chart's
+    top-level ``conditionals`` list (channel stamped from the encode key),
+    matching the chart-level ``encode(<channel>=cond)`` path -- not the
+    per-layer ``EncodingSpec.condition`` nested blob this test originally
+    pinned (superseded by F-L13-03/F-L15-01; see the module docstring)."""
+    sel = fm.selection_point(fields=["g"], name="sel_g")
+    cond = sel.when(fm.Color("g")).otherwise(fm.value("#cccccc"))
     df = _df()
     bars = fm.Chart(df).mark_bar().encode(x="x", y="revenue")
     points = (
-        fm.Chart(df).mark_point().encode(x="x", y="margin", color=fm.Color("g", condition=cond))
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x", y="margin", color=fm.Color("g", condition=cond))
+        .add_selection(sel)
     )
     merged = fm.LayerChart(bars, points, resolve={"y": "independent"})._build_merged()
 
     kw = json.loads(merged.to_json())
     color_enc = kw["layers"][1]["encoding"]["color"]
-    assert color_enc["condition"] == cond
+    assert "condition" not in color_enc, (
+        "condition= no longer serializes into the per-layer EncodingSpec -- "
+        "it is translated into the chart-level conditionals list"
+    )
+    conditionals = kw["conditionals"]
+    assert len(conditionals) == 1
+    assert conditionals[0]["selection_name"] == "sel_g"
+    assert conditionals[0]["channel"] == "color"
 
     svg = merged.to_svg()
     assert "<svg" in svg

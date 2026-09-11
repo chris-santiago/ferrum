@@ -923,11 +923,38 @@ def _resolve_encoding_value(
         raise TypeError(
             f"fm.value(...) accepts a color string or a number, got {type(v).__name__}: {v!r}"
         )
+    if isinstance(enc, str):
+        # A bare string means a FIELD everywhere in ferrum -- literals require
+        # fm.value() (encode()'s own rule; see H10). Parse via the same
+        # shorthand grammar encode() uses, then build the real channel object
+        # implied by the branch's resolved wire channel so shorthand errors
+        # (e.g. a bad type suffix) match encode()'s own behavior, and fall
+        # through to the ChannelBase handling below.
+        from ferrum._shorthand import parse_shorthand
+        from ferrum.encoding import _channel_class_for
+
+        shorthand_field, type_, agg = parse_shorthand(enc)
+        if shorthand_field is None:
+            raise TypeError(
+                f"conditional encoding value {enc!r} has no field to encode -- an "
+                f"aggregate-only shorthand like 'count()' needs an explicit channel "
+                f"object (e.g. fm.Color(...)), not a bare string"
+            )
+        branch_cls = _channel_class_for(channel) if channel is not None else None
+        if branch_cls is None:
+            from ferrum.encoding.appearance import Color as branch_cls
+        shorthand_kwargs: dict[str, Any] = {}
+        if type_:
+            shorthand_kwargs["type"] = type_
+        if agg:
+            shorthand_kwargs["aggregate"] = agg
+        enc = branch_cls(shorthand_field, **shorthand_kwargs)
     from ferrum.encoding.base import ChannelBase
 
     if isinstance(enc, ChannelBase):
         return {"kind": "field", "name": enc.field}
     raise TypeError(
-        f"conditional encoding value must be a channel object (Color, Shape, etc.) "
-        f"or a literal value(...) — got {type(enc).__name__}"
+        f"conditional encoding value must be a channel object (Color, Shape, etc.), "
+        f"a field shorthand string (e.g. 'category:N'), or a literal value(...) — "
+        f"got {type(enc).__name__}"
     )
