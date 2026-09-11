@@ -138,6 +138,17 @@ class ParityCase(NamedTuple):
     # y_pred= keyword-only params have no equivalent on CalibrationVisualizer,
     # which only ever wraps fitted models via its variadic *models.
     exclude: frozenset[str] = frozenset()
+    # An explicit override for the function whose *defaults* the visualizer
+    # must match. Normally nothing sets this: `_defaults_target` below
+    # resolves the PUBLIC figure function automatically, because a default
+    # is a user-facing promise made by the public wrapper. `residuals_chart`
+    # re-defaults `panels=` on its way into `_residuals_chart_from_source`,
+    # so diffing against the private builder would compare the visualizer
+    # to a number no user ever reads (the blind spot the close review
+    # named). Auto-resolution rather than opt-in (cycle 3) means a public
+    # wrapper that starts re-defaulting tomorrow is caught by construction,
+    # not when someone remembers to add a row here.
+    default_target: Callable[..., Any] | None = None
 
 
 _PARITY_REGISTRY: list[ParityCase] = [
@@ -350,20 +361,205 @@ def test_visualizer_chart_parity() -> None:
     explicit, forwarded `__init__` param -- or a documented skip-map entry.
     """
     failures: list[str] = []
-    for visualizer, target, exclude in _PARITY_REGISTRY:
-        own_params = _own_param_names(visualizer)
-        target_params = _keyword_only_param_names(target) - exclude
+    for case in _PARITY_REGISTRY:
+        own_params = _own_param_names(case.visualizer)
+        target_params = _keyword_only_param_names(case.target) - case.exclude
         for name in sorted(target_params):
             if name in own_params:
                 continue
-            if (visualizer, name) in _SKIP_MAP:
+            if (case.visualizer, name) in _SKIP_MAP:
                 continue
             failures.append(
-                f"{visualizer.__name__} is missing {name!r} (present on {target.__qualname__})"
+                f"{case.visualizer.__name__} is missing {name!r} "
+                f"(present on {case.target.__qualname__})"
             )
     assert not failures, "Visualizer <-> chart-builder parameter drift detected:\n" + "\n".join(
         f"  {f}" for f in failures
     )
+
+
+# ---------------------------------------------------------------------------
+# Defaults parity (batch G close, design F12)
+# ---------------------------------------------------------------------------
+#
+# Names alone are not the contract: a visualizer that accepts `alpha=` and a
+# chart function that accepts `alpha=` still render differently if their
+# defaults disagree, and nothing in the name diff notices. The close review
+# found one live divergence that way (`ParallelCoordinatesVisualizer.alpha`
+# 0.5 vs the builder's dead 0.3, since fixed at the builder) and named a
+# second that the name diff structurally cannot see (`ResidualsVisualizer`
+# vs the *public* `residuals_chart`'s `panels=`). This diff carries the same
+# rationale-bearing, staleness-checked skip-map discipline as the name diff.
+
+
+#: Private builders whose public wrapper is not simply the builder's name
+#: with the decoration stripped. Two in the whole family; without them the
+#: auto-resolution below would silently fall back to the private builder
+#: for exactly these two, which is the opt-in failure mode all over again.
+_PUBLIC_NAME_ALIASES = {
+    "confusion_chart": "confusion_matrix_chart",
+    "parallel_coords_chart": "parallel_coordinates_chart",
+}
+
+
+def _public_counterpart(builder: Callable[..., Any]) -> Callable[..., Any] | None:
+    """The public `ferrum.*` figure function a private builder backs, if any.
+
+    `_residuals_chart_from_source` -> `ferrum.residuals_chart`. Returns
+    `None` for a builder with no public wrapper of that name, in which case
+    the defaults diff falls back to the builder itself -- there is no
+    user-facing default to compare against.
+    """
+    stem = builder.__name__.lstrip("_")
+    for suffix in ("_from_source", "_from_dataframe"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    stem = _PUBLIC_NAME_ALIASES.get(stem, stem)
+    public = getattr(ferrum, stem, None)
+    return public if callable(public) else None
+
+
+def _defaults_target(case: ParityCase) -> Callable[..., Any]:
+    """The function whose defaults `case.visualizer` must match.
+
+    An explicit `default_target=` wins; otherwise the public figure
+    function when one exists; otherwise the private builder.
+    """
+    return case.default_target or _public_counterpart(case.target) or case.target
+
+
+class DefaultSkipEntry(NamedTuple):
+    visualizer: type[FerrumVisualizer]
+    param: str
+    reference: Callable[..., Any]
+    rationale: str
+
+
+_DEFAULT_SKIP_ENTRIES: list[DefaultSkipEntry] = [
+    DefaultSkipEntry(
+        ResidualsVisualizer,
+        "panels",
+        ferrum.residuals_chart,
+        "residuals_chart defaults to the 4-panel diagnostic grid; the "
+        "visualizer defaults to a single panel, which is what it has always "
+        "rendered. Changing either default would break existing callers' "
+        "output, so the divergence is deliberate and documented (batch G "
+        "T9 / F-L10-07 -- the finding's symptom was that the 4-panel layout "
+        "was *unreachable* from the visualizer, which panels='auto' fixed).",
+    ),
+    DefaultSkipEntry(
+        CooksDistanceVisualizer,
+        "panels",
+        ferrum.residuals_chart,
+        "CooksDistanceVisualizer exists to render the leverage panel, so it "
+        "defaults to exactly that panel rather than to residuals_chart's "
+        "4-panel grid -- the class's whole purpose, and its unchanged "
+        "pre-existing behavior (pinned by "
+        "test_cooks_distance_visualizer_default_panels_unchanged).",
+    ),
+]
+
+_DEFAULT_SKIP_ENTRIES += [
+    DefaultSkipEntry(
+        Rank1DVisualizer,
+        "algorithm",
+        ferrum.rank1d_chart,
+        "Two spellings of one default, not two defaults: rank1d_chart "
+        'documents algorithm=None as "defaults to shapiro" and resolves it '
+        "before calling the builder, while the visualizer names shapiro "
+        "outright. Both render the identical chart when left unset (pinned "
+        "by test_rank_visualizer_default_algorithm_matches_the_chart).",
+    ),
+    DefaultSkipEntry(
+        Rank2DVisualizer,
+        "algorithm",
+        ferrum.rank2d_chart,
+        "Same sentinel spelling as Rank1DVisualizer, with pearson as the resolved default.",
+    ),
+]
+
+_DEFAULT_SKIP_MAP: dict[tuple[type, str], DefaultSkipEntry] = {
+    (entry.visualizer, entry.param): entry for entry in _DEFAULT_SKIP_ENTRIES
+}
+
+
+def _keyword_only_defaults(fn: Callable[..., Any]) -> dict[str, Any]:
+    """KEYWORD_ONLY parameter -> default, skipping params with no default.
+
+    A required keyword-only parameter on the target (``sample_idx`` on the
+    SHAP waterfall builder) has no default to diverge from; the visualizer
+    supplying one is the adapter doing its job, not drift.
+    """
+    sig = inspect.signature(fn)
+    return {
+        name: param.default
+        for name, param in sig.parameters.items()
+        if param.kind is inspect.Parameter.KEYWORD_ONLY
+        and param.default is not inspect.Parameter.empty
+    }
+
+
+def test_visualizer_chart_default_parity() -> None:
+    """Every parameter a visualizer shares with its chart builder must
+    default to the same value -- or carry a documented skip-map entry.
+    """
+    failures: list[str] = []
+    for case in _PARITY_REGISTRY:
+        reference = _defaults_target(case)
+        own_defaults = _keyword_only_defaults(case.visualizer.__init__)
+        target_defaults = _keyword_only_defaults(reference)
+        for name in sorted(set(own_defaults) & (set(target_defaults) - case.exclude)):
+            if own_defaults[name] == target_defaults[name]:
+                continue
+            if (case.visualizer, name) in _DEFAULT_SKIP_MAP:
+                continue
+            failures.append(
+                f"{case.visualizer.__name__}.{name} defaults to "
+                f"{own_defaults[name]!r} but {reference.__qualname__}.{name} "
+                f"defaults to {target_defaults[name]!r}"
+            )
+    assert not failures, "Visualizer <-> chart-builder default drift detected:\n" + "\n".join(
+        f"  {f}" for f in failures
+    )
+
+
+def test_default_skip_map_entries_are_not_stale() -> None:
+    """Every defaults skip-map entry must carry a rationale and still
+    describe a real divergence -- once the two sides agree, the entry is
+    stale and must be removed, not left to rot.
+    """
+    stale: list[str] = []
+    for entry in _DEFAULT_SKIP_ENTRIES:
+        assert entry.rationale.strip(), (
+            f"{entry.visualizer.__name__}.{entry.param} defaults skip-map "
+            "entry has an empty rationale."
+        )
+        own_defaults = _keyword_only_defaults(entry.visualizer.__init__)
+        reference_defaults = _keyword_only_defaults(entry.reference)
+        if entry.param not in own_defaults or entry.param not in reference_defaults:
+            stale.append(
+                f"{entry.visualizer.__name__}.{entry.param} is stale -- one "
+                f"side no longer has a defaulted keyword-only {entry.param!r}."
+            )
+        elif own_defaults[entry.param] == reference_defaults[entry.param]:
+            stale.append(
+                f"{entry.visualizer.__name__}.{entry.param} is stale -- both "
+                f"sides now default to {own_defaults[entry.param]!r}."
+            )
+    assert not stale, "Stale defaults skip-map entries:\n" + "\n".join(f"  {f}" for f in stale)
+
+
+def test_parallel_coordinates_alpha_default_is_shared() -> None:
+    """The close review's live defaults divergence: the private builder's
+    ``alpha=0.3`` was dead (both callers always pass ``alpha``), so a third
+    caller would silently have gotten a different look than either public
+    surface documents. All three now agree on 0.5.
+    """
+    builder_alpha = _keyword_only_defaults(_parallel_coords_chart_from_dataframe)["alpha"]
+    visualizer_alpha = _keyword_only_defaults(ParallelCoordinatesVisualizer.__init__)["alpha"]
+    public_alpha = _keyword_only_defaults(ferrum.parallel_coordinates_chart)["alpha"]
+    assert builder_alpha == visualizer_alpha == public_alpha == 0.5
 
 
 def test_skip_map_entries_are_not_stale() -> None:
@@ -666,3 +862,133 @@ def test_quartet_reaches_finalize_chart_classification() -> None:
 
     svg = ferrum.ROCVisualizer(model, properties={"width": 622}).fit(X, y).show().to_svg()
     assert 'width="622"' in svg
+
+
+# ---------------------------------------------------------------------------
+# Documented surface (batch G close, design F7)
+# ---------------------------------------------------------------------------
+
+
+def test_visualizer_family_docstring_describes_the_real_surface() -> None:
+    """The family module docstring is the first thing a reader meets, so it
+    must name the methods that exist and claim only the composability they
+    support. It advertised `.predict` / `get_params` / `set_params` and
+    `GridSearchCV` composability, none of which the base class implements --
+    and without `get_params`, `sklearn.base.clone` (and therefore every
+    sklearn meta-estimator) cannot work at all.
+    """
+    from ferrum.diagnostics import visualizers
+
+    doc = visualizers.__doc__ or ""
+    surface = {name for name in dir(FerrumVisualizer) if not name.startswith("_")}
+    assert surface == {"fit", "has_score", "score", "show"}
+    for name in sorted(surface):
+        assert f"``{name}" in doc, f"the family docstring never mentions {name}()"
+
+    # While the family lacks `get_params`, it may not advertise the
+    # clone()-dependent sklearn composability that needs it. If someone
+    # implements `get_params` later, this guard steps aside on its own.
+    if not hasattr(FerrumVisualizer, "get_params"):
+        assert "composable inside sklearn" not in doc
+
+
+def test_compare_rejects_the_reserved_base_key_on_every_visualizer() -> None:
+    """`compare={"base": ...}` would silently overwrite the primary `model=`
+    (GH #76). The refusal exists in two places -- `plots._helpers
+    ._resolve_source` for the figure functions and `visualizers
+    ._classification._build_compare_source` for the visualizers (a
+    DUPLICATION-PENDING pair; a diagnostics module may not import the
+    plots-private helper) -- and only the figure-function copy was pinned,
+    so the visualizer copy's guard could be deleted with the suite green.
+    """
+    model = load_fixture("binary_logistic")
+    rival = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+
+    for visualizer in _MUST_HAVE_COMPARE:
+        with pytest.raises(ValueError, match=r"reserved for the primary"):
+            visualizer(model, compare={"base": rival}).fit(X, y)
+        # A non-reserved key on the same call shape still works, so the
+        # refusal is keyed on "base" rather than on compare= at large.
+        assert visualizer(model, compare={"rival": rival}).fit(X, y)._source.model_names == [
+            "base",
+            "rival",
+        ]
+
+
+def test_compare_rejects_a_non_dict_on_every_visualizer() -> None:
+    """The sibling guard in the same duplicated block: `compare=` must be a
+    dict, and the refusal names the type it got.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+
+    for visualizer in _MUST_HAVE_COMPARE:
+        with pytest.raises(TypeError, match=r"compare= must be dict\[str, model\] or None"):
+            visualizer(model, compare=[model]).fit(X, df["y"])
+
+
+@pytest.mark.parametrize(
+    "visualizer, chart_fn",
+    [
+        (Rank1DVisualizer, ferrum.rank1d_chart),
+        (Rank2DVisualizer, ferrum.rank2d_chart),
+    ],
+)
+def test_rank_visualizer_default_algorithm_matches_the_chart(visualizer, chart_fn) -> None:
+    """The two defaults skip-map entries claim `algorithm=None` and the
+    visualizer's named default are the same default in two spellings. That
+    claim is only worth making if it is checked: left unset, both surfaces
+    must render byte-identically.
+    """
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+
+    assert visualizer().fit(X).show().to_svg() == chart_fn(X).to_svg()
+
+
+def test_defaults_diff_targets_the_public_figure_function() -> None:
+    """The defaults diff must resolve the PUBLIC wrapper automatically.
+
+    A default is a promise the public figure function makes, and several
+    wrappers re-default on their way into the private builder
+    (`residuals_chart`'s `panels=`, `rank1d_chart`'s `algorithm=`). Diffing
+    against the private builder compares the visualizer to a number no user
+    reads, and hides exactly those divergences -- which is why the
+    resolution is automatic rather than opt-in. Asserted directly, because
+    the diff itself gets *quieter*, not louder, if this regresses.
+    """
+    by_visualizer = {case.visualizer: case for case in _PARITY_REGISTRY}
+
+    assert _defaults_target(by_visualizer[ResidualsVisualizer]) is ferrum.residuals_chart
+    assert _defaults_target(by_visualizer[Rank1DVisualizer]) is ferrum.rank1d_chart
+    # Both name-aliased builders resolve too -- without the alias map these
+    # two would silently fall back to their private builders.
+    assert _defaults_target(by_visualizer[ConfusionMatrixVisualizer]) is (
+        ferrum.confusion_matrix_chart
+    )
+    assert _defaults_target(by_visualizer[ParallelCoordinatesVisualizer]) is (
+        ferrum.parallel_coordinates_chart
+    )
+
+    # Every registry row must resolve to a public `ferrum.*` function; a
+    # silent fallback to the private builder is the failure mode, so this
+    # counts them rather than trusting the four spot checks above.
+    # (`CalibrationVisualizer`'s registry target is already the public
+    # `calibration_chart` -- see its ParityCase comment -- so it satisfies
+    # this directly rather than through the name derivation.)
+    public_functions = {
+        obj for obj in (getattr(ferrum, name, None) for name in dir(ferrum)) if callable(obj)
+    }
+    private_fallbacks = [
+        case.visualizer.__name__
+        for case in _PARITY_REGISTRY
+        if _defaults_target(case) not in public_functions
+    ]
+    assert not private_fallbacks, (
+        "these visualizers' defaults are diffed against a private builder, "
+        f"so a public re-default would be invisible: {sorted(set(private_fallbacks))}"
+    )

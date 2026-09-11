@@ -225,7 +225,9 @@ def test_calibration_curve_all_same_prediction():
     source = ferrum.ModelSource(ConstProba(), X, y)
     cal = source.calibration_curve(n_bins=5)
     assert cal.height >= 1
-    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count"}
+    # `brier` joined the calibration schema at the batch G close (the
+    # per-sample Brier broadcast onto every bin row).
+    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count", "brier"}
 
 
 def test_lift_curve_class_with_zero_base_rate():
@@ -1243,7 +1245,9 @@ def test_precomputed_source_calibration_quantile_strategy():
     src = _PrecomputedSource(y_true, y_pred)
     cal = src.calibration_curve(n_bins=5, strategy="quantile")
     assert cal.height > 0
-    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count"}
+    # `brier` joined the calibration schema at the batch G close (the
+    # per-sample Brier broadcast onto every bin row).
+    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count", "brier"}
 
 
 def test_precomputed_source_multiclass_cumulative_gain():
@@ -1826,7 +1830,6 @@ def test_residuals_visualizer_show_then_configure():
 
 def test_inject_curve_annotation_zero_row_df():
     """_inject_curve_annotation with zero-row DataFrame should not crash."""
-    from ferrum._metric_labels import _trapezoid_auc
     from ferrum.marks._desugar_helpers import _inject_curve_annotation
 
     df = pl.DataFrame(
@@ -1840,10 +1843,8 @@ def test_inject_curve_annotation_zero_row_df():
     result = _inject_curve_annotation(
         df,
         group_field="class",
-        metric_field="auc",
-        metric_label="AUC",
+        kind="auc",
         prefix="_auc",
-        metric_fn=_trapezoid_auc,
         x_col="fpr",
         y_col="tpr",
     )
@@ -1853,13 +1854,17 @@ def test_inject_curve_annotation_zero_row_df():
 
 def test_inject_curve_annotation_null_group():
     """_inject_curve_annotation with None in the group column should skip nulls."""
-    from ferrum._metric_labels import _trapezoid_auc
     from ferrum.marks._desugar_helpers import _inject_curve_annotation
 
+    # The metric column is named for its kind ("auc") -- since the batch G
+    # close, a caller names the metric kind and the column, value function
+    # and display name all come from the kind table, so neither an
+    # arbitrarily-named metric column nor a custom label is addressable.
+    # The behavior under test (null groups are skipped) is unchanged.
     df = pl.DataFrame(
         {
             "class": ["a", None, "b"],
-            "metric": [0.9, 0.8, 0.7],
+            "auc": [0.9, 0.8, 0.7],
             "x": [1.0, 2.0, 3.0],
             "y": [1.0, 2.0, 3.0],
         }
@@ -1867,10 +1872,8 @@ def test_inject_curve_annotation_null_group():
     result = _inject_curve_annotation(
         df,
         group_field="class",
-        metric_field="metric",
-        metric_label="M",
+        kind="auc",
         prefix="_m",
-        metric_fn=_trapezoid_auc,
         x_col="x",
         y_col="y",
     )

@@ -267,7 +267,11 @@ def test_calibration_curve_binary():
     X = df.select(["f0", "f1", "f2", "f3"])
     source = ferrum.ModelSource(model, X, df["y"])
     cal = source.calibration_curve(n_bins=5)
-    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count"}
+    # `brier` joined the schema at the batch G close: the per-sample Brier
+    # score broadcast onto every bin row, the same way `auc`/`ap` broadcast
+    # onto ROC/PR rows, so every Brier display surface reads one number
+    # from one source instead of re-deriving it from the binned curve.
+    assert set(cal.columns) == {"mean_predicted", "fraction_positive", "count", "brier"}
     assert cal.height <= 5
     assert cal.height > 0
     assert (cal["mean_predicted"] >= 0).all()

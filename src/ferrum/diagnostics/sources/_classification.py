@@ -47,12 +47,96 @@ def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame, real_classes: An
     proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
     y_true = np.asarray(y)
     labels = [c[len("proba_") :] for c in proba_cols]
-    if real_classes is not None and len(real_classes) == len(labels):
-        class_values = _coerce_real_classes(real_classes, y.dtype)
-    else:
-        class_values = [_coerce_class_label(c, y_true.dtype) for c in labels]
+    class_values = _resolve_class_values(real_classes, y, labels)
     score_matrix = proba_df[proba_cols].to_numpy()
     return y_true, score_matrix, labels, class_values
+
+
+def _resolve_class_values(real_classes: Any, y, labels: list[str]) -> list:
+    """Per-class comparison values in ``y``'s domain, in score-column order.
+
+    Every classification-curve method binarizes ``y_true == class_values[i]``,
+    so these values must live in ``y``'s domain. Three tiers, in order:
+
+    1. **The model's own ``classes_``**, coerced into ``y``'s dtype
+       (:func:`_coerce_real_classes`). Positionally aligned with the
+       ``proba_`` columns by ``predict_proba``'s contract.
+    2. **``y``'s own distinct values**, ascending, when there are exactly as
+       many as there are score columns (:func:`_curve_frames
+       .binary_class_values` supplies the binary pair; the multiclass case
+       is the same rule over ``np.unique``). This is the sibling rule the
+       precomputed path already uses, and it assumes the same ascending
+       class order every score matrix here assumes.
+    3. **The display labels**, parsed back into ``y``'s dtype -- the last
+       resort, only when neither of the above can produce the right count.
+
+    Tier 2 exists because tier 3 is *unsound as a general fallback*, which
+    the mandatory binarization turned from latent into live (2026-09-10
+    close review, cycle 3). ``probabilities()`` names its columns from
+    ``class_names``, which is either a user-supplied display alias or a
+    synthetic ``class_{i}`` when the model exposes no ``classes_``. Neither
+    is a value ``y`` contains, so binarizing against it zeroes the indicator
+    and collapses every binary curve -- the batch's own
+    display-label-as-comparison-value defect, inside the resolution helper
+    written to prevent it. Tier 3 now only runs when ``y``'s cardinality
+    disagrees with the score-column count, where no sound answer exists and
+    a parsed label is at least a guess made from the caller's own spelling.
+    """
+    if real_classes is not None and len(real_classes) == len(labels):
+        return _coerce_real_classes(real_classes, y.dtype)
+
+    y_true = np.asarray(y)
+    if len(labels) == 2:
+        values, _ = _curve_frames.binary_class_values(y_true)
+        if len(np.unique(y_true)) == 2:
+            return values
+    else:
+        observed = np.unique(y_true).tolist()
+        if len(observed) == len(labels):
+            return observed
+
+    return [_coerce_class_label(label, y_true.dtype) for label in labels]
+
+
+def _positive_class_value(model: Any, y, proba_cols: list[str]) -> object:
+    """Resolve the value in ``y``'s domain that means "positive".
+
+    The binary slice of :func:`_resolve_class_values`: the positive class is
+    the second of the two, matching ``predict_proba``'s column order.
+
+    Shared by the two binary-only diagnostics that binarize ``y`` against a
+    single class -- ``calibration_curve`` and ``discrimination_threshold``
+    -- so they cannot resolve "positive" two different ways, and shared with
+    ``roc_curve``/``pr_curve``/``cumulative_gain``/``lift_curve`` through the
+    common resolver, so neither can the two families.
+    """
+    labels = [c[len("proba_") :] for c in proba_cols]
+    return _resolve_class_values(getattr(model, "classes_", None), y, labels)[1]
+
+
+def _predictions_in_y_domain(
+    real_classes: Any, encode_values: list, y_pred: np.ndarray
+) -> np.ndarray:
+    """Translate predicted class values from ``classes_``'s domain into ``y``'s.
+
+    ``model.predict`` returns values drawn from ``model.classes_``, which
+    carries the *model's* dtype, while ``confusion_frame`` encodes against
+    comparison values living in ``y``'s dtype (see
+    :func:`_coerce_real_classes`). When the two dtypes differ -- an
+    int-coded ``classes_`` against a ``Utf8``/``Categorical``/``Enum`` ``y``
+    is the common shape -- every predicted value misses the encode map,
+    the kernel drops the pair as out-of-vocabulary, and the rendered
+    confusion matrix is **entirely zeros** (found by the batch G close's
+    own dtype matrix, 2026-09-10).
+
+    ``classes_`` and ``encode_values`` are the same classes in the two
+    domains, positionally aligned by construction, so the translation is
+    that correspondence applied per prediction -- not a second, separately
+    derived cast that could disagree with the encoding. A value not in
+    ``classes_`` is passed through untouched and drops as before.
+    """
+    translation = dict(zip(np.asarray(real_classes).tolist(), encode_values))
+    return np.array([translation.get(value, value) for value in y_pred.tolist()], dtype=object)
 
 
 class ClassificationCurvesMixin(_MixinBase):
@@ -160,8 +244,16 @@ class ClassificationCurvesMixin(_MixinBase):
         """Calibration (reliability) curve for binary classifiers.
 
         Returns one row per non-empty bin with ``mean_predicted``,
-        ``fraction_positive``, and ``count``. Delegates to the
-        ``calibration_kernel`` Rust kernel.
+        ``fraction_positive``, and ``count``, plus a broadcast ``brier``
+        column carrying the per-sample Brier score of the predictions the
+        bins were built from. Delegates to the ``calibration_kernel`` Rust
+        kernel.
+
+        ``y`` is binarized against the positive class
+        (:func:`_positive_class_value`) before binning, so every binary
+        label convention -- ``{0, 1}``, ``{-1, 1}``, ``{1, 2}``, string
+        labels -- yields the same reliability curve and the same Brier
+        score for the same probabilities.
 
         Parameters
         ----------
@@ -189,10 +281,11 @@ class ClassificationCurvesMixin(_MixinBase):
             raise ValueError(
                 f"calibration_curve() is binary-classifier only; got {len(proba_cols)} classes."
             )
-        y_true = np.asarray(self._y, dtype=np.float64)
+        y_true = np.asarray(self._y)
         y_score = proba_df[proba_cols[1]].to_numpy().astype(np.float64)
+        positive_class = _positive_class_value(self._model, self._y, proba_cols)
 
-        df = _curve_frames.calibration_frame(y_true, y_score, n_bins, strategy)
+        df = _curve_frames.calibration_frame(y_true, y_score, positive_class, n_bins, strategy)
         self._cache[key] = df
         return df
 
@@ -273,23 +366,15 @@ class ClassificationCurvesMixin(_MixinBase):
                 f"got {len(proba_cols)} classes."
             )
         y_true = np.asarray(self._y)
-        real_classes = getattr(self._model, "classes_", None)
-        if real_classes is not None and len(real_classes) == len(proba_cols):
-            # Positionally aligned with proba_cols[1] by the same
-            # probabilities()/predict_proba guarantee _resolve_proba's
-            # real_classes parameter relies on.
-            positive_class = _coerce_real_classes(real_classes, self._y.dtype)[1]
-        else:
-            positive_class = _coerce_class_label(
-                proba_cols[1][len("proba_") :],
-                y_true.dtype,
-            )
+        # Positionally aligned with proba_cols[1] by the same
+        # probabilities()/predict_proba guarantee _resolve_proba's
+        # real_classes parameter relies on.
+        positive_class = _positive_class_value(self._model, self._y, proba_cols)
         thresholds = np.linspace(0.0, 1.0, n_thresholds)
 
         if cv is None:
             y_score = np.asarray(proba_df[proba_cols[1]])
-            y_true_bin = (y_true == positive_class).astype(int)
-            df = _curve_frames.threshold_sweep_frame(y_true_bin, y_score, thresholds)
+            df = _curve_frames.threshold_sweep_frame(y_true, y_score, positive_class, thresholds)
         else:
             df = self._discrimination_threshold_cv(
                 cv,
@@ -308,9 +393,34 @@ class ClassificationCurvesMixin(_MixinBase):
         thresholds: np.ndarray,
         positive_class: object,
     ) -> pl.DataFrame:
-        """Cross-validated threshold sweep — average per-fold metrics."""
+        """Cross-validated threshold sweep — average per-fold metrics.
+
+        The positive class is resolved and validated **once, here, against
+        the whole target** (2026-09-11 close review, cycle 4). Folds then
+        receive rows of that already-validated indicator rather than a raw
+        slice to re-resolve.
+
+        That split matters because the two failures look identical to a
+        frame builder and are not the same thing. "``y`` and the model's
+        classes never met" is a bad request and refuses. "this ``KFold``
+        slice happens to hold no positives" is a property of the split of a
+        perfectly good target -- routine on the imbalanced data this
+        diagnostic exists for (measured: a 10% positive rate with ``cv=5``
+        produced a zero-positive fold in 4 of 20 seeds), and doubly so
+        because the default generator here is plain ``KFold(shuffle=True)``
+        rather than a stratified one. Such a fold contributes the kernel's
+        honest ``precision = recall = f1 = 0`` with its real ``queue_rate``,
+        which is what the fold average has always incorporated and what this
+        call returned before the whole-target guard existed.
+        """
         from sklearn.base import clone
         from sklearn.model_selection import KFold
+
+        # Request-level: refuses a target that genuinely never matches the
+        # positive class, before any fold exists to be blamed for it.
+        y_true_bin = _curve_frames.binary_indicator(
+            y_true, positive_class, diagnostic="discrimination_threshold"
+        )
 
         # numpy required: CV split uses integer-array row indexing (X_np[tr], X_np[te])
         # which polars does not support.
@@ -328,8 +438,9 @@ class ClassificationCurvesMixin(_MixinBase):
         for tr, te in splitter.split(X_np):
             m = clone(self._model).fit(X_np[tr], y_true[tr])
             s = _score_fold(m, X_np[te])
-            y_te_bin = (y_true[te] == positive_class).astype(int)
-            fold_dfs.append(_curve_frames.threshold_sweep_frame(y_te_bin, s, thresholds))
+            fold_dfs.append(
+                _curve_frames.threshold_sweep_from_indicator(y_true_bin[te], s, thresholds)
+            )
         return (
             pl.concat(fold_dfs, how="vertical")
             .group_by("threshold")
@@ -379,6 +490,7 @@ class ClassificationCurvesMixin(_MixinBase):
         real_classes = getattr(self._model, "classes_", None)
         if real_classes is not None:
             encode_values = _coerce_real_classes(real_classes, self._y.dtype)
+            y_pred = _predictions_in_y_domain(real_classes, encode_values, y_pred)
         else:
             encode_values = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
 

@@ -9,9 +9,16 @@ first-class API.
   sklearn-protocol object. Each visualizer subclasses
   ``FerrumVisualizer`` (``_base.py``), implements ``_materialize`` to
   compute its derived data + headline ``_metrics``, and ``_build_chart``
-  to render. The ``.fit`` / ``.predict`` / ``get_params`` /
-  ``set_params`` surface keeps visualizers composable inside sklearn
-  pipelines, ``GridSearchCV``, and external evaluators.
+  to render. The public surface is exactly ``fit`` / ``score`` /
+  ``has_score`` / ``show``: ``fit(X, y)`` builds the source and the
+  chart, ``score(X, y)`` delegates to the wrapped estimator's own
+  ``score`` (with ``has_score`` saying whether that number is real or
+  the documented fallback), and ``show()`` returns the ``Chart``.
+  There is deliberately no ``predict``; ``get_params`` / ``set_params``
+  are not implemented either, so a visualizer is **not** clonable by
+  ``sklearn.base.clone`` and cannot be dropped into a ``Pipeline`` or
+  ``GridSearchCV`` — wrap the estimator, fit the visualizer on the
+  search's best estimator instead.
 - **Figure functions** (``ferrum.plots``). A direct
   ``f(model, X, y) -> Chart`` call. No state, no separate ``.fit()``.
   Best for exploratory work, notebook one-liners, and any path where

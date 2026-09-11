@@ -25,7 +25,7 @@ Python-facing DataFrame schemas (the chart-builder contract, unchanged):
 
 - ROC: ``fpr, tpr, threshold, class, auc``
 - PR: ``precision, recall, threshold, class, ap``
-- Calibration: ``mean_predicted, fraction_positive, count``
+- Calibration: ``mean_predicted, fraction_positive, count, brier``
 - Confusion: ``actual, predicted, value, value_fmt``
 - Classification report: ``class, metric, value, value_fmt``
 - Discrimination threshold: ``threshold, precision, recall, f1, queue_rate``
@@ -54,6 +54,121 @@ from ferrum._core import (
 _AVG_GRID_POINTS = 100
 
 
+def brier_score(y_prob: np.ndarray, y_true_bin: np.ndarray) -> float:
+    """Per-sample Brier score: ``mean((y_prob - y_true_bin) ** 2)``.
+
+    Lives here, beside the kernels, because it is curve arithmetic rather
+    than a display concern: :func:`calibration_frame` broadcasts it onto
+    its rows the way the Rust kernels broadcast ``auc``/``ap``.
+    ``ferrum._metric_labels`` imports it from here for its metric-kind
+    table, so there is exactly one Brier formula and the dependency runs
+    display -> computation rather than the other way round.
+    """
+    p = np.asarray(y_prob, dtype=np.float64)
+    obs = np.asarray(y_true_bin, dtype=np.float64)
+    return float(np.mean((p - obs) ** 2))
+
+
+def positive_indicator(y_true: np.ndarray, class_value: object) -> np.ndarray:
+    """0/1 indicator column for ``y_true == class_value``.
+
+    Every Rust kernel in this module counts positives by *summing* its
+    ``y_true`` argument, so it requires an indicator and cannot be handed a
+    raw target. That makes binarization mandatory on every path, not a
+    convenience: a ``{-1, 1}`` target summed as an indicator yields negative
+    "true positive" counts, a ``{1, 2}`` target double-counts, and a string
+    target cannot be cast to float at all. This function is the one
+    expression of that binarization, shared by :func:`one_hot` (multiclass
+    one-vs-rest), :func:`gain_frame`/:func:`lift_frame`, and -- via
+    :func:`binary_indicator` -- every binary curve builder.
+
+    Values outside the class set (including nulls, which arrive as NaN or
+    ``None`` and compare unequal to everything) land on 0, the same slot as
+    a genuine negative. That is correct for the one-vs-rest callers, where
+    "not this class" is exactly the question. It is *not* safe for a binary
+    curve, where it would let a corrupted target masquerade as a clean one
+    -- which is why binary callers go through :func:`binary_indicator`
+    instead of calling this directly.
+    """
+    return (np.asarray(y_true) == class_value).astype(int)
+
+
+def _observed_values(y_true: np.ndarray, limit: int = 8) -> list:
+    """Distinct values of ``y_true`` for an error message, capped and sorted.
+
+    Sorted by ``repr`` rather than by value: a target this is called on is
+    by definition suspect, so it may hold mixed or unorderable types.
+    """
+    distinct = {repr(v): v for v in np.asarray(y_true).tolist()}
+    ordered = [distinct[key] for key in sorted(distinct)]
+    return ordered[:limit]
+
+
+def binary_indicator(y_true: np.ndarray, positive_value: object, *, diagnostic: str) -> np.ndarray:
+    """:func:`positive_indicator`, refusing a target that matches nothing.
+
+    The binary curve builders binarize against a single positive class. If
+    *no* row matches it, every kernel downstream sees an all-negative
+    target and returns something plausible and meaningless -- a Brier of
+    ``mean(p**2)``, an AP of 0.0, a flat reliability curve -- with no
+    indication that the target and the class value never met. That is the
+    exact trade :func:`ferrum._metric_labels._broadcast_metric` refuses in
+    the other direction, and it is how a mis-resolved positive class stays
+    invisible (2026-09-10 close review, cycle 3).
+
+    So a total mismatch refuses by name instead: it is never a meaningful
+    request, and the two things a caller needs in order to fix it are the
+    class value that was searched for and the values ``y`` actually holds.
+    An all-null target is the same case (nulls compare unequal to
+    everything) and refuses the same way.
+
+    An empty target is *not* an error -- there is nothing to mismatch --
+    and a target whose rows are all positive is left alone too: the kernels
+    report that honestly as an undefined (NaN) metric.
+    """
+    indicator = positive_indicator(y_true, positive_value)
+    if len(indicator) and not indicator.any():
+        raise ValueError(
+            f"{diagnostic}: no row of y equals the positive class "
+            f"{positive_value!r}, so the target is entirely negative and "
+            f"every metric computed from it would be meaningless. y holds "
+            f"{_observed_values(y_true)!r}. Check that y and the model's "
+            f"classes_ describe the same labels."
+        )
+    return indicator
+
+
+def binary_class_values(y_true: np.ndarray) -> tuple[list, list[str]]:
+    """``(class_values, class_labels)`` read off a binary target itself.
+
+    The fallback both source adapters use when the model offers no
+    ``classes_`` to align against: the two classes are ``y_true``'s own
+    distinct values, ascending, with the larger taken as positive. That
+    matches what every score matrix in this subsystem assumes (column
+    ``i`` scores the ``i``-th class in ascending class order, which is how
+    scikit-learn orders ``predict_proba``) and it matches
+    ``discrimination_threshold``'s long-standing ``np.unique(y)[-1]`` rule.
+
+    Values come back in ``y_true``'s own dtype -- they are comparison
+    values, used as ``y_true == class_values[1]`` -- and labels are their
+    string forms, used only for a ``class`` discriminator column. Deriving
+    them from ``y`` rather than from a display string is the whole point:
+    a proba column's name may be a user-supplied alias or a synthetic
+    ``class_{i}``, neither of which is a value ``y`` contains.
+
+    A degenerate target with fewer than two distinct values has no second
+    class, so both slots describe the one class present (values *and*
+    labels agree, so the record never says two different things); an empty
+    target falls back to ``0``/``1``.
+    """
+    unique = np.unique(np.asarray(y_true)).tolist()
+    if len(unique) >= 2:
+        return [unique[0], unique[-1]], [str(unique[0]), str(unique[-1])]
+    if len(unique) == 1:
+        return [unique[0], unique[0]], [str(unique[0]), str(unique[0])]
+    return [0, 1], ["0", "1"]
+
+
 def one_hot(y_true: np.ndarray, classes: list) -> np.ndarray:
     """One-hot encode ``y_true`` against an ordered list of class values.
 
@@ -65,7 +180,7 @@ def one_hot(y_true: np.ndarray, classes: list) -> np.ndarray:
     k = len(classes)
     out = np.zeros((n, k), dtype=int)
     for j, cls in enumerate(classes):
-        out[:, j] = (y_true == cls).astype(int)
+        out[:, j] = positive_indicator(y_true, cls)
     return out
 
 
@@ -196,7 +311,7 @@ def roc_frame(
     """
     if len(class_labels) == 2:
         return _roc_one(
-            y_true,
+            binary_indicator(y_true, class_values[1], diagnostic="roc_curve"),
             y_score_matrix[:, 1],
             class_labels[1],
             drop_intermediate=drop_intermediate,
@@ -306,7 +421,11 @@ def pr_frame(
     otherwise one-vs-rest curves per class.
     """
     if len(class_labels) == 2:
-        return _pr_one(y_true, y_score_matrix[:, 1], class_labels[1])
+        return _pr_one(
+            binary_indicator(y_true, class_values[1], diagnostic="pr_curve"),
+            y_score_matrix[:, 1],
+            class_labels[1],
+        )
 
     y_bin = one_hot(y_true, class_values)
     if average in ("micro", "macro", "weighted"):
@@ -325,17 +444,55 @@ def pr_frame(
 def calibration_frame(
     y_true: np.ndarray,
     y_prob: np.ndarray,
+    positive_value: object,
     n_bins: int,
     strategy: str,
 ) -> pl.DataFrame:
-    """Reliability-diagram bins via ``calibration_kernel`` (empty bins dropped)."""
+    """Reliability-diagram bins via ``calibration_kernel``, plus ``brier``.
+
+    Parameters
+    ----------
+    y_true
+        Raw ground-truth labels (caller's dtype), binarized here against
+        ``positive_value`` -- the kernel averages ``y_true`` per bin to get
+        ``fraction_positive``, so it needs an indicator, not a raw target.
+    y_prob
+        Positive-class probability per sample.
+    positive_value
+        The value in ``y_true``'s domain that means "positive". The caller
+        owns resolving it (``model.classes_[1]`` on the model path, the
+        larger of the two observed labels on the precomputed path), the
+        same contract :func:`roc_frame`'s ``class_values`` carries.
+    n_bins, strategy
+        Forwarded to ``calibration_kernel``. Empty bins are dropped.
+
+    Returns
+    -------
+    pl.DataFrame
+        ``mean_predicted, fraction_positive, count, brier``. ``brier`` is
+        the **per-sample** Brier score of ``(y_prob, indicator)`` broadcast
+        onto every bin row, the same way ``auc``/``ap`` broadcast onto ROC
+        and PR rows. It is computed here, at frame assembly, because this
+        is the last place the per-sample arrays exist: once the frame is
+        binned, a Brier recomputed from ``(mean_predicted,
+        fraction_positive)`` is a bin-level statistic that swings with
+        ``n_bins=``/``strategy=`` and is not the Brier score. Carrying it
+        on the frame is what lets every display surface -- the chart title,
+        the figure builder's overlay, and the composable
+        ``chart + BrierLabel()`` -- read one number from one source.
+    """
+    y_bin = binary_indicator(y_true, positive_value, diagnostic="calibration_curve")
     rb = calibration_kernel(
-        _f64(y_true),
+        _f64(y_bin),
         _f64(y_prob),
         n_bins,
         strategy,
     )
-    return cast("pl.DataFrame", pl.from_arrow(rb))
+    bins = cast("pl.DataFrame", pl.from_arrow(rb))
+    # An empty target has no Brier score; NaN says so, where the mean of an
+    # empty array would say the same thing plus a numpy RuntimeWarning.
+    brier = brier_score(y_prob, y_bin) if len(y_bin) else float("nan")
+    return bins.with_columns(pl.lit(brier).alias("brier"))
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +614,7 @@ def gain_frame(
     n = len(y_true)
     frames: list[pl.DataFrame] = []
     for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
-        y_bin = (y_true == cls_val).astype(int)
+        y_bin = positive_indicator(y_true, cls_val)
         order = _descending_score_order(y_score_matrix[:, i])
         cum_pos = np.cumsum(y_bin[order])
         total_pos = max(int(cum_pos[-1]), 1) if n else 1
@@ -521,7 +678,7 @@ def lift_frame(
     n = len(y_true)
     frames: list[pl.DataFrame] = []
     for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
-        y_bin = (y_true == cls_val).astype(int)
+        y_bin = positive_indicator(y_true, cls_val)
         base_rate = float(y_bin.mean()) if n else 0.0
         if base_rate == 0.0:
             continue
@@ -558,15 +715,57 @@ def lift_frame(
 
 
 def threshold_sweep_frame(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    positive_value: object,
+    thresholds: np.ndarray,
+) -> pl.DataFrame:
+    """Precision/recall/F1/queue-rate sweep over a **whole target**.
+
+    ``y_true`` is the raw target and ``positive_value`` the class that means
+    "positive", the same ``(raw target, resolved comparison value)`` contract
+    :func:`roc_frame` and :func:`calibration_frame` take -- binarization
+    happens here, through :func:`binary_indicator`, not in the caller.
+
+    It used to be the caller's job, which is structurally the same shape as
+    the pre-fix ``roc_frame``: a builder that accepts a resolved class value
+    and trusts someone upstream to have applied it. Three call sites each
+    wrote the same ``(y == positive).astype(int)`` line, and none of them got
+    the mismatch refusal.
+
+    This entry is for a whole target, where an all-negative result means the
+    caller's ``y`` and the model's classes never met, and refusing is right.
+    A caller holding an already-resolved *slice* of a validated target -- the
+    cross-validation fold loop is the only one -- wants
+    :func:`threshold_sweep_from_indicator` instead, because a degenerate
+    slice of a good target is not a bad request (2026-09-11 close review,
+    cycle 4).
+    """
+    y_true_bin = binary_indicator(y_true, positive_value, diagnostic="discrimination_threshold")
+    return threshold_sweep_from_indicator(y_true_bin, y_score, thresholds)
+
+
+def threshold_sweep_from_indicator(
     y_true_bin: np.ndarray,
     y_score: np.ndarray,
     thresholds: np.ndarray,
 ) -> pl.DataFrame:
-    """Precision/recall/F1/queue-rate threshold sweep via ``prf_at_thresholds``.
+    """Sweep an already-binarized target, with no mismatch refusal.
 
-    ``y_true_bin`` is the binarized (0/1) positive-class indicator; the caller
-    owns positive-class resolution. The kernel returns metrics in threshold
-    order; the threshold column is prepended to match the output schema.
+    The sibling of :func:`threshold_sweep_frame` for callers that have
+    already resolved and validated the positive class at *request* level and
+    are now feeding it rows -- i.e. a CV fold. An all-negative fold is a
+    property of the split, not of the request: the kernel reports
+    ``precision = recall = f1 = 0`` at every threshold with a real
+    ``queue_rate``, which is the honest answer for a slice containing
+    nothing to find, and which is exactly what the fold average has always
+    incorporated.
+
+    Keeping the refusal out of this entry is the whole point: a guard that
+    sees an array cannot tell a user's broken target from an internal slice
+    of a good one, so the guard belongs to the entry that sees the request.
+    The kernel returns metrics in threshold order; the threshold column is
+    prepended to match the output schema.
     """
     thresholds = thresholds.astype(np.float64)
     rb = prf_at_thresholds(

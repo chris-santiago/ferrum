@@ -101,6 +101,35 @@ def multi_source():
     return ferrum.ModelSource(model, df.select(["f0", "f1", "f2", "f3"]), df["y"])
 
 
+@pytest.fixture(scope="module")
+def separating_source():
+    """A deliberately noisy 4-class fixture on which the two candidate
+    readings of an averaged AUC visibly disagree (0.754 column-sourced vs
+    0.756 integrated-over-the-interpolated-curve).
+
+    The repo's ordinary multiclass fixture is too separable: both readings
+    round to 0.987 there, so a test built on it cannot fail when the
+    column-read is removed. `flip_y=0.35` with `class_sep=0.4` is what
+    pulls the interpolated macro curve away from the per-class mean.
+    """
+    from sklearn.datasets import make_classification
+    from sklearn.linear_model import LogisticRegression
+
+    X, y = make_classification(
+        n_samples=90,
+        n_features=5,
+        n_informative=3,
+        n_classes=4,
+        n_clusters_per_class=1,
+        flip_y=0.35,
+        class_sep=0.4,
+        random_state=0,
+    )
+    frame = pl.DataFrame(X, schema=[f"f{i}" for i in range(5)])
+    model = LogisticRegression(max_iter=1000).fit(X, y)
+    return ferrum.ModelSource(model, frame, pl.Series("y", y))
+
+
 # ---------------------------------------------------------------------------
 # 1. Stable integration
 # ---------------------------------------------------------------------------
@@ -178,19 +207,69 @@ def test_roc_chart_per_class_legend_entries_equal_their_own_auc_column(multi_sou
         assert f"{cls} (AUC = {auc:.3f})" in texts
 
 
-def test_roc_chart_averaged_title_is_the_macro_mean_of_per_class_aucs(multi_source):
+def test_roc_chart_averaged_title_is_the_macro_mean_of_per_class_aucs(separating_source):
     """``per_class=False`` titles the weighted mean the frame carries -- for
     macro that is the plain mean of the per-class AUCs (sklearn parity), not
-    a trapezoid over the interpolated average curve."""
-    frame = multi_source.roc_curve(average=None)
+    a trapezoid over the interpolated average curve.
+
+    Built on ``separating_source`` for the same reason the PR twin below
+    picks its own fixture: on the ordinary multiclass fixture the two
+    candidate readings both round to 0.987, so the test asserted this line
+    without being able to tell the two apart. The mutation gate proved that
+    empty -- breaking ``metric_field="auc"`` to ``None`` here changed
+    nothing any assertion could see. Here the readings are 0.754 (column)
+    vs 0.756 (integrated).
+    """
+    frame = separating_source.roc_curve(average=None)
     per_class = [
         frame.filter(pl.col("class") == cls)["auc"].unique().to_list()[0]
         for cls in frame["class"].unique(maintain_order=True).to_list()
     ]
     expected = sum(per_class) / len(per_class)
 
-    chart = ferrum.roc_chart(multi_source, per_class=False, average="macro")
+    macro = separating_source.roc_curve(average="macro").filter(pl.col("class") == "macro")
+    interpolated = _trapezoid_auc(
+        np.asarray(macro["fpr"].to_list(), dtype=float),
+        np.asarray(macro["tpr"].to_list(), dtype=float),
+    )
+    assert f"{expected:.3f}" != f"{interpolated:.3f}"  # the readings really differ
+
+    chart = ferrum.roc_chart(separating_source, per_class=False, average="macro")
     assert chart._title.text == f"ROC Curve — AUC {expected:.3f}"
+
+
+def test_roc_chart_averaged_overlay_and_legend_read_the_auc_column(separating_source):
+    """The overlay and the legend text obey the same rule as the title.
+
+    On a binary or per-class curve the frame's ``auc`` and a trapezoid over
+    the drawn curve agree by construction, so only an *averaged* multiclass
+    curve can tell them apart: the rendered curve is the interpolated macro
+    curve (integral 0.756) while its ``auc`` column holds the weighted mean
+    of the per-class AUCs (0.754).
+    """
+    frame = separating_source.roc_curve(average=None)
+    per_class = [
+        frame.filter(pl.col("class") == cls)["auc"].unique().to_list()[0]
+        for cls in frame["class"].unique(maintain_order=True).to_list()
+    ]
+    expected = sum(per_class) / len(per_class)
+    macro = separating_source.roc_curve(average="macro").filter(pl.col("class") == "macro")
+    interpolated = _trapezoid_auc(
+        np.asarray(macro["fpr"].to_list(), dtype=float),
+        np.asarray(macro["tpr"].to_list(), dtype=float),
+    )
+    assert f"{expected:.3f}" != f"{interpolated:.3f}"
+
+    texts = svg_texts(
+        ferrum.roc_chart(
+            separating_source, per_class=False, average="macro", annotate_auc=True
+        ).to_svg()
+    )
+    auc_texts = [t for t in texts if "AUC" in t]
+    assert auc_texts  # the overlay and legend really rendered
+    for text in auc_texts:
+        assert f"{expected:.3f}" in text
+        assert f"{interpolated:.3f}" not in text
 
 
 def test_pr_chart_averaged_title_is_the_macro_mean_of_per_class_aps(multi_source):
@@ -453,3 +532,169 @@ def test_calibration_precomputed_title_carries_brier():
 
     assert chart._title.text == f"Calibration Curve — Brier {expected:.3f}"
     assert f"Brier = {expected:.3f}" in svg_texts(chart.to_svg())
+
+
+# ---------------------------------------------------------------------------
+# 7. Which class is "positive" (batch G close, mutation survivor 1)
+# ---------------------------------------------------------------------------
+
+
+class _FixedProbaModel:
+    """A classifier with hand-chosen probabilities and an explicit class set.
+
+    Small and deterministic so the sweep below can be checked against
+    arithmetic done by hand rather than against another implementation.
+    """
+
+    def __init__(self, classes, p_positive):
+        self.classes_ = np.asarray(classes)
+        self._p = np.asarray(p_positive, dtype=float)
+
+    def predict(self, X):
+        return np.where(self._p >= 0.5, self.classes_[1], self.classes_[0])
+
+    def predict_proba(self, X):
+        return np.column_stack([1.0 - self._p, self._p])
+
+
+#: Positive-class probability per sample, paired with a target whose 2nd
+#: class (``classes_[1]``) is the positive one. Deliberately asymmetric:
+#: sample 2 is a false positive and sample 3 a false negative at t=0.5, so
+#: precision, recall and f1 are all distinguishable from their values under
+#: the opposite polarity.
+_SWEEP_P = [0.1, 0.2, 0.6, 0.4, 0.8, 0.9]
+_SWEEP_X = pl.DataFrame({"f0": [float(i) for i in range(len(_SWEEP_P))]})
+
+
+@pytest.mark.parametrize(
+    "classes, y_values",
+    [
+        pytest.param([0, 1], [0, 0, 0, 1, 1, 1], id="int_labels"),
+        pytest.param(
+            ["neg", "pos"],
+            ["neg", "neg", "neg", "pos", "pos", "pos"],
+            id="string_labels",
+        ),
+    ],
+)
+def test_discrimination_threshold_sweep_equals_hand_computed_values(classes, y_values):
+    """The sweep's actual numbers, against arithmetic done by hand.
+
+    ``discrimination_threshold`` binarizes ``y`` against ``classes_[1]``.
+    Swapping that index to ``classes_[0]`` inverts the whole frame and the
+    batch's 767-test pin set did not notice, because every existing
+    assertion checks either shape (row counts, columns, render success) or
+    base-vs-rival *relative* agreement -- and a polarity flip moves both
+    sides of a relative comparison together. So this pins absolute values.
+
+    At ``t=0.5`` the three samples scoring >= 0.5 are samples 2, 4 and 5;
+    two of them are genuinely positive and sample 3 (p=0.4) is a missed
+    positive. So TP=2, FP=1, FN=1: precision = recall = f1 = 2/3, and the
+    queue rate is 3/6. Under the inverted polarity those become 1/3. At
+    ``t=0.0`` everything is queued, so precision is the base rate 3/6 and
+    recall is 1. The two label conventions must agree exactly -- which
+    class is positive is a property of ``classes_``, not of how the labels
+    are spelled.
+    """
+    source = ferrum.ModelSource(
+        _FixedProbaModel(classes, _SWEEP_P), _SWEEP_X, pl.Series("y", y_values)
+    )
+    rows = source.discrimination_threshold(n_thresholds=3).to_dicts()
+
+    assert [r["threshold"] for r in rows] == pytest.approx([0.0, 0.5, 1.0])
+
+    at_zero, at_half, at_one = rows
+    assert at_zero["precision"] == pytest.approx(3 / 6)
+    assert at_zero["recall"] == pytest.approx(1.0)
+    assert at_zero["queue_rate"] == pytest.approx(1.0)
+
+    assert at_half["precision"] == pytest.approx(2 / 3)
+    assert at_half["recall"] == pytest.approx(2 / 3)
+    assert at_half["f1"] == pytest.approx(2 / 3)
+    assert at_half["queue_rate"] == pytest.approx(3 / 6)
+
+    assert at_one["precision"] == pytest.approx(0.0)
+    assert at_one["recall"] == pytest.approx(0.0)
+    assert at_one["queue_rate"] == pytest.approx(0.0)
+
+
+def test_discrimination_threshold_chart_renders_the_positive_class_optimum():
+    """The same polarity, at the user-visible surface: the f1 optimum the
+    chart labels is the positive class's 2/3, not the negative class's 1/3.
+    """
+    source = ferrum.ModelSource(
+        _FixedProbaModel([0, 1], _SWEEP_P), _SWEEP_X, pl.Series("y", [0, 0, 0, 1, 1, 1])
+    )
+    frame = source.discrimination_threshold(n_thresholds=3)
+    assert frame["f1"].max() == pytest.approx(2 / 3)
+    assert "<svg" in ferrum.discrimination_threshold_chart(source, n_thresholds=3).to_svg()
+
+
+# ---------------------------------------------------------------------------
+# 8. Where per-group labels land (batch G close, mutation survivors 7+8)
+# ---------------------------------------------------------------------------
+
+
+#: Three curves whose first appearance order ("c", "a", "b") is neither
+#: sorted nor reverse-sorted, so a test written against it can tell
+#: first-appearance order apart from any other ordering rule. Their AUCs
+#: (0.700 / 0.550 / 0.400) are distinct, so each label identifies its group.
+_GROUP_ORDER_FRAME = pl.DataFrame(
+    {
+        "fpr": [0.0, 0.5, 1.0] * 3,
+        "tpr": [0.0, 0.9, 1.0, 0.0, 0.6, 1.0, 0.0, 0.3, 1.0],
+        "class": ["c"] * 3 + ["a"] * 3 + ["b"] * 3,
+    }
+)
+
+
+def test_curve_metrics_by_group_keeps_first_appearance_order():
+    """``_curve_metrics_by_group``'s docstring promises first-appearance
+    order precisely so callers assigning per-group display slots get a
+    deterministic one. Nothing asserted it, so reversing the order survived
+    the whole suite.
+    """
+    from ferrum._metric_labels import _curve_metrics_by_group
+
+    metrics = _curve_metrics_by_group(
+        _GROUP_ORDER_FRAME, group_field="class", kind="auc", x_col="fpr", y_col="tpr"
+    )
+    assert list(metrics) == ["c", "a", "b"]
+    assert list(metrics.values()) == pytest.approx([0.70, 0.55, 0.40])
+
+
+def test_mark_roc_stackers_each_group_label_on_its_own_row():
+    """Multi-class annotation labels are staggered down the y axis so they
+    do not overlap -- a documented contract that nothing pinned, so
+    collapsing every label onto one line survived. Pins both the stagger
+    (distinct, evenly stepped y positions) and the slot order (labels in
+    first-appearance order).
+    """
+    chart = (
+        ferrum.Chart(_GROUP_ORDER_FRAME)
+        .mark_roc(annotate_auc=True)
+        .encode(x="fpr", y="tpr", color="class")
+    )
+    placed = (
+        chart._resolve_pending()
+        ._data.filter(pl.col("_auc_label").is_not_null())
+        .select(["_auc_label_y", "_auc_label"])
+        .to_dicts()
+    )
+
+    assert [row["_auc_label"] for row in placed] == [
+        "c: AUC = 0.700",
+        "a: AUC = 0.550",
+        "b: AUC = 0.400",
+    ]
+    ys = [row["_auc_label_y"] for row in placed]
+    assert len(set(ys)) == len(ys), f"labels collapsed onto shared y positions: {ys}"
+    steps = [round(b - a, 9) for a, b in zip(ys, ys[1:])]
+    assert len(set(steps)) == 1 and steps[0] > 0, f"stagger is not a constant step: {steps}"
+
+    # And they really reach the SVG, in that order.
+    assert [t for t in svg_texts(chart.to_svg()) if "AUC" in t] == [
+        "c: AUC = 0.700",
+        "a: AUC = 0.550",
+        "b: AUC = 0.400",
+    ]

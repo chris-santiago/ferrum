@@ -847,7 +847,11 @@ def _parallel_coords_chart_from_dataframe(
     features: list[str] | None = None,
     hue: str | None = None,
     rescale: str | None = "minmax",
-    alpha: float = 0.3,
+    # 0.5, matching both callers' own defaults (`parallel_coordinates_chart`
+    # and `ParallelCoordinatesVisualizer`), which always pass `alpha`
+    # explicitly. A third caller relying on the default used to get a
+    # different look than the two public surfaces document.
+    alpha: float = 0.5,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,

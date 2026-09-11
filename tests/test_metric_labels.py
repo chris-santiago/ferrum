@@ -25,10 +25,15 @@ def test_metric_label_specs_single_source():
     """The metric-kind table is the one source shared by the direct-mark
     ``__radd__`` path and the figure-function explicit-field path.
 
-    Both surfaces must read the same ``(value_fn, prefix)`` per kind: the
-    per-class dataclass defaults derive their prefix from the table, and
-    ``_apply_metric_label_explicit`` looks the kind up in the same table.
-    A drift here is exactly the two-code-paths hazard MOD-05 flagged.
+    Both surfaces must read the same ``(value_fn, display_name, column)``
+    per kind: the per-class dataclass defaults derive their prefix from the
+    table, and ``_apply_metric_label_explicit`` looks the kind up in the
+    same table. A drift here is exactly the two-code-paths hazard MOD-05
+    flagged. ``column`` (the broadcast metric column a ferrum diagnostic
+    frame carries) joined the tuple at the batch G close, so *which frame
+    column a surface reads* is a property of the metric kind rather than of
+    the calling surface; ``display_name`` replaced the stored ``prefix`` in
+    cycle 4 for the same reason, with ``prefix`` now derived from it.
     """
     from ferrum._metric_labels import (
         APLabel,
@@ -41,19 +46,20 @@ def test_metric_label_specs_single_source():
     )
 
     assert _METRIC_LABEL_SPECS == {
-        "auc": (_trapezoid_auc, "AUC = "),
-        "ap": (_ap_step, "AP = "),
-        "brier": (_brier_score, "Brier = "),
+        "auc": (_trapezoid_auc, "AUC", "auc"),
+        "ap": (_ap_step, "AP", "ap"),
+        "brier": (_brier_score, "Brier", "brier"),
     }
     expected_fns = {"auc": _trapezoid_auc, "ap": _ap_step, "brier": _brier_score}
     # The dataclass prefix defaults are the table's prefixes (no second copy).
     for cls, kind in ((AUCLabel, "auc"), (APLabel, "ap"), (BrierLabel, "brier")):
-        assert cls().prefix == _METRIC_LABEL_SPECS[kind][1]
+        assert cls().prefix == _METRIC_LABEL_SPECS[kind].prefix
         assert cls._kind == kind
         # __radd__ resolves its value function FROM the table: i.e. the lookup
-        # ``_METRIC_LABEL_SPECS[self._kind][0]`` returns the expected fn for this
-        # class. (Pins the resolution, not just that ``_kind`` matches a key.)
-        assert _METRIC_LABEL_SPECS[cls._kind][0] is expected_fns[kind]
+        # ``_METRIC_LABEL_SPECS[self._kind].value_fn`` returns the expected fn
+        # for this class. (Pins the resolution, not just that ``_kind`` matches
+        # a key.)
+        assert _METRIC_LABEL_SPECS[cls._kind].value_fn is expected_fns[kind]
 
 
 def test_metric_label_classes_registry_derived_consistent():
@@ -304,3 +310,96 @@ def test_annotate_arrow_with_label_is_plain_chart_with_label_annotation():
 def test_annotate_arrow_stroke_passes_through():
     chart = annotate_arrow(0, 0, 1, 1, stroke="#ff0000")
     assert chart._mark_kwargs.get("stroke") == "#ff0000"
+
+
+# ---- Absent vs. present-but-NaN metric column (batch G close) ---------------
+
+
+def test_broadcast_metric_propagates_a_present_nan():
+    """A metric column the kernel computed as NaN says "undefined", which is
+    a different fact from "this frame carries no such metric". Collapsing
+    the two sent a degenerate curve down the integration fallback, which
+    turned the one honest signal into a plausible-looking fabricated
+    number.
+    """
+    import math
+
+    from ferrum._metric_labels import _broadcast_metric
+
+    present_nan = pl.DataFrame({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0], "auc": [float("nan")] * 2})
+    value = _broadcast_metric(present_nan, "auc")
+    assert value is not None and math.isnan(value)
+
+    absent = pl.DataFrame({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0]})
+    assert _broadcast_metric(absent, "auc") is None
+
+    two_curves = pl.DataFrame({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0], "auc": [0.5, 0.9]})
+    assert _broadcast_metric(two_curves, "auc") is None
+
+
+def test_curve_metric_shows_nan_instead_of_integrating_a_broken_curve():
+    """``_curve_metric`` only integrates when the frame carries no metric
+    column at all. A NaN in the column reaches the display surface as NaN.
+    """
+    import math
+
+    from ferrum._metric_labels import _curve_metric
+
+    broken = pl.DataFrame({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0], "auc": [float("nan")] * 2})
+    assert math.isnan(_curve_metric(broken, kind="auc", x_col="fpr", y_col="tpr"))
+
+    # Same curve, no column: the integration fallback still works, which is
+    # what makes ``chart + AUCLabel()`` usable on arbitrary user data.
+    user_data = pl.DataFrame({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0]})
+    assert _curve_metric(user_data, kind="auc", x_col="fpr", y_col="tpr") == 0.5
+
+
+# ---- One name per metric (batch G close, cycle 4) ---------------------------
+
+
+def test_no_display_surface_names_a_metric_twice():
+    """A metric kind carries exactly one spelling of its own name.
+
+    Before this, four call sites passed `kind="auc"` *and* a literal
+    `"AUC"` (as `metric_name=`/`metric_label=`) while the table held a third
+    spelling in `prefix="AUC = "`. A mismatch there renders wrong text
+    rather than a wrong number, which is why it outlived the column/function
+    unification -- but it is the same shape one field over. Checked
+    structurally rather than by grepping for the string, so it stays true
+    for a metric kind added next year.
+    """
+    import inspect
+
+    from ferrum._metric_labels import _METRIC_LABEL_SPECS, _display_name
+    from ferrum.marks._desugar_helpers import _inject_curve_annotation
+    from ferrum.plots._helpers import _inject_metric_into_legend_labels
+
+    # The prefix is derived from the display name, not stored beside it.
+    for kind, spec in _METRIC_LABEL_SPECS.items():
+        assert spec.prefix == f"{spec.display_name} = "
+        assert _display_name(kind) == spec.display_name
+
+    # Neither display helper accepts a caller-supplied name any more: they
+    # take the kind and ask the table. A helper that still had such a
+    # parameter is a site that can disagree with the table.
+    for helper in (_inject_metric_into_legend_labels, _inject_curve_annotation):
+        params = set(inspect.signature(helper).parameters)
+        assert "kind" in params, f"{helper.__qualname__} should take the metric kind"
+        assert not params & {"metric_name", "metric_label", "metric_fn", "metric_field"}, (
+            f"{helper.__qualname__} still accepts a hand-paired metric spelling: "
+            f"{sorted(params & {'metric_name', 'metric_label', 'metric_fn', 'metric_field'})}"
+        )
+
+
+def test_broadcast_metric_rejects_an_unknown_kind():
+    """Every metric lookup validates its kind. `_broadcast_metric` was the
+    one direct caller that bypassed `_curve_metric`'s check, so a typo gave
+    a bare `KeyError` from the table instead of a named error.
+    """
+    import pytest
+
+    from ferrum._metric_labels import _broadcast_metric
+
+    df = pl.DataFrame({"fpr": [0.0, 1.0], "tpr": [0.0, 1.0], "auc": [0.5, 0.5]})
+    with pytest.raises(ValueError, match=r"_broadcast_metric.*kind"):
+        _broadcast_metric(df, "brier_score")

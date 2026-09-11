@@ -326,12 +326,26 @@ class PRVisualizer(FerrumVisualizer):
         )
 
 
+def _calibration_error(bins: pl.DataFrame) -> float:
+    """Mean squared bin-level deviation from the diagonal, for one model.
+
+    ``bins`` must hold a single model's reliability rows; the caller
+    filters. Kept separate from :meth:`CalibrationVisualizer._materialize`
+    so the single-model and per-model branches provably compute the same
+    quantity.
+    """
+    diff = bins["fraction_positive"] - bins["mean_predicted"]
+    return float((diff**2).mean())
+
+
 class CalibrationVisualizer(FerrumVisualizer):
     """Calibration (reliability) diagram for a probability classifier.
 
     Wraps ``ModelSource.calibration_curve()``. Records the mean squared
     deviation between ``mean_predicted`` and ``fraction_positive`` as
-    ``calibration_error``.
+    ``calibration_error`` — one entry per model, keyed
+    ``calibration_error[<model name>]``, when several models are
+    overlaid, since no single pooled number describes them all.
 
     Parameters
     ----------
@@ -476,11 +490,20 @@ class CalibrationVisualizer(FerrumVisualizer):
             n_bins=self.n_bins,
             strategy=self.strategy,
         )
-        # When the source is a ComparedModelSource the frame carries one
-        # row per (model, bin). Per-model calibration_error then
-        # surfaces as a dict in the repr via the dispatched mean.
-        diff = cal["fraction_positive"] - cal["mean_predicted"]
-        self._metrics["calibration_error"] = float((diff**2).mean())
+        # A multi-model overlay carries one row per (model, bin), so a
+        # single pooled mean over every row would describe no model in
+        # particular -- the metric-identity defect this batch fixed for the
+        # compare= trio via _base_model_rows, in the one sibling whose
+        # multi-model form is symmetric (*models) rather than
+        # base-plus-rivals. `_metrics` is dict[str, float] and __repr__
+        # formats every value with `:.4f`, so the honest shape here is one
+        # float *key* per model rather than one dict-valued key.
+        if "model" in cal.columns:
+            for name in cal["model"].unique(maintain_order=True).to_list():
+                rows = cal.filter(pl.col("model") == name)
+                self._metrics[f"calibration_error[{name}]"] = _calibration_error(rows)
+        else:
+            self._metrics["calibration_error"] = _calibration_error(cal)
 
     def _build_chart(self) -> Any:
         return _calibration_chart_from_source(

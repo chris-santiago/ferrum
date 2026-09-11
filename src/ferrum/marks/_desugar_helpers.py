@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
-from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group
+from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group, _display_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -297,10 +297,8 @@ def _inject_curve_annotation(
     df: pl.DataFrame,
     *,
     group_field: str | None,
-    metric_field: str | None,
-    metric_label: str,
+    kind: str,
     prefix: str,
-    metric_fn: Callable[[Any, Any], float],
     x_col: str,
     y_col: str,
 ) -> pl.DataFrame:
@@ -311,9 +309,11 @@ def _inject_curve_annotation(
     - ``{prefix}_label_x: Float64`` -- x coordinate of the label anchor.
     - ``{prefix}_label_y: Float64`` -- staggered y per group.
     - ``{prefix}_label: Utf8`` -- formatted string
-      ``"{group_value}: {metric_label} = {value:.3f}"``, or
-      ``"{metric_label} = {value:.3f}"`` when the data carries no group
-      column.
+      ``"{group_value}: {display name} = {value:.3f}"``, or
+      ``"{display name} = {value:.3f}"`` when the data carries no group
+      column. The display name comes from the kind table rather than from a
+      caller-supplied literal, so a mark annotation cannot spell a metric
+      differently from the chart title (close review, 2026-09-11).
 
     All rows except one per group are null; ``mark_text`` skips nulls so
     exactly N labels render for N groups. This is what backs
@@ -323,14 +323,17 @@ def _inject_curve_annotation(
     ``data_transform`` so the columns exist by the time the layer binds.
 
     The metric per group is resolved by :func:`ferrum._metric_labels._curve_metric`
-    -- the frame's broadcast ``metric_field`` (``"auc"``/``"ap"``, as
-    ``ModelSource.roc_curve()``/``pr_curve()`` emit it) when it carries the
-    value, else ``metric_fn`` integrated over ``(x_col, y_col)`` so a
-    hand-built curve frame annotates too.
+    from the metric ``kind`` (``"auc"``/``"ap"``) -- the frame's broadcast
+    column for that kind (as ``ModelSource.roc_curve()``/``pr_curve()``
+    emit it) when it carries the value, else the kind's own value function
+    integrated over ``(x_col, y_col)`` so a hand-built curve frame
+    annotates too.
     """
     n_rows = df.height
     if n_rows == 0:
         return df
+
+    name = _display_name(kind)
 
     label_x: list[float | None] = [None] * n_rows
     label_y: list[float | None] = [None] * n_rows
@@ -338,12 +341,7 @@ def _inject_curve_annotation(
 
     if group_field is not None and group_field in df.columns:
         metrics = _curve_metrics_by_group(
-            df,
-            group_field=group_field,
-            metric_field=metric_field,
-            metric_fn=metric_fn,
-            x_col=x_col,
-            y_col=y_col,
+            df, group_field=group_field, kind=kind, x_col=x_col, y_col=y_col
         )
         first_row: dict[str, int] = {}
         for row_i, value in enumerate(df[group_field].to_list()):
@@ -353,18 +351,12 @@ def _inject_curve_annotation(
             idx = first_row[group]
             label_x[idx] = _CURVE_LABEL_X
             label_y[idx] = _CURVE_LABEL_Y0 + slot * _CURVE_LABEL_Y_STEP
-            label_text[idx] = f"{group}: {metric_label} = {metric:.3f}"
+            label_text[idx] = f"{group}: {name} = {metric:.3f}"
     else:
-        metric = _curve_metric(
-            df,
-            metric_field=metric_field,
-            metric_fn=metric_fn,
-            x_col=x_col,
-            y_col=y_col,
-        )
+        metric = _curve_metric(df, kind=kind, x_col=x_col, y_col=y_col)
         label_x[0] = _CURVE_LABEL_X
         label_y[0] = _CURVE_LABEL_Y0
-        label_text[0] = f"{metric_label} = {metric:.3f}"
+        label_text[0] = f"{name} = {metric:.3f}"
 
     return df.with_columns(
         pl.Series(f"{prefix}_label_x", label_x, dtype=pl.Float64),

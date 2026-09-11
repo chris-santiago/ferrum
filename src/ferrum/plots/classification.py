@@ -160,18 +160,14 @@ def _roc_chart_from_source(
     that would leak into mark_roc's diagonal reference layer).
 
     F-L11-01 (2026-09-10): title, legend text and overlay all resolve their
-    AUC through ``metric_field="auc"`` -- the frame's Rust-computed column
+    AUC through ``kind="auc"`` -- the frame's Rust-computed column
     -- so the three surfaces show one number from one source. For
     ``per_class=False`` that column holds the weighted mean of the
     per-class AUCs (sklearn parity), which is what the averaged-curve title
     reports.
     """
     import ferrum
-    from ferrum._metric_labels import (
-        _apply_metric_label_explicit,
-        _curve_metric,
-        _trapezoid_auc,
-    )
+    from ferrum._metric_labels import _apply_metric_label_explicit, _curve_metric
     from ferrum.marks._desugar_helpers import _roc_render_frame
 
     df = source.roc_curve(average=None if per_class else average)
@@ -183,9 +179,7 @@ def _roc_chart_from_source(
             color_field=color_field,
             x_col="fpr",
             y_col="tpr",
-            metric_fn=_trapezoid_auc,
-            metric_field="auc",
-            metric_name="AUC",
+            kind="auc",
         )
 
     # Single annotation surface: the figure builder owns the AUC overlay
@@ -223,8 +217,7 @@ def _roc_chart_from_source(
     if n_curves == 1:
         auc_value = _curve_metric(
             curve_df,
-            metric_field="auc",
-            metric_fn=_trapezoid_auc,
+            kind="auc",
             x_col="fpr",
             y_col="tpr",
         )
@@ -241,7 +234,6 @@ def _roc_chart_from_source(
             x_col="fpr",
             y_col="tpr",
             color_col=color_field,
-            metric_field="auc",
             position="end",
         )
 
@@ -272,17 +264,13 @@ def _pr_chart_from_source(
     helper.
 
     F-L11-01 (2026-09-10): title, legend text and overlay all resolve their
-    AP through ``metric_field="ap"`` -- the frame's Rust-computed column --
+    AP through ``kind="ap"`` -- the frame's Rust-computed column --
     so the three surfaces show one number from one source. For
     ``per_class=False`` that column holds the weighted mean of the
     per-class APs.
     """
     import ferrum
-    from ferrum._metric_labels import (
-        _ap_step,
-        _apply_metric_label_explicit,
-        _curve_metric,
-    )
+    from ferrum._metric_labels import _apply_metric_label_explicit, _curve_metric
 
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
@@ -296,9 +284,7 @@ def _pr_chart_from_source(
             color_field=_pr_color_field,
             x_col="recall",
             y_col="precision",
-            metric_fn=_ap_step,
-            metric_field="ap",
-            metric_name="AP",
+            kind="ap",
             curve_filter=lambda d: d.filter(pl.col("precision").is_not_null()),
         )
 
@@ -356,8 +342,7 @@ def _pr_chart_from_source(
     if n_curves == 1:
         ap_value = _curve_metric(
             curve_df,
-            metric_field="ap",
-            metric_fn=_ap_step,
+            kind="ap",
             x_col="recall",
             y_col="precision",
         )
@@ -391,50 +376,12 @@ def _pr_chart_from_source(
             x_col="recall",
             y_col="precision",
             color_col=color_field,
-            metric_field="ap",
             position="end",
         )
 
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
-
-
-def _per_sample_brier(source: Any) -> float | None:
-    """Return the per-sample Brier score for one binary-classification source.
-
-    ``None`` when ``source`` cannot produce one: a ``_PrecomputedSource``
-    always can (it holds exactly ``brier_score()`` needs); a ``ModelSource``
-    can when its wrapped model exposes ``predict_proba`` and returns
-    exactly two columns. A ``ComparedModelSource`` has no single per-sample
-    story of its own -- callers iterate ``.items()`` and call this once per
-    wrapped ``ModelSource`` instead (F-L11-04, 2026-09-10).
-    """
-    import numpy as np
-
-    from ferrum._metric_labels import _brier_score
-    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
-
-    if isinstance(source, _PrecomputedSource):
-        return source.brier_score()
-
-    model = getattr(source, "model", None)
-    X_attr = getattr(source, "X", None)
-    y_attr = getattr(source, "y", None)
-    if model is None or X_attr is None or y_attr is None or not hasattr(model, "predict_proba"):
-        return None
-    try:
-        proba = np.asarray(model.predict_proba(X_attr))
-    except Exception:
-        # A wrapped model that advertises predict_proba but fails on this
-        # X (e.g. an incompatible feature count) degrades the title, not
-        # the chart -- matches the pre-fix behavior's graceful fallback.
-        return None
-    if proba.ndim != 2 or proba.shape[1] != 2:
-        return None
-    p = proba[:, 1].astype(float)
-    obs = np.asarray(y_attr, dtype=float)
-    return _brier_score(p, obs)
 
 
 def _calibration_chart_from_source(
@@ -456,22 +403,26 @@ def _calibration_chart_from_source(
     Brier score when the chart shows a single model; per-series
     :class:`ferrum.BrierLabel` overlay when ``annotate_brier=True``.
 
-    F-L11-04 (2026-09-10): both the title and the overlay read the *same*
-    per-sample Brier -- ``_per_sample_brier`` computed from the held
-    predictions, never from the binned ``(mean_predicted,
-    fraction_positive)`` reliability-diagram data ``n_bins=``/``strategy=``
+    F-L11-04 (2026-09-10, reworked at the batch G close): both the title and
+    the overlay read the *same* per-sample Brier -- the frame's broadcast
+    ``brier`` column, computed in ``calibration_frame`` from the
+    predictions the bins were built from, never from the binned
+    ``(mean_predicted, fraction_positive)`` data ``n_bins=``/``strategy=``
     control. Single-model: one value drives both the title and the
     ungrouped overlay. Compared (``isinstance(source, ComparedModelSource)``
     -- the dead ``hasattr(source, "models")`` check is gone, no source class
     ever had a ``models`` attribute): the title stays plain (no single
-    number describes several models, unchanged from before), but each
-    model's own per-sample Brier drives its own overlay label, keyed by
-    model name to match the ``color="model"`` grouping (user checkpoint
-    decision 2, supersedes the spec's prior bin-level-for-compared
-    sanction -- see ``ferrum-spec.md``'s dated note).
+    number describes several models, unchanged from before), while the
+    per-model rows each carry their own ``brier``, so the overlay labels
+    the ``color="model"`` groups with each model's own score (user
+    checkpoint decision 2, supersedes the spec's prior
+    bin-level-for-compared sanction -- see ``ferrum-spec.md``'s dated
+    note). The composable ``chart + BrierLabel()`` path reads the same
+    column by the same rule, so composing can no longer print a different
+    number over the one the figure already placed.
     """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit
+    from ferrum._metric_labels import _apply_metric_label_explicit, _broadcast_metric
 
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None
@@ -484,17 +435,11 @@ def _calibration_chart_from_source(
         y=Y("fraction_positive", title="Fraction of positives"),
     )
 
-    if isinstance(source, ComparedModelSource):
-        brier_value: float | None = None
-        per_model_brier = {
-            name: _per_sample_brier(model_source) for name, model_source in source.items()
-        }
-        overlay_value: float | dict[str, float] | None = {
-            name: value for name, value in per_model_brier.items() if value is not None
-        } or None
-    else:
-        brier_value = _per_sample_brier(source)
-        overlay_value = brier_value
+    # A compared chart has no single Brier to title with; the per-model
+    # numbers reach the reader through the per-series overlay instead.
+    brier_value = (
+        None if isinstance(source, ComparedModelSource) else _broadcast_metric(df, "brier")
+    )
 
     if brier_value is not None:
         chart = chart.properties(
@@ -510,19 +455,17 @@ def _calibration_chart_from_source(
 
     if annotate_brier:
         # Brier overlay shares the canonical metric-kind table in
-        # _metric_labels (same single source as the ROC/PR AUC/AP overlays).
-        # mark_calibration has no annotate flag, so the figure function is the
-        # sole annotation surface here. precomputed_value= makes the overlay
-        # show the true per-sample number(s) above rather than integrating
-        # the bin-level curve _apply_metric_label_explicit would otherwise
-        # compute from (mean_predicted, fraction_positive).
+        # _metric_labels (same single source as the ROC/PR AUC/AP overlays),
+        # which routes it to the frame's broadcast `brier` column rather
+        # than to an integration over the binned (mean_predicted,
+        # fraction_positive) curve. mark_calibration has no annotate flag,
+        # so the figure function is the sole annotation surface here.
         chart = _apply_metric_label_explicit(
             chart,
             "brier",
             x_col="mean_predicted",
             y_col="fraction_positive",
             color_col=color,
-            precomputed_value=overlay_value,
             position="corner",
         )
 

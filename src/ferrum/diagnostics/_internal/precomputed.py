@@ -91,13 +91,13 @@ class _PrecomputedSource:
         if y_pred.ndim == 1:
             # Binary: y_pred is 1-D scores for the positive class. Reshape to a
             # 2-column score matrix so the shared builder takes the binary path.
-            pos_class = str(np.unique(y_true)[-1]) if len(np.unique(y_true)) >= 2 else "1"
+            class_values, class_labels = _curve_frames.binary_class_values(y_true)
             score_matrix = np.column_stack([1.0 - y_pred, y_pred])
             return _curve_frames.roc_frame(
                 y_true,
                 score_matrix,
-                ["0", pos_class],
-                ["0", pos_class],
+                class_values,
+                class_labels,
                 average=None,
                 drop_intermediate=drop_intermediate,
             )
@@ -121,13 +121,13 @@ class _PrecomputedSource:
         y_pred = self._y_pred_np
 
         if y_pred.ndim == 1:
-            pos_class = str(np.unique(y_true)[-1]) if len(np.unique(y_true)) >= 2 else "1"
+            class_values, class_labels = _curve_frames.binary_class_values(y_true)
             score_matrix = np.column_stack([1.0 - y_pred, y_pred])
             return _curve_frames.pr_frame(
                 y_true,
                 score_matrix,
-                ["0", pos_class],
-                ["0", pos_class],
+                class_values,
+                class_labels,
                 average=None,
             )
 
@@ -147,31 +147,20 @@ class _PrecomputedSource:
         n_bins: int = 10,
         strategy: str = "uniform",
     ) -> pl.DataFrame:
-        """Reliability diagram bins.  Mirrors ``ModelSource.calibration_curve`` schema."""
+        """Reliability diagram bins.  Mirrors ``ModelSource.calibration_curve`` schema.
+
+        Includes the broadcast ``brier`` column the shared builder computes
+        from the per-sample ``(y_pred, binarized y_true)`` pair -- the one
+        number every Brier display surface reads.
+        """
+        class_values, _ = _curve_frames.binary_class_values(self._y_true_np)
         return _curve_frames.calibration_frame(
             self._y_true_np,
             self._y_pred_np,  # 1-D probabilities for positive class
+            class_values[1],
             n_bins,
             strategy,
         )
-
-    def brier_score(self) -> float:
-        """Per-sample Brier score of the held predictions (F-L11-04, 2026-09-10).
-
-        ``mean((y_pred - y_true) ** 2)`` over the raw ``(y_true, y_pred)``
-        arrays supplied at construction -- ``y_pred`` is the 1-D positive-
-        class probability ``calibration_curve`` also consumes. Shares the
-        one Brier formula with the model-backed and composable label paths
-        (:func:`ferrum._metric_labels._brier_score`) so the precomputed
-        calibration chart's title carries the same true per-sample number
-        the ``BrierLabel`` overlay shows, not a value recomputed from the
-        binned reliability-diagram output.
-        """
-        from ferrum._metric_labels import _brier_score
-
-        y_true = self._y_true_np.astype(np.float64)
-        y_pred = self._y_pred_np.astype(np.float64)
-        return _brier_score(y_pred, y_true)
 
     def cumulative_gain(self) -> pl.DataFrame:
         """Cumulative-gain curve.  Mirrors ``ModelSource.cumulative_gain`` schema."""
@@ -315,9 +304,8 @@ class _PrecomputedSource:
                 f"binary y_true; got {len(unique)} unique classes."
             )
         positive_class = unique[-1]
-        y_true_bin = (y_true == positive_class).astype(int)
         thresholds_np = np.linspace(0.0, 1.0, n_thresholds)
-        return _curve_frames.threshold_sweep_frame(y_true_bin, y_pred, thresholds_np)
+        return _curve_frames.threshold_sweep_frame(y_true, y_pred, positive_class, thresholds_np)
 
 
 if TYPE_CHECKING:

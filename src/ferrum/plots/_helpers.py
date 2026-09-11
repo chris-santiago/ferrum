@@ -279,44 +279,40 @@ def _inject_metric_into_legend_labels(
     color_field: str,
     x_col: str,
     y_col: str,
-    metric_fn: Callable[[Any, Any], float],
-    metric_name: str,
-    metric_field: str | None = None,
+    kind: str,
     curve_filter: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
 ) -> pl.DataFrame:
     """Rename each ``color_field`` value to embed its per-series metric.
 
     Rewrites each group's legend value to
-    ``"{group} ({metric_name} = {v:.3f})"`` so the legend itself carries the
-    AUC/AP value. Shared by the ROC (``metric_name="AUC"``, no filter) and
-    PR (``metric_name="AP"``, ``curve_filter`` drops null-precision
-    iso-curve sentinel rows) builders.
+    ``"{group} ({display name} = {v:.3f})"`` so the legend itself carries
+    the AUC/AP value. Shared by the ROC (``kind="auc"``, no filter) and PR
+    (``kind="ap"``, ``curve_filter`` drops null-precision iso-curve sentinel
+    rows) builders. The metric's display name comes from the kind table, so
+    the legend cannot spell a metric differently from the title or the
+    overlay (close review, 2026-09-11).
 
-    ``metric_field`` names the frame's broadcast metric column (``"auc"`` /
-    ``"ap"``); the value is resolved by
-    :func:`ferrum._metric_labels._curve_metrics_by_group`, which reads that
-    column when the frame carries it and integrates ``metric_fn`` otherwise
-    — the same rule the chart title and the label overlay use, so the
-    legend cannot show a different number from the rest of the chart
-    (F-L11-01).
+    ``kind`` names the metric (``"auc"`` / ``"ap"``); the value is resolved
+    by :func:`ferrum._metric_labels._curve_metrics_by_group`, which reads
+    the kind's broadcast column when the frame carries it and integrates
+    the kind's own value function otherwise — the same rule the chart title
+    and the label overlay use, so the legend cannot show a different number
+    from the rest of the chart (F-L11-01), and cannot pair a metric with
+    the wrong column (close review, 2026-09-10).
 
     ``curve_filter`` (when given) restricts the rows used to enumerate
     groups and compute the metric, but the rename is always applied to the
     full ``df`` — so any group present only in filtered-out rows is left
     unrenamed, matching the original per-builder behavior.
     """
-    from ferrum._metric_labels import _curve_metrics_by_group
+    from ferrum._metric_labels import _curve_metrics_by_group, _display_name
 
     group_df = curve_filter(df) if curve_filter is not None else df
     metrics = _curve_metrics_by_group(
-        group_df,
-        group_field=color_field,
-        metric_field=metric_field,
-        metric_fn=metric_fn,
-        x_col=x_col,
-        y_col=y_col,
+        group_df, group_field=color_field, kind=kind, x_col=x_col, y_col=y_col
     )
-    rename_map = {g: f"{g} ({metric_name} = {value:.3f})" for g, value in metrics.items()}
+    name = _display_name(kind)
+    rename_map = {g: f"{g} ({name} = {value:.3f})" for g, value in metrics.items()}
     return df.with_columns(pl.col(color_field).cast(pl.Utf8).replace(rename_map).alias(color_field))
 
 

@@ -738,8 +738,39 @@ def test_calibration_visualizer_multi_model_variadic():
     df = load_dataset("binary_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
     viz = ferrum.CalibrationVisualizer(model, model, n_bins=5).fit(X, df["y"])
-    assert "calibration_error=" in repr(viz)
+    # Two models overlaid -> one keyed calibration_error per model, since
+    # no single pooled number describes them both.
+    assert "calibration_error[model_0]=" in repr(viz)
+    assert "calibration_error[model_1]=" in repr(viz)
     assert "<svg" in viz.show().to_svg()
+
+
+def test_calibration_visualizer_multi_model_error_is_per_model():
+    """Each overlaid model's ``calibration_error`` must be its own -- equal
+    to the number that model reports alone -- not a single pooled mean over
+    every model's rows. Pre-fix the visualizer computed one scalar over the
+    whole compared frame while its own comment claimed per-model values.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    loose = load_fixture("binary_logistic")
+    strict = LogisticRegression(C=0.01, max_iter=1000).fit(X.to_numpy(), y.to_numpy())
+
+    solo_loose = ferrum.CalibrationVisualizer(loose, n_bins=5).fit(X, y)
+    solo_strict = ferrum.CalibrationVisualizer(strict, n_bins=5).fit(X, y)
+    expected_loose = solo_loose._metrics["calibration_error"]
+    expected_strict = solo_strict._metrics["calibration_error"]
+    # The fixture has to discriminate: a pooled mean of two equal numbers
+    # would be indistinguishable from the per-model answer.
+    assert expected_loose != pytest.approx(expected_strict)
+
+    overlay = ferrum.CalibrationVisualizer({"loose": loose, "strict": strict}, n_bins=5).fit(X, y)
+    assert overlay._metrics["calibration_error[loose]"] == pytest.approx(expected_loose)
+    assert overlay._metrics["calibration_error[strict]"] == pytest.approx(expected_strict)
+    assert "calibration_error" not in overlay._metrics
 
 
 def test_discrimination_threshold_visualizer():
@@ -1130,3 +1161,127 @@ def test_class_balance_chart_bars_colored_by_class():
     svg = chart.to_svg()
     fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))
     assert len(fills) >= 3, f"Expected ≥3 distinct fill colors for 3 classes; got {fills}"
+
+
+# ---------------------------------------------------------------------------
+# Batch G close — mutation-gate pins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "y_transform, class_names",
+    [
+        pytest.param(lambda y: y, None, id="numeric_y_no_names"),
+        pytest.param(lambda y: y.cast(pl.Utf8), None, id="utf8_y_no_names"),
+        pytest.param(
+            lambda y: y.cast(pl.Utf8).cast(pl.Categorical), None, id="categorical_y_no_names"
+        ),
+        pytest.param(lambda y: y.cast(pl.Utf8), ["A", "B", "C"], id="utf8_y_with_class_names"),
+        pytest.param(
+            lambda y: y.cast(pl.Utf8).cast(pl.Enum(["2", "0", "1"])), None, id="enum_y_no_names"
+        ),
+    ],
+)
+def test_confusion_matrix_encode_values_land_in_ys_domain_matrix(y_transform, class_names):
+    """``confusion_matrix`` is the third call site of the batch's
+    display-label-vs-comparison-value rule, and the only one without a
+    dtype matrix guarding it -- the gain/lift twin
+    (``test_gain_lift_class_values_land_in_ys_domain_matrix``, whose shape
+    this mirrors) killed the analogous break while this one survived.
+
+    ``model.classes_`` is int-typed here; when ``y`` is Utf8 / Categorical
+    / Enum, an uncoerced ``classes_`` matches nothing, the kernel maps every
+    row to code ``-1`` and drops it, and the rendered matrix is all zeros.
+    So the assertion is on the counts: every row of ``y`` must land in some
+    cell, and the diagonal must be non-empty for a model that is not
+    entirely wrong.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = y_transform(df["y"])
+    kwargs = {} if class_names is None else {"class_names": class_names}
+    source = ferrum.ModelSource(model, X, y, **kwargs)
+
+    cm = source.confusion_matrix()
+    assert cm.height == 9  # 3 x 3 cells, none dropped
+    assert float(cm["value"].sum()) == float(len(y)), (
+        "counts vanished: a class value did not land in y's domain, so every "
+        "(actual, predicted) pair encoded to -1 and the kernel dropped it"
+    )
+    diagonal = cm.filter(pl.col("actual") == pl.col("predicted"))
+    assert float(diagonal["value"].sum()) > 0.0
+
+    # Relabelling y cannot move a count: the matrix must be exactly the one
+    # the numeric-y source produces, cell for cell.
+    baseline = ferrum.ModelSource(model, X, df["y"]).confusion_matrix()
+    assert cm["value"].to_list() == baseline["value"].to_list()
+
+    # And at the user-visible surface. Only the cell texts are compared --
+    # a `class_names=` alias legitimately changes the axis tick labels.
+    def cells(src):
+        texts = re.findall(
+            r"<text[^>]*>([^<]*)</text>", ferrum.confusion_matrix_chart(src).to_svg()
+        )
+        return [t for t in texts if re.fullmatch(r"\d+\.\d+", t)]
+
+    rendered = cells(source)
+    assert rendered, "no numeric cells rendered at all"
+    assert set(rendered) != {"0.00"}, "the rendered matrix is a grid of zeros"
+    assert rendered == cells(ferrum.ModelSource(model, X, df["y"]))
+
+
+def test_classification_report_cells_render_two_decimal_places():
+    """``value_fmt`` is the entire visible content of a classification
+    report chart, and nothing asserted its text -- widening the format to
+    four decimals survived the suite. Hand-computed on an asymmetric
+    fixture so each cell is a distinguishable number.
+
+    ``y_true = [0,0,0,0,1,1]``, ``y_pred = [0,0,0,1,1,1]``. Class 0: three
+    of three predicted-0 are right (precision 1.00) out of four actual-0
+    (recall 0.75), f1 = 2(1)(0.75)/1.75 = 0.857. Class 1: two of three
+    predicted-1 are right (precision 0.667), both actual-1 found (recall
+    1.00), f1 = 0.80.
+    """
+    y_true = np.array([0, 0, 0, 0, 1, 1])
+    y_pred = np.array([0, 0, 0, 1, 1, 1])
+
+    frame = ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)._data
+    fmt = {
+        (row["class"], row["metric"]): row["value_fmt"]
+        for row in frame.select(["class", "metric", "value_fmt"]).to_dicts()
+    }
+    assert fmt[("0", "precision")] == "1.00"
+    assert fmt[("0", "recall")] == "0.75"
+    assert fmt[("0", "f1-score")] == "0.86"
+    assert fmt[("1", "precision")] == "0.67"
+    assert fmt[("1", "f1-score")] == "0.80"
+
+    texts = re.findall(
+        r"<text[^>]*>([^<]*)</text>",
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred).to_svg(),
+    )
+    for cell in ("1.00", "0.75", "0.86", "0.67", "0.80"):
+        assert cell in texts, f"cell {cell!r} is not rendered; got {texts}"
+    for widened in ("1.0000", "0.7500", "0.8571", "0.6667", "0.8000"):
+        assert widened not in texts, f"cells rendered four decimals: {widened!r} in {texts}"
+
+
+def test_classification_report_chart_refuses_a_y_less_source_before_an_x_less_one():
+    """Both guards raise a typed domain error, but the order is a contract:
+    ``y`` is checked first, mirroring ``ModelSource.confusion_matrix``'s
+    own y-then-X order, so a source missing both is told about ``y``. Only
+    observable when both are absent, which nothing constructed.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+
+    both_missing = ferrum.ModelSource(model)
+    with pytest.raises(ValueError, match=r"requires y to be provided"):
+        ferrum.classification_report_chart(both_missing)
+
+    # X alone missing still names X, so the y-first order is not just
+    # "y's message always wins".
+    y_only = ferrum.ModelSource(model, None, df["y"])
+    with pytest.raises(ValueError, match=r"requires the training data"):
+        ferrum.classification_report_chart(y_only)

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ferrum._metric_labels import _ap_step, _trapezoid_auc
 from ferrum.marks._desugar_helpers import (
     _filter_class_average,
     _inject_curve_annotation,
@@ -93,10 +92,8 @@ class ClassificationMarksMixin:
                 df = _inject_curve_annotation(
                     df,
                     group_field=color_field,
-                    metric_field="auc",
-                    metric_label="AUC",
+                    kind="auc",
                     prefix="_auc",
-                    metric_fn=_trapezoid_auc,
                     x_col="fpr",
                     y_col="tpr",
                 )
@@ -174,10 +171,8 @@ class ClassificationMarksMixin:
                 df = _inject_curve_annotation(
                     df,
                     group_field=color_field,
-                    metric_field="ap",
-                    metric_label="AP",
+                    kind="ap",
                     prefix="_ap",
-                    metric_fn=_ap_step,
                     x_col="recall",
                     y_col="precision",
                 )

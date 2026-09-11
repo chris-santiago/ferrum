@@ -84,8 +84,10 @@ class ModelSource(
         DataFrame, or ``["f0", "f1", ...]`` otherwise.
     class_names : sequence of str, optional
         Per-class display labels for classification diagnostics.
-        Defaults to ``model.classes_`` when available, else the unique
-        values of ``y``.
+        Defaults to ``model.classes_`` when available, and to ``None``
+        otherwise — see [class_names][ferrum.ModelSource.class_names],
+        whose docstring explains why no ``y``-derived fallback is
+        attempted.
     sample_weight : array-like, optional
         Per-row weights forwarded to sklearn scorers that accept them.
     random_state : int, optional

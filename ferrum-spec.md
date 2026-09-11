@@ -272,7 +272,7 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 - `.roc_curve(*, average=None, drop_intermediate=True)` — `fpr`, `tpr`, `threshold`, `class`, `auc`
 - `.pr_curve(*, average=None)` — `precision`, `recall`, `threshold`, `class`, `ap`
 - `.confusion_matrix(*, normalize=None)` — `actual`, `predicted`, `value`, `value_fmt`
-- `.calibration_curve(*, n_bins=10, strategy="uniform")` — `mean_predicted`, `fraction_positive`, `count`
+- `.calibration_curve(*, n_bins=10, strategy="uniform")` — `mean_predicted`, `fraction_positive`, `count`, `brier`
 - `.cumulative_gain()` — `percent_population`, `gain`, `class`
 - `.lift_curve()` — `percent_population`, `lift`, `class`
 - `.importances(*, method="builtin", n_repeats=30, scoring=None, random_state=None)` — `feature`, `importance`, `std`, `rank`
@@ -899,6 +899,93 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > values move wherever the old unstable re-derivation was wrong — verified
 > against the kernel column independently on the phase-10 golden fixtures
 > (seven goldens regenerated and PNG-inspected).
+
+> **2026-09-10 (batch G close — binary label conventions):** every binary
+> classification diagnostic now binarizes the target against the positive
+> class before the Rust kernels see it, so a target's *labels* no longer
+> change its metrics. The kernels count positives by summing `y_true`, so
+> they require a 0/1 indicator; the multiclass arms always supplied one
+> (via `one_hot`), but the binary arms of `roc_curve`/`pr_curve` and all of
+> `calibration_curve` passed the raw target straight through. **Disclosed
+> behavior change, all of it corrections:** `y ∈ {-1, 1}` (the SVM
+> convention) rendered `"ROC Curve — AUC -1.747"` with `tpr` ranging to
+> -4.375 against a true AUC of 0.9994; `y ∈ {1, 2}` rendered `AUC 0.302`
+> against 0.9989 and a Brier of 1.035 (a Brier score is bounded in
+> `[0, 1]`); string labels raised `could not convert string to float`
+> outright, from `roc_chart`, `pr_chart`, `calibration_chart` and the
+> precomputed `y_true=`/`y_pred=` path alike. All four now produce the same
+> numbers the `{0, 1}` labelling produces for the same probabilities.
+> `{0, 1}` targets — every fixture and golden in the repo — are
+> byte-identical: `y == positive_class` is the identity there. The
+> precomputed path additionally stops comparing against the *string* `"1"`:
+> its binary class values are now read from `y_true` in `y_true`'s own
+> dtype (ascending, larger value positive, matching
+> `discrimination_threshold`'s long-standing rule), and a degenerate
+> single-class `y_true` labels its curve with the class actually present
+> instead of a fabricated `"1"`.
+>
+> Relatedly, a present-but-NaN metric column now **propagates** instead of
+> triggering the integration fallback. "The frame carries no such metric"
+> and "the metric is undefined for this curve" are different facts;
+> collapsing them turned the one honest signal a degenerate (single-class)
+> curve emits into a plausible-looking number integrated from the broken
+> curve. Such a chart now renders `AUC = nan` rather than a fabricated
+> figure. Frames with no metric column at all are unaffected.
+
+> **2026-09-10 (batch G close — `confusion_matrix` predictions):** the same
+> display-label-vs-comparison-value rule reaches the third of its call
+> sites. `confusion_matrix()` coerced its *encode values* into `y`'s domain
+> but left `model.predict`'s output in `classes_`'s, so an int-coded
+> `classes_` against a `Utf8`/`Categorical`/`Enum` `y` — the ordinary shape
+> for a string-labelled target — encoded every predicted value to the
+> kernel's out-of-vocabulary code and produced a matrix of **all zeros**,
+> rendered as such by `confusion_matrix_chart` and
+> `ConfusionMatrixVisualizer`. Predictions are now translated through the
+> same positional `classes_ -> y`-domain correspondence that builds the
+> encoding, so the two cannot disagree. Numeric `y` is byte-identical (the
+> translation is the identity). Found by the close's own dtype matrix, not
+> by a user report.
+
+> **2026-09-10 (batch G close, cycle 3 — positive-class resolution and
+> target hygiene):** two consequences of making binarization mandatory,
+> both corrections.
+>
+> *Resolution.* The positive class is now always a value from `y`'s own
+> domain. Three tiers: the model's `classes_` coerced into `y`'s dtype;
+> else `y`'s own distinct values when their count matches the score
+> columns; else, as a last resort, the display label parsed back into
+> `y`'s dtype. Tier 2 is new. Tier 3 used to be the only fallback, and it
+> is unsound as a general rule: `probabilities()` names its columns from
+> `class_names`, which is a user alias or a synthetic `class_{i}`, so a
+> model without `classes_` binarized `y` against a string `y` never
+> contains and every binary curve collapsed (measured: `AUC nan`, `AP
+> 0.0`, a flat reliability curve, and a Brier of `mean(p²)` against a true
+> 0.0959). Models exposing `classes_` are unaffected, with or without a
+> `class_names=` alias.
+>
+> *Hygiene.* A binary curve whose target matches **no** row of the positive
+> class now raises `ValueError` naming the class value and `y`'s observed
+> values, rather than computing against an entirely-negative target. An
+> all-null target is the same case. This is the same refusal-over-plausible-
+> number principle as the NaN note above, applied at the other end of the
+> pipeline. Scope is deliberately narrow: multiclass one-vs-rest still
+> tolerates an absent class ("no row is class k" is a real answer, and
+> `lift_curve` documents skipping zero-base-rate classes), an empty target
+> is not an error, and an all-positive target still yields the kernels'
+> honest NaN. A *partially* corrupted target — some null or out-of-domain
+> rows among valid ones — is still absorbed as negative and is **not**
+> covered here.
+>
+> The refusal judges the **request**, never an internal slice of it.
+> `discrimination_threshold(cv=...)` resolves and validates the positive
+> class once against the whole target, then sweeps each fold from rows of
+> that validated indicator. A held-out fold that happens to contain no
+> positives is a property of the split, not a bad request — routine on the
+> imbalanced data this diagnostic exists for, and more so because the
+> default generator is plain `KFold(shuffle=True)` — so it contributes the
+> kernel's honest `precision = recall = f1 = 0` with its real `queue_rate`,
+> exactly as it always has. A target that genuinely never matches still
+> refuses, with or without `cv=`.
 
 > **2026-08-27 (P9 remediation, findings-remediation batch):** three
 > mark-level parameters listed above were accepted and silently dropped
@@ -2877,7 +2964,10 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
 >   superseded).
 
 > **2026-09-10 (batch G, F-L11-04 — supersedes the bin-level compared-path
-> text above):** the `BrierLabel` overlay and the title now show the exact
+> text above; itself partly superseded by the batch G close note that
+> follows it, which replaces the `precomputed_value=` mechanism described
+> here with a `brier` column on the frame — read both):** the `BrierLabel`
+> overlay and the title now show the exact
 > same per-sample Brier score, invariant to `n_bins=`/`strategy=`. Before
 > this fix, the title computed the true per-sample Brier from
 > `model.predict_proba`, but the overlay independently integrated the
@@ -2899,6 +2989,37 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
 > arrays via `_PrecomputedSource.brier_score()`, the same formula as every
 > other path — one Brier formula, `ferrum._metric_labels._brier_score`, used
 > everywhere), where previously it stayed blank.
+
+> **2026-09-10 (batch G close — supersedes the `precomputed_value=`
+> mechanism described in the note immediately above, which was written
+> earlier the same day; the user-visible contract below is the current
+> one):** the per-sample Brier now lives
+> on the **frame**, not in a builder-side override. `.calibration_curve()`
+> gains a broadcast `brier` column (schema above), computed at frame
+> assembly from the per-sample predictions and the binarized target — the
+> last point at which the per-sample arrays exist — exactly as `auc`/`ap`
+> are broadcast onto ROC/PR frames. The chart title, the figure builder's
+> overlay, and the composable `chart + BrierLabel()` path all read that one
+> column through the same rule (`_curve_metric`: read the kind's broadcast
+> column when the frame carries it, integrate the drawn curve only when it
+> does not), so `_apply_metric_label_explicit`'s `precomputed_value=`
+> parameter and `_PrecomputedSource.brier_score()` are both removed —
+> neither has a caller once the number rides on the frame. **User-visible
+> consequence:** `calibration_chart(...) + fm.BrierLabel()` — the example
+> in `BrierLabel`'s own docstring — now renders the true per-sample Brier
+> matching the title, on both `strategy="uniform"` and
+> `strategy="quantile"`. It previously rendered the bin-level integral
+> (0.030 uniform / 0.009 quantile against a true 0.028 on a reference
+> fixture) *and overwrote* the correct label the figure had already placed,
+> leaving a chart strictly less correct than its own default. Composing
+> `+ AUCLabel()`/`+ APLabel()` onto a `roc_chart`/`pr_chart` likewise now
+> reads the kernel's `auc`/`ap` column rather than re-integrating; the
+> values agreed already, so no rendered number moves there. A frame with no
+> such column — arbitrary user data, the reason the composable path exists
+> — still integrates the metric kind's own value function over the drawn
+> curve, unchanged. (The `metric_fn` parameter that phrase originally named
+> is gone: a surface now names a metric *kind* and the table supplies its
+> value function, column and display name together.)
 > - `residuals_chart`: new `annotate_metrics=True` kwarg (default on).
 >   Overlays a top-right corner annotation with `R²` / `RMSE` / `MAE` on
 >   the residuals-vs-fitted view in both the single-panel and the 4-panel
