@@ -24,7 +24,13 @@ class Layer:
         layer-targeted mark overrides. ``None`` for unnamed layers.
     encoding : dict, optional
         Mapping of channel names to ``ChannelBase`` objects.  Defaults to an
-        empty dict when omitted.
+        empty dict when omitted.  A channel's own ``condition=`` kwarg (e.g.
+        ``fm.Color(field, condition=sel.when(...).otherwise(...))``) is
+        honored: ``Chart.layer()`` lifts it into the chart's real
+        conditional pipeline, gated by the same vocabulary ``encode()``
+        uses -- a conditional on a channel the wire cannot carry
+        (``stroke``, ``shape``, ``x``, ``y``) raises the same typed
+        ``ValueError`` (2026-09-11, batch-H close cycle 3).
     transforms : list, optional
         Sequence of transform objects applied to this layer's data before
         rendering.  Defaults to an empty list when omitted.

@@ -231,18 +231,42 @@ def test_triple_layer_all_three_selections_survive():
 
 
 def test_triple_layer_all_three_conditionals_survive():
-    """(c1 + c2 + c3) where each has a distinct conditional must preserve all 3."""
+    """(c1 + c2 + c3) where each has a distinct conditional -- on a
+    DIFFERENT wire channel apiece -- must preserve all 3.
+
+    Batch-H close cycle 4: `Chart + Chart` now enforces the same
+    one-conditional-per-wire-channel rule `encode()`/`Chart.layer()` do
+    (see `_append_conditional`'s docstring) -- the WASM runtime's
+    `conditionals` list is flat and applies every entry to every mark
+    batch in every panel, with no per-layer scope, so three charts all
+    conditioning the SAME channel (this test's pre-cycle-4 shape) would
+    merge into three wire conditionals stamped one channel with no
+    defined winner. This test now exercises three DISTINCT channels,
+    which is the shape the test's own name and docstring actually meant
+    to prove survives a chained triple merge.
+    """
     df = _df()
     result_charts = []
+    # Each branch's channel comes from the `if_selected` value's own type
+    # (`_resolve_channel`), since `.conditional()` -- unlike `encode(<channel>=cond)`
+    # -- has no encode key to stamp a channel from. Three distinct
+    # ChannelBase types => three distinct wire channels.
+    branches = (
+        lambda sel: sel.when(fm.Color("group")).otherwise(value("#cccccc")),
+        lambda sel: sel.when(fm.Opacity("y")).otherwise(value(0.2)),
+        lambda sel: sel.when(fm.Size("y")).otherwise(value(20.0)),
+    )
     for i in range(3):
         sel = selection_point(fields=["group"], name=f"tricd_{i}")
-        cond = sel.when(fm.Color("group")).otherwise(value("#cccccc"))
+        cond = branches[i](sel)
         c = _base_chart(df, sel=sel, cond=cond, mark=["point", "line", "bar"][i])
         result_charts.append(c)
     merged = result_charts[0] + result_charts[1] + result_charts[2]
     assert len(merged._conditionals) >= 3, (
         f"expected >= 3 conditionals from triple layer; got {len(merged._conditionals)}"
     )
+    channels = {json.loads(merged.to_json())["conditionals"][i]["channel"] for i in range(3)}
+    assert channels == {"color", "opacity", "size"}, channels
 
 
 # ---------------------------------------------------------------------------

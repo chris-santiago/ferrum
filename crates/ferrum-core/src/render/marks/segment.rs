@@ -133,6 +133,18 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             // (no direction to point in) — that row still renders its shaft,
             // just without a head, rather than a NaN-coordinate triangle.
             match arrowhead_triangle(line_x1, line_y1, line_x2, line_y2, arrow_size) {
+                // ORDER IS LOAD-BEARING: the shaft `Line` must precede its
+                // arrowhead `Path` in this array. `break_axis.rs`'s
+                // `remap_segment_nodes` rebuilds an in-gap arrowhead from
+                // "the most recently placed `Line`" when it walks a broken
+                // `Segment` batch's nodes in order — it has no other way to
+                // learn which shaft a head belongs to, since a batch holds
+                // many rows' worth of `[Line, Path]` pairs back to back.
+                // Reversing this pair (or interleaving a `Line` between an
+                // unrelated row's shaft and head) makes that walk silently
+                // pair an arrowhead with the WRONG row's shaft direction
+                // under a break — wrong, not absent, so no gate catches it
+                // without the test-side assertion below pinning this order.
                 Some(points) => acc.push_many(
                     [
                         line_node,
@@ -793,6 +805,63 @@ mod tests {
         assert_eq!(paths, 1, "arrow=true must emit exactly one arrowhead path");
     }
 
+    /// The shaft/head node order the arrowhead comment above `push_many`
+    /// calls out as load-bearing: for every arrowed row, `build` must emit
+    /// `[Line, Path]` ADJACENT, in that order, not just "one Line and one
+    /// Path somewhere in the batch." `break_axis.rs`'s `remap_segment_nodes`
+    /// pairs a head with "the most recently placed `Line`" while walking the
+    /// batch in order; if a future change reordered or interleaved these
+    /// pairs, that walk would silently attach an arrowhead to the WRONG
+    /// row's shaft under a break, and neither this test's sibling assertions
+    /// (which only count node kinds) nor the render would visibly complain
+    /// on a chart with no break. Three rows, arrow enabled, none degenerate.
+    #[test]
+    fn segment_arrow_true_emits_line_then_path_adjacent_per_row() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let enc = |f: &str| Some(EncodingSpec { field: f.into(), type_: None, ..Default::default() });
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding { x: enc("x"), y: enc("y"), x2: enc("x2"), y2: enc("y2"), ..Default::default() },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0_f64, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 25.0, 40.0])),
+            Arc::new(Float64Array::from(vec![5.0_f64, 30.0, 45.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { arrow: Some(true), arrow_size: Some(6.0), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Segment).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let result = super::build(&ctx).unwrap();
+        assert_eq!(result.nodes.len(), 6, "3 rows x [Line, Path]");
+        for row in 0..3 {
+            assert!(
+                matches!(result.nodes[row * 2], ferrum_scene::SceneNode::Line { .. }),
+                "row {row}: expected the shaft Line at index {}",
+                row * 2
+            );
+            assert!(
+                matches!(result.nodes[row * 2 + 1], ferrum_scene::SceneNode::Path { .. }),
+                "row {row}: expected the arrowhead Path immediately after its shaft at index {}",
+                row * 2 + 1
+            );
+        }
+    }
+
     /// `arrow` unset (`None`, the default) emits only the shaft — no
     /// arrowhead `Path` — the byte-stable no-op every segment rendered
     /// before this field existed.
@@ -954,6 +1023,103 @@ mod tests {
         assert_eq!(
             head_style.stroke_opacity, shaft.1,
             "arrowhead stroke_opacity must match the shaft's resolved stroke_opacity"
+        );
+    }
+
+    /// Discriminating fixture (close-review mutation gate): the test above
+    /// sets only `opacity=`, which leaves the shaft's `opacity` and
+    /// `stroke_opacity` EQUAL and `fill_opacity` at its `1.0` default — so
+    /// swapping the arrowhead's opacity arguments, or hardcoding its
+    /// `fill_opacity` to `1.0`, passes it. Here all three opacity-family
+    /// channels are bound to distinct columns, so each slot must land in its
+    /// own field: `opacity` verbatim, `stroke_opacity` as the shaft's
+    /// post-multiply product, `fill_opacity` as the head's own fill.
+    #[test]
+    fn segment_arrowhead_places_each_opacity_family_slot_in_its_own_field() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let enc = |f: &str| Some(EncodingSpec { field: f.into(), type_: None, ..Default::default() });
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding {
+                x: enc("x"),
+                y: enc("y"),
+                x2: enc("x2"),
+                y2: enc("y2"),
+                opacity: enc("op"),
+                stroke_opacity: enc("so"),
+                fill_opacity: enc("fo"),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+            Field::new("so", DataType::Float64, false),
+            Field::new("fo", DataType::Float64, false),
+        ]));
+        // Three rows, asserted on the MIDDLE one: `stroke_opacity` and
+        // `fill_opacity` resolve through the theme's opacity band, so an
+        // endpoint row would saturate to the band's own ends (1.0 among
+        // them) and could not tell the three slots apart.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![0.0_f64, 5.0, 10.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 25.0, 40.0])),
+            Arc::new(Float64Array::from(vec![5.0_f64, 30.0, 45.0])),
+            Arc::new(Float64Array::from(vec![0.2_f64, 0.5, 0.8])),
+            Arc::new(Float64Array::from(vec![0.3_f64, 0.6, 0.9])),
+            Arc::new(Float64Array::from(vec![0.1_f64, 0.4, 0.7])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let overrides = MarkKwargsSpec { arrow: Some(true), arrow_size: Some(6.0), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Segment).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        // The same resolver `build` consults, so the expected values are the
+        // resolved per-row ones rather than the raw column values.
+        let resolver = OpacityResolver::load(
+            &ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0),
+        );
+        const ROW: usize = 1;
+        let (row_opacity, row_fill_opacity, row_stroke_opacity) = resolver.at_row(ROW);
+        let shaft_stroke_opacity = row_opacity * row_stroke_opacity;
+        assert!(
+            (row_opacity - shaft_stroke_opacity).abs() > 1e-6
+                && (row_opacity - row_fill_opacity).abs() > 1e-6
+                && (shaft_stroke_opacity - row_fill_opacity).abs() > 1e-6
+                && (row_fill_opacity - 1.0).abs() > 1e-6,
+            "test sanity: the three slots must be pairwise distinct and none of them 1.0 \
+             (opacity={row_opacity}, stroke={shaft_stroke_opacity}, fill={row_fill_opacity})"
+        );
+
+        let result = super::build(&ctx).unwrap();
+        let heads: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            ferrum_scene::SceneNode::Path { style, .. } => Some(style.clone()),
+            _ => None,
+        }).collect();
+        assert_eq!(heads.len(), 3, "one arrowhead per row");
+        let head = &heads[ROW];
+
+        assert_eq!(head.opacity, row_opacity, "opacity must land in the head's opacity");
+        assert_eq!(
+            head.stroke_opacity, shaft_stroke_opacity,
+            "stroke_opacity must land in the head's stroke_opacity — the shaft's own \
+             post-multiply value, not the raw channel and not the opacity slot"
+        );
+        assert_eq!(
+            head.fill_opacity, row_fill_opacity,
+            "the head is segment's only FILLED node; it must carry the row's resolved \
+             fill_opacity, not a hardcoded 1.0"
         );
     }
 }

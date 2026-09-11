@@ -505,6 +505,26 @@ def test_encode_facet_columns_overrides_prior_facet_ncols():
     assert c._facet.ncols == 5
 
 
+def test_encode_facet_columns_zero_still_overrides_prior_facet_ncols():
+    """`columns=0` is a *written* value and wins over a prior `ncols`, the
+    same as any other number.
+
+    The precedence test is `columns is not None`, not truthiness: a falsy-but-
+    present `columns=0` must not silently fall through to the earlier
+    `.facet(ncols=3)` value, which would hand the user a 3-column wrap they
+    never asked for instead of the refusal `ncols=0` earns downstream.
+    """
+    _, df = _facet_columns_test_data()
+    c = (
+        Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .facet(field="grp", ncols=3)
+        .encode(facet=fm.Facet("grp", columns=0))
+    )
+    assert c._facet.ncols == 0
+
+
 def test_facet_ncols_overrides_prior_encode_facet_columns():
     """A LATER `.facet(ncols=N)` call wins over an earlier channel `columns=`.
 

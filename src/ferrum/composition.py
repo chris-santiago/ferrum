@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json as _json
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
 from ferrum._overrides import _FIGURE_CHROME_KEYS
 from ferrum._validate import validate_choice
+from ferrum.title import Title
 
 _SHARE_MODES = ("shared", "independent")
 
@@ -43,6 +45,287 @@ def _embed_chart_spec(c) -> Optional[dict]:
     if not hasattr(c, "to_spec"):
         return None
     return _json.loads(c.to_spec().to_json())
+
+
+# A Title field with no composite-chrome slot to land in at all: a
+# composite's title/subtitle/caption are plain text (title additionally
+# gets one routed subtitle LINE -- see _normalize_composite_title -- but
+# never a subtitle STYLE channel). (name, default) pairs, DERIVED from
+# Title's own dataclass fields rather than hand-mirrored (2026-09-11,
+# batch-H close cycle 5) -- the same derive-don't-duplicate move this batch
+# already made for the encoding-alias table (_ENCODING_ALIASES) and the
+# `condition` honored bit (ChannelBase.__init_subclass__): a Title field
+# added tomorrow is automatically covered here instead of silently
+# vanishing through a stale hand-copy, which is exactly how `subtitle`
+# itself vanished in cycle 3. "text" and "subtitle" are excluded -- "text"
+# always survives (it IS the chrome value), "subtitle" is handled
+# separately since it is sometimes routable (see _title_style_overrides).
+_TITLE_STYLE_FIELDS = tuple(
+    (f.name, f.default) for f in dataclasses.fields(Title) if f.name not in ("text", "subtitle")
+)
+
+
+def _title_style_overrides(title, *, include_subtitle: bool) -> list[str]:
+    """Return the names of *title*'s fields set away from their default that
+    the composite chrome slot receiving it has nowhere to put.
+
+    ``include_subtitle`` governs whether a non-``None`` ``title.subtitle``
+    counts as one of those unsupported fields: on the ``title=`` slot of a
+    class with a real subtitle slot to route into (the six
+    ``_CompositeBase`` views), a ``Title``'s own ``subtitle`` is ROUTED, not
+    refused (see :func:`_normalize_composite_title`), so callers there pass
+    ``include_subtitle=False``. Everywhere else -- ``subtitle=``/``caption=``
+    themselves, and ``LayerChart``'s ``title=``, which has no separate
+    subtitle slot at all -- a non-``None`` ``subtitle`` field is exactly as
+    unsupported as any style field, so callers there pass
+    ``include_subtitle=True``.
+    """
+    overrides = [name for name, default in _TITLE_STYLE_FIELDS if getattr(title, name) != default]
+    if include_subtitle and title.subtitle is not None:
+        overrides.append("subtitle")
+    return overrides
+
+
+#: Default ``declare`` for :func:`_refuse_title_richness` -- the vast
+#: majority of chrome-ingress call sites are genuinely ``.properties(...)``
+#: calls (see that function's ``declare`` parameter for why this needs to be
+#: threaded at all rather than hardcoded).
+def _declare_properties_call(slot: str) -> str:
+    return f"properties({slot}=fm.Title(...))"
+
+
+def _refuse_title_richness(
+    slot: str,
+    overrides: list[str],
+    *,
+    subtitle_routes: bool,
+    declare: Callable[[str], str] = _declare_properties_call,
+) -> None:
+    """Raise the typed refusal for a ``Title``'s unsupported fields on *slot*.
+
+    Same typed-error idiom the batch already uses for an unsupportable
+    declaration (the conditional-vocabulary refusals, the alias
+    base-field-vs-conditional collision) -- name the call spelling, name
+    what has no home, name the fix -- rather than silently dropping the
+    field the way ``title=fm.Title(..., subtitle=...)`` used to (2026-09-11,
+    batch-H close cycle 4, gating H3-4 fix: a `Title` carrying fields the
+    composite genuinely cannot express refuses typed, it never silently
+    vanishes).
+
+    *declare* formats the call spelling into the message, matching the
+    ``declare`` idiom :func:`ferrum.chart._refuse_alias_field_dropped_with_kept_conditional`
+    already uses (2026-09-11, batch-H close cycle 5) -- without it, a
+    ``LayerChart(..., title=fm.Title(..., subtitle=...))`` refusal used to
+    tell the caller to fix a ``properties(title=...)`` call they never made
+    (``LayerChart.__init__`` is a constructor kwarg, not a ``.properties()``
+    call). Every OTHER call site genuinely is a ``.properties(...)`` call,
+    so the default covers them without change.
+    """
+    names = ", ".join(overrides)
+    surface = "text plus one routed subtitle line" if subtitle_routes else "plain text"
+    raise ValueError(
+        f"{declare(slot)} with {names} set is refused: a composite "
+        f"figure {slot} carries {surface} only, with no slot for {names}. Pass a plain "
+        f"str, or Title(text=...) with {names} left at its default, and style the "
+        "underlying chart(s) directly instead."
+    )
+
+
+def _refuse_title_subtitle_collision() -> None:
+    """Raise when ``title=fm.Title(..., subtitle=...)`` and an explicit
+    ``subtitle=`` are both given -- same message shape as the conditional
+    collision refusals (names both spellings, states the shared slot, names
+    the fix).
+    """
+    raise ValueError(
+        "properties(title=fm.Title(..., subtitle=...)) and properties(subtitle=...) "
+        "both declare the figure subtitle; a composite has one subtitle slot. Declare "
+        "one of them, or move the Title's own subtitle into subtitle= directly."
+    )
+
+
+def _normalize_composite_title(
+    title: object,
+    *,
+    explicit_subtitle: object = None,
+    supports_subtitle_slot: bool = True,
+    declare: Callable[[str], str] = _declare_properties_call,
+) -> tuple[Optional[str], Optional[str]]:
+    """Reduce a composite figure ``title=`` value to the render entry's bare-str
+    contract, LOSSLESSLY where a lossless answer exists.
+
+    Called at INGRESS (:meth:`_CompositeBase.properties`, ``LayerChart``'s
+    ``__init__``/``properties``), not at serialization time (2026-09-11,
+    batch-H close cycle 3, H3-4; made lossless in cycle 4) -- so
+    ``_figure_title``/``_title`` is ALWAYS the shape the composite-tree
+    renderer actually accepts. Every composite output path (all six
+    ``_CompositeBase`` views' ``to_svg``, and ``LayerChart.to_svg``'s
+    default/shared-y path) lowers the figure title straight into the
+    one-call Rust composite entry's wire ``title`` field
+    (``composition._composite_node``), which is a bare ``Optional<String>``
+    -- there is no per-figure-title richness slot in the composite tree the
+    way a LEAF ``Chart``'s ``ChartSpec.title`` has one (a full ``TitleSpec``
+    with subtitle/anchor/offset/colors). Passing a raw :class:`ferrum.Title`
+    through unnormalized used to build a JSON-safe ``to_dict()`` and then
+    blow up ``to_svg()`` with an unmapped PyO3 ``TypeError: 'Title' object
+    is not an instance of 'str'``.
+
+    **Cycle 4 correction: the cycle-3 fix over-corrected into a silent
+    drop.** A composite figure DOES have a working ``_figure_subtitle``
+    slot (``(a | b).properties(subtitle=...)`` renders it) -- cycle 3's
+    flatten-to-``.text`` discarded a ``Title``'s own ``.subtitle`` even
+    though the information was representable, renderable, and one field
+    away. This now ROUTES ``title.subtitle`` into that slot when
+    *supports_subtitle_slot* is True (the six ``_CompositeBase`` views) and
+    no explicit ``subtitle=`` was also given in the same call (a genuine
+    collision between two spellings of the same declaration, refused
+    typed rather than silently picking a winner). ``LayerChart`` has no
+    separate subtitle slot at all (its ``.properties(subtitle=...)`` fans
+    to member charts instead of storing figure chrome -- pre-existing,
+    unrelated to this fix), so it passes ``supports_subtitle_slot=False``
+    and a ``Title`` carrying a subtitle there is refused, the same as any
+    other field the composite genuinely cannot express (``anchor``,
+    ``offset``, ``font_size``, ``font_weight``, ``color``,
+    ``subtitle_font_size``, ``subtitle_color`` -- none of which have ANY
+    composite-chrome slot, on any class, regardless of
+    *supports_subtitle_slot*).
+
+    *declare* names the caller's own call spelling in a richness refusal
+    (2026-09-11, batch-H close cycle 5) -- defaults to the ``.properties()``
+    spelling, which is correct for every caller except ``LayerChart.__init__``,
+    a constructor kwarg rather than a ``.properties()`` call, which passes
+    its own.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        ``(title_text, routed_subtitle)``. *routed_subtitle* is non-``None``
+        only when *title* is a :class:`ferrum.Title` carrying its own
+        ``subtitle`` and *supports_subtitle_slot* is True -- the caller
+        applies it to ``_figure_subtitle`` only when no explicit
+        ``subtitle=`` was ALSO given in the same call (see
+        :meth:`_CompositeBase.properties`).
+
+    Raises
+    ------
+    ValueError
+        When *title* is a ``Title`` carrying a field the composite has no
+        slot for (see :func:`_title_style_overrides`), or (only when
+        *supports_subtitle_slot* is True) *title*'s own ``subtitle``
+        collides with an explicit ``subtitle=`` given in the same call.
+    """
+    if title is None:
+        return None, None
+    if not isinstance(title, Title):
+        return str(title), None
+    overrides = _title_style_overrides(title, include_subtitle=not supports_subtitle_slot)
+    if overrides:
+        _refuse_title_richness(
+            "title", overrides, subtitle_routes=supports_subtitle_slot, declare=declare
+        )
+    if supports_subtitle_slot and title.subtitle is not None:
+        if explicit_subtitle is not None:
+            _refuse_title_subtitle_collision()
+        return title.text, title.subtitle
+    return title.text, None
+
+
+def _normalize_composite_text(
+    value: object, *, slot: str, declare: Callable[[str], str] = _declare_properties_call
+) -> Optional[str]:
+    """Reduce a figure ``subtitle=``/``caption=`` value to plain text, refusing richness.
+
+    Mirrors :func:`_normalize_composite_title`'s ingress rule for the two
+    slots that have no routing target of their own (2026-09-11, batch-H
+    close cycle 4, S3 "one slot of three"): a bare ``str``/``None`` passes
+    through; a text-only :class:`ferrum.Title` (``.text`` only, nothing
+    else set) reduces to its ``.text``; a ``Title`` carrying any style field
+    OR its own ``.subtitle`` is refused typed -- there is no nested-subtitle
+    or styling concept for a plain-text figure slot, and ``to_svg()`` used
+    to raise the unmapped PyO3 ``TypeError`` on exactly this spelling while
+    ``to_dict()``/``to_json()`` silently accepted it. *declare* names the
+    caller's own call spelling (2026-09-11, cycle 5) -- see
+    :func:`_normalize_composite_title`'s matching parameter.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Title):
+        return str(value)
+    overrides = _title_style_overrides(value, include_subtitle=True)
+    if overrides:
+        _refuse_title_richness(slot, overrides, subtitle_routes=False, declare=declare)
+    return value.text
+
+
+def _chrome_entries(
+    *, title: object = None, subtitle: object = None, caption: object = None
+) -> dict:
+    """Return the figure-chrome entries a composition's ``to_dict()`` carries.
+
+    One rule for the whole seven-wrapper family (batch-H close remediation,
+    2026-09-11): a figure-level ``title`` / ``subtitle`` / ``caption`` set
+    via ``.properties(...)`` belongs in the declaration dict, under those
+    user-facing key names -- before this, ``LayerChart`` emitted ``title``
+    and the other six silently dropped all three, so the same user-visible
+    declaration was present in one member of the family and absent from six.
+
+    Unset entries are **omitted**, not emitted as ``None``: a composition
+    with no figure chrome produces exactly the dict it produced before this
+    rule existed, so only titled compositions gain keys.
+
+    Called by each ``to_dict()`` through :meth:`_ChartLike._declaration_chrome`,
+    which supplies the values from wherever that class stores them
+    (:class:`_CompositeBase`'s three ``_figure_*`` slots, ``LayerChart``'s
+    single ``_title``) -- the same split :meth:`_ChartLike._figure_title_text`
+    already uses.
+
+    **Values arrive already normalized (2026-09-11, batch-H close cycle 3,
+    H3-4; made lossless for ``subtitle`` and applied to all three slots in
+    cycle 4).** All three of ``title``/``subtitle``/``caption`` are
+    ingress-normalized to a plain ``str`` or ``None`` -- by
+    :func:`_normalize_composite_title` (``title``) or
+    :func:`_normalize_composite_text` (``subtitle``/``caption``) -- before
+    they ever reach ``_figure_title``/``_figure_subtitle``/``_figure_caption``
+    (or ``LayerChart``'s single ``_title``). A raw :class:`ferrum.Title`
+    passed to any of the three either reduces to plain text or is refused
+    typed at ingress (see those two functions); it can never reach this
+    function un-normalized. ``_chrome_title_value`` below still serializes
+    the (already-plain) ``title`` text through ``Title.to_spec_dict()`` (the
+    same helper a leaf ``Chart``'s title goes through), so the top-level
+    ``title`` keeps the **same shape** as every embedded child's
+    (``{"text": ...}``). A ``Title``'s own ``.subtitle`` is not nested
+    inside that dict -- it is routed to the composite's separate
+    ``subtitle`` slot at ingress (see :func:`_normalize_composite_title`),
+    which is the slot that actually renders, so `to_dict()["subtitle"]`
+    (a sibling key, not `to_dict()["title"]["subtitle"]`) is where it
+    surfaces.
+    """
+    # subtitle/caption pass through unchanged: both are already plain
+    # str/None by the time they reach here -- :func:`_normalize_composite_text`
+    # ran at ingress (2026-09-11, batch-H close cycle 4), so a
+    # :class:`ferrum.Title` can never reach this point (2026-09-11, cycle 5:
+    # inlined from the since-deleted identity function `_chrome_text_value`,
+    # which existed only to mirror `_chrome_title_value` syntactically after
+    # the ingress move left it with no actual work to do).
+    entries = (
+        ("title", _chrome_title_value(title)),
+        ("subtitle", subtitle),
+        ("caption", caption),
+    )
+    return {k: v for k, v in entries if v is not None}
+
+
+def _chrome_title_value(value: object) -> Optional[dict]:
+    """Serialize an already-normalized figure ``title`` slot to the leaf's own title-dict shape.
+
+    *value* is a plain ``str``/``None`` by the time this runs --
+    :func:`_normalize_composite_title` ran at ingress -- so this has one job:
+    match the embedded-child shape (``{"text": ...}``), not detect a
+    ``Title`` instance.
+    """
+    if value is None:
+        return None
+    return Title(text=str(value)).to_spec_dict()
 
 
 def _is_chart_or_composite(obj) -> bool:
@@ -1290,9 +1573,23 @@ class _ChartLike(ConfigureMixin):
         """Return a recursive declaration dict (ferrum-spec §3.16 ``to_dict`` contract).
 
         Subclasses must implement this -- see :func:`_embed_chart_spec` for
-        the shared child-embedding rule every composite follows.
+        the shared child-embedding rule every composite follows, and
+        :meth:`_declaration_chrome` for the figure-level
+        ``title``/``subtitle``/``caption`` entries every implementation
+        splices in (omitted when unset).
         """
         raise NotImplementedError(f"{type(self).__name__} must implement to_dict")
+
+    def _declaration_chrome(self) -> dict:
+        """Return this node's figure-chrome entries for :meth:`to_dict`.
+
+        The base resolves a single ``_title`` (``LayerChart``, whose title
+        *is* its figure chrome; it carries no subtitle or caption of its
+        own -- those fan to the layers).  :class:`_CompositeBase` overrides
+        this with its three ``_figure_*`` slots.  Formatting and the
+        omit-when-unset rule live once in :func:`_chrome_entries`.
+        """
+        return _chrome_entries(title=getattr(self, "_title", None))
 
     def to_json(self, *, indent: Optional[int] = None) -> str:
         """Return this composition's declaration as a JSON string.
@@ -1811,6 +2108,18 @@ class _CompositeBase(_ChartLike):
 
         return _extract_title_text(self._figure_title)
 
+    def _declaration_chrome(self) -> dict:
+        """Return this composite's figure chrome for :meth:`to_dict`.
+
+        Overrides the base's single-``_title`` resolution with the three
+        figure-chrome slots every composite stores (:meth:`_init_figure_chrome`).
+        """
+        return _chrome_entries(
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
+
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
         new = _shallow_copy_composite(self)
@@ -1832,12 +2141,23 @@ class _CompositeBase(_ChartLike):
 
         Parameters
         ----------
-        title : str, optional
-            Figure-level title rendered above all panels.
-        subtitle : str, optional
-            Figure-level subtitle rendered below the title, above all panels.
-        caption : str, optional
-            Figure-level caption rendered below all panels.
+        title : str or Title, optional
+            Figure-level title rendered above all panels. A ``fm.Title(...)``
+            carrying its own ``subtitle`` routes it into ``subtitle=`` below
+            when that kwarg is not ALSO given in this call (refused, typed,
+            if both are); a ``fm.Title(...)`` carrying a style field this
+            composite cannot express (``anchor``/``offset``/``font_size``/
+            ``font_weight``/``color``/``subtitle_font_size``/
+            ``subtitle_color``) is refused typed too (2026-09-11, batch-H
+            close cycle 4).
+        subtitle : str or Title, optional
+            Figure-level subtitle rendered below the title, above all
+            panels. A text-only ``fm.Title(...)`` reduces to its ``.text``;
+            one carrying a style field or its own ``subtitle`` is refused
+            typed (cycle 4).
+        caption : str or Title, optional
+            Figure-level caption rendered below all panels. Same
+            text-only-or-refuse rule as ``subtitle`` (cycle 4).
         **kwargs
             Additional keyword arguments forwarded to ``Chart.properties``
             for every child chart (e.g. ``width``, ``height``).
@@ -1847,14 +2167,33 @@ class _CompositeBase(_ChartLike):
         _CompositeBase
             A new instance of the same composition class with the figure
             chrome stored and / or child properties updated.
+
+        Raises
+        ------
+        ValueError
+            When ``title=``/``subtitle=``/``caption=`` carries a ``Title``
+            field the composite has no slot for, or when ``title=``'s own
+            subtitle collides with an explicit ``subtitle=`` in the same
+            call (see :func:`_normalize_composite_title`).
         """
         # Separate figure-level chrome from per-child kwargs.
         # Use the shared _FIGURE_CHROME_KEYS constant so the key set stays
         # in sync with the factory-dict split in _overrides._apply_overrides.
         chrome_vals = {k: kwargs.pop(k, None) for k in _FIGURE_CHROME_KEYS}
-        figure_title = chrome_vals["title"]
-        figure_subtitle = chrome_vals["subtitle"]
-        figure_caption = chrome_vals["caption"]
+        # Ingress-normalize all three chrome slots (H3-4, batch-H close
+        # cycle 3; made lossless + applied to all three in cycle 4) -- see
+        # _normalize_composite_title / _normalize_composite_text. title=
+        # normalizes first so its routed subtitle (if any) can be checked
+        # against an explicit subtitle= given in the same call.
+        figure_title, routed_subtitle = _normalize_composite_title(
+            chrome_vals["title"], explicit_subtitle=chrome_vals["subtitle"]
+        )
+        figure_subtitle = (
+            _normalize_composite_text(chrome_vals["subtitle"], slot="subtitle")
+            if chrome_vals["subtitle"] is not None
+            else routed_subtitle
+        )
+        figure_caption = _normalize_composite_text(chrome_vals["caption"], slot="caption")
 
         if kwargs:
             # Forward remaining (non-chrome) kwargs to the appropriate panel(s).
@@ -1922,12 +2261,18 @@ class _CompositeBase(_ChartLike):
         composite recursively via its own ``to_dict()``.
         :class:`ConcatChart` extends this shape with its ``columns`` field
         (see its own ``to_dict`` override).
+
+        Figure-level ``title``/``subtitle``/``caption`` set via
+        :meth:`properties` are carried by :meth:`_declaration_chrome`, and
+        omitted when unset -- the one rule the whole composition family
+        shares (see :func:`_chrome_entries`).
         """
         return {
             "kind": self._composite_layout,
             "children": [_embed_chart_spec(c) for c in self.charts],
             "spacing": self.spacing,
             "resolve": _resolve_wire_dict(getattr(self, "_resolve", None)),
+            **self._declaration_chrome(),
         }
 
     def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
@@ -2159,12 +2504,16 @@ class JointChart(_CompositeBase):
     def to_dict(self) -> dict:
         """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
 
-        Identical to :attr:`spec` -- :attr:`spec` already returns the
-        recursive shape :meth:`_ChartLike.to_dict` promises (see
-        :func:`_embed_chart_spec`); ``to_dict`` is the generalized name
-        every composition view now carries.
+        :attr:`spec` already returns the recursive layout shape
+        :meth:`_ChartLike.to_dict` promises (see :func:`_embed_chart_spec`);
+        ``to_dict`` is the generalized name every composition view now
+        carries, and adds the figure-level ``title``/``subtitle``/``caption``
+        set via :meth:`properties` -- omitted when unset, so an
+        untitled ``JointChart``'s ``to_dict()`` is still exactly its
+        :attr:`spec` (see :func:`_chrome_entries`). ``spec`` itself stays
+        the pure layout-introspection surface it has always been.
         """
-        return self.spec
+        return {**self.spec, **self._declaration_chrome()}
 
     def _forward_child_properties(self, kwargs: dict) -> "JointChart":
         """Route non-chrome ``properties`` kwargs to the center chart only.
@@ -2511,10 +2860,12 @@ class RepeatChart(_CompositeBase):
     def to_dict(self) -> dict:
         """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
 
-        Identical to :attr:`spec` -- see :class:`JointChart`'s ``to_dict``
-        for the rationale.
+        :attr:`spec` plus the figure-level ``title``/``subtitle``/``caption``
+        set via :meth:`properties` (omitted when unset) -- see
+        :class:`JointChart`'s ``to_dict`` for the rationale and
+        :func:`_chrome_entries` for the family-wide chrome rule.
         """
-        return self.spec
+        return {**self.spec, **self._declaration_chrome()}
 
     def expand(self) -> list:
         """Materialize the template into fully-resolved chart panels.
@@ -2932,10 +3283,12 @@ class ClusterMapChart(_CompositeBase):
     def to_dict(self) -> dict:
         """Return a recursive composite declaration dict (ferrum-spec §3.16 contract).
 
-        Identical to :attr:`spec` -- see :class:`JointChart`'s ``to_dict``
-        for the rationale.
+        :attr:`spec` plus the figure-level ``title``/``subtitle``/``caption``
+        set via :meth:`properties` (omitted when unset) -- see
+        :class:`JointChart`'s ``to_dict`` for the rationale and
+        :func:`_chrome_entries` for the family-wide chrome rule.
         """
-        return self.spec
+        return {**self.spec, **self._declaration_chrome()}
 
     def _forward_child_properties(self, kwargs: dict) -> "ClusterMapChart":
         """Route non-chrome ``properties`` kwargs to the heatmap chart only.
@@ -3188,15 +3541,21 @@ class LayerChart(_ChartLike):
         the same inheritance rules as ``Chart + Chart``.  Pass a
         [Resolve][ferrum.Resolve] to also control figure-level legend resolution for
         a shared ``color``/``size`` scale.
-    title : str, optional
+    title : str or Title, optional
         Title applied to the combined chart via ``.properties(title=...)``.
+        A ``fm.Title(...)``'s ``.text`` is honored; ``LayerChart`` has no
+        separate figure-subtitle slot (unlike the other six composition
+        views), so a ``Title`` carrying its own ``subtitle`` -- or any other
+        style field -- is refused typed rather than silently dropped
+        (2026-09-11, batch-H close cycle 4).
 
     Raises
     ------
     ValueError
         If fewer than one chart is provided, if ``resolve`` contains
-        invalid values, or if ``resolve`` marks ``x`` ``"independent"``
-        (see GH #55 dual-x-axis).
+        invalid values, if ``resolve`` marks ``x`` ``"independent"`` (see
+        GH #55 dual-x-axis), or if ``title=`` is a ``Title`` carrying a
+        field this class has no slot for.
 
     Examples
     --------
@@ -3215,7 +3574,7 @@ class LayerChart(_ChartLike):
         self,
         *charts,
         resolve: ResolveArg = None,
-        title: Optional[str] = None,
+        title: Union[str, "Title", None] = None,
     ) -> None:
         if len(charts) < 1:
             raise ValueError("LayerChart requires at least one chart")
@@ -3224,7 +3583,24 @@ class LayerChart(_ChartLike):
         _validate_composite_children(charts, "LayerChart")
         self._charts = list(charts)
         self._resolve = resolve
-        self._title = title
+        # Ingress-normalize title= to the renderer's bare-str contract (H3-4,
+        # batch-H close cycle 3). LayerChart's shared-y to_svg() lowers
+        # _title into the same composite-tree wire "title" field the six
+        # _CompositeBase views use, so it needs the same normalization even
+        # though it has its own constructor kwarg. supports_subtitle_slot=
+        # False: unlike the six _CompositeBase views, LayerChart has no
+        # separate _figure_subtitle slot to route a Title's own subtitle
+        # into (its .properties(subtitle=...) fans to member charts instead
+        # -- pre-existing, unrelated to this fix), so that field is refused
+        # typed here rather than silently dropped (cycle 4). declare= names
+        # this as the constructor kwarg it is, not the .properties() call
+        # the default `declare` would otherwise (wrongly) name it as
+        # (2026-09-11, cycle 5).
+        self._title, _ = _normalize_composite_title(
+            title,
+            supports_subtitle_slot=False,
+            declare=lambda slot: f"LayerChart(..., {slot}=fm.Title(...))",
+        )
 
     def __copy__(self):
         """Shallow copy that duplicates the mutable _charts list."""
@@ -3249,12 +3625,16 @@ class LayerChart(_ChartLike):
         ``to_dict()``. Layer members are ordinarily plain leaf charts (render
         time further restricts this in :meth:`_composite_tree`), but this
         introspection dict embeds whatever was actually constructed.
+
+        ``title`` now follows the family-wide chrome rule
+        (:func:`_chrome_entries`): present when set, omitted when unset
+        rather than emitted as ``None``.
         """
         return {
             "kind": "overlay",
             "children": [_embed_chart_spec(c) for c in self._charts],
             "resolve": _resolve_wire_dict(self._resolve),
-            "title": self._title,
+            **self._declaration_chrome(),
         }
 
     def _composite_tree(self, *, auto_tooltips: bool, is_root: bool = True) -> _LoweredTree:
@@ -3568,7 +3948,25 @@ class LayerChart(_ChartLike):
             A new ``LayerChart`` instance with ``_title`` updated and / or
             per-layer properties applied.
         """
-        title = kwargs.pop("title", None)
+        # Ingress-normalize title= to the renderer's bare-str contract (H3-4,
+        # batch-H close cycle 3); supports_subtitle_slot=False -- see the
+        # matching comment in __init__ (cycle 4).
+        title, _ = _normalize_composite_title(
+            kwargs.pop("title", None), supports_subtitle_slot=False
+        )
+        # subtitle=/caption= fan to member charts as-is (pre-existing --
+        # LayerChart has no separate figure-subtitle/caption slot of its
+        # own, see __init__'s supports_subtitle_slot=False comment), but
+        # still need ingress normalization: a raw fm.Title reaching a leaf
+        # Chart's own subtitle=/caption= (which expects a plain str) built a
+        # malformed Title(subtitle=<Title>) that crashed to_svg() with the
+        # same unmapped PyO3 TypeError H3-4 exists to eliminate (cycle 4,
+        # "one slot of three" widened to all three, including LayerChart's
+        # fan-out path).
+        if kwargs.get("subtitle") is not None:
+            kwargs["subtitle"] = _normalize_composite_text(kwargs["subtitle"], slot="subtitle")
+        if kwargs.get("caption") is not None:
+            kwargs["caption"] = _normalize_composite_text(kwargs["caption"], slot="caption")
 
         if kwargs:
             # Fan non-chrome kwargs to every layer.

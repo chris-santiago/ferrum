@@ -1,10 +1,11 @@
 """Channel-alias rules — map convenience channels onto their render targets.
 
-The alias graph is expressed as DATA (the ``_ENCODING_ALIASES`` table) driven by
-one generic loop, so the policy is visible in one place rather than spread across
-inline branches. `apply_channel_aliases` operates on shallow copies of the
-encoding and mark-kwargs dicts from ``Chart.to_spec`` — it does not mutate the
-chart's internal state.
+The alias graph is expressed as DATA (the ``_ENCODING_ALIASES`` table, declared
+in ``_channel_policy`` beside the other per-channel-name routing data and
+re-exported here) driven by one generic loop, so the policy is visible in one
+place rather than spread across inline branches. `apply_channel_aliases`
+operates on shallow copies of the encoding and mark-kwargs dicts from
+``Chart.to_spec`` — it does not mutate the chart's internal state.
 
 Ordering is load-bearing: rules are applied top-to-bottom, and an earlier alias
 that already populated the target wins over a later one (the later one then sees
@@ -13,48 +14,27 @@ that already populated the target wins over a later one (the later one then sees
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
+# The alias TABLE itself lives in the sibling routing module
+# (``_channel_policy``, the zero-import leaf that owns every other
+# per-channel-name disposition) and is re-exported here, where the loop that
+# applies it lives, so existing importers of
+# ``ferrum.encoding._aliases._ENCODING_ALIASES`` are unaffected. It moved
+# 2026-09-11 (batch-H close re-review) so the conditional vocabulary could
+# DERIVE its own alias map from this one table instead of hand-copying the
+# source->target pairs: deriving in the other direction would have made the
+# leaf module import this one, breaking the #103 leaf invariant that
+# ``tests/test_finding_p1.py`` pins. Data sits with the other routing data;
+# behavior stays here.
+from ferrum.encoding._channel_policy import (  # noqa: F401  (re-exported)
+    _ENCODING_ALIASES,
+    _EncodingAlias,
+)
 
 # Marks whose Rust builder reads mark_style.group.detail for per-group
 # splitting (crates/ferrum-core/src/render/draw.rs, area.rs, polygon.rs;
 # channels.rs's build_color_detail_groups). Every other mark ignores the
 # field entirely, so `detail` on those marks is warn_once'd after aliasing.
 _DETAIL_CONSUMING_MARKS = frozenset(("line", "area", "polygon"))
-
-
-@dataclass(frozen=True)
-class _EncodingAlias:
-    """One ``source -> target`` aliasing rule within the encoding dict.
-
-    Parameters
-    ----------
-    source :
-        The convenience channel name read from the encoding dict.
-    target :
-        The canonical channel name the source maps onto.
-    on_conflict :
-        What to do when *target* is already present in the encoding:
-
-        - ``"keep_target"`` — silently leave the existing target, dropping the
-          source's mapping (no warning).
-        - ``"warn_drop"`` — drop the source's mapping and emit a one-time
-          warning (only when the source carries a concrete field).
-    """
-
-    source: str
-    target: str
-    on_conflict: Literal["keep_target", "warn_drop"]
-
-
-# Order matters: fill is resolved before stroke, so when both are present and
-# color is absent, fill wins the color target and stroke then sees color present
-# and follows its warn_drop policy.
-_ENCODING_ALIASES: tuple[_EncodingAlias, ...] = (
-    _EncodingAlias(source="fill", target="color", on_conflict="keep_target"),
-    _EncodingAlias(source="stroke", target="color", on_conflict="warn_drop"),
-)
 
 
 def _channel_field(ch: object) -> str | None:

@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from ferrum._coerce import normalize_for_rust, to_arrow_table
 from ferrum._render_prepare import (
     _apply_label_maps,
+    _classify_field,
     _collect_label_maps,
     _resolve_category_coords_in_annotations,
 )
@@ -38,6 +39,91 @@ def _sanitize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
     return normalize_for_rust(tbl)
 
 
+#: The resolved data-type kind of an auto-raster color channel. ``"unknown"``
+#: means the gate could determine nothing: no type annotation on the channel
+#: and no readable dtype for the field (a missing column, or a data source
+#: the polars dtype path does not cover).
+_ColorTypeKind = Literal["quantitative", "categorical", "temporal", "unknown"]
+
+#: Explicit type annotations (both the shorthand letters and the long
+#: spellings ``ChannelBase`` accepts) mapped to their auto-raster kind.
+_DECLARED_TYPE_KINDS: dict[str, _ColorTypeKind] = {
+    "Q": "quantitative",
+    "quantitative": "quantitative",
+    "N": "categorical",
+    "nominal": "categorical",
+    "O": "categorical",
+    "ordinal": "categorical",
+    "T": "temporal",
+    "temporal": "temporal",
+}
+
+#: ``_render_prepare._classify_field``'s scale kinds mapped to ours. That
+#: helper is the codebase's existing dtype classifier (it also drives
+#: ``composition``'s cross-chart scale sharing); reusing it keeps one
+#: dtype-reading rule instead of a second, drifting copy.
+_SCALE_KIND_TYPE_KINDS: dict[str, _ColorTypeKind] = {
+    "linear": "quantitative",
+    "time": "temporal",
+    "ordinal": "categorical",
+}
+
+
+def _color_type_kind(enc, data) -> _ColorTypeKind:
+    """Resolve the type kind of the auto-raster ``color`` channel.
+
+    An explicit annotation always wins -- ``color="z:N"`` on a numeric
+    column is categorical because the user said so. With no annotation the
+    column dtype decides, via ``_render_prepare._classify_field``: a bare
+    ``color="z"`` on a float column is quantitative and therefore
+    substitutable, which is what makes the "same chart spec works at every
+    data size" promise true for the spelling most users write, not only for
+    the explicit ``:Q`` one (2026-09-11, batch-H close remediation).
+
+    Parameters
+    ----------
+    enc :
+        The ``color`` encoding value -- a ``ChannelBase`` (the ``encode()``
+        path, always) or a plain string shorthand (the layered path).
+    data :
+        The chart's data. **The dtype fallback applies to polars-backed data
+        only; pandas / PyArrow / dict sources stay annotation-only** and yield
+        ``"unknown"`` for an untyped channel rather than a guess. That gate
+        mirrors ``chart._infer_type_from_data``'s own isinstance gate, and it
+        means the "same chart spec works at every data size" promise reads
+        "…if your data is polars" for the untyped color spelling. Giving every
+        frame library one dtype answer (one ``to_arrow_table()`` on this
+        already-slow path, or a shared ``_column_dtype(data, field)`` helper)
+        is a filed follow-up, not this change.
+
+    Returns
+    -------
+    _ColorTypeKind
+    """
+    import polars as pl
+
+    from ferrum._shorthand import parse_shorthand
+
+    if isinstance(enc, ChannelBase):
+        field = enc.field
+        declared = enc._kwargs.get("type")
+    else:
+        field, declared, _agg = parse_shorthand(enc)
+
+    if declared is not None:
+        # An unrecognized annotation is not silently reinterpreted as a
+        # dtype question -- the channel carries a type the gate cannot rank,
+        # so it stays "unknown" and the conservative exclusion applies.
+        return _DECLARED_TYPE_KINDS.get(declared, "unknown")
+
+    if field is None or not isinstance(data, pl.DataFrame):
+        return "unknown"
+    scale_kind = _classify_field(data, field)
+    if scale_kind is None:
+        return "unknown"
+    return _SCALE_KIND_TYPE_KINDS.get(scale_kind, "unknown")
+
+
 def _warn_large_chart(mark_count: int) -> None:
     """Emit a guidance warning when a chart has many marks but is ineligible for auto-raster."""
     warnings.warn(
@@ -49,28 +135,51 @@ def _warn_large_chart(mark_count: int) -> None:
     )
 
 
-def _warn_categorical_color_excluded(mark_count: int, color_field: str | None) -> None:
+def _warn_categorical_color_excluded(
+    mark_count: int, color_field: str | None, kind: "_ColorTypeKind"
+) -> None:
     """Emit the specific guidance warning for the permanent categorical-color exclusion.
 
     Unlike ``_warn_large_chart`` (the generic "ineligible" warning used for
     the other auto-raster gates), this warning names *why* the chart was
-    excluded -- rasterising a categorical/ordinal/temporal color encoding
-    would collapse it to one pixel color per bin, discarding the category
-    information the chart is meant to show -- and gives the exact manual
-    workaround. Quantitative color is not affected: it substitutes via
+    excluded -- rasterising a non-quantitative color encoding would collapse
+    it to one pixel color per bin, discarding the category information the
+    chart is meant to show -- and gives the exact manual workaround.
+    Quantitative color is not affected: it substitutes via
     ``aggregate="mean"`` instead of being excluded (see
     ``_apply_auto_raster``).
+
+    *kind* is the color channel's resolved type kind from
+    :func:`_color_type_kind` (never ``"quantitative"`` here -- that branch
+    substitutes instead of warning). The warning describes exactly that
+    kind, so it never asserts a type the gate did not determine: an
+    ``"unknown"`` color (no type annotation and no dtype to read, e.g. a
+    non-polars data source) is reported as untyped rather than being called
+    categorical (2026-09-11, batch-H close remediation -- this warning used
+    to call every excluded column "categorical/ordinal/temporal", including
+    plain numeric ones).
     """
     field_desc = f"color field {color_field!r}" if color_field else "the color encoding"
+    kind_desc = {
+        "categorical": "a categorical/ordinal",
+        "temporal": "a temporal",
+        "unknown": "an untyped (neither annotated nor dtype-inferrable)",
+    }[kind]
     warnings.warn(
-        f"Chart has {mark_count:,} marks with a categorical/ordinal/temporal "
+        f"Chart has {mark_count:,} marks with {kind_desc} "
         f"{field_desc}, which is permanently excluded from raster substitution "
         f"because rasterising would discard categorical information -- there is "
         f"no pixel aggregate that preserves a non-quantitative color's identity. "
         f"This exclusion does not apply to quantitative color, which substitutes "
         f"automatically. To rasterize this chart anyway (accepting that the "
         f"category collapses to one summary color per pixel), call "
-        f"`.mark_raster(aggregate=..., field=...)` manually.",
+        f"`.mark_raster(aggregate=..., field=...)` manually."
+        + (
+            ' If this field is numeric, annotate it (e.g. `color="field:Q"`) so '
+            "the quantitative substitution applies instead."
+            if kind == "unknown"
+            else ""
+        ),
         UserWarning,
         stacklevel=5,
     )
@@ -104,8 +213,9 @@ class _RenderMixin:
         - The chart was produced by a composite/statistical mark (histogram,
           density, hex, etc.) where the row count does not reflect the
           actual SVG element count.
-        - The chart has an active categorical/ordinal/temporal ``color``
-          encoding -- this exclusion is **permanent** (not a "not yet
+        - The chart has an active non-quantitative ``color`` encoding
+          (categorical, ordinal, temporal, or of a type the gate cannot
+          determine) -- this exclusion is **permanent** (not a "not yet
           implemented" gap): rasterising would collapse the category to one
           summary pixel color per bin, discarding the information the color
           channel exists to show. A quantitative ``color`` encoding is
@@ -121,6 +231,18 @@ class _RenderMixin:
 
         Quantitative color
         -------------------
+        The color channel's type is resolved by :func:`_color_type_kind`:
+        an explicit annotation (``color="z:Q"``, ``fm.Color("z", type_="N")``)
+        wins, and with no annotation the column dtype decides. So a bare
+        ``color="z"`` on a numeric column is quantitative and substitutes,
+        while a bare ``color="c"`` on a string column stays excluded
+        (2026-09-11, batch-H close remediation: the gate used to recognize
+        only the explicit ``:Q`` spelling, so the untyped numeric spelling --
+        the one this repo's own docs mostly use -- fell into the categorical
+        branch and was wrongly reported as categorical in the warning).
+        The x/y gate below is unchanged: it still requires explicit
+        quantitative annotations.
+
         An over-threshold chart with a **quantitative** ``color`` encoding
         *does* get auto-rastered: the substitution uses
         ``aggregate="mean"``, ``field=<the color field>``, and the color
@@ -173,9 +295,10 @@ class _RenderMixin:
         if self._composite_kind is not None:
             return self
 
-        # Determine if an encoding channel is quantitative (explicit `:Q` /
-        # type="quantitative"). Shared by the color-encoding gate below and
-        # the x/y gate further down.
+        # Determine if a POSITIONAL encoding channel is quantitative
+        # (explicit `:Q` / type="quantitative"). The x/y gate keeps this
+        # annotation-only rule; the color gate resolves its type through
+        # `_color_type_kind`, which falls back to the column dtype.
         def _is_quantitative(enc) -> bool:
             if isinstance(enc, ChannelBase):
                 t = enc._kwargs.get("type")
@@ -187,12 +310,16 @@ class _RenderMixin:
 
         # Active color encoding: categorical/ordinal/temporal color keeps the
         # permanent exclusion. Quantitative color is eligible -- it drives
-        # the substitution's aggregate below instead of blocking it.
+        # the substitution's aggregate below instead of blocking it. The kind
+        # comes from the channel's annotation when it has one and from the
+        # column dtype when it does not, so a bare `color="z"` on a numeric
+        # column substitutes like `color="z:Q"` does.
         color_enc = self._encoding.get("color")
-        color_is_quantitative = color_enc is not None and _is_quantitative(color_enc)
+        color_kind = _color_type_kind(color_enc, self._data) if color_enc is not None else "unknown"
+        color_is_quantitative = color_kind == "quantitative"
         if color_enc is not None and not color_is_quantitative:
             color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
-            _warn_categorical_color_excluded(mark_count, color_field)
+            _warn_categorical_color_excluded(mark_count, color_field, color_kind)
             return self
 
         # Check x and y are both present and quantitative.

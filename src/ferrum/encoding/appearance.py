@@ -10,7 +10,6 @@ from __future__ import annotations
 from ferrum.encoding._honored import (
     APPEARANCE_BASE,
     APPEARANCE_COLOR,
-    APPEARANCE_CONDITION,
     APPEARANCE_FULL,
     APPEARANCE_SCHEME,
     APPEARANCE_SORT,
@@ -57,7 +56,9 @@ class Color(ChannelBase):
 
     _channel_name = "color"
 
-    # {"type","legend","scale","title","condition","sort","scheme"}
+    # {"type","legend","scale","title","sort","scheme"} plus "condition",
+    # added by ChannelBase.__init_subclass__ -- "color" is a real conditional
+    # channel (ferrum.encoding._channel_policy._CONDITIONAL_CHANNELS).
     _honored_kwargs = APPEARANCE_COLOR
 
 
@@ -102,7 +103,9 @@ class Size(ChannelBase):
 
     _channel_name = "size"
 
-    _honored_kwargs = APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
+    # {"type","legend","scale","title"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- "size" is a real conditional channel.
+    _honored_kwargs = APPEARANCE_FULL
 
 
 class Shape(ChannelBase):
@@ -131,11 +134,19 @@ class Shape(ChannelBase):
     legend is rendered automatically showing one glyph per distinct category value.
     ``sort`` is honored: pass ``"ascending"``, ``"descending"``, a list of strings
     for an explicit domain order, or a channel shorthand such as ``"-y"`` to sort
-    by the per-category aggregate of another channel.  ``condition`` is
-    honored: pass a ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)``
-    (or ``fm.when(sel).then(...).otherwise(...)``) to switch shape based on
-    selection state -- see ``Chart.encode()``'s condition= translation
-    (``ferrum-spec.md`` §3.10).
+    by the per-category aggregate of another channel.
+
+    ``condition`` is **not** honored: ``shape`` is not a conditional target,
+    and ``encode(shape=<ConditionalSpec>)`` / ``Shape(field, condition=...)``
+    raise ``ValueError`` at ``encode()`` time naming the channels that are.
+    The wire has a ``shape`` channel name but no shape *value*: a shape
+    conditional could only carry a field reference, which the runtime applies
+    as a no-op, so it would serialize cleanly and then do nothing. An earlier
+    version of this docstring said ``condition`` was honored, written on the
+    assumption that reaching the wire meant working; it did not. Refusing
+    beats a kwarg that quietly does nothing. Filed follow-up:
+    ``EncodingValue::Shape`` in Rust, after which this channel can honor
+    ``condition`` for real.
 
     Examples
     --------
@@ -147,7 +158,15 @@ class Shape(ChannelBase):
 
     _channel_name = "shape"
 
-    _honored_kwargs = APPEARANCE_SORT  # {"type","legend","scale","title","condition","sort"}
+    # {"type","legend","scale","title","sort"} — no "condition": a shape
+    # conditional serializes and then applies as a no-op (no
+    # EncodingValue::Shape), so ChannelBase.__init_subclass__ does not add
+    # the bit (_channel_policy._CONDITIONAL_REFUSALS["shape"]) and encode()
+    # refuses it. StrokeDash shares this same role set and DOES gain the bit
+    # (a real EncodingValue::StrokeDash exists) -- see APPEARANCE_SORT's
+    # docstring; the derivation, not a second role set, is what keeps the two
+    # channels apart.
+    _honored_kwargs = APPEARANCE_SORT
 
 
 class Opacity(ChannelBase):
@@ -167,6 +186,13 @@ class Opacity(ChannelBase):
     title : str, optional
         Legend title override.
 
+    Notes
+    -----
+    ``condition`` is honored: pass a ``ConditionalSpec`` built via
+    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
+    to switch opacity based on selection state -- see ``Chart.encode()``'s
+    condition= translation (``ferrum-spec.md`` §3.10).
+
     Examples
     --------
     >>> import ferrum as fm
@@ -175,7 +201,9 @@ class Opacity(ChannelBase):
 
     _channel_name = "opacity"
 
-    _honored_kwargs = APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
+    # {"type","legend","scale","title"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- "opacity" is a real conditional channel.
+    _honored_kwargs = APPEARANCE_FULL
 
 
 # Deferred to Phase 9:
@@ -207,7 +235,10 @@ class Fill(ChannelBase):
     ``condition`` is honored: pass a ``ConditionalSpec`` built via
     ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
     to switch fill based on selection state -- see ``Chart.encode()``'s
-    condition= translation (``ferrum-spec.md`` §3.10).
+    condition= translation (``ferrum-spec.md`` §3.10).  The conditional lands
+    on the ``color`` channel, the same target ``fill`` aliases to for its base
+    encoding, so ``encode(fill=fm.Fill("c", condition=cond))`` and
+    ``encode(fill=cond)`` produce the identical wire conditional.
 
     Examples
     --------
@@ -218,7 +249,11 @@ class Fill(ChannelBase):
 
     _channel_name = "fill"
 
-    _honored_kwargs = APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
+    # {"type","legend","scale","title","scheme"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- "fill" aliases to "color" and gains
+    # the bit. Stroke shares this same role set and does NOT gain it -- see
+    # APPEARANCE_SCHEME's docstring.
+    _honored_kwargs = APPEARANCE_SCHEME
 
 
 class Stroke(ChannelBase):
@@ -244,10 +279,20 @@ class Stroke(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend={"disabled": True}``, ``legend=None``,
     or ``legend=False`` suppresses the stroke legend in the rendered SVG.
-    ``condition`` is honored: pass a ``ConditionalSpec`` built via
-    ``sel.when(...).otherwise(...)`` (or ``fm.when(sel).then(...).otherwise(...)``)
-    to switch stroke based on selection state -- see ``Chart.encode()``'s
-    condition= translation (``ferrum-spec.md`` §3.10).
+
+    ``condition`` is **not** honored: ``stroke`` is not a conditional target,
+    and ``encode(stroke=<ConditionalSpec>)`` / ``Stroke(field, condition=...)``
+    raise ``ValueError`` at ``encode()`` time naming the channels that are.
+    The reason is a missing renderer capability rather than a policy choice:
+    a conditional's only colour value is ``EncodingValue::Color``, which the
+    WASM runtime applies to the mark's **fill** (``apply_value_common``;
+    ``FillStrokeView`` has no stroke-colour member), so carrying a stroke
+    conditional onto ``color`` -- the channel ``stroke`` aliases to for its
+    base encoding -- would recolour the interior instead of the outline.
+    Refusing beats silently changing the wrong property. ``Fill`` is
+    unaffected and does honor ``condition`` (``Color`` *is* the fill).
+    Filed follow-up: ``EncodingValue::StrokeColor`` in Rust, after which this
+    channel can honor ``condition`` for real.
 
     Examples
     --------
@@ -258,7 +303,13 @@ class Stroke(ChannelBase):
 
     _channel_name = "stroke"
 
-    _honored_kwargs = APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
+    # {"type","legend","scale","title","scheme"} — no "condition": a stroke
+    # conditional would repaint the fill (no EncodingValue::StrokeColor), so
+    # ChannelBase.__init_subclass__ does not add the bit
+    # (_channel_policy._CONDITIONAL_REFUSALS["stroke"]) and encode() refuses
+    # it. Fill shares this same role set and DOES gain the bit -- the
+    # derivation, not a second role set, is what keeps the two channels apart.
+    _honored_kwargs = APPEARANCE_SCHEME
 
 
 class FillOpacity(ChannelBase):
@@ -278,7 +329,11 @@ class FillOpacity(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
     the legend in the rendered SVG.  ``scale`` (explicit scale override) and
-    ``title`` (legend title) are also honored.
+    ``title`` (legend title) are also honored.  ``condition`` is honored: pass a
+    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
+    ``fm.when(sel).then(...).otherwise(...)``) to switch fill opacity based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -288,7 +343,10 @@ class FillOpacity(ChannelBase):
 
     _channel_name = "fill_opacity"
 
-    _honored_kwargs = APPEARANCE_FULL  # {"type","legend","scale","title"}
+    # {"type","legend","scale","title"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- fill_opacity is a conditional channel
+    # on the wire and its condition= works end to end.
+    _honored_kwargs = APPEARANCE_FULL
 
 
 class StrokeOpacity(ChannelBase):
@@ -312,7 +370,11 @@ class StrokeOpacity(ChannelBase):
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
     the legend in the rendered SVG.  ``scale`` (explicit scale override) and
-    ``title`` (legend title) are also honored.
+    ``title`` (legend title) are also honored.  ``condition`` is honored: pass a
+    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
+    ``fm.when(sel).then(...).otherwise(...)``) to switch stroke opacity based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -322,7 +384,10 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
 
-    _honored_kwargs = APPEARANCE_FULL  # {"type","legend","scale","title"}
+    # {"type","legend","scale","title"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- stroke_opacity is a conditional channel
+    # on the wire and its condition= works end to end.
+    _honored_kwargs = APPEARANCE_FULL
 
 
 class StrokeWidth(ChannelBase):
@@ -340,7 +405,11 @@ class StrokeWidth(ChannelBase):
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.
+    the legend in the rendered SVG.  ``condition`` is honored: pass a
+    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
+    ``fm.when(sel).then(...).otherwise(...)``) to switch stroke width based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -350,7 +419,10 @@ class StrokeWidth(ChannelBase):
 
     _channel_name = "stroke_width"
 
-    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
+    # {"type","legend"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- stroke_width is a conditional channel
+    # on the wire and its condition= works end to end.
+    _honored_kwargs = APPEARANCE_BASE
 
 
 class StrokeDash(ChannelBase):
@@ -393,9 +465,12 @@ class StrokeDash(ChannelBase):
 
     _channel_name = "stroke_dash"
 
-    # {"type","legend","scale","title","condition","sort"} — sort added
-    # 2026-09-01 (batch-A T12 spec-review addendum, spec §4.3) so a user's
-    # sort= reaches the wire; Rust's build_stroke_dash_scale already read it.
+    # {"type","legend","scale","title","sort"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- stroke_dash is a real conditional
+    # channel. sort added 2026-09-01 (batch-A T12 spec-review addendum, spec
+    # §4.3) so a user's sort= reaches the wire; Rust's build_stroke_dash_scale
+    # already read it. Shape shares this same role set and does NOT gain
+    # "condition" -- see APPEARANCE_SORT's docstring.
     _honored_kwargs = APPEARANCE_SORT
 
 
@@ -415,7 +490,11 @@ class Angle(ChannelBase):
     Notes
     -----
     ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
-    the legend in the rendered SVG.
+    the legend in the rendered SVG.  ``condition`` is honored: pass a
+    ``ConditionalSpec`` built via ``sel.when(...).otherwise(...)`` (or
+    ``fm.when(sel).then(...).otherwise(...)``) to switch rotation based on
+    selection state -- see ``Chart.encode()``'s condition= translation
+    (``ferrum-spec.md`` §3.10).
 
     Examples
     --------
@@ -425,4 +504,7 @@ class Angle(ChannelBase):
 
     _channel_name = "angle"
 
-    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
+    # {"type","legend"} plus "condition", added by
+    # ChannelBase.__init_subclass__ -- angle is a conditional channel on the
+    # wire and its condition= works end to end.
+    _honored_kwargs = APPEARANCE_BASE

@@ -21,7 +21,34 @@ docstrings below. **Further dated note (2026-09-01, batch-A T12 spec-review
 addendum):** StrokeDash moved a second time, from ``APPEARANCE_FULL`` to
 ``APPEARANCE_SORT`` (mirroring Shape), so ``sort=`` reaches the wire instead
 of being silently dropped while Rust's ``build_stroke_dash_scale`` already
-reads it. The appearance-channel membership is pinned by
+reads it.
+
+**``condition`` is no longer a role-set member at all (2026-09-11, batch-H
+close cycle 3).** Between 2026-09-11's remediation and re-review, ``condition``
+bounced between four channels moving onto ``APPEARANCE_BASE_CONDITION`` /
+``APPEARANCE_CONDITION`` (StrokeWidth/Angle, FillOpacity/StrokeOpacity — the
+wire genuinely honors their conditional) and two moving onto
+``APPEARANCE_SCHEME_NO_CONDITION`` / ``APPEARANCE_SORT_NO_CONDITION``
+(Stroke, Shape — the wire cannot express theirs). Six role sets carrying two
+copies of the same yes/no answer the conditional vocabulary already owns
+(``ferrum.encoding._channel_policy._CONDITIONAL_CHANNELS`` /
+``_CONDITIONAL_CHANNEL_ALIASES`` / ``_CONDITIONAL_REFUSALS``) is exactly the
+hand-synced-copies shape this batch's alias-table work fixed elsewhere by
+deriving instead of duplicating — and it is how Fill/Stroke and later
+Shape/StrokeDash drifted from the vocabulary in the first place, one channel
+at a time. ``ChannelBase.__init_subclass__`` (``ferrum.encoding.base``) now
+derives the bit directly from ``_channel_policy.channel_honors_condition``,
+keyed on each class's own ``_channel_name`` — every role constant below
+declares its BASE contract only, with no ``condition`` member and no
+``*_NO_CONDITION`` twin; the hook adds or removes the single bit after the
+class body finishes executing. The two former ``_NO_CONDITION`` sets are
+deleted: ``Shape`` and ``StrokeDash`` now share plain ``APPEARANCE_SORT``,
+and ``Fill``/``Stroke`` now share plain ``APPEARANCE_SCHEME`` — the
+derivation, not a second set, is what keeps Stroke/Shape without the bit and
+Fill/StrokeDash with it. The two tables are now structurally unable to
+disagree again.
+
+The appearance-channel membership is pinned by
 ``tests/test_appearance_honored_kwargs.py``, which documents each intentional
 change with a dated comment.
 
@@ -87,33 +114,51 @@ POLAR_PRIMARY = frozenset({"type", "stack"})
 
 # ---------------------------------------------------------------------------
 # Appearance roles (compose upward; final sets match the prior _APPEARANCE_*)
+#
+# None of these carry ``condition`` — see the module docstring's 2026-09-11
+# cycle-3 note. ``ChannelBase.__init_subclass__`` adds or removes that single
+# bit per class, keyed on ``_channel_name`` against
+# ``_channel_policy.channel_honors_condition``, so a channel's *documented*
+# conditional support (StrokeWidth/Angle/FillOpacity/StrokeOpacity/Size/
+# Opacity/StrokeDash/Color/Fill: yes; Shape/Stroke: no, the wire cannot
+# express theirs) is never spelled out as a role-set member here.
 # ---------------------------------------------------------------------------
 
 #: Minimum appearance contract — data type + legend suppression/customization.
 #: (StrokeWidth, Angle — both documented as per-row constants with no scale
-#: resolution; see ``spec/encoding.rs:746``.)
+#: resolution; see ``spec/encoding.rs:746``. Both gain ``condition`` via the
+#: derivation above — ``stroke_width``/``angle`` are real conditional
+#: channels.)
 APPEARANCE_BASE = frozenset({"type", "legend"})
 
-#: Adds an explicit scale override and legend title. (FillOpacity,
-#: StrokeOpacity — batch-A §4.3 opens the wire gate so these two serialize
-#: ``scale=``/``title=`` instead of warn-and-drop. StrokeDash started here
+#: Adds an explicit scale override and legend title. (Size, Opacity,
+#: FillOpacity, StrokeOpacity all gain ``condition`` via the derivation —
+#: each is a real conditional channel on the wire. StrokeDash started here
 #: too on 2026-08-28 but moved up to ``APPEARANCE_SORT`` on 2026-09-01 — see
 #: that constant's docstring.)
 APPEARANCE_FULL = APPEARANCE_BASE | {"scale", "title"}
 
-#: Adds a conditional encoding. (Size, Opacity.)
-APPEARANCE_CONDITION = APPEARANCE_FULL | {"condition"}
+#: Adds an explicit domain-order sort. (StrokeDash and Shape both use this
+#: set, as of 2026-09-01 / 2026-09-11 respectively — Shape mirrors
+#: StrokeDash's sort role even though the derivation leaves Shape WITHOUT
+#: ``condition``, since ``EncodingValue::Shape`` does not exist:
+#: ``stroke_dash`` is a real conditional channel and gains the bit;
+#: ``shape`` is refused by ``_channel_policy._CONDITIONAL_REFUSALS`` and does
+#: not. One set, two derived outcomes — that split is the point of deriving
+#: rather than hand-copying.)
+APPEARANCE_SORT = APPEARANCE_FULL | {"sort"}
 
-#: Adds an explicit domain-order sort. (Shape; StrokeDash as of 2026-09-01,
-#: batch-A T12 spec-review addendum — mirrors Shape since the Rust
-#: ``build_stroke_dash_scale`` domain builder already reads ``sort``.)
-APPEARANCE_SORT = APPEARANCE_CONDITION | {"sort"}
-
-#: Adds a named color scheme. (Fill, Stroke.)
-APPEARANCE_SCHEME = APPEARANCE_CONDITION | {"scheme"}
+#: Adds a named color scheme. (Fill and Stroke both use this set, same split
+#: as ``APPEARANCE_SORT`` above: ``fill`` aliases to ``color`` and gains
+#: ``condition``; ``stroke`` is refused — its only conditional colour value
+#: (``EncodingValue::Color``) would repaint the mark's fill, not its stroke
+#: — and does not.)
+APPEARANCE_SCHEME = APPEARANCE_FULL | {"scheme"}
 
 #: The Color channel: full appearance contract plus both sort and scheme.
-APPEARANCE_COLOR = APPEARANCE_CONDITION | {"sort", "scheme"}
+#: (Gains ``condition`` via the derivation — ``color`` is the canonical
+#: conditional channel.)
+APPEARANCE_COLOR = APPEARANCE_FULL | {"sort", "scheme"}
 
 
 # ---------------------------------------------------------------------------

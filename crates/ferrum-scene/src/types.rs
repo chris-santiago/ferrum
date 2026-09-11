@@ -284,6 +284,38 @@ pub enum MarkBatchKind {
     Arc,
 }
 
+impl MarkBatchKind {
+    /// This kind's canonical wire spelling — the same string
+    /// `#[serde(rename_all = "snake_case")]` serializes it as.
+    ///
+    /// The one source for the name any user-facing text should use. Deriving
+    /// it from `Debug` instead (`format!("{self:?}").to_lowercase()`) agrees
+    /// only by accident, because every variant today happens to be one word:
+    /// a two-word variant would render as `boxplotwhisker`, and renaming a
+    /// variant would silently change a user-visible message. The exhaustive
+    /// match means a new variant must answer here too, and
+    /// `mark_batch_kind_wire_name_matches_serde` proves the two spellings
+    /// stay identical.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Point => "point",
+            Self::Line => "line",
+            Self::Bar => "bar",
+            Self::Area => "area",
+            Self::Rule => "rule",
+            Self::Text => "text",
+            Self::Label => "label",
+            Self::Tick => "tick",
+            Self::Rect => "rect",
+            Self::Polygon => "polygon",
+            Self::Image => "image",
+            Self::Ribbon => "ribbon",
+            Self::Segment => "segment",
+            Self::Arc => "arc",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlendMode {
@@ -659,4 +691,52 @@ pub enum GeoProjection {
     NaturalEarth,
     Orthographic,
     Equirectangular,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MarkBatchKind;
+
+    /// `wire_name` must be the serde spelling, for every variant listed in
+    /// `all` below — the property that lets user-facing text use it instead
+    /// of a `Debug` string.
+    ///
+    /// This is weaker than it may read: `wire_name`'s own `match` is
+    /// exhaustive (no wildcard arm), so the COMPILER forces an answer for a
+    /// new `MarkBatchKind` variant there. This test does not get that for
+    /// free — `all` is a hand-written array whose only integrity check is
+    /// its own length (`assert_eq!(all.len(), 14, …)`), so a 15th variant
+    /// added to the enum simply goes untested here until someone remembers
+    /// to append it; the test itself stays green either way. Same shape as
+    /// `BreakPlacement::for_kind`'s table, which asserts its own length the
+    /// same way — consistent with the crate's existing convention, not a
+    /// coupling this test enforces on its own.
+    #[test]
+    fn mark_batch_kind_wire_name_matches_serde() {
+        let all = [
+            MarkBatchKind::Point,
+            MarkBatchKind::Line,
+            MarkBatchKind::Bar,
+            MarkBatchKind::Area,
+            MarkBatchKind::Rule,
+            MarkBatchKind::Text,
+            MarkBatchKind::Label,
+            MarkBatchKind::Tick,
+            MarkBatchKind::Rect,
+            MarkBatchKind::Polygon,
+            MarkBatchKind::Image,
+            MarkBatchKind::Ribbon,
+            MarkBatchKind::Segment,
+            MarkBatchKind::Arc,
+        ];
+        assert_eq!(all.len(), 14, "every MarkBatchKind variant must be listed");
+        for kind in all {
+            let serialized = serde_json::to_string(&kind).unwrap();
+            assert_eq!(
+                serialized,
+                format!("\"{}\"", kind.wire_name()),
+                "wire_name disagrees with serde for {kind:?}"
+            );
+        }
+    }
 }

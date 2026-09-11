@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 
 import pytest
 import polars as pl
@@ -459,9 +460,24 @@ class TestStructuralRendering:
         assert svg.startswith("<svg")
 
     def test_break_axis_renders_svg(self, base_chart):
-        chart = base_chart + BreakAxis(axis="y", gap=(50, 200))
-        svg = chart.to_svg()
+        """The smoke test must actually smoke: the gap has to fall INSIDE the
+        chart's y domain (10..50) or no break is applied at all.
+
+        The fixture used ``gap=(50, 200)`` -- entirely above the domain -- so
+        the render exercised the no-break path and proved nothing. The Rust
+        ``BreakAxisIneffective`` warning added in the batch-H close
+        remediation is what surfaced it; asserting the warning does NOT fire
+        makes the fixture self-checking against the same drift.
+        """
+        chart = base_chart + BreakAxis(axis="y", gap=(20, 40))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.to_svg()
         assert svg.startswith("<svg")
+        assert not [w for w in caught if "had no effect" in str(w.message)], (
+            "gap=(20, 40) is inside the y domain, so the break must take effect: "
+            f"{[str(w.message) for w in caught]}"
+        )
 
     def test_inset_renders_svg(self, base_chart, dual_field_df):
         inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")

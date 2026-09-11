@@ -652,9 +652,18 @@ def test_ordinal_axis_break_leaves_annotations_and_bars_unmoved():
         warnings.simplefilter("always")
         broken_svg = (labelled + fm.BreakAxis(axis="x", gap=(0.3, 0.6))).to_svg()
 
-    assert not any("break" in str(w.message).lower() for w in caught), (
-        f"an ordinal-axis BreakAxis must not suppress annotations; got "
-        f"{[str(w.message) for w in caught]}"
+    messages = [str(w.message) for w in caught]
+    assert not any("suppressed" in m for m in messages), (
+        f"an ordinal-axis BreakAxis must not suppress annotations; got {messages}"
+    )
+    # It DOES say it did nothing (close-review cycle-2, N1): an ordinal axis has
+    # no numeric domain for a gap to clip against, so the break is a no-op — and
+    # a structural feature that silently does nothing is indistinguishable from
+    # one the renderer failed to honor. Before that fix the check ran against a
+    # fabricated `(0.0, 1.0)` domain, so this very gap "survived" it: no warning,
+    # and a slash indicator painted over a scale nothing had moved on.
+    assert any("had no effect" in m and "ordinal" in m for m in messages), (
+        f"an ineffective ordinal break must say so; got {messages}"
     )
     for label in ("L", "M"):
         assert re.search(rf'<text x="-?[\d.]+" y="-?[\d.]+"[^>]*>{label}</text>', broken_svg), (
@@ -674,6 +683,13 @@ def test_ordinal_axis_break_leaves_annotations_and_bars_unmoved():
         assert label_x(plain_svg, label) == label_x(broken_svg, label), (
             f"the {label!r} annotation must not move on an ordinal-axis break either"
         )
+
+    # And it draws no indicator: a break that moves nothing must not paint a
+    # marker claiming it did (close-review cycle-2, N1 — measured as two extra
+    # `<line>` elements over a byte-identical chart).
+    assert broken_svg.count("<line") == plain_svg.count("<line"), (
+        "an ordinal-axis break must not add a break indicator"
+    )
 
 
 def test_two_same_axis_breaks_fold_annotations_and_marks_to_the_same_position():
@@ -792,6 +808,48 @@ def test_x_axis_surviving_annotation_lands_at_the_marks_compressed_position():
     assert abs(x100_cx - plain_x100_cx) > 1.0, (
         "the break must move the mark (and the annotation with it); "
         f"broken={x100_cx} unbroken={plain_x100_cx}"
+    )
+
+
+# --------------------------------------------------------------------------
+# cycle-3 fix: an ineffective break on a continuous axis renders as if
+# undeclared (design-review cycle 3, C1)
+# --------------------------------------------------------------------------
+
+
+def test_break_whose_gaps_miss_the_padded_domain_renders_identically_to_unbroken():
+    """A `BreakAxis` whose gaps miss the (padded) domain must be a true no-op.
+
+    The cycle-2 N1 fix made ``BreakAxisIneffective`` fire for this case, but
+    kept pushing a single-segment "identity" result so the render stayed
+    byte-identical to the *pre-batch broken* chart — not to the *unbroken*
+    chart the warning's own wording promises ("had no effect"). That
+    single-segment map is laid over the plot rect while the real remap
+    reverse-maps from the scale's own PADDED pixel range, so it silently
+    collapsed the scale's padding: every gridline, tick, tick label, and
+    mark shifted by up to the padding width (measured by the reviewer as a
+    35-element, up-to-8px diff). This pins the adjudicated fix: drop the
+    `break_results` entry when `effective_gaps == 0`, so the continuous
+    branch matches the ordinal branch exactly and the SVG is byte-identical
+    to the unbroken chart.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    unbroken_svg = chart.to_svg()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        broken_svg = (chart + fm.BreakAxis(axis="y", gap=(500, 900))).to_svg()
+
+    messages = [str(w.message) for w in caught]
+    assert any("had no effect" in m and "on the y axis" in m for m in messages), (
+        f"expected the ineffective-break warning naming the y axis; got {messages}"
+    )
+    assert broken_svg == unbroken_svg, (
+        "a break whose gaps miss the domain must render exactly the unbroken "
+        "chart — the warning says it 'had no effect', so the render must "
+        "agree, not merely stay stable relative to the old (also-wrong) "
+        "broken behavior"
     )
 
 

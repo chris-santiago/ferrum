@@ -18,12 +18,12 @@ constructor. Two keys had drifted between the two paths:
   channel with a format that derives a type (e.g. ``X(field,
   format="percent")`` -- ``_emit_format`` derives ``format_type="number"``
   from the preset) raise ``unknown field 'format_type'``.
-- ``condition``: a public honored kwarg on every appearance channel
-  (``encoding/_honored.py``'s ``APPEARANCE_CONDITION``, ``_emit_condition``
-  in ``encoding/base.py``). The chart-level path forwards it; the layer
-  path's allowlist simply never listed it, so it was silently dropped --
-  the same "wire key vanishes" bug class F-L09-08 fixed for ``title=""``,
-  just a different key.
+- ``condition``: a public honored kwarg on every conditional-honoring
+  appearance channel (``ferrum.encoding._channel_policy.channel_honors_condition``,
+  ``_emit_condition`` in ``encoding/base.py``). The chart-level path forwards
+  it; the layer path's allowlist simply never listed it, so it was silently
+  dropped -- the same "wire key vanishes" bug class F-L09-08 fixed for
+  ``title=""``, just a different key.
 
 .. note::
    ``test_layer_condition_reaches_the_wire`` originally pinned ``condition=``

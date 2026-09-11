@@ -942,7 +942,24 @@ def _resolve_encoding_value(
             )
         branch_cls = _channel_class_for(channel) if channel is not None else None
         if branch_cls is None:
-            from ferrum.encoding.appearance import Color as branch_cls
+            # Reached only by a direct call with no channel (every chart path
+            # resolves one first -- see `ConditionalSpec.to_spec_dict`), so
+            # there is no channel to imply a branch class. Color is the
+            # stand-in for "some field-carrying channel"; the wire dict below
+            # reads `enc.field` only, so the class does not change the
+            # serialized output. It IS observable in the channel's own
+            # honored-kwarg warning, though -- an aggregate-carrying shorthand
+            # warns `color(aggregate=...)` here and would warn
+            # `shape(aggregate=...)` under a different stand-in -- so the
+            # choice is pinned by
+            # `tests/test_condition_translation.py::test_channelless_shorthand_branch_warns_as_color`
+            # rather than left to a comment. (A previous version of this
+            # comment claimed the two were "indistinguishable by
+            # construction"; that was false, and it told the next reader not
+            # to test something testable.)
+            from ferrum.encoding.appearance import Color
+
+            branch_cls = Color
         shorthand_kwargs: dict[str, Any] = {}
         if type_:
             shorthand_kwargs["type"] = type_

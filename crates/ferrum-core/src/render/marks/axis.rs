@@ -19,6 +19,19 @@ pub struct AxisNodes {
     pub data_positioned: Vec<SceneNode>,
     /// The axis title, placed from the axis geometry rather than from data.
     pub title: Option<SceneNode>,
+    /// Which PHYSICAL axis these nodes were placed along — `"x"` or `"y"`,
+    /// from this axis's own orient, in the same vocabulary as
+    /// [`crate::render::break_axis::BreakRemap::axis`].
+    ///
+    /// The other half of the split above, and the one a pixel coordinate
+    /// cannot answer: a break may move a node only if the node was placed
+    /// from a tick value ON THAT AXIS. Inferring it from geometry instead is
+    /// what collapsed every x-axis tick mark to zero length under a y-break —
+    /// a downward tick's `min(y1, y2)` is the plot floor, i.e. inside the
+    /// y-axis's own pixel range, so the guard meant to exclude cross-axis
+    /// chrome admitted it and then clamped both ends onto one pixel.
+    /// `build_axis` knows which axis it built; this is it saying so.
+    pub placed_along: &'static str,
 }
 
 impl AxisNodes {
@@ -340,7 +353,11 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
     // are perpendicular shifts away from the plot edge and **compose additively**
     // (`translate` is Vega's axis translate, `offset` its axis offset). `None`/`0`
     // on both is a no-op so default output is byte-identical.
-    let mut out = AxisNodes { data_positioned: nodes, title };
+    let mut out = AxisNodes {
+        data_positioned: nodes,
+        title,
+        placed_along: axis.orient.dimension().channel_token(),
+    };
     let shift = axis.translate.unwrap_or(0.0) + axis.offset.unwrap_or(0.0);
     if shift != 0.0 {
         let (dx, dy) = match axis.orient {

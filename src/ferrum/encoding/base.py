@@ -263,7 +263,7 @@ class ChannelBase:
     """
 
     _channel_name: ClassVar[str] = "_unknown_"
-    _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type", "condition"])
+    _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type"])
     # Stacking channels (X, Y, Theta, Radius) set this True so the base
     # ``_validate`` normalizes their ``stack=`` kwarg.  Non-stacking channels
     # leave it False and the normalization is skipped.
@@ -275,6 +275,46 @@ class ChannelBase:
     # channel's legend" the way it does on Color/Size/Shape — see
     # `_emit_legend_cascade_only`.
     _has_own_legend: ClassVar[bool] = True
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Derive the ``condition`` honored-kwarg bit from the one conditional vocabulary.
+
+        ``ferrum.encoding._channel_policy`` is the single source of truth for
+        which channel *names* a selection conditional can target (Rust's
+        ``EncodingValue`` variants, plus the ``fill -> color`` alias). Before
+        this (2026-09-11, batch-H close cycle 3), every channel class hand-set
+        whether ``"condition"`` belonged in its own ``_honored_kwargs`` -- a
+        second, manually-synced copy of the same yes/no answer that
+        vocabulary already encodes, and exactly how ``Fill``/``Stroke`` and
+        later ``Shape``/``StrokeDash`` drifted from it one channel at a time
+        (the batch's own H9/C2/C2b findings). Deriving the bit here instead
+        makes the two tables structurally unable to disagree again: a
+        subclass declares its role set WITHOUT ``condition`` (the role
+        constants in ``ferrum.encoding._honored`` no longer carry it either),
+        and this hook adds or removes the single bit from ``_honored_kwargs``
+        based on ``cls._channel_name`` once the class body has finished
+        executing (``__init_subclass__`` runs after every class-body
+        assignment, so both class attributes are already set).
+
+        Only reassigns ``_honored_kwargs`` when the derived bit actually
+        changes membership -- ``frozenset.__or__``/``__sub__`` always return a
+        *new* object, even as a no-op, which would silently break the several
+        channels that share one role-set object by identity (e.g.
+        ``fm.X._honored_kwargs is PRIMARY_POSITIONAL``,
+        ``tests/test_honored_single_source.py``). A channel whose derived bit
+        matches its class-body role set (the common case -- most roles carry
+        no ``condition`` and most channel names are not conditional targets)
+        keeps the exact object its class body assigned.
+        """
+        super().__init_subclass__(**kwargs)
+        from ferrum.encoding._channel_policy import channel_honors_condition
+
+        should_honor = channel_honors_condition(cls._channel_name)
+        already_honors = "condition" in cls._honored_kwargs
+        if should_honor and not already_honors:
+            cls._honored_kwargs = cls._honored_kwargs | frozenset({"condition"})
+        elif already_honors and not should_honor:
+            cls._honored_kwargs = cls._honored_kwargs - frozenset({"condition"})
 
     def __init__(self, field: Any = None, **kwargs: Any) -> None:
         # Phase 9: accept _RepeatPlaceholder as a sentinel value alongside str.

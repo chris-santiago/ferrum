@@ -183,6 +183,17 @@ pub struct InsetSpec {
 /// every `InsetSpec` serialized before the tagged wire existed carried plain
 /// floats and must keep deserializing identically, so a bare number decodes
 /// as `Norm` (its pre-existing meaning).
+///
+/// Two things this type does NOT say, and both are deliberate. The range
+/// invariants — `Norm` within `[0, 1]`, `Px` non-negative, a non-empty box —
+/// are enforced UPSTREAM, at `ferrum.structural.Inset`'s construction in
+/// Python; Rust accepts what Python refuses (`build_inset_nodes`'s `.max(1.0)`
+/// keeps the geometry non-degenerate regardless), which is the right layering
+/// for a single Python client. And `Px` is an offset from the plot area's
+/// ORIGIN for all four entries, including `right`/`bottom` — `px(220)` as a
+/// `right` bound means 220px from the plot's LEFT edge, not 220px in from its
+/// right edge. [`InsetCoord::resolve`] is the whole rule, and it is the same
+/// one for every entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InsetCoord {
     /// Normalized `[0, 1]` fraction of the plot area's width/height.

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::break_axis;
 use super::color::parse_color as parse_color_str;
 use super::draw::{arrowhead_path, arrowhead_triangle, to_scene_color};
-use super::scale_resolve::ScaleKind;
+use super::scale_resolve::{data_pixel_x, data_pixel_y, ScaleKind};
 use crate::layout::geometry::Rect;
 
 // ── Coordinate types ────────────────────────────────────────────────────────
@@ -247,24 +247,7 @@ impl<'a> ScaleContext<'a> {
     pub fn resolve_x(&self, v: &CoordValue) -> f64 {
         match v {
             CoordValue::Data(d) => {
-                let base = self.x_scale.to_pixel_f64(*d).unwrap_or_else(|| {
-                    // Fallback: linear interpolation using data domain. Unlike
-                    // `resolve_y`'s fallback, this needs no flip: `axis_pixel_
-                    // range` only swaps the pixel range for the y channel
-                    // (`channel == "y"`), so a continuous x axis's domain[0]
-                    // already maps to the LEFT pixel, matching `frac` directly.
-                    if let Some((lo, hi)) = self.x_scale.data_domain() {
-                        let frac = if (hi - lo).abs() < f64::EPSILON {
-                            0.5
-                        } else {
-                            (d - lo) / (hi - lo)
-                        };
-                        self.plot_area.x + frac * self.plot_area.w
-                    } else {
-                        // Ordinal: cannot resolve numeric data to ordinal scale; center.
-                        self.plot_area.x + self.plot_area.w * 0.5
-                    }
-                });
+                let base = data_pixel_x(self.x_scale, &self.plot_area, *d);
                 self.fold_breaks("x", base)
             }
             CoordValue::Pixel { px } => self.plot_area.x + px,
@@ -280,46 +263,7 @@ impl<'a> ScaleContext<'a> {
     pub fn resolve_y(&self, v: &CoordValue) -> f64 {
         match v {
             CoordValue::Data(d) => {
-                let base = self.y_scale.to_pixel_f64(*d).unwrap_or_else(|| {
-                    // Fallback: linear interpolation using data domain, for a
-                    // continuous y scale's OUT-OF-DOMAIN value (`to_pixel_f64`
-                    // returns `None` there by design, not only for ordinal
-                    // scales — see its doc comment).
-                    //
-                    // Every non-ordinal y axis's pixel RANGE is flipped
-                    // relative to its domain, unconditionally
-                    // (`scale_resolve::positional::axis_pixel_range`:
-                    // domain[0] -> the BOTTOM pixel, domain[1] -> the TOP —
-                    // `reverse=` only swaps which value sits at domain[0] vs
-                    // domain[1], never which pixel each endpoint maps to, so
-                    // `data_domain()`'s `(lo, hi)` already encodes `reverse=`
-                    // and this flip composes with it for free). `frac` is the
-                    // fraction of the domain span past `lo`, so `(1.0 -
-                    // frac)` is that SAME flip: frac=0 (at `lo`) lands at the
-                    // bottom, frac=1 (at `hi`) at the top — matching every
-                    // in-domain annotation and every mark on this axis.
-                    //
-                    // Before this fix the formula used `frac` directly (no
-                    // flip), so an out-of-domain value landed on the WRONG
-                    // side once a `BreakAxis` clamped it back onto the
-                    // visible canvas (quality-review cycle-3 finding: y=5000
-                    // above a domain max of 1000 rendered at the plot BOTTOM
-                    // instead of the TOP). Not separately audited under
-                    // `CoordFlip` — that swap happens upstream of
-                    // `ScaleContext`, which this module does not trace, and
-                    // this fallback only fires for the narrow
-                    // out-of-domain-annotation edge case.
-                    if let Some((lo, hi)) = self.y_scale.data_domain() {
-                        let frac = if (hi - lo).abs() < f64::EPSILON {
-                            0.5
-                        } else {
-                            (d - lo) / (hi - lo)
-                        };
-                        self.plot_area.y + (1.0 - frac) * self.plot_area.h
-                    } else {
-                        self.plot_area.y + self.plot_area.h * 0.5
-                    }
-                });
+                let base = data_pixel_y(self.y_scale, &self.plot_area, *d);
                 self.fold_breaks("y", base)
             }
             CoordValue::Pixel { px } => self.plot_area.y + px,
@@ -375,17 +319,45 @@ pub fn kind_name(spec: &AnnotationSpec) -> &'static str {
     }
 }
 
-/// The data-space (`CoordValue::Data`) coordinate values `spec` carries along
-/// `axis` (`"x"` or `"y"`).
+/// What an annotation's data-space coordinates on one axis MEAN, which is
+/// what decides how a `BreakAxis` gap must test them.
+///
+/// The distinction is the whole content of spec §4 H5's "any in-gap data
+/// coordinate": for a point-shaped annotation the coordinate IS the
+/// annotation's position, but for an extent-shaped one the two coordinates
+/// bound an interval whose interior is part of the annotation too. Testing
+/// only the endpoints made suppression non-monotonic — a rect overlapping a
+/// gap vanished while a LARGER rect containing that gap painted straight
+/// across the break.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxisCoords {
+    /// Point-shaped anchors (`Text`, `Callout`'s anchor and text anchor,
+    /// `Image`), each suppressed only when it lands inside a gap. Also the
+    /// degenerate form of an extent shape whose endpoints are not both
+    /// data-space: with no second data bound there is no interval to test,
+    /// only the coordinate(s) that are data.
+    Points(Vec<f64>),
+    /// Both bounds of an extent shape (`Rect`, `Span`, `Line`, `Arrow`,
+    /// `Bracket`) on this axis, in spec order. Suppressed when the interval
+    /// they bound INTERSECTS a gap — an endpoint inside one, or the interval
+    /// reaching across one.
+    Extent(f64, f64),
+}
+
+/// The data-space (`CoordValue::Data`) coordinates `spec` carries along
+/// `axis` (`"x"` or `"y"`), in the shape the break's suppression rule must
+/// test them — see [`AxisCoords`].
 ///
 /// Pixel/norm coordinates are plot-area-relative, not data positions, so a
 /// `BreakAxis` gap never suppresses them — they are excluded here rather than
-/// filtered by the caller, so every caller gets that rule for free.
+/// filtered by the caller, so every caller gets that rule for free. An extent
+/// shape with only one data-space bound therefore degrades to
+/// [`AxisCoords::Points`]: half a data interval bounds nothing.
 ///
 /// Exhaustive over `AnnotationSpec`'s 8 shapes, enumerated from this file's
 /// own field list (spec §4 H5's coordinate table), so a new spec variant is a
 /// compile error here rather than silently skipping break suppression for it.
-pub fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> Vec<f64> {
+pub fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> AxisCoords {
     // Branches on `axis == "y"` with x as the fallback, matching every other
     // break-axis consumer's convention (`break_axis.rs`'s `is_y()`,
     // `scene_build.rs`'s `if axis == "y" { &scales.y } else { &scales.x }`) —
@@ -393,26 +365,33 @@ pub fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> Vec<f64> {
     // but keeping one direction crate-wide means a future third axis value
     // can't be suppressed as one axis and remapped as the other.
     let is_y = axis == "y";
-    let fields: Vec<&CoordValue> = match spec {
-        AnnotationSpec::Text { x, y, .. } => vec![if is_y { y } else { x }],
+    let (fields, shape): (Vec<&CoordValue>, Shape) = match spec {
+        AnnotationSpec::Text { x, y, .. } => (vec![if is_y { y } else { x }], Shape::Point),
         AnnotationSpec::Arrow { x, y, x2, y2, .. } => {
-            if is_y { vec![y, y2] } else { vec![x, x2] }
+            (if is_y { vec![y, y2] } else { vec![x, x2] }, Shape::Extent)
         }
         AnnotationSpec::Rect { x1, y1, x2, y2, .. } => {
-            if is_y { vec![y1, y2] } else { vec![x1, x2] }
+            (if is_y { vec![y1, y2] } else { vec![x1, x2] }, Shape::Extent)
         }
         AnnotationSpec::Line { x1, y1, x2, y2, .. } => {
-            if is_y { vec![y1, y2] } else { vec![x1, x2] }
+            (if is_y { vec![y1, y2] } else { vec![x1, x2] }, Shape::Extent)
         }
         // A `Span`'s `start`/`end` are values on its OWN `axis` field, which
         // may differ from the axis under test — an x-span is untouched by a
         // y-break, and vice versa.
         AnnotationSpec::Span { axis: span_axis, start, end, .. } => {
-            if span_axis == axis { vec![start, end] } else { Vec::new() }
+            if span_axis == axis {
+                (vec![start, end], Shape::Extent)
+            } else {
+                (Vec::new(), Shape::Point)
+            }
         }
         AnnotationSpec::Bracket { x1, y1, x2, y2, .. } => {
-            if is_y { vec![y1, y2] } else { vec![x1, x2] }
+            (if is_y { vec![y1, y2] } else { vec![x1, x2] }, Shape::Extent)
         }
+        // A callout's anchor and its text anchor are two independent POINTS,
+        // not the ends of one interval — the leader line between them is a
+        // pointer, not an extent the annotation claims.
         AnnotationSpec::Callout { x, y, text_x, text_y, .. } => {
             let mut v = vec![if is_y { y } else { x }];
             if is_y {
@@ -422,17 +401,29 @@ pub fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> Vec<f64> {
             } else if let Some(tx) = text_x {
                 v.push(tx);
             }
-            v
+            (v, Shape::Point)
         }
-        AnnotationSpec::Image { x, y, .. } => vec![if is_y { y } else { x }],
+        AnnotationSpec::Image { x, y, .. } => (vec![if is_y { y } else { x }], Shape::Point),
     };
-    fields
+    let values: Vec<f64> = fields
         .into_iter()
         .filter_map(|v| match v {
             CoordValue::Data(d) => Some(*d),
             _ => None,
         })
-        .collect()
+        .collect();
+    match (shape, values.as_slice()) {
+        (Shape::Extent, &[lo, hi]) => AxisCoords::Extent(lo, hi),
+        _ => AxisCoords::Points(values),
+    }
+}
+
+/// Whether a spec's coordinates on one axis bound an interval or stand alone
+/// — the per-variant half of [`AxisCoords`], kept next to the field list it
+/// is read off.
+enum Shape {
+    Point,
+    Extent,
 }
 
 // ── Color helpers ───────────────────────────────────────────────────────────
@@ -1862,8 +1853,8 @@ mod tests {
             dy: 0.0,
             z: "above_marks".into(),
         };
-        assert_eq!(data_coords_on_axis(&spec, "x"), vec![10.0]);
-        assert_eq!(data_coords_on_axis(&spec, "y"), vec![20.0]);
+        assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Points(vec![10.0]));
+        assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Points(vec![20.0]));
     }
 
     #[test]
@@ -1881,8 +1872,8 @@ mod tests {
             dy: 0.0,
             z: "above_marks".into(),
         };
-        assert!(data_coords_on_axis(&spec, "x").is_empty());
-        assert!(data_coords_on_axis(&spec, "y").is_empty());
+        assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Points(Vec::new()));
+        assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Points(Vec::new()));
     }
 
     #[test]
@@ -1896,8 +1887,8 @@ mod tests {
             stroke_width: 1.5,
             head_size: 8.0,
         };
-        assert_eq!(data_coords_on_axis(&spec, "x"), vec![1.0, 3.0]);
-        assert_eq!(data_coords_on_axis(&spec, "y"), vec![2.0, 4.0]);
+        assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Extent(1.0, 3.0));
+        assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Extent(2.0, 4.0));
     }
 
     #[test]
@@ -1934,8 +1925,8 @@ mod tests {
             },
         ];
         for spec in &specs {
-            assert_eq!(data_coords_on_axis(spec, "x"), vec![1.0, 3.0]);
-            assert_eq!(data_coords_on_axis(spec, "y"), vec![2.0, 4.0]);
+            assert_eq!(data_coords_on_axis(spec, "x"), AxisCoords::Extent(1.0, 3.0));
+            assert_eq!(data_coords_on_axis(spec, "y"), AxisCoords::Extent(2.0, 4.0));
         }
     }
 
@@ -1950,8 +1941,8 @@ mod tests {
             label_position: "center".into(),
             label: None,
         };
-        assert_eq!(data_coords_on_axis(&x_span, "x"), vec![1.0, 2.0]);
-        assert!(data_coords_on_axis(&x_span, "y").is_empty());
+        assert_eq!(data_coords_on_axis(&x_span, "x"), AxisCoords::Extent(1.0, 2.0));
+        assert_eq!(data_coords_on_axis(&x_span, "y"), AxisCoords::Points(Vec::new()));
 
         let y_span = AnnotationSpec::Span {
             axis: "y".into(),
@@ -1962,8 +1953,8 @@ mod tests {
             label_position: "center".into(),
             label: None,
         };
-        assert_eq!(data_coords_on_axis(&y_span, "y"), vec![5.0, 6.0]);
-        assert!(data_coords_on_axis(&y_span, "x").is_empty());
+        assert_eq!(data_coords_on_axis(&y_span, "y"), AxisCoords::Extent(5.0, 6.0));
+        assert_eq!(data_coords_on_axis(&y_span, "x"), AxisCoords::Points(Vec::new()));
     }
 
     #[test]
@@ -1980,8 +1971,15 @@ mod tests {
             text_x: Some(CoordValue::Data(11.0)),
             text_y: Some(CoordValue::Data(12.0)),
         };
-        assert_eq!(data_coords_on_axis(&with_text_pos, "x"), vec![1.0, 11.0]);
-        assert_eq!(data_coords_on_axis(&with_text_pos, "y"), vec![2.0, 12.0]);
+        assert_eq!(
+            data_coords_on_axis(&with_text_pos, "x"),
+            AxisCoords::Points(vec![1.0, 11.0]),
+            "a callout's anchor and text anchor are two points, never one interval"
+        );
+        assert_eq!(
+            data_coords_on_axis(&with_text_pos, "y"),
+            AxisCoords::Points(vec![2.0, 12.0])
+        );
 
         // text_x/text_y omitted: only the anchor coordinate is reported.
         let no_text_pos = AnnotationSpec::Callout {
@@ -1996,8 +1994,8 @@ mod tests {
             text_x: None,
             text_y: None,
         };
-        assert_eq!(data_coords_on_axis(&no_text_pos, "x"), vec![1.0]);
-        assert_eq!(data_coords_on_axis(&no_text_pos, "y"), vec![2.0]);
+        assert_eq!(data_coords_on_axis(&no_text_pos, "x"), AxisCoords::Points(vec![1.0]));
+        assert_eq!(data_coords_on_axis(&no_text_pos, "y"), AxisCoords::Points(vec![2.0]));
     }
 
     #[test]
@@ -2010,8 +2008,8 @@ mod tests {
             height: 10.0,
             anchor: "middle".into(),
         };
-        assert_eq!(data_coords_on_axis(&spec, "x"), vec![7.0]);
-        assert_eq!(data_coords_on_axis(&spec, "y"), vec![8.0]);
+        assert_eq!(data_coords_on_axis(&spec, "x"), AxisCoords::Points(vec![7.0]));
+        assert_eq!(data_coords_on_axis(&spec, "y"), AxisCoords::Points(vec![8.0]));
     }
 
     // ── break-aware resolve_x/resolve_y (spec §4 H5, F-L08-07) ──────────────
@@ -2105,6 +2103,58 @@ mod tests {
             (folded_px - single_px).abs() > 1.0,
             "the second break must further move a coordinate the first break \
              already moved, not be ignored: folded={folded_px} single_only={single_px}"
+        );
+    }
+
+    /// The fold is ORDERED: it composes the breaks in declaration order, the
+    /// same left-to-right sequence `remap_mark_batch_through_break`'s
+    /// `for remap in &break_remaps` loop applies to marks. Two same-axis
+    /// breaks compose to different pixels depending on which runs first, so a
+    /// reversed fold silently disagrees with the marks it must land on.
+    #[test]
+    fn resolve_x_folds_same_axis_breaks_in_declaration_order() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let pixels = (50.0, 550.0);
+        let result_a = crate::render::break_axis::apply_break_to_scale(
+            (0.0, 100.0),
+            &[[5.0, 35.0]],
+            pixels,
+            10.0,
+        );
+        let result_b = crate::render::break_axis::apply_break_to_scale(
+            (0.0, 100.0),
+            &[[60.0, 90.0]],
+            pixels,
+            10.0,
+        );
+        fn remap(
+            result: &crate::render::break_axis::BreakResult,
+            pixels: (f64, f64),
+        ) -> crate::render::break_axis::BreakRemap<'_> {
+            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), pixels, result)
+        }
+        let ctx_for = |breaks: &[crate::render::break_axis::BreakRemap<'_>]| -> f64 {
+            ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale, breaks }
+                .resolve_x(&CoordValue::Data(50.0))
+        };
+
+        let ab = ctx_for(&[remap(&result_a, pixels), remap(&result_b, pixels)]);
+        let ba = ctx_for(&[remap(&result_b, pixels), remap(&result_a, pixels)]);
+        assert!(
+            (ab - ba).abs() > 1.0,
+            "test sanity: these two breaks must compose differently in each order \
+             ({ab} vs {ba}), or the order pin proves nothing"
+        );
+
+        // The mark-side reference: apply each break's own `coord` in the
+        // order the list declares them.
+        let base = x_scale.to_pixel_f64(50.0).unwrap();
+        let expected = remap(&result_b, pixels)
+            .coord(remap(&result_a, pixels).coord(base).unwrap())
+            .unwrap();
+        assert!(
+            (ab - expected).abs() < 1e-9,
+            "an annotation must land where a mark at the same value lands: {ab} vs {expected}"
         );
     }
 

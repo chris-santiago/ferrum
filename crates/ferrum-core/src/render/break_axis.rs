@@ -82,12 +82,38 @@ pub struct BreakResult {
     pub segments: Vec<ScaleSegment>,
     /// Pixel midpoints of each break indicator, along the broken axis.
     pub indicator_pixels: Vec<f64>,
+    /// How many of the requested gaps survived [`normalize_gaps`] — i.e. how
+    /// many removed a real slice of the domain, after clipping to it and
+    /// merging overlaps.
+    ///
+    /// Zero means the `BreakAxis` is a no-op: every gap fell outside the
+    /// domain, or the axis had no numeric domain to clip against at all.
+    /// That case is otherwise invisible (no indicator, no moved mark), so
+    /// `scene_build::build_structural_nodes` reads this to emit
+    /// [`RenderWarning::BreakAxisIneffective`](crate::render::RenderWarning::BreakAxisIneffective)
+    /// rather than letting a structural feature disappear in silence.
+    /// A gap that merely touches a domain edge still counts here — it
+    /// removes data even though it draws no indicator.
+    pub effective_gaps: usize,
 }
 
 // ── Scale computation ─────────────────────────────────────────────────────────
 
-/// Clip `gaps` to `[d_lo, d_hi]`, then sort and merge them into disjoint,
-/// ascending ranges.
+/// Clip `gaps` to the domain `d_lo`/`d_hi` — **in either order** — then sort
+/// and merge them into disjoint, ascending ranges.
+///
+/// The domain bounds are read as an unordered pair. A reversed scale
+/// (`LinearScale(reverse=True)`) reports a DESCENDING `data_domain()`, and
+/// clipping against it endpoint-wise discarded every gap: `g[0].max(1000.0)`
+/// and `g[1].min(0.0)` can never satisfy `hi > lo`, so a `BreakAxis` on a
+/// reversed axis silently rendered an unbroken chart. Which data range a gap
+/// removes is orientation-free; the orientation belongs to the pixel
+/// assignment in [`apply_break_to_scale`].
+///
+/// A GAP's own bounds are read as written, not sorted: `[850, 150]` describes
+/// an empty interval and removes nothing. That stays a no-op — but no longer
+/// a silent one, since `effective_gaps` then reaches zero and the caller
+/// warns.
 ///
 /// Merging is what makes overlapping and nested gaps well-defined: `[100, 900]`
 /// plus `[200, 300]` is one removed range `[100, 900]`, not two. Without it the
@@ -97,6 +123,7 @@ pub struct BreakResult {
 /// draws. Adjacent gaps (`hi == lo`) merge too — they remove one contiguous
 /// range and get one indicator, so they must reserve one indicator's pixels.
 fn normalize_gaps(gaps: &[[f64; 2]], d_lo: f64, d_hi: f64) -> Vec<(f64, f64)> {
+    let (d_lo, d_hi) = (d_lo.min(d_hi), d_lo.max(d_hi));
     let mut clipped: Vec<(f64, f64)> = gaps
         .iter()
         .filter_map(|g| {
@@ -125,18 +152,38 @@ fn normalize_gaps(gaps: &[[f64; 2]], d_lo: f64, d_hi: f64) -> Vec<(f64, f64)> {
 /// `(plot_top, plot_bottom)`, but the function is axis-agnostic.
 /// `break_size` is the pixel height/width reserved for each indicator.
 ///
+/// `original_domain` may be given in EITHER order. A reversed scale reports a
+/// descending `(lo, hi)`; the domain is normalized to ascending here and the
+/// orientation is carried into the pixel assignment instead — `d_hi` simply
+/// starts at the far end of `pixel_range`. Segments therefore always run
+/// ascending in data, whichever way the axis is drawn, and every downstream
+/// reader (`contains`, `pixel_for`, `gap_containing`) stays orientation-free.
+///
 /// Segments are allocated proportionally to their data-domain fraction of the
 /// total non-gap span. Gaps that fall entirely outside `original_domain` are
-/// silently ignored, and gaps that overlap (or merely touch) each other are
-/// merged into one before segments are computed — see [`normalize_gaps`].
+/// ignored (and counted: see [`BreakResult::effective_gaps`], which the caller
+/// turns into a warning rather than a silent no-op), and gaps that overlap (or
+/// merely touch) each other are merged into one before segments are computed —
+/// see [`normalize_gaps`].
 pub fn apply_break_to_scale(
     original_domain: (f64, f64),
     gaps: &[[f64; 2]],
     pixel_range: (f64, f64),
     break_size: f64,
 ) -> BreakResult {
-    let (d_lo, d_hi) = original_domain;
-    let (px_lo, px_hi) = pixel_range;
+    let (raw_lo, raw_hi) = original_domain;
+    let descending = raw_hi < raw_lo;
+    let (d_lo, d_hi) = (raw_lo.min(raw_hi), raw_lo.max(raw_hi));
+    // The pixel end `d_lo` sits at, and the direction the walk runs in. For an
+    // ascending domain this is `pixel_range` unchanged (byte-identical to
+    // every break rendered before reversed scales were handled); for a
+    // descending one the two ends swap, so the smallest data value keeps the
+    // pixel the unbroken scale put it at.
+    let (px_lo, px_hi) = if descending {
+        (pixel_range.1, pixel_range.0)
+    } else {
+        pixel_range
+    };
     let total_px = (px_hi - px_lo).abs();
 
     let valid_gaps = normalize_gaps(gaps, d_lo, d_hi);
@@ -151,6 +198,7 @@ pub fn apply_break_to_scale(
                 pixel_hi: px_hi,
             }],
             indicator_pixels: Vec::new(),
+            effective_gaps: 0,
         };
     }
 
@@ -216,7 +264,11 @@ pub fn apply_break_to_scale(
         .map(|w| (w[0].pixel_hi + w[1].pixel_lo) / 2.0)
         .collect();
 
-    BreakResult { segments, indicator_pixels }
+    BreakResult {
+        segments,
+        indicator_pixels,
+        effective_gaps: valid_gaps.len(),
+    }
 }
 
 /// Map a single data value to its pixel position under the broken scale.
@@ -252,6 +304,27 @@ pub fn gap_containing(value: f64, result: &BreakResult) -> Option<(f64, f64)> {
         let (_, hi0) = w[0].ordered_data();
         let (lo1, _) = w[1].ordered_data();
         (value > hi0 && value < lo1).then_some((hi0, lo1))
+    })
+}
+
+/// The first gap in `result` that the closed interval between `a` and `b`
+/// (given in either order) covers ENTIRELY.
+///
+/// The companion of [`gap_containing`], which answers the same question for a
+/// single point. Between them they decide whether an interval's closure meets
+/// any gap's interior: either an endpoint is inside a gap (`gap_containing`),
+/// or neither is and the interval reaches across one (here). An extent that
+/// straddles a gap has no in-gap endpoint at all, which is why it survived
+/// the endpoint-only suppression test and painted straight across the break.
+///
+/// Consumed by the BreakAxis annotation-suppression pass (spec §4 H5) for the
+/// extent-shaped annotation kinds.
+pub fn gap_spanned_by(a: f64, b: f64, result: &BreakResult) -> Option<(f64, f64)> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    result.segments.windows(2).find_map(|w| {
+        let (_, hi0) = w[0].ordered_data();
+        let (lo1, _) = w[1].ordered_data();
+        (lo <= hi0 && hi >= lo1).then_some((hi0, lo1))
     })
 }
 
@@ -472,6 +545,27 @@ fn build_wave_indicator(
 /// instead, is decided per mark batch by [`BreakPlacement`].
 pub const BREAK_HIDDEN: f64 = -99999.0;
 
+/// Whether `c` is the hidden-sentinel pixel [`BreakRemap::remap_node`]'s
+/// `Line` arm writes for a coordinate that fell inside a gap.
+///
+/// Exact equality, not a tolerance band: `remap_node`'s `Line` arm writes
+/// `BREAK_HIDDEN` verbatim (`*a = self.coord(*a).unwrap_or(BREAK_HIDDEN)`,
+/// no offset), which is the only producer this function's one caller reads
+/// from — the segment shaft `remap_segment_nodes` captures right after
+/// `remap_node` places it. That makes `== BREAK_HIDDEN` the precise
+/// question "did this coordinate hide", not an approximation of it.
+/// [`BreakRemap::remap_glyph_node`]'s hide path is a different producer: it
+/// offsets a multi-coordinate glyph's other coordinates by `c - anchor`
+/// around the sentinel, so those coordinates do NOT satisfy this exact
+/// test — a caller reading glyph-hidden coordinates needs its own,
+/// necessarily inexact, threshold. A real pixel is never within a fraction
+/// of `BREAK_HIDDEN` either way, so the distinction is academic in
+/// practice; it is named here so the next caller does not have to
+/// re-derive which producer it is reading from.
+fn is_hidden(c: f64) -> bool {
+    c == BREAK_HIDDEN
+}
+
 /// How a mark batch's geometry meets a broken axis.
 ///
 /// The three models exist because "the mark is inside the gap" means three
@@ -521,6 +615,23 @@ pub enum BreakPlacement {
     /// paint a column across the whole break. Splitting connected geometry per
     /// segment (the line analogue of the area clip) is the separate follow-up.
     MoveVertices,
+    /// The mark is vertex-placed stroked geometry that also carries a
+    /// fixed-size glyph derived from it: `mark_segment`'s shaft plus its
+    /// optional `arrow=True` arrowhead. The shaft's vertices place
+    /// independently (exactly [`BreakPlacement::MoveVertices`]); the head is
+    /// then REBUILT at its tip's placed position from the shaft's placed
+    /// endpoints, so it keeps both its drawn size and its alignment with the
+    /// shaft, whose slope the break changes.
+    ///
+    /// The mirror of [`BreakPlacement::MoveGlyphAndConnector`], and it exists
+    /// for the same reason: only the batch kind knows that a closed `Path` in
+    /// a `Segment` batch is an arrowhead. Placing its three vertices one by
+    /// one scaled the head by the segment's own compression ratio — a 20px
+    /// head became ~90px tall and sheared under a `(150, 850)` gap; rigidly
+    /// translating it instead fixed the size but froze the pre-break
+    /// direction, leaving the head pointing 16° off the shaft it terminates.
+    /// See [`BreakRemap::remap_segment_nodes`].
+    MoveVerticesAndGlyph,
 }
 
 impl BreakPlacement {
@@ -559,10 +670,10 @@ impl BreakPlacement {
             // and polar bars), where Cartesian axes — and so Cartesian breaks —
             // are suppressed; it takes the vertex model as the closest honest
             // answer rather than a separate polar one.
-            MarkBatchKind::Line
-            | MarkBatchKind::Rule
-            | MarkBatchKind::Segment
-            | MarkBatchKind::Arc => Self::MoveVertices,
+            MarkBatchKind::Line | MarkBatchKind::Rule | MarkBatchKind::Arc => Self::MoveVertices,
+            // `mark_segment` alone mixes vertex-placed shafts with an attached
+            // fixed-size glyph (`arrow=True`'s head).
+            MarkBatchKind::Segment => Self::MoveVerticesAndGlyph,
         }
     }
 }
@@ -614,6 +725,17 @@ impl ClippedNodes {
     /// already misaligned (a builder bug the debug-only alignment guard in
     /// `mark_nodes` exists to catch); it is passed through untouched rather
     /// than indexed into, so a release build cannot panic here.
+    ///
+    /// This is the DIRECT entry point, and its `debug_assert` guards a caller
+    /// that hands over a wrong-length sidecar without having asked. The
+    /// production path does not come through here blind: it uses
+    /// [`ClippedNodes::realigner`], which asks
+    /// [`ClippedNodes::accepts_sidecar_len`] first, records the answer, and
+    /// returns a misaligned sidecar untouched without reaching this assert —
+    /// so a misattributed batch is REPORTED (as
+    /// `RenderWarning::BreakClipSidecarMisaligned`) in both build profiles,
+    /// and that reporting has test coverage in the debug gate the project
+    /// actually runs.
     pub fn realign<T: Clone>(&self, sidecar: Option<Vec<T>>) -> Option<Vec<T>> {
         let sidecar = sidecar?;
         debug_assert_eq!(
@@ -625,6 +747,61 @@ impl ClippedNodes {
             return Some(sidecar);
         }
         Some(self.sources.iter().map(|&i| sidecar[i].clone()).collect())
+    }
+
+    /// Start realigning a batch's per-node sidecars, accumulating whether any
+    /// of them was already misaligned. See [`SidecarRealign`].
+    pub fn realigner(&self) -> SidecarRealign<'_> {
+        SidecarRealign { clipped: self, misaligned: false }
+    }
+
+    /// True when a sidecar of `len` entries can be realigned — i.e. `len` is
+    /// the PRE-clip node count, one entry per source node. The single rule
+    /// behind both [`ClippedNodes::realign`]'s pass-through and
+    /// [`SidecarRealign`]'s misalignment flag.
+    pub fn accepts_sidecar_len(&self, len: usize) -> bool {
+        len == self.source_len
+    }
+}
+
+/// Realigns a clipped batch's per-node sidecars one at a time and remembers
+/// whether any of them could not be realigned.
+///
+/// [`ClippedNodes::realign`]'s pass-through for a wrong-length sidecar is the
+/// right release-mode choice — indexing into it would panic — but it leaves
+/// that batch's `data_indices`/tooltips/hrefs/keys pointing at the pre-clip
+/// node list, i.e. attributed to the wrong marks. The `debug_assert` catches
+/// it in a debug build; this type is how a release build still gets to say
+/// so, via one `RenderWarning` per affected batch rather than six.
+pub struct SidecarRealign<'a> {
+    clipped: &'a ClippedNodes,
+    misaligned: bool,
+}
+
+impl SidecarRealign<'_> {
+    /// Realign one sidecar, recording a length mismatch if there is one.
+    ///
+    /// A misaligned sidecar is passed through from HERE rather than from
+    /// [`ClippedNodes::realign`], so this path never trips that method's
+    /// `debug_assert`. The degradation is identical (the sidecar is returned
+    /// untouched, never indexed into); what changes is that it is now a
+    /// reported, testable outcome in a debug build instead of a panic in one
+    /// profile and silence in the other.
+    pub fn realign<T: Clone>(&mut self, sidecar: Option<Vec<T>>) -> Option<Vec<T>> {
+        if sidecar
+            .as_ref()
+            .is_some_and(|s| !self.clipped.accepts_sidecar_len(s.len()))
+        {
+            self.misaligned = true;
+            return sidecar;
+        }
+        self.clipped.realign(sidecar)
+    }
+
+    /// True when any sidecar realigned through this accumulator had the wrong
+    /// length and was passed through unchanged.
+    pub fn misaligned(&self) -> bool {
+        self.misaligned
     }
 }
 
@@ -672,12 +849,24 @@ impl<'a> BreakRemap<'a> {
     /// to its domain.
     ///
     /// The reverse-map is linear — `data` is `d_lo` plus the pixel's fraction
-    /// of `px_hi - px_lo` times `d_hi - d_lo`. That is correct for every
-    /// continuous scale type: all ferrum scales produce a linear pixel
-    /// mapping, the non-linearity lives in the data transform, not in the
-    /// range. Clamping keeps geometry that overshoots the domain (a bar drawn
-    /// down to the plot floor, which sits below the scale's zero) attached to
-    /// the nearest segment instead of vanishing.
+    /// of `px_hi - px_lo` times `d_hi - d_lo`. That is the true inverse only
+    /// where the scale is LINEAR IN DATA (`Linear`, `Time`, and a reversed
+    /// linear scale, whose descending `data_domain()` this arithmetic carries
+    /// for free). On `Log`/`Pow`/`Symlog` it is NOT: `data_domain()` reports
+    /// the untransformed domain while `to_pixel_f64` maps through the data
+    /// transform, so this arithmetic names the wrong data value for a pixel
+    /// and the break removes the wrong region (a tick outside the gap can
+    /// hide while a point inside it draws). That defect is pre-existing and
+    /// unfixed here — the honest fix is a scale-level inverse
+    /// (`ScaleKind::invert_f64`) or building marks against the piecewise
+    /// scale directly, a filed follow-up — but it is no longer silent:
+    /// `scene_build::build_structural_nodes` emits
+    /// [`RenderWarning::BreakAxisOnNonlinearScale`](crate::render::RenderWarning::BreakAxisOnNonlinearScale)
+    /// when a `BreakAxis` targets one of those scale kinds.
+    ///
+    /// Clamping keeps geometry that overshoots the domain (a bar drawn down
+    /// to the plot floor, which sits below the scale's zero) attached to the
+    /// nearest segment instead of vanishing.
     fn data_at(&self, px: f64) -> f64 {
         let (d_lo, d_hi) = self.domain;
         let (px_lo, px_hi) = self.pixels;
@@ -955,6 +1144,117 @@ impl<'a> BreakRemap<'a> {
         }
     }
 
+    /// Re-place a whole segment batch's nodes — the
+    /// [`BreakPlacement::MoveVerticesAndGlyph`] model.
+    ///
+    /// `mark_segment(arrow=True)` emits two node species per row: the shaft
+    /// `Line`, whose two ends are two data positions, and a CLOSED `Path` —
+    /// the arrowhead triangle, whose size and direction are drawn geometry
+    /// derived from the shaft. The shaft places per vertex; the head is then
+    /// REBUILT from the shaft's placed endpoints, which is exactly what the
+    /// annotation path does (`annotation::emit_arrow` builds its triangle
+    /// after `fold_breaks` has resolved both ends). Rebuilding rather than
+    /// moving is what makes the head keep pointing along the shaft it
+    /// terminates: translating the pre-break triangle preserved its size but
+    /// froze its pre-break direction, leaving a visible head-vs-shaft angle
+    /// mismatch wherever a break changed the shaft's slope.
+    ///
+    /// This takes the batch rather than one node because a head is only
+    /// meaningful with its shaft, and the pairing is positional:
+    /// `marks::segment::build` pushes `[shaft Line, head Path]` per row, in
+    /// that order, so the most recently placed `Line` is the head's own
+    /// shaft. A head that arrives without one (a malformed batch), or whose
+    /// shaft has a hidden end (so its placed direction is the `BREAK_HIDDEN`
+    /// sentinel, not a direction), falls back to rigid translation onto its
+    /// tip — the previous behavior, and the honest degradation.
+    pub fn remap_segment_nodes(&self, nodes: &mut [SceneNode]) {
+        let mut shaft: Option<(f64, f64, f64, f64)> = None;
+        for node in nodes.iter_mut() {
+            match node {
+                SceneNode::Line { .. } => {
+                    self.remap_node(node);
+                    if let SceneNode::Line { x1, y1, x2, y2, .. } = node {
+                        shaft = Some((*x1, *y1, *x2, *y2));
+                    }
+                }
+                SceneNode::Path { closed: true, .. } => self.remap_arrowhead(node, shaft),
+                other => self.remap_node(other),
+            }
+        }
+    }
+
+    /// Re-place one arrowhead triangle, rebuilding it from its shaft's placed
+    /// endpoints when they describe a direction.
+    ///
+    /// The tip is the triangle's first vertex by construction
+    /// (`draw::arrowhead_path_with_opacity` writes it as the leading
+    /// `MoveTo`) and is the shaft's own `(x2, y2)`; `head_size` is the
+    /// distance from that tip to the midpoint of the other two vertices,
+    /// which is how `draw::arrowhead_triangle` built them. A tip inside a gap
+    /// hides the whole head at [`BREAK_HIDDEN`], alongside the shaft vertex
+    /// that hides with it.
+    fn remap_arrowhead(&self, node: &mut SceneNode, shaft: Option<(f64, f64, f64, f64)>) {
+        let Some(vertices) = triangle_vertices(node) else {
+            // Not the three-vertex shape this batch's heads have; place it
+            // per vertex rather than guessing at its anatomy.
+            self.remap_node(node);
+            return;
+        };
+        let [tip, left, right] = vertices;
+        let along_tip = if self.is_y() { tip.1 } else { tip.0 };
+        let Some(placed_along) = self.coord(along_tip) else {
+            // In a gap: hide the head whole, keeping its shape off-screen.
+            self.for_each_along(node, &mut |c| *c = BREAK_HIDDEN + (*c - along_tip));
+            return;
+        };
+        let placed_tip = self.join_point(tip, placed_along);
+        // `arrowhead_triangle` places the other two vertices `head_size` back
+        // from the tip, half a head to either side, so the tip-to-base-midpoint
+        // distance recovers the `arrow_size` this head was drawn with.
+        let base_mid = ((left.0 + right.0) / 2.0, (left.1 + right.1) / 2.0);
+        let head_size = (tip.0 - base_mid.0).hypot(tip.1 - base_mid.1);
+
+        // The shaft's placed direction, when it has one. A `BREAK_HIDDEN` end
+        // is a sentinel rather than a position, so it yields no direction.
+        let rebuilt = shaft
+            .filter(|(x1, y1, x2, y2)| {
+                [*x1, *y1, *x2, *y2].iter().all(|c| !is_hidden(*c))
+            })
+            .and_then(|(x1, y1, x2, y2)| {
+                let (dx, dy) = (x2 - x1, y2 - y1);
+                let len = dx.hypot(dy);
+                (len > 0.0).then(|| {
+                    // Start the triangle exactly `head_size` back along the
+                    // placed shaft, so `arrowhead_triangle`'s own
+                    // clamp-to-length is a no-op and the head keeps its size.
+                    let (ux, uy) = (dx / len, dy / len);
+                    (placed_tip.0 - ux * head_size, placed_tip.1 - uy * head_size)
+                })
+            })
+            .and_then(|(sx, sy)| {
+                crate::render::draw::arrowhead_triangle(
+                    sx,
+                    sy,
+                    placed_tip.0,
+                    placed_tip.1,
+                    head_size,
+                )
+            });
+
+        match rebuilt {
+            Some(points) => set_triangle_vertices(node, points),
+            // No usable shaft direction: translate rigidly onto the placed
+            // tip, which at least keeps the head attached and sized.
+            None => self.for_each_along(node, &mut |c| *c = placed_along + (*c - along_tip)),
+        }
+    }
+
+    /// Put `along` back into `point`'s broken-axis slot, keeping the other
+    /// coordinate.
+    fn join_point(&self, point: (f64, f64), along: f64) -> (f64, f64) {
+        if self.is_y() { (point.0, along) } else { (along, point.1) }
+    }
+
     /// The `(min, max)` of the node's coordinates along this break's axis.
     ///
     /// `None` for node kinds this walker does not visit (`Image`, `Raw`),
@@ -1045,42 +1345,24 @@ impl<'a> BreakRemap<'a> {
     /// Re-place data-positioned axis chrome (domain line, tick marks, tick
     /// labels) onto the broken axis.
     ///
-    /// Nodes whose coordinate on this axis sits outside the unbroken scale's
-    /// pixel range are cross-axis chrome (an x-axis label below the plot under
-    /// a y-break) and are left alone. The axis *title* is never in this list:
-    /// it is positioned from the axis's own midpoint rather than from a data
-    /// value, so reverse-mapping it is meaningless — and when that midpoint
-    /// happened to land in a gap, it teleported the title to `BREAK_HIDDEN`.
-    /// `marks::axis::AxisNodes` keeps the two apart at the source.
+    /// Every node given here IS this break's chrome: ownership is decided by
+    /// the caller from the axis's own identity
+    /// (`marks::axis::AxisNodes::placed_along`), not inferred here from a
+    /// coordinate. The pixel-range guard this replaces asked "does this node
+    /// sit inside my axis's pixel span", which is true of the wrong axis's
+    /// chrome too — an x-axis tick dash starts ON the plot floor, inside the
+    /// y range, so a y-break admitted all 11 of them and then clamped both
+    /// ends of each onto one pixel, collapsing every x tick to zero length.
+    ///
+    /// The axis *title* is never in this list: it is positioned from the
+    /// axis's own midpoint rather than from a data value, so reverse-mapping
+    /// it is meaningless — and when that midpoint happened to land in a gap,
+    /// it teleported the title to `BREAK_HIDDEN`. `marks::axis::AxisNodes`
+    /// keeps the two apart at the source.
     pub fn remap_axis_chrome(&self, nodes: &mut [SceneNode]) {
-        let (lo, hi) = (self.pixels.0.min(self.pixels.1), self.pixels.0.max(self.pixels.1));
         for node in nodes.iter_mut() {
-            if self.node_coord_in_range(node, lo, hi) {
-                self.remap_node(node);
-            }
+            self.remap_node(node);
         }
-    }
-
-    /// True when the node's primary coordinate on this axis falls within
-    /// `[lo, hi]` (inclusive, with a 1px margin).
-    fn node_coord_in_range(&self, node: &SceneNode, lo: f64, hi: f64) -> bool {
-        let margin = 1.0;
-        let coord = match node {
-            SceneNode::Text { x, y, .. } => {
-                if self.is_y() { *y } else { *x }
-            }
-            SceneNode::Line { x1, y1, x2, y2, .. } => {
-                if self.is_y() { (*y1).min(*y2) } else { (*x1).min(*x2) }
-            }
-            SceneNode::Rect { x, y, .. } => {
-                if self.is_y() { *y } else { *x }
-            }
-            SceneNode::Group { children, .. } => {
-                return children.iter().any(|c| self.node_coord_in_range(c, lo, hi));
-            }
-            _ => return false,
-        };
-        coord >= lo - margin && coord <= hi + margin
     }
 
     /// Re-place a single node's coordinates along the broken axis, hiding any
@@ -1209,6 +1491,40 @@ fn for_each_path_cmd_coord(cmd: &mut PathCmd, is_y: bool, f: &mut impl FnMut(&mu
             }
         }
         PathCmd::Close => {}
+    }
+}
+
+/// The three vertices of an arrowhead triangle node, tip first — the shape
+/// `draw::arrowhead_path_with_opacity` emits (`MoveTo` tip, `LineTo` left,
+/// `LineTo` right, `Close`).
+///
+/// `None` for any other closed path, which routes the node to the per-vertex
+/// remap instead of the arrowhead rebuild.
+fn triangle_vertices(node: &SceneNode) -> Option<[(f64, f64); 3]> {
+    let SceneNode::Path { commands, .. } = node else {
+        return None;
+    };
+    let points = polygon_points(commands)?;
+    match points[..] {
+        [tip, left, right] => Some([tip, left, right]),
+        _ => None,
+    }
+}
+
+/// Overwrite an arrowhead triangle node's three vertices in place, keeping
+/// its style and command shape. The inverse of [`triangle_vertices`].
+fn set_triangle_vertices(node: &mut SceneNode, points: [(f64, f64); 3]) {
+    let SceneNode::Path { commands, .. } = node else {
+        return;
+    };
+    let mut vertices = points.iter();
+    for cmd in commands.iter_mut() {
+        if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = cmd {
+            if let Some(&(nx, ny)) = vertices.next() {
+                *x = nx;
+                *y = ny;
+            }
+        }
     }
 }
 
@@ -1978,7 +2294,7 @@ mod tests {
             (MarkBatchKind::Label, MoveGlyphAndConnector),
             (MarkBatchKind::Line, MoveVertices),
             (MarkBatchKind::Rule, MoveVertices),
-            (MarkBatchKind::Segment, MoveVertices),
+            (MarkBatchKind::Segment, MoveVerticesAndGlyph),
             (MarkBatchKind::Arc, MoveVertices),
         ];
         assert_eq!(table.len(), 14, "every MarkBatchKind variant must be listed");
@@ -2294,29 +2610,314 @@ mod tests {
         assert!((total - 388.0).abs() < 1e-9, "400 - 12 pixels of data; got {total}");
     }
 
+    /// Cross-axis chrome is now excluded BY THE CALLER (an axis knows which
+    /// dimension it was placed along — `marks::axis::AxisNodes::placed_along`),
+    /// so this function places every node it is handed. That is what makes
+    /// handing it foreign chrome wrong, and it is exactly what the deleted
+    /// pixel-range guard failed to prevent: an x-axis tick dash BEGINS on the
+    /// plot floor, inside the y range, so the guard admitted it and then
+    /// clamped both of its ends onto one pixel. Pinned here as the
+    /// characteristic the caller must respect.
     #[test]
-    fn axis_chrome_outside_the_pixel_range_is_left_alone() {
+    fn axis_chrome_handed_to_a_break_is_placed_whatever_its_coordinate() {
         let br = guide_break();
-        // An x-axis label below the plot (y = 430) is cross-axis chrome for a
-        // y-break and must not be reverse-mapped.
-        let mut nodes = vec![SceneNode::Text {
-            x: 50.0,
-            y: 430.0,
-            content: "A".to_string(),
-            style: crate::render::draw::to_scene_text_style(
+        // A downward x-axis tick dash: 4px below the plot floor (pixel 400).
+        let mut nodes = vec![SceneNode::Line {
+            x1: 50.0,
+            y1: 400.0,
+            x2: 50.0,
+            y2: 404.0,
+            style: crate::render::draw::to_scene_stroke(
                 palette::Srgba::new(0, 0, 0, 255),
-                11.0,
-                crate::layout::TextAnchor::Middle,
-                0.0,
-                "Inter",
-                None,
-                None,
                 1.0,
+                1.0,
+                None,
+                None,
+                None,
             ),
-            slot: None,
         }];
         guide_remap(&br).remap_axis_chrome(&mut nodes);
-        let SceneNode::Text { y, .. } = &nodes[0] else { panic!() };
-        assert_eq!(*y, 430.0);
+        let SceneNode::Line { y1, y2, .. } = nodes[0] else { panic!() };
+        assert_eq!(
+            (y1, y2),
+            (400.0, 400.0),
+            "both ends clamp onto the domain's own edge — which is why a y-break \
+             must never be handed an x-axis's chrome"
+        );
+    }
+
+    // ── Reversed scales (close-review S3) ────────────────────────────────────
+
+    /// A reversed scale reports a DESCENDING `data_domain()`. Clipping the
+    /// gaps against it endpoint-wise discarded every one of them, so
+    /// `LinearScale(reverse=True)` + `BreakAxis(gap=(150, 850))` drew an
+    /// unbroken chart: all three points rendered, no indicator. The domain's
+    /// orientation now belongs to the pixel assignment only.
+    #[test]
+    fn a_descending_domain_still_breaks() {
+        // Reversed y: data 0 at the TOP pixel (20), data 1000 at the BOTTOM
+        // (320) — the pixel range is the axis's own, unchanged.
+        let br = apply_break_to_scale((1000.0, 0.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+
+        assert_eq!(br.effective_gaps, 1, "the gap is inside the domain either way");
+        assert_eq!(br.segments.len(), 2, "one segment per side of the gap");
+        assert_eq!(br.indicator_pixels.len(), 1, "the break draws its indicator");
+        assert!(
+            broken_scale_map(500.0, &br).is_none(),
+            "a value inside the gap has no pixel on a reversed axis either"
+        );
+        // Retained span 300, so each half takes (300 - 12) / 2 = 144 pixels,
+        // laid out from the pixel the SMALLEST data value owns.
+        assert!((broken_scale_map(0.0, &br).unwrap() - 20.0).abs() < 1e-9);
+        assert!((broken_scale_map(1000.0, &br).unwrap() - 320.0).abs() < 1e-9);
+        assert!((broken_scale_map(150.0, &br).unwrap() - 164.0).abs() < 1e-9);
+        assert!((broken_scale_map(850.0, &br).unwrap() - 176.0).abs() < 1e-9);
+    }
+
+    /// The ascending case is untouched by the orientation handling — the same
+    /// numbers the guide's worked example has always produced.
+    #[test]
+    fn an_ascending_domain_is_unchanged_by_the_orientation_handling() {
+        let br = guide_break();
+        assert_eq!(br.effective_gaps, 1);
+        assert!((br.segments[0].pixel_lo - 400.0).abs() < 1e-9);
+        assert!((br.segments[1].pixel_hi - 0.0).abs() < 1e-9);
+    }
+
+    /// Gaps entirely outside the domain leave a scale that is not broken at
+    /// all. `effective_gaps` is how the caller tells that apart from a real
+    /// break and warns instead of rendering a silently ignored feature.
+    #[test]
+    fn out_of_domain_gaps_report_zero_effective_gaps() {
+        let br = apply_break_to_scale((0.0, 100.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        assert_eq!(br.effective_gaps, 0);
+        assert_eq!(br.segments.len(), 1, "one segment spanning the whole domain");
+        assert!(br.indicator_pixels.is_empty());
+    }
+
+    /// A domain-edge-touching gap removes real data without drawing an
+    /// indicator — effective, and must NOT be reported as a no-op.
+    #[test]
+    fn an_edge_touching_gap_is_still_effective() {
+        let br = apply_break_to_scale((0.0, 1000.0), &[[0.0, 200.0]], (400.0, 0.0), 12.0);
+        assert_eq!(br.effective_gaps, 1);
+        assert!(br.indicator_pixels.is_empty(), "no indicator, but the data is gone");
+        assert!(broken_scale_map(100.0, &br).is_none());
+    }
+
+    // ── gap_spanned_by (close-review S3: containment inversion) ──────────────
+
+    /// The interval that CONTAINS a gap is the case `gap_containing` cannot
+    /// see: neither endpoint is inside, yet the interval's interior is.
+    #[test]
+    fn gap_spanned_by_finds_the_gap_an_interval_reaches_across() {
+        let br = guide_break();
+        assert_eq!(gap_spanned_by(100.0, 900.0, &br), Some((150.0, 850.0)));
+        assert_eq!(gap_spanned_by(900.0, 100.0, &br), Some((150.0, 850.0)), "either order");
+        assert_eq!(gap_spanned_by(0.0, 100.0, &br), None, "wholly on one side");
+        assert_eq!(gap_spanned_by(900.0, 1000.0, &br), None, "wholly on the other");
+        assert_eq!(
+            gap_spanned_by(100.0, 400.0, &br),
+            None,
+            "a partial overlap has an in-gap endpoint; that is gap_containing's question"
+        );
+    }
+
+    // ── Segment arrowheads (close-review S3 size, cycle-2 N3 direction) ──────
+
+    fn stroke() -> ferrum_scene::StrokeStyle {
+        crate::render::draw::to_scene_stroke(
+            palette::Srgba::new(0, 0, 0, 255),
+            1.0,
+            1.0,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// One `mark_segment(arrow=True)` row as the batch carries it: the shaft
+    /// `Line` followed by its arrowhead `Path`, built by the same shared
+    /// helper `marks::segment::build` uses.
+    fn segment_row(
+        start: (f64, f64),
+        tip: (f64, f64),
+        head_size: f64,
+    ) -> Vec<SceneNode> {
+        let points = crate::render::draw::arrowhead_triangle(
+            start.0, start.1, tip.0, tip.1, head_size,
+        )
+        .expect("non-degenerate segment yields a triangle");
+        vec![
+            SceneNode::Line {
+                x1: start.0,
+                y1: start.1,
+                x2: tip.0,
+                y2: tip.1,
+                style: stroke(),
+            },
+            crate::render::draw::arrowhead_path(points, ferrum_scene::Color::rgb(0, 0, 0)),
+        ]
+    }
+
+    fn triangle(node: &SceneNode) -> [(f64, f64); 3] {
+        triangle_vertices(node).expect("arrowhead triangle")
+    }
+
+    /// `(head_size, angle)` of an arrowhead: the distance and direction from
+    /// the base midpoint to the tip, i.e. the two properties a break must not
+    /// change and must keep aligned with the shaft.
+    fn head_size_and_angle(node: &SceneNode) -> (f64, f64) {
+        let [tip, left, right] = triangle(node);
+        let base = ((left.0 + right.0) / 2.0, (left.1 + right.1) / 2.0);
+        let (dx, dy) = (tip.0 - base.0, tip.1 - base.1);
+        (dx.hypot(dy), dy.atan2(dx))
+    }
+
+    fn shaft_angle(node: &SceneNode) -> f64 {
+        let SceneNode::Line { x1, y1, x2, y2, .. } = node else { panic!("expected the shaft") };
+        (y2 - y1).atan2(x2 - x1)
+    }
+
+    /// The head must keep its drawn SIZE — placing its three vertices one by
+    /// one scaled it by the segment's own compression ratio (a 20px head
+    /// became ~90px and sheared) — AND keep pointing along the shaft it
+    /// terminates, which rigid translation did not: it froze the pre-break
+    /// direction, leaving a measured 16.19° head-vs-shaft mismatch.
+    #[test]
+    fn a_segment_arrowhead_keeps_its_size_and_follows_its_shaft_under_a_break() {
+        let br = guide_break();
+        // The reviewer's fixture in pixel space: data y=100 (pixel 360) up to
+        // data y=900 (pixel 40), crossing the (150, 850) gap.
+        let mut nodes = segment_row((10.0, 360.0), (100.0, 40.0), 20.0);
+        let (size_before, angle_before) = head_size_and_angle(&nodes[1]);
+        let angle_unbroken_shaft = shaft_angle(&nodes[0]);
+        assert!(
+            (angle_before - angle_unbroken_shaft).abs() < 1e-9,
+            "test sanity: the unbroken head already points along its shaft"
+        );
+
+        guide_remap(&br).remap_segment_nodes(&mut nodes);
+        let (size_after, angle_after) = head_size_and_angle(&nodes[1]);
+        let placed_shaft_angle = shaft_angle(&nodes[0]);
+
+        assert!(
+            (size_after - size_before).abs() < 1e-9,
+            "the head must keep its drawn size: {size_before} -> {size_after}"
+        );
+        assert!(
+            (placed_shaft_angle - angle_unbroken_shaft).abs() > 0.05,
+            "test sanity: the break must actually change the shaft's slope, or \
+             the direction pin proves nothing ({angle_unbroken_shaft} -> {placed_shaft_angle})"
+        );
+        assert!(
+            (angle_after - placed_shaft_angle).abs() < 1e-9,
+            "the head must point along the PLACED shaft, not its pre-break \
+             direction: head={angle_after} shaft={placed_shaft_angle}"
+        );
+        // And it still sits at the shaft's placed end.
+        let [tip, _, _] = triangle(&nodes[1]);
+        let SceneNode::Line { x2, y2, .. } = nodes[0] else { panic!() };
+        assert!(
+            (tip.0 - x2).abs() < 1e-9 && (tip.1 - y2).abs() < 1e-9,
+            "the head's tip is the shaft's placed end: {tip:?} vs ({x2}, {y2})"
+        );
+    }
+
+    /// A head whose tip lands in a gap hides whole, alongside the shaft vertex
+    /// that hides with it — never half-placed, never spiked across the break.
+    #[test]
+    fn a_segment_arrowhead_hides_whole_when_its_tip_is_in_a_gap() {
+        let br = guide_break();
+        // Data 500 (mid-gap) sits at pixel 200 on the unbroken 0..1000 scale.
+        let mut nodes = segment_row((10.0, 380.0), (100.0, 200.0), 20.0);
+        guide_remap(&br).remap_segment_nodes(&mut nodes);
+        let [tip, left, right] = triangle(&nodes[1]);
+        for y in [tip.1, left.1, right.1] {
+            assert!(y <= BREAK_HIDDEN + 30.0, "every vertex hides with the tip: {y}");
+        }
+    }
+
+    /// A head with no shaft in front of it (a malformed batch) still lands on
+    /// its own placed tip, at its own size — the documented fallback.
+    #[test]
+    fn a_lone_arrowhead_falls_back_to_rigid_translation() {
+        let br = guide_break();
+        let mut nodes = segment_row((10.0, 360.0), (100.0, 40.0), 20.0);
+        nodes.remove(0);
+        let (size_before, angle_before) = head_size_and_angle(&nodes[0]);
+        guide_remap(&br).remap_segment_nodes(&mut nodes);
+        let (size_after, angle_after) = head_size_and_angle(&nodes[0]);
+        assert!((size_after - size_before).abs() < 1e-9, "size survives");
+        assert!((angle_after - angle_before).abs() < 1e-9, "its own direction survives");
+        let [tip, _, _] = triangle(&nodes[0]);
+        assert!(
+            (tip.1 - guide_remap(&br).coord(40.0).unwrap()).abs() < 1e-9,
+            "and it rides its placed tip"
+        );
+    }
+
+    /// The shaft keeps the vertex model: its two ends are two data positions,
+    /// so they place independently (this is what lets a segment span a break).
+    #[test]
+    fn a_segment_shaft_still_places_per_vertex() {
+        let br = guide_break();
+        let mut nodes = vec![SceneNode::Line {
+            x1: 10.0,
+            y1: 380.0,
+            x2: 100.0,
+            y2: 40.0,
+            style: stroke(),
+        }];
+        let remap = guide_remap(&br);
+        remap.remap_segment_nodes(&mut nodes);
+        let SceneNode::Line { y1, y2, .. } = nodes[0] else { panic!() };
+        assert_eq!(y1, remap.coord(380.0).unwrap());
+        assert_eq!(y2, remap.coord(40.0).unwrap());
+    }
+
+    // ── Sidecar realignment reporting (close-review "still feels wrong") ─────
+
+    /// A wrong-length sidecar still passes through untouched (a release build
+    /// must not panic), and the realigner REMEMBERS that it did, so the caller
+    /// can warn instead of silently shipping misattributed tooltips.
+    ///
+    /// Runs in the DEBUG gate: the realigner answers the alignment question
+    /// itself and returns the sidecar without calling
+    /// [`ClippedNodes::realign`], whose `debug_assert` still guards a direct
+    /// caller. Before that split, the only reachable branch of
+    /// `BreakClipSidecarMisaligned` was release-only, i.e. covered by no gate
+    /// the project runs.
+    #[test]
+    fn the_realigner_reports_a_misaligned_sidecar() {
+        let br = guide_break();
+        // A bar crossing the gap: one source node, two clipped pieces.
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 40.0,
+            w: 20.0,
+            h: 340.0,
+            style: fill_stroke(),
+            corner_radius: 0.0,
+        };
+        let clipped = guide_remap(&br).clip_nodes(vec![node]);
+        assert!(clipped.is_reindexed());
+        assert!(clipped.accepts_sidecar_len(1), "one entry per PRE-clip node");
+        assert!(
+            !clipped.accepts_sidecar_len(2),
+            "post-clip lengths are exactly the misalignment this reports"
+        );
+
+        let mut aligned = clipped.realigner();
+        assert_eq!(aligned.realign(Some(vec![7usize])), Some(vec![7usize, 7usize]));
+        assert!(!aligned.misaligned(), "a right-length sidecar realigns cleanly");
+
+        let mut broken = clipped.realigner();
+        assert_eq!(
+            broken.realign(Some(vec![7usize, 8usize])),
+            Some(vec![7usize, 8usize]),
+            "a wrong-length sidecar is passed through, never indexed into"
+        );
+        assert!(broken.misaligned(), "and the pass-through is recorded");
     }
 }

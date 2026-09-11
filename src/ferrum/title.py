@@ -10,9 +10,32 @@ from typing import Optional
 class Title:
     """Chart title with optional subtitle.
 
-    Accepted everywhere a title string is accepted: ``Chart(title=...)``,
-    ``Chart.properties(title=...)``, ``HConcat/VConcat/Layer(title=...)``.
-    Passing a bare string is equivalent to ``Title(text=string)``.
+    Accepted on a leaf ``Chart``'s ``title=`` -- ``Chart(title=...)`` /
+    ``Chart.properties(title=...)`` -- with every field here (subtitle,
+    anchor, offset, font, color) honored: a leaf's ``ChartSpec.title`` is a
+    full ``TitleSpec``.
+
+    On a composition's figure-level ``title=``/``subtitle=``/``caption=``
+    (``HConcatChart``/``VConcatChart``/``ConcatChart``/``JointChart``/
+    ``RepeatChart``/``ClusterMapChart``/``LayerChart``), the composite-tree
+    render entry's wire chrome fields are bare strings with no
+    subtitle/styling slot of their own, so a ``Title`` passed to any of the
+    three is normalized at ``.properties()``: a text-only ``Title`` (no
+    field but ``.text`` set away from default) reduces to its ``.text``;
+    ``title=fm.Title(text=..., subtitle=...)`` on the six views with a
+    separate figure-subtitle slot ROUTES the ``Title``'s own ``subtitle``
+    into that slot -- unless an explicit ``subtitle=`` is *also* given in
+    the same call, which raises ``ValueError`` naming both spellings; and a
+    ``Title`` carrying any other field this composite genuinely cannot
+    express (``anchor``, ``offset``, ``font_size``, ``font_weight``,
+    ``color``, ``subtitle_font_size``, ``subtitle_color`` on any of the
+    three keys; ``subtitle`` itself on ``subtitle=``/``caption=``, or on
+    ``LayerChart``'s ``title=``, which has no separate subtitle slot) raises
+    ``ValueError`` at ``.properties()`` time rather than silently dropping
+    it (2026-09-11, batch-H close cycle 3, made lossless and widened to all
+    three chrome keys in cycle 4; see ``ferrum-spec.md`` §3.16's dated
+    notes). Passing a bare string is equivalent to ``Title(text=string)``
+    everywhere.
 
     Parameters
     ----------

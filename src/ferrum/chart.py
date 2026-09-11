@@ -10,7 +10,7 @@ import copy
 import json
 import logging
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 if TYPE_CHECKING:
     from ferrum._interactive import InteractiveChart
@@ -31,7 +31,7 @@ from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_build import SpecBuildMixin
 from ferrum._spec_view import _SpecView
-from ferrum.encoding._channel_policy import _FACET_CHANNELS
+from ferrum.encoding._channel_policy import _FACET_CHANNELS, conditional_wire_channel
 from ferrum.encoding.base import ChannelBase, _PendingAggregate
 from ferrum.marks.base import MarkBase
 from ferrum.position import _STACKABLE_MARKS
@@ -286,6 +286,280 @@ def _append_unique_by_name(seq: list, item: object) -> None:
     existing = {el.name for el in seq if el is not None and hasattr(el, "name")}
     if item.name not in existing:
         seq.append(item)
+
+
+def _conditional_wire_channel_of(spec: object) -> Optional[str]:
+    """Return the wire channel *spec* will serialize under, or ``None``.
+
+    A spec stamped by ``encode()`` carries its channel; one built by
+    ``sel.when(...)`` and handed straight to :meth:`Chart.conditional` carries
+    ``None`` and infers the channel from its ``if_selected`` branch at
+    serialization time (``ConditionalSpec.to_spec_dict``). This resolves the
+    same answer either way, so the collision check below sees the channel the
+    wire will actually carry rather than the one the declaration happened to
+    spell.
+
+    Returns ``None`` for anything that is not a ``ConditionalSpec`` --
+    ``Chart.conditional()`` is annotated to accept any object, so the
+    conditional list is not guaranteed homogeneous, and a foreign entry
+    should not be treated as claiming a channel.
+    """
+    from ferrum.selection import _resolve_channel
+
+    if not isinstance(spec, ConditionalSpec):
+        return None
+    return spec.channel if spec.channel is not None else _resolve_channel(spec.if_selected)
+
+
+def _channel_already_conditioned(chart: "Chart", wire: str) -> bool:
+    """Return whether *chart* already carries a conditional on wire channel *wire*.
+
+    The single "is this channel taken" predicate shared by all three
+    collision sites -- ``_append_conditional``'s cross-call check,
+    ``Chart.conditional()``'s, and ``Chart.__add__``'s merge check
+    (2026-09-11, batch-H close cycle 5) -- which had each hand-written the
+    identical ``any(_conditional_wire_channel_of(c) == wire for c in ...)``
+    generator. Each site keeps its own raise with its own message (the three
+    are genuinely different: "collides with an encode() declaration",
+    "collides via Chart.conditional()", "collides across a chart merge"), so
+    only the boolean check is shared, not the refusal.
+    """
+    return any(_conditional_wire_channel_of(c) == wire for c in chart._conditionals)
+
+
+def _append_conditional(
+    target: "Chart",
+    spec: "ConditionalSpec",
+    *,
+    source_key: str,
+    claimed_here: dict[str, str],
+) -> None:
+    """Record one conditional on *target*, refusing a wire-channel collision.
+
+    The single append site for both ``encode()`` spellings
+    (``encode(<channel>=cond)`` and ``<Channel>(field, condition=cond)``):
+    resolves the wire channel through the one vocabulary, refuses a second
+    conditional on a channel that already has one, stamps the channel, and
+    auto-registers the spec's source selection.
+
+    **Collision rule.** A wire channel carries at most one conditional. Two
+    declarations that resolve to the same channel — ``encode(color=condA,
+    fill=condB)``, since ``fill`` aliases to ``color`` — used to produce two
+    wire conditionals with the same ``channel``, no warning, and no defined
+    winner: whichever the runtime applied last silently discarded the other
+    declaration. Refusing names the conflict at the call that creates it.
+    *claimed_here* maps wire channel -> the encode key that claimed it earlier
+    in the same ``encode()`` call, so a same-call collision can name both
+    spellings; a collision against a conditional already on the chart names
+    the channel and the earlier declaration generically, since the spelling
+    that produced it is not recorded on the spec.
+
+    ``Chart.__add__``'s layer merge enforces the identical rule via its own
+    inline check rather than calling this function (it has no single
+    *source_key*/*claimed_here* to resolve -- it is merging two already-built
+    conditional lists, not appending one new declaration), but the answer
+    must be the same: **2026-09-11, batch-H close cycle 4 correction.** An
+    earlier version of this docstring exempted the merge on the premise
+    that "each layer's conditional belongs to that layer's marks" -- reading
+    the WASM runtime (``crates/ferrum-wasm/src/conditional.rs``'s
+    ``resolve_conditionals_with_packed``) disproves that: every conditional
+    in the wire's flat ``conditionals`` list is applied to every mark batch
+    in every panel, with no per-layer scope at all. So `a + b`, where each
+    side carries its own conditional on the same wire channel, used to build
+    a spec with two conditionals stamped the same ``channel`` and no defined
+    winner -- the exact undefined-runtime-behaviour shape this rule exists
+    to refuse, reached through the one entry point that used to skip the
+    check.
+    """
+    wire = conditional_wire_channel(source_key)
+    prior_key = claimed_here.get(wire)
+    if prior_key is not None:
+        raise ValueError(
+            f"encode({prior_key}=...) and encode({source_key}=...) both declare a "
+            f"conditional on the {wire!r} wire channel"
+            + (f" ({source_key} carries its conditional onto {wire})" if source_key != wire else "")
+            + f"; a channel can carry only one conditional. Declare one of them, or "
+            f"move the other to a different channel."
+        )
+    if _channel_already_conditioned(target, wire):
+        raise ValueError(
+            f"encode({source_key}=...) declares a conditional on the {wire!r} wire "
+            f"channel, which already carries one on this chart (from an earlier "
+            f"encode(...) or Chart.conditional(...) call); a channel can carry only "
+            f"one conditional. Drop one of the two declarations."
+        )
+    claimed_here[wire] = source_key
+    target._conditionals.append(replace(spec, channel=wire))
+    sel = spec.selection
+    if sel is not None:
+        _append_unique_by_name(target._selections, sel)
+
+
+def _refuse_alias_field_dropped_with_kept_conditional(
+    encoding: dict,
+    alias_conditional_sources: dict[str, str],
+    *,
+    declare: Callable[[str], str],
+) -> None:
+    """Refuse when an alias source's base field would be dropped while its
+    OWN conditional survives and overrides the alias target.
+
+    Batch-H close cycle 3 (H3-2): ``_append_conditional``'s collision rule
+    refuses two conditionals landing on one wire channel, but not this
+    half-and-half case -- ``encode(color=fm.Color("d"), fill=fm.Fill("c",
+    condition=cond))`` used to build silently: ``fill``'s own field ``"c"``
+    is dropped by ``_ENCODING_ALIASES``' ``keep_target`` policy (``color`` is
+    already present), while ``fill``'s conditional -- extracted independently
+    in ``encode()``'s ``ChannelBase`` branch -- survives and overrides
+    ``color`` at selection time. The user's field mapping silently vanishes
+    while the call *looks* like it did something (the conditional still
+    fires). This is the surviving twin of the cycle-2 fix that refused two
+    conditionals on one channel: same shape, one side is a base field instead
+    of a second conditional.
+
+    Parameters
+    ----------
+    encoding :
+        The encoding dict to check (``Chart._encoding`` for the chart-level
+        call site, or a single layer's own encoding dict for the
+        ``Chart.layer()`` call site -- alias resolution is scoped per-layer,
+        so the check is too).
+    alias_conditional_sources :
+        Wire channel -> the alias-source encode key whose OWN
+        ``condition=`` resolved to that wire channel during this call (e.g.
+        ``{"color": "fill"}``). Populated only for the ``ChannelBase``
+        branch (a bare ``ConditionalSpec`` spelling carries no base field to
+        collide).
+    declare :
+        Formats an encode key into its call-site spelling for the error
+        message (``"encode({name}=...)"`` for the chart-level path,
+        ``"Layer(encoding={{{name!r}: ...}})"`` for the layer path).
+
+    Raises
+    ------
+    ValueError
+        Naming both the target channel and the alias-source key, the same
+        message shape as ``_append_conditional``'s same-call collision.
+    """
+    for wire, source_name in alias_conditional_sources.items():
+        if wire not in encoding:
+            continue
+        source_channel = encoding.get(source_name)
+        field = getattr(source_channel, "field", None)
+        if field is None:
+            # A fieldless alias source (e.g. bare fm.Fill(condition=cond),
+            # matching the equivalent encode(fill=<ConditionalSpec>) bare
+            # spelling) has no field for the alias to drop -- there is
+            # nothing to collide with color's own field, so this is a fully
+            # supported call, not the split this guard exists to refuse
+            # (2026-09-11, batch-H close cycle 4, S3: the pre-cycle-4 code
+            # raised here unconditionally, refusing a call that built fine
+            # before cycle 3 and that the bare-ConditionalSpec spelling
+            # still accepts).
+            continue
+        raise ValueError(
+            f"{declare(wire)} and {declare(source_name)} both declare the {wire!r} wire "
+            f"channel: {source_name}'s field ({field!r}) would be silently dropped by the "
+            f"{source_name} -> {wire} alias since {wire} is already encoded, but "
+            f"{source_name}'s condition= survives and overrides {wire} at selection time "
+            f"-- that split (field dropped, conditional kept) is refused. Encode "
+            f"{source_name} only when {wire} is absent, or move its condition= to "
+            f"{wire} directly."
+        )
+
+
+def _strip_layer_conditionals(
+    target: "Chart",
+    encoding: dict,
+    *,
+    claimed_here: dict[str, str],
+) -> dict:
+    """Lift a layer-declared channel's ``condition=`` into *target*'s chart-level conditionals.
+
+    ``Chart.layer(Layer(encoding={...}))`` is a fourth public way to attach a
+    conditional (H3-1, batch-H close cycle 3) alongside ``encode()``'s two
+    spellings and ``Chart.conditional()`` -- but unlike those three, a
+    layer's ``encoding`` dict never passes through ``Chart.encode()``, so a
+    channel-carried ``condition=`` used to serialize straight into the dead
+    per-layer ``EncodingSpec.condition`` blob (``_emit_condition``; nothing
+    on the Rust side reads it -- ``crates/ferrum-core/src/spec/encoding.rs``
+    stores it as an opaque ``serde_json::Value``) instead of the chart's
+    real ``conditionals`` pipeline. Accepted, serialized, and inert -- the
+    exact silent-drop shape this batch's ``encode()`` work removed for every
+    other entry point, one code path over.
+
+    Mirrors **both** of ``encode()``'s conditional branches, not just the
+    channel-carried one (2026-09-11, batch-H close cycle 4, S2: the bare
+    ``ConditionalSpec`` spelling -- ``Layer(encoding={"color": cond})``,
+    matching ``encode(color=cond)`` -- used to fall through this loop
+    untouched, since ``isinstance(cond, ChannelBase)`` is False for it, and
+    then vanish entirely at serialization: ``_build_layers_list`` only
+    recognizes ``ChannelBase`` values, so the key was silently dropped with
+    no warning, no conditional, nothing). Both branches resolve the wire
+    channel through the one conditional vocabulary (refusing the same
+    unsupported channels with the same typed error) and append to
+    ``target._conditionals`` via :func:`_append_conditional` (so a
+    layer-declared conditional collides with an ``encode()``-declared one on
+    the same wire channel exactly as two ``encode()`` calls would); the
+    channel-carried branch additionally rebuilds the channel without
+    ``condition`` in its kwargs and is checked against the
+    alias-vs-base-field collision :func:`_refuse_alias_field_dropped_with_kept_conditional`
+    describes -- scoped to *this layer's own* encoding dict, matching
+    ``_build_layers_list``'s per-layer alias resolution.
+
+    Parameters
+    ----------
+    target :
+        The chart the conditional is lifted onto (``Chart.layer()``'s
+        in-progress ``new``).
+    encoding :
+        One ``Layer``'s own encoding dict (``PublicLayer.encoding``).
+    claimed_here :
+        Wire channel -> the encode key that claimed it earlier in this
+        ``Chart.layer(*layers)`` call, shared across every layer in the
+        call (mirrors ``encode()``'s per-call ``claimed_here``) -- so two
+        layers attached in the same call declaring a conditional on the
+        same wire channel collide exactly as two ``encode()`` kwargs would.
+
+    Returns
+    -------
+    dict
+        A new encoding dict with every ``condition=`` kwarg stripped;
+        *encoding* itself is never mutated.
+    """
+    stripped: dict = {}
+    alias_conditional_sources: dict[str, str] = {}
+    for name, channel in encoding.items():
+        if isinstance(channel, ConditionalSpec):
+            # Layer(encoding={<channel>: <ConditionalSpec>}): the bare
+            # spelling, matching encode(<channel>=<ConditionalSpec>) exactly
+            # -- the wire channel is known from the encode key, and there is
+            # no base field to preserve, so this entry does not join
+            # `stripped` at all (mirrors encode()'s `continue`).
+            _append_conditional(target, channel, source_key=name, claimed_here=claimed_here)
+            continue
+        if isinstance(channel, ChannelBase):
+            cond = channel._kwargs.get("condition")
+            if cond is not None:
+                if not isinstance(cond, ConditionalSpec):
+                    raise TypeError(
+                        f"Layer(encoding={{{name!r}: {channel.__class__.__name__}(condition=...)}}) "
+                        f"must be a ConditionalSpec built via sel.when(...).otherwise(...) (or "
+                        f"fm.when(sel).then(...).otherwise(...)); got {type(cond).__name__}."
+                    )
+                wire = conditional_wire_channel(name)
+                _append_conditional(target, cond, source_key=name, claimed_here=claimed_here)
+                if wire != name:
+                    alias_conditional_sources[wire] = name
+                remaining_kwargs = {k: v for k, v in channel._kwargs.items() if k != "condition"}
+                channel = channel.__class__(channel.field, **remaining_kwargs)
+        stripped[name] = channel
+    _refuse_alias_field_dropped_with_kept_conditional(
+        stripped,
+        alias_conditional_sources,
+        declare=lambda n: f"Layer(encoding={{{n!r}: ...}})",
+    )
+    return stripped
 
 
 def _check_param_collision(
@@ -1332,6 +1606,14 @@ class Chart(
         Chart(mark='point', encoding=['x', 'y', 'color'])
         """
         new = self._clone()
+        # wire channel -> the encode key that claimed it in THIS call, so a
+        # same-call collision can name both spellings (see _append_conditional).
+        claimed_here: dict[str, str] = {}
+        # wire channel -> the alias-source encode key whose OWN condition=
+        # resolved to it in THIS call (e.g. {"color": "fill"}), checked
+        # against the final _encoding once every channel in this call has
+        # been processed (see _refuse_alias_field_dropped_with_kept_conditional).
+        alias_conditional_sources: dict[str, str] = {}
         for name, value in channels.items():
             cls = _channel_class_for(name)
             if cls is None:
@@ -1340,14 +1622,13 @@ class Chart(
             if isinstance(value, ConditionalSpec):
                 # encode(<channel>=cond): the wire channel is KNOWN from the
                 # encode key (already snake_case, e.g. "opacity", "size",
-                # "stroke_width"). Stamp it so both the wire channel and the
-                # value-kind resolution are correct, then record the conditional
-                # and auto-register its source selection. Conditionals live in
-                # _conditionals, not _encoding.
-                new._conditionals.append(replace(value, channel=name))
-                sel = value.selection
-                if sel is not None:
-                    _append_unique_by_name(new._selections, sel)
+                # "stroke_width"). Resolve it through the one conditional
+                # vocabulary (fill lands on color; an unsupported channel
+                # refuses here, typed, instead of in serde) so both the wire
+                # channel and the value-kind resolution are correct, then
+                # record the conditional and auto-register its source
+                # selection. Conditionals live in _conditionals, not _encoding.
+                _append_conditional(new, value, source_key=name, claimed_here=claimed_here)
                 continue
 
             if isinstance(value, ChannelBase):
@@ -1362,7 +1643,11 @@ class Chart(
                     # Rebuild the channel without `condition` in its kwargs so
                     # it no longer round-trips through _emit_condition's inert
                     # nested EncodingSpec.condition blob -- the real
-                    # conditional now lives only in _conditionals.
+                    # conditional now lives only in _conditionals. The wire
+                    # channel resolves through the SAME vocabulary the
+                    # encode(<channel>=cond) form above uses, so the two
+                    # spellings cannot disagree about which channels accept a
+                    # conditional or where fill/stroke land.
                     if not isinstance(cond, ConditionalSpec):
                         raise TypeError(
                             f"{cls.__name__}(condition=...) must be a ConditionalSpec built "
@@ -1371,10 +1656,14 @@ class Chart(
                             f"working forms: encode({name}=<ConditionalSpec>) or "
                             f"{cls.__name__}(field=..., condition=<ConditionalSpec>)."
                         )
-                    new._conditionals.append(replace(cond, channel=name))
-                    sel = cond.selection
-                    if sel is not None:
-                        _append_unique_by_name(new._selections, sel)
+                    wire = conditional_wire_channel(name)
+                    _append_conditional(new, cond, source_key=name, claimed_here=claimed_here)
+                    if wire != name:
+                        # name is an alias source (only "fill" today -- the
+                        # refusal registry already excludes "stroke"):
+                        # checked below once this channel's own field lands
+                        # in new._encoding[name].
+                        alias_conditional_sources[wire] = name
                     remaining_kwargs = {
                         k: v for k, v in channel._kwargs.items() if k != "condition"
                     }
@@ -1409,6 +1698,17 @@ class Chart(
                 # _clone() so _inject_auto_tooltips treats it as explicit
                 # (GH #78).
                 new._tooltip_promoted = False
+
+        # H3-2 (batch-H close cycle 3): refuse an alias source's base field
+        # silently dropping while its OWN condition= survives and overrides
+        # the target it collided with. Checked once, after every channel in
+        # this call has landed in new._encoding, so it catches both
+        # encode(color=..., fill=Fill(..., condition=...)) orderings.
+        _refuse_alias_field_dropped_with_kept_conditional(
+            new._encoding,
+            alias_conditional_sources,
+            declare=lambda n: f"encode({n}=...)",
+        )
 
         # Synthesize _facet whenever facet encoding channels are passed in this
         # call. This wires encode(facet_col=...) / encode(facet_row=...) /
@@ -1479,7 +1779,14 @@ class Chart(
         """Add one or more layer objects to this chart.
 
         Accepts both public ``Layer`` instances (user-facing API) and
-        internal ``_Layer`` instances (used by ferrum internals).
+        internal ``_Layer`` instances (used by ferrum internals). An
+        internal ``_Layer`` is appended verbatim, with no conditional
+        stripping -- every internal builder that constructs one is required
+        to have already routed any ``condition=`` through ``encode()`` (or
+        left none) on the chart-level encoding it derives ``_Layer.encoding``
+        from, so it never carries a live ``condition=`` kwarg for this
+        method to miss (see :func:`_strip_layer_conditionals`, which only
+        the public-``Layer`` branch below calls).
 
         When a ``Layer(data=df, ...)`` has its own ``data`` attribute, that
         data is merged with the chart's existing data via diagonal concatenation
@@ -1493,6 +1800,15 @@ class Chart(
             Layer objects to append. Public ``Layer`` instances may carry an
             independent ``data=`` DataFrame.
 
+        A ``Layer(encoding={...})`` channel's ``condition=`` is honored: it is
+        lifted into this chart's real conditional pipeline (the same
+        ``_conditionals`` list ``encode(<channel>=cond)`` populates), gated
+        by the same conditional vocabulary -- a ``stroke``/``shape``/``x``/
+        ``y`` conditional inside a layer's encoding raises the same typed
+        ``ValueError`` ``encode()`` raises, instead of silently reaching the
+        Rust wire's dead per-channel ``condition`` blob (H3-1, batch-H close
+        cycle 3; see :func:`_strip_layer_conditionals`).
+
         Returns
         -------
         Chart
@@ -1504,6 +1820,10 @@ class Chart(
         new = resolved._clone()
         existing, _ = _expand_layers(new)
         converted = []
+        # wire channel -> the encode key that claimed it in THIS layer() call,
+        # shared across every layer being attached (mirrors encode()'s
+        # per-call claimed_here) -- see _strip_layer_conditionals.
+        claimed_here: dict[str, str] = {}
         for ly in layers:
             if isinstance(ly, _Layer):
                 converted.append(ly)
@@ -1528,7 +1848,9 @@ class Chart(
                     _Layer(
                         name=ly.name,
                         mark=ly.mark,
-                        encoding=dict(ly.encoding),
+                        encoding=_strip_layer_conditionals(
+                            new, ly.encoding, claimed_here=claimed_here
+                        ),
                         transforms=list(ly.transforms),
                         mark_kwargs=dict(ly.mark_kwargs) if ly.mark_kwargs else None,
                     )
@@ -1861,7 +2183,27 @@ class Chart(
                     _check_param_collision(s.name, is_selection=True, context="layer merge")
                 _append_unique_by_name(new._selections, s)
         if rhs._conditionals:
-            new._conditionals.extend(rhs._conditionals)
+            # One-conditional-per-wire-channel, enforced across the merge
+            # too (2026-09-11, batch-H close cycle 4): the wire's
+            # `conditionals` list is flat and scope-free (every conditional
+            # applies to every mark batch in every panel -- see
+            # `_append_conditional`'s docstring), so two conditionals
+            # colliding on one channel is exactly as undefined here as it
+            # is within one `encode()` call. Checked against `new._conditionals`
+            # as it accumulates, so a third+ chart in a chained
+            # `a + b + c` merge collides against everything merged so far.
+            for cond in rhs._conditionals:
+                wire = _conditional_wire_channel_of(cond)
+                if wire is not None and _channel_already_conditioned(new, wire):
+                    raise ValueError(
+                        f"chart + chart: both sides declare a conditional on the {wire!r} "
+                        f"wire channel; a channel can carry only one conditional after the "
+                        f"marks merge onto one panel -- every conditional on the merged "
+                        f"wire applies to every layer's marks, so there is no per-layer "
+                        f"scope to keep the two apart. Drop one of the two declarations, "
+                        f"or move one to a different channel before merging."
+                    )
+                new._conditionals.append(cond)
         if rhs._params:
             from ferrum.parameter import VariableParameter
 
@@ -3058,6 +3400,39 @@ class Chart(
         ... )
         """
         new = self._clone()
+        # A spec built by sel.when(...) carries channel=None (the channel is
+        # inferred from the branch value at serialization). A spec that DOES
+        # name a channel goes through the same vocabulary encode() uses, so
+        # this entry point cannot smuggle an unsupported channel past the
+        # typed refusal and into serde.
+        if isinstance(spec, ConditionalSpec):
+            # The vocabulary check runs on the channel this spec will actually
+            # serialize under -- the stamped one, or the one inferred from the
+            # branch value when unstamped. Checking only the stamped case would
+            # leave this entry point emitting exactly the conditionals the
+            # vocabulary refuses: `conditional(sel.when(fm.Shape(...)))` infers
+            # `shape` at serialization and would otherwise sail past.
+            # _conditional_wire_channel_of returns Optional[str] (None only
+            # for a non-ConditionalSpec, which this isinstance guard already
+            # excludes) but conditional_wire_channel takes str; _resolve_channel
+            # is total over a ConditionalSpec's if_selected, so this is never
+            # actually None here -- named explicitly rather than relying on
+            # the reader re-deriving that from the isinstance guard above.
+            wire_source = _conditional_wire_channel_of(spec)
+            assert wire_source is not None, (
+                "a ConditionalSpec's wire channel is never unresolvable -- "
+                "_resolve_channel is total"
+            )
+            wire = conditional_wire_channel(wire_source)
+            if spec.channel is not None:
+                spec = replace(spec, channel=wire)
+            # Same one-conditional-per-wire-channel rule encode() enforces.
+            if _channel_already_conditioned(new, wire):
+                raise ValueError(
+                    f"Chart.conditional(): this chart already carries a conditional on "
+                    f"the {wire!r} wire channel; a channel can carry only one "
+                    f"conditional. Drop one of the two declarations."
+                )
         new._conditionals.append(spec)
         if hasattr(spec, "selection_name"):
             # Ensure the selection is also registered so scene_build can wire it.

@@ -243,7 +243,13 @@ pub fn build_scene(
             extra_annotations: structural_annotations,
             break_results,
         } = if panel_idx == 0 && !chart_config.structural.is_empty() {
-            build_structural_nodes(&chart_config.structural, &scales, &panel.plot_area, theme)
+            build_structural_nodes(
+                &chart_config.structural,
+                &scales,
+                &panel.plot_area,
+                theme,
+                warnings,
+            )
         } else {
             StructuralOutput {
                 extra_annotations: Vec::new(),
@@ -451,7 +457,7 @@ pub fn build_scene(
         // were already placed by `route_panel_axes_and_grid` above.
         for remap in &break_remaps {
             for batch in &mut mark_batches {
-                remap_mark_batch_through_break(batch, remap);
+                remap_mark_batch_through_break(batch, remap, warnings);
             }
         }
 
@@ -1069,11 +1075,17 @@ fn route_panel_axes_and_grid(
     let mut axes_below: Vec<SceneNode> = Vec::new();
     let mut axes_above: Vec<SceneNode> = Vec::new();
     // Place this axis's data-positioned chrome on every broken scale that
-    // applies to it, leaving the title where the layout put it. A secondary-y
-    // axis (`y_slot >= 1`) is labelled from its own scale, so a break on the
-    // primary y scale is not its break (spec §4 H4).
+    // applies to it, leaving the title where the layout put it. Two axes are
+    // exempt, both by identity rather than by geometry: an axis placed along
+    // the OTHER dimension (an x axis under a y break — its nodes were placed
+    // from x tick values, so a y break has nothing to say about them), and a
+    // secondary-y axis (`y_slot >= 1`), which is labelled from its own scale,
+    // so a break on the primary y scale is not its break (spec §4 H4).
     let break_axis_nodes = |mut nodes: marks::axis::AxisNodes, y_slot: usize| {
         for remap in breaks {
+            if remap.axis() != nodes.placed_along {
+                continue;
+            }
             if y_slot != 0 && remap.axis() == "y" {
                 continue;
             }
@@ -2359,11 +2371,29 @@ struct StructuralOutput {
     break_results: Vec<(String, break_axis::BreakResult)>,
 }
 
+/// The name of `scale`'s kind when it is continuous but NOT linear in data,
+/// i.e. when the break's linear pixel→data reverse map
+/// (`break_axis::BreakRemap::data_at`) is not that scale's inverse.
+///
+/// `None` for `Linear`/`Time` (linear in data, so the round trip is exact)
+/// and for `Ordinal` (no numeric domain at all — that axis contributes no
+/// remap, and its own no-op is reported as `BreakAxisIneffective` instead).
+fn nonlinear_scale_kind(scale: &scale_resolve::ScaleKind) -> Option<&'static str> {
+    use scale_resolve::ScaleKind;
+    match scale {
+        ScaleKind::Log(_) => Some("log"),
+        ScaleKind::Pow(_) => Some("pow"),
+        ScaleKind::Symlog(_) => Some("symlog"),
+        ScaleKind::Linear(_) | ScaleKind::Time(_) | ScaleKind::Ordinal(_) => None,
+    }
+}
+
 fn build_structural_nodes(
     structural: &[StructuralSpec],
     scales: &scale_resolve::ResolvedScales,
     plot_area: &crate::layout::Rect,
     theme: &crate::layout::ThemeInputs,
+    warnings: &mut Vec<RenderWarning>,
 ) -> StructuralOutput {
     let mut extra_annotations: Vec<SceneNode> = Vec::new();
     let mut break_results: Vec<(String, break_axis::BreakResult)> = Vec::new();
@@ -2375,17 +2405,36 @@ fn build_structural_nodes(
         match item {
             StructuralSpec::BreakAxis(spec_brk) => {
                 // Build break indicators and add them to annotations.
-                let pixel_range = if spec_brk.axis == "y" {
+                let is_y = spec_brk.axis == "y";
+                let pixel_range = if is_y {
                     (plot_area.y + plot_area.h, plot_area.y)
                 } else {
                     (plot_area.x, plot_area.x + plot_area.w)
                 };
 
-                // Use the primary axis scale domain if available.
-                let data_domain = if spec_brk.axis == "y" {
-                    scales.y.data_domain().unwrap_or((0.0, 1.0))
-                } else {
-                    scales.x.data_domain().unwrap_or((0.0, 1.0))
+                // ONE predicate decides whether this break does anything, and
+                // it is the same one `build_scene` applies downstream when it
+                // turns these results into `BreakRemap`s: the axis must have a
+                // continuous domain, and at least one gap must survive being
+                // clipped to it. Asking it here — rather than fabricating a
+                // `(0.0, 1.0)` domain for an ordinal axis and asking whether a
+                // gap lands inside THAT — is what makes the answer match the
+                // render: an ordinal `BreakAxis(gap=(0.2, 0.4))` used to draw a
+                // slash indicator over a scale nothing moved on, and warn
+                // nothing, because the fabricated domain made its gap look
+                // effective.
+                let scale = if is_y { &scales.y } else { &scales.x };
+                let Some(data_domain) = scale.data_domain() else {
+                    // No numeric domain at all: no remap downstream, so no
+                    // indicator here and no `break_results` entry (one would
+                    // be filtered out by that same `data_domain()` test).
+                    warnings.push(RenderWarning::BreakAxisIneffective {
+                        axis: spec_brk.axis.clone(),
+                        reason: "the axis is ordinal, so its gaps have no numeric \
+                                 data range to remove"
+                            .to_string(),
+                    });
+                    continue;
                 };
 
                 let break_result = break_axis::apply_break_to_scale(
@@ -2394,15 +2443,51 @@ fn build_structural_nodes(
                     pixel_range,
                     spec_brk.break_size,
                 );
-                let indicator_nodes = break_axis::build_break_indicators(
+
+                if break_result.effective_gaps == 0 {
+                    // Nothing was removed, so nothing may claim it was: no
+                    // indicator, no nonlinear-placement warning (placement
+                    // cannot be unreliable when nothing was placed), and no
+                    // `break_results` entry — matching the ordinal branch
+                    // above exactly. A prior cut kept pushing the
+                    // single-segment identity result here so these charts
+                    // stayed byte-identical to the pre-batch broken render,
+                    // but that identity map is laid over the *plot rect*
+                    // while `BreakRemap::new` reverse-maps from the scale's
+                    // own (padded) pixel range, so it was never truly the
+                    // identity: it silently collapsed the scale's padding,
+                    // moving every mark and gridline by up to the padding
+                    // width. Dropping the entry makes this render exactly
+                    // the unbroken chart, which is what the warning below
+                    // promises. Disclosed behavior change — see
+                    // ferrum-spec.md's batch-H dated note.
+                    let (lo, hi) = data_domain;
+                    warnings.push(RenderWarning::BreakAxisIneffective {
+                        axis: spec_brk.axis.clone(),
+                        reason: format!("no gap overlaps the axis domain ({lo}, {hi})"),
+                    });
+                    continue;
+                }
+
+                // The break's placement math reverse-maps pixels to data
+                // linearly, which is not a log/pow/symlog scale's inverse —
+                // the gap then removes a different data range than the one
+                // asked for. Unfixed here (the scale-level inverse is a
+                // filed follow-up), but no longer silent.
+                if let Some(scale_kind) = nonlinear_scale_kind(scale) {
+                    warnings.push(RenderWarning::BreakAxisOnNonlinearScale {
+                        axis: spec_brk.axis.clone(),
+                        scale_kind: scale_kind.to_string(),
+                    });
+                }
+                extra_annotations.extend(break_axis::build_break_indicators(
                     &break_result,
                     plot_area,
                     &spec_brk.axis,
                     spec_brk.break_size,
                     &spec_brk.break_style,
                     theme,
-                );
-                extra_annotations.extend(indicator_nodes);
+                ));
 
                 // Stash the break result so the caller can remap primary marks.
                 break_results.push((spec_brk.axis.clone(), break_result));
@@ -2412,33 +2497,21 @@ fn build_structural_nodes(
                 // `connect_to` is specified in data-space by the Python API.
                 // Resolve [x, y] through the primary scales to pixel coordinates
                 // before passing to build_inset_nodes (which treats them as pixels).
+                //
+                // Through `scale_resolve`'s data→pixel resolver pair (a
+                // re-export of `scale_resolve::positional`'s implementation,
+                // which lives next to `axis_pixel_range` — see that module's
+                // doc), which owns the out-of-domain/ordinal fallback this
+                // block used to carry its own copy of, including the y flip
+                // `axis_pixel_range` is the reason for. That flip was fixed
+                // in the annotation copy and left wrong here, so an
+                // out-of-domain connector anchor resolved to the mirrored
+                // side of the plot; with one implementation a third copy
+                // cannot drift again.
                 let resolved_inset;
                 let inset_to_build = if let Some([dx, dy]) = spec_inset.connect_to {
-                    let px_x = scales.x.to_pixel_f64(dx).unwrap_or_else(|| {
-                        // Fallback for ordinal / out-of-domain: linear interpolation.
-                        if let Some((lo, hi)) = scales.x.data_domain() {
-                            let frac = if (hi - lo).abs() < f64::EPSILON {
-                                0.5
-                            } else {
-                                (dx - lo) / (hi - lo)
-                            };
-                            plot_area.x + frac * plot_area.w
-                        } else {
-                            plot_area.x + plot_area.w * 0.5
-                        }
-                    });
-                    let px_y = scales.y.to_pixel_f64(dy).unwrap_or_else(|| {
-                        if let Some((lo, hi)) = scales.y.data_domain() {
-                            let frac = if (hi - lo).abs() < f64::EPSILON {
-                                0.5
-                            } else {
-                                (dy - lo) / (hi - lo)
-                            };
-                            plot_area.y + frac * plot_area.h
-                        } else {
-                            plot_area.y + plot_area.h * 0.5
-                        }
-                    });
+                    let px_x = scale_resolve::data_pixel_x(&scales.x, plot_area, dx);
+                    let px_y = scale_resolve::data_pixel_y(&scales.y, plot_area, dy);
                     resolved_inset = super::chart_config::InsetSpec {
                         connect_to: Some([px_x, px_y]),
                         ..spec_inset.clone()
@@ -2492,22 +2565,65 @@ fn suppress_annotations_for_break(
         .filter(|spec| {
             for remap in break_remaps {
                 let axis = remap.axis();
-                for value in super::annotation::data_coords_on_axis(spec, axis) {
-                    if let Some(gap) = break_axis::gap_containing(value, remap.result()) {
-                        warnings.push(RenderWarning::AnnotationSuppressedByBreak {
-                            kind: super::annotation::kind_name(spec).to_string(),
-                            axis: axis.to_string(),
-                            value,
-                            gap: [gap.0, gap.1],
-                        });
-                        return false;
-                    }
+                if let Some(warning) = spec_break_conflict(spec, axis, remap.result()) {
+                    warnings.push(warning);
+                    return false;
                 }
             }
             true
         })
         .cloned()
         .collect()
+}
+
+/// The warning `spec` earns from `result` on `axis`, or `None` when the two
+/// do not conflict.
+///
+/// Two questions, one per coordinate shape (`annotation::AxisCoords`):
+///
+/// - A POINT coordinate conflicts when it lands inside a gap.
+/// - An EXTENT's interval conflicts when it MEETS a gap — an endpoint inside
+///   one (reported identically to a point, since a real coordinate is in the
+///   gap) or, failing that, the interval reaching across one. The second case
+///   is the containment inversion: `annotate_rect(y1=100, y2=900)` under a
+///   `(150, 850)` gap has no in-gap endpoint, so endpoint-only testing let it
+///   paint as one solid rect straight across the break while every smaller,
+///   merely-overlapping rect was suppressed.
+///
+/// Endpoints are tested before the span so an extent with an in-gap endpoint
+/// keeps naming that value in `AnnotationSuppressedByBreak`, rather than
+/// degrading to the coarser span message.
+fn spec_break_conflict(
+    spec: &super::annotation::AnnotationSpec,
+    axis: &str,
+    result: &break_axis::BreakResult,
+) -> Option<RenderWarning> {
+    use super::annotation::AxisCoords;
+
+    let kind = || super::annotation::kind_name(spec).to_string();
+    let in_gap = |value: f64| {
+        break_axis::gap_containing(value, result).map(|gap| {
+            RenderWarning::AnnotationSuppressedByBreak {
+                kind: kind(),
+                axis: axis.to_string(),
+                value,
+                gap: [gap.0, gap.1],
+            }
+        })
+    };
+    match super::annotation::data_coords_on_axis(spec, axis) {
+        AxisCoords::Points(values) => values.into_iter().find_map(in_gap),
+        AxisCoords::Extent(lo, hi) => [lo, hi].into_iter().find_map(in_gap).or_else(|| {
+            break_axis::gap_spanned_by(lo, hi, result).map(|gap| {
+                RenderWarning::AnnotationSpansBreakGap {
+                    kind: kind(),
+                    axis: axis.to_string(),
+                    extent: [lo, hi],
+                    gap: [gap.0, gap.1],
+                }
+            })
+        }),
+    }
 }
 
 // ── Break-axis mark remapping ────────────────────────────────────────────────
@@ -2525,7 +2641,11 @@ fn suppress_annotations_for_break(
 /// Secondary-y batches are exempt from a primary-axis break: a layer resolved
 /// against an `independent_y` slot maps through its own scale, which the break
 /// was never applied to (spec §4 H4).
-fn remap_mark_batch_through_break(batch: &mut MarkBatch, remap: &break_axis::BreakRemap<'_>) {
+fn remap_mark_batch_through_break(
+    batch: &mut MarkBatch,
+    remap: &break_axis::BreakRemap<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) {
     if batch.y_slot != 0 && remap.axis() == "y" {
         return;
     }
@@ -2533,12 +2653,25 @@ fn remap_mark_batch_through_break(batch: &mut MarkBatch, remap: &break_axis::Bre
         break_axis::BreakPlacement::ClipExtent => {
             let clipped = remap.clip_nodes(std::mem::take(&mut batch.nodes));
             if clipped.is_reindexed() {
-                batch.data_indices = clipped.realign(batch.data_indices.take());
-                batch.tooltips = clipped.realign(batch.tooltips.take());
-                batch.hrefs = clipped.realign(batch.hrefs.take());
-                batch.descriptions = clipped.realign(batch.descriptions.take());
-                batch.keys = clipped.realign(batch.keys.take());
-                batch.polar_spans = clipped.realign(batch.polar_spans.take());
+                // One realigner for the whole batch: it applies the same
+                // wrong-length pass-through `ClippedNodes::realign` always
+                // did, and reports it once instead of leaving a release build
+                // to ship misattributed tooltips in silence.
+                let mut realign = clipped.realigner();
+                batch.data_indices = realign.realign(batch.data_indices.take());
+                batch.tooltips = realign.realign(batch.tooltips.take());
+                batch.hrefs = realign.realign(batch.hrefs.take());
+                batch.descriptions = realign.realign(batch.descriptions.take());
+                batch.keys = realign.realign(batch.keys.take());
+                batch.polar_spans = realign.realign(batch.polar_spans.take());
+                if realign.misaligned() {
+                    warnings.push(RenderWarning::BreakClipSidecarMisaligned {
+                        // The serde spelling, not a `Debug` string: the two
+                        // agree only because every variant is one word today,
+                        // and a user-visible message must not depend on that.
+                        mark: batch.kind.wire_name().to_string(),
+                    });
+                }
             }
             batch.nodes = clipped.nodes;
         }
@@ -2556,6 +2689,11 @@ fn remap_mark_batch_through_break(batch: &mut MarkBatch, remap: &break_axis::Bre
             for node in batch.nodes.iter_mut() {
                 remap.remap_node(node);
             }
+        }
+        // Batch-wide, not per node: an arrowhead is rebuilt from its own
+        // shaft's placed endpoints, so the walk has to see both.
+        break_axis::BreakPlacement::MoveVerticesAndGlyph => {
+            remap.remap_segment_nodes(&mut batch.nodes);
         }
     }
 }
@@ -7430,6 +7568,529 @@ mod tests {
         );
     }
 
+    // ── build_structural_nodes (close-review S2/S4) ─────────────────────────
+
+    /// The plot rect these structural tests share: y runs 20 (top) to 320
+    /// (bottom), x runs 20 to 320.
+    fn structural_plot() -> crate::layout::Rect {
+        crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 }
+    }
+
+    /// A `ResolvedScales` carrying just the two positional scales — the only
+    /// fields `build_structural_nodes` reads.
+    fn positional_scales(
+        x: scale_resolve::ScaleKind,
+        y: scale_resolve::ScaleKind,
+    ) -> scale_resolve::ResolvedScales {
+        scale_resolve::ResolvedScales {
+            x,
+            y,
+            color: None,
+            size: None,
+            shape: None,
+            opacity: None,
+            fill_opacity: None,
+            stroke_opacity: None,
+            stroke_dash: None,
+            x2: None,
+            y2: None,
+            y_slots: Default::default(),
+        }
+    }
+
+    fn linear_scale(domain: [f64; 2], range: [f64; 2]) -> scale_resolve::ScaleKind {
+        scale_resolve::ScaleKind::Linear(crate::scale::linear::LinearScale::new_internal(
+            domain.to_vec(),
+            range.to_vec(),
+            false,
+            false,
+        ))
+    }
+
+    fn break_spec(axis: &str, gaps: Vec<[f64; 2]>) -> StructuralSpec {
+        StructuralSpec::BreakAxis(super::super::chart_config::BreakAxisSpec {
+            axis: axis.to_string(),
+            gaps,
+            break_size: 12.0,
+            break_style: "slash".to_string(),
+        })
+    }
+
+    fn structural_warnings(
+        structural: &[StructuralSpec],
+        scales: &scale_resolve::ResolvedScales,
+    ) -> Vec<RenderWarning> {
+        let mut warnings = Vec::new();
+        build_structural_nodes(
+            structural,
+            scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut warnings,
+        );
+        warnings
+    }
+
+    /// The break's pixel→data reverse map is linear, which is not a log
+    /// scale's inverse: the gap then removes a different data range than the
+    /// one requested (measured: ticks outside the gap hidden, a point inside
+    /// it drawn). Unfixed — the scale-level inverse is a filed follow-up —
+    /// but no longer silent.
+    #[test]
+    fn a_break_on_a_nonlinear_scale_warns() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            scale_resolve::ScaleKind::Log(crate::scale::log::LogScale::new_internal(
+                vec![1.0, 1000.0],
+                vec![320.0, 20.0],
+                10.0,
+                false,
+                false,
+            )),
+        );
+        let warnings = structural_warnings(&[break_spec("y", vec![[20.0, 200.0]])], &scales);
+        let named: Vec<_> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::BreakAxisOnNonlinearScale { axis, scale_kind } => {
+                    Some((axis.as_str(), scale_kind.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(named, vec![("y", "log")], "got {warnings:?}");
+    }
+
+    /// A linear axis takes the reverse map exactly, so it must NOT warn —
+    /// otherwise every break chart in the suite gains noise.
+    #[test]
+    fn a_break_on_a_linear_scale_is_silent() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 1000.0], [320.0, 20.0]),
+        );
+        let warnings = structural_warnings(&[break_spec("y", vec![[150.0, 850.0]])], &scales);
+        assert!(warnings.is_empty(), "a well-formed linear break says nothing: {warnings:?}");
+    }
+
+    /// Gaps outside the axis domain leave the chart identical to one with no
+    /// `BreakAxis` at all: no indicator, and — the cycle-3 C1 fix — no
+    /// `break_results` entry either, so `build_scene`'s downstream
+    /// `BreakRemap` filter has nothing to remap and every mark, tick, and
+    /// gridline renders exactly as the unbroken chart. A prior cut still
+    /// pushed a single-segment "identity" result here, but that map was laid
+    /// over the plot rect while the real remap reverse-maps from the scale's
+    /// own padded pixel range, so it silently collapsed the scale's padding
+    /// — not the identity the ineffective warning promised.
+    #[test]
+    fn a_break_whose_gaps_miss_the_domain_warns() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 100.0], [320.0, 20.0]),
+        );
+        let mut warnings = Vec::new();
+        let out = build_structural_nodes(
+            &[break_spec("y", vec![[150.0, 850.0]])],
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut warnings,
+        );
+        assert!(
+            out.extra_annotations.is_empty(),
+            "a break that moves nothing must not draw an indicator claiming it did"
+        );
+        assert!(
+            out.break_results.is_empty(),
+            "a break whose gaps miss the domain contributes no remap downstream, \
+             so it stashes no result — otherwise the render is not truly the \
+             unbroken chart the warning claims"
+        );
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::BreakAxisIneffective { axis, reason } => {
+                assert_eq!(axis, "y");
+                assert!(reason.contains("domain"), "{reason}");
+                assert!(reason.contains("100"), "the domain is named: {reason}");
+            }
+            other => panic!("expected BreakAxisIneffective, got {other:?}"),
+        }
+    }
+
+    /// An ordinal axis has no numeric domain for a gap to clip against, so
+    /// its break is a no-op — reported with its own reason, and drawing NO
+    /// indicator.
+    ///
+    /// Both halves are the cycle-2 N1 fix. The check used to run against a
+    /// fabricated `(0.0, 1.0)` domain, so only a gap that also missed `[0,1]`
+    /// reached the ordinal branch: `gap=(0.2, 0.4)` on a categorical axis
+    /// "survived" that fake domain, warned nothing, and painted a slash
+    /// indicator over a scale on which not one mark had moved. The predicate
+    /// is now the same one `build_scene` uses downstream to decide whether
+    /// this axis contributes a `BreakRemap` at all.
+    #[test]
+    fn a_break_on_an_ordinal_axis_warns_and_draws_no_indicator() {
+        use crate::scale::discrete::DiscreteLayout;
+        let ordinal = || {
+            scale_resolve::ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".to_string(), "b".to_string()],
+                vec![20.0, 320.0],
+                DiscreteLayout::UNPADDED,
+            ))
+        };
+        // The gap that used to slip through: inside the fabricated [0,1].
+        for gaps in [vec![[0.2, 0.4]], vec![[150.0, 850.0]]] {
+            let scales = positional_scales(ordinal(), linear_scale([0.0, 1000.0], [320.0, 20.0]));
+            let mut warnings = Vec::new();
+            let out = build_structural_nodes(
+                &[break_spec("x", gaps.clone())],
+                &scales,
+                &structural_plot(),
+                &ThemeInputs::default(),
+                &mut warnings,
+            );
+            assert!(
+                out.extra_annotations.is_empty(),
+                "a break that moves nothing must not draw an indicator claiming it did \
+                 (gaps {gaps:?}); got {} nodes",
+                out.extra_annotations.len()
+            );
+            assert!(
+                out.break_results.is_empty(),
+                "an ordinal axis contributes no remap downstream, so it stashes no result"
+            );
+            assert_eq!(warnings.len(), 1, "gaps {gaps:?}: got {warnings:?}");
+            match &warnings[0] {
+                RenderWarning::BreakAxisIneffective { axis, reason } => {
+                    assert_eq!(axis, "x");
+                    assert!(reason.contains("ordinal"), "{reason}");
+                }
+                other => panic!("expected BreakAxisIneffective, got {other:?}"),
+            }
+        }
+    }
+
+    /// An ineffective break short-circuits the nonlinear-placement warning:
+    /// placement cannot be unreliable when nothing was placed. Both fired
+    /// before, for one declaration.
+    #[test]
+    fn an_ineffective_break_does_not_also_warn_about_placement() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            scale_resolve::ScaleKind::Log(crate::scale::log::LogScale::new_internal(
+                vec![1.0, 1000.0],
+                vec![320.0, 20.0],
+                10.0,
+                false,
+                false,
+            )),
+        );
+        let warnings = structural_warnings(&[break_spec("y", vec![[5000.0, 9000.0]])], &scales);
+        assert_eq!(warnings.len(), 1, "one declaration, one warning: {warnings:?}");
+        assert!(
+            matches!(&warnings[0], RenderWarning::BreakAxisIneffective { .. }),
+            "the ineffective answer wins: {warnings:?}"
+        );
+    }
+
+    /// A reversed y scale reports a descending domain; its break is now real,
+    /// so it neither warns nor renders an unbroken chart. The indicator is
+    /// the visible half of that.
+    #[test]
+    fn a_break_on_a_reversed_scale_is_effective_and_silent() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            // reverse=True swaps the DOMAIN, not the range.
+            linear_scale([1000.0, 0.0], [320.0, 20.0]),
+        );
+        let mut warnings = Vec::new();
+        let out = build_structural_nodes(
+            &[break_spec("y", vec![[150.0, 850.0]])],
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut warnings,
+        );
+        assert!(warnings.is_empty(), "a real break on a reversed axis is not a no-op: {warnings:?}");
+        assert!(
+            !out.extra_annotations.is_empty(),
+            "the break indicator must be drawn on a reversed axis too"
+        );
+        let (_, result) = &out.break_results[0];
+        assert_eq!(result.segments.len(), 2);
+    }
+
+    /// `Inset(connect_to=…)`'s out-of-domain fallback is the SAME one
+    /// annotations use, so a value below the domain anchors below the plot.
+    /// The second copy of this formula was left unflipped when the first was
+    /// fixed, mirroring the anchor to the top of the plot instead.
+    #[test]
+    fn inset_connect_to_below_the_domain_anchors_below_the_plot() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 100.0], [320.0, 20.0]),
+        );
+        let inset = StructuralSpec::Inset(super::super::chart_config::InsetSpec {
+            svg: "<g/>".to_string(),
+            bounds: [
+                super::super::chart_config::InsetCoord::Norm(0.6),
+                super::super::chart_config::InsetCoord::Norm(0.1),
+                super::super::chart_config::InsetCoord::Norm(0.9),
+                super::super::chart_config::InsetCoord::Norm(0.4),
+            ],
+            border: true,
+            border_color: "#999999".to_string(),
+            border_dash: None,
+            background: None,
+            shadow: false,
+            connect_to: Some([50.0, -50.0]),
+            connect_style: "lines".to_string(),
+        });
+        let mut warnings = Vec::new();
+        let out = build_structural_nodes(
+            &[inset],
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut warnings,
+        );
+        let anchors: Vec<f64> = out
+            .extra_annotations
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { y1, .. } => Some(*y1),
+                _ => None,
+            })
+            .collect();
+        assert!(!anchors.is_empty(), "connect_style=lines emits connector lines");
+        for y in anchors {
+            assert!(
+                y > 320.0,
+                "y=-50 is below a [0, 100] domain, so its anchor is below the plot floor \
+                 (320); got {y}"
+            );
+        }
+    }
+
+    /// The misaligned-sidecar warning, end to end through the batch remap and
+    /// reachable in the DEBUG gate (cycle-2 N6): a bar batch whose
+    /// `data_indices` has the wrong length is split 1→2 by the clip, cannot be
+    /// realigned, and now says so — naming the mark by its SERDE spelling,
+    /// not a `Debug` string.
+    #[test]
+    fn a_misaligned_sidecar_warns_when_the_break_clip_splits_a_batch() {
+        let result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remap = y_remap(&result);
+        // One bar spanning the whole domain: the clip cuts it into two.
+        let bar = SceneNode::Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 20.0,
+            h: 300.0,
+            style: ferrum_scene::FillStroke {
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+            corner_radius: 0.0,
+        };
+        let mut batch = MarkBatch {
+            kind: ferrum_scene::MarkBatchKind::Bar,
+            nodes: vec![bar],
+            // One node in, TWO entries here: the builder bug this reports.
+            data_indices: Some(vec![0, 1]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            clip: true,
+        };
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
+
+        assert_eq!(batch.nodes.len(), 2, "test sanity: the clip must split the bar");
+        assert_eq!(
+            batch.data_indices,
+            Some(vec![0, 1]),
+            "a wrong-length sidecar passes through untouched, never indexed into"
+        );
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::BreakClipSidecarMisaligned { mark } => assert_eq!(mark, "bar"),
+            other => panic!("expected BreakClipSidecarMisaligned, got {other:?}"),
+        }
+    }
+
+    /// The matching silence: an ALIGNED sidecar realigns cleanly and pushes
+    /// no warning, so a normal clipped chart gains no noise.
+    #[test]
+    fn an_aligned_sidecar_realigns_through_the_clip_without_warning() {
+        let result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remap = y_remap(&result);
+        let bar = SceneNode::Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 20.0,
+            h: 300.0,
+            style: ferrum_scene::FillStroke {
+                fill: None,
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_dash: None,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                angle: 0.0,
+            },
+            corner_radius: 0.0,
+        };
+        let mut batch = MarkBatch {
+            kind: ferrum_scene::MarkBatchKind::Bar,
+            nodes: vec![bar],
+            data_indices: Some(vec![7]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            clip: true,
+        };
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
+
+        assert_eq!(
+            batch.data_indices,
+            Some(vec![7, 7]),
+            "both clipped pieces point back at the row that produced them"
+        );
+        assert!(warnings.is_empty(), "no noise on a well-formed batch: {warnings:?}");
+    }
+
+    // ── Cross-axis chrome under a break (close-review cycle-2 N2) ───────────
+
+    /// A y-axis break must not touch the x axis's chrome. It used to: the
+    /// pixel-range guard read a tick dash's `min(y1, y2)`, which for a
+    /// downward x tick IS the plot floor — inside the y range — so all 11 x
+    /// ticks were reverse-mapped, and `data_at`'s clamp put both ends of each
+    /// on one pixel. Measured before this fix: 11 4px ticks became 11
+    /// zero-length lines. Ownership is now decided by the axis's own
+    /// dimension, not by a coordinate.
+    #[test]
+    fn a_y_break_leaves_the_x_axis_tick_marks_alone() {
+        use crate::layout::text_metrics::{fixed_width, MockMetrics};
+        use crate::layout::{AxisInput, AxisOrient};
+
+        let (spec, batch) = two_layer_dual_y_spec(false);
+        let scales = resolve_dual_y(&spec, &batch);
+        let panel = crate::layout::PanelLayout {
+            plot_area: crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 },
+            ..Default::default()
+        };
+        let theme = ThemeInputs::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let mut x_input = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("X".into()),
+            vec!["0".into(), "5".into(), "10".into()],
+            None,
+        );
+        x_input.overrides.show_domain = Some(true);
+        // `show_grid` is normally folded in by `AxesInput::apply_show_defaults`;
+        // set it here so the debug invariant that guards that ordering holds.
+        x_input.overrides.show_grid = Some(false);
+        x_input.overrides.show_ticks = Some(true);
+        let (x_axis, _) = crate::layout::axis::layout_x_axis(
+            &x_input,
+            panel.plot_area,
+            0,
+            11.0,
+            13.0,
+            8.0,
+            0,
+            4.0,
+            &m,
+        );
+
+        let tick_lengths = |result: &PanelAxisGrid| -> Vec<f64> {
+            result
+                .axes_below
+                .iter()
+                .chain(&result.axes_above)
+                .filter_map(|n| match n {
+                    // The tick dashes: short vertical lines (the domain line
+                    // is horizontal, so it has zero vertical extent and a
+                    // non-zero horizontal one).
+                    SceneNode::Line { x1, y1, x2, y2, .. } if (x1 - x2).abs() < f64::EPSILON => {
+                        Some((y2 - y1).abs())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let route = |breaks: &[break_axis::BreakRemap<'_>]| {
+            route_panel_axes_and_grid(
+                &spec,
+                &scales,
+                &panel,
+                &[&x_axis],
+                Some(&x_axis),
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                &theme,
+                &chart_config,
+                breaks,
+            )
+        };
+
+        let unbroken = tick_lengths(&route(&[]));
+        assert!(
+            !unbroken.is_empty() && unbroken.iter().all(|len| *len > 0.0),
+            "test sanity: the unbroken x axis draws non-zero tick marks; got {unbroken:?}"
+        );
+
+        let y_domain = scales.y.data_domain().expect("continuous y");
+        let mid = (y_domain.0 + y_domain.1) / 2.0;
+        let span = y_domain.1 - y_domain.0;
+        let result = break_axis::apply_break_to_scale(
+            y_domain,
+            &[[mid - span * 0.1, mid + span * 0.1]],
+            (panel.plot_area.y + panel.plot_area.h, panel.plot_area.y),
+            12.0,
+        );
+        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
+        let remap = break_axis::BreakRemap::new("y", y_domain, scales.y.pixel_range(), &result);
+        let broken = tick_lengths(&route(std::slice::from_ref(&remap)));
+
+        assert_eq!(
+            broken, unbroken,
+            "a y break must leave every x tick mark exactly as it was"
+        );
+    }
+
     // ── suppress_annotations_for_break (spec §4 H5, F-L08-07) ───────────────
 
     fn text_spec(y: crate::render::annotation::CoordValue, text: &str) -> crate::render::annotation::AnnotationSpec {
@@ -7615,6 +8276,94 @@ mod tests {
             RenderWarning::AnnotationSuppressedByBreak { kind, .. } => assert_eq!(kind, "span"),
             other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
         }
+    }
+
+    /// A y-`Rect` spec with the given data bounds; every other coordinate is
+    /// norm, so only the y interval is under test.
+    fn y_rect_spec(y1: f64, y2: f64) -> crate::render::annotation::AnnotationSpec {
+        use crate::render::annotation::{AnnotationSpec, CoordValue};
+        AnnotationSpec::Rect {
+            x1: CoordValue::Norm { norm: 0.0 },
+            y1: CoordValue::Data(y1),
+            x2: CoordValue::Norm { norm: 1.0 },
+            y2: CoordValue::Data(y2),
+            fill: "#cccccc".to_string(),
+            opacity: 0.3,
+            corner_radius: 0.0,
+            stroke: None,
+        }
+    }
+
+    /// The containment inversion (close-review S3): a rect whose interval
+    /// STRADDLES the gap has no in-gap endpoint, so endpoint-only testing let
+    /// it render as one solid rect straight across the break while every
+    /// smaller, merely-overlapping rect was suppressed. Growing an annotation
+    /// can no longer bring it back.
+    #[test]
+    fn suppress_annotations_for_break_drops_an_extent_that_spans_the_gap() {
+        let specs = vec![y_rect_spec(100.0, 900.0)];
+        let break_result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remaps = vec![y_remap(&break_result)];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+
+        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
+        assert!(
+            surviving.is_empty(),
+            "a rect bounding the gap asserts continuity exactly where the axis is broken"
+        );
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            RenderWarning::AnnotationSpansBreakGap { kind, axis, extent, gap } => {
+                assert_eq!(kind, "rect");
+                assert_eq!(axis, "y");
+                assert_eq!(*extent, [100.0, 900.0]);
+                assert_eq!(*gap, [150.0, 850.0]);
+            }
+            other => panic!("expected AnnotationSpansBreakGap, got {other:?}"),
+        }
+    }
+
+    /// The other side of that pin: an extent with an in-gap ENDPOINT keeps
+    /// naming that value through the original warning, and an extent wholly
+    /// on one side of the gap still survives untouched.
+    #[test]
+    fn suppress_annotations_for_break_keeps_the_endpoint_answer_for_extents() {
+        let specs = vec![y_rect_spec(100.0, 400.0), y_rect_spec(0.0, 140.0)];
+        let break_result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remaps = vec![y_remap(&break_result)];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+
+        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
+        assert_eq!(surviving.len(), 1, "only the overlapping rect is dropped");
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            RenderWarning::AnnotationSuppressedByBreak { kind, value, gap, .. } => {
+                assert_eq!(kind, "rect");
+                assert_eq!(*value, 400.0, "the in-gap endpoint is named, not the extent");
+                assert_eq!(*gap, [150.0, 850.0]);
+            }
+            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
+        }
+    }
+
+    /// A point-shaped annotation keeps the membership test: a `Text` whose
+    /// anchor is outside every gap survives, whatever lies between it and
+    /// another annotation.
+    #[test]
+    fn suppress_annotations_for_break_leaves_point_shapes_on_membership() {
+        use crate::render::annotation::CoordValue;
+
+        let specs = vec![text_spec(CoordValue::Data(100.0), "below the gap")];
+        let break_result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remaps = vec![y_remap(&break_result)];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+
+        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
+        assert_eq!(surviving.len(), 1, "a point outside every gap is not an extent");
+        assert!(warnings.is_empty());
     }
 
     /// Two same-axis breaks: suppression consults EVERY one of them, not

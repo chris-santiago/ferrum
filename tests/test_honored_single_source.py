@@ -25,10 +25,7 @@ from ferrum.encoding import _apply_channel_aliases
 from ferrum.encoding._aliases import apply_channel_aliases
 from ferrum.encoding._honored import (
     APPEARANCE_BASE,
-    APPEARANCE_COLOR,
-    APPEARANCE_CONDITION,
     APPEARANCE_FULL,
-    APPEARANCE_SCHEME,
     APPEARANCE_SORT,
     BARE,
     FACET,
@@ -107,9 +104,14 @@ _ROLE_CONTRACT = [
     ),
     (fm.X2, SECONDARY_EXTENT, {"field", "type_"}),
     (fm.Theta, POLAR_PRIMARY, {"field", "type_", "stack"}),
+    # Color/Fill's role param is the class's own (derived) _honored_kwargs,
+    # not the bare APPEARANCE_COLOR/APPEARANCE_SCHEME constant -- neither
+    # constant carries "condition" any more (2026-09-11, batch-H close cycle
+    # 3), but both channels genuinely honor it via the derivation, and
+    # expected_keys below (pinning the pre-existing contract) still does.
     (
         fm.Color,
-        APPEARANCE_COLOR,
+        fm.Color._honored_kwargs,
         {
             "field",
             "type_",
@@ -123,7 +125,7 @@ _ROLE_CONTRACT = [
     ),
     (
         fm.Fill,
-        APPEARANCE_SCHEME,
+        fm.Fill._honored_kwargs,
         {
             "field",
             "type_",
@@ -134,9 +136,31 @@ _ROLE_CONTRACT = [
             "scheme",
         },
     ),
+    # Shape and StrokeDash share the plain APPEARANCE_SORT role set (as of
+    # 2026-09-11, batch-H close cycle 3 -- the two former *_NO_CONDITION
+    # twins are deleted; ChannelBase.__init_subclass__ derives the bit per
+    # class instead). `shape` has no EncodingValue counterpart, so its
+    # conditional serialized and then applied as a no-op, and encode() now
+    # refuses it -- the derivation leaves Shape WITHOUT "condition" here.
+    # StrokeDash is the sort role's condition-honoring representative -- it
+    # HAS a wire value, so the derivation adds the bit.
     (
         fm.Shape,
         APPEARANCE_SORT,
+        {
+            "field",
+            "type_",
+            "scale",
+            "title",
+            "legend",
+            "sort",
+        },
+    ),
+    # StrokeDash/Size likewise use their own derived _honored_kwargs as the
+    # kwarg filter, for the same reason.
+    (
+        fm.StrokeDash,
+        fm.StrokeDash._honored_kwargs,
         {
             "field",
             "type_",
@@ -149,7 +173,7 @@ _ROLE_CONTRACT = [
     ),
     (
         fm.Size,
-        APPEARANCE_CONDITION,
+        fm.Size._honored_kwargs,
         {
             "field",
             "type_",
@@ -187,7 +211,15 @@ def test_spec_dict_emits_pinned_keys_per_role(channel_cls, role, expected_keys):
     """A representative channel of each role serializes the pinned key set.
 
     Pins the serialization contract so iterating _honored_kwargs cannot drift
-    from what the old hard-coded serializer emitted.
+    from what the old hard-coded serializer emitted. ``role`` is the kwarg
+    filter for this row: for a channel whose ``expected_keys`` includes
+    ``condition``, ``role`` is that class's own (derived) ``_honored_kwargs``
+    rather than a bare imported constant -- ``condition`` is no longer a
+    static role-set member (2026-09-11, batch-H close cycle 3):
+    ``ChannelBase.__init_subclass__`` derives it per channel from the
+    conditional vocabulary, so a shared role constant (``APPEARANCE_SORT``,
+    ``APPEARANCE_FULL``, ...) can no longer describe a condition-honoring
+    channel's real honored set on its own.
     """
     reset_warnings()
     kw = {k: v for k, v in _REPRESENTATIVE_KWARGS.items() if k in role}

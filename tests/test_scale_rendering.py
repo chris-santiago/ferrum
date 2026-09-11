@@ -480,7 +480,9 @@ class TestAutoRaster:
         msg = str(guidance_warnings[0].message)
         assert "categorical" in msg, f"warning should name the categorical exclusion: {msg!r}"
         assert "discard" in msg, f"warning should state the reason (discards info): {msg!r}"
-        assert "mark_raster(aggregate=" in msg, f"warning should show the manual workaround: {msg!r}"
+        assert "mark_raster(aggregate=" in msg, (
+            f"warning should show the manual workaround: {msg!r}"
+        )
         # SVG should be large (no substitution)
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb > 10, f"Expected full SVG >10MB; got {size_mb:.1f}MB"
@@ -706,6 +708,178 @@ class TestAutoRaster:
         auto_raster_warnings = [w for w in caught if "Auto-raster" in str(w.message)]
         assert not auto_raster_warnings
         assert "<image" not in svg, "disabled auto-raster must not substitute"
+
+    def test_auto_raster_untyped_numeric_color_substitutes_like_explicit_q(self):
+        """A bare `color="val"` on a numeric column substitutes exactly like
+        `color="val:Q"` -- the color channel's type comes from the column
+        dtype when the user wrote no annotation (batch-H close remediation).
+
+        Before this, only the explicit `:Q` spelling substituted: the untyped
+        spelling took the categorical-exclusion branch, so the batch's "the
+        same chart spec works at every data size" promise was delivered only
+        for the minority spelling.
+        """
+        df = _df_quant_valued(2_000)
+        cfg = fm.RenderConfig(raster_threshold=0, raster_behavior="silent")
+
+        def _svg(color):
+            return (
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", color=color)
+                .properties(width=400, height=300, render_config=cfg)
+                .to_svg()
+            )
+
+        untyped_svg = _svg("val")
+        assert "<image" in untyped_svg, "untyped numeric color must trigger substitution"
+        assert untyped_svg == _svg("val:Q"), (
+            "an untyped numeric color must resolve to the same quantitative "
+            "substitution as the explicit :Q spelling"
+        )
+
+    def test_auto_raster_untyped_numeric_color_emits_no_categorical_warning(self):
+        """The exclusion warning never fires -- and so never calls a numeric
+        column categorical -- for a bare numeric color field."""
+        df = _df_quant_valued(2_000)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            (
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", color="val")
+                .properties(
+                    width=400,
+                    height=300,
+                    render_config=fm.RenderConfig(raster_threshold=0, raster_behavior="silent"),
+                )
+                .to_svg()
+            )
+        assert not [w for w in caught if "categorical" in str(w.message)], (
+            "a numeric color column must never be described as categorical: "
+            f"{[str(w.message) for w in caught]}"
+        )
+
+    def test_auto_raster_untyped_string_color_still_excluded(self):
+        """A bare `color="group"` on a string column keeps the permanent
+        exclusion, and the warning names it as categorical."""
+        df = _df_grouped(2_000, n_groups=5)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = (
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", color="group")
+                .properties(
+                    width=400,
+                    height=300,
+                    render_config=fm.RenderConfig(raster_threshold=0, raster_behavior="silent"),
+                )
+                .to_svg()
+            )
+        assert "<image" not in svg, "a string-dtype color must keep the exclusion"
+        guidance = [w for w in caught if "mark_raster" in str(w.message)]
+        assert guidance, "the exclusion must still emit its guidance warning"
+        assert "categorical" in str(guidance[0].message)
+
+    def test_auto_raster_explicit_nominal_type_beats_numeric_dtype(self):
+        """An explicit `:N` on a numeric column keeps the exclusion -- the
+        annotation is authoritative, dtype inference only fills the gap when
+        the user declared nothing."""
+        df = _df_quant_valued(2_000)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = (
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", color="val:N")
+                .properties(
+                    width=400,
+                    height=300,
+                    render_config=fm.RenderConfig(raster_threshold=0, raster_behavior="silent"),
+                )
+                .to_svg()
+            )
+        assert "<image" not in svg, "an explicit :N must keep the exclusion on a numeric column"
+        assert [w for w in caught if "categorical" in str(w.message)], (
+            "the explicit-nominal exclusion must still warn categorically"
+        )
+
+    def test_auto_raster_temporal_color_warning_names_temporal(self):
+        """A date-dtype color field is excluded and described as temporal --
+        the warning reports the kind the gate actually determined, never a
+        blanket 'categorical/ordinal/temporal'."""
+        n = 2_000
+        df = _df_quant(n).with_columns(
+            pl.date_range(
+                pl.date(2020, 1, 1), pl.date(2020, 1, 1) + pl.duration(days=n - 1), eager=True
+            ).alias("day")
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = (
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q", color="day")
+                .properties(
+                    width=400,
+                    height=300,
+                    render_config=fm.RenderConfig(raster_threshold=0, raster_behavior="silent"),
+                )
+                .to_svg()
+            )
+        assert "<image" not in svg, "a temporal color must keep the exclusion"
+        guidance = [w for w in caught if "mark_raster" in str(w.message)]
+        assert guidance, "the exclusion must still emit its guidance warning"
+        msg = str(guidance[0].message)
+        assert "temporal" in msg, f"warning must name the temporal kind: {msg!r}"
+        assert "categorical color field" not in msg, (
+            f"warning must not call a temporal column categorical: {msg!r}"
+        )
+
+    def test_auto_raster_explicit_raster_field_alone_wins_over_quantitative_color(self):
+        """`raster_field=` set ALONE (aggregate left at its "count" default)
+        still counts as an explicit RenderConfig and wins over the
+        color-driven substitution.
+
+        This is the half of the explicitness rule that the
+        `raster_aggregate="sum"` sibling test cannot reach: a non-default
+        aggregate always arrives with a field (construction validation
+        requires it), so only a field-without-aggregate config discriminates
+        the two operands of the divergence test.
+        """
+        df = _df_quant_valued(2_000)
+        cfg = fm.RenderConfig(raster_threshold=0, raster_behavior="silent", raster_field="val")
+
+        with_color = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="val:Q")
+            .properties(width=400, height=300, render_config=cfg)
+            .to_svg()
+        )
+        manual_count = (
+            fm.Chart(df)
+            .mark_raster(aggregate="count", cmap="viridis")
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .to_svg()
+        )
+        assert with_color == manual_count, (
+            "an explicit raster_field= must keep the config's own count aggregate, "
+            "not fall through to the color-driven mean substitution"
+        )
+        manual_mean = (
+            fm.Chart(df)
+            .mark_raster(aggregate="mean", field="val", cmap="viridis")
+            .encode(x="x:Q", y="y:Q")
+            .properties(width=400, height=300)
+            .to_svg()
+        )
+        assert with_color != manual_mean, (
+            "sanity check: count and mean must render differently, or this test "
+            "cannot discriminate the explicit-config branch from the color-driven one"
+        )
 
     def test_auto_raster_below_threshold_no_change(self):
         """Charts below the threshold are unaffected."""

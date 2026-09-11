@@ -7,6 +7,14 @@
 mod auxiliary;
 mod color;
 mod domain;
+/// Positional (x/y) scale construction. Private: `render`-wide callers that
+/// need the data→pixel resolvers next to `axis_pixel_range`
+/// (`data_pixel_x`/`data_pixel_y`, which serve annotation and
+/// structural-inset placement too) get them through the targeted re-export
+/// below rather than through a wide-open module — this module's other 19
+/// items (`build_axis_scale`, `apply_coord_domain_overrides`,
+/// `PositionalFields`, `resolve_padding_fraction`, …) are scale-*construction*
+/// internals that have no business being reachable from `scene_build`.
 mod positional;
 mod seam;
 #[cfg(test)]
@@ -63,6 +71,11 @@ pub(in crate::render) use self::positional::{apply_axis_domain_config, AxisDomai
 // The one "does this encoding pin its own extent" predicate, shared by the
 // color resolver and the chart-level scale-domain cascade gate.
 pub(in crate::render) use self::domain::encoding_explicit_extent;
+// The data→pixel fallback `to_pixel_f64` refuses (out-of-domain/ordinal),
+// shared by `annotation::ScaleContext` and `scene_build`'s structural-inset
+// `connect_to` resolution — see the `mod positional` doc above for why this
+// is a re-export rather than a wider module visibility.
+pub(in crate::render) use self::positional::{data_pixel_x, data_pixel_y};
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

@@ -41,7 +41,7 @@ pub(in crate::render) struct PositionalFields<'a> {
 // reproduce the *exact same* inset when projecting axis ticks. Re-export the
 // helper here under its existing `pub(in crate::render)` path so render-side
 // callers are unchanged.
-use crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC;
+use crate::layout::geometry::{Rect, DEFAULT_SCALE_PADDING_FRAC};
 pub(in crate::render) use crate::layout::geometry::inset_pixel_range;
 
 /// Resolve the effective padding fraction.
@@ -214,6 +214,73 @@ pub(in crate::render) fn axis_pixel_range(channel: &str, dtype: &SpecDataType, p
     } else {
         pixel_range
     }
+}
+
+/// The fraction of `scale`'s data domain at `d` — `0.0` at `domain.0`, `1.0`
+/// at `domain.1`, and past either end for an out-of-domain value.
+///
+/// `None` for an ordinal scale (no numeric domain) and `Some(0.5)` for a
+/// degenerate one (both endpoints equal), which is the midpoint every caller
+/// wants there.
+fn domain_fraction(scale: &ScaleKind, d: f64) -> Option<f64> {
+    let (lo, hi) = scale.data_domain()?;
+    Some(if (hi - lo).abs() < f64::EPSILON {
+        0.5
+    } else {
+        (d - lo) / (hi - lo)
+    })
+}
+
+/// Resolve a data-space **x** value to an absolute pixel, including the
+/// out-of-domain/ordinal fallback `to_pixel_f64` refuses.
+///
+/// Unlike [`data_pixel_y`], this needs no flip: [`axis_pixel_range`] just
+/// above only swaps the pixel range for the y channel, so a continuous x
+/// axis's `domain.0` already maps to the LEFT pixel and the fraction applies
+/// directly. An ordinal scale has no numeric position for a number, so the
+/// value centers.
+pub(in crate::render) fn data_pixel_x(scale: &ScaleKind, plot_area: &Rect, d: f64) -> f64 {
+    scale.to_pixel_f64(d).unwrap_or_else(|| match domain_fraction(scale, d) {
+        Some(frac) => plot_area.x + frac * plot_area.w,
+        None => plot_area.x + plot_area.w * 0.5,
+    })
+}
+
+/// Resolve a data-space **y** value to an absolute pixel, including the
+/// out-of-domain/ordinal fallback `to_pixel_f64` refuses.
+///
+/// `to_pixel_f64` returns `None` for an OUT-OF-DOMAIN value on a continuous
+/// scale, not only for an ordinal one (see its doc comment), and that is the
+/// case this fallback exists for.
+///
+/// Every non-ordinal y axis's pixel RANGE is flipped relative to its domain,
+/// unconditionally — that is [`axis_pixel_range`], immediately above, and the
+/// reason this pair lives beside it rather than in the annotation module
+/// that used to own it: domain[0] maps to the BOTTOM pixel and domain[1] to
+/// the TOP. (`reverse=` only swaps which value sits at domain[0] vs
+/// domain[1], never which pixel each endpoint maps to, so `data_domain()`'s
+/// `(lo, hi)` already encodes `reverse=` and this flip composes with it for
+/// free.) `(1.0 - frac)` is that same flip: frac=0 (at `lo`) lands at the
+/// bottom, frac=1 (at `hi`) at the top — matching every in-domain annotation
+/// and every mark on this axis.
+///
+/// Before this flip landed the formula used `frac` directly, so an
+/// out-of-domain value landed on the WRONG side — on broken AND unbroken
+/// charts alike (`annotate_hline(y=-50)` on a `[0, 100]` axis rendered
+/// ABOVE the plot); a `BreakAxis` only made it conspicuous by clamping the
+/// value back onto the visible canvas. Not separately audited under
+/// `CoordFlip` — that swap happens upstream of this module.
+///
+/// This pair is THE fallback for both of its callers —
+/// `annotation::ScaleContext`'s `resolve_x`/`resolve_y` and `scene_build`'s
+/// `Inset(connect_to=…)` resolution — so the flip cannot be fixed in one and
+/// left wrong in the other, which is exactly what happened while the formula
+/// was duplicated.
+pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f64) -> f64 {
+    scale.to_pixel_f64(d).unwrap_or_else(|| match domain_fraction(scale, d) {
+        Some(frac) => plot_area.y + (1.0 - frac) * plot_area.h,
+        None => plot_area.y + plot_area.h * 0.5,
+    })
 }
 
 /// Build a ScaleKind from an explicit ScaleSpec, using the given pixel range.

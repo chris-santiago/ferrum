@@ -409,6 +409,147 @@ Encoding channels are typed objects passed as keyword arguments to `.encode()`. 
 | `Shape(field, *, scale=None, legend=None)` | Point shape (circle, square, cross, diamond, triangle-*) |
 | `Angle(field, *, legend=None)` | Point rotation angle — per-row constant, `scale=` accepted but not honored (see 2026-09-02 note below) |
 
+> **Dated note (2026-09-11, batch H close remediation): which channels accept
+> a `condition=`.** A selection conditional — `encode(<channel>=sel.when(...)
+> .otherwise(...))` or `<Channel>(field, condition=...)`, the two spellings
+> being equivalent — may target exactly these eight channels: `color`,
+> `size`, `opacity`, `stroke_width`, `stroke_opacity`,
+> `stroke_dash`, `fill_opacity`, `angle`. `fill` is accepted and carries the
+> conditional onto `color`, the same target it aliases to for its base
+> encoding, so `encode(fill=cond)` and
+> `encode(fill=Fill(f, condition=cond))` produce the identical wire
+> conditional — and that value genuinely repaints the fill, which is what
+> `fill` names. **`stroke` is NOT a conditional target** (corrected
+> 2026-09-11 in the same batch's close re-review, before shipping): the only
+> conditional colour value the wire carries is `EncodingValue::Color`, and
+> the WASM runtime applies it to the mark's **fill**
+> (`apply_value_common`; `FillStrokeView` exposes no stroke-colour member,
+> though `CircleInstance`/`RectInstance` each carry a `stroke_color` the
+> conditional path never touches). Aliasing a stroke conditional onto
+> `color` would therefore recolour the interior while the user asked for the
+> outline, so it is refused by name with the same typed error every other
+> non-conditional channel gets. Filed follow-up: add
+> `EncodingValue::StrokeColor` in Rust, after which `stroke` joins the list
+> for real. **`shape` is NOT a conditional target either** (corrected the
+> same day, same re-review): `ChannelName::Shape` exists, so a shape
+> conditional serialized and round-tripped cleanly, but `EncodingValue` has
+> no `Shape` variant — the conditional could only carry a field reference,
+> which the runtime applies as a no-op. It was accepted and **inert**, which
+> is the silent-drop shape this batch exists to remove, so it is refused by
+> name like `stroke`. Filed follow-up: `EncodingValue::Shape`. (The batch's
+> earlier docstring calling `Shape`'s `condition=` honored was written on the
+> assumption that reaching the wire meant working; a mirror test against the
+> Rust enum disproved it before the batch shipped.) **Every other channel
+> raises `ValueError` at `encode()` time**,
+> naming the supported set — previously a conditional on `fill`/`stroke` (or
+> on any non-conditional channel such as `text`/`tooltip`/`facet`) died with
+> an unmapped serde `unknown variant` error from inside `to_spec()`. The set
+> is one Python constant, `ferrum.encoding._channel_policy._CONDITIONAL_CHANNELS`,
+> mirrored from Rust's `EncodingValue` variants (the value the WASM runtime
+> actually dispatches on) and **test-enforced in both directions** against
+> that enum's source, so a future Rust conditional value cannot land without
+> Python noticing; `ChannelName::X`/`Y` exist in the Rust enum for a
+> *selection's* `encodings=` projection list, not for conditionals, and are
+> therefore not conditional targets. Every wire channel name with no value
+> variant — `x`, `y`, `shape` — is an explicit, documented refusal carrying
+> its own reason, in one registry
+> (`_channel_policy._CONDITIONAL_REFUSALS`, which also holds the `stroke`
+> alias refusal); the mirror test asserts that registry covers the whole gap,
+> so the next such channel is a test failure rather than a discovery. The
+> channels' `_honored_kwargs` tables agree with this set: `StrokeWidth`,
+> `StrokeOpacity`, `FillOpacity` and `Angle` declare `condition` honored
+> (their `condition=` demonstrably renders; the warn guard used to call it
+> ignored), while `Stroke` and `Shape` do not.
+>
+> **One conditional per wire channel (2026-09-11, close re-review; extended
+> to `Chart + Chart` in batch-H close cycle 4 — see the dated note below).**
+> A wire channel carries at most one conditional. Two declarations that
+> resolve to the same channel — `encode(color=condA, fill=condB)`, since
+> `fill` aliases onto `color` — raise `ValueError` naming both spellings and
+> the shared channel, at the call that creates the conflict. Previously both
+> were emitted with the same `channel` and no defined winner, so whichever
+> the runtime applied last silently discarded the other declaration. The
+> rule is enforced at all FOUR declaration entry points — `encode()`'s two
+> spellings, `Chart.conditional()`, and `Chart.layer(Layer(encoding=...))`
+> (see the dated note below) — **and, as of cycle 4, across `Chart + Chart`'s
+> layer merge too** (see the dedicated dated note below for why the earlier
+> exemption there was wrong).
+>
+> **`Chart.layer(Layer(encoding=...))` is a fourth declaration entry point
+> (2026-09-11, batch-H close cycle 3, H3-1; both spellings covered as of
+> cycle 4).** A `Layer`'s `encoding=` dict never passes through `encode()`,
+> so a `condition=` inside it used to serialize into the dead per-channel
+> `EncodingSpec.condition` blob (nothing on the Rust side reads it) instead
+> of the chart's real `conditionals` pipeline — accepted, serialized, and
+> **inert**, the exact shape this section exists to remove, one code path
+> over. It is now lifted into the chart's `conditionals` list at
+> `Chart.layer()` time, gated by the same `_CONDITIONAL_REFUSALS` vocabulary
+> (a `stroke`/`shape`/`x`/`y` conditional inside `Layer(encoding=...)`
+> raises the same typed error), and subject to the same
+> one-conditional-per-wire-channel rule as `encode()` — including against a
+> conditional already on the chart from an `encode()` call, or from another
+> layer attached in the same `Chart.layer(*layers)` call. Both of
+> `encode()`'s spellings are mirrored here: the channel-carried form
+> (`Layer(encoding={"color": fm.Color(f, condition=cond)})`, cycle 3) and
+> the bare `ConditionalSpec` form (`Layer(encoding={"color": cond})`, cycle
+> 4 — the cycle-3 code only recognized `ChannelBase` values in this loop, so
+> the bare spelling silently vanished with no warning and no conditional,
+> the identical silent-drop shape this whole section exists to remove, one
+> spelling over). This makes a layer-declared conditional LIVE where it was
+> previously silently inert: a disclosed, deliberate behavior change (see
+> the changelog).
+>
+> **`Chart + Chart`'s layer merge is not exempt from the one-conditional-
+> per-wire-channel rule (2026-09-11, batch-H close cycle 4 correction).** An
+> earlier version of this note (and of `Chart.conditional()`'s docstring)
+> exempted `a + b` from the rule on the premise that "each layer's
+> conditional belongs to that layer's marks." That premise is false: the
+> WASM interactive runtime's `conditionals` list is flat and carries no
+> per-layer scope at all — every conditional applies to every mark batch in
+> every panel (`resolve_conditionals_with_packed`,
+> `crates/ferrum-wasm/src/conditional.rs`). So `a + b`, where each side
+> conditions the same wire channel (`color`, say), used to build a spec with
+> two conditionals stamped the same `channel` and no defined winner — the
+> exact undefined-runtime-behavior shape this rule exists to refuse, reached
+> through the one entry point that used to skip the check. `Chart + Chart`
+> now raises `ValueError` naming the wire channel when both sides condition
+> it, checked cumulatively across a chained `a + b + c` merge; two layers
+> conditioning DIFFERENT channels still compose freely, unchanged. **Breaking
+> change:** `a + b` where both sides carry a conditional on the same wire
+> channel now raises where it previously built (with undefined
+> last-writer-wins runtime behavior); see the changelog.
+>
+> **Alias base-field-vs-own-conditional collision refused (2026-09-11,
+> batch-H close cycle 3, H3-2; corrected in cycle 4).** The
+> one-conditional-per-channel rule above covers two conditionals colliding
+> on one wire channel; it did not cover an alias source's OWN base field
+> colliding with its OWN conditional — `encode(color=fm.Color("d"),
+> fill=fm.Fill("c", condition=cond))` used to build silently: `fill`'s field
+> `"c"` is dropped by the `fill -> color` alias's `keep_target` policy
+> (`color` is already encoded), while `fill`'s conditional survives and
+> overrides `color` at selection time. The user's field mapping vanished
+> while the call still visibly did something. This is now refused with the
+> same message shape as the two-conditional collision, at `encode()` and at
+> `Chart.layer(Layer(encoding=...))` alike, for **both same-call kwarg
+> orderings** and for the forward cross-call ordering (`encode(color=...)`
+> then a later `encode(fill=Fill(f, condition=...))`). The refusal requires
+> the alias source to actually carry a field: `encode(color=fm.Color("g"),
+> fill=fm.Fill(condition=cond))` — a fieldless `fill`, matching the
+> equivalent bare-`ConditionalSpec` spelling `encode(color=...,
+> fill=cond)` — builds; there is no field for the alias to drop (cycle-4
+> correction: the cycle-3 code refused this unconditionally, a false
+> refusal on a call that built before cycle 3).
+>
+> **Disclosed residual, not closed:** the REVERSE cross-call ordering —
+> `.encode(fill=fm.Fill(f, condition=cond))` in one call, then a *later,
+> separate* `.encode(color=...)` — still builds silently with the same drop.
+> Closing it needs the declaration layer to remember, across chart clones,
+> which encode key's OWN `condition=` produced a given wire conditional (a
+> chart-private `wire_channel -> source_key` map carried alongside
+> `_conditionals`, never serialized, never public — not a field on the
+> public `ConditionalSpec` dataclass, which earlier cycles correctly
+> declined to extend for this). Filed as a follow-up, not yet built.
+
 #### Text / Detail / Tooltip
 
 | Class | Description |
@@ -635,14 +776,19 @@ All positional and appearance channels accept:
 > - **`StrokeWidth`/`Angle` `scale=` is still not honored.** Both remain
 >   per-row constants by documented design (`spec/encoding.rs:746`); the
 >   table above lists only the kwargs each channel actually honors (`type`,
->   `legend`). This corrects a stale advertisement — earlier phase notes
+>   `legend`, and — since 2026-09-11 — `condition`, per the conditional-channel
+>   note under §3.2's appearance table). This corrects a stale advertisement — earlier phase notes
 >   implied `scale=` reached the wire for these two channels; it never did,
 >   and this batch made no change to that.
 > - **`StrokeDash` full contract.** `scale=` and `title=` are honored
 >   (2026-08-28); `sort=` is honored (2026-09-01, mirrors `Shape`, since the
 >   Rust `build_stroke_dash_scale` domain builder already read it);
->   `condition=` is accepted on the wire but not yet consumed by any builder
->   (reserved). A categorical `stroke_dash` column groups `mark_line`/
+>   `condition=` is honored — `stroke_dash` is one of the nine conditional
+>   channels (2026-09-11, batch H close remediation; this line previously read
+>   "accepted on the wire but not yet consumed by any builder (reserved)",
+>   which the shipped behavior already contradicted — see the
+>   conditional-channel dated note under §3.2's appearance table). A
+>   categorical `stroke_dash` column groups `mark_line`/
 >   `mark_ribbon` series by (color, detail, stroke_dash) instead of merging
 >   distinct dash categories into one polyline. `mark_line`, `mark_rule`,
 >   `mark_point`, `mark_bar`, and `mark_rect` (rect newly gained the read)
@@ -783,6 +929,8 @@ Auto-raster will **not** fire if the chart has an active color encoding — doin
 Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), `"silent"`, or `"error"`.
 
 > **Dated note (2026-09-11, batch H task 10 — F-L14-04, the color exclusion above splits by color type):** a **quantitative** color encoding (`:Q`, or `type="quantitative"`) no longer blocks auto-raster — it now substitutes `mark_raster(aggregate="mean", field=<the color field>, cmap=<the color channel's own `scheme=` if declared, else `raster_scheme`>)`, so a large scatter with a continuous color mapping still rasterizes past `raster_threshold` instead of silently staying vector (and, at very large N, silently ballooning past the size guard). A **categorical/ordinal/temporal** color encoding keeps the exclusion above exactly as stated — permanently, not a temporary gap — since no pixel aggregate preserves a category's identity; the emitted warning now names the field, the reason, and the manual `mark_raster(aggregate=..., field=...)` workaround. An explicit `RenderConfig(raster_aggregate=..., raster_field=...)` wins wholesale over the color-driven default regardless of the color channel's type — the color field is ignored entirely when the user has already named an aggregate/field.
+
+> **Dated note (2026-09-11, batch H close remediation — the color type is *inferred* when unannotated):** the split above is decided by the color channel's resolved type, and that resolution reads the column dtype when the user declared no type: `color="z"` on a numeric column is quantitative and substitutes exactly like `color="z:Q"`, while `color="c"` on a string column stays excluded. An explicit annotation always wins (`color="z:N"` on a numeric column keeps the exclusion), and a field whose type can be neither annotated nor inferred (a missing column, or a non-polars data source) stays excluded too, with the warning describing it as untyped rather than asserting a type the gate never determined. Previously only the explicit `:Q` spelling substituted, so the untyped spelling — the one most user code and most of these docs write — fell into the categorical branch and was reported as categorical even for a plain float column. The positional `x`/`y` eligibility gate is unchanged: it still requires explicit quantitative annotations.
 
 > *(2026-05-10) Phase 8b: `blend="additive"` is deferred to Phase 11 (interactive renderer). Auto-raster policy (`raster_threshold`, `raster_behavior`) is deferred to Phase 9+; explicit `mark_raster` is implemented in Phase 8b.*
 
@@ -1851,7 +1999,14 @@ a spec already carrying its own selection.
 > list (channel stamped from the encode key, selection auto-registered), and
 > the channel itself encodes normally minus the `condition` kwarg. A
 > `condition=` value that is not a `ConditionalSpec` raises `TypeError` at
-> encode time, naming both working forms. (This supersedes the stale example
+> encode time, naming both working forms. **Which channels a conditional may
+> target — and the typed `ValueError` for the ones it may not — is stated
+> once under §3.2's appearance table (dated note, 2026-09-11); all FOUR
+> entry points here (`encode(<channel>=cond)`,
+> `<Channel>(field, condition=cond)`, `Chart.conditional(spec)`, and
+> `Chart.layer(Layer(encoding={<channel>: cond}))` — batch H close cycle
+> 3/4, H3-1, see §3.2's fourth-entry-point note below) resolve through that
+> one vocabulary.** (This supersedes the stale example
 > and the `.conditional(sel, color=..., else_color=...)` sentence that used
 > to sit above this note — `Chart.conditional()` never took per-channel
 > kwargs; it takes a single pre-built `spec`.)
@@ -2139,7 +2294,7 @@ raises `ValueError`.
 
 All compound views accept `.theme()`, `.properties()`, `.save()`, `.show()`.
 
-> **Dated note (2026-09-11, batch H tasks 3/4 — F-L08-06/F-L08-07, `BreakAxis` (`ferrum.structural.BreakAxis`) clipping, glyph placement, tick behavior, and annotation suppression+remap go from broken/undocumented to matching the guide's contract):** the guide's clipping model (`docs/site/guide/concepts/break-axes.md`) is now real. A mark's placement under a `BreakAxis` gap is decided by what its geometry *encodes*, not by node shape: an extent mark (bar, area, rect, ribbon, and a filled/closed shape like `mark_violin`'s ring) whose data extent intersects a gap is split into one clipped sub-node per visible segment; a glyph mark (point, tick, text, label, image) is translated whole to its anchor's compressed position and hidden whole (never resized, split, or dropped) when its anchor falls inside a gap; a vertex-placed mark (line, rule, segment, arc) places each vertex independently, hidden per-vertex — this is the one shape that still spikes toward the hidden sentinel for *connected* stroked geometry crossing a gap, a documented, unfixed residual (per-segment line splitting is a filed follow-up). A `mark_label(leader_line=True)` connector and a `mark_tick` rug dash are visually the same node kind (`Line`) inside a glyph batch with opposite meanings (a two-point connector vs. a fixed-length dash) and are now disambiguated by the mark's batch kind, not the node shape. In-gap axis ticks and gridlines were already hidden correctly before this batch and remain so; what this batch actually found and fixed in that chain was the axis title — a `Text` node at the axis midpoint that reverse-mapped into a gap straddling it and teleported off-canvas (all three pre-existing break goldens carried this defect and are now corrected, one element each: the restored title). A `SecondaryY` layer's marks are exempt from a break declared on the primary axis, and overlapping/nested/domain-edge-touching gaps normalize (merge, sort, clip to domain) before segments are computed so an indicator reserves pixels only for a gap it actually draws. Separately, an annotation (`annotate_*`/`ann.*`, §3.11) whose data-space coordinate on a broken axis falls inside that axis's gap is now suppressed with a named `RenderWarning` (`annotation '<kind>' at <axis>=<value> falls inside BreakAxis gap (<lo>, <hi>); suppressed`) instead of silently rendering at the unbroken (wrong) position; a surviving data-space annotation is remapped through every same-axis break in declaration order, landing on the same compressed pixel a mark at that value would; pixel-/norm-space annotation coordinates are never touched by a break. An out-of-domain annotation value now clamps to the correct plot edge (a prior sign error clamped it to the wrong side once the break's fold made the clamp visible). Disclosed residuals, not fixed by this batch: `Line`-shaped extent marks (`mark_rule`, box/violin whiskers, area borders) still spike across a gap rather than splitting (same root as the vertex-placed-mark residual above); a bar's `corner_radius` is replicated onto each split segment, rounding the internal cut edge; a mark sitting within a few px of a gap edge can resolve to "hidden" due to bbox-anchor imprecision for asymmetric glyphs; a faceted chart applies its `BreakAxis` to panel 0 only; interactive (WASM) rendering under a break remains a documented non-goal.
+> **Dated note (2026-09-11, batch H tasks 3/4 — F-L08-06/F-L08-07, `BreakAxis` (`ferrum.structural.BreakAxis`) clipping, glyph placement, tick behavior, and annotation suppression+remap go from broken/undocumented to matching the guide's contract):** the guide's clipping model (`docs/site/guide/concepts/break-axes.md`) is now real. A mark's placement under a `BreakAxis` gap is decided by what its geometry *encodes*, not by node shape: an extent mark (bar, area, rect, ribbon, and a filled/closed shape like `mark_violin`'s ring) whose data extent intersects a gap is split into one clipped sub-node per visible segment; a glyph mark (point, tick, text, label, image) is translated whole to its anchor's compressed position and hidden whole (never resized, split, or dropped) when its anchor falls inside a gap; a vertex-placed mark (line, rule, segment, arc) places each vertex independently, hidden per-vertex — this is the one shape that still spikes toward the hidden sentinel for *connected* stroked geometry crossing a gap, a documented, unfixed residual (per-segment line splitting is a filed follow-up). A `mark_label(leader_line=True)` connector and a `mark_tick` rug dash are visually the same node kind (`Line`) inside a glyph batch with opposite meanings (a two-point connector vs. a fixed-length dash) and are now disambiguated by the mark's batch kind, not the node shape. In-gap axis ticks and gridlines were already hidden correctly before this batch and remain so; what this batch found and fixed in that chain was two things: the axis title — a `Text` node at the axis midpoint that reverse-mapped into a gap straddling it and teleported off-canvas (all three pre-existing break goldens carried this defect and are now corrected, one element each: the restored title) — and, on the OTHER axis, its tick marks. Which chrome belongs to a broken axis used to be inferred from a node's own pixel coordinate, and a downward x-axis tick starts ON the plot floor — inside the y axis's own pixel span — so on a chart with no scale padding a y-axis break reverse-mapped and clamped every x-axis tick dash to a single pixel (rendered as zero-length lines, the tick marks vanishing entirely while their labels survived). Ownership is now decided by the axis's own dimension instead of a coordinate range, which closes this for both directions. A `SecondaryY` layer's marks are exempt from a break declared on the primary axis, and overlapping/nested/domain-edge-touching gaps normalize (merge, sort, clip to domain) before segments are computed so an indicator reserves pixels only for a gap it actually draws. Separately, an annotation (`annotate_*`/`ann.*`, §3.11) whose data-space coordinate on a broken axis falls inside that axis's gap is now suppressed with a named `RenderWarning` (`annotation '<kind>' at <axis>=<value> falls inside BreakAxis gap (<lo>, <hi>); suppressed`) instead of silently rendering at the unbroken (wrong) position; a surviving data-space annotation is remapped through every same-axis break in declaration order, landing on the same compressed pixel a mark at that value would; pixel-/norm-space annotation coordinates are never touched by a break. An extent-shaped annotation (rect, span, line, arrow, bracket) is suppressed when its interval INTERSECTS a gap, not only when one of its endpoints lies inside one — the spec's "any in-gap data coordinate" includes the interval's interior, so a rect large enough to contain the gap is suppressed like every smaller overlapping one instead of painting straight across the break (a distinct warning names the extent and the gap it crosses). Point-shaped coordinates (text, callout anchors, image) keep the plain membership test. Suppression is TOTAL for extents under this contract: a band that brackets every visible segment (e.g. `annotate_rect` spanning the whole axis as a background shade) is dropped whole rather than clipped into one piece per segment, which is what the equivalent MARK geometry does — unifying the two answers is the filed follow-up, not this batch. An out-of-domain annotation value now clamps to the correct plot edge, and that correction applies to EVERY chart, not only broken ones: the prior sign error put an out-of-domain value on the mirrored side on a break-free chart too (`annotate_hline(y=-50)` on a `[0, 100]` axis rendered above the plot); the break's fold only made it conspicuous by clamping the value back onto the visible canvas. `Inset(connect_to=...)` resolves its own out-of-domain anchor through that same corrected rule. A `BreakAxis` that resolves to zero effective gaps (every gap outside the domain, or an ordinal axis) now emits a warning AND renders exactly as if it had never been declared — the render, not only the diagnosis, matches "had no effect": no indicator, no remap, and (for a continuous axis whose gaps simply miss the domain) no collapse of the scale's own pixel padding either, which an earlier cut of this fix still let through as an up-to-8px shift in every mark, tick, and gridline. A break on a reversed (descending-domain) scale is now effective instead of being silently discarded, and a break on a non-linear scale (`log`, `pow`/`sqrt`, `symlog`) warns that its placement is computed with a linear pixel-to-data map and therefore removes a different data range than requested — unfixed, disclosed, and a filed follow-up. A `mark_segment(arrow=True)` arrowhead under a break keeps both its drawn size and its alignment with the shaft: the head is rebuilt from the shaft's own placed endpoints — the same thing `annotate_arrow` already did on the annotation path — rather than having its three vertices translated or placed independently, which previously sheared a 20px head into a ~90px one, and then (a later fix) kept the head's size but left it pointing along its pre-break direction instead of the shaft's new one. The shaft itself still places per vertex. Disclosed residuals, not fixed by this batch: `Line`-shaped extent marks (`mark_rule`, box/violin whiskers, area borders) still spike across a gap rather than splitting (same root as the vertex-placed-mark residual above); a bar's `corner_radius` is replicated onto each split segment, rounding the internal cut edge; a mark sitting within a few px of a gap edge can resolve to "hidden" due to bbox-anchor imprecision for asymmetric glyphs; a faceted chart applies its `BreakAxis` to panel 0 only; interactive (WASM) rendering under a break remains a documented non-goal.
 
 > **Dated note (2026-09-11, batch H tasks 5/6 — F-L08-08, `Inset` (`ferrum.structural.Inset`) bounds go from a docstring/stopgap mismatch to the design's original resolution model):** `Inset.bounds`'s four entries — `(left, top, right, bottom)` — resolve two coordinate kinds, each entry independent of the others: a bare `float` or `NormCoord` (`fm.norm(f)`) is a normalized `[0, 1]` fraction of the parent plot area (unchanged, as designed since the 2026-05-24 inset-panels design); `PixelCoord` (`fm.px(n)`) is now a real absolute pixel offset from the plot area's origin, resolved in Rust against the computed plot rect at layout time (`InsetCoord::Px`, `chart_config.rs`) — previously `fm.px(...)` in an `Inset` bounds tuple raised `TypeError` as a stopgap. Mixed kinds within one bounds tuple are allowed and resolve independently (e.g. `bounds=(px(10), norm(0.0), px(220), norm(1.0))`). The docstring's former claim that a bare float meant a *data-space* coordinate was same-commit authorship drift against the original design (which always specified normalized-or-pixel, never data-space, and reserved data-space coordinates for the annotation layer only) — corrected here, not implemented, since implementing it would have overridden a located, real design decision. `Inset(bounds=...)` now refuses at construction time (`ValueError`) for a normalized entry outside `[0, 1]`, a negative pixel entry, or an empty box (`left >= right` / `top >= bottom`, compared only within like kinds — a mixed-kind pair, e.g. `left=px(50), right=norm(0.1)`, is never compared for emptiness); previously all three constructed silently and rendered off-canvas or as a degenerate zero-extent inset.
 
@@ -3341,7 +3496,71 @@ They are slated for removal after `0.16.0`. New code should call `to_svg()` /
 > `0.16.0`. The rename applies to `Chart` and all composition views; on
 > composition views `to_png` is scale-only (no `raster` argument).
 
-> **Dated note (2026-09-11, batch H task 11 — `to_dict`/`to_json`/`pipe` generalize; `to_spec` stays `Chart`-only, F-L14-01/F-L14-02/F-L06-04):** `to_json(*, indent=None)` and `pipe(fn, *args, **kwargs) -> Any` are now real on every composition view (`HConcatChart`, `VConcatChart`, `ConcatChart`, `LayerChart`, `JointChart`, `RepeatChart`, `ClusterMapChart`), not just `Chart` — this table's blanket "these methods exist on ... every composition view" claim was itself stale before this task, since neither existed on any of the seven. Each composite also gains `to_dict() -> dict`: a *recursive* declaration dict (`{"kind": <layout>, ...layout fields..., <child slots>: <embedded dict(s)>}`) generalizing the pre-existing `JointChart.spec` / `RepeatChart.spec` / `ClusterMapChart.spec` introspection properties — a leaf `Chart` child embeds as `json.loads(chart.to_spec().to_json())` (round-trippable through `ChartSpec.from_json`), and a nested composite child now embeds *recursively* via its own `to_dict()` instead of the old `None` placeholder. Those three `.spec` properties are unchanged in shape and now recursive-consistent with `to_dict` through the one shared embedding helper (`composition._embed_chart_spec`) — for `JointChart`/`RepeatChart`/`ClusterMapChart`, `to_dict()` simply returns `.spec`.
+> **Dated note (2026-09-11, batch H task 11 — `to_dict`/`to_json`/`pipe` generalize; `to_spec` stays `Chart`-only, F-L14-01/F-L14-02/F-L06-04):** `to_json(*, indent=None)` and `pipe(fn, *args, **kwargs) -> Any` are now real on every composition view (`HConcatChart`, `VConcatChart`, `ConcatChart`, `LayerChart`, `JointChart`, `RepeatChart`, `ClusterMapChart`), not just `Chart` — this table's blanket "these methods exist on ... every composition view" claim was itself stale before this task, since neither existed on any of the seven. Each composite also gains `to_dict() -> dict`: a *recursive* declaration dict (`{"kind": <layout>, ...layout fields..., <child slots>: <embedded dict(s)>}`) generalizing the pre-existing `JointChart.spec` / `RepeatChart.spec` / `ClusterMapChart.spec` introspection properties — a leaf `Chart` child embeds as `json.loads(chart.to_spec().to_json())` (round-trippable through `ChartSpec.from_json`), and a nested composite child now embeds *recursively* via its own `to_dict()` instead of the old `None` placeholder. Those three `.spec` properties are unchanged in shape and now recursive-consistent with `to_dict` through the one shared embedding helper (`composition._embed_chart_spec`) — for `JointChart`/`RepeatChart`/`ClusterMapChart`, `to_dict()` returns `.spec` (plus figure chrome when set — see the 2026-09-11 note below).
+>
+> **Figure chrome in the declaration dict (2026-09-11, batch H close remediation).** A composition's figure-level `title` / `subtitle` / `caption` — set via `.properties(title=..., subtitle=..., caption=...)` — is part of its declaration, so `to_dict()` carries it under those key names, omitted when unset. The **six** `_CompositeBase` views (`HConcatChart`, `VConcatChart`, `ConcatChart`, `JointChart`, `RepeatChart`, `ClusterMapChart`) carry all three, because all three are figure-level slots on those classes. `LayerChart` carries **`title` only**: it is a single-plot overlay with one `_title` slot, and `.properties(subtitle=..., caption=...)` on it fans those kwargs to its member charts (a layer's own title blob) rather than storing figure chrome — that fan-out is pre-existing behavior, lossy for this purpose (a fanned `caption` reaches no layer slot at all), and is named here rather than papered over. Before this correction only `LayerChart` emitted `title` (and emitted it as `None` when unset) while the other six silently dropped every one of the three, so `(a | b).properties(title="t").to_dict()` had no title anywhere. Because unset chrome is omitted, a chrome-free composition's dict is unchanged, and `JointChart`/`RepeatChart`/`ClusterMapChart`'s `to_dict()` still equals `.spec` exactly when untitled — for a titled one it is `.spec` plus the chrome keys. The `.spec` properties themselves stay pure layout introspection and never gain chrome.
+>
+> **Chrome values are normalized at ingress, LOSSLESSLY where a lossless
+> answer exists, and applied to all three chrome keys (2026-09-11, batch H
+> close cycle 3, H3-4; made lossless and widened to `subtitle=`/`caption=`
+> in cycle 4).** All three of `title=`/`subtitle=`/`caption=` accept a bare
+> `str` or a `ferrum.Title`, normalized at `.properties()` — before it ever
+> reaches `_figure_title`/`_figure_subtitle`/`_figure_caption` (or
+> `LayerChart`'s single `_title`) — not at `to_dict()`/serialization time.
+> **`title=fm.Title(text=..., subtitle=...)` routes the `Title`'s own
+> `subtitle` into the composite's separate, already-working `subtitle` slot**
+> (the six `_CompositeBase` views only — `LayerChart` has no such slot, see
+> below) when no explicit `subtitle=` was ALSO given in the same call;
+> giving both **in the same `.properties()` call** is refused typed, naming
+> both spellings, the same idiom as the conditional-vocabulary collision
+> refusals. This scoping is deliberate, not an oversight (2026-09-11, batch
+> H close cycle 5): **across separate calls it is not a collision at all** —
+> a later `.properties()` call's routed subtitle silently replaces an
+> earlier one, the same last-write-wins rule an explicit `subtitle=` already
+> follows across chained calls (`.properties(subtitle="OLD").properties(title=fm.Title("T",
+> subtitle="NEW"))` ends with the figure subtitle `"NEW"`, no warning — a
+> routed subtitle behaves exactly like an explicit one once it lands in the
+> `subtitle` slot). This corrects the cycle-3
+> shipped behavior, which flattened `title=fm.Title(..., subtitle=...)` to
+> `.text` and **silently dropped** the subtitle with no warning — the same
+> disease this batch refused `shape` conditionals for elsewhere in the same
+> cycle ("accepted and inert"), reached here via the declaration layer
+> instead of the wire. A `Title` field with genuinely nowhere to go on ANY
+> chrome slot — `anchor`, `offset`, `font_size`, `font_weight`, `color`,
+> `subtitle_font_size`, `subtitle_color` on any of the three keys; `subtitle`
+> itself on `subtitle=`/`caption=` (nesting makes no sense) or on
+> `LayerChart`'s `title=` (no separate subtitle slot exists there) — is
+> refused typed rather than silently dropped, naming the field(s) and the
+> fix. `to_dict()` still serializes `title`'s (already-plain) text through
+> `Title.to_spec_dict()`, so the top-level `title` stays `{"text": ...}`,
+> identical in shape to every embedded child's `title`; the routed subtitle
+> surfaces as the top-level `subtitle` KEY (a dict sibling of `title`, not
+> nested inside `title`'s own dict), since that is the slot that actually
+> renders.
+>
+> **The composite-tree renderer only ever accepted a bare-string title (and
+> subtitle/caption), and now the declaration surface agrees for all three
+> (2026-09-11, batch H close cycle 3, H3-4; widened in cycle 4).** Every
+> composite output path (all six `_CompositeBase` views' `to_svg`/
+> `.interactive()`, and `LayerChart.to_svg`'s default/shared-y path) lowers
+> the figure title into the one-call Rust composite entry's wire `title`
+> field, which is a bare `Optional<String>` — there is no per-figure-title
+> richness slot in the composite tree the way a leaf `Chart`'s
+> `ChartSpec.title` has one (a full `TitleSpec` with
+> subtitle/anchor/offset/colors). Cycle 3 fixed this for `title=` only;
+> cycle 4 found `subtitle=fm.Title(...)`/`caption=fm.Title(...)` still
+> raised the identical unmapped PyO3 `TypeError: 'Title' object is not an
+> instance of 'str'` from `to_svg()` on every wrapper including `LayerChart`
+> (whose `subtitle=`/`caption=` fan a normalized string to member charts
+> rather than storing composite-level chrome — pre-existing, unrelated to
+> this fix), while `to_dict()`/`to_json()` silently accepted the same call.
+> All three keys, on all seven wrappers, now agree: `.properties(title=...,
+> subtitle=..., caption=...)` with any `fm.Title(...)` either renders or
+> refuses typed at `.properties()` time — it never builds a declaration
+> `to_svg()` cannot honor. `ferrum.Title`'s own docstring previously claimed
+> it was "accepted everywhere a title string is accepted" including
+> `HConcat/VConcat/Layer(title=...)`; that claim is corrected to describe
+> the routing/refusal rule above.
 >
 > **`to_spec() -> ChartSpec` stays `Chart`-only.** `ChartSpec` is a leaf-only Rust dataclass (one mark/encoding/transform set); a composite view has no single `ChartSpec` to return, so it does not gain this method — the original wording above implying `to_spec` was universal across composition views was the stale claim being corrected here, not a feature being removed.
 >

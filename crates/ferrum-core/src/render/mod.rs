@@ -655,6 +655,59 @@ pub enum RenderWarning {
         value: f64,
         gap: [f64; 2],
     },
+    /// An EXTENT-shaped annotation (rect, span, line, arrow, bracket) on a
+    /// broken axis had no coordinate inside a gap but *straddled* one — its
+    /// two data coordinates bound an interval that contains the gap (spec §4
+    /// H5). It is suppressed for the same reason an annotation with an in-gap
+    /// endpoint is: the interval's interior lies in the gap, so drawing it
+    /// would assert continuity exactly where the axis says it is broken.
+    /// Before this, growing such an annotation past the gap brought it back
+    /// and painted it as one solid shape across the break. `extent` is the
+    /// annotation's `(lo, hi)` on the broken axis; `gap` is the `(lo, hi)`
+    /// band it crosses.
+    AnnotationSpansBreakGap {
+        kind: String,
+        axis: String,
+        extent: [f64; 2],
+        gap: [f64; 2],
+    },
+    /// A `BreakAxis` resolved to zero effective gaps, so the chart rendered
+    /// exactly as if the break had not been declared: no indicator, no
+    /// compressed scale, no moved mark. Either every gap fell outside the
+    /// axis's data domain, or the axis is ordinal and has no numeric domain
+    /// for a gap to clip against. `reason` says which. Emitted because a
+    /// structural feature that silently does nothing is indistinguishable
+    /// from one the renderer failed to honor.
+    BreakAxisIneffective { axis: String, reason: String },
+    /// A `BreakAxis` was declared on an axis whose resolved scale is
+    /// continuous but NOT linear in data (`log`, `pow`/`sqrt`, `symlog`).
+    /// The break is applied post-hoc in pixel space and reverse-maps
+    /// pixel→data LINEARLY (`break_axis::BreakRemap::data_at`), which is not
+    /// the inverse of those scales' mapping, so the removed region and the
+    /// indicator position do not correspond to the requested gap: ticks
+    /// outside the gap can hide while marks inside it draw. The chart still
+    /// renders — placement is unreliable, not absent — and the scale-level
+    /// inverse that would fix it is a filed follow-up. `scale_kind` is the
+    /// offending kind's name (`"pow"` covers `Sqrt`, which resolves as
+    /// `Pow(0.5)`; the one exact case a kind test cannot exclude is a
+    /// hand-written `Pow(exponent=1)`, whose transform IS linear — hence the
+    /// message hedges with "can differ" rather than asserting a mis-mapping).
+    ///
+    /// The message also names the second consequence: annotation suppression
+    /// asks a DATA question (`gap_containing` on the spec's own value) while
+    /// mark placement asks a PIXEL one, and on these scales the two answers
+    /// diverge — an annotation can be suppressed as in-gap in the same render
+    /// where a mark at a nominally in-gap value draws.
+    BreakAxisOnNonlinearScale { axis: String, scale_kind: String },
+    /// A `BreakAxis` clip split one mark batch's nodes (1→N) while one of
+    /// that batch's per-node sidecars (`data_indices`, tooltips, hrefs,
+    /// descriptions, keys, polar spans) had the wrong length, so it could not
+    /// be rebuilt in lockstep and was passed through unchanged — leaving that
+    /// batch's tooltips/links/keys attributed to the wrong marks. This is a
+    /// builder bug (a `debug_assert` catches it in a debug build); the
+    /// warning is how a release build says so instead of shipping the
+    /// misattribution silently. `mark` is the batch kind.
+    BreakClipSidecarMisaligned { mark: String },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -768,6 +821,30 @@ impl std::fmt::Display for RenderWarning {
                  ({}, {}); suppressed",
                 gap[0], gap[1]
             ),
+            RenderWarning::AnnotationSpansBreakGap { kind, axis, extent, gap } => write!(
+                f,
+                "annotation '{kind}' spans {axis} {} to {}, crossing BreakAxis gap \
+                 ({}, {}); suppressed",
+                extent[0], extent[1], gap[0], gap[1]
+            ),
+            RenderWarning::BreakAxisIneffective { axis, reason } => write!(
+                f,
+                "BreakAxis on the {axis} axis had no effect: {reason}"
+            ),
+            RenderWarning::BreakAxisOnNonlinearScale { axis, scale_kind } => write!(
+                f,
+                "BreakAxis on the {axis} axis targets a {scale_kind} scale; break \
+                 placement is computed with a linear pixel-to-data map, so the removed \
+                 range and the indicator position can differ from the gap you asked for, \
+                 and annotation suppression (which reads the data value directly) can \
+                 disagree with where marks are placed"
+            ),
+            RenderWarning::BreakClipSidecarMisaligned { mark } => write!(
+                f,
+                "{mark} marks were split by a BreakAxis clip while their per-node \
+                 metadata had the wrong length; tooltips, links, and keys on that \
+                 batch may name the wrong marks"
+            ),
         }
     }
 }
@@ -838,6 +915,21 @@ mod tests {
                 value: 500.0,
                 gap: [150.0, 850.0],
             },
+            RenderWarning::AnnotationSpansBreakGap {
+                kind: "rect".into(),
+                axis: "y".into(),
+                extent: [100.0, 900.0],
+                gap: [150.0, 850.0],
+            },
+            RenderWarning::BreakAxisIneffective {
+                axis: "y".into(),
+                reason: "no gap overlaps the axis domain (0, 100)".into(),
+            },
+            RenderWarning::BreakAxisOnNonlinearScale {
+                axis: "y".into(),
+                scale_kind: "log".into(),
+            },
+            RenderWarning::BreakClipSidecarMisaligned { mark: "bar".into() },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
