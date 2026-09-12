@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ferrum._validate import is_none_color_sentinel, validate_choice
+from ferrum._validate import is_none_color_sentinel, validate_choice, validate_color_value
 
 # Marks whose primary visual channel is stroke rather than fill.
 # For these marks, the user-facing ``color=`` alias resolves to ``stroke``
@@ -227,33 +227,34 @@ _VALID_MARK_KWARGS: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.valu
 def _validate_literal_color(mark_name: str, key: str, value: str) -> None:
     """Raise ``ValueError`` if *value* is not a color ``ferrum.color.to_hex`` accepts.
 
-    ``to_hex`` is ferrum's single Rust color parser (``parse_color`` exposed
-    via ``ferrum._core``); this function is a thin construction-time gate
-    around it, not a second color vocabulary — the raised message wraps
-    to_hex's own accepted-forms text unchanged. Callers must short-circuit
-    the non-color sentinels (``"none"``, ``"transparent"``, ``"theme:label"``)
-    before calling this function — each raises here by design (``"none"``/
+    A thin, label-composing wrapper over
+    :func:`ferrum._validate.validate_color_value` (close-remediation, batch
+    F) — the shared gate ``configure._validate_config_color`` also composes
+    over, collapsing what were two independently hand-copied ``try:
+    to_hex(...) except ValueError: raise ValueError(...)`` bodies into one.
+    Not a second color vocabulary — the raised message wraps to_hex's own
+    accepted-forms text unchanged. Callers must short-circuit the non-color
+    sentinels (``"none"``, ``"transparent"``, ``"theme:label"``) before
+    calling this function — each raises here by design (``"none"``/
     ``"transparent"`` with to_hex's sentinel-aware clearing-paint message,
     ``"theme:label"`` with the generic accepted-forms text), matching
-    to_hex's behavior.
+    to_hex's behavior. This mark-kwarg call site already restricts *value*
+    to ``str`` before calling (see its own ``isinstance`` guard), so it
+    leaves ``validate_color_value``'s ``require_str`` at its default
+    ``False`` -- unlike ``configure.py``'s config-surface fields, which
+    request it to refuse a structurally-valid-to-``to_hex`` non-``str``
+    (e.g. an RGB(A) tuple) at construction.
 
-    The import is lazy (inside this function, not at module load time) to
-    avoid a module-init-order dependency on ``ferrum.color``, but it is not
-    guarded: ``ferrum.marks.base`` cannot be reached without
-    ``ferrum._core`` already having loaded (``ferrum/__init__.py`` imports
-    it unconditionally before anything else), so ``ferrum.color`` — whose
-    only import is ``ferrum._core`` — is always importable by the time this
-    runs. If that ever stops being true (e.g. a stale compiled extension
-    missing ``parse_color_to_hex``), that is a real build/environment
-    defect and must fail loudly here, not silently disable this batch's
-    "bad colors fail at construction" guarantee.
+    The ``ferrum.color`` import is lazy (inside this function, not at
+    module load time) to avoid a module-init-order dependency: ``ferrum.marks.base``
+    cannot be reached without ``ferrum._core`` already having loaded
+    (``ferrum/__init__.py`` imports it unconditionally before anything
+    else), so ``ferrum.color`` — whose only import is ``ferrum._core`` — is
+    always importable by the time this runs.
     """
     from ferrum.color import to_hex
 
-    try:
-        to_hex(value)
-    except ValueError as exc:
-        raise ValueError(f"mark_{mark_name}: {key}={value!r} is not a valid color ({exc})") from exc
+    validate_color_value(f"mark_{mark_name}: {key}", value, to_hex)
 
 
 class MarkBase:

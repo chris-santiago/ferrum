@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import threading
 
+import pytest
+
 import ferrum
 
 
@@ -95,7 +97,14 @@ class TestToHexAlpha:
 
     def test_alpha_endpoints(self):
         assert ferrum.color.to_hex((1.0, 0.0, 0.0, 0.0)) == "#ff000000"
-        assert ferrum.color.to_hex((1.0, 0.0, 0.0, 1.0)) == "#ff0000ff"
+        # Close-remediation cycle 2 (#122 residual): fully-opaque alpha
+        # normalizes away on EVERY input form, tuple included -- matching
+        # the string path (`to_hex("#ff0000ff") == "#ff0000"`, unchanged)
+        # rather than keeping `ff` just because a 4th component was
+        # structurally present. This was re-aimed deliberately: before this
+        # fix the tuple form answered "#ff0000ff" here, which was the
+        # cross-form divergence the intent reviewer's #122 re-check caught.
+        assert ferrum.color.to_hex((1.0, 0.0, 0.0, 1.0)) == "#ff0000"
 
     def test_three_component_tuple_unaffected(self):
         # No 4th component: output stays the plain 6-digit form (byte-identical
@@ -123,6 +132,47 @@ class TestToHexAlpha:
 
         with pytest.raises(ValueError, match="numeric"):
             ferrum.color.to_hex((1.0, 0.0, 0.0, "opaque"))
+
+
+class TestToHexOpaqueAlphaUnified:
+    """Close-remediation cycle 2 (#122 residual): fully-opaque alpha must
+    normalize away identically on every input form -- tuple, hex string,
+    and ``rgba()`` string -- restoring the "one keep-alpha rule shared by
+    both input forms" the docstring already promised and making
+    ``to_hex`` idempotent over its own output. Before this fix, only the
+    string forms elided a fully-opaque alpha; a 4-component tuple kept
+    ``ff`` (an arity-based rule diverging from the string path's
+    value-based rule)."""
+
+    _OPAQUE_FORMS = [
+        (255, 0, 0, 255),
+        (1.0, 0.0, 0.0, 1.0),
+        "#ff0000ff",
+        "#f00f",
+        "rgba(255,0,0,1)",
+        "rgba(255,0,0,1.0)",
+    ]
+
+    @pytest.mark.parametrize("value", _OPAQUE_FORMS)
+    def test_every_opaque_form_elides_alpha(self, value):
+        # No explicit scale=: the (255, 0, 0, 255) tuple auto-infers "byte"
+        # (a component > 1) and (1.0, 0.0, 0.0, 1.0) auto-infers "unit" --
+        # passing scale="byte" for both would misinterpret the unit tuple.
+        assert ferrum.color.to_hex(value) == "#ff0000"
+
+    @pytest.mark.parametrize("value", _OPAQUE_FORMS)
+    def test_idempotent_over_own_output(self, value):
+        once = ferrum.color.to_hex(value)
+        twice = ferrum.color.to_hex(once)
+        assert once == twice == "#ff0000"
+
+    def test_non_opaque_alpha_still_kept_on_both_forms(self):
+        # Regression guard: the opaque-elision fix must not touch the
+        # non-opaque case, which both forms already agreed on.
+        assert ferrum.color.to_hex((255, 0, 0, 128), scale="byte") == "#ff000080"
+        assert ferrum.color.to_hex("rgba(255,0,0,0.5)") == "#ff000080"
+        assert ferrum.color.to_hex((255, 0, 0, 254), scale="byte") == "#ff0000fe"
+        assert ferrum.color.to_hex("#ff0000fe") == "#ff0000fe"
 
 
 class TestSequential:

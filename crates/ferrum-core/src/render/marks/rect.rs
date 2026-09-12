@@ -484,7 +484,34 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
     // keeps the cell size its complete siblings have.
     let (cell_w, cell_h) = match (ctx.scales.x.bandwidth(), ctx.scales.y.bandwidth()) {
         (Some(w), Some(h)) => (w, h),
-        _ => return Ok(empty_result()),
+        (x_bw, y_bw) => {
+            // #118 remainder (wave-1 close remediation, intent-review
+            // finding): a heatmap cell is the band on BOTH axes, so a
+            // heatmap needs both x and y resolved to an ordinal scale —
+            // `mark_rect().encode(x=<ordinal>, y=<continuous>)` (no y2) or
+            // `mark_rect().encode(x=<continuous>, y=<continuous>)` are both
+            // presence-legal (`validate_mark_encoding` already passed them)
+            // and used to draw zero cells with zero diagnostics, the exact
+            // shape `MarkBuildResult::empty_reason`'s own doc reserves
+            // `Some` for. Mirrors `build_ordinal_range`'s own (already-named)
+            // bandwidth gate above, naming which axis/axes resolved
+            // continuous instead.
+            let reason = match (x_bw.is_some(), y_bw.is_some()) {
+                (false, false) => "mark_rect() needs an ordinal x and y axis to size its \
+                                   cells, but both resolved scales are continuous"
+                    .to_string(),
+                (false, true) => "mark_rect() needs an ordinal x and y axis to size its \
+                                  cells, but the resolved x scale is continuous"
+                    .to_string(),
+                (true, false) => "mark_rect() needs an ordinal x and y axis to size its \
+                                  cells, but the resolved y scale is continuous"
+                    .to_string(),
+                (true, true) => unreachable!(
+                    "both bandwidths Some was already matched by the arm above"
+                ),
+            };
+            return Ok(MarkBuildResult::empty_because(MarkBatchKind::Rect, reason));
+        }
     };
 
     let (color_strings, color_numeric) = color_column_loader(ctx);
@@ -2179,5 +2206,92 @@ mod tests {
             matches!(&err, crate::render::RenderError::UnknownColumn { name } if name == "nope"),
             "expected UnknownColumn naming 'nope'; got {err:?}"
         );
+    }
+
+    // ── #118 remainder (wave-1 close remediation): build_heatmap's terminal
+    // fallback names its reason instead of blanking silently ────────────
+
+    /// `mark_rect().encode(x=<ordinal>, y=<continuous>)` with no `y2` is
+    /// presence-legal (`validate_mark_encoding` passes it) and dispatches to
+    /// `build_heatmap` (no x2/y2 bound), but a heatmap cell needs a band on
+    /// BOTH axes — before this fix it silently drew zero cells. `x` resolves
+    /// ordinal, `y` resolves continuous, so exactly the y scale is named.
+    #[test]
+    fn rect_heatmap_ordinal_x_continuous_y_names_the_continuous_axis() {
+        use arrow::array::Float64Array;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let result = super::build(&ctx).unwrap();
+        assert!(result.nodes.is_empty(), "a continuous y axis cannot size a heatmap cell");
+        let reason = result.empty_reason.expect(
+            "an ordinal-x/continuous-y heatmap must name why it drew nothing, not blank silently",
+        );
+        assert!(reason.0.contains("y scale is continuous"), "{}", reason.0);
+    }
+
+    /// Both axes continuous (e.g. `mark_rect().encode(x=<continuous>,
+    /// y=<continuous>)`) is the other presence-legal, silently-blank shape
+    /// the intent review found — names both scales.
+    #[test]
+    fn rect_heatmap_both_continuous_names_both_axes() {
+        use arrow::array::Float64Array;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![3.0, 4.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let result = super::build(&ctx).unwrap();
+        assert!(result.nodes.is_empty(), "two continuous axes cannot size a heatmap cell");
+        let reason = result.empty_reason.expect(
+            "a both-continuous heatmap must name why it drew nothing, not blank silently",
+        );
+        assert!(reason.0.contains("both resolved scales are continuous"), "{}", reason.0);
     }
 }

@@ -360,7 +360,9 @@ mod tests {
             TransformWarning::FallbackApplied {
                 transform: "Impute".into(),
                 group: Some("g=b".into()),
-                reason: "group has no non-null values; the whole column's mean was used instead"
+                // Not "group has no ..." — `Display`'s `Some(g)` arm already
+                // writes "group {g} " ahead of this text.
+                reason: "has no non-null values; the whole column's mean was used instead"
                     .into(),
             },
             TransformWarning::FallbackApplied {
@@ -421,6 +423,30 @@ mod tests {
             reason: "fewer than 2 usable points".into(),
         };
         assert!(!without_group.to_string().contains("group"));
+    }
+
+    /// Wave-1 close remediation (S1 finding): `FallbackApplied`'s `Some(g)`
+    /// Display arm writes `"group {g} {reason}"` — a `reason` clause that
+    /// ALSO starts with "the group" renders "group g=b the group has no ...",
+    /// doubling the word. The only literal `FallbackApplied` caller
+    /// (`impute.rs`) must phrase its group-scoped reasons to start with the
+    /// condition itself ("has no ...", not "the group has no ..."), and this
+    /// test pins the general contract: "group" must appear exactly once.
+    #[test]
+    fn fallback_applied_display_does_not_double_the_word_group() {
+        let w = TransformWarning::FallbackApplied {
+            transform: "Impute".into(),
+            group: Some("g=b".into()),
+            reason: "has no non-null/non-NaN values; the whole column's statistic was used \
+                     instead"
+                .into(),
+        };
+        let text = w.to_string();
+        assert_eq!(
+            text.matches("group").count(),
+            1,
+            "\"group\" must appear exactly once in: {text:?}"
+        );
     }
 
     /// The keystone gotcha the design doc calls out: `apply_transforms_named`

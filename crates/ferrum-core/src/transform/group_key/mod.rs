@@ -657,6 +657,60 @@ pub(crate) struct NullKeyCounts {
     pub n_rows: usize,
 }
 
+/// Maps a grouped transform's wire-facing `label` (the string every
+/// `group_partition_multi`/`validate_groupby_columns` caller already passes,
+/// used verbatim as the error-text prefix for THAT transform's other
+/// refusals — left untouched by this function and every one of its sixteen
+/// call sites) to the same Python-facing display vocabulary
+/// [`crate::transform::context::TransformWarning`]'s other three variants
+/// already use for their own `transform` field: the `TransformSpec` variant's
+/// own name (`"Smooth"`, `"Impute"`, `"Kde2D"`, ...), not the wire/type tag
+/// (`"stat_smooth"`, `"data_impute"`, `"stat_kde_2d"`, ...).
+///
+/// Wave-1 close remediation (S2 finding): before this map,
+/// `GroupKeyAllNull`'s `transform` field carried whatever `label` string its
+/// call site happened to pass — the wire tag for sixteen of seventeen
+/// call sites, but the bare Rust type name `"Robust"` for the seventeenth
+/// (`robust.rs`) — so one render's consecutive warnings could read
+/// `"data_impute: ..."` immediately followed by `"Impute: ..."` for the same
+/// transform. This map is the single place that translation happens, so
+/// `label` itself never needs to change (avoiding a much larger blast radius:
+/// every `validate_groupby_columns`/collision/error-text site that already
+/// prefixes its message with `label` verbatim, several of them pinned by
+/// existing tests).
+fn display_name_for_label(label: &str) -> &str {
+    match label {
+        "stat_bin" => "Bin",
+        "data_top_k" => "TopK",
+        "data_aggregate" => "DataAggregate",
+        "data_join_aggregate" => "JoinAggregate",
+        "stat_aggregate" => "Aggregate",
+        "data_density" => "DensityData",
+        "data_pivot" => "Pivot",
+        "stat_error_extent" => "ErrorExtent",
+        "stat_kde_2d" => "Kde2D",
+        "data_stack" => "DataStack",
+        "stat_violin" => "Violin",
+        "stat_box_stats" => "BoxStats",
+        "stat_outliers" => "Outliers",
+        "stat_summary" => "Summary",
+        "stat_smooth" => "Smooth",
+        "stat_kde" => "Kde",
+        "data_impute" => "Impute",
+        "data_window" => "DataWindow",
+        // `robust.rs` already passes the Python-facing name as its `label`
+        // (unlike its sixteen siblings, which pass the wire tag) — identity,
+        // not a gap in this table.
+        "Robust" => "Robust",
+        // Unmapped labels (a future grouped transform whose call site was
+        // added here but not to this table) fall back to the raw label
+        // rather than panicking — display-only, so degrading to the wire
+        // name is a visible reminder to extend this table, not a correctness
+        // bug.
+        other => other,
+    }
+}
+
 /// Emit GH #197's all-null-group-key warning if this request degraded to "no
 /// grouping happened".
 ///
@@ -685,7 +739,7 @@ pub(crate) fn warn_if_group_keys_all_null(
         return;
     }
     warn_ctx.warn(TransformWarning::GroupKeyAllNull {
-        transform: label.to_string(),
+        transform: display_name_for_label(label).to_string(),
         columns: group_cols.join(", "),
         disposition: null_keys.all_null_disposition().to_string(),
     });

@@ -11,7 +11,12 @@ from typing import Any
 
 from ferrum._configure_mixin import _MISSING, _resolve_band_alias
 from ferrum._title_sentinel import _UNSET, TitleParam, is_unspecified, serialize_title
-from ferrum._validate import validate_choice, validate_fraction_value, validate_pixel_value
+from ferrum._validate import (
+    validate_choice,
+    validate_color_value,
+    validate_fraction_value,
+    validate_pixel_value,
+)
 from ferrum.axis import validate_label_overlap
 from ferrum.legend import validate_legend_direction, validate_legend_orient
 
@@ -106,25 +111,24 @@ def _validate_config_color(owner: str, field: str, value: str | None) -> None:
     construction-time gate that makes that silent keep unreachable from the
     typed Python API; the Rust fallbacks stay in place as an inert belt.
 
-    This is the same construction-time shape as
-    ``marks.base._validate_literal_color`` — a thin wrapper around
-    :func:`ferrum.color.to_hex` (ferrum's single Rust color parser), lazily
-    imported for the same module-init-order reason documented there. It
-    does not accept ``"none"``/``"transparent"``/``"theme:label"`` as
-    sentinels; those are mark/selection-boundary concepts, not something any
-    of these five config surfaces gives special meaning to (the one
-    documented exception, ``GridConfig.band_colors``' own ``"transparent"``
-    skip, is handled by its caller, not here — see
-    :func:`_validate_config_band_colors`).
+    A thin, label-composing wrapper over :func:`ferrum._validate.validate_color_value`
+    (close-remediation, batch F) — the shared gate ``marks.base._validate_literal_color``
+    also composes over, so the two independently hand-copied ``try:
+    to_hex(...) except ValueError: raise ValueError(...)`` bodies collapsed
+    into one. ``require_str=True`` here because these five fields are typed
+    ``str | None``: an RGB(A) *tuple* is structurally acceptable to
+    ``to_hex`` but must still refuse at this construction-time boundary
+    (naming this class and field) rather than reach the wire and fail there
+    with a serde message naming neither (#107 residual). This function does
+    not accept ``"none"``/``"transparent"``/``"theme:label"`` as sentinels;
+    those are mark/selection-boundary concepts, not something any of these
+    five config surfaces gives special meaning to (the one documented
+    exception, ``GridConfig.band_colors``' own ``"transparent"`` skip, is
+    handled by its caller, not here — see :func:`_validate_config_band_colors`).
     """
-    if value is None:
-        return
     from ferrum.color import to_hex
 
-    try:
-        to_hex(value)
-    except ValueError as exc:
-        raise ValueError(f"{owner}.{field}={value!r} is not a valid color ({exc})") from exc
+    validate_color_value(f"{owner}.{field}", value, to_hex, require_str=True)
 
 
 def _validate_config_band_colors(owner: str, field: str, values: list[str] | None) -> None:

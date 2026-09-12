@@ -257,19 +257,15 @@ impl TransformSpec {
         batch: &RecordBatch,
         ctx: &TransformContext,
     ) -> PyResult<RecordBatch> {
-        // Default: ignore context and forward to existing apply().
         // The macro arm enumerates the variants whose context-override has the
         // standard `apply_with_context(s, batch, ctx)` signature. Reorder has a
         // different signature (`apply_with_outputs(s, batch, &named_outputs)`),
-        // so it stays explicit alongside the default fallback.
+        // so it stays explicit alongside them.
         //
         // `Smooth` was added in batch-D T9 round 3: its rank-deficiency
         // refusal needs `ctx.is_partition` to tell a genuine whole-frame call
         // apart from one facet panel of a larger frame (see
-        // `smooth::apply_one_group`'s degenerate-input policy doc). Without
-        // this arm, `TransformContext` would be constructed and threaded all
-        // the way to `apply_with_context` and then silently dropped at the
-        // `_ => self.apply(batch)` fallback below.
+        // `smooth::apply_one_group`'s degenerate-input policy doc).
         //
         // `Robust`/`RegressionData`/`LoessData`/`Kde`/`LetterValue`/`Impute`
         // were added for the #162 degrade-warning channel: each needs
@@ -287,13 +283,40 @@ impl TransformSpec {
         // one's `apply` is now a forwarder to its own `apply_with_context`, so
         // omitting an arm here would silently drop that transform's warnings
         // and nothing else — which is exactly the silence this wave removes.
+        //
+        // Wave-1 close remediation (S3-2): the remaining variants have no
+        // context-dependent behavior at all (no groupby, no per-group fit, no
+        // named-output lookup), so they forward to `apply(batch)` unchanged —
+        // but each is now spelled out explicitly instead of hiding behind a
+        // `_` wildcard. A `_` arm silently drops warnings for any FUTURE
+        // transform added to `TransformSpec` that needs `ctx` but whose arm a
+        // human forgot to add above; spelling every remaining variant here
+        // makes that omission a compile error instead — the day a new variant
+        // is added to the enum, this match stops being exhaustive until an
+        // arm decides, explicitly, whether it needs `ctx` or not.
         macro_rules! arm {
             ($($V:ident => $m:ident,)*) => {
                 match self {
                     $( Self::$V(s) => crate::transform::$m::apply_with_context(s, batch, ctx), )*
                     Self::Reorder(s) => crate::transform::reorder::apply_with_outputs(
                         s, batch, Some(&ctx.named_outputs)),
-                    _ => self.apply(batch),
+                    Self::Bin2D(_)
+                    | Self::Contour(_)
+                    | Self::Qq(_)
+                    | Self::Linkage(_)
+                    | Self::Hex(_)
+                    | Self::Unpivot(_)
+                    | Self::ReferenceLine(_)
+                    | Self::Logistic(_)
+                    | Self::Glm(_)
+                    | Self::Identity(_)
+                    | Self::Filter(_)
+                    | Self::Calculate(_)
+                    | Self::Fold(_)
+                    | Self::Flatten(_)
+                    | Self::Sample(_)
+                    | Self::TimeUnit(_)
+                    | Self::DataBin(_) => self.apply(batch),
                 }
             };
         }

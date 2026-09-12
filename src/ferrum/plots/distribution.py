@@ -735,6 +735,16 @@ def _catplot_ci_level(ci: Any, n_boot: Any) -> float:
     return ci_percent / 100.0
 
 
+# The short type codes (`Channel.option("type")`) whose scale is continuous
+# -- "Q" (quantitative) and "T" (temporal) -- and therefore has no discrete
+# legend order for `hue_order=` to apply. "N" (nominal) and "O" (ordinal)
+# both resolve to discrete scales and are excluded here on purpose: an
+# explicit `type_="ordinal"`/`"nominal"` hue channel + `hue_order=` is the
+# honored, byte-identical path (`test_catplot_channel_object_hue_explicit_type_honored_with_hue_order`).
+_CATPLOT_CONTINUOUS_HUE_TYPES = frozenset({"Q", "T"})
+_CATPLOT_TYPE_CODE_NAMES = {"Q": "quantitative", "T": "temporal"}
+
+
 def _catplot_cat_field_parts(cat_field: Any) -> tuple[str | None, str | None, dict]:
     """Split catplot's category-channel argument into name / explicit type / kwargs.
 
@@ -1683,6 +1693,23 @@ def _catplot_build(
     color_channel = None
     if hue_name is not None:
         if hue_order is not None:
+            # An explicit continuous type ("Q"/"T") is honored verbatim by
+            # the pass-through rule above, but `sort=` on a continuous
+            # scale is not a statement that scale can act on -- there is
+            # no discrete legend order for it to reorder. The two knobs
+            # contradict each other, so refuse rather than silently drop
+            # `hue_order=` (#190 residual: this combination used to raise
+            # `TypeError` before the #190 hardening; converting it to a
+            # silent accept-and-drop violated the standing refuse-or-warn
+            # policy).
+            if hue_explicit_type in _CATPLOT_CONTINUOUS_HUE_TYPES:
+                raise ValueError(
+                    f"catplot(hue=fm.Color({hue_name!r}, type_=...), hue_order=...): "
+                    f"hue_order= cannot order a {_CATPLOT_TYPE_CODE_NAMES[hue_explicit_type]} "
+                    "hue channel -- there is no discrete legend order for a continuous "
+                    "scale to apply. Drop hue_order=, or type the channel nominal/ordinal "
+                    "(e.g. type_='nominal') so hue_order= has levels to order."
+                )
             color_kwargs = dict(hue_kwargs)
             if hue_explicit_type is None:
                 color_kwargs["type_"] = "nominal"

@@ -342,7 +342,12 @@ class TestMarkRasterFloat64Probe:
         svg = fm.Chart(df).mark_raster(aggregate="mean", field="v").encode(x="x", y="y").to_svg()
         assert "<svg" in svg
 
-    def test_non_numeric_field_column_still_raises_at_render(self):
+    def test_non_numeric_field_column_now_raises_at_call_time(self):
+        """Close-remediation (#136 residual): when the Chart already carries
+        data, a non-numeric field= is answerable at mark_raster() call time,
+        not deferred to the Rust `stat_raster` transform at render. This
+        used to raise only at `.to_svg()`; it now raises before `.encode()`
+        is even called."""
         df = pl.DataFrame(
             {
                 "x": [1.0, 2.0, 3.0, 1.5],
@@ -350,6 +355,109 @@ class TestMarkRasterFloat64Probe:
                 "v": ["a", "b", "c", "d"],
             }
         )
-        chart = fm.Chart(df).mark_raster(aggregate="mean", field="v").encode(x="x", y="y")
         with pytest.raises(ValueError, match="numeric"):
-            chart.to_svg()
+            fm.Chart(df).mark_raster(aggregate="mean", field="v")
+
+    def test_absent_field_column_now_raises_at_call_time(self):
+        """Sibling to the non-numeric case: a field= naming a column the
+        data doesn't have is answerable eagerly too (#136 residual)."""
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 1.5],
+                "y": [1.0, 2.0, 3.0, 1.2],
+            }
+        )
+        with pytest.raises(ValueError, match="not a column"):
+            fm.Chart(df).mark_raster(aggregate="mean", field="nosuch")
+
+    def test_deferred_data_chart_skips_field_check_gracefully(self):
+        """A Chart with no data yet (Chart(None)) has nothing to check
+        field= against -- the eager check must not raise for a chart whose
+        data isn't attached yet, matching
+        `test_valid_combination_does_not_raise_at_call_time`."""
+        fm.Chart(None).mark_raster(aggregate="mean", field="v")
+
+    def test_inert_field_on_count_aggregate_is_not_checked(self):
+        """field= is genuinely inert for aggregate="count"/"density"/"any"
+        (dropped before the substitution, per the docstring) -- the eager
+        check must not fire for it even when the named column doesn't
+        exist or isn't numeric."""
+        df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "v": ["a", "b"]})
+        fm.Chart(df).mark_raster(aggregate="count", field="v")
+        fm.Chart(df).mark_raster(aggregate="count", field="nosuch")
+
+
+class TestMarkRasterLazyFrameSchemaProbe:
+    """Close-remediation cycle 2 (design-review S3): the #136 eager
+    field= check must answer from a LazyFrame's SCHEMA, never by
+    materializing it -- a chart-declaration method (mark_raster()) must
+    stay as free on lazy data as mark_point() is, and must never let an
+    untyped, non-ferrum exception (e.g. a bare FileNotFoundError from a
+    missing scan path) escape from a public builder.
+    """
+
+    def _big_lazyframe_with_slow_udf(self, n: int = 50_000) -> "pl.LazyFrame":
+        # A python-level map_elements is slow enough (a fraction of a
+        # millisecond per row) that if collect_schema() actually executed
+        # the query plan, this test would take seconds instead of
+        # milliseconds -- proving "no materialization" by elapsed time,
+        # not by mocking internals.
+        import time
+
+        def _slow(x):
+            time.sleep(0.0001)
+            return x
+
+        df = pl.DataFrame(
+            {
+                "x": list(range(n)),
+                "y": list(range(n)),
+                "v": ["a"] * n,
+                "n": [1] * n,
+            }
+        )
+        return df.lazy().with_columns(pl.col("n").map_elements(_slow, return_dtype=pl.Int64))
+
+    def test_lazyframe_eager_check_does_not_materialize(self):
+        import time
+
+        lf = self._big_lazyframe_with_slow_udf()
+        t0 = time.monotonic()
+        fm.Chart(lf).mark_raster(aggregate="mean", field="n")
+        elapsed = time.monotonic() - t0
+        # The slow UDF alone would take >1s over 50k rows if executed;
+        # collect_schema() must resolve the schema without touching it.
+        assert elapsed < 0.5, f"mark_raster() took {elapsed:.3f}s -- looks materialized"
+
+    def test_lazyframe_non_numeric_field_still_refuses_eagerly(self):
+        """The eager check must still WORK for a lazy source whose schema
+        resolves cleanly -- collect_schema() is 0-cost, not a reason to
+        skip validation altogether."""
+        lf = self._big_lazyframe_with_slow_udf()
+        with pytest.raises(ValueError, match="numeric"):
+            fm.Chart(lf).mark_raster(aggregate="mean", field="v")
+
+    def test_lazyframe_missing_field_still_refuses_eagerly(self):
+        lf = self._big_lazyframe_with_slow_udf()
+        with pytest.raises(ValueError, match="not a column"):
+            fm.Chart(lf).mark_raster(aggregate="mean", field="nosuch")
+
+    def test_lazyframe_over_missing_file_does_not_raise_at_declaration(self):
+        """A LazyFrame whose schema resolution itself fails (e.g. a scan
+        over a nonexistent path) must skip the eager check gracefully --
+        mark_raster() must construct fine, exactly like mark_point() does,
+        deferring to render time as before this eager check existed."""
+        missing_lf = pl.scan_parquet("/tmp/does-not-exist-xyz-close-remediation.parquet")
+        # Must not raise FileNotFoundError (or any exception) here.
+        chart = fm.Chart(missing_lf).mark_raster(aggregate="mean", field="v")
+        assert chart is not None
+
+    def test_eager_dataframe_field_checks_unaffected(self):
+        """Sibling guard: the schema-probe refactor must not change
+        behavior for the already-materialized (non-lazy) case."""
+        df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "v": ["a", "b"], "n": [1, 2]})
+        with pytest.raises(ValueError, match="numeric"):
+            fm.Chart(df).mark_raster(aggregate="mean", field="v")
+        with pytest.raises(ValueError, match="not a column"):
+            fm.Chart(df).mark_raster(aggregate="mean", field="nosuch")
+        fm.Chart(df).mark_raster(aggregate="mean", field="n")

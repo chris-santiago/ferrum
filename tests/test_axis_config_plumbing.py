@@ -1084,6 +1084,35 @@ class TestConfigSurfaceColorRefusal:
     def test_valid_color_still_constructs(self, ctor, kwargs):
         assert ctor(**kwargs).to_dict()
 
+    @pytest.mark.parametrize(
+        ("ctor", "kwargs"),
+        [
+            (fm.AxisConfig, {"label_color": (1.0, 0.0, 0.0)}),
+            (fm.LegendConfig, {"label_color": (255, 0, 0)}),
+            (fm.TitleConfig, {"color": (1.0, 0.0, 0.0, 0.5)}),
+            (fm.GridAxisConfig, {"color": (0, 0, 0)}),
+            (fm.GridConfig, {"color": (0, 128, 0)}),
+        ],
+        ids=[
+            "AxisConfig.label_color",
+            "LegendConfig.label_color",
+            "TitleConfig.color",
+            "GridAxisConfig.color",
+            "GridConfig.color",
+        ],
+    )
+    def test_rgb_tuple_refuses_at_construction_not_the_wire(self, ctor, kwargs):
+        """Close-remediation (design-review S2): these fields are typed
+        ``str | None``, and ``to_hex`` happens to accept RGB(A) *tuples*
+        structurally -- so before this fix, a tuple passed the #107 gate,
+        serialized onto the wire, and failed there with a serde message
+        naming neither the class nor the field
+        (``ValueError: chart_config: invalid type: sequence, expected a
+        string ...``). It must now refuse at construction, naming the
+        class and field, exactly like an unparseable string does."""
+        with pytest.raises(ValueError, match="must be a color string"):
+            ctor(**kwargs)
+
     def test_grid_config_nested_x_mapping_color_refuses_too(self):
         """The mapping spelling of `GridConfig(x=...)` normalizes into a
         `GridAxisConfig`, so it must meet the identical color refusal, not

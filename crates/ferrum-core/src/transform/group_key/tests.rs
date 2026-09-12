@@ -670,7 +670,9 @@ fn all_null_group_keys_warn_once_naming_columns_and_disposition() {
     let warnings = ctx.warnings.borrow();
     assert_eq!(warnings.len(), 1, "exactly one warning, not one per row");
     let text = warnings[0].to_string();
-    assert!(text.contains("stat_summary"), "names the transform: {text}");
+    // "Summary", not the wire tag "stat_summary" — wave-1 close remediation
+    // (`display_name_for_label`).
+    assert!(text.contains("Summary"), "names the transform: {text}");
     assert!(text.contains('g'), "names the groupby column: {text}");
     assert!(
         text.contains("the grouped output is empty"),
@@ -697,6 +699,63 @@ fn all_null_warning_disposition_follows_the_policy() {
     assert!(mk(NullKeyPolicy::SkipWithWholeBatchFallback)
         .contains("the whole batch was used as one ungrouped computation instead"));
     assert!(mk(NullKeyPolicy::Pool).contains("all rows were treated as one unlabeled group"));
+}
+
+/// Wave-1 close remediation (S2 finding): `GroupKeyAllNull`'s `transform`
+/// field must use the same Python-facing vocabulary
+/// `DegenerateFit`/`ParameterClamped`/`FallbackApplied` already use (the
+/// `TransformSpec` variant's own name), not the wire/type tag every
+/// `group_partition_multi` call site passes as `label` for its OWN error
+/// text. One render used to say `"data_impute: ..."` immediately followed by
+/// `"Impute: ..."` for the SAME transform; this test pins every current
+/// call site's mapping so a sixteenth silent mismatch (`robust.rs`'s
+/// pre-fix "Robust" vs. its siblings' wire tags) cannot recur unnoticed.
+#[test]
+fn group_key_all_null_warning_uses_the_python_facing_name_not_the_wire_tag() {
+    pyo3::Python::initialize();
+    let mk_transform = |label: &str| {
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![None, None] as Vec<Option<i64>>));
+        let batch = batch_with_group(col);
+        let ctx = TransformContext::default();
+        group_partition_multi(&batch, &["g".to_string()], label, NullKeyPolicy::Skip, &ctx)
+            .unwrap();
+        let warnings = ctx.warnings.borrow();
+        match &warnings[0] {
+            crate::transform::context::TransformWarning::GroupKeyAllNull { transform, .. } => {
+                transform.clone()
+            }
+            other => panic!("expected GroupKeyAllNull, got {other:?}"),
+        }
+    };
+    let cases = [
+        ("stat_bin", "Bin"),
+        ("data_top_k", "TopK"),
+        ("data_aggregate", "DataAggregate"),
+        ("data_join_aggregate", "JoinAggregate"),
+        ("stat_aggregate", "Aggregate"),
+        ("data_density", "DensityData"),
+        ("data_pivot", "Pivot"),
+        ("stat_error_extent", "ErrorExtent"),
+        ("stat_kde_2d", "Kde2D"),
+        ("data_stack", "DataStack"),
+        ("stat_violin", "Violin"),
+        ("stat_box_stats", "BoxStats"),
+        ("stat_outliers", "Outliers"),
+        ("stat_summary", "Summary"),
+        ("stat_smooth", "Smooth"),
+        ("stat_kde", "Kde"),
+        ("data_impute", "Impute"),
+        ("data_window", "DataWindow"),
+        // `robust.rs` already passes the display name as `label` (the
+        // odd one out among its siblings) — identity, not a gap.
+        ("Robust", "Robust"),
+    ];
+    for (label, expected) in cases {
+        assert_eq!(
+            mk_transform(label), expected,
+            "label {label:?} must map to display name {expected:?}"
+        );
+    }
 }
 
 /// The warning is for the ALL-null case only: a column with even one usable

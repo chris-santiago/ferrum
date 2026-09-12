@@ -46,6 +46,31 @@ Four independent predicates live here today:
   ``gap`` (a single pair or a list of pairs) — the numeric-pair analog of
   ``validate_fraction_value``'s single-value contract.
 
+- ``validate_color_value`` (close-remediation, batch F) is the "literal
+  color contract": a color-bearing value must be parseable by the caller's
+  color parser (``ferrum.color.to_hex`` in every current caller). It
+  replaces two independently hand-copied gates that were the same six-line
+  ``try: to_hex(value) except ValueError: raise ValueError(<label> +
+  str(exc))`` body — ``marks.base._validate_literal_color`` and
+  ``configure._validate_config_color`` — differing only in how each
+  composes its own label prefix and whether the surface additionally
+  requires ``str`` before parsing (``configure.py``'s five config
+  dataclasses are typed ``str | None`` and must refuse a non-``str``, e.g.
+  an RGB(A) tuple, at construction rather than let it reach the wire and
+  fail there naming neither the class nor the field; ``marks/base.py``'s
+  caller already restricts to ``str`` before calling, so it leaves
+  ``require_str`` at its default). Both callers now compose their own
+  label (``f"{owner}.{field}"`` / ``f"mark_{mark_name}: {key}"``) and pass
+  it through unchanged, so each surface's exact historical message shape is
+  preserved byte-for-byte. The parser itself is passed in by the caller
+  (``parse_color=to_hex``) rather than imported here — this module's
+  zero-import leaf invariant (below) is not "no import of ``ferrum.color``",
+  it is "no import of anything under ``ferrum`` at all", pinned unconditionally
+  by ``tests/test_finding_p7.py::test_validate_module_is_a_leaf`` (an AST
+  walk that catches a lazy, function-body import exactly as readily as a
+  module-level one) — so this function stays a pure predicate over
+  caller-supplied inputs instead of reaching for ``ferrum.color`` itself.
+
 Each is a small, self-contained predicate with no shared machinery between
 them — this module is a landing spot for that shape of helper, not a
 general utility dump; a new addition should be a comparably minimal,
@@ -53,13 +78,16 @@ zero-import validation predicate, not accreted business logic.
 
 This is a leaf module: it imports nothing from ``ferrum``, matching the
 ``_warn``/``_metrics_fmt`` convention, so any part of the package can depend
-on it without inverting the dependency graph.
+on it without inverting the dependency graph. ``validate_color_value``
+needs a color parser to do its job but keeps the invariant intact by taking
+one as a parameter (``parse_color``) instead of importing ``ferrum.color``
+itself, even lazily.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Callable
 
 
 def is_none_color_sentinel(value: str) -> bool:
@@ -231,3 +259,63 @@ def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> None:
         raise ValueError(
             f"{label}: start ({start!r}) must be less than end ({end!r}); got ({start!r}, {end!r})"
         )
+
+
+def validate_color_value(
+    label: str,
+    value: Any,
+    parse_color: Callable[[Any], Any],
+    *,
+    require_str: bool = False,
+) -> None:
+    """Raise ``ValueError`` if *value* is not a color *parse_color* accepts.
+
+    *parse_color* is the caller-supplied color parser -- every current
+    caller passes ``ferrum.color.to_hex`` (ferrum's single Rust color
+    parser). It is a parameter rather than an import performed here because
+    this module is a zero-import leaf (see the module docstring); the
+    caller already needs ``to_hex`` for other reasons and simply forwards
+    it, so no caller pays a new import to use this function.
+
+    This function is a thin construction-time gate around *parse_color*,
+    shared by every literal-color-bearing surface in the package instead of
+    each hand-copying the same ``try/except`` body. *label* is a
+    pre-composed description of the field being checked -- e.g.
+    ``f"{owner}.{field}"`` (``configure.py``'s five config dataclasses) or
+    ``f"mark_{mark_name}: {key}"`` (``marks/base.py``'s literal fill/stroke
+    gate) -- so each caller keeps its own historical message shape; this
+    function owns only the check itself.
+
+    ``None`` always passes (the caller's "unset" sentinel, matching this
+    module's other predicates). Non-color sentinels ("none"/"transparent"/
+    "theme:label") are NOT special-cased here: each existing caller already
+    short-circuits its own sentinel vocabulary before calling this function
+    (``marks/base.py``'s literal-color call site checks ``_is_paint_sentinel``
+    first; ``configure.py``'s config surfaces have no sentinel vocabulary of
+    their own), so a sentinel that reaches this function raises exactly as
+    *parse_color* itself would.
+
+    ``require_str=True`` additionally refuses any non-``str`` *value* before
+    ever calling *parse_color* -- ``configure.py``'s config-surface fields
+    are typed ``str | None``, and without this gate a value ``to_hex``
+    happens to accept structurally (e.g. an RGB(A) tuple) would pass
+    construction, serialize a tuple onto the wire, and fail there with a
+    serde message naming neither the class nor the field (#107 residual).
+    ``marks/base.py``'s caller already restricts to ``str`` before calling
+    (see its own ``isinstance`` guard), so it leaves this at the default
+    ``False``.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not a ``str`` when ``require_str=True``, or if
+        ``parse_color(value)`` itself raises ``ValueError``.
+    """
+    if value is None:
+        return
+    if require_str and not isinstance(value, str):
+        raise ValueError(f"{label}={value!r} must be a color string, not {type(value).__name__}")
+    try:
+        parse_color(value)
+    except ValueError as exc:
+        raise ValueError(f"{label}={value!r} is not a valid color ({exc})") from exc

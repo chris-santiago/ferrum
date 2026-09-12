@@ -2397,7 +2397,9 @@ mod tests {
         assert_eq!(out.num_rows(), 0);
         let warnings = ctx.warnings.borrow();
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert!(warnings[0].to_string().contains("stat_bin"), "{:?}", warnings[0]);
+        // "Bin", not the wire tag "stat_bin" — wave-1 close remediation
+        // (`display_name_for_label`).
+        assert!(warnings[0].to_string().contains("Bin"), "{:?}", warnings[0]);
     }
 
 }

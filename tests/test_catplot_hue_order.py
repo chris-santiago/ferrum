@@ -216,6 +216,52 @@ def test_catplot_channel_object_hue_explicit_type_honored_with_hue_order():
     assert _legend_label_order(svg)[:2] == ["Female", "Male"]
 
 
+def test_catplot_hue_order_with_explicit_quantitative_hue_raises():
+    """Close-remediation (#190 residual): an explicit continuous `type_=`
+    hue channel + `hue_order=` used to raise `TypeError` before the #190
+    hardening, then silently dropped `hue_order=` after it (a `sort=` a
+    continuous scale cannot honor) -- the standing policy admits only
+    refuse-malformed or warn-degraded, never silent accept-and-drop. This
+    combination must refuse, naming both `hue_order=` and the channel."""
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b", "a", "b"],
+            "val": [1.0, 2.0, 3.0, 4.0],
+            "h": [0.1, 0.2, 0.3, 0.4],
+        }
+    )
+    with pytest.raises(ValueError, match="hue_order"):
+        fm.catplot(
+            df,
+            x="cat",
+            y="val",
+            hue=fm.Color("h", type_="quantitative"),
+            hue_order=[2, 1],
+            kind="bar",
+        )
+
+
+def test_catplot_hue_order_with_explicit_temporal_hue_raises():
+    """Sibling of the quantitative case: temporal is also a continuous
+    scale with no discrete legend order for `hue_order=` to apply."""
+    df = pl.DataFrame(
+        {
+            "cat": ["a", "b", "a", "b"],
+            "val": [1.0, 2.0, 3.0, 4.0],
+            "t": pl.Series(["2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"]).str.to_date(),
+        }
+    )
+    with pytest.raises(ValueError, match="hue_order"):
+        fm.catplot(
+            df,
+            x="cat",
+            y="val",
+            hue=fm.Color("t", type_="temporal"),
+            hue_order=["2020-01-01"],
+            kind="bar",
+        )
+
+
 def test_nominal_color_channel_sort_kwarg_overrides_channel_object_sort():
     """Sibling defect closed alongside #190: `nominal_color_channel`'s early
     pass-through for an already-built channel object used to silently

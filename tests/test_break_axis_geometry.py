@@ -493,7 +493,9 @@ def test_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
     messages = [str(w.message) for w in caught]
     matches = [m for m in messages if "break" in m.lower() and "y axis" in m and "suppressed" in m]
     assert matches, f"expected a warning naming the annotation's axis; got {messages}"
-    assert len(matches) == 1, f"N suppressed instances must roll up into ONE warning; got {messages}"
+    assert len(matches) == 1, (
+        f"N suppressed instances must roll up into ONE warning; got {messages}"
+    )
 
 
 def test_boundary_value_annotation_is_not_suppressed():
@@ -756,7 +758,9 @@ def test_x_axis_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
     messages = [str(w.message) for w in caught]
     matches = [m for m in messages if "break" in m.lower() and "x axis" in m and "suppressed" in m]
     assert matches, f"expected a warning naming the annotation's axis; got {messages}"
-    assert len(matches) == 1, f"N suppressed instances must roll up into ONE warning; got {messages}"
+    assert len(matches) == 1, (
+        f"N suppressed instances must roll up into ONE warning; got {messages}"
+    )
 
 
 def _vert_line_xs(svg: str) -> collections.Counter:

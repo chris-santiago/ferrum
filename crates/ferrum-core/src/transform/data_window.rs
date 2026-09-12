@@ -1506,7 +1506,9 @@ mod tests {
         let warnings = ctx.warnings.borrow();
         assert_eq!(warnings.len(), 1, "one warning for the whole transform; got {warnings:?}");
         let text = warnings[0].to_string();
-        assert!(text.contains("data_window"), "names the transform: {text}");
+        // "DataWindow", not the wire tag "data_window" — wave-1 close
+        // remediation (`display_name_for_label`).
+        assert!(text.contains("DataWindow"), "names the transform: {text}");
         assert!(text.contains('g'), "names the groupby column: {text}");
         assert!(
             text.contains("all rows were treated as one unlabeled group"),

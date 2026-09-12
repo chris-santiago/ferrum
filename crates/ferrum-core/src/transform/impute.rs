@@ -228,8 +228,12 @@ pub(crate) fn apply_with_context(
             ctx.warn(TransformWarning::FallbackApplied {
                 transform: "Impute".into(),
                 group: Some(describe_group_keys(groupby, key)),
-                reason: "the group has no non-null/non-NaN values; the whole column's \
-                         statistic was used instead"
+                // `Display`'s `Some(g)` arm already renders `"group {g} "`
+                // ahead of this text (`"{transform}: group {g} {reason}"`),
+                // so this clause must not repeat "group" itself — it did
+                // ("group g=b the group has no ...") until this fix.
+                reason: "has no non-null/non-NaN values; the whole column's statistic was \
+                         used instead"
                     .into(),
             });
         }
@@ -245,9 +249,17 @@ pub(crate) fn apply_with_context(
     // value to keep this transform row-preserving, so it falls back to the
     // same whole-column statistic the ungrouped path would use. This never
     // triggers when `groupby` is empty (every row is in the one implicit
-    // group) or has no null keys. Reported once (not per row).
+    // group) or has no null keys. Reported once (not per row) — and only for
+    // the PARTIAL case (some, not all, rows null-keyed): when EVERY row is
+    // null-keyed (`null_keyed_rows == n_rows`), `group_partition_multi`
+    // already pushed `TransformWarning::GroupKeyAllNull` for this exact
+    // condition, whose `SkipWithWholeBatchFallback` disposition text ("the
+    // whole batch was used as one ungrouped computation instead") already
+    // says what this rollup would restate — reporting both reads as two
+    // problems for the one condition (wave-1 close remediation, reviewer
+    // finding).
     let null_keyed_rows = assigned.iter().filter(|&&a| !a).count();
-    if null_keyed_rows > 0 {
+    if null_keyed_rows > 0 && null_keyed_rows < n_rows {
         ctx.warn(TransformWarning::FallbackApplied {
             transform: "Impute".into(),
             group: None,
@@ -1519,6 +1531,13 @@ mod tests {
             TransformWarning::FallbackApplied { transform, group, .. }
                 if transform == "Impute" && group.as_deref() == Some("g=b")
         ));
+        // S1 finding (wave-1 close remediation): the rendered sentence must
+        // not say "group" twice ("group g=b the group has no ...").
+        let text = warnings[0].to_string();
+        assert_eq!(
+            text.matches("group").count(), 1,
+            "\"group\" must appear exactly once in: {text:?}"
+        );
     }
 
     /// A row whose groupby key is null falls back to the whole-column
@@ -1639,6 +1658,16 @@ mod tests {
         assert_eq!(filled.value(2), 15.0, "the null row takes the whole column's mean");
 
         let warnings = ctx.warnings.borrow();
+        // Wave-1 close remediation (reviewer finding): an all-null groupby
+        // key used to ALSO push a `FallbackApplied` from the null-keyed-row
+        // rollup below `GroupKeyAllNull` — the same condition reported
+        // twice. Exactly one warning total now: `GroupKeyAllNull` alone
+        // already says every row fell back to the whole-column statistic.
+        assert_eq!(
+            warnings.len(), 1,
+            "an all-null groupby key must push exactly one warning, not double-report the \
+             same condition; got {warnings:?}"
+        );
         let all_null: Vec<&TransformWarning> = warnings
             .iter()
             .filter(|w| matches!(w, TransformWarning::GroupKeyAllNull { .. }))
@@ -1653,4 +1682,9 @@ mod tests {
         );
     }
 
+    // Note: `impute_null_groupby_key_row_pushes_one_fallback_applied_warning`
+    // above already pins the genuinely PARTIAL case (2 of 4 rows null-keyed,
+    // not every row) — the all-null fix just above must not touch that path,
+    // since `null_keyed_rows < n_rows` there keeps the rollup's own warning
+    // live.
 }

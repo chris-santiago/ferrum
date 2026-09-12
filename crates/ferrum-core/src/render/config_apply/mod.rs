@@ -998,10 +998,16 @@ pub(in crate::render) fn apply_axis_style_to_axis_input(
 /// at all (`scale.temporal_tick_values` returns `None`) — this surface's own
 /// pre-existing time-detection predicate (`format_type == "time"`, unlike
 /// `prepare::apply_axis_format_or_thread`'s `is_time_format_spec`, which also
-/// tolerates an unset `format_type`) is kept as-is; only the resolved-scale
-/// refusal is added on top. A length-drift on a genuinely temporal scale
-/// (`Some` at a different length) keeps its pre-existing string-reparse
-/// fallback, unrefused. `channel` is `"x"`/`"y"` — this surface is EXEMPT
+/// tolerates an unset `format_type`) is kept as-is; the resolved-scale
+/// refusal itself is built by `prepare::refuse_time_format_on_non_temporal`,
+/// the same function `build_axis_tick_inputs`'s two mode arms call, at both
+/// of this function's own call sites (wave-1 close remediation, #133
+/// predicate-sharing finding) — so all four sites in the crate that can
+/// refuse a time-typed format on a non-temporal scale build the identical
+/// error, including `coord_flipped: false`, from one place. A length-drift
+/// on a genuinely temporal scale (`Some` at a different length) keeps its
+/// pre-existing string-reparse fallback, unrefused. `channel` is `"x"`/`"y"`
+/// — this surface is EXEMPT
 /// from the R3 un-flip correction (`coord_flipped` always `false`):
 /// `axis_x`/`axis_y`/`axis_y2` are resolved-slot vocabulary the user typed
 /// directly, never remapped under `CoordFlip`, matching
@@ -1020,25 +1026,44 @@ fn apply_label_format_to_axis(
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
         let fmt = axis.overrides.label_format.as_deref();
         if let Some(f) = fmt {
-            if is_time_type && scale.temporal_tick_values(tick_count).is_none() {
-                return Err(RenderError::TimeFormatOnNonTemporalScale {
-                    channel,
-                    format: f.to_string(),
-                    coord_flipped: false,
-                });
-            }
+            // #133 predicate sharing (wave-1 close remediation): the same
+            // refusal `prepare::build_axis_tick_inputs`'s two mode arms share.
+            prepare::refuse_time_format_on_non_temporal(
+                f,
+                format_type.as_deref(),
+                scale,
+                tick_count,
+                channel,
+            )?;
         }
         axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
         return Ok(());
     }
     let Some(fmt_str) = axis.overrides.label_format.clone() else { return Ok(()) };
     if is_time_type {
+        // #133 predicate sharing (wave-1 close remediation), cycle-2 N2 fix:
+        // check `temporal_tick_values` directly rather than routing through
+        // the shared refusal first and then re-deriving it via `.expect()`
+        // — that coupling held today (the helper's own condition is
+        // `format_type == Some("time") && temporal_tick_values(..).is_none()`,
+        // the exact branch below) but turned a typed `RenderError` into a
+        // panic across the PyO3 boundary the moment the two checks could
+        // ever drift. `refuse_time_format_on_non_temporal` is now called
+        // ONLY in the `None` arm, to build the identical shared error (same
+        // predicate, same `coord_flipped: false` discipline as the
+        // `tick_values` branch above and `build_axis_tick_inputs`'s two
+        // mode arms) — its `Result` is returned directly, so a future
+        // narrowing of the helper's predicate that ever let this arm pass
+        // without refusing degrades to a no-op tick-label update instead of
+        // a panic.
         let Some(mut values) = scale.temporal_tick_values(tick_count) else {
-            return Err(RenderError::TimeFormatOnNonTemporalScale {
+            return prepare::refuse_time_format_on_non_temporal(
+                &fmt_str,
+                format_type.as_deref(),
+                scale,
+                tick_count,
                 channel,
-                format: fmt_str,
-                coord_flipped: false,
-            });
+            );
         };
         if reversed {
             values.reverse();

@@ -1381,7 +1381,11 @@ mod tests {
         let warnings = ctx.warnings.borrow();
         assert_eq!(warnings.len(), 1);
         let text = warnings[0].to_string();
-        assert!(text.contains("stat_aggregate"), "{text}");
+        // "Aggregate", not the wire tag "stat_aggregate" — wave-1 close
+        // remediation unified `GroupKeyAllNull`'s `transform` field onto the
+        // same Python-facing vocabulary every other `TransformWarning`
+        // variant already uses (`display_name_for_label`).
+        assert!(text.contains("Aggregate"), "{text}");
         assert!(text.contains("grp"), "{text}");
     }
 

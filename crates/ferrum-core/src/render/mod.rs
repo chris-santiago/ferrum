@@ -646,10 +646,6 @@ pub enum RenderWarning {
         reason: String,
     },
     EmptyPanel { panel_index: usize },
-    /// An explicit color range string could not be parsed. The entire range is
-    /// discarded and the default theme palette is used instead.
-    /// `entry` is the offending color string.
-    ColorRangeParseFailure { entry: String },
     /// A chart-level `configure_color(range=…)` named a different number of
     /// colors than the discretizing (Quantize/Quantile/Threshold/BinOrdinal)
     /// color scale has buckets. The bucket count is fixed by the scale's own
@@ -876,6 +872,17 @@ pub enum RenderWarning {
     /// through that desugar validation) that reaches Rust with an
     /// unvalidated name.
     UnknownColorScheme { name: String },
+    /// A `Sequential` scale spec's `stops` parsed but produced fewer than 2
+    /// entries — not enough to form a gradient (wave-1 close remediation,
+    /// #240-4b sibling). The typed `fm.Gradient(...)` constructor already
+    /// refuses this at construction (spec reviewer cycle 3, finding 2), so
+    /// this is reachable only from a hand-written wire spec that bypasses
+    /// that constructor; the resolver falls back to the theme's default
+    /// scheme instead of silently degrading with no diagnostic (the last
+    /// silent arm `#240-4b`'s own de-silencing left in
+    /// `resolve_continuous_scheme`). `count` is the number of stops that
+    /// survived parsing.
+    GradientTooFewStops { count: usize },
 }
 
 /// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
@@ -947,11 +954,6 @@ impl std::fmt::Display for RenderWarning {
             RenderWarning::EmptyPanel { panel_index } => write!(
                 f,
                 "panel {panel_index} is too small to render and was left empty"
-            ),
-            RenderWarning::ColorRangeParseFailure { entry } => write!(
-                f,
-                "could not parse color '{entry}'; the explicit color range was \
-                 discarded in favor of the theme palette"
             ),
             RenderWarning::ColorRangeBucketCountMismatch { expected, received } => write!(
                 f,
@@ -1062,6 +1064,11 @@ impl std::fmt::Display for RenderWarning {
                 "color scheme '{name}' is not recognized; the theme's default scheme \
                  was used instead"
             ),
+            RenderWarning::GradientTooFewStops { count } => write!(
+                f,
+                "the gradient's {count} stop(s) cannot form a gradient (at least 2 are \
+                 required); the theme's default scheme was used instead"
+            ),
         }
     }
 }
@@ -1108,7 +1115,6 @@ mod tests {
                 reason: "mark_rect() needs an ordinal x or y axis".into(),
             },
             RenderWarning::EmptyPanel { panel_index: 1 },
-            RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
             RenderWarning::ColorRangeBucketCountMismatch { expected: 3, received: 2 },
             RenderWarning::ColorDomainOmitsCategories { categories: vec!["c".into()] },
             RenderWarning::SortSpecIgnored { reason: "missing field".into() },
@@ -1155,6 +1161,7 @@ mod tests {
             },
             RenderWarning::BreakClipSidecarMisaligned { mark: "bar".into() },
             RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() },
+            RenderWarning::GradientTooFewStops { count: 1 },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -1179,11 +1186,6 @@ mod tests {
         assert!(text.contains("missing field"), "Display text was: {text}");
         // Display must NOT leak the variant name (the old Debug behavior did).
         assert!(!text.contains("SortSpecIgnored"), "Display leaked Debug: {text}");
-
-        let parse_fail = RenderWarning::ColorRangeParseFailure {
-            entry: "#zzz".into(),
-        };
-        assert!(format!("{parse_fail}").contains("could not parse color"));
 
         let empty = RenderWarning::EmptyPanel { panel_index: 2 };
         assert!(format!("{empty}").contains("too small to render"));
@@ -1298,6 +1300,21 @@ mod tests {
         assert!(
             !unknown_scheme_text.contains("UnknownColorScheme"),
             "{unknown_scheme_text}"
+        );
+
+        // Wave-1 close remediation (#240-4b's last silent arm): a <2-stop
+        // gradient falls back to the theme default instead of degrading with
+        // no diagnostic.
+        let too_few_stops = RenderWarning::GradientTooFewStops { count: 1 };
+        let too_few_stops_text = format!("{too_few_stops}");
+        assert!(too_few_stops_text.contains('1'), "{too_few_stops_text}");
+        assert!(
+            too_few_stops_text.contains("theme's default scheme was used instead"),
+            "{too_few_stops_text}"
+        );
+        assert!(
+            !too_few_stops_text.contains("GradientTooFewStops"),
+            "{too_few_stops_text}"
         );
     }
 

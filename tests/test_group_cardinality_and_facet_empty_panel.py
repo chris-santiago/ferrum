@@ -75,9 +75,9 @@ def test_catplot_boxplot_500_categories_warns_group_cardinality_degenerate():
         chart.to_svg()
 
     messages = [str(w.message) for w in caught]
-    assert any(
-        "500 categories" in m and "per category" in m for m in messages
-    ), f"expected a GroupCardinalityDegenerate warning naming 500 categories; got {messages}"
+    assert any("500 categories" in m and "per category" in m for m in messages), (
+        f"expected a GroupCardinalityDegenerate warning naming 500 categories; got {messages}"
+    )
 
 
 def test_facet_empty_panel_after_filter_stays_silent():
@@ -108,12 +108,7 @@ def test_facet_empty_panel_after_filter_stays_silent():
             "y": [1.0, 2.0, 3.0, 4.0],
         }
     )
-    chart = (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .facet(row="row_cat", col="col_cat")
-    )
+    chart = fm.Chart(df).mark_point().encode(x="x", y="y").facet(row="row_cat", col="col_cat")
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -121,12 +116,12 @@ def test_facet_empty_panel_after_filter_stays_silent():
 
     assert "<svg" in svg
     messages = [str(w.message) for w in caught]
-    assert any(
-        "empty cell" in m for m in messages
-    ), f"expected the pre-existing grid-planning notice to still fire; got {messages}"
-    assert not any(
-        "drew nothing" in m for m in messages
-    ), f"a facet-filtered empty panel must not ALSO warn from the per-panel mark-build path; got {messages}"
+    assert any("empty cell" in m for m in messages), (
+        f"expected the pre-existing grid-planning notice to still fire; got {messages}"
+    )
+    assert not any("drew nothing" in m for m in messages), (
+        f"a facet-filtered empty panel must not ALSO warn from the per-panel mark-build path; got {messages}"
+    )
 
 
 def test_catplot_boxplot_continuous_groupby_column_warns_named_instead_of_silent_chrome_only():
@@ -159,9 +154,9 @@ def test_catplot_boxplot_continuous_groupby_column_warns_named_instead_of_silent
 
     assert "<svg" in svg
     messages = [str(w.message) for w in caught]
-    assert any(
-        "rect" in m and "ordinal" in m for m in messages
-    ), f"expected a MarkBuildEmpty warning naming the rect/ordinal mismatch; got {messages}"
+    assert any("rect" in m and "ordinal" in m for m in messages), (
+        f"expected a MarkBuildEmpty warning naming the rect/ordinal mismatch; got {messages}"
+    )
 
 
 def test_mark_segment_missing_x2_y2_warns_named_empty():
@@ -180,9 +175,9 @@ def test_mark_segment_missing_x2_y2_warns_named_empty():
 
     assert "<svg" in svg
     messages = [str(w.message) for w in caught]
-    assert any(
-        "segment" in m and "x2" in m for m in messages
-    ), f"expected a MarkBuildEmpty warning naming the missing x2 channel; got {messages}"
+    assert any("segment" in m and "x2" in m for m in messages), (
+        f"expected a MarkBuildEmpty warning naming the missing x2 channel; got {messages}"
+    )
 
 
 def test_mark_image_missing_url_warns_named_empty():
@@ -197,9 +192,9 @@ def test_mark_image_missing_url_warns_named_empty():
 
     assert "<svg" in svg
     messages = [str(w.message) for w in caught]
-    assert any(
-        "image" in m and "url" in m for m in messages
-    ), f"expected a MarkBuildEmpty warning naming the missing url channel; got {messages}"
+    assert any("image" in m and "url" in m for m in messages), (
+        f"expected a MarkBuildEmpty warning naming the missing url channel; got {messages}"
+    )
 
 
 def test_mark_image_under_polar_coord_warns_named_empty():
@@ -217,20 +212,15 @@ def test_mark_image_under_polar_coord_warns_named_empty():
         {"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "url": [data_url, data_url, data_url]}
     )
 
-    polar_chart = (
-        fm.Chart(df)
-        .mark_image()
-        .encode(x="x", y="y", url="url")
-        .coord(fm.CoordPolar())
-    )
+    polar_chart = fm.Chart(df).mark_image().encode(x="x", y="y", url="url").coord(fm.CoordPolar())
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         polar_svg = polar_chart.to_svg()
     assert "<svg" in polar_svg
     polar_messages = [str(w.message) for w in caught]
-    assert any(
-        "image" in m and "CoordPolar" in m for m in polar_messages
-    ), f"expected a MarkBuildEmpty warning naming CoordPolar; got {polar_messages}"
+    assert any("image" in m and "CoordPolar" in m for m in polar_messages), (
+        f"expected a MarkBuildEmpty warning naming CoordPolar; got {polar_messages}"
+    )
     assert "<image" not in polar_svg
 
     cartesian_chart = fm.Chart(df).mark_image().encode(x="x", y="y", url="url")
@@ -238,7 +228,9 @@ def test_mark_image_under_polar_coord_warns_named_empty():
         warnings.simplefilter("always")
         cartesian_svg = cartesian_chart.to_svg()
     assert "<image" in cartesian_svg, "the Cartesian control must render"
-    assert not caught, f"the Cartesian control must stay silent; got {[str(w.message) for w in caught]}"
+    assert not caught, (
+        f"the Cartesian control must stay silent; got {[str(w.message) for w in caught]}"
+    )
 
 
 def test_mark_geoshape_no_geometry_warns_named_empty():
@@ -257,9 +249,9 @@ def test_mark_geoshape_no_geometry_warns_named_empty():
 
     assert "<svg" in svg
     messages = [str(w.message) for w in caught]
-    assert any(
-        "geoshape" in m and "geometry" in m for m in messages
-    ), f"expected a MarkBuildEmpty warning naming the missing geometry; got {messages}"
+    assert any("geoshape" in m and "geometry" in m for m in messages), (
+        f"expected a MarkBuildEmpty warning naming the missing geometry; got {messages}"
+    )
 
 
 def test_break_axis_n_in_gap_annotations_roll_up_to_one_warning():
@@ -275,9 +267,8 @@ def test_break_axis_n_in_gap_annotations_roll_up_to_one_warning():
     df = pl.DataFrame(
         {"category": ["A", "B", "C", "D", "E"], "value": [72.0, 68.0, 75.0, 900.0, 81.0]}
     )
-    chart = (
-        fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
-        + fm.BreakAxis(axis="y", gap=(150, 850))
+    chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q") + fm.BreakAxis(
+        axis="y", gap=(150, 850)
     )
     for y in (300.0, 400.0, 500.0, 600.0):
         chart = chart + fm.annotate_hline(y=y, label=f"line at {y}")
@@ -332,9 +323,9 @@ def test_empty_data_chart_still_warns_on_unrecognized_color_scheme():
 
     assert "linearGradient" in svg, "the colorbar must still render on empty data"
     messages = [str(w.message) for w in caught]
-    assert any(
-        "not-a-scheme" in m and "not recognized" in m for m in messages
-    ), f"an empty-data chart must still warn on the unrecognized scheme; got {messages}"
+    assert any("not-a-scheme" in m and "not recognized" in m for m in messages), (
+        f"an empty-data chart must still warn on the unrecognized scheme; got {messages}"
+    )
 
 
 def test_healthy_small_chart_renders_with_zero_warnings():
@@ -356,7 +347,9 @@ def test_healthy_small_chart_renders_with_zero_warnings():
         warnings.simplefilter("always")
         chart.to_svg()
 
-    assert not caught, f"a healthy 3-category chart must render silently; got {[str(w.message) for w in caught]}"
+    assert not caught, (
+        f"a healthy 3-category chart must render silently; got {[str(w.message) for w in caught]}"
+    )
 
 
 def test_group_cardinality_degenerate_fans_out_per_facet_panel():
@@ -381,11 +374,7 @@ def test_group_cardinality_degenerate_fans_out_per_facet_panel():
         }
     )
     chart = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="cat", y="v")
-        .facet(col="facet_col")
-        .properties(width=100)
+        fm.Chart(df).mark_bar().encode(x="cat", y="v").facet(col="facet_col").properties(width=100)
     )
 
     with warnings.catch_warnings(record=True) as caught:

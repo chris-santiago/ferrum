@@ -319,7 +319,7 @@ fn resolve_continuous_scheme(
 ) -> Result<(crate::render::color::ContinuousScheme, Vec<crate::render::RenderWarning>), RenderError> {
     use crate::render::color::{ContinuousScheme, NamedContinuous};
     let mut warnings = Vec::new();
-    let mut scheme = match gradient_scheme_from_stops(enc)? {
+    let mut scheme = match gradient_scheme_from_stops(enc, &mut warnings)? {
         Some(s) => s,
         None => {
             let requested = enc.scheme.as_deref().or(scale_common_scheme(enc));
@@ -376,8 +376,15 @@ fn sequential_stops(enc: &crate::spec::encoding::EncodingSpec) -> Option<&[(f64,
 /// `explicit_string_range` convention: one unparseable stop refuses with a
 /// [`RenderError::ColorRangeParseFailure`] naming the first offending entry
 /// (#126) rather than rendering a partial or silently-wrong gradient.
+///
+/// Pushes [`crate::render::RenderWarning::GradientTooFewStops`] onto
+/// `warnings` (wave-1 close remediation, #240-4b's last silent arm) when the
+/// stops parse but fewer than 2 survive — see that variant's doc for why
+/// this arm is reachable at all despite the typed `fm.Gradient(...)`
+/// constructor refusing the same shape at construction.
 fn gradient_scheme_from_stops(
     enc: &crate::spec::encoding::EncodingSpec,
+    warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<Option<crate::render::color::ContinuousScheme>, RenderError> {
     let Some(stops) = sequential_stops(enc) else { return Ok(None) };
     let parsed: Result<Vec<(f64, Color)>, String> = stops
@@ -396,11 +403,17 @@ fn gradient_scheme_from_stops(
         // pyfunction now rejects this at construction (spec reviewer cycle
         // 3, finding 2 — `_to_scale_spec_dict` only ever emits what a valid
         // `ContinuousScheme::Gradient` carries), so this arm is reachable
-        // only from a hand-written-JSON spec that bypasses that constructor;
-        // falls through with no warning, matching `bucket_colors`' treatment
-        // of a range whose length doesn't fit the partition it can't
-        // describe.
-        Ok(_) => Ok(None),
+        // only from a hand-written-JSON spec that bypasses that constructor.
+        // Falls back to the theme default scheme (the caller's `None` arm)
+        // rather than refusing — this is a WARN-DEGRADED shape, not a
+        // malformed one, matching `UnknownColorScheme`'s own treatment of
+        // "asked for something that didn't resolve".
+        Ok(gradient_stops) => {
+            warnings.push(crate::render::RenderWarning::GradientTooFewStops {
+                count: gradient_stops.len(),
+            });
+            Ok(None)
+        }
         Err(entry) => Err(RenderError::ColorRangeParseFailure { entry }),
     }
 }

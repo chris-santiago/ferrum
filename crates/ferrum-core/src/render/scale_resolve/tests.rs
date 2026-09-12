@@ -5584,12 +5584,13 @@ fn sequential_stops_resolve_to_gradient_and_interpolate_at_declared_t() {
 /// found untested: an unparseable stop refuses (#126, re-aimed from the
 /// former warn-and-fall-through) with the same `ColorRangeParseFailure`
 /// convention as every other explicit-color-list path, all-or-nothing; and a
-/// `stops` list with fewer than 2 usable entries takes the documented silent
-/// fall-through to plain scheme-name resolution (mirroring `bucket_colors`'
-/// own malformed-partition precedent — `Gradient(...)`'s Python constructor
-/// guards the primary route, so this arm is reachable only from a
-/// hand-written dict spec, e.g. `Color(scale={"type": "sequential", "stops":
-/// [[0.0, "red"]]})`).
+/// `stops` list with fewer than 2 usable entries falls through to plain
+/// scheme-name resolution WITH a named `GradientTooFewStops` warning
+/// (wave-1 close remediation: this used to be the last silent arm in
+/// `resolve_continuous_scheme`, reachable only from a hand-written dict
+/// spec, e.g. `Color(scale={"type": "sequential", "stops": [[0.0,
+/// "red"]]})`, since `Gradient(...)`'s Python constructor guards the
+/// primary route).
 #[test]
 fn sequential_stops_raw_dict_edges() {
     let batch = batch_with_numeric_color(vec![0.0, 10.0]);
@@ -5607,16 +5608,23 @@ fn sequential_stops_raw_dict_edges() {
         crate::render::RenderError::ColorRangeParseFailure { entry: "notacolor".into() },
     );
 
-    // Fewer than 2 usable stops: no warning, silent fall-through (the
-    // documented `Ok(_) => None` arm in `gradient_scheme_from_stops` — this is
-    // a malformed-partition shape, not a parse failure, so #126 leaves it
-    // alone).
+    // Fewer than 2 usable stops: named `GradientTooFewStops` warning, then
+    // falls through to scheme resolution (wave-1 close remediation — this
+    // is a malformed-partition shape, not a parse failure, so #126's
+    // ColorRangeParseFailure convention does not apply, but it must not be
+    // silent either).
     let one_stop = spec_with_color_scale_json(serde_json::json!({
         "type": "sequential",
         "stops": [[0.0, "red"]],
     }));
     let (scale, warnings) = resolve_color(&one_stop, &batch);
-    assert!(warnings.is_empty(), "a < 2-stop fall-through must not warn: {warnings:?}");
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            crate::render::RenderWarning::GradientTooFewStops { count: 1 }
+        )),
+        "a < 2-stop fall-through must warn by name: {warnings:?}"
+    );
     assert!(
         !matches!(
             scale,

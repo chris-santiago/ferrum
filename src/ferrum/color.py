@@ -144,7 +144,11 @@ def to_hex(
         An RGB tuple with values in [0, 1] (unit) or [0, 255] (byte) — the
         first 3 components are R/G/B; an optional 4th component is alpha,
         in the same scale as R/G/B, and is honored into the hex output (see
-        Returns) rather than silently dropped — or a color string: a CSS
+        Returns) rather than silently dropped, EXCEPT when it is fully
+        opaque -- a fully-opaque alpha normalizes away on every input form
+        (matching the historical, still-current string behavior), so
+        ``to_hex((1.0, 0.0, 0.0, 1.0))`` and ``to_hex((1.0, 0.0, 0.0))``
+        both return ``"#ff0000"`` — or a color string: a CSS
         named color (e.g. ``"steelblue"``), hex
         (``#rgb``/``#rgba``/``#rrggbb``/``#rrggbbaa``), or a functional
         ``rgb()``/``rgba()`` form. String input is validated and normalized
@@ -163,11 +167,17 @@ def to_hex(
     Returns
     -------
     str
-        Normalized hex string. For *string* input: ``"#rrggbb"``, or
-        ``"#rrggbbaa"`` when the parsed color carried alpha (e.g. an
-        ``rgba()`` or 4/8-digit hex input). For *tuple* input: ``"#rrggbb"``
-        for a 3-component tuple, or ``"#rrggbbaa"`` for a 4-component tuple
-        — one keep-alpha rule shared by both input forms, no per-form drift.
+        Normalized hex string: ``"#rrggbb"`` when there is no alpha
+        component, or the alpha is fully opaque, and ``"#rrggbbaa"`` when
+        there is a non-opaque alpha. This is one rule shared by both input
+        forms with no per-form drift (#122 residual, close-remediation
+        cycle 2): a *string* carrying alpha (``rgba()``, 4/8-digit hex)
+        keeps it in the output only when it is not fully opaque, and a
+        *tuple*'s 4th component follows the identical rule — so
+        ``to_hex((1.0, 0.0, 0.0, 1.0))``, ``to_hex("#ff0000ff")``,
+        ``to_hex("#f00f")``, and ``to_hex("rgba(255,0,0,1)")`` all return
+        ``"#ff0000"``, and ``to_hex`` is idempotent over its own output
+        (``to_hex(to_hex(x)) == to_hex(x)``) for every opaque color.
 
     Raises
     ------
@@ -275,6 +285,18 @@ def to_hex(
     if ai is None:
         return f"#{ri:02x}{gi:02x}{bi:02x}"
     ai = max(0, min(255, ai))
+    if ai == 255:
+        # Fully-opaque alpha normalizes away on EVERY input form (#122
+        # residual, close-remediation cycle 2): the string path already
+        # elides it here (`parse_color_to_hex`'s Rust parser normalizes
+        # "rgba(255,0,0,1)"/"#ff0000ff"/"#f00f" to "#ff0000"), so the tuple
+        # path must match rather than keep `ff` just because a 4th
+        # component was structurally present. This is what makes "one
+        # keep-alpha rule shared by both input forms" (see Returns) true,
+        # and restores idempotence: to_hex(to_hex(x)) == to_hex(x) for
+        # every opaque color, tuple or string. Non-opaque alpha is
+        # unaffected -- it is kept on both forms exactly as before.
+        return f"#{ri:02x}{gi:02x}{bi:02x}"
     return f"#{ri:02x}{gi:02x}{bi:02x}{ai:02x}"
 
 

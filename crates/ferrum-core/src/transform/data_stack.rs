@@ -417,7 +417,9 @@ mod tests {
         let warnings = ctx.warnings.borrow();
         assert_eq!(warnings.len(), 1);
         let text = warnings[0].to_string();
-        assert!(text.contains("data_stack"), "{text}");
+        // "DataStack", not the wire tag "data_stack" — wave-1 close
+        // remediation (`display_name_for_label`).
+        assert!(text.contains("DataStack"), "{text}");
         assert!(
             text.contains("all rows were treated as one unlabeled group"),
             "the warning states this transform's OWN disposition: {text}"

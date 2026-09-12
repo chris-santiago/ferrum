@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
 import pytest
 
 import ferrum
@@ -338,6 +339,66 @@ def test_rank2d_chart_fitted_estimator_with_x_matches_model_source_path():
     chart = ferrum.rank2d_chart(model, df)
     via_model_source = ferrum.rank2d_chart(ferrum.ModelSource(model, df))
     assert chart.to_svg() == via_model_source.to_svg()
+
+
+def test_rank1d_chart_accepts_pyarrow_table():
+    # Close-remediation (#216 residual): `_is_raw_tabular_data`'s allowlist
+    # had narrowed past what the raw-data coercer (`polars_or_array_to_record_batch`)
+    # actually accepts -- a pa.Table computed fine pre-batch and must keep
+    # working, not misdiagnose as "ModelSource.rank1d() requires the
+    # training data".
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    tbl = df.to_arrow()
+    chart = ferrum.rank1d_chart(tbl, algorithm="shapiro")
+    assert "<svg" in chart.to_svg()
+
+
+def test_rank1d_chart_accepts_pyarrow_record_batch():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    batch = df.to_arrow().to_batches()[0]
+    chart = ferrum.rank1d_chart(batch, algorithm="shapiro")
+    assert "<svg" in chart.to_svg()
+
+
+def test_rank1d_chart_accepts_list_of_lists():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    rows = df.to_numpy().tolist()
+    chart = ferrum.rank1d_chart(rows, algorithm="shapiro")
+    assert "<svg" in chart.to_svg()
+
+
+def test_rank2d_chart_accepts_pyarrow_table():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    tbl = df.to_arrow()
+    chart = ferrum.rank2d_chart(tbl, algorithm="pearson")
+    assert "<svg" in chart.to_svg()
+
+
+def test_rank2d_chart_accepts_pyarrow_record_batch():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    batch = df.to_arrow().to_batches()[0]
+    chart = ferrum.rank2d_chart(batch, algorithm="pearson")
+    assert "<svg" in chart.to_svg()
+
+
+def test_rank2d_chart_accepts_list_of_lists():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    rows = df.to_numpy().tolist()
+    chart = ferrum.rank2d_chart(rows, algorithm="pearson")
+    assert "<svg" in chart.to_svg()
+
+
+def test_rank1d_chart_1d_array_reports_accurate_shape_message():
+    # The 1-D-array shape check must still come from the coercer
+    # (`polars_or_array_to_record_batch`'s own "X must be 2D" message),
+    # not misroute into the estimator-refusal arm.
+    with pytest.raises(ValueError, match=r"X must be 2D; got shape \(3,\)"):
+        ferrum.rank1d_chart(np.array([1.0, 2.0, 3.0]), algorithm="shapiro")
+
+
+def test_rank2d_chart_1d_array_reports_accurate_shape_message():
+    with pytest.raises(ValueError, match=r"X must be 2D; got shape \(3,\)"):
+        ferrum.rank2d_chart(np.array([1.0, 2.0, 3.0]), algorithm="pearson")
 
 
 def test_rank_chart_2d_pearson_renders():

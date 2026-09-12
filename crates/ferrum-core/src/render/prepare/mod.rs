@@ -748,6 +748,52 @@ fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWar
         .collect()
 }
 
+/// True for a provisional-pass scale warning that the panel-real pass
+/// (`scene_build::resolve_panel_scales`) reports again, byte-identically,
+/// once at least one panel actually resolves — a companion predicate to
+/// [`drop_placeholder_only_warnings`] for the warnings that survive it.
+/// `drop_placeholder_only_warnings` drops what the placeholder
+/// `(0.0, 1.0)`-pixel-range pass cannot honestly judge at all
+/// (`GroupCardinalityDegenerate`'s bandwidth question). This predicate names
+/// the different failure this batch introduced: a warning the placeholder
+/// pass judges CORRECTLY (a color scheme name lookup does not depend on the
+/// pixel range) but which is a whole-chart fact, not a per-panel one — so
+/// once a real panel exists to judge it again, the provisional copy is a
+/// pure restatement, not an independent finding. This is the opposite shape
+/// from `GroupCardinalityDegenerate`/`ColorPaletteOverflowed`, which ARE
+/// per-panel facts and must keep fanning out one warning per panel
+/// (adjudicated boundary, wave-1 close remediation).
+///
+/// Members share one shape: produced by continuous-color-scheme resolution
+/// (`scale_resolve::color::resolve_continuous_scheme`), pixel-range-independent,
+/// and chart-level rather than panel-level.
+/// - `UnknownColorScheme` — a named-but-unrecognized `scheme`/`cmap`.
+/// - `GradientTooFewStops` — a `Sequential` scale's `stops` resolved to
+///   fewer than 2 usable entries (cycle-2 close-remediation finding N1: this
+///   variant reproduced the exact S3-1 shape in the very change that fixed
+///   it for `UnknownColorScheme`, because it is built by the same resolver
+///   but was not added to this predicate when it was introduced).
+///
+/// A future member must be added here explicitly — there is no compile-time
+/// forcing function for this list (unlike `apply_with_context`'s exhaustive
+/// match), so a new continuous-color-scheme warning needs a human to notice
+/// it shares this shape. See "What still feels wrong" in the close-rust
+/// design review for the durable fix (an exhaustive `RenderWarning::multiplicity()`
+/// classifier), not executed here as out of scope for this remediation.
+///
+/// `scene_build::build_scene` calls this to strip the provisional prefix of
+/// its warnings vec once it has confirmed at least one panel actually
+/// reached `resolve_panel_scales` — see that function's own doc for why the
+/// empty-after-transform case (T11, #118) must keep the provisional copy
+/// when NO panel ever resolves (the provisional pass is then the only chance
+/// this fact is ever reported).
+pub(crate) fn provisional_scale_warning_superseded_by_panel_pass(w: &RenderWarning) -> bool {
+    matches!(
+        w,
+        RenderWarning::UnknownColorScheme { .. } | RenderWarning::GradientTooFewStops { .. }
+    )
+}
+
 /// Prepare a single leaf's render inputs (transforms, per-layer encodings,
 /// provisional scales/axes, legends).
 ///
@@ -2223,13 +2269,12 @@ fn apply_axis_format_or_thread(
         // `apply_tick_format`'s narrower `format_type == Some("time")` check
         // already routes it — refusing here would reject ordinary percent
         // specs on every non-temporal axis.
-        if format_type == Some("time") {
-            return Err(RenderError::TimeFormatOnNonTemporalScale {
-                channel,
-                format: fmt,
-                coord_flipped: false,
-            });
-        }
+        // #133 wave-1 close remediation: route through the same
+        // `refuse_time_format_on_non_temporal` helper the `Immediate` mode
+        // arm calls, instead of restating the `format_type == Some("time")`
+        // check here — this is the predicate `build_axis_tick_inputs`'s own
+        // doc already claims "both mode arms share".
+        refuse_time_format_on_non_temporal(&fmt, format_type, scale, tick_count, channel)?;
         return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
     }
     // Numeric / non-temporal: thread the spec to the override, apply later.
@@ -2253,7 +2298,15 @@ fn apply_axis_format_or_thread(
 /// disciplines cannot drift on which scale kinds refuse. `channel` is the
 /// RESOLVED token; `coord_flipped` is always constructed `false` — corrected
 /// by the caller boundary (R3, same discipline as `InvalidAxisOrient`).
-fn refuse_time_format_on_non_temporal(
+///
+/// `pub(crate)` (wave-1 close remediation, #133 predicate-sharing finding):
+/// `config_apply::apply_label_format_to_axis` shares this same refusal
+/// predicate at its own two sites rather than hand-rolling the
+/// `format_type == "time"` + `scale.temporal_tick_values(...).is_none()`
+/// check a third and fourth time — all four sites that can refuse a
+/// time-typed format on a non-temporal scale now build the SAME error
+/// through this one function.
+pub(crate) fn refuse_time_format_on_non_temporal(
     fmt: &str,
     format_type: Option<&str>,
     scale: &crate::render::scale_resolve::ScaleKind,

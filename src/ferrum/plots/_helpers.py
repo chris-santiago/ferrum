@@ -346,26 +346,59 @@ def _is_raw_tabular_data(value: Any) -> bool:
     """Return ``True`` when ``value`` is raw tabular data, not a fitted estimator.
 
     Distinguishes "raw data the caller wants ranked/decomposed directly"
-    (a polars/pandas DataFrame or a 2-D numpy array) from "a fitted
-    estimator whose attributes must be resolved through a ``ModelSource``".
-    ``rank1d_chart``/``rank2d_chart`` (``plots/ranking.py``) and
-    ``pca_scree_chart`` (``plots/clustering.py``) all need this probe before
-    dispatching, so a fitted estimator that reaches the raw-data path
+    from "a fitted estimator whose attributes must be resolved through a
+    ``ModelSource``". ``rank1d_chart``/``rank2d_chart`` (``plots/ranking.py``)
+    and ``pca_scree_chart`` (``plots/clustering.py``) all need this probe
+    before dispatching, so a fitted estimator that reaches the raw-data path
     doesn't get handed to ``np.asarray()``/``polars_or_array_to_record_batch()``
     and leak an internal ``TypeError`` instead of the typed ``ModelSource``
     refusal (#216). Previously hand-copied at three call sites.
+
+    The recognized-container checks (``pl.DataFrame``, ``pd.DataFrame``,
+    ``pa.Table``, ``pa.RecordBatch``, 2-D ``np.ndarray``) cover the fast
+    paths every raw-data coercer (``polars_or_array_to_record_batch`` in
+    ``diagnostics/_internal/_rank_helpers.py``, ``to_polars`` in
+    ``_coerce.py``) recognizes explicitly. Anything else falls through to
+    the same probe those coercers themselves use as their own last resort
+    (``np.asarray``): if numpy can wrap the value as an array of at least
+    one dimension, it is candidate tabular data (e.g. a list-of-lists, or a
+    malformed 1-D array), and the raw path's own coercer decides whether
+    the shape is actually usable -- producing its accurate shape-mismatch
+    message instead of this probe pre-empting it. A fitted estimator (e.g.
+    a scikit-learn model) has no array structure, so ``np.asarray`` wraps
+    it as a 0-D object array rather than raising; ``ndim == 0`` is exactly
+    the signal that keeps such an estimator routed to ``ModelSource``
+    resolution instead of leaking into the raw path (closes the #216
+    residual: ``rank1d_chart``/``rank2d_chart`` had narrowed past what
+    their own coercer accepts -- ``pa.Table``, ``pa.RecordBatch``, and
+    list-of-lists all worked pre-batch and must keep working).
     """
     import numpy as np
+    import pyarrow as pa
 
     if isinstance(value, pl.DataFrame):
+        return True
+    if isinstance(value, (pa.Table, pa.RecordBatch)):
         return True
     if isinstance(value, np.ndarray) and value.ndim == 2:
         return True
     try:
         import pandas as pd
+
+        if isinstance(value, pd.DataFrame):
+            return True
     except ImportError:
+        pass
+    try:
+        # Broad catch is deliberate: this is a boolean probe over an
+        # arbitrary caller-supplied object, and np.asarray raises whatever
+        # exception type the underlying object's conversion machinery
+        # chooses (ValueError, TypeError, or a library-specific error for
+        # exotic __array__ implementations) -- any of them means "not
+        # coercible", i.e. not raw tabular data.
+        return np.asarray(value).ndim >= 1
+    except Exception:
         return False
-    return isinstance(value, pd.DataFrame)
 
 
 def _should_facet_by_class(df: pl.DataFrame, *, per_class: bool) -> bool:

@@ -36,6 +36,15 @@ pub fn build_scene(
 ) -> Result<SceneGraph, RenderError> {
     let background = config.background.or(Some(theme.colors.background_color));
 
+    // Wave-1 close remediation (S3-1): the boundary between "warnings already
+    // pushed before this call" (which may include the prepare provisional
+    // pass's survivors, e.g. `UnknownColorScheme`) and whatever the panel
+    // loop below appends. See `provisional_scale_warning_superseded_by_panel_pass`'s
+    // doc for why a provisional survivor is a duplicate once any panel below
+    // actually resolves its own copy of the same chart-level fact.
+    let pre_panel_warning_count = warnings.len();
+    let mut any_panel_resolved = false;
+
     let mut title_nodes: Vec<SceneNode> = Vec::new();
     let mut legend_nodes: Vec<SceneNode> = Vec::new();
 
@@ -138,6 +147,7 @@ pub fn build_scene(
         if panel_batch.num_rows() == 0 {
             continue;
         }
+        any_panel_resolved = true;
 
         // Layer batch resolution
         let layer_batches: Vec<RecordBatch> = prep
@@ -526,6 +536,21 @@ pub fn build_scene(
             strip_title: strip_title_nodes,
             layout_scale: LayoutScale::identity(),
         });
+    }
+
+    // Wave-1 close remediation (S3-1): once at least one panel actually
+    // resolved its own scales, the panel-real pass has already re-reported
+    // every `provisional_scale_warning_superseded_by_panel_pass` fact that
+    // survived into `warnings` before this call — strip those duplicates
+    // from the pre-panel prefix only (never from what the panel loop itself
+    // just appended, which is the one copy this render keeps). When NO panel
+    // resolved (every panel_batch was empty — the T11 empty-after-transform
+    // case), the provisional copy is the ONLY report this render will ever
+    // make of that fact, so it stays.
+    if any_panel_resolved {
+        let mut panel_and_later = warnings.split_off(pre_panel_warning_count);
+        warnings.retain(|w| !super::prepare::provisional_scale_warning_superseded_by_panel_pass(w));
+        warnings.append(&mut panel_and_later);
     }
 
     // Legend
@@ -7528,6 +7553,328 @@ mod tests {
         let scene = result.expect("a zero-row layer is skipped, not refused");
         assert_eq!(panel_mark_batch_node_counts(&scene).len(), 1, "only layer 0 renders");
         assert!(warnings.is_empty(), "a zero-row data_source layer must stay silent: {warnings:?}");
+    }
+
+    // ── Wave-1 close remediation (S3-1): provisional-pass vs. panel-real-pass
+    // warning multiplicity ──────────────────────────────────────────────────
+
+    /// A continuous color encoding with an unrecognized `scheme=` name: a
+    /// chart-level fact (the same scheme resolves the same way for every
+    /// panel), so the prepare provisional pass and the per-panel real pass
+    /// used to EACH report it — a flat (1-panel) chart emitted the warning
+    /// twice, and an N-panel facet emitted it N+1 times. `optional_facet`
+    /// controls whether `grp` (2 distinct values) drives a 2-panel facet.
+    fn color_scheme_typo_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::Encoding;
+
+        let facet = faceted.then(|| crate::layout::FacetSpec {
+            field: "grp".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        });
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "v".into(),
+                    scheme: Some("not-a-real-scheme".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    fn count_unknown_color_scheme(warnings: &[RenderWarning]) -> usize {
+        warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::UnknownColorScheme { .. }))
+            .count()
+    }
+
+    /// RED (pre-fix): a flat chart emitted `UnknownColorScheme` twice — once
+    /// from the prepare provisional pass, once from panel 0's real
+    /// resolution. Exactly one panel actually resolves here, so exactly one
+    /// copy of the fact must survive.
+    #[test]
+    fn unknown_color_scheme_does_not_double_emit_on_a_flat_chart() {
+        pyo3::Python::initialize();
+        let (spec, batch) = color_scheme_typo_spec(false);
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        result.expect("scene must build despite the unrecognized scheme");
+        assert_eq!(
+            count_unknown_color_scheme(&warnings), 1,
+            "a flat chart must report an unrecognized scheme exactly once, not once per \
+             resolution pass; got {warnings:?}"
+        );
+    }
+
+    /// RED (pre-fix): the same chart faceted into 2 panels emitted the
+    /// warning 3 times (1 provisional + 2 panel-real). The adjudicated
+    /// boundary (wave-1 close remediation) keeps `UnknownColorScheme`
+    /// fanning out ONE PER PANEL that actually resolves — 2 panels, 2
+    /// warnings — while removing the extra provisional-pass restatement.
+    #[test]
+    fn unknown_color_scheme_fans_out_once_per_panel_not_once_per_pass() {
+        pyo3::Python::initialize();
+        let (spec, batch) = color_scheme_typo_spec(true);
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        result.expect("scene must build despite the unrecognized scheme");
+        assert_eq!(
+            count_unknown_color_scheme(&warnings), 2,
+            "a 2-panel facet must report an unrecognized scheme exactly once per panel \
+             (2), not once per (provisional + panel) resolution pass (3); got {warnings:?}"
+        );
+    }
+
+    /// Cycle-2 close-remediation finding N1: `GradientTooFewStops` is built
+    /// by the same `resolve_continuous_scheme` resolver as `UnknownColorScheme`
+    /// (same provisional-pass-then-panel-real-pass double resolution), but
+    /// was not added to `provisional_scale_warning_superseded_by_panel_pass`
+    /// when it was introduced — reproducing the exact S3-1 shape in the same
+    /// change that fixed it for `UnknownColorScheme`. Only reachable from a
+    /// hand-written `stops` list bypassing the typed `fm.Gradient(...)`
+    /// constructor (mirrors `scale_resolve::tests::sequential_stops_raw_dict_edges`'s
+    /// construction).
+    fn gradient_too_few_stops_spec(faceted: bool) -> (ChartSpec, RecordBatch) {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, ScaleSpec};
+
+        let facet = faceted.then(|| crate::layout::FacetSpec {
+            field: "grp".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
+        });
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                color: Some(EncodingSpec {
+                    field: "v".into(),
+                    scale: Some(ScaleSpec::Sequential {
+                        scheme: None,
+                        domain: None,
+                        reverse: false,
+                        stops: Some(vec![(0.0, "red".into())]),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    fn count_gradient_too_few_stops(warnings: &[RenderWarning]) -> usize {
+        warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::GradientTooFewStops { .. }))
+            .count()
+    }
+
+    /// RED (pre-fix, cycle-2 finding N1): a flat chart with a raw 1-stop
+    /// `sequential` gradient emitted `GradientTooFewStops` twice — once from
+    /// the prepare provisional pass, once from panel 0's real resolution.
+    #[test]
+    fn gradient_too_few_stops_does_not_double_emit_on_a_flat_chart() {
+        pyo3::Python::initialize();
+        let (spec, batch) = gradient_too_few_stops_spec(false);
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        result.expect("scene must build despite the too-few-stops gradient");
+        assert_eq!(
+            count_gradient_too_few_stops(&warnings), 1,
+            "a flat chart must report a too-few-stops gradient exactly once, not once per \
+             resolution pass; got {warnings:?}"
+        );
+    }
+
+    /// The 2-panel facet sibling: 1 warning per panel that actually
+    /// resolves (2), not once per (provisional + panel) resolution pass (3)
+    /// — the same adjudicated per-panel-fact boundary `UnknownColorScheme`
+    /// keeps.
+    #[test]
+    fn gradient_too_few_stops_fans_out_once_per_panel_not_once_per_pass() {
+        pyo3::Python::initialize();
+        let (spec, batch) = gradient_too_few_stops_spec(true);
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        result.expect("scene must build despite the too-few-stops gradient");
+        assert_eq!(
+            count_gradient_too_few_stops(&warnings), 2,
+            "a 2-panel facet must report a too-few-stops gradient exactly once per panel \
+             (2), not once per (provisional + panel) resolution pass (3); got {warnings:?}"
+        );
+    }
+
+    /// Companion RED proof: a 300-category ordinal x axis squeezed into each
+    /// of 2 facet panels (real per-panel plot-area widths, not the
+    /// provisional placeholder) must still emit `GroupCardinalityDegenerate`
+    /// ONCE PER PANEL — the adjudicated boundary this batch must NOT
+    /// change. `drop_placeholder_only_warnings` already excludes this
+    /// variant from the provisional pass entirely (T11), so it was never at
+    /// risk from the `UnknownColorScheme`-only dedupe above; this test
+    /// proves that structurally, not by inspection.
+    #[test]
+    fn group_cardinality_degenerate_still_fans_out_once_per_facet_panel() {
+        pyo3::Python::initialize();
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::Encoding;
+
+        let n_cats = 300;
+        let cats: Vec<String> = (0..n_cats).map(|i| format!("c{i}")).collect();
+        // Each of the 300 categories appears once in EACH of 2 facet groups,
+        // so both panels independently resolve the same sub-pixel bandwidth.
+        let mut cat_col: Vec<&str> = Vec::with_capacity(n_cats * 2);
+        let mut grp_col: Vec<&str> = Vec::with_capacity(n_cats * 2);
+        let mut y_col: Vec<f64> = Vec::with_capacity(n_cats * 2);
+        for c in &cats {
+            cat_col.push(c.as_str());
+            grp_col.push("a");
+            y_col.push(1.0);
+        }
+        for c in &cats {
+            cat_col.push(c.as_str());
+            grp_col.push("b");
+            y_col.push(1.0);
+        }
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "grp".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cat_col)),
+                Arc::new(Float64Array::from(y_col)),
+                Arc::new(StringArray::from(grp_col)),
+            ],
+        )
+        .unwrap();
+
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        result.expect("scene must build despite the sub-pixel bandwidth");
+        let degenerate_count = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::GroupCardinalityDegenerate { .. }))
+            .count();
+        assert_eq!(
+            degenerate_count, 2,
+            "2 facet panels, each independently sub-pixel, must each report their own \
+             GroupCardinalityDegenerate; got {warnings:?}"
+        );
     }
 
     /// The gate reads the layer's `x2`/`y2` endpoints too, not just `x`/`y`.

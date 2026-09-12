@@ -2084,7 +2084,11 @@ fn kde_all_null_group_keys_yield_no_rows_and_warn() {
     assert!(matches!(
         &warnings[0],
         TransformWarning::GroupKeyAllNull { transform, columns, .. }
-            if transform == "stat_kde" && columns == "g"
+            // "Kde", not the wire tag "stat_kde" — wave-1 close remediation
+            // unified `GroupKeyAllNull`'s `transform` field onto the same
+            // Python-facing vocabulary `DegenerateFit`/`FallbackApplied`
+            // already use for this same producer (`display_name_for_label`).
+            if transform == "Kde" && columns == "g"
     ));
 }
 

@@ -379,7 +379,9 @@ mod tests {
         assert_eq!(out.num_rows(), 0);
         let warnings = ctx.warnings.borrow();
         assert_eq!(warnings.len(), 1, "one warning for the whole transform");
-        assert!(warnings[0].to_string().contains("data_pivot"), "{:?}", warnings[0]);
+        // "Pivot", not the wire tag "data_pivot" — wave-1 close remediation
+        // (`display_name_for_label`).
+        assert!(warnings[0].to_string().contains("Pivot"), "{:?}", warnings[0]);
     }
 
 

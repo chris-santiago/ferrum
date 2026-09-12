@@ -8,7 +8,7 @@ and introduces no ``__init__`` or ``__slots__``.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from ferrum._layer import _PRIMITIVE_MARKS
 from ferrum._validate import validate_choice
@@ -20,7 +20,55 @@ from ferrum.marks.statistical import (
     _resolve_smooth,
 )
 
+if TYPE_CHECKING:
+    import polars as pl
+
 _ORIENT_CHOICES = ("horizontal", "vertical")
+
+
+def _mark_raster_field_schema(data: Any) -> "pl.Schema | None":
+    """Best-effort, non-materializing schema lookup for ``mark_raster``'s
+    eager ``field=`` check (close-remediation cycle 2, design-review S3).
+
+    Returns ``None`` when the schema cannot be resolved cheaply and safely
+    -- the caller then skips the eager check entirely, and the render-time
+    ``stat_raster`` transform surfaces whatever error applies, exactly as
+    it did before ``mark_raster``'s ``field=`` validation existed. A
+    chart-*declaration* method must never execute a lazy pipeline or let
+    an untyped, non-ferrum exception (e.g. a bare ``FileNotFoundError``
+    from a ``pl.scan_parquet`` over a missing path) escape from it.
+
+    - ``pl.LazyFrame``: ``collect_schema()`` resolves the schema WITHOUT
+      executing the query plan or reading any of the underlying data.
+      This is the fix's whole point -- the eager check previously called
+      ``to_polars(self._data)``, which for a ``LazyFrame`` calls
+      ``.collect()`` internally and materializes the entire result (27 ms
+      on a 4M-row parquet scan; scales with the source, not with anything
+      ``mark_raster()`` needs). ``mark_point()`` and every other
+      declaration-time method on a lazy-data ``Chart`` stay free; this
+      check must too.
+    - Anything else (``pl.DataFrame``, dict, list, numpy, pandas, ...) is
+      already fully realized in memory by construction, so
+      :func:`ferrum._coerce.to_polars` is cheap and this path is unchanged
+      from before this fix.
+
+    Any exception raised while resolving the schema (an unreachable scan
+    path, an input shape ``to_polars`` cannot coerce, ...) is caught and
+    turned into ``None`` here rather than escaping from this public
+    builder -- the broad catch is deliberate: whatever the underlying
+    source's own exception type is, it means "the eager check cannot run
+    safely right now", not "field= is invalid", so it must not be
+    reported as a field-validation refusal.
+    """
+    import polars as pl
+    from ferrum._coerce import to_polars
+
+    try:
+        if isinstance(data, pl.LazyFrame):
+            return data.collect_schema()
+        return to_polars(data).schema
+    except Exception:
+        return None
 
 
 def _normalize_orient(func_name: str, orient: str | None, horizontal: bool) -> bool:
@@ -1033,6 +1081,42 @@ class StatisticalMarksMixin:
                 f"column to aggregate); pass field=... or use "
                 f"aggregate='count'|'density'|'any', which need no field."
             )
+
+        # #136 (close-remediation): when the Chart already carries data
+        # (Chart(df).mark_raster(...), not a deferred-data chart), field=
+        # is a real column reference for `aggregate` values that consume
+        # it -- its existence and numeric-ness are answerable right now,
+        # not just at .to_svg() render time when the Rust `stat_raster`
+        # transform runs. `aggregate="count"/"density"/"any"` leave field=
+        # inert (unchanged, pre-existing behavior; see the docstring), so
+        # this only fires for the same "needs field" set the check above
+        # already gates on. Deferred-data charts (self._data is None,
+        # e.g. Chart().mark_raster(...) before any data is attached) skip
+        # gracefully -- there is nothing to check yet. `_mark_raster_field_schema`
+        # answers the schema question only -- it must never materialize a
+        # lazy source or let an untyped exception escape a declaration-time
+        # method (close-remediation cycle 2, design-review S3): `None`
+        # means "could not resolve a schema cheaply/safely", in which case
+        # this eager check is skipped and render time surfaces whatever
+        # error applies, exactly as it did before this check existed.
+        if (
+            aggregate in _RASTER_AGGREGATES_NEEDING_FIELD
+            and field is not None
+            and self._data is not None
+        ):
+            schema = _mark_raster_field_schema(self._data)
+            if schema is not None:
+                if field not in schema:
+                    raise ValueError(
+                        f"mark_raster: field={field!r} is not a column in the data "
+                        f"(columns: {list(schema)})."
+                    )
+                dtype = schema[field]
+                if not dtype.is_numeric():
+                    raise ValueError(
+                        f"mark_raster: field={field!r} must be numeric to aggregate "
+                        f"with aggregate={aggregate!r}; got dtype {dtype}."
+                    )
 
         return self._set_composite_mark(
             "raster",
