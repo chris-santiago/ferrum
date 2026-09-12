@@ -187,9 +187,9 @@ chart = (
 
 ## Interaction with annotations
 
-Annotations whose positions fall within a break region are suppressed with a warning.
-The warning names the annotation and its position so you can decide whether to move it
-or accept the suppression.
+Annotations whose positions fall within a break region are suppressed with a warning
+naming the axis and how many annotation elements were dropped, so you can decide
+whether to move them or accept the suppression.
 
 ---
 
