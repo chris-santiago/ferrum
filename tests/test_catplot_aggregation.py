@@ -514,23 +514,29 @@ class TestCallerChannelOptions:
         assert cat_axis_labels(svg) == ["d", "c", "b", "a"]
 
     @pytest.mark.parametrize("kind", _ALL_KINDS)
-    def test_hue_order_with_a_channel_hue_refuses_on_every_kind(self, cat_df, kind):
-        """The color channel's own precedence answer: a typed refusal, uniformly.
+    def test_hue_order_wins_over_a_channel_hue_on_every_kind(self, cat_df, kind):
+        """The color channel's own precedence answer, uniformly (#190).
 
-        `hue_order=` rebuilds the color channel from the `hue=` argument, which
-        must be a column name -- combining it with an already-built `Color(...)`
-        raises, and always has, on all eight kinds. Pinned so the aggregating
-        kinds cannot quietly acquire a different answer than their siblings
-        (the x channel's equivalent combination was made to work in batch F;
-        this one is tracked as a follow-up, not silently split).
+        Mirrors ``test_the_order_kwarg_wins_over_the_channel_sort`` above, on
+        the color channel: `hue_order=` wins over an already-built `hue=`
+        channel's own `sort=`, on all eight kinds -- the checkpoint ruling
+        (honor both, kwarg wins; the `order=` precedent, not the issue text's
+        "explicit channel sort wins" parenthetical). Previously `hue_order=`
+        rebuilt the color channel by handing the whole `hue=` channel object
+        to `Color(...)`'s positional `field`, which raised `TypeError` on
+        every kind (the test this replaces pinned that raise as "tracked as a
+        follow-up, not silently split" -- #190 is that follow-up). The fix
+        routes `hue` through `_catplot_cat_field_parts`, the same
+        channel-agnostic splitter that already solved this for the category
+        channel's `order=` above.
         """
-        with pytest.raises(TypeError, match="field must be str"):
-            fm.catplot(
-                cat_df,
-                **_catplot_kwargs(
-                    kind, x="cat", hue=fm.Color("grp", sort=["X", "Y"]), hue_order=["Y", "X"]
-                ),
-            )
+        svg = fm.catplot(
+            cat_df,
+            **_catplot_kwargs(
+                kind, x="cat", hue=fm.Color("grp", sort=["X", "Y"]), hue_order=["Y", "X"]
+            ),
+        ).to_svg()
+        assert hue_legend_labels(svg) == ["Y", "X"]
 
 
 # ---------------------------------------------------------------------------

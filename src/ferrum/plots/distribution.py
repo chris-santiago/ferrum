@@ -1644,20 +1644,52 @@ def _catplot_build(
             enc["x"] = y  # cat_field goes on x
         if x is not None:
             enc["y"] = x  # val_field goes on y
-    # `hue` is typed Nominal for EVERY kind, with no per-kind branch. catplot
-    # is the categorical-plot family: its hue is a group discriminator by
-    # construction (`hue_order=` orders its levels, `dodge=True` offsets by
-    # them), so a Continuous reading is never the right one -- not even on the
-    # point-mark kinds. Uniformity here is the point: before this, one Int64
-    # hue answered three different ways across the eight kinds (violin
+    # `hue` is typed Nominal for a bare string on EVERY kind, with no
+    # per-kind branch: catplot is the categorical-plot family, its hue is a
+    # group discriminator by construction (`hue_order=` orders its levels,
+    # `dodge=True` offsets by them), so a Continuous reading of a bare
+    # column name is never the right one -- not even on the point-mark
+    # kinds. Uniformity here is the point: before this, one Int64 hue
+    # answered three different ways across the eight kinds (violin
     # categorical, box a typed raise, bar/boxen/strip/swarm/point a silent
-    # fabricated colorbar), and the divergence was invisible in the signature.
+    # fabricated colorbar), and the divergence was invisible in the
+    # signature.
+    #
+    # An already-built channel object (`hue=fm.Color(...)`) is a DIFFERENT
+    # case, and `hue_order=` is what decides which rule applies (#190,
+    # spec-review cycle 2 correction): with no `hue_order=`, the channel
+    # passes through completely untouched via `nominal_color_channel` --
+    # preserving whatever type it already states or infers, INCLUDING a
+    # numeric column's continuous colorbar, exactly as before this task
+    # (byte-identical). `hue_order=` changes that: ordering a fixed list of
+    # named levels is a statement `sort=` cannot honor against a Continuous
+    # scale at all, so passing `hue_order=` is itself a declaration that
+    # this channel is categorical -- forcing nominal typing the same way a
+    # bare string always does, UNLESS the caller's own channel already
+    # stated an explicit `type_=`, which is honored verbatim per
+    # `nominal_color_channel`'s pass-through precedent. The rebuild routes
+    # through `_catplot_cat_field_parts` -- the same channel-agnostic
+    # splitter `cat_channel`/`order` use below -- so a channel object's own
+    # other kwargs (`scheme=`, `legend=`, ...) survive, and `sort=` is
+    # overridden rather than handed whole to `Color(hue, ...)`, which raises
+    # `TypeError` on a non-string `field`: the SAME kwarg-wins precedent
+    # `order=` sets for `cat_channel` below (checkpoint ruling: two halves
+    # of one builder share one precedence rule).
     #
     # Bound to a name because the estimating kinds need this SAME resolved
     # channel on their layers (see `_catplot_summary_layers`): one resolution,
     # both consumers.
-    color_channel = nominal_color_channel(hue)
-    if color_channel is not None:
+    hue_name, hue_explicit_type, hue_kwargs = _catplot_cat_field_parts(hue)
+    color_channel = None
+    if hue_name is not None:
+        if hue_order is not None:
+            color_kwargs = dict(hue_kwargs)
+            if hue_explicit_type is None:
+                color_kwargs["type_"] = "nominal"
+            color_kwargs["sort"] = list(hue_order)
+            color_channel = _Color(hue_name, **color_kwargs)
+        else:
+            color_channel = nominal_color_channel(hue)
         enc["color"] = color_channel
 
     # The category channel is ALWAYS explicitly typed here -- the one
@@ -1717,13 +1749,6 @@ def _catplot_build(
     # `native_scale` docs.
     if encode_cat_channel is not None:
         cat_channel = encode_cat_channel
-
-    # Wire hue_order → sort on the color encoding. Typed Nominal for the same
-    # reason as above, and a fortiori: an explicit hue_order= is a statement
-    # that the levels are categories.
-    if hue_order is not None and hue is not None:
-        color_channel = _Color(hue, sort=list(hue_order), type_="nominal")
-        enc["color"] = color_channel
 
     enc.update(encode_kwargs)
 

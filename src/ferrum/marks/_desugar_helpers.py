@@ -134,9 +134,25 @@ def nominal_color_channel(
     rather than run through ``_resolve_sort_for_composite``. Left as
     ``None`` (the default), no ``sort=`` kwarg reaches ``Color`` at all --
     that keeps every existing call site byte-identical.
+
+    An already-constructed channel object combined with an explicit ``sort``
+    is rebuilt (same class, same field, same other kwargs) with ``sort``
+    overriding whatever the channel already carried -- the sibling defect
+    closed alongside #190: the early pass-through above returns a non-string
+    ``field`` untouched, which used to silently discard a caller-supplied
+    ``sort`` the moment ``field`` was already a channel object instead of a
+    bare name. ``sort=None`` (no override requested) still passes the
+    channel through byte-identical, preserving its own ``sort=`` (or its
+    absence) verbatim.
     """
-    if field is None or not isinstance(field, str):
-        return field
+    if field is None:
+        return None
+    if not isinstance(field, str):
+        if sort is None:
+            return field
+        kwargs = dict(field._kwargs)
+        kwargs["sort"] = list(sort)
+        return type(field)(field.field, **kwargs)
     from ferrum.encoding import Color
 
     kwargs: dict = {"type_": "nominal"}
@@ -378,6 +394,22 @@ def resolve_cmap_alias(
     neither) may be supplied.  The resolved name is returned for the mark's
     internal colormap kwarg; ``None`` means "defer to the theme's scheme".
 
+    #240-4a (routed rider): the resolved name is validated against the
+    registered continuous colormaps here, at desugar, rather than left to
+    silently fall back to Viridis. Two Rust mark sites --
+    ``render/marks/image.rs`` (``mark_raster``) and
+    ``render/marks/polygon.rs`` (quantitative-color ``mark_hex``) -- read
+    ``mark_style.group.cmap`` directly with no encoding channel in the loop,
+    so an unrecognized name never reaches ``resolve_continuous_scheme``
+    (the site that emits ``RenderWarning::UnknownColorScheme`` for a
+    channel-bound scheme) and previously desugared to Viridis with no
+    diagnostic at all. Refusing an unknown name here -- before it ever
+    reaches Rust -- makes those two channel-less sites unreachable with bad
+    input, per the standing "refuse malformed" policy. The registered-name
+    list is read from :func:`ferrum.schemes.continuous_palette`'s registry
+    view (``NamedContinuous::list()`` one-for-one), so it cannot drift from
+    what the Rust resolvers actually accept.
+
     Parameters
     ----------
     scheme:
@@ -395,14 +427,26 @@ def resolve_cmap_alias(
     Raises
     ------
     ValueError
-        When both ``scheme`` and ``cmap`` are supplied with different values.
+        When both ``scheme`` and ``cmap`` are supplied with different
+        values, or when the resolved name is not a registered continuous
+        colormap.
     """
     if scheme is not None and cmap is not None and scheme != cmap:
         raise ValueError(
             f"{where}: pass either scheme= or cmap= (its alias), not both with "
             f"different values; got scheme={scheme!r}, cmap={cmap!r}"
         )
-    return scheme if scheme is not None else cmap
+    resolved = scheme if scheme is not None else cmap
+    if resolved is not None:
+        from ferrum.schemes import continuous_palette
+
+        available = continuous_palette.list()
+        if resolved.lower() not in available:
+            raise ValueError(
+                f"{where}: color scheme {resolved!r} is not recognized; "
+                f"available: {', '.join(available)}"
+            )
+    return resolved
 
 
 def identity_transform(name: str):
