@@ -13,6 +13,7 @@ colors that actually render.
 
 from __future__ import annotations
 
+import numbers
 import warnings
 from typing import Literal
 
@@ -140,14 +141,16 @@ def to_hex(
     Parameters
     ----------
     color : tuple or str
-        An RGB tuple with values in [0, 1] (unit) or [0, 255] (byte) — only
-        the first 3 components are read, so a 4th (alpha) component is
-        silently ignored — or a color string: a CSS named color (e.g.
-        ``"steelblue"``), hex (``#rgb``/``#rgba``/``#rrggbb``/``#rrggbbaa``),
-        or a functional ``rgb()``/``rgba()`` form. String input is validated
-        and normalized by ferrum's single Rust color parser (`parse_color`),
-        so this function accepts the exact vocabulary every other ferrum
-        color boundary accepts, alpha included.
+        An RGB tuple with values in [0, 1] (unit) or [0, 255] (byte) — the
+        first 3 components are R/G/B; an optional 4th component is alpha,
+        in the same scale as R/G/B, and is honored into the hex output (see
+        Returns) rather than silently dropped — or a color string: a CSS
+        named color (e.g. ``"steelblue"``), hex
+        (``#rgb``/``#rgba``/``#rrggbb``/``#rrggbbaa``), or a functional
+        ``rgb()``/``rgba()`` form. String input is validated and normalized
+        by ferrum's single Rust color parser (`parse_color`), so this
+        function accepts the exact vocabulary every other ferrum color
+        boundary accepts, alpha included.
     scale : {"unit", "byte"}, optional
         Explicit interpretation of an RGB tuple's component range.  ``"unit"``
         treats components as floats in ``[0, 1]``; ``"byte"`` treats them as
@@ -162,9 +165,9 @@ def to_hex(
     str
         Normalized hex string. For *string* input: ``"#rrggbb"``, or
         ``"#rrggbbaa"`` when the parsed color carried alpha (e.g. an
-        ``rgba()`` or 4/8-digit hex input). For *tuple* input: always
-        ``"#rrggbb"`` — a 4th tuple component is not alpha-encoded into the
-        output (see the `color` parameter above).
+        ``rgba()`` or 4/8-digit hex input). For *tuple* input: ``"#rrggbb"``
+        for a 3-component tuple, or ``"#rrggbbaa"`` for a 4-component tuple
+        — one keep-alpha rule shared by both input forms, no per-form drift.
 
     Raises
     ------
@@ -177,7 +180,10 @@ def to_hex(
         and have no hex form here, so the message says that instead of the
         generic accepted-forms text, which would be self-contradicting for
         ``"transparent"`` (a real CSS Color 4 keyword); if a tuple input's
-        format is not recognized; or if *scale* is not one of ``"unit"``,
+        shape is not recognized, or any of its read components is not
+        numeric (e.g. ``("a", "b", "c")`` — previously an unexplained
+        ``TypeError`` escaped from the internal range comparison; it is now
+        this typed ``ValueError``); or if *scale* is not one of ``"unit"``,
         ``"byte"``, or ``None``.
 
     Examples
@@ -189,6 +195,8 @@ def to_hex(
     '#ff0000'
     >>> ferrum.color.to_hex((128, 128, 128), scale="byte")
     '#808080'
+    >>> ferrum.color.to_hex((1.0, 0.0, 0.0, 0.5))
+    '#ff000080'
     >>> ferrum.color.to_hex("steelblue")
     '#4682b4'
     >>> ferrum.color.to_hex("rgb(70, 130, 180)")
@@ -210,6 +218,24 @@ def to_hex(
         raise ValueError(f"scale must be 'unit', 'byte', or None, got: {scale!r}")
 
     r, g, b = color[0], color[1], color[2]
+    # A 4th component is alpha; a 5th+ is read past, unchanged from before.
+    alpha = color[3] if len(color) >= 4 else None
+
+    # Every component actually read must be numeric. Previously a
+    # non-numeric component (e.g. `("a", "b", "c")`) escaped as a bare
+    # `TypeError` from the `max(r, g, b) > 1` comparison below — an
+    # unexplained internal error at any caller that only expected
+    # `ValueError` (see `plots/_helpers.py`'s `_column_or_literal_color`).
+    # `bool` is intentionally NOT excluded here (unlike e.g.
+    # `_validate_domain_bounds`): a `(True, False, True)` tuple already
+    # rendered `"#ff00ff"` before this change, and closing only the
+    # genuinely-non-numeric escape must not also start refusing that.
+    for component in (r, g, b, alpha):
+        if component is not None and not isinstance(component, numbers.Real):
+            raise ValueError(
+                f"Expected numeric RGB(A) components, got: {color!r} "
+                f"({component!r} is not a number)"
+            )
 
     if scale is None:
         # Range-based heuristic: any component above 1 means a byte ([0, 255])
@@ -238,13 +264,18 @@ def to_hex(
         ri = int(round(float(r) * 255))
         gi = int(round(float(g) * 255))
         bi = int(round(float(b) * 255))
+        ai = int(round(float(alpha) * 255)) if alpha is not None else None
     else:  # "byte"
         ri, gi, bi = int(r), int(g), int(b)
+        ai = int(alpha) if alpha is not None else None
 
     ri = max(0, min(255, ri))
     gi = max(0, min(255, gi))
     bi = max(0, min(255, bi))
-    return f"#{ri:02x}{gi:02x}{bi:02x}"
+    if ai is None:
+        return f"#{ri:02x}{gi:02x}{bi:02x}"
+    ai = max(0, min(255, ai))
+    return f"#{ri:02x}{gi:02x}{bi:02x}{ai:02x}"
 
 
 def sequential(name: str, n: int = 256) -> list[str]:

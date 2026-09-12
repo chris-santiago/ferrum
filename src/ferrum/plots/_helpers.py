@@ -236,12 +236,15 @@ def _column_or_literal_color(
     try:
         paint = to_hex(color)
     except (ValueError, TypeError) as exc:
-        # `TypeError` too: the third leg of the dispatch is normatively "a
-        # typed ValueError naming both readings", and this is the site that
-        # owes it. `to_hex` documents `ValueError` for an unrecognized tuple,
-        # but a non-numeric one (`("a", "b", "c")`) escapes that contract as a
-        # raw `TypeError` from the component comparison -- which would reach
-        # the caller as an unexplained internal error.
+        # The third leg of the dispatch is normatively "a typed ValueError
+        # naming both readings", and this is the site that owes it. `to_hex`
+        # now raises `ValueError` for every unparseable tuple, including a
+        # non-numeric one (`("a", "b", "c")`) -- previously that shape
+        # escaped `to_hex` as a raw, uncaught `TypeError` from the internal
+        # component comparison, which this `except` clause had to name and
+        # catch specially (#122 closed that escape in `ferrum.color.to_hex`
+        # itself). The `TypeError` arm stays here as a defensive belt, not
+        # because `to_hex` is known to still raise one.
         raise ValueError(
             f"{func_name}(color={color!r}): not a column of the data and not a "
             f"parseable color. As a column name it would group the data, but no "

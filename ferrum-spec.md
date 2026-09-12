@@ -737,12 +737,23 @@ All positional and appearance channels accept:
 >   discards the **entire** explicit range (not just the bad entry) in favor
 >   of the theme palette, so one bad string silently drops every good one
 >   alongside it; this is a distinct gap from, and not yet covered by, #107,
->   and is tracked separately as **#126**, scoped to encoding-level `range=`. (2)
->   the swept chart-config/legend-styling/axis-band/title surfaces named in
->   #107, which keep their pre-existing silent unparseable→theme-default
->   fallback because refusal there would make `apply_chart_config`/
->   `axis_style_fill_from` fallible (tracked follow-up: #107,
->   "config-surface color refusal policy").
+>   and is tracked separately as **#126**, scoped to encoding-level `range=`.
+>   (2) **Closed 2026-09-11 (#107, wave-1 hardening).** The chart-config/
+>   legend-styling/axis-band/title color fields (`AxisConfig`, `LegendConfig`,
+>   `TitleConfig`, `GridAxisConfig`, `GridConfig`) now refuse an unparseable
+>   color string at construction (Python `ValueError`, wrapping
+>   `ferrum.color.to_hex`'s message), the same boundary shape as the five
+>   mandated strict boundaries above — this is a sixth family of construction-
+>   time gates, layered in front of them rather than added to the list. The
+>   deeper Rust scene-build sites these fields feed (`apply_chart_config`,
+>   `axis_style_fill_from`, legend swatch/label color, chart title/subtitle
+>   color, axis band fills, inset background/border) keep their `.ok()`/
+>   `unwrap_or` fallback shape unchanged — construction now refuses first, so
+>   those fallbacks are unreachable from the typed Python API rather than
+>   removed. `GridConfig.band_colors`' `"transparent"` entries stay legal
+>   (an intentional "draw no rect for this band" skip, matching
+>   `render/marks/axis.rs`'s own exemption) and are exempted from the color
+>   parse, not from list membership.
 > - **Two clearing spellings.** `"none"` and `"transparent"` both clear a
 >   mark's fill/stroke paint at the mark boundary, in both Python and Rust,
 >   matched case-insensitively after trimming. (Selection styling diverges —

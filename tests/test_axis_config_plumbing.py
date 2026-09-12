@@ -1012,8 +1012,88 @@ class TestGridStyleValueRefusals:
         )
 
     @pytest.mark.parametrize("cls", [fm.GridConfig, fm.GridAxisConfig])
-    def test_color_is_deliberately_not_value_validated(self, cls):
-        """Config-surface color-VALUE refusal is #107's separate decision and
-        an explicit non-goal of this batch's spec (§3), whose gate is KEYS.
-        An unparseable color keeps the theme value."""
-        assert cls(color="notacolor").to_dict()["color"] == "notacolor"
+    def test_color_value_now_refuses(self, cls):
+        """#107 (wave-1 hardening) closed the carve-out this test used to pin:
+        config-surface color-VALUE refusal used to be deferred (an
+        unparseable color silently kept the theme value); it now refuses at
+        construction like every other config-surface value."""
+        with pytest.raises(ValueError, match="not a valid color"):
+            cls(color="notacolor")
+
+
+class TestConfigSurfaceColorRefusal:
+    """#107 (wave-1 hardening): the five ``configure.py`` dataclasses that
+    accept a literal color string refuse an unparseable one at construction
+    instead of silently keeping the theme default (the carve-out this
+    replaces lived at ``configure.py``'s ``_validate_grid_style`` docstring).
+    ``ferrum.color.to_hex`` is the shared vocabulary authority, so the
+    refused message always names it; a value it accepts always constructs.
+    """
+
+    @pytest.mark.parametrize(
+        ("ctor", "kwargs"),
+        [
+            (fm.AxisConfig, {"label_color": "notacolor"}),
+            (fm.AxisConfig, {"title_color": "notacolor"}),
+            (fm.AxisConfig, {"domain_color": "notacolor"}),
+            (fm.AxisConfig, {"grid_color": "notacolor"}),
+            (fm.LegendConfig, {"label_color": "notacolor"}),
+            (fm.TitleConfig, {"color": "notacolor"}),
+            (fm.TitleConfig, {"subtitle_color": "notacolor"}),
+            (fm.GridAxisConfig, {"color": "notacolor"}),
+            (fm.GridConfig, {"color": "notacolor"}),
+        ],
+        ids=[
+            "AxisConfig.label_color",
+            "AxisConfig.title_color",
+            "AxisConfig.domain_color",
+            "AxisConfig.grid_color",
+            "LegendConfig.label_color",
+            "TitleConfig.color",
+            "TitleConfig.subtitle_color",
+            "GridAxisConfig.color",
+            "GridConfig.color",
+        ],
+    )
+    def test_unparseable_color_refuses_at_construction(self, ctor, kwargs):
+        with pytest.raises(ValueError, match="not a valid color"):
+            ctor(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("ctor", "kwargs"),
+        [
+            (fm.AxisConfig, {"label_color": "steelblue"}),
+            (fm.LegendConfig, {"label_color": "#ff0000"}),
+            (fm.TitleConfig, {"color": "rgb(0, 0, 0)"}),
+            (fm.GridAxisConfig, {"color": "#eee"}),
+            (fm.GridConfig, {"color": "green"}),
+        ],
+    )
+    def test_valid_color_still_constructs(self, ctor, kwargs):
+        assert ctor(**kwargs).to_dict()
+
+    def test_grid_config_nested_x_mapping_color_refuses_too(self):
+        """The mapping spelling of `GridConfig(x=...)` normalizes into a
+        `GridAxisConfig`, so it must meet the identical color refusal, not
+        bypass it the way the pre-normalization mapping spelling used to
+        bypass `width`/`opacity` (see `TestGridStyleValueRefusals`)."""
+        with pytest.raises(ValueError, match="not a valid color"):
+            fm.GridConfig(x={"color": "notacolor"})
+
+    def test_band_colors_transparent_is_a_legal_skip_not_a_color(self):
+        """`"transparent"` (any case) means "draw no rect for this band" --
+        matching `render/marks/axis.rs`'s own exemption -- so it must not be
+        sent through the color parser, which would otherwise refuse it as a
+        paint-clearing sentinel."""
+        cfg = fm.GridConfig(band_colors=["#f0f0f0", "transparent", "TRANSPARENT"])
+        assert cfg.band_colors == ["#f0f0f0", "transparent", "TRANSPARENT"]
+
+    def test_band_colors_other_sentinel_still_refuses(self):
+        """Only `"transparent"` is exempted; `"none"` has no special meaning
+        for a band entry and is refused like any other unparseable value."""
+        with pytest.raises(ValueError, match="not a valid color"):
+            fm.GridConfig(band_colors=["#f0f0f0", "none"])
+
+    def test_band_colors_bad_entry_names_its_index(self):
+        with pytest.raises(ValueError, match=r"band_colors\[1\]"):
+            fm.GridConfig(band_colors=["#f0f0f0", "notacolor"])

@@ -90,6 +90,62 @@ def _validate_domain_bounds(domain_min: float | None, domain_max: float | None) 
 _DEGENERATE_DOMAIN_MESSAGE = "domain endpoints must differ (lo != hi)"
 
 
+def _validate_config_color(owner: str, field: str, value: str | None) -> None:
+    """Refuse a config-surface color string ``ferrum.color.to_hex`` cannot parse.
+
+    #107: the five chart-level config dataclasses (:class:`AxisConfig`,
+    :class:`LegendConfig`, :class:`TitleConfig`, :class:`GridAxisConfig`,
+    :class:`GridConfig`) each accept one or more literal color strings.
+    Before this gate, an unparseable value (a typo, a non-color word) was
+    silently kept at the theme default with no warning at all — every Rust
+    consumer of these fields resolves the color through an
+    ``if let Ok(c) = parse_color(...)``-shaped fallback (see
+    ``render/config_apply/mod.rs``, ``render/prepare/mod.rs``,
+    ``render/marks/legend.rs``, ``render/scene_build.rs``,
+    ``render/marks/axis.rs``, ``render/inset.rs``). This function is the
+    construction-time gate that makes that silent keep unreachable from the
+    typed Python API; the Rust fallbacks stay in place as an inert belt.
+
+    This is the same construction-time shape as
+    ``marks.base._validate_literal_color`` — a thin wrapper around
+    :func:`ferrum.color.to_hex` (ferrum's single Rust color parser), lazily
+    imported for the same module-init-order reason documented there. It
+    does not accept ``"none"``/``"transparent"``/``"theme:label"`` as
+    sentinels; those are mark/selection-boundary concepts, not something any
+    of these five config surfaces gives special meaning to (the one
+    documented exception, ``GridConfig.band_colors``' own ``"transparent"``
+    skip, is handled by its caller, not here — see
+    :func:`_validate_config_band_colors`).
+    """
+    if value is None:
+        return
+    from ferrum.color import to_hex
+
+    try:
+        to_hex(value)
+    except ValueError as exc:
+        raise ValueError(f"{owner}.{field}={value!r} is not a valid color ({exc})") from exc
+
+
+def _validate_config_band_colors(owner: str, field: str, values: list[str] | None) -> None:
+    """Refuse an unparseable entry in a ``band_colors=`` list.
+
+    Sibling to :func:`_validate_config_color`, with one per-surface
+    short-circuit: ``"transparent"`` (case-insensitive, matching
+    ``render/marks/axis.rs``'s ``eq_ignore_ascii_case("transparent")`` check)
+    is a legal band entry meaning "draw no rect for this band" — an
+    intentional gap, not a color, so it must not be sent through
+    ``to_hex`` (which raises on it as a paint-clearing sentinel). Every
+    other entry is validated exactly like a scalar config color.
+    """
+    if values is None:
+        return
+    for i, value in enumerate(values):
+        if isinstance(value, str) and value.strip().lower() == "transparent":
+            continue
+        _validate_config_color(owner, f"{field}[{i}]", value)
+
+
 @dataclass(frozen=True, init=False)
 class AxisConfig:
     """Chart-level axis configuration applied uniformly to all axes (or a specific one).
@@ -344,6 +400,11 @@ class AxisConfig:
         if label_overlap is not None:
             validate_label_overlap("AxisConfig.label_overlap", label_overlap)
 
+        _validate_config_color("AxisConfig", "label_color", label_color)
+        _validate_config_color("AxisConfig", "title_color", title_color)
+        _validate_config_color("AxisConfig", "domain_color", domain_color)
+        _validate_config_color("AxisConfig", "grid_color", grid_color)
+
         object.__setattr__(self, "x", x)
         object.__setattr__(self, "y", y)
         object.__setattr__(self, "labels", labels)
@@ -506,6 +567,7 @@ class LegendConfig:
             validate_legend_orient("LegendConfig.orient", self.orient)
         if not is_unspecified(self.direction):
             validate_legend_direction("LegendConfig.direction", self.direction)
+        _validate_config_color("LegendConfig", "label_color", self.label_color)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""
@@ -545,6 +607,8 @@ class TitleConfig:
     def __post_init__(self) -> None:
         if self.anchor is not None:
             validate_choice("TitleConfig.anchor", "anchor", self.anchor, _VALID_TITLE_ANCHORS)
+        _validate_config_color("TitleConfig", "color", self.color)
+        _validate_config_color("TitleConfig", "subtitle_color", self.subtitle_color)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""
@@ -568,10 +632,9 @@ def _validate_grid_style(owner: str, width: Any, opacity: Any) -> None:
     numeric-and-finite predicate in two places inside one function body — the
     shape ``validate_pixel_value`` was consolidated to remove.
 
-    ``color`` is deliberately NOT validated here: config-surface color-VALUE
-    refusal is a separate decision (#107) and an explicit non-goal of this
-    batch's spec (§3), whose gate is about KEYS. An unparseable color keeps
-    the theme value, unchanged.
+    ``color`` is validated by each caller via :func:`_validate_config_color`
+    (#107), not here — this function only owns the ``width``/``opacity`` pair
+    the two grid classes share.
     """
     validate_pixel_value(f"{owner}.width", width)
     validate_fraction_value(f"{owner}.opacity", opacity)
@@ -615,8 +678,9 @@ class GridAxisConfig:
     opacity: float | None = None
 
     def __post_init__(self) -> None:
-        """Validate the numeric style values (see :func:`_validate_grid_style`)."""
+        """Validate the numeric style values (see :func:`_validate_grid_style`) and color."""
         _validate_grid_style("GridAxisConfig", self.width, self.opacity)
+        _validate_config_color("GridAxisConfig", "color", self.color)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values."""
@@ -662,7 +726,10 @@ class GridConfig:
     opacity : float, optional
         Grid line opacity.
     band_colors : list[str], optional
-        Alternating band fill colors between grid lines.
+        Alternating band fill colors between grid lines. ``"transparent"``
+        (case-insensitive) is a legal entry meaning "draw no rect for this
+        band" rather than a color; every other entry must be a color
+        ``ferrum.color.to_hex`` accepts, refused at construction otherwise.
     """
 
     x: "bool | GridAxisConfig | None" = None
@@ -700,6 +767,8 @@ class GridConfig:
         ``dict``) serializes correctly.
         """
         _validate_grid_style("GridConfig", self.width, self.opacity)
+        _validate_config_color("GridConfig", "color", self.color)
+        _validate_config_band_colors("GridConfig", "band_colors", self.band_colors)
         for axis in ("x", "y"):
             value = getattr(self, axis)
             if value is None or isinstance(value, (bool, GridAxisConfig)):

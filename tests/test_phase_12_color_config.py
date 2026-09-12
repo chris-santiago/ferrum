@@ -78,6 +78,53 @@ class TestToHex:
             ferrum.color.to_hex("not_a_hex")
 
 
+class TestToHexAlpha:
+    """#122: ``to_hex`` keeps alpha on every input form, not just strings.
+
+    Before this fix, a 4th tuple component was read past and silently
+    dropped (``color.py``'s own docstring said so); a non-numeric tuple
+    (e.g. a typo'd component) escaped as a bare, uncaught ``TypeError``
+    instead of the ``ValueError`` every other ``to_hex`` failure raises.
+    """
+
+    def test_unit_scale_tuple_keeps_alpha(self):
+        assert ferrum.color.to_hex((1.0, 0.0, 0.0, 0.5)) == "#ff000080"
+
+    def test_byte_scale_tuple_keeps_alpha(self):
+        assert ferrum.color.to_hex((255, 0, 0, 128), scale="byte") == "#ff000080"
+
+    def test_alpha_endpoints(self):
+        assert ferrum.color.to_hex((1.0, 0.0, 0.0, 0.0)) == "#ff000000"
+        assert ferrum.color.to_hex((1.0, 0.0, 0.0, 1.0)) == "#ff0000ff"
+
+    def test_three_component_tuple_unaffected(self):
+        # No 4th component: output stays the plain 6-digit form (byte-identical
+        # with pre-#122 behavior for every already-correct 3-tuple caller).
+        assert ferrum.color.to_hex((1.0, 0.0, 0.0)) == "#ff0000"
+        assert ferrum.color.to_hex((255, 0, 0)) == "#ff0000"
+
+    def test_bool_tuple_still_accepted(self):
+        # `bool` is intentionally not excluded from the tuple's numeric check
+        # (unlike e.g. `AxisConfig`'s domain bounds) -- closing the
+        # non-numeric escape must not also start refusing what already
+        # worked.
+        assert ferrum.color.to_hex((True, False, True)) == "#ff00ff"
+
+    def test_non_numeric_tuple_raises_typed_value_error(self):
+        import pytest
+
+        # Previously escaped as a bare `TypeError` from the internal
+        # `max(r, g, b) > 1` comparison; #122 closes that escape.
+        with pytest.raises(ValueError, match="numeric"):
+            ferrum.color.to_hex(("a", "b", "c"))
+
+    def test_non_numeric_alpha_component_raises_typed_value_error(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="numeric"):
+            ferrum.color.to_hex((1.0, 0.0, 0.0, "opaque"))
+
+
 class TestSequential:
     def test_viridis_n10(self):
         colors = ferrum.color.sequential("viridis", n=10)
