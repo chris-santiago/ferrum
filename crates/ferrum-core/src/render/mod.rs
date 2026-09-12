@@ -349,6 +349,43 @@ pub enum RenderError {
         format: String,
         coord_flipped: bool,
     },
+    /// A chart combines a projected coordinate system — `Polar` or, since
+    /// 2026-09-12, `Geo` — with a `BreakAxis` structural spec (#230-8, D3:
+    /// REFUSE MALFORMED). `coord` names which one (`"Polar"`/`"Geo"`);
+    /// `axis` is the offending `BreakAxis.axis` token (`"x"`/`"y"`).
+    ///
+    /// Pre-fix this was silent geometry destruction, not a suppression: the
+    /// false claim (removed from `break_axis::BreakPlacement::for_kind`'s
+    /// `Arc` arm doc) was that Cartesian breaks are suppressed under polar
+    /// coords. For `Polar`, what actually happened is measured directly:
+    /// `mark_arc`'s wedge transform runs during BATCH BUILD, before any
+    /// break geometry exists, so the break fold then reverse-mapped the
+    /// already-projected pixels through the Cartesian scale it replaced —
+    /// destroying the geometry (measured: every polar wedge destroyed, 11
+    /// sentinel occurrences in one repro) while still painting a break
+    /// indicator over Cartesian axes that `resolve_panel_axes`
+    /// (`scene_build.rs`) suppresses under this coord, with zero warnings.
+    ///
+    /// Adjudicated 2026-09-12: the gate extends from `Polar`-only to also
+    /// cover `Geo`, on a structural argument rather than an empirical one.
+    /// Under `CoordGeo`, `mark_geoshape` places every vertex by bbox-fitting
+    /// its `projection::forward`-projected lon/lat into the plot rect
+    /// (`marks/geoshape.rs`'s scaling pass), entirely independent of the
+    /// resolved x/y scales. `BreakRemap`'s reverse-map runs through the
+    /// Cartesian scale it replaces, so for geo geometry there is no
+    /// scale-relative position left for it to correct — the break contract
+    /// cannot be honored for `Geo`, and `resolve_panel_axes` suppresses the
+    /// very Cartesian axes the break indicator would otherwise annotate.
+    /// REFUSE MALFORMED is the sound response here, not silent geometry
+    /// loss dressed up as a render.
+    ///
+    /// Raised at the top of `scene_build::build_scene` — the one funnel
+    /// every standalone render AND every composite leaf's render passes
+    /// through — before any break geometry, or any other geometry, is
+    /// built. A composite leaf combining either coord with a break
+    /// therefore refuses per-leaf, exactly like every other per-leaf
+    /// render error.
+    BreakAxisIncompatibleCoord { coord: &'static str, axis: String },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -426,7 +463,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::LayerUnknownColumn { .. }
         // #126: carries no channel token at all — a color string, not a
         // positional channel.
-        | RenderError::ColorRangeParseFailure { .. }) => other,
+        | RenderError::ColorRangeParseFailure { .. }
+        // #230-8: carries a coord name and the `BreakAxis.axis` token, not a
+        // positional encoding channel — nothing here to un-flip.
+        | RenderError::BreakAxisIncompatibleCoord { .. }) => other,
     }
 }
 
@@ -587,6 +627,11 @@ impl std::fmt::Display for RenderError {
                      but the resolved scale is not temporal"
                 )
             }
+            Self::BreakAxisIncompatibleCoord { coord, axis } => write!(
+                f,
+                "BreakAxis(axis={axis:?}) is not supported under {coord} coordinates; \
+                 remove the break or render this chart under Cartesian coords"
+            ),
         }
     }
 }

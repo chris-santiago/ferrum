@@ -698,9 +698,18 @@ impl BreakPlacement {
             MarkBatchKind::Label => Self::MoveGlyphAndConnector,
             // Connected stroked geometry: every vertex is a data position.
             // `Arc` is polar-only geometry (its batches come from `mark_arc`
-            // and polar bars), where Cartesian axes — and so Cartesian breaks —
-            // are suppressed; it takes the vertex model as the closest honest
-            // answer rather than a separate polar one.
+            // and polar bars). A chart combining `Polar` coordinates with any
+            // `BreakAxis` now refuses at the render funnel
+            // (`RenderError::BreakAxisIncompatibleCoord`, #230-8) before this
+            // placement model — or any other break geometry — is ever built,
+            // so this arm is unreachable for a real polar+break chart. (The
+            // prior claim here, that Cartesian breaks are "suppressed" under
+            // polar coords, was false: polar projection runs during batch
+            // build, then the break fold reverse-mapped the already-projected
+            // pixels through the Cartesian scale it replaced, destroying the
+            // geometry silently.) It keeps the vertex model — not a separate
+            // polar one — as the defensive default should `Arc` ever reach
+            // this match under a non-polar coord.
             MarkBatchKind::Line | MarkBatchKind::Rule | MarkBatchKind::Arc => Self::MoveVertices,
             // `mark_segment` alone mixes vertex-placed shafts with an attached
             // fixed-size glyph (`arrow=True`'s head).

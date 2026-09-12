@@ -20,6 +20,34 @@ use super::{
     CLIP_ID_PREFIX,
 };
 
+/// The `(coord name, BreakAxis.axis token)` of the first `BreakAxis`
+/// structural spec, if `spec.coord` is `Polar` or `Geo` and
+/// `chart_config.structural` carries at least one — the combination #230-8
+/// refuses (D3: REFUSE MALFORMED; extended to `Geo` 2026-09-12). Both
+/// coordinate systems place geometry during batch build, before the break
+/// fold exists, but they share this root cause structurally rather than by
+/// a measured signature: `Geo`'s vertices are bbox-fit from
+/// `projection::forward`-projected lon/lat into the plot rect, independent
+/// of the resolved x/y scales, so the break's reverse-map through the
+/// Cartesian scale it replaces has no scale-relative position left to
+/// correct — see [`RenderError::BreakAxisIncompatibleCoord`]'s doc. `None`
+/// for every other coord/structural pairing, including a `Polar`/`Geo`
+/// chart with no `BreakAxis`.
+fn break_axis_incompatible_coord(
+    spec: &ChartSpec,
+    chart_config: &super::chart_config::ChartConfig,
+) -> Option<(&'static str, String)> {
+    let coord = match &spec.coord {
+        Some(crate::spec::coord::CoordKind::Polar { .. }) => "Polar",
+        Some(crate::spec::coord::CoordKind::Geo { .. }) => "Geo",
+        _ => return None,
+    };
+    chart_config.structural.iter().find_map(|item| match item {
+        StructuralSpec::BreakAxis(b) => Some((coord, b.axis.clone())),
+        _ => None,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     spec: &ChartSpec,
@@ -34,6 +62,18 @@ pub fn build_scene(
     // → byte-identical.
     leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<SceneGraph, RenderError> {
+    // #230-8 (D3: REFUSE MALFORMED; extended to `Geo` 2026-09-12). A
+    // projected coordinate system (`Polar` or `Geo`) combined with any
+    // `BreakAxis` structural spec is refused, before any geometry — break or
+    // otherwise — is built. This is the one funnel every standalone render
+    // AND every composite leaf's render passes through, so a leaf combining
+    // the two refuses per-leaf like any other render error. See
+    // `RenderError::BreakAxisIncompatibleCoord`'s doc for why silent
+    // corruption (not suppression) was the pre-fix behavior for both coords.
+    if let Some((coord, axis)) = break_axis_incompatible_coord(spec, chart_config) {
+        return Err(RenderError::BreakAxisIncompatibleCoord { coord, axis });
+    }
+
     let background = config.background.or(Some(theme.colors.background_color));
 
     // Wave-1 close remediation (S3-1): the boundary between "warnings already
@@ -4158,13 +4198,31 @@ mod tests {
         spec: &ChartSpec,
         batch: &RecordBatch,
     ) -> Result<ferrum_scene::SceneGraph, RenderError> {
+        try_build_scene_for_with_chart_config(
+            spec,
+            batch,
+            &super::super::chart_config::ChartConfig::default(),
+        )
+    }
+
+    /// [`try_build_scene_for`], but with an explicit `ChartConfig` passed to
+    /// `build_scene` — for tests that need `chart_config.structural`
+    /// populated (e.g. the #230-8 polar+`BreakAxis` funnel gate), which the
+    /// plain helper always calls with `ChartConfig::default()`. The
+    /// `prepare_render_inputs` call keeps its own pre-existing
+    /// `ChartConfig::default()` (unrelated to this parameter — see the note
+    /// at that call site), unchanged for every existing caller.
+    fn try_build_scene_for_with_chart_config(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+        chart_config: &super::super::chart_config::ChartConfig,
+    ) -> Result<ferrum_scene::SceneGraph, RenderError> {
         let theme = ThemeInputs::default();
         let viewport = crate::layout::Viewport {
             width: 600.0,
             height: 400.0,
         };
         let config = super::super::config::RenderConfig::default();
-        let chart_config = super::super::chart_config::ChartConfig::default();
 
         let mut prep = super::super::prepare::prepare_render_inputs(
             spec,
@@ -4205,7 +4263,7 @@ mod tests {
             &theme,
             &config,
             &mut warnings,
-            &chart_config,
+            chart_config,
             None,
         )
     }
@@ -8363,6 +8421,160 @@ mod tests {
             break_size: 12.0,
             break_style: "slash".to_string(),
         })
+    }
+
+    // ── #230-8 polar + BreakAxis funnel refusal (D3: REFUSE MALFORMED) ──────
+
+    /// A minimal single-mark `(ChartSpec, RecordBatch)` pair whose `coord`
+    /// the caller sets afterward. `break_axis_incompatible_coord` fires on
+    /// `spec.coord`/`chart_config.structural` alone, before any encoding or
+    /// data is read, so this fixture only needs to be well-formed enough to
+    /// clear `prepare_render_inputs`/`compute_layout` ahead of `build_scene`.
+    fn minimal_point_spec() -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "a".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "b".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Float64, false),
+            Field::new("b", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0_f64, 90.0])),
+                Arc::new(Float64Array::from(vec![1.0_f64, 5.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    fn polar_coord() -> crate::spec::coord::CoordKind {
+        crate::spec::coord::CoordKind::Polar {
+            theta: crate::spec::coord::PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: crate::spec::coord::PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        }
+    }
+
+    fn geo_coord() -> crate::spec::coord::CoordKind {
+        crate::spec::coord::CoordKind::Geo {
+            projection: crate::spec::coord::GeoProjection::Mercator,
+        }
+    }
+
+    fn chart_config_with_structural(
+        structural: Vec<StructuralSpec>,
+    ) -> super::super::chart_config::ChartConfig {
+        super::super::chart_config::ChartConfig {
+            structural,
+            ..Default::default()
+        }
+    }
+
+    /// The funnel itself: a `Polar`-coord chart carrying a `BreakAxis`
+    /// structural spec refuses from `build_scene` before any geometry
+    /// (break or otherwise) is built. Pre-fix this rendered silently
+    /// corrupted output (every polar wedge destroyed) instead of refusing.
+    #[test]
+    fn polar_coord_with_break_axis_refuses_before_any_geometry_is_built() {
+        let (mut spec, batch) = minimal_point_spec();
+        spec.coord = Some(polar_coord());
+        let chart_config =
+            chart_config_with_structural(vec![break_spec("y", vec![[20.0, 80.0]])]);
+        let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect_err("polar + BreakAxis must refuse at the render funnel");
+        match &err {
+            RenderError::BreakAxisIncompatibleCoord { coord, axis } => {
+                assert_eq!(*coord, "Polar");
+                assert_eq!(axis, "y");
+            }
+            other => panic!("expected BreakAxisIncompatibleCoord, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("BreakAxis"), "message must name BreakAxis: {msg}");
+        assert!(msg.contains('y'), "message must name the axis token: {msg}");
+        assert!(msg.contains("Polar"), "message must name the polar coordinate: {msg}");
+    }
+
+    /// A polar chart with no `BreakAxis` at all is untouched by this gate.
+    #[test]
+    fn polar_coord_with_no_break_axis_renders_normally() {
+        let (mut spec, batch) = minimal_point_spec();
+        spec.coord = Some(polar_coord());
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect("a polar chart with no BreakAxis must render as before");
+    }
+
+    /// The pre-existing, still-supported combination: Cartesian + BreakAxis
+    /// is unaffected by this refusal.
+    #[test]
+    fn cartesian_coord_with_break_axis_renders_normally() {
+        let (spec, batch) = minimal_point_spec();
+        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[2.0, 4.0]])]);
+        try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect("Cartesian + BreakAxis is the existing, unrefused combination");
+    }
+
+    /// `Geo` + `BreakAxis` refuses too (adjudicated 2026-09-12, extending
+    /// #230-8 from `Polar`-only), on a structural argument: `mark_geoshape`
+    /// places every vertex by bbox-fitting its
+    /// `projection::forward`-projected lon/lat into the plot rect
+    /// (`marks/geoshape.rs`'s scaling pass), independent of the resolved
+    /// x/y scales. The break fold's reverse-map runs through the Cartesian
+    /// scale it replaces, so it has no scale-relative position left to
+    /// correct for geo geometry — the break contract cannot be honored for
+    /// `Geo`, hence REFUSE MALFORMED rather than the silent geometry loss
+    /// this gate now prevents.
+    #[test]
+    fn geo_coord_with_break_axis_refuses_before_any_geometry_is_built() {
+        let (mut spec, batch) = minimal_point_spec();
+        spec.coord = Some(geo_coord());
+        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[2.0, 4.0]])]);
+        let err = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect_err("Geo + BreakAxis must refuse at the render funnel");
+        match &err {
+            RenderError::BreakAxisIncompatibleCoord { coord, axis } => {
+                assert_eq!(*coord, "Geo");
+                assert_eq!(axis, "y");
+            }
+            other => panic!("expected BreakAxisIncompatibleCoord, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("BreakAxis"), "message must name BreakAxis: {msg}");
+        assert!(msg.contains("Geo"), "message must name the geo coordinate: {msg}");
+    }
+
+    /// A geo chart with no `BreakAxis` at all is untouched by this gate.
+    #[test]
+    fn geo_coord_with_no_break_axis_renders_normally() {
+        let (mut spec, batch) = minimal_point_spec();
+        spec.coord = Some(geo_coord());
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect("a geo chart with no BreakAxis must render as before");
     }
 
     fn structural_warnings(

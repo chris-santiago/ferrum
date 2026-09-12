@@ -1486,3 +1486,157 @@ def test_flush_edge_tick_label_offset_survives_a_break():
             f"must survive a break just like an interior tick's; "
             f"unbroken={unbroken_offset} broken={broken_offset}"
         )
+
+
+# --------------------------------------------------------------------------
+# #230-8: polar + BreakAxis refuses (D3: REFUSE MALFORMED)
+# --------------------------------------------------------------------------
+
+
+def _polar_pie_chart(df: pl.DataFrame) -> fm.Chart:
+    return fm.Chart(df).mark_arc().encode(x="val:Q", color="cat:N").coord(fm.CoordPolar(theta="x"))
+
+
+def _polar_pie_df() -> pl.DataFrame:
+    return pl.DataFrame({"cat": ["A", "B", "C"], "val": [10.0, 20.0, 30.0]})
+
+
+def test_polar_coord_with_break_axis_refuses_with_a_named_message():
+    """#230-8: under `CoordPolar`, arc marks build their own polar geometry
+    (`marks/arc.rs::build` — wedge centers and radii, not positions on the
+    Cartesian scale), so the break fold's reverse map through that scale has
+    no meaning for them; the pre-fix pipeline applied it anyway rather than
+    suppressing it as the (since-removed) comment near
+    `BreakPlacement::for_kind`'s `Arc` arm claimed. (This fixture's own gap
+    misses the y domain — the chart has no y encoding — so pre-fix it took
+    the `BreakAxisIneffective` branch; a domain-overlapping gap was the
+    corrupting shape.) The combination now refuses with a typed
+    `ValueError` (Rust `RenderError::BreakAxisIncompatibleCoord`), before
+    any geometry is built."""
+    chart = _polar_pie_chart(_polar_pie_df()) + fm.BreakAxis(axis="y", gap=(150, 850))
+    with pytest.raises(ValueError, match=r"BreakAxis"):
+        chart.to_svg()
+
+
+def test_polar_coord_with_break_axis_message_names_the_combination():
+    chart = _polar_pie_chart(_polar_pie_df()) + fm.BreakAxis(axis="y", gap=(150, 850))
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    message = str(exc_info.value)
+    assert "BreakAxis" in message, message
+    assert "y" in message, message
+    assert "Polar" in message, message
+
+
+def test_polar_coord_with_break_axis_on_x_names_that_axis():
+    chart = _polar_pie_chart(_polar_pie_df()) + fm.BreakAxis(axis="x", gap=(5, 15))
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    # The literal `axis=` in every message contains an "x", so a bare
+    # `"x" in message` check passes even when the gate reported `axis="y"`.
+    # Pin the full token so this is the one Python assertion that actually
+    # discriminates the x-axis case.
+    assert 'axis="x"' in str(exc_info.value)
+
+
+def test_polar_coord_without_break_axis_still_renders():
+    """The refusal is scoped to the combination, not to polar coords alone —
+    a polar chart with no `BreakAxis` is untouched."""
+    svg = _polar_pie_chart(_polar_pie_df()).to_svg()
+    assert "<svg" in svg
+
+
+def test_cartesian_break_axis_is_unaffected_by_the_polar_refusal():
+    plain_chart = fm.Chart(pl.DataFrame({"c": ["A", "B"], "v": [1.0, 900.0]})).mark_bar().encode(
+        x="c:N", y="v:Q"
+    )
+    chart = plain_chart + fm.BreakAxis(axis="y", gap=(150, 850))
+    plain_svg = plain_chart.to_svg()
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    # A silently dropped break would render byte-identically to the
+    # unbroken chart; the break indicator's `<line>` elements are the
+    # discriminating signal that the break actually happened.
+    assert svg.count("<line") > plain_svg.count("<line"), (
+        "the Cartesian break must still draw its indicator, not be silently dropped"
+    )
+
+
+def test_polar_break_axis_leaf_inside_a_composite_also_refuses():
+    """A composite leaf combining polar coords with a `BreakAxis` refuses
+    per-leaf, exactly like every other per-leaf render error: composite
+    rendering funnels every leaf through the same `build_scene` call the
+    standalone path uses, so the refusal is not something a composite can
+    route around."""
+    ok_chart = fm.Chart(pl.DataFrame({"c": ["A", "B"], "v": [1.0, 2.0]})).mark_bar().encode(
+        x="c:N", y="v:Q"
+    )
+    bad_leaf = _polar_pie_chart(_polar_pie_df()) + fm.BreakAxis(axis="y", gap=(150, 850))
+    with pytest.raises(ValueError, match=r"BreakAxis"):
+        fm.hconcat(ok_chart, bad_leaf).to_svg()
+
+
+# --------------------------------------------------------------------------
+# #230-8 extended (adjudicated 2026-09-12): Geo + BreakAxis refuses too, on
+# the same root cause as Polar — a coordinate system whose projection runs
+# before the break fold refuses rather than silently corrupting.
+# --------------------------------------------------------------------------
+
+# A unit-square GeoJSON polygon (mirrors tests/test_coord_guards.py's
+# `_BARE_POLYGON`) — enough for `mark_geoshape` to project real geometry.
+_GEO_UNIT_SQUARE = {
+    "type": "Polygon",
+    "coordinates": [[[-10, -10], [10, -10], [10, 10], [-10, 10], [-10, -10]]],
+}
+
+
+def _geoshape_chart() -> fm.Chart:
+    return fm.Chart(_GEO_UNIT_SQUARE).mark_geoshape().coord(
+        fm.CoordGeo(projection="equirectangular")
+    )
+
+
+def test_geo_coord_with_break_axis_refuses_with_a_named_message():
+    """Under `CoordGeo`, `mark_geoshape` places every vertex by
+    bbox-fitting its projected lon/lat into the plot rect
+    (`crates/ferrum-core/src/render/marks/geoshape.rs`'s scaling pass),
+    independent of the resolved x/y scales. `BreakAxis`'s reverse-map runs
+    through the Cartesian scale it replaces, so it has no scale-relative
+    position left to correct for geo geometry — the break contract cannot
+    be honored for `Geo`, hence this combination refuses with a typed
+    `ValueError` (Rust `RenderError::BreakAxisIncompatibleCoord`), before
+    any geometry is built — extending the #230-8 gate from `Polar`-only to
+    also cover `Geo`.
+
+    (Note: a plain-render `<path>` count dropping to zero under an
+    overlapping `BreakAxis` is not itself Geo-specific evidence of
+    corruption — it is `BreakPlacement::ClipExtent`'s documented,
+    coord-agnostic behavior for any polygon/area batch wholly inside the
+    gap, pinned coord-agnostically by
+    `break_axis.rs::polygon_wholly_inside_a_gap_keeps_its_node_and_loses_its_rings`
+    and reproducible with a plain Cartesian `mark_area` under the same gap
+    shape. The assertion below is a sanity check that the plain geo chart
+    draws real geometry before checking that the combined chart refuses
+    instead of silently rendering it away.)"""
+    plain_svg = _geoshape_chart().to_svg()
+    assert plain_svg.count("<path") == 1, "sanity: the plain geo chart draws one path"
+
+    chart = _geoshape_chart() + fm.BreakAxis(axis="y", gap=(-2.0, 2.0))
+    with pytest.raises(ValueError, match=r"BreakAxis"):
+        chart.to_svg()
+
+
+def test_geo_coord_with_break_axis_message_names_the_combination():
+    chart = _geoshape_chart() + fm.BreakAxis(axis="y", gap=(-2.0, 2.0))
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    message = str(exc_info.value)
+    assert "BreakAxis" in message, message
+    assert "Geo" in message, message
+
+
+def test_geo_coord_without_break_axis_still_renders():
+    """The refusal is scoped to the combination, not to Geo coords alone —
+    a Geo chart with no `BreakAxis` is untouched."""
+    svg = _geoshape_chart().to_svg()
+    assert svg.count("<path") == 1
