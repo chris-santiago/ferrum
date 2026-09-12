@@ -34,8 +34,20 @@ pub enum CoordValue {
 // ── Annotation spec ─────────────────────────────────────────────────────────
 
 /// One annotation spec, deserialized from the chart_config `annotations` array.
+///
+/// `deny_unknown_fields` closes the #148 array carve-out's defense-in-depth
+/// line (the primary refusal is the wire gate, `binding.rs::
+/// validate_chart_config_keys`'s array branch, which consults
+/// [`accepted_keys_for_annotation_variant`] below and runs BEFORE
+/// deserialization — same "manual gate first, deny_unknown_fields second"
+/// split `chart_config.rs`'s module doc describes for the dict-shaped
+/// sections). Verified empirically that this does not defeat itself the way
+/// `#[serde(flatten)]` does for `AxisConfigSpec`: an internally-tagged enum's
+/// own `type` tag is excluded from each variant's "expected" field set by
+/// serde-derive, so `deny_unknown_fields` here rejects a genuinely unknown
+/// field without ever flagging `type` itself as unknown.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum AnnotationSpec {
     #[serde(rename = "text")]
     Text {
@@ -165,6 +177,74 @@ pub enum AnnotationSpec {
         #[serde(default = "default_anchor")]
         anchor: String,
     },
+}
+
+// ── Per-variant wire key sets (#92/#148 array-item gate) ────────────────────
+//
+// One const per `AnnotationSpec` variant, INCLUDING `type` (the item's own
+// discriminator key, which is a real key on the wire dict even though it is
+// not a named field of the variant struct itself — see the enum's own doc).
+// Each is drift-tested against the real variant in this module's `tests`
+// (`annotation_*_keys_match_serde`), the same `deny_unknown_fields`-mining
+// technique `chart_config.rs`'s `*_keys_match_serde` tests use
+// (`accepted_fields_from_deny_unknown_error`, reused from there).
+
+/// `AnnotationSpec::Text`'s wire keys.
+pub(crate) const ANNOTATION_TEXT_KEYS: &[&str] = &[
+    "type", "x", "y", "text", "font_size", "color", "anchor", "baseline", "angle", "dx", "dy", "z",
+];
+/// `AnnotationSpec::Arrow`'s wire keys.
+pub(crate) const ANNOTATION_ARROW_KEYS: &[&str] =
+    &["type", "x", "y", "x2", "y2", "stroke", "stroke_width", "head_size"];
+/// `AnnotationSpec::Rect`'s wire keys.
+pub(crate) const ANNOTATION_RECT_KEYS: &[&str] =
+    &["type", "x1", "y1", "x2", "y2", "fill", "opacity", "corner_radius", "stroke"];
+/// `AnnotationSpec::Line`'s wire keys.
+pub(crate) const ANNOTATION_LINE_KEYS: &[&str] =
+    &["type", "x1", "y1", "x2", "y2", "stroke", "stroke_width", "dash"];
+/// `AnnotationSpec::Span`'s wire keys.
+pub(crate) const ANNOTATION_SPAN_KEYS: &[&str] =
+    &["type", "axis", "start", "end", "fill", "opacity", "label_position", "label"];
+/// `AnnotationSpec::Bracket`'s wire keys.
+pub(crate) const ANNOTATION_BRACKET_KEYS: &[&str] =
+    &["type", "x1", "y1", "x2", "y2", "label", "direction", "stroke", "tip_length"];
+/// `AnnotationSpec::Callout`'s wire keys.
+pub(crate) const ANNOTATION_CALLOUT_KEYS: &[&str] = &[
+    "type",
+    "x",
+    "y",
+    "text",
+    "arrow",
+    "padding",
+    "background",
+    "border_color",
+    "border_radius",
+    "text_x",
+    "text_y",
+];
+/// `AnnotationSpec::Image`'s wire keys.
+pub(crate) const ANNOTATION_IMAGE_KEYS: &[&str] =
+    &["type", "x", "y", "src", "width", "height", "anchor"];
+
+/// The accepted wire-key set for one `annotations[]` item, keyed by its
+/// `type` tag — the per-item counterpart of `chart_config::
+/// accepted_keys_for_section`, consulted by the wire gate's array branch
+/// (`binding.rs::validate_chart_config_keys`) to close the #148 carve-out.
+/// `None` for an unrecognized tag — that case is left to serde's own
+/// "unknown variant" error, matching how the gate walk already leaves a
+/// non-dict-shaped section value to serde's type-mismatch error.
+pub(crate) fn accepted_keys_for_annotation_variant(type_tag: &str) -> Option<&'static [&'static str]> {
+    match type_tag {
+        "text" => Some(ANNOTATION_TEXT_KEYS),
+        "arrow" => Some(ANNOTATION_ARROW_KEYS),
+        "rect" => Some(ANNOTATION_RECT_KEYS),
+        "line" => Some(ANNOTATION_LINE_KEYS),
+        "span" => Some(ANNOTATION_SPAN_KEYS),
+        "bracket" => Some(ANNOTATION_BRACKET_KEYS),
+        "callout" => Some(ANNOTATION_CALLOUT_KEYS),
+        "image" => Some(ANNOTATION_IMAGE_KEYS),
+        _ => None,
+    }
 }
 
 // ── Serde defaults ──────────────────────────────────────────────────────────
@@ -1053,6 +1133,91 @@ mod tests {
     // its own `PathCmd` variants internally) — scoped here rather than at
     // module scope so a module-wide `use` doesn't go stale/unused again.
     use ferrum_scene::PathCmd;
+
+    // ── Per-variant wire key drift tests (#92/#148) ──────────────────────────
+    //
+    // Mines each variant's REAL accepted-field set out of its own
+    // `deny_unknown_fields` error (a minimal valid `type` tag plus one bogus
+    // key — the tag is required to select the variant, unlike
+    // `chart_config.rs`'s plain-struct `mined_fields_of`, which has no tag to
+    // supply), and asserts it equals the corresponding const minus `type`
+    // (the tag itself is consumed by serde before the variant's own
+    // `deny_unknown_fields` check runs, so it never appears in the mined set
+    // — see `AnnotationSpec`'s own doc comment).
+
+    fn mined_annotation_variant_fields(type_tag: &str) -> std::collections::BTreeSet<String> {
+        let json = format!(r#"{{"type": "{type_tag}", "__definitely_not_a_real_field__": 1}}"#);
+        let res: Result<AnnotationSpec, _> = serde_json::from_str(&json);
+        let err = res.expect_err("bogus key must be rejected by deny_unknown_fields");
+        super::super::chart_config::accepted_fields_from_deny_unknown_error(&err.to_string())
+    }
+
+    /// Shared assertion body for every `annotation_*_keys_match_serde` test
+    /// below — a plain function rather than a macro (no behavior worth
+    /// obscuring, per this crate's macro-avoidance convention).
+    fn assert_annotation_variant_keys_match_serde(type_tag: &str, keys_const: &[&str]) {
+        let mined = mined_annotation_variant_fields(type_tag);
+        let expected = keys_minus_type(keys_const);
+        assert_eq!(
+            mined, expected,
+            "annotation `{type_tag}` variant's key const drifted from AnnotationSpec.\n\
+             in serde but not const: {:?}\nin const but not serde: {:?}",
+            mined.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&mined).collect::<Vec<_>>(),
+        );
+    }
+
+    fn keys_minus_type(keys: &[&str]) -> std::collections::BTreeSet<String> {
+        keys.iter().filter(|&&k| k != "type").map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn annotation_text_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("text", ANNOTATION_TEXT_KEYS);
+    }
+    #[test]
+    fn annotation_arrow_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("arrow", ANNOTATION_ARROW_KEYS);
+    }
+    #[test]
+    fn annotation_rect_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("rect", ANNOTATION_RECT_KEYS);
+    }
+    #[test]
+    fn annotation_line_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("line", ANNOTATION_LINE_KEYS);
+    }
+    #[test]
+    fn annotation_span_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("span", ANNOTATION_SPAN_KEYS);
+    }
+    #[test]
+    fn annotation_bracket_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("bracket", ANNOTATION_BRACKET_KEYS);
+    }
+    #[test]
+    fn annotation_callout_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("callout", ANNOTATION_CALLOUT_KEYS);
+    }
+    #[test]
+    fn annotation_image_keys_match_serde() {
+        assert_annotation_variant_keys_match_serde("image", ANNOTATION_IMAGE_KEYS);
+    }
+
+    /// `accepted_keys_for_annotation_variant` covers every real `AnnotationSpec`
+    /// tag and only those — the completeness half of closing #148's array
+    /// carve-out (the inverse of the pre-fix state, where every tag returned
+    /// no per-item key set at all because the gate never looked).
+    #[test]
+    fn accepted_keys_for_annotation_variant_covers_every_tag() {
+        for tag in ["text", "arrow", "rect", "line", "span", "bracket", "callout", "image"] {
+            assert!(
+                accepted_keys_for_annotation_variant(tag).is_some(),
+                "tag `{tag}` must have an accepted-key set"
+            );
+        }
+        assert!(accepted_keys_for_annotation_variant("not_a_real_type").is_none());
+    }
 
     /// Create a simple linear scale context for testing.
     /// Domain [0, 100], x pixel range [50, 550], y pixel range [20, 320].

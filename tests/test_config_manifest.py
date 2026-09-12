@@ -216,7 +216,7 @@ _STRUCT_TO_PYTHON_CONFIG: dict[str, tuple[type, dict[str, str]]] = {
 }
 
 
-def _resolve_python_target(manifest_key: str) -> tuple[type, str]:
+def _resolve_python_target(manifest_key: str) -> tuple[type, str] | None:
     """Map one manifest key to ``(python_config_class, expected_field_name)``.
 
     ``AxisConfigSpec.axis_y2.<field>`` resolves through
@@ -224,20 +224,36 @@ def _resolve_python_target(manifest_key: str) -> tuple[type, str]:
     is just another ``AxisConfig`` instance, so the axis_y2-scoped
     disposition of an ``AxisStyleSpec`` field shares that field's Python
     reachability with the axis/axis_x/axis_y positions.
+
+    Returns ``None`` when *manifest_key* names a struct with no
+    ``Configure``/``configure()``-family surface at all — the
+    ``AnnotationSpec.<Variant>.<field>`` / ``StructuralSpec.<Variant>.<field>``
+    shape (#92/#148): a THREE-part key that isn't the ``axis_y2`` special
+    case. Those structs are reached via ``Chart.annotate()`` and the
+    break_axis/inset structural methods, not `_STRUCT_TO_PYTHON_CONFIG`, so
+    there is no dataclass to resolve a field name against — distinct from
+    "resolved, but the field is absent from that dataclass" (`False` from a
+    real lookup), which is what every other 3-part/2-part key still gets.
     """
     parts = manifest_key.split(".")
     if len(parts) == 3:
-        _struct, nested, field = parts
-        assert nested == "axis_y2", f"unexpected 3-part manifest key: {manifest_key!r}"
+        struct, nested, field = parts
+        if struct != "AxisConfigSpec" or nested != "axis_y2":
+            return None
         struct = "AxisStyleSpec"
     else:
         struct, field = parts
+    if struct not in _STRUCT_TO_PYTHON_CONFIG:
+        return None
     cls, alias = _STRUCT_TO_PYTHON_CONFIG[struct]
     return cls, alias.get(field, field)
 
 
 def _is_reachable_from_python(manifest_key: str) -> bool:
-    cls, python_field = _resolve_python_target(manifest_key)
+    target = _resolve_python_target(manifest_key)
+    if target is None:
+        return False
+    cls, python_field = target
     return python_field in {f.name for f in fields(cls)}
 
 
@@ -288,6 +304,448 @@ _EXPECTED_PYTHON_ABSENT: dict[str, str] = {
         "a separate top-level chart-config section reached via the "
         "break_axis/inset structural methods, not the Configure/configure() "
         "family this leg covers"
+    ),
+    # --- AnnotationSpec/StructuralSpec array-item fields (#92/#148): the
+    # --- wire gate's array branch closed the per-item key carve-out, which
+    # --- is what makes each variant's fields a distinct, gate-checked schema
+    # --- surface for the first time; every one is reached via a dedicated
+    # --- annotation/structural constructor, not the Configure/configure()
+    # --- family this leg covers (same shape as ChartConfig.annotations /
+    # --- ChartConfig.structural above, one level deeper).
+    "AnnotationSpec.Text.type": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.x": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.y": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.text": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.font_size": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.color": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.anchor": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.baseline": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.angle": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.dx": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.dy": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Text.z": (
+        "AnnotationSpec.Text's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationText.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.type": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.x": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.y": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.x2": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.y2": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.stroke": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.stroke_width": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Arrow.head_size": (
+        "AnnotationSpec.Arrow's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationArrow.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.type": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.x1": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.y1": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.x2": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.y2": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.fill": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.opacity": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.corner_radius": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Rect.stroke": (
+        "AnnotationSpec.Rect's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationRect.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.type": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.x1": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.y1": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.x2": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.y2": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.stroke": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.stroke_width": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Line.dash": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.type": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.axis": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.start": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.end": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.fill": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.opacity": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.label_position": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Span.label": (
+        "AnnotationSpec.Span's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.type": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.x1": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.y1": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.x2": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.y2": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.label": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.direction": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.stroke": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Bracket.tip_length": (
+        "AnnotationSpec.Bracket's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationBracket.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.type": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.x": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.y": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.text": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.arrow": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.padding": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.background": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.border_color": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.border_radius": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.text_x": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Callout.text_y": (
+        "AnnotationSpec.Callout's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationCallout.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.type": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.x": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.y": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.src": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.width": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.height": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "AnnotationSpec.Image.anchor": (
+        "AnnotationSpec.Image's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationImage.to_dict(), not the "
+        "Configure/configure() family this leg covers"
+    ),
+    "StructuralSpec.BreakAxis.type": (
+        "StructuralSpec.BreakAxis's own item-level field, reached via "
+        "ferrum.structural.BreakAxis, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.BreakAxis.axis": (
+        "StructuralSpec.BreakAxis's own item-level field, reached via "
+        "ferrum.structural.BreakAxis, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.BreakAxis.gaps": (
+        "StructuralSpec.BreakAxis's own item-level field, reached via "
+        "ferrum.structural.BreakAxis, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.BreakAxis.break_size": (
+        "StructuralSpec.BreakAxis's own item-level field, reached via "
+        "ferrum.structural.BreakAxis, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.BreakAxis.break_style": (
+        "StructuralSpec.BreakAxis's own item-level field, reached via "
+        "ferrum.structural.BreakAxis, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.type": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.svg": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.bounds": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.border": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.border_color": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.border_dash": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.background": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.shadow": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.connect_to": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
+    ),
+    "StructuralSpec.Inset.connect_style": (
+        "StructuralSpec.Inset's own item-level field, reached via "
+        "ferrum.structural.Inset, not the Configure/configure() family "
+        "this leg covers"
     ),
     # --- Deliberate per-channel-only design choices: Rust honors these,
     # --- Python exposes them on the per-channel fm.Legend class, but never
@@ -550,3 +1008,94 @@ def test_wire_gate_refuses_unknown_nested_axis_key_verbatim_substring():
         chart.to_svg()
     msg = str(exc_info.value)
     assert "chart config: unknown key 'totally_bogus_key' in grid.x; accepted:" in msg
+
+
+# ---------------------------------------------------------------------------
+# #92/#148 — the array-item wire gate. `annotations`/`structural` are JSON
+# arrays of internally-tagged variant structs; before this fix
+# `accepted_keys_for_section` returned `None` for both and
+# `validate_chart_config_keys` walked no further, so an unknown key inside an
+# annotation/structural ITEM reached serde ungated. RED proof (run manually,
+# not committed): comment out `validate_chart_config_array_section`'s call
+# site in `binding.rs::validate_chart_config_keys` and re-run
+# `test_wire_gate_refuses_unknown_annotation_item_key_verbatim_substring` — it
+# passes pre-fix (the bogus key sails through to a real render) and fails
+# post-fix is reverted, proving this pin is live.
+# ---------------------------------------------------------------------------
+
+
+def test_wire_gate_refuses_unknown_annotation_item_key_verbatim_substring():
+    """An unknown key inside an `annotations[]` item raises the same pinned
+    substring, naming the item's index and `type` tag as its "section"."""
+    chart = _chart_with_raw_config_layer(
+        {
+            "annotations": [
+                {"type": "text", "x": 1.0, "y": 2.0, "text": "hi", "totally_bogus_key": 1}
+            ]
+        }
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    msg = str(exc_info.value)
+    assert (
+        "chart config: unknown key 'totally_bogus_key' in annotations[0] (text); accepted:" in msg
+    )
+
+
+def test_wire_gate_refuses_unknown_structural_item_key_verbatim_substring():
+    """Same pin for a `structural[]` item (the `break_axis` variant)."""
+    chart = _chart_with_raw_config_layer(
+        {
+            "structural": [
+                {
+                    "type": "break_axis",
+                    "axis": "y",
+                    "gaps": [[10.0, 20.0]],
+                    "totally_bogus_key": 1,
+                }
+            ]
+        }
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    msg = str(exc_info.value)
+    assert (
+        "chart config: unknown key 'totally_bogus_key' in structural[0] (break_axis); accepted:"
+        in msg
+    )
+
+
+def test_wire_gate_refuses_nan_break_axis_gap():
+    """#92's wire half: a hand-built `chart_config` dict carrying a
+    ``float('nan')`` gap bound — bypassing ``ferrum.structural.BreakAxis.
+    __post_init__``'s construction-time refusal entirely — is refused at the
+    wire gate too, not silently resolved into a domain-covering gap that
+    erases every datum (BRK-1)."""
+    chart = _chart_with_raw_config_layer(
+        {
+            "structural": [
+                {"type": "break_axis", "axis": "y", "gaps": [[float("nan"), float("nan")]]}
+            ]
+        }
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    msg = str(exc_info.value)
+    assert "chart config: structural[0] (break_axis).gaps[0]: start must be finite" in msg
+
+
+def test_wire_gate_refuses_reversed_break_axis_gap():
+    """Same wire gate, the ordering half: `start >= end` refuses even though
+    both bounds are perfectly finite numbers — this half has no JSON-encoding
+    accident to fall back on, so without this check it would render silently
+    (a reversed gap clips to an empty range, per `normalize_gaps`'s doc)."""
+    chart = _chart_with_raw_config_layer(
+        {"structural": [{"type": "break_axis", "axis": "y", "gaps": [[200.0, 100.0]]}]}
+    )
+    with pytest.raises(ValueError) as exc_info:
+        chart.to_svg()
+    msg = str(exc_info.value)
+    assert (
+        "chart config: structural[0] (break_axis).gaps[0]: start (200.0) must be less than end (100.0)"
+        in msg
+    )

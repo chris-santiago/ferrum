@@ -2,7 +2,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3_arrow::PyRecordBatchReader;
 
 use crate::layout::{LegendDirection, LegendOrient, TextAnchor, ThemeInputs, Viewport};
@@ -1300,11 +1300,12 @@ fn chart_config_unknown_key_err(key: &str, section: &str, accepted: &[&str]) -> 
 /// schema-derived (`chart_config::accepted_keys_for_section`), so this
 /// function owns only the dict walk and the pinned error text.
 ///
-/// `annotations`/`structural` are validated at the top level only —
-/// `accepted_keys_for_section` returns `None` for them (arrays of
-/// internally-tagged variant structs, each with its own field set; per-item
-/// gating is out of this task's scope, matching Task 8's grid-sub-struct
-/// carve-out).
+/// `annotations`/`structural` are ARRAY sections: [`validate_chart_config_array_section`]
+/// gates each item's keys against its own `type` tag (#92/#148), rather than
+/// against one section-wide set the way every other (dict-shaped) section is
+/// gated below — matching Task 8's grid-sub-struct nesting shape (one level
+/// deeper, keyed by a discriminator) more than it matches the top-level
+/// per-section gate.
 fn validate_chart_config_keys(d: &Bound<'_, PyDict>) -> PyResult<()> {
     for (key_obj, value) in d.iter() {
         let key: String = key_obj.extract()?;
@@ -1314,6 +1315,10 @@ fn validate_chart_config_keys(d: &Bound<'_, PyDict>) -> PyResult<()> {
                 "chart_config",
                 super::chart_config::CHART_CONFIG_SECTIONS,
             ));
+        }
+        if key == "annotations" || key == "structural" {
+            validate_chart_config_array_section(&key, &value)?;
+            continue;
         }
         let Some(accepted) = super::chart_config::accepted_keys_for_section(&key) else {
             continue;
@@ -1349,6 +1354,123 @@ fn validate_chart_config_keys(d: &Bound<'_, PyDict>) -> PyResult<()> {
                     return Err(chart_config_unknown_key_err(&leaf, &section_path, nested));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// The wire-key gate's array branch for `annotations`/`structural` (#92/#148):
+/// walks each item, reads its `type` discriminator, and gates the item's own
+/// keys against [`chart_config::accepted_keys_for_array_item`]'s per-variant
+/// set — closing the carve-out `accepted_keys_for_section` documents (an
+/// array section has no single per-dict key set of its own). Also runs
+/// [`validate_break_axis_gaps_value`] for a `break_axis` item, the #92 VALUE
+/// half of the same closure.
+///
+/// A non-list `value` (let serde's type-mismatch error surface it), a
+/// non-dict item, or a missing/non-string/unrecognized `type` tag all walk no
+/// further here — each of those is left to serde's own diagnostic
+/// (`data did not match any variant of internally tagged enum`, or
+/// `missing field 'type'`), matching how the dict-section walk above leaves a
+/// non-dict section value to serde. This function's job is narrowly the
+/// pinned-text refusal for a genuinely unknown key or value on an otherwise
+/// well-formed, recognized item.
+///
+/// Runs entirely on the RAW `Bound<'_, PyDict>`/`PyList`, before
+/// `chart_config_from_dict`'s `pyo3_serde::from_py` call — deliberately, not
+/// just for ordering. `from_py` bridges through `json.dumps`/`serde_json::
+/// from_str` (see `pyo3_serde.rs`'s module doc), and Python's `json.dumps`
+/// serializes a non-finite float as the bare `NaN`/`Infinity` token (its
+/// `allow_nan=True` default) — a token strict JSON (and so `serde_json`)
+/// rejects, so a non-finite gap bound already fails on that path today, but
+/// with an opaque `expected value at line 1 column N` parse error naming
+/// neither the field nor why. Extracting `f64` straight off the Python object
+/// here (`PyFloat_AsDouble`, no JSON in between) preserves `NaN` exactly and
+/// lets this gate give the SAME refusal Python's own `BreakAxis.__post_init__`
+/// gives, before the JSON bridge ever gets a chance to produce its opaque one.
+fn validate_chart_config_array_section(section: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    let Ok(list) = value.cast::<PyList>() else {
+        return Ok(());
+    };
+    for (idx, item) in list.iter().enumerate() {
+        let Ok(item_dict) = item.cast::<PyDict>() else {
+            continue;
+        };
+        let Some(type_tag) = item_dict
+            .get_item("type")?
+            .and_then(|v| v.extract::<String>().ok())
+        else {
+            continue;
+        };
+        let Some(accepted) = super::chart_config::accepted_keys_for_array_item(section, &type_tag)
+        else {
+            continue;
+        };
+        let item_section = format!("{section}[{idx}] ({type_tag})");
+        for (inner_key_obj, _) in item_dict.iter() {
+            let inner_key: String = inner_key_obj.extract()?;
+            if !accepted.contains(&inner_key.as_str()) {
+                return Err(chart_config_unknown_key_err(&inner_key, &item_section, accepted));
+            }
+        }
+        if section == "structural" && type_tag == "break_axis" {
+            validate_break_axis_gaps_value(item_dict, &item_section)?;
+        }
+    }
+    Ok(())
+}
+
+/// The #92 VALUE half of the array-item gate: refuses a non-finite or
+/// reversed `(start, end)` pair in a `break_axis` item's `gaps`, mirroring
+/// `ferrum.structural._validate_break_gaps`'s finite+ordered check
+/// (`ferrum._validate.validate_finite_ordered_pair`) so the wire path and
+/// Python's construction-time refusal agree on what "malformed" means for a
+/// `BreakAxis` gap. Without this, a non-finite gap bound that somehow reached
+/// `apply_break_to_scale` would resolve via `f64::max`/`f64::min` to a
+/// domain-covering gap that silently erases every datum (BRK-1);
+/// `apply_break_to_scale` itself stays infallible per the `chart_config.rs:
+/// 184-195` layering doctrine, and `break_axis::normalize_gaps`'s own
+/// non-finite filter is separate defense-in-depth for a caller that builds a
+/// `BreakAxisSpec` directly, bypassing this wire gate entirely — this
+/// function is the primary, well-messaged refusal for every wire caller.
+///
+/// A missing `gaps` key, a non-list value, or a malformed pair (not exactly 2
+/// numeric entries) all walk no further here — each is left to
+/// deserialization's own "missing field" / type-mismatch error, matching this
+/// gate's existing carve-outs elsewhere.
+fn validate_break_axis_gaps_value(item_dict: &Bound<'_, PyDict>, item_section: &str) -> PyResult<()> {
+    let Some(gaps_obj) = item_dict.get_item("gaps")? else {
+        return Ok(());
+    };
+    // `try_iter` (not a `PyList` cast) so a tuple-of-tuples wire spec — which
+    // `json.dumps` serializes identically to a list-of-lists, so deserialization
+    // treats them the same — is walked the same way this gate's own raw-dict
+    // read does.
+    let Ok(gaps_iter) = gaps_obj.try_iter() else {
+        return Ok(());
+    };
+    for (j, gap_res) in gaps_iter.enumerate() {
+        let Ok(gap) = gap_res else { continue };
+        let Ok(pair) = gap.extract::<Vec<f64>>() else {
+            continue;
+        };
+        if pair.len() != 2 {
+            continue;
+        }
+        let (start, end) = (pair[0], pair[1]);
+        let label = format!("{item_section}.gaps[{j}]");
+        for (name, v) in [("start", start), ("end", end)] {
+            if !v.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "chart config: {label}: {name} must be finite; received {v}"
+                )));
+            }
+        }
+        if start >= end {
+            return Err(PyValueError::new_err(format!(
+                "chart config: {label}: start ({start:?}) must be less than end ({end:?}); \
+                 got ({start:?}, {end:?})"
+            )));
         }
     }
     Ok(())
@@ -1491,6 +1613,139 @@ mod chart_config_gate_tests {
                     "section `{section}`: {msg}"
                 );
             }
+        });
+    }
+
+    /// RED-proof for the #148 array-item key gate: comment out the
+    /// `if key == "annotations" || key == "structural" { ... }` branch in
+    /// `validate_chart_config_keys` and re-run this test — it passes when it
+    /// should fail, because `pyo3_serde::from_py`'s `deny_unknown_fields`
+    /// (added alongside this gate) is the ONLY thing left refusing the bogus
+    /// key, with a raw serde message instead of this gate's pinned text.
+    /// Restore the branch before committing.
+    #[test]
+    fn chart_config_annotation_array_item_rejects_a_bogus_key() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let item = PyDict::new(py);
+            item.set_item("type", "text").unwrap();
+            item.set_item("x", 1.0).unwrap();
+            item.set_item("y", 2.0).unwrap();
+            item.set_item("text", "hi").unwrap();
+            item.set_item("definitely_not_a_real_key", 1).unwrap();
+            let list = PyList::new(py, [item]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("annotations", list).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("unknown annotation item key must be refused");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains("chart config: unknown key 'definitely_not_a_real_key' in annotations[0] (text)"),
+                "{msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn chart_config_structural_array_item_rejects_a_bogus_key() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let item = PyDict::new(py);
+            item.set_item("type", "break_axis").unwrap();
+            item.set_item("axis", "y").unwrap();
+            item.set_item("gaps", vec![vec![10.0, 20.0]]).unwrap();
+            item.set_item("definitely_not_a_real_key", 1).unwrap();
+            let list = PyList::new(py, [item]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("structural", list).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("unknown structural item key must be refused");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains("chart config: unknown key 'definitely_not_a_real_key' in structural[0] (break_axis)"),
+                "{msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn chart_config_annotation_array_item_valid_keys_accepted() {
+        // Positive control for the two refusal tests above — proves the gate
+        // does not over-refuse a well-formed item.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let item = PyDict::new(py);
+            item.set_item("type", "text").unwrap();
+            item.set_item("x", 1.0).unwrap();
+            item.set_item("y", 2.0).unwrap();
+            item.set_item("text", "hi").unwrap();
+            let list = PyList::new(py, [item]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("annotations", list).unwrap();
+            let cc = chart_config_from_dict(Some(&d)).expect("a well-formed annotation item must be accepted");
+            assert_eq!(cc.annotations.len(), 1);
+        });
+    }
+
+    /// RED-proof for #92's Rust half: comment out the
+    /// `validate_chart_config_values(&val)?;` line in `chart_config_from_dict`
+    /// and re-run this test — it fails, because deserialization alone accepts
+    /// `NaN` as a syntactically valid `f64` gap bound and this refusal is the
+    /// only thing that rejects it. Restore the line before committing.
+    #[test]
+    fn chart_config_break_axis_nan_gap_refused() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let item = PyDict::new(py);
+            item.set_item("type", "break_axis").unwrap();
+            item.set_item("axis", "y").unwrap();
+            item.set_item("gaps", vec![vec![f64::NAN, f64::NAN]]).unwrap();
+            let list = PyList::new(py, [item]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("structural", list).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("a NaN gap bound must be refused");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains("chart config: structural[0] (break_axis).gaps[0]: start must be finite"),
+                "{msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn chart_config_break_axis_reversed_gap_refused() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let item = PyDict::new(py);
+            item.set_item("type", "break_axis").unwrap();
+            item.set_item("axis", "y").unwrap();
+            item.set_item("gaps", vec![vec![200.0, 100.0]]).unwrap();
+            let list = PyList::new(py, [item]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("structural", list).unwrap();
+            let err = chart_config_from_dict(Some(&d)).expect_err("a reversed gap must be refused");
+            let msg = err.value(py).to_string();
+            assert!(
+                msg.contains(
+                    "chart config: structural[0] (break_axis).gaps[0]: start (200.0) must be less than end (100.0)"
+                ),
+                "{msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn chart_config_break_axis_finite_ordered_gap_accepted() {
+        // Positive control for the two refusal tests above.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let item = PyDict::new(py);
+            item.set_item("type", "break_axis").unwrap();
+            item.set_item("axis", "y").unwrap();
+            item.set_item("gaps", vec![vec![50.0, 100.0]]).unwrap();
+            let list = PyList::new(py, [item]).unwrap();
+            let d = PyDict::new(py);
+            d.set_item("structural", list).unwrap();
+            let cc = chart_config_from_dict(Some(&d)).expect("a finite ordered gap must be accepted");
+            assert_eq!(cc.structural.len(), 1);
         });
     }
 

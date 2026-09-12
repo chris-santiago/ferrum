@@ -1,4 +1,292 @@
 {
+  "AnnotationSpec.Arrow.head_size": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> emit_arrow's arrowhead size"
+  },
+  "AnnotationSpec.Arrow.stroke": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> emit_arrow's stroke color"
+  },
+  "AnnotationSpec.Arrow.stroke_width": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> emit_arrow's stroke width"
+  },
+  "AnnotationSpec.Arrow.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Arrow`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Arrow.x": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> ScaleContext::resolve_x (start point)"
+  },
+  "AnnotationSpec.Arrow.x2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> ScaleContext::resolve_x (end point)"
+  },
+  "AnnotationSpec.Arrow.y": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> ScaleContext::resolve_y (start point)"
+  },
+  "AnnotationSpec.Arrow.y2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Arrow arm -> ScaleContext::resolve_y (end point)"
+  },
+  "AnnotationSpec.Bracket.direction": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> emit_bracket's direction (validated by emit_bracket_unknown_direction_defaults_to_up)"
+  },
+  "AnnotationSpec.Bracket.label": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> emit_bracket's label text"
+  },
+  "AnnotationSpec.Bracket.stroke": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> emit_bracket's stroke color"
+  },
+  "AnnotationSpec.Bracket.tip_length": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> emit_bracket's tip_length"
+  },
+  "AnnotationSpec.Bracket.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Bracket`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Bracket.x1": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Bracket.x2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Bracket.y1": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Bracket.y2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Bracket arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Callout.arrow": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's arrow style (emit_callout_arrow_none_suppresses_leader_line)"
+  },
+  "AnnotationSpec.Callout.background": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's bubble fill"
+  },
+  "AnnotationSpec.Callout.border_color": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's bubble border color"
+  },
+  "AnnotationSpec.Callout.border_radius": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's bubble corner radius"
+  },
+  "AnnotationSpec.Callout.padding": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's bubble padding"
+  },
+  "AnnotationSpec.Callout.text": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's bubble text"
+  },
+  "AnnotationSpec.Callout.text_x": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's optional explicit text position, when present"
+  },
+  "AnnotationSpec.Callout.text_y": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's optional explicit text position, when present"
+  },
+  "AnnotationSpec.Callout.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Callout`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Callout.x": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's anchor coordinate"
+  },
+  "AnnotationSpec.Callout.y": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Callout arm -> emit_callout's anchor coordinate"
+  },
+  "AnnotationSpec.Image.anchor": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Image arm -> the emitted raw image node's anchor"
+  },
+  "AnnotationSpec.Image.height": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Image arm -> the emitted raw image node's height"
+  },
+  "AnnotationSpec.Image.src": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Image arm -> the emitted raw image node's href"
+  },
+  "AnnotationSpec.Image.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Image`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Image.width": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Image arm -> the emitted raw image node's width"
+  },
+  "AnnotationSpec.Image.x": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Image arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Image.y": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Image arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Line.dash": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> StrokeStyle.dash, when present"
+  },
+  "AnnotationSpec.Line.stroke": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> resolve_color -> StrokeStyle.color"
+  },
+  "AnnotationSpec.Line.stroke_width": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> StrokeStyle.width"
+  },
+  "AnnotationSpec.Line.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Line`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Line.x1": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Line.x2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Line.y1": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Line.y2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Line arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Rect.corner_radius": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> SceneNode::Rect.corner_radius"
+  },
+  "AnnotationSpec.Rect.fill": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> resolve_color -> FillStroke.fill"
+  },
+  "AnnotationSpec.Rect.opacity": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> FillStroke.fill_opacity"
+  },
+  "AnnotationSpec.Rect.stroke": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> resolve_color -> FillStroke.stroke, when present"
+  },
+  "AnnotationSpec.Rect.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Rect`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Rect.x1": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Rect.x2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Rect.y1": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Rect.y2": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Rect arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Span.axis": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's axis argument"
+  },
+  "AnnotationSpec.Span.end": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's end coordinate"
+  },
+  "AnnotationSpec.Span.fill": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's fill color"
+  },
+  "AnnotationSpec.Span.label": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's optional label text"
+  },
+  "AnnotationSpec.Span.label_position": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's label_position"
+  },
+  "AnnotationSpec.Span.opacity": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's opacity"
+  },
+  "AnnotationSpec.Span.start": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Span arm -> emit_span's start coordinate"
+  },
+  "AnnotationSpec.Span.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Span`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Text.anchor": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> parse_anchor -> TextStyle.anchor"
+  },
+  "AnnotationSpec.Text.angle": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> TextStyle.angle"
+  },
+  "AnnotationSpec.Text.baseline": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> parse_baseline -> TextStyle.baseline"
+  },
+  "AnnotationSpec.Text.color": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> resolve_color -> TextStyle.color"
+  },
+  "AnnotationSpec.Text.dx": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm, offsets the resolved x pixel before emitting SceneNode::Text"
+  },
+  "AnnotationSpec.Text.dy": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm, offsets the resolved y pixel before emitting SceneNode::Text"
+  },
+  "AnnotationSpec.Text.font_size": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> TextStyle.font_size"
+  },
+  "AnnotationSpec.Text.text": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> SceneNode::Text.content"
+  },
+  "AnnotationSpec.Text.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `AnnotationSpec::Text`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "AnnotationSpec.Text.x": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> ScaleContext::resolve_x"
+  },
+  "AnnotationSpec.Text.y": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_one's Text arm -> ScaleContext::resolve_y"
+  },
+  "AnnotationSpec.Text.z": {
+    "honored": true,
+    "reason": "render/annotation.rs::build_annotations routes a Text item into the below-marks or above-marks bucket by this field"
+  },
   "AxisConfigSpec.axis_y2.domain": {
     "honored": true,
     "reason": "same field as AxisStyleSpec.domain, scoped to axis_y2: reaches the secondary axis's own AxisStyleOverrides slot via the same fill-only apply_axis_config_to_axis_input path axis/axis_x/axis_y use; the field stopped being theme-only in Task 8, so axis_y2 can now express it without writing the shared theme (which would leak a secondary-only override onto the primary axes). D12, spec \u00a74.9. Resolved against theme.axis.axis_line by AxesInput::apply_show_defaults, then read by build_axis."
@@ -446,6 +734,66 @@
   "PaddingConfigSpec.top": {
     "honored": true,
     "reason": "apply_chart_config_to_theme padding block -> theme.padding.padding_top, render/config_apply/mod.rs"
+  },
+  "StructuralSpec.BreakAxis.axis": {
+    "honored": true,
+    "reason": "render/scene_build.rs::build_structural_nodes's BreakAxis arm, selects which resolved scale (x or y) apply_break_to_scale remaps"
+  },
+  "StructuralSpec.BreakAxis.break_size": {
+    "honored": true,
+    "reason": "render/break_axis.rs::apply_break_to_scale's break_size argument, via build_structural_nodes"
+  },
+  "StructuralSpec.BreakAxis.break_style": {
+    "honored": true,
+    "reason": "render/break_axis.rs::build_break_indicators's style argument, via build_structural_nodes"
+  },
+  "StructuralSpec.BreakAxis.gaps": {
+    "honored": true,
+    "reason": "render/break_axis.rs::apply_break_to_scale's gaps argument, via build_structural_nodes"
+  },
+  "StructuralSpec.BreakAxis.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `StructuralSpec::BreakAxis`, consumed by serde to select this variant before deserializing the rest of the item"
+  },
+  "StructuralSpec.Inset.background": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's optional background fill, when present"
+  },
+  "StructuralSpec.Inset.border": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's border-rect toggle"
+  },
+  "StructuralSpec.Inset.border_color": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's border stroke color"
+  },
+  "StructuralSpec.Inset.border_dash": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's optional border dash pattern, when present"
+  },
+  "StructuralSpec.Inset.bounds": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes -> InsetCoord::resolve, against the computed plot rect"
+  },
+  "StructuralSpec.Inset.connect_style": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's connector style"
+  },
+  "StructuralSpec.Inset.connect_to": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's optional connector target point, when present"
+  },
+  "StructuralSpec.Inset.shadow": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's drop-shadow toggle"
+  },
+  "StructuralSpec.Inset.svg": {
+    "honored": true,
+    "reason": "render/inset.rs::build_inset_nodes's embedded raw SVG payload"
+  },
+  "StructuralSpec.Inset.type": {
+    "honored": true,
+    "reason": "the enum's own internally-tagged `type` discriminator (`#[serde(tag = \"type\")]`) on `StructuralSpec::Inset`, consumed by serde to select this variant before deserializing the rest of the item"
   },
   "TitleConfigSpec.anchor": {
     "honored": true,

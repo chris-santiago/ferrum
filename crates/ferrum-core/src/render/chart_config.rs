@@ -41,7 +41,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::annotation::AnnotationSpec;
+use super::annotation::{accepted_keys_for_annotation_variant, AnnotationSpec};
 
 /// Top-level chart configuration passed from Python via the `chart_config` dict.
 ///
@@ -129,7 +129,18 @@ pub enum StructuralSpec {
 }
 
 /// Axis break — removes a range from the data domain and adds visual indicators.
+///
+/// `deny_unknown_fields` is the defense-in-depth second line for this struct
+/// (see the module doc); the primary #92/#148 refusal is the wire gate's
+/// array branch (`binding.rs::validate_chart_config_keys`), which consults
+/// [`accepted_keys_for_structural_variant`] below and runs BEFORE
+/// deserialization. Unlike `AnnotationSpec`'s inline struct variants, this is
+/// a newtype variant of `StructuralSpec` (`StructuralSpec::BreakAxis(BreakAxisSpec)`)
+/// wrapping a standalone struct, so `deny_unknown_fields` belongs on THIS
+/// struct directly rather than on the enum — verified empirically that the
+/// enum's `type` tag does not leak into this struct's own unknown-field check.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BreakAxisSpec {
     /// Which axis to break (`"x"` or `"y"`).
     pub axis: String,
@@ -144,7 +155,10 @@ pub struct BreakAxisSpec {
 }
 
 /// Inset chart — embeds a pre-rendered SVG at plot-area-relative bounds.
+///
+/// `deny_unknown_fields`: same defense-in-depth rationale as [`BreakAxisSpec`].
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InsetSpec {
     /// Pre-rendered SVG string to embed.
     pub svg: String,
@@ -993,12 +1007,16 @@ pub(crate) const TITLE_CONFIG_KEYS: &[&str] = &[
 
 /// The full accepted-key set for a `chart_config` section, or `None` when
 /// `section` isn't a gated (single-object) section — `annotations`/
-/// `structural` are arrays of internally-tagged variant structs, each with
-/// its own field set; per-item key gating for those is out of this task's
-/// scope (Grid's OWN per-axis sub-structs are Task 8's, by the same
-/// carve-out). Called by `binding.rs::validate_chart_config_keys`, the wire
-/// chokepoint gate — this is the single place a new section's key set is
-/// wired into the gate.
+/// `structural` are ARRAYS of internally-tagged variant structs, so there is
+/// no single per-dict key set to return for the section as a whole (each
+/// item's accepted set depends on its own `type` tag). Their per-item gating
+/// (#92/#148) is [`accepted_keys_for_array_item`] below, consulted directly
+/// by `binding.rs::validate_chart_config_keys`'s array branch rather than
+/// through this function (Grid's OWN per-axis sub-structs are Task 8's, via
+/// the separate [`accepted_keys_for_nested`] path). Called by
+/// `binding.rs::validate_chart_config_keys` for every OTHER section — this is
+/// the single place a new dict-shaped section's key set is wired into the
+/// gate.
 pub(crate) fn accepted_keys_for_section(section: &str) -> Option<Vec<&'static str>> {
     let keys: Vec<&'static str> = match section {
         "axis" | "axis_x" | "axis_y" | "axis_y2" => AXIS_STYLE_CANONICAL_KEYS
@@ -1019,6 +1037,62 @@ pub(crate) fn accepted_keys_for_section(section: &str) -> Option<Vec<&'static st
         _ => return None,
     };
     Some(keys)
+}
+
+// ── Per-variant wire key sets for the array sections (#92/#148) ────────────
+//
+// `annotations`/`structural` are JSON arrays of internally-tagged variant
+// structs; closing the array carve-out means gating each ITEM's keys against
+// its own `type` tag rather than against one section-wide set. The
+// `AnnotationSpec` consts live in `annotation.rs` (alongside the enum they
+// describe); the two `StructuralSpec` consts live here for the same reason.
+// Each is drift-tested against its struct (`structural_*_keys_match_serde`),
+// the same `deny_unknown_fields`-mining technique the dict-shaped sections'
+// `*_keys_match_serde` tests use.
+
+/// `StructuralSpec::BreakAxis`'s wire keys (its `BreakAxisSpec` payload's
+/// fields, plus the enum's own `type` tag).
+pub(crate) const STRUCTURAL_BREAK_AXIS_KEYS: &[&str] =
+    &["type", "axis", "gaps", "break_size", "break_style"];
+/// `StructuralSpec::Inset`'s wire keys (its `InsetSpec` payload's fields,
+/// plus the enum's own `type` tag).
+pub(crate) const STRUCTURAL_INSET_KEYS: &[&str] = &[
+    "type",
+    "svg",
+    "bounds",
+    "border",
+    "border_color",
+    "border_dash",
+    "background",
+    "shadow",
+    "connect_to",
+    "connect_style",
+];
+
+/// The accepted wire-key set for one `structural[]` item, keyed by its `type`
+/// tag. `None` for an unrecognized tag — left to serde's own "unknown
+/// variant" error, matching [`accepted_keys_for_annotation_variant`]'s
+/// contract.
+pub(crate) fn accepted_keys_for_structural_variant(type_tag: &str) -> Option<&'static [&'static str]> {
+    match type_tag {
+        "break_axis" => Some(STRUCTURAL_BREAK_AXIS_KEYS),
+        "inset" => Some(STRUCTURAL_INSET_KEYS),
+        _ => None,
+    }
+}
+
+/// The accepted wire-key set for one item of an ARRAY `chart_config` section
+/// (`annotations` or `structural`), keyed by the item's own `type` tag — the
+/// per-item counterpart of [`accepted_keys_for_section`], and the single
+/// dispatch point `binding.rs::validate_chart_config_keys`'s array branch
+/// calls. `None` when `section` names no array section, or when `type_tag`
+/// names no variant of that section's enum (both left to serde's own error).
+pub(crate) fn accepted_keys_for_array_item(section: &str, type_tag: &str) -> Option<&'static [&'static str]> {
+    match section {
+        "annotations" => accepted_keys_for_annotation_variant(type_tag),
+        "structural" => accepted_keys_for_structural_variant(type_tag),
+        _ => None,
+    }
 }
 
 // ── Disposition manifest (spec §6, NF-B11/NF-B12) ──────────────────────────
@@ -1836,6 +1910,24 @@ mod tests {
         // two consts' docs). Distinct namespace (`AxisConfigSpec.axis_y2.*`)
         // so these don't collide with the shared `AxisStyleSpec.*` entries.
         expected.extend(namespaced("AxisConfigSpec.axis_y2", AXIS_Y2_SCOPED_FIELDS));
+        // #92/#148: the array sections' per-item field sets — one namespace
+        // per enum variant (`"AnnotationSpec.<Variant>"` /
+        // `"StructuralSpec.<Variant>"`), honoring the CONTRACT above. Before
+        // this, only the two array SECTIONS themselves (`ChartConfig.
+        // annotations` / `ChartConfig.structural`) had manifest entries; the
+        // 87 item-level fields these consts enumerate had none, because
+        // closing the array carve-out is what makes them a distinct,
+        // gate-checked schema surface for the first time.
+        expected.extend(namespaced("AnnotationSpec.Text", super::super::annotation::ANNOTATION_TEXT_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Arrow", super::super::annotation::ANNOTATION_ARROW_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Rect", super::super::annotation::ANNOTATION_RECT_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Line", super::super::annotation::ANNOTATION_LINE_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Span", super::super::annotation::ANNOTATION_SPAN_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Bracket", super::super::annotation::ANNOTATION_BRACKET_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Callout", super::super::annotation::ANNOTATION_CALLOUT_KEYS));
+        expected.extend(namespaced("AnnotationSpec.Image", super::super::annotation::ANNOTATION_IMAGE_KEYS));
+        expected.extend(namespaced("StructuralSpec.BreakAxis", STRUCTURAL_BREAK_AXIS_KEYS));
+        expected.extend(namespaced("StructuralSpec.Inset", STRUCTURAL_INSET_KEYS));
 
         let missing: Vec<&String> = expected.difference(&dispositioned).collect();
         assert!(
@@ -1941,12 +2033,16 @@ mod tests {
     }
 
     /// `accepted_keys_for_section` covers every gated ChartConfig section and
-    /// returns `None` only for the two array sections (out of this task's
-    /// per-item-gating scope) — derived from `CHART_CONFIG_SECTIONS` itself
-    /// (spec review, cycle 2) rather than a hand-copied list, so a future
-    /// section added to `ChartConfig` without a matching
-    /// `accepted_keys_for_section` arm fails THIS test instead of silently
-    /// falling into the ungated `annotations`/`structural` bucket.
+    /// returns `None` only for the two ARRAY sections — not because their
+    /// per-item gating is unimplemented (#92/#148 closed that carve-out; see
+    /// `accepted_keys_for_array_item_covers_every_variant_tag` below for the
+    /// per-item completeness half), but because an array section has no
+    /// single per-dict key set for this function's `Vec<&str>` return shape
+    /// to describe — derived from `CHART_CONFIG_SECTIONS` itself (spec
+    /// review, cycle 2) rather than a hand-copied list, so a future section
+    /// added to `ChartConfig` without a matching `accepted_keys_for_section`
+    /// arm fails THIS test instead of silently falling into the ungated
+    /// bucket.
     #[test]
     fn accepted_keys_for_section_covers_every_gated_section() {
         const ARRAY_SECTIONS: &[&str] = &["annotations", "structural"];
@@ -1961,5 +2057,65 @@ mod tests {
             );
         }
         assert!(accepted_keys_for_section("not_a_real_section").is_none());
+    }
+
+    // ── Array-item wire key gate: const <-> schema drift tests (#92/#148) ───
+
+    #[test]
+    fn structural_break_axis_keys_match_serde() {
+        let mined = mined_fields_of::<BreakAxisSpec>();
+        let expected: std::collections::BTreeSet<String> = STRUCTURAL_BREAK_AXIS_KEYS
+            .iter()
+            .filter(|&&k| k != "type")
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            mined, expected,
+            "STRUCTURAL_BREAK_AXIS_KEYS drifted from BreakAxisSpec.\n\
+             in serde but not const: {:?}\nin const but not serde: {:?}",
+            mined.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&mined).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn structural_inset_keys_match_serde() {
+        let mined = mined_fields_of::<InsetSpec>();
+        let expected: std::collections::BTreeSet<String> = STRUCTURAL_INSET_KEYS
+            .iter()
+            .filter(|&&k| k != "type")
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            mined, expected,
+            "STRUCTURAL_INSET_KEYS drifted from InsetSpec.\n\
+             in serde but not const: {:?}\nin const but not serde: {:?}",
+            mined.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&mined).collect::<Vec<_>>(),
+        );
+    }
+
+    /// `accepted_keys_for_array_item` covers every real variant tag of both
+    /// array sections, and only those — the completeness half of closing
+    /// #148's carve-out (inverted from the pre-fix state, where NO tag had a
+    /// per-item key set because the gate never looked inside the array at
+    /// all).
+    #[test]
+    fn accepted_keys_for_array_item_covers_every_variant_tag() {
+        for tag in ["text", "arrow", "rect", "line", "span", "bracket", "callout", "image"] {
+            assert!(
+                accepted_keys_for_array_item("annotations", tag).is_some(),
+                "annotations tag `{tag}` must have an accepted-key set"
+            );
+        }
+        for tag in ["break_axis", "inset"] {
+            assert!(
+                accepted_keys_for_array_item("structural", tag).is_some(),
+                "structural tag `{tag}` must have an accepted-key set"
+            );
+        }
+        assert!(accepted_keys_for_array_item("annotations", "not_a_real_type").is_none());
+        assert!(accepted_keys_for_array_item("structural", "not_a_real_type").is_none());
+        assert!(accepted_keys_for_array_item("not_a_real_section", "text").is_none());
     }
 }

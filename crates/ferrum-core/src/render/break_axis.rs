@@ -122,10 +122,24 @@ pub struct BreakResult {
 /// had removed; and the reserved indicator space counted a break the scale never
 /// draws. Adjacent gaps (`hi == lo`) merge too — they remove one contiguous
 /// range and get one indicator, so they must reserve one indicator's pixels.
+///
+/// A non-finite bound (`NaN`/`±inf`) is dropped before clipping rather than
+/// clipped against the domain: `f64::max`/`f64::min` return the *non-NaN*
+/// argument (Rust docs), so without this guard `[NaN, NaN].max(d_lo).min(d_hi)`
+/// resolved to `[d_lo, d_hi]` — a domain-covering gap that silently erased
+/// every datum (BRK-1, `design-docs/superpowers/followups/
+/// 2026-05-15-code-archaeology.md`). #92/#148 refuse a non-finite gap at
+/// `BreakAxis` construction and at the wire gate, so this normal path no
+/// longer sees one; this filter is defense-in-depth for any caller that
+/// builds a `BreakAxisSpec` directly (e.g. this module's own unit tests) —
+/// `apply_break_to_scale` stays infallible per the `chart_config.rs:184-195`
+/// layering doctrine, so a malformed gap is treated as absent (dropping
+/// `effective_gaps`, which the caller already warns on) rather than erroring.
 fn normalize_gaps(gaps: &[[f64; 2]], d_lo: f64, d_hi: f64) -> Vec<(f64, f64)> {
     let (d_lo, d_hi) = (d_lo.min(d_hi), d_lo.max(d_hi));
     let mut clipped: Vec<(f64, f64)> = gaps
         .iter()
+        .filter(|g| g[0].is_finite() && g[1].is_finite())
         .filter_map(|g| {
             let g_lo = g[0].max(d_lo);
             let g_hi = g[1].min(d_hi);
@@ -1779,21 +1793,26 @@ mod tests {
     }
 
     #[test]
-    fn nan_gap_bounds_resolve_to_a_domain_covering_gap() {
-        // Documents a real, pinned edge case rather than an assumed-good one:
-        // `f64::max`/`f64::min` return the *non-NaN* argument (Rust docs), so
-        // `NaN.max(d_lo) == d_lo` and `NaN.min(d_hi) == d_hi` — a NaN gap bound
-        // resolves to `[d_lo, d_hi]`, which clips to a domain-covering gap and
-        // silently erases all data, exactly like an explicit `[d_lo, d_hi]` gap.
-        // Tracked as BRK-1 in design-docs/superpowers/followups/
-        // 2026-05-15-code-archaeology.md (a NaN gap bound should be rejected
-        // loudly, not render a blank chart); this test pins the current
-        // behavior until that lands.
+    fn nan_gap_bounds_are_dropped_not_domain_covering() {
+        // BRK-1 (design-docs/superpowers/followups/2026-05-15-code-archaeology.md)
+        // closed: a non-finite gap bound used to resolve to `[d_lo, d_hi]` under
+        // IEEE `f64::max`/`f64::min` semantics (`NaN.max(d_lo) == d_lo`), which
+        // clipped to a domain-covering gap and silently erased all data. #92/#148
+        // now refuse a non-finite gap at `BreakAxis` construction and at the wire
+        // gate, so this path is unreachable through the normal pipeline; this
+        // test inverts the former pin to assert `normalize_gaps`'s defense-in-depth
+        // filter, which drops a non-finite bound instead of clipping it — the gap
+        // contributes nothing, so the full domain survives as one segment (the
+        // same "gap outside the domain" shape `gap_covering_entire_domain_leaves_
+        // no_segments`'s sibling `degenerate_domain_with_gap_produces_single_
+        // segment` test already exercises for a different malformed-gap shape).
         let result = apply_break_to_scale((0.0, 100.0), &[[f64::NAN, f64::NAN]], (50.0, 350.0), 12.0);
-        assert!(
-            result.segments.is_empty(),
-            "NaN gap bounds resolve to a domain-covering gap under IEEE max/min semantics"
+        assert_eq!(
+            result.segments.len(),
+            1,
+            "a non-finite gap bound must be dropped, not clipped into a domain-covering gap"
         );
+        assert_eq!(result.effective_gaps, 0, "a dropped non-finite gap must not count as effective");
     }
 
     #[test]
