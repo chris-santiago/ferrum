@@ -38,12 +38,26 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
     use ferrum_scene::MarkBatchKind;
 
-    let empty = || MarkBuildResult::empty(MarkBatchKind::Image);
-
-    // Both paths are Cartesian-only — return empty for Polar/Geo coords.
+    // #118: both paths below are Cartesian-only, so a Polar/Geo coord leaves
+    // this mark with nothing it can place — a genuine defect (the user
+    // asked for images on a coord this mark cannot draw under), not a
+    // documented degrade: nothing about `mark_image()`'s public API says
+    // Polar/Geo is a legitimate, silent no-op.
     match &ctx.spec.coord {
-        Some(crate::spec::coord::CoordKind::Polar { .. }) |
-        Some(crate::spec::coord::CoordKind::Geo { .. }) => return empty(),
+        Some(crate::spec::coord::CoordKind::Polar { .. }) => {
+            return MarkBuildResult::empty_because(
+                MarkBatchKind::Image,
+                "mark_image() does not support CoordPolar; both its url-tile and \
+                 raster paths place images in Cartesian pixel space",
+            );
+        }
+        Some(crate::spec::coord::CoordKind::Geo { .. }) => {
+            return MarkBuildResult::empty_because(
+                MarkBatchKind::Image,
+                "mark_image() does not support CoordGeo; both its url-tile and \
+                 raster paths place images in Cartesian pixel space",
+            );
+        }
         _ => {}
     }
 
@@ -157,6 +171,7 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Image,
         nodes,
@@ -173,10 +188,26 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use ferrum_scene::{ImageData, ImageMime, MarkBatchKind, SceneNode};
 
     let empty = || MarkBuildResult::empty(MarkBatchKind::Image);
+    // #118: reached only when `build()`'s dispatch found no `url` encoding
+    // (the URL-tile path's own presence/dtype guards are unreachable/
+    // already-covered classes — see the doc above `build`) — so every
+    // failure below means the batch is not a `url=`-carrying tile batch AND
+    // not the single-row Raster-transform output `mark_raster()`'s own
+    // desugar always produces. The only way a user reaches here is calling
+    // `mark_image()` bare, with neither a `url` channel nor the internal
+    // Raster transform behind it — a genuine defect (the user asked for an
+    // image and named no source for one), not a documented degrade.
+    let empty_no_data = || {
+        MarkBuildResult::empty_because(
+            MarkBatchKind::Image,
+            "mark_image() requires either a `url` encoding channel or Raster-transform \
+             data (produced by mark_raster()); this batch has neither",
+        )
+    };
 
     let batch = ctx.batch;
     if batch.num_rows() != 1 {
-        return empty();
+        return empty_no_data();
     }
 
     let x_min = match batch
@@ -184,54 +215,54 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
     let x_max = match batch
         .column_by_name("x_max")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
     let y_min = match batch
         .column_by_name("y_min")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
     let y_max = match batch
         .column_by_name("y_max")
         .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
     let width = match batch
         .column_by_name("width")
         .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
     let height = match batch
         .column_by_name("height")
         .and_then(|c| c.as_any().downcast_ref::<UInt32Array>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
     let pixel_bytes = match batch
         .column_by_name("pixel_data")
         .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
     {
         Some(a) => a.value(0),
-        None => return empty(),
+        None => return empty_no_data(),
     };
 
     let n_cells = (width as usize) * (height as usize);
     if pixel_bytes.len() != n_cells * 8 {
-        return empty();
+        return empty_no_data();
     }
 
     // Resolve colormap: mark_style.group.cmap → theme.palette.sequential_scheme → Viridis.
@@ -289,6 +320,7 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&raster_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Image,
         nodes: vec![SceneNode::Image {
@@ -516,6 +548,97 @@ mod tests {
             } else { false }
         });
         assert!(has_png, "expected inline PNG image data");
+    }
+
+    /// #118 RED proof: both build paths place images in Cartesian pixel
+    /// space, so a `CoordPolar` chart used to render nothing with no
+    /// diagnostic — the same class the mechanism now covers for
+    /// segment/rect/geoshape. The Cartesian control (same fixture, no coord
+    /// override) renders and stays silent, proving the warning is keyed to
+    /// the coord, not to this fixture generally.
+    #[test]
+    fn image_under_coord_polar_warns_named_empty() {
+        use crate::spec::coord::CoordKind;
+        use ferrum_scene::{PolarDirection, PolarThetaChannel};
+
+        let values: Vec<f64> = vec![0.0, 0.33, 0.67, 1.0];
+        let mut pixel_data: Vec<u8> = Vec::with_capacity(values.len() * 8);
+        for v in &values {
+            pixel_data.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut spec = image_spec((0.0, 1.0), (0.0, 1.0));
+        spec.coord = Some(CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: None,
+            pad_angle: 0.0,
+        });
+        let batch = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, pixel_data);
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = super::build(&ctx);
+        assert!(result.nodes.is_empty(), "CoordPolar must not render an image");
+        let reason = result.empty_reason.expect("CoordPolar must name why nothing was drawn");
+        assert!(reason.0.contains("CoordPolar"), "got {:?}", reason.0);
+    }
+
+    /// The `CoordGeo` mirror of the above.
+    #[test]
+    fn image_under_coord_geo_warns_named_empty() {
+        use crate::spec::coord::{CoordKind, GeoProjection};
+
+        let pixel_data: Vec<u8> = 1.0_f64.to_le_bytes().to_vec();
+        let mut spec = image_spec((0.0, 1.0), (0.0, 1.0));
+        spec.coord = Some(CoordKind::Geo { projection: GeoProjection::Mercator });
+        let batch = raster_batch(0.0, 1.0, 0.0, 1.0, 1, 1, pixel_data);
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = super::build(&ctx);
+        assert!(result.nodes.is_empty(), "CoordGeo must not render an image");
+        let reason = result.empty_reason.expect("CoordGeo must name why nothing was drawn");
+        assert!(reason.0.contains("CoordGeo"), "got {:?}", reason.0);
+    }
+
+    /// Cartesian control for the two tests above: the SAME fixture, no coord
+    /// override, must render and stay silent.
+    #[test]
+    fn image_under_default_cartesian_coord_renders_and_is_silent() {
+        let values: Vec<f64> = vec![0.0, 0.33, 0.67, 1.0];
+        let mut pixel_data: Vec<u8> = Vec::with_capacity(values.len() * 8);
+        for v in &values {
+            pixel_data.extend_from_slice(&v.to_le_bytes());
+        }
+        let spec = image_spec((0.0, 1.0), (0.0, 1.0));
+        let batch = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, pixel_data);
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image).unwrap();
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = super::build(&ctx);
+        assert_eq!(
+            result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Image { .. })).count(),
+            1,
+            "the default Cartesian coord must still render"
+        );
+        assert!(result.empty_reason.is_none(), "a rendered image must carry no empty_reason");
     }
 
     #[test]

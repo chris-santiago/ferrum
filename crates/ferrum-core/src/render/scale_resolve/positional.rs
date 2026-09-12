@@ -60,6 +60,60 @@ pub(in crate::render) fn resolve_padding_fraction(scale_padding: Option<f64>, ha
     DEFAULT_SCALE_PADDING_FRAC
 }
 
+/// #183: a categorical axis asked to place more categories into its pixel
+/// range than the range has room for degrades honestly (there is no invalid
+/// input to refuse — d3's band/point math is well-defined for any domain
+/// length) but silently: every category's band/point allotment rounds down
+/// under one pixel, so distinct categories draw on top of each other or
+/// vanish entirely, and nothing about the rendered chart says why. Checked
+/// once, right after an [`OrdinalScale`] is built, from every positional
+/// Ordinal/Band/Point construction site in this module — mirroring
+/// [`RenderWarning::ColorPaletteOverflowed`]/[`RenderWarning::ShapePaletteOverflowed`]'s
+/// "the degradation stays, but it is never silent" contract (spec §4.3).
+///
+/// `categories` is passed in rather than re-read off `scale` because two call
+/// sites move their domain `Vec` into [`OrdinalScale::new_internal`] before
+/// this runs; the caller already has the length in hand from before that
+/// move.
+///
+/// **No placeholder-range special-casing here.** `build_axis_scale`/
+/// `build_from_scale_spec` are also called with a metadata-only `(0.0, 1.0)`
+/// pixel range from two sites that never place a single pixel —
+/// `prepare/mod.rs`'s `provisional_scales` (needs only the domain/tick set
+/// for `compute_layout`, before the real per-panel plot area exists) and
+/// `build_secondary_y_axis_inputs`'s per-layer axis-input pass (same
+/// reason). Over a 1px-wide placeholder, ANY domain of 2+ categories divides
+/// to a sub-pixel bandwidth by construction, which would fire on every
+/// ordinal-axis chart regardless of its real rendered size if this function
+/// had to distinguish "placeholder" from "real" itself. It doesn't have to:
+/// both placeholder call sites filter this SPECIFIC warning class out of
+/// this function's returned `Vec` at the source
+/// (`prepare/mod.rs::drop_placeholder_only_warnings`), so this function
+/// stays a pure "is this bandwidth sub-pixel" check — the placeholder-vs-real
+/// distinction is the CALLER's structural fact to know, not a magnitude this
+/// function has to infer from the numbers it receives.
+///
+/// That filter is scoped to THIS warning class only (quality-review finding
+/// #1, batch F/wave-1 task 11): every other scale warning the placeholder
+/// pass can produce (color scheme, palette overflow, sort-spec-ignored, ...)
+/// does not depend on the pixel range and is real regardless of which range
+/// resolved it, so those survive the filter and still reach the user even
+/// for a chart whose data is empty after transforms (where the panel-real
+/// pass never runs to "re-emit" anything, since `build_scene`'s panel loop
+/// skips every zero-row panel).
+fn warn_if_ordinal_cardinality_degenerate(
+    scale: &OrdinalScale,
+    categories: usize,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    if categories > 0 && scale.bandwidth() < 1.0 {
+        warnings.push(RenderWarning::GroupCardinalityDegenerate {
+            categories: categories as u32,
+            bandwidth_px: scale.bandwidth(),
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn build_axis_scale(
     channel: &'static str,
@@ -124,9 +178,11 @@ pub(in crate::render) fn build_axis_scale(
             // applies.
             let mut domain = match shared {
                 Some(SharedDomain::Ordinal(cats)) => {
-                    return Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
+                    let scale = OrdinalScale::new_internal(
                         cats.clone(), vec![pr.0, pr.1], DiscreteLayout::UNPADDED,
-                    )));
+                    );
+                    warn_if_ordinal_cardinality_degenerate(&scale, cats.len(), warnings);
+                    return Ok(ScaleKind::Ordinal(scale));
                 }
                 _ => distinct_positional_categories_shared(
                     located.batch, &enc.field, transform_outputs, include_final,
@@ -160,9 +216,12 @@ pub(in crate::render) fn build_axis_scale(
             // An auto-inferred categorical axis has no user padding to honor:
             // the unpadded band model, which reduces to the pre-F-L04-03
             // symmetric model bit-exactly (see `crate::scale::discrete`).
-            Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
+            let categories = domain.len();
+            let scale = OrdinalScale::new_internal(
                 domain, vec![pr.0, pr.1], DiscreteLayout::UNPADDED,
-            )))
+            );
+            warn_if_ordinal_cardinality_degenerate(&scale, categories, warnings);
+            Ok(ScaleKind::Ordinal(scale))
         }
         SpecDataType::Temporal => {
             let (min, max) = resolve_numeric_extent(
@@ -338,10 +397,11 @@ pub(in crate::render) fn build_from_scale_spec(
             // `ScaleSpec::Ordinal` carries only an inner padding (no outer, no
             // align) — the band model with d3's default alignment.
             let layout = DiscreteLayout::band(*padding, 0.0, DEFAULT_ALIGN);
-            ScaleKind::Ordinal(
-                OrdinalScale::new_internal(d, pixel_range, layout)
-                    .with_explicit_range(explicit),
-            )
+            let categories = d.len();
+            let scale = OrdinalScale::new_internal(d, pixel_range, layout)
+                .with_explicit_range(explicit);
+            warn_if_ordinal_cardinality_degenerate(&scale, categories, warnings);
+            ScaleKind::Ordinal(scale)
         }
         ScaleSpec::Pow { exponent, common } => {
             validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
@@ -376,11 +436,12 @@ pub(in crate::render) fn build_from_scale_spec(
                 padding_outer.unwrap_or(*padding),
                 *align,
             );
+            let categories = d.len();
             let (band_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
-            ScaleKind::Ordinal(
-                OrdinalScale::new_internal(d, band_range, layout)
-                    .with_explicit_range(explicit),
-            )
+            let scale = OrdinalScale::new_internal(d, band_range, layout)
+                .with_explicit_range(explicit);
+            warn_if_ordinal_cardinality_degenerate(&scale, categories, warnings);
+            ScaleKind::Ordinal(scale)
         }
         ScaleSpec::Point { domain, padding, align, range, reverse } => {
             let mut d = match domain {
@@ -402,11 +463,13 @@ pub(in crate::render) fn build_from_scale_spec(
             if *reverse {
                 d.reverse();
             }
+            let categories = d.len();
             let (point_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
-            ScaleKind::Ordinal(
+            let scale =
                 OrdinalScale::new_internal(d, point_range, DiscreteLayout::point(*padding, *align))
-                    .with_explicit_range(explicit),
-            )
+                    .with_explicit_range(explicit);
+            warn_if_ordinal_cardinality_degenerate(&scale, categories, warnings);
+            ScaleKind::Ordinal(scale)
         }
         // Continuous-degrading variants: whether the spec's `domain` is a
         // positional extent or a discrete-binning artifact is classified by
@@ -867,7 +930,7 @@ pub(in crate::render) fn apply_axis_domain_config(
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};
-    use crate::render::RenderError;
+    use crate::render::{RenderError, RenderWarning};
     use crate::scale::discrete::{CategoricalPlacement, DiscreteLayout};
     use arrow::record_batch::RecordBatch;
     use crate::render::scale_resolve::ScaleKind;
@@ -1132,16 +1195,7 @@ mod tests {
         spec: &crate::spec::encoding::ScaleSpec,
         cats: &[String],
     ) -> ScaleKind {
-        use arrow::array::StringArray;
-        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
-        use std::sync::Arc;
-
-        let schema = Arc::new(Schema::new(vec![Field::new("cat", ArrowDataType::Utf8, false)]));
-        let batch = arrow::record_batch::RecordBatch::try_new(
-            schema,
-            vec![Arc::new(StringArray::from(cats.to_vec()))],
-        )
-        .unwrap();
+        let batch = category_batch("cat", cats);
 
         let enc = crate::spec::encoding::EncodingSpec {
             field: "cat".into(),
@@ -1456,6 +1510,18 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![Field::new(field, ArrowDataType::Float64, false)]));
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    /// A one-column Utf8 batch, mirroring `resolve_scale_spec_for_cats`'s
+    /// inline fixture but as a standalone helper for tests (below) that call
+    /// `build_axis_scale` directly rather than `build_from_scale_spec`.
+    fn category_batch(field: &str, cats: &[String]) -> RecordBatch {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new(field, ArrowDataType::Utf8, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(cats.to_vec()))]).unwrap()
     }
 
     /// Resolve `spec` through the real `build_from_scale_spec` arm without
@@ -1926,40 +1992,16 @@ mod tests {
 
     // ── spec §9's discriminating y-axis assertion ──
 
-    /// Resolves a `ScaleSpec::Linear` y-axis scale through the REAL
-    /// `build_axis_scale("y", ...)` entry point (not `build_from_scale_spec`
-    /// directly), so `axis_pixel_range`'s structural pixel-range inversion
-    /// for the y channel is actually computed by production code and fed
-    /// forward — a future reorder of that composition would fail this test,
-    /// not just a hand-mirrored fixture.
-    ///
-    /// An explicit `domain=[0, 100]` (with no explicit `range`) keeps the
-    /// pixel math exact: an explicit domain suppresses the default 5%
-    /// padding inset (`resolve_padding_fraction`), so the un-padded plot
-    /// range `(0.0, 400.0)` passed in comes back out of `axis_pixel_range`'s
-    /// y-inversion as exactly `(400.0, 0.0)`, with no inset arithmetic to
-    /// account for in the assertions below.
-    fn build_y_axis_scale(reverse: bool) -> ScaleKind {
+    /// A minimal, mark/coord-agnostic `ChartSpec` for tests that call
+    /// `build_axis_scale`/`build_from_scale_spec` directly: the auto-inferred
+    /// Ordinal/Nominal arm never reads `spec` at all, and the explicit
+    /// `enc.scale` paths return before `spec` would matter (`resolve_numeric_extent`
+    /// is only reachable from the auto path) — so any well-formed `ChartSpec`
+    /// satisfies the parameter for these entry-point tests.
+    fn minimal_point_chart_spec() -> crate::spec::chart::ChartSpec {
         use crate::spec::data_ref::DataRef;
-        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
         use crate::spec::mark::Mark;
-        use std::collections::HashMap;
-
-        let batch = numeric_batch("v", vec![0.0, 100.0]);
-        let enc = EncodingSpec {
-            field: "v".into(),
-            type_: None,
-            scale: Some(ScaleSpec::Linear {
-                common: reverse_common(Some(vec![0.0, 100.0]), None, reverse),
-                nice: false,
-                zero: false,
-            }),
-            ..Default::default()
-        };
-        // `spec` is unused on the explicit-`enc.scale` bypass `build_axis_scale`
-        // takes here (it returns before ever consulting `spec`), so any valid
-        // `ChartSpec` satisfies the parameter.
-        let spec = crate::spec::chart::ChartSpec {
+        crate::spec::chart::ChartSpec {
             data: DataRef::default(),
             mark: Mark::Point,
             encoding: Default::default(),
@@ -1976,7 +2018,38 @@ mod tests {
             conditionals: Vec::new(),
             chart_description: None,
             params: Vec::new(),
+        }
+    }
+
+    /// Resolves a `ScaleSpec::Linear` y-axis scale through the REAL
+    /// `build_axis_scale("y", ...)` entry point (not `build_from_scale_spec`
+    /// directly), so `axis_pixel_range`'s structural pixel-range inversion
+    /// for the y channel is actually computed by production code and fed
+    /// forward — a future reorder of that composition would fail this test,
+    /// not just a hand-mirrored fixture.
+    ///
+    /// An explicit `domain=[0, 100]` (with no explicit `range`) keeps the
+    /// pixel math exact: an explicit domain suppresses the default 5%
+    /// padding inset (`resolve_padding_fraction`), so the un-padded plot
+    /// range `(0.0, 400.0)` passed in comes back out of `axis_pixel_range`'s
+    /// y-inversion as exactly `(400.0, 0.0)`, with no inset arithmetic to
+    /// account for in the assertions below.
+    fn build_y_axis_scale(reverse: bool) -> ScaleKind {
+        use crate::spec::encoding::{EncodingSpec, ScaleSpec};
+        use std::collections::HashMap;
+
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let enc = EncodingSpec {
+            field: "v".into(),
+            type_: None,
+            scale: Some(ScaleSpec::Linear {
+                common: reverse_common(Some(vec![0.0, 100.0]), None, reverse),
+                nice: false,
+                zero: false,
+            }),
+            ..Default::default()
         };
+        let spec = minimal_point_chart_spec();
         let outputs: HashMap<String, RecordBatch> = HashMap::new();
         let mut warnings = Vec::new();
         super::build_axis_scale(
@@ -1993,6 +2066,68 @@ mod tests {
             &mut warnings,
         )
         .unwrap()
+    }
+
+    // ── #183: degenerate/high-cardinality ordinal grouping ──
+
+    /// A one-column Utf8 batch of `cats` distinct categories, resolved
+    /// through the REAL auto-inferred `build_axis_scale` entry point a
+    /// `catplot(kind="box")`-style chart takes: no explicit `enc.scale`, a
+    /// plain categorical field binding, `type_: None` so `infer_spec_type`
+    /// classifies the Utf8 column as Nominal exactly like production does.
+    fn build_x_axis_scale_for_categories(cats: Vec<String>, pixel_range: (f64, f64)) -> (ScaleKind, Vec<RenderWarning>) {
+        use crate::spec::encoding::EncodingSpec;
+        use std::collections::HashMap;
+
+        let batch = category_batch("cat", &cats);
+        let enc = EncodingSpec { field: "cat".into(), type_: None, ..Default::default() };
+        let spec = minimal_point_chart_spec();
+        let outputs: HashMap<String, RecordBatch> = HashMap::new();
+        let mut warnings = Vec::new();
+        let scale = super::build_axis_scale(
+            "x",
+            &enc,
+            None,
+            super::PositionalFields { x: Some("cat"), y: None },
+            &batch,
+            &outputs,
+            pixel_range,
+            &spec,
+            false,
+            None,
+            &mut warnings,
+        )
+        .unwrap();
+        (scale, warnings)
+    }
+
+    /// RED proof for #118/#183 (D §183): a 500-category axis squeezed into a
+    /// 300px plot area — the shape a `catplot(kind="box")` over a
+    /// high-cardinality grouping column produces — used to resolve silently
+    /// into sub-pixel bands. It now names the category count.
+    #[test]
+    fn build_axis_scale_warns_on_500_category_sub_pixel_bandwidth() {
+        let cats: Vec<String> = (0..500).map(|i| format!("cat{i}")).collect();
+        let (scale, warnings) = build_x_axis_scale_for_categories(cats, (0.0, 300.0));
+        assert!(matches!(scale, ScaleKind::Ordinal(_)));
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::GroupCardinalityDegenerate { categories, bandwidth_px } => {
+                assert_eq!(*categories, 500);
+                assert!(*bandwidth_px < 1.0, "bandwidth_px was {bandwidth_px}");
+            }
+            other => panic!("expected GroupCardinalityDegenerate, got {other:?}"),
+        }
+    }
+
+    /// A handful of categories over a generous plot area stays silent — the
+    /// common case must not gain a spurious warning.
+    #[test]
+    fn build_axis_scale_silent_on_healthy_bandwidth() {
+        let cats: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let (scale, warnings) = build_x_axis_scale_for_categories(cats, (0.0, 300.0));
+        assert!(matches!(scale, ScaleKind::Ordinal(_)));
+        assert!(warnings.is_empty(), "got {warnings:?}");
     }
 
     /// `reverse=true` composes with the y-channel's structural pixel-range

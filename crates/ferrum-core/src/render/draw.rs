@@ -730,11 +730,46 @@ pub struct MarkBuildResult {
     /// straight onto `MarkBatch::polar_spans` (batch E Task 2, cycle 5).
     /// `None` for every other mark.
     pub polar_spans: Option<Vec<(f64, f64)>>,
+    /// Why `nodes` is empty, when it is (#118) — spec §4's silent-empty
+    /// policy. `None` covers every LEGITIMATE empty a mark builder can
+    /// produce: a zero-row input batch, a documented per-row null/non-finite/
+    /// out-of-domain skip, or a post-filter facet panel (none of which reach
+    /// a builder with rows to lose in the first place, or degrade the same
+    /// way regardless of input) — every builder that constructs its own
+    /// `nodes: vec![]` on a non-empty, presence-legal input still passes
+    /// `None` here unless it explicitly names a reason via
+    /// [`empty_because`](Self::empty_because). `Some` names the specific
+    /// channel, column, or scale-kind mismatch responsible for a GENUINE
+    /// defect — a presence-legal channel combination (it already passed
+    /// `validate_mark_encoding`) that still can't draw anything, which is
+    /// otherwise indistinguishable from a rendering bug. Read ONLY at
+    /// `scene_build`'s `dispatch_mark_build` call site, the sole place a
+    /// `MarkBuildResult`'s emptiness becomes a `RenderWarning` — see
+    /// `RenderWarning::MarkBuildEmpty`.
+    pub empty_reason: Option<EmptyReason>,
 }
+
+/// A ready-to-surface sentence fragment naming why a mark builder produced
+/// zero nodes — see [`MarkBuildResult::empty_reason`]. A plain `String`
+/// wrapper, not a variant enum: the handful of genuine cases found so far
+/// (a segment missing `x2`/`y2`, an image with neither a `url` channel nor
+/// Raster-transform data, a rect needing an ordinal axis it didn't get) are
+/// heterogeneous enough that a shared field shape (`channel`/`column`/`kind`)
+/// would either force an awkward common denominator or grow a variant per
+/// mark; each call site already knows the exact true sentence to write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmptyReason(pub String);
 
 impl MarkBuildResult {
     pub fn empty(kind: MarkBatchKind) -> Self {
-        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None }
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, empty_reason: None }
+    }
+
+    /// Like [`empty`](Self::empty), but names why — for a builder that
+    /// discovers a genuine defect (see [`EmptyReason`]'s doc) rather than a
+    /// legitimate exemption.
+    pub fn empty_because(kind: MarkBatchKind, reason: impl Into<String>) -> Self {
+        Self { empty_reason: Some(EmptyReason(reason.into())), ..Self::empty(kind) }
     }
 }
 

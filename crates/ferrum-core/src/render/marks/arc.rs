@@ -269,6 +269,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     Ok(MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
@@ -407,6 +408,7 @@ fn build_nominal_theta(
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
@@ -528,6 +530,7 @@ fn build_annular(
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),

@@ -172,6 +172,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     Ok(MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
@@ -422,7 +423,22 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
             }, i);
         }
     } else {
-        return Ok(empty_result());
+        // #118: reached when `build()` dispatched here because a `y2` (or
+        // `x2`) endpoint was bound, but NEITHER x nor y actually resolved to
+        // an Ordinal scale — this branch's whole geometry is "one band-width
+        // rect per category," and there is no band without an ordinal axis.
+        // This is #183's own reported path: grouping by a column that
+        // resolves to a CONTINUOUS scale (e.g. a numeric column the caller
+        // expected to render as categories) produces exactly this shape —
+        // `mark_boxplot`'s IQR-rect layer silently drawing nothing while its
+        // sibling rule/tick layers (which only need a single pixel position,
+        // not a band) still render, so the chart looks "mostly fine" with a
+        // missing box body and no diagnostic.
+        return Ok(MarkBuildResult::empty_because(
+            MarkBatchKind::Rect,
+            "mark_rect() needs an ordinal x or y axis to size its band-relative \
+             width, but the resolved scale is continuous",
+        ));
     }
 
     let (nodes, data_indices) = acc.finalize();
@@ -436,6 +452,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
         tooltips,
         hrefs,
         descriptions,
+        empty_reason: None,
     })
 }
 
@@ -612,6 +629,7 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     Ok(MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,

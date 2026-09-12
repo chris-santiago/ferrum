@@ -27,8 +27,26 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
 
     let spec = ctx.spec;
     let (Some(xf), Some(yf)) = (x_field(ctx, spec), y_field(ctx, spec)) else { return Ok(empty()); };
-    let Some(x2f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) else { return Ok(empty()); };
-    let Some(y2f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) else { return Ok(empty()); };
+    // #118: x/y alone is a presence-legal encoding (nothing refuses it at
+    // construction, unlike a bare `mark_segment()` with no x/y at all — see
+    // the unreachable check just above), so a chart missing x2/y2 renders a
+    // blank panel with no diagnostic. Every in-repo producer of a segment
+    // layer (`plots/matrix.py`'s connector lines, `annotations.py`'s arrow
+    // shaft, `marks/heavy_stat.py`'s prediction-error connectors) binds all
+    // four channels, so this can never fire on a ferrum-built chart — only
+    // on a hand-built one missing what the mark actually needs.
+    let Some(x2f) = spec.encoding.x2.as_ref().map(|e| e.field.as_str()) else {
+        return Ok(MarkBuildResult::empty_because(
+            MarkBatchKind::Segment,
+            "mark_segment() requires x2 in encoding (got x, y only)",
+        ));
+    };
+    let Some(y2f) = spec.encoding.y2.as_ref().map(|e| e.field.as_str()) else {
+        return Ok(MarkBuildResult::empty_because(
+            MarkBatchKind::Segment,
+            "mark_segment() requires y2 in encoding (got x, y, x2 only)",
+        ));
+    };
 
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty()) };
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty()) };
@@ -165,6 +183,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     Ok(MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Segment,
         nodes,

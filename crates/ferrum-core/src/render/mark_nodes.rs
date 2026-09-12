@@ -34,7 +34,7 @@
 //! }
 //! let (nodes, data_indices) = acc.finalize();
 //! let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-//! MarkBuildResult { kind, nodes, data_indices: Some(data_indices), tooltips, hrefs, descriptions, polar_spans: None }
+//! MarkBuildResult { kind, nodes, data_indices: Some(data_indices), tooltips, hrefs, descriptions, polar_spans: None, empty_reason: None }
 //! ```
 
 use ferrum_scene::SceneNode;

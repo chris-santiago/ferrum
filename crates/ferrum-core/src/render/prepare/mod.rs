@@ -721,6 +721,33 @@ fn build_axis_input(
     })
 }
 
+/// Filter out warnings a metadata-only, placeholder-`(0.0, 1.0)`-pixel-range
+/// scale resolution cannot honestly judge — currently just
+/// `GroupCardinalityDegenerate` (#183), whose entire question ("is the
+/// resolved bandwidth sub-pixel") is meaningless over a 1px-wide range for
+/// any domain of 2+ categories, regardless of how the chart actually
+/// renders. Every other scale warning (color scheme, palette overflow,
+/// color-range parse failures, sort-spec-ignored, `ScaleDomainConfigOnOrdinalAxis`,
+/// ...) does not depend on the pixel range at all, so it is genuinely true
+/// and must survive this filter — dropping it wholesale was the bug this
+/// filter replaces (quality-review finding #1, batch F/wave-1 task 11): for
+/// a chart whose data is empty after transforms, `build_scene`'s panel loop
+/// never resolves a panel to re-emit anything, so a warning discarded here
+/// would vanish for good, breaking this whole batch's "never silent"
+/// premise for exactly that shape of chart.
+///
+/// Called at both of this module's placeholder-range scale-resolution call
+/// sites (the primary provisional pass below, and
+/// `build_secondary_y_axis_inputs`'s per-layer pass) — the two places
+/// `prepare_render_inputs` resolves scales before the real per-panel plot
+/// area exists.
+fn drop_placeholder_only_warnings(warnings: Vec<RenderWarning>) -> Vec<RenderWarning> {
+    warnings
+        .into_iter()
+        .filter(|w| !matches!(w, RenderWarning::GroupCardinalityDegenerate { .. }))
+        .collect()
+}
+
 /// Prepare a single leaf's render inputs (transforms, per-layer encodings,
 /// provisional scales/axes, legends).
 ///
@@ -809,7 +836,24 @@ pub fn prepare_render_inputs(
         ..spec.clone()
     };
 
-    let (provisional_scales, scale_warnings) = crate::render::scale_resolve::resolve_scales_with_leaf_context(
+    // This call resolves over a metadata-only `(0.0, 1.0)` placeholder pixel
+    // range (needed only for the DOMAIN, to feed `compute_layout`'s
+    // tick/label sizing before the real per-panel plot area exists) — so its
+    // warnings are NOT uniformly safe to keep: `GroupCardinalityDegenerate`
+    // (#183) asks "is the resolved bandwidth sub-pixel", which is untrue by
+    // construction over a 1px-wide placeholder for any domain of 2+
+    // categories, regardless of the chart's real rendered size. Every OTHER
+    // scale warning (color scheme, palette overflow, color-range parse
+    // failures, sort-spec-ignored, ...) does not depend on the pixel range at
+    // all and is exactly as real here as it would be from the panel-real
+    // pass — dropping those unconditionally was a REGRESSION (quality-review
+    // finding #1): `build_scene`'s panel loop `continue`s past every
+    // zero-row panel, so a chart whose data is empty after transforms never
+    // reaches the panel-real resolution that this comment used to claim
+    // would "re-emit" everything. `drop_placeholder_only_warnings` is the
+    // fix: filter out only the class this placeholder pass cannot honestly
+    // judge, and keep the rest.
+    let (provisional_scales, provisional_scale_warnings) = crate::render::scale_resolve::resolve_scales_with_leaf_context(
         &rendering_spec,
         &transformed,
         &transform_outputs,
@@ -829,11 +873,13 @@ pub fn prepare_render_inputs(
     // `RenderWarning::Transform` (mirrors `RenderWarning::Layout`'s
     // newtype-wrap idiom). Order doesn't matter to `emit_warnings` (each
     // becomes its own independent Python `UserWarning`), so these are simply
-    // prepended ahead of the scale-resolution warnings computed above.
+    // collected as the seed of `scale_warnings`, which every later stage in
+    // this function (axis input building, legend construction, ...) keeps
+    // accumulating into.
     let mut scale_warnings: Vec<RenderWarning> = transform_warnings
         .into_iter()
         .map(RenderWarning::Transform)
-        .chain(scale_warnings)
+        .chain(drop_placeholder_only_warnings(provisional_scale_warnings))
         .collect();
     let mut provisional_scales = provisional_scales;
     // D3 (spec §4.2): chart-level `domain_min`/`domain_max`/`nice`/`zero`
@@ -1325,7 +1371,18 @@ fn build_secondary_y_axis_inputs(
             theme,
             leaf_scales: None,
         };
-        let (y_scale, layer_warnings) =
+        // This call resolves over a metadata-only placeholder `(0.0, 1.0)`
+        // pixel range — it exists only to get this layer's y DOMAIN for
+        // `compute_layout`'s tick/label sizing, before the real per-panel
+        // plot area exists. `drop_placeholder_only_warnings` keeps every
+        // warning this placeholder pass can honestly produce (color scheme,
+        // palette overflow, sort-spec-ignored, ...) and drops only
+        // `GroupCardinalityDegenerate`, whose bandwidth question is
+        // meaningless over a 1px range — see that function's doc. The
+        // panel-real resolution (`scene_build::resolve_layer_y_scale`)
+        // re-runs this exact call over the actual plot area and keeps its
+        // own (correctly pixel-scoped) cardinality warnings.
+        let (y_scale, layer_scale_warnings) =
             crate::render::scale_resolve::resolve_layer_y_slot_scale(
                 &layer_ctx,
                 layer.mark,
@@ -1334,7 +1391,7 @@ fn build_secondary_y_axis_inputs(
                 (0.0, 1.0),
                 (0.0, 1.0),
             )?;
-        warnings.extend(layer_warnings);
+        warnings.extend(drop_placeholder_only_warnings(layer_scale_warnings));
         // D3 (spec §4.2) at the `axis_y2` position: reshape THIS layer's own y
         // domain before `build_axis_input` below derives its ticks from the
         // scale, exactly as the primary pair is reshaped before `build_axes`.

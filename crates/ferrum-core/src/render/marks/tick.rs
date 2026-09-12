@@ -212,6 +212,7 @@ fn build_geometry(
                 let (nodes, data_indices) = acc.finalize();
                 let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
                 return MarkBuildResult {
+                    empty_reason: None,
                     polar_spans: None,
                     kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                     tooltips, hrefs, descriptions,
@@ -245,6 +246,7 @@ fn build_geometry(
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
+                empty_reason: None,
                 polar_spans: None,
                 kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                 tooltips, hrefs, descriptions,
@@ -313,6 +315,7 @@ fn build_geometry(
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
+                empty_reason: None,
                 polar_spans: None,
                 kind: MarkBatchKind::Tick,
                 nodes,
@@ -368,6 +371,7 @@ fn build_geometry(
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
+                empty_reason: None,
                 polar_spans: None,
                 kind: MarkBatchKind::Tick,
                 nodes,
@@ -428,6 +432,7 @@ fn build_geometry(
         let (nodes, data_indices) = acc.finalize();
         let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
         return MarkBuildResult {
+            empty_reason: None,
             polar_spans: None,
             kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
             tooltips, hrefs, descriptions,
@@ -494,6 +499,7 @@ fn build_geometry(
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Tick,
         nodes,

@@ -292,6 +292,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
@@ -434,6 +435,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Bar,
         nodes,
         data_indices: Some(data_indices),
@@ -599,6 +601,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Bar,
         nodes,
         data_indices: Some(data_indices),
@@ -782,6 +785,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Bar,
         nodes,
         data_indices: Some(data_indices),
@@ -907,6 +911,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
+        empty_reason: None,
         kind: MarkBatchKind::Bar,
         nodes,
         data_indices: Some(data_indices),

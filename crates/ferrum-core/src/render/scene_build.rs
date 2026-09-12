@@ -126,6 +126,15 @@ pub fn build_scene(
         } else {
             prep.final_batch().clone()
         };
+        // #118 exemption table item (c): a panel with no rows for its own
+        // facet combination (an incomplete factorial design, an empty
+        // category after a chart-level filter, …) is a legitimate, common
+        // shape, not a misconfiguration — it stays silent. This is distinct
+        // from a LAYER's own resolved batch coming back empty further below
+        // (`build_panel_mark_batches`'s per-layer skip), which can only
+        // happen via a named transform output producing zero rows, not via
+        // facet filtering — and stays silent too, for its own reason (see
+        // that skip's comment).
         if panel_batch.num_rows() == 0 {
             continue;
         }
@@ -1229,6 +1238,19 @@ fn build_panel_mark_batches(
     for (li, layer) in prep.layers.iter().enumerate() {
         let layer_batch = &layer_batches[li];
         if layer_batch.num_rows() == 0 {
+            // #118: a layer with NO `data_source` always reads a clone of
+            // `panel_batch` (see the resolution above), which the panel loop
+            // already confirmed non-empty — so the only way this layer's OWN
+            // batch is empty is a named `data_source` (a transform output)
+            // that produced zero rows. Orchestrator-adjudicated exception to
+            // "every silent continue gains a named warning": a warning here
+            // was implemented, then reverted, because `catplot(kind="box")`'s
+            // own `outliers` layer legitimately has zero rows for any
+            // dataset with no IQR outliers — the ordinary case, not a corner
+            // case — and this call site cannot tell that apart from a
+            // genuine transform degrade without per-transform knowledge it
+            // does not have. Ruling: stay silent. Pinned by
+            // `zero_row_data_source_layer_stays_silent`.
             continue;
         }
 
@@ -1467,6 +1489,17 @@ fn build_panel_mark_batches(
         )?;
         validate_mark_encoding(&layer.mark, &layer_spec.encoding, prep.coord_flipped)?;
         let mut result = draw::dispatch_mark_build(&layer.mark, &ctx)?;
+        // #118: the ONE place a `MarkBuildResult`'s named emptiness becomes a
+        // `RenderWarning` — see `MarkBuildResult::empty_reason`'s doc for the
+        // exemption boundary (a builder that returns empty for a legitimate
+        // reason leaves this `None` and is unaffected).
+        if let Some(reason) = result.empty_reason.take() {
+            warnings.push(RenderWarning::MarkBuildEmpty {
+                layer: li,
+                mark: layer.mark.as_str().to_string(),
+                reason: reason.0,
+            });
+        }
 
         // For CoordPolar, transform all mark nodes from Cartesian pixel
         // space to polar pixel space. Arc marks (Mark::Arc) handle their
@@ -2550,10 +2583,26 @@ fn build_structural_nodes(
 // ── Break-axis annotation suppression ────────────────────────────────────────
 
 /// Drop annotations whose data-space position on a broken axis falls inside
-/// that axis's gap, emitting one `RenderWarning::AnnotationSuppressedByBreak`
-/// per suppressed annotation (spec §4 H5, F-L08-07). The whole annotation is
-/// dropped, not just the offending coordinate, so a caller never sees a
+/// that axis's gap (spec §4 H5, F-L08-07). The whole annotation is dropped,
+/// not just the offending coordinate, so a caller never sees a
 /// half-suppressed callout or span.
+///
+/// BOTH suppression mechanisms are collected per axis and rolled into ONE
+/// warning each after the filter completes (#240-3): a chart with N
+/// suppressed annotations under one axis's break used to emit N (or, for a
+/// desugar that emits multiple primitive specs per user call —
+/// `annotate_hline`'s line plus its own label Text, both landing on the same
+/// in-gap value — 2N) near-identical warnings for what is one underlying
+/// fact per axis ("this break's gap swallowed some annotations"). The
+/// per-instance offending value/extent was never independently actionable
+/// (there is exactly one fix regardless of which instance: move the gap, or
+/// move the annotation), so each rollup bundles every suppressed instance's
+/// kind into one `RenderWarning`, mirroring
+/// `RenderWarning::LegendValuesUnknown`'s "bundle every offender into one
+/// `Vec`, not one warning each" shape. The two mechanisms stay separate
+/// warning types (point-in-gap vs. extent-spans-gap are different, equally
+/// true facts about the same annotation), each independently rolled up to
+/// at most one warning per axis.
 ///
 /// `break_remaps` is the SAME list `remap_mark_batch_through_break` folds
 /// marks through — already filtered to axes whose resolved scale has a
@@ -2574,23 +2623,60 @@ fn suppress_annotations_for_break(
     if break_remaps.is_empty() {
         return specs.to_vec();
     }
-    specs
+    // Per-axis rollup accumulators (#240-3): small `Vec`s, not `HashMap`s, so
+    // the emitted warnings stay in first-seen-axis order — deterministic for
+    // a per-render count that is never large enough for O(n^2) lookup to
+    // matter.
+    let mut in_gap: Vec<(String, Vec<String>)> = Vec::new();
+    let mut spanning: Vec<(String, Vec<String>)> = Vec::new();
+    let surviving = specs
         .iter()
         .filter(|spec| {
             for remap in break_remaps {
                 let axis = remap.axis();
-                if let Some(warning) = spec_break_conflict(spec, axis, remap.result()) {
-                    warnings.push(warning);
-                    return false;
+                match spec_break_conflict(spec, axis, remap.result()) {
+                    Some(BreakConflict::Point { axis, kind }) => {
+                        accumulate_by_axis(&mut in_gap, axis, kind);
+                        return false;
+                    }
+                    Some(BreakConflict::Span { axis, kind }) => {
+                        accumulate_by_axis(&mut spanning, axis, kind);
+                        return false;
+                    }
+                    None => {}
                 }
             }
             true
         })
         .cloned()
-        .collect()
+        .collect();
+    for (axis, kinds) in in_gap {
+        warnings.push(RenderWarning::AnnotationSuppressedByBreak { axis, kinds });
+    }
+    for (axis, kinds) in spanning {
+        warnings.push(RenderWarning::AnnotationSpansBreakGap { axis, kinds });
+    }
+    surviving
 }
 
-/// The warning `spec` earns from `result` on `axis`, or `None` when the two
+/// Append `kind` to `axis`'s bucket in a per-axis rollup accumulator,
+/// creating the bucket on first sight. Shared by both suppression mechanisms
+/// in `suppress_annotations_for_break`.
+fn accumulate_by_axis(acc: &mut Vec<(String, Vec<String>)>, axis: String, kind: String) {
+    match acc.iter_mut().find(|(a, _)| *a == axis) {
+        Some((_, kinds)) => kinds.push(kind),
+        None => acc.push((axis, vec![kind])),
+    }
+}
+
+/// One spec's conflict against one break, before it is folded into its
+/// mechanism's per-axis rollup — see `suppress_annotations_for_break`.
+enum BreakConflict {
+    Point { axis: String, kind: String },
+    Span { axis: String, kind: String },
+}
+
+/// The conflict `spec` earns from `result` on `axis`, or `None` when the two
 /// do not conflict.
 ///
 /// Two questions, one per coordinate shape (`annotation::AxisCoords`):
@@ -2605,37 +2691,25 @@ fn suppress_annotations_for_break(
 ///   merely-overlapping rect was suppressed.
 ///
 /// Endpoints are tested before the span so an extent with an in-gap endpoint
-/// keeps naming that value in `AnnotationSuppressedByBreak`, rather than
-/// degrading to the coarser span message.
+/// keeps folding into the `Point` rollup, rather than degrading to the
+/// coarser span case.
 fn spec_break_conflict(
     spec: &super::annotation::AnnotationSpec,
     axis: &str,
     result: &break_axis::BreakResult,
-) -> Option<RenderWarning> {
+) -> Option<BreakConflict> {
     use super::annotation::AxisCoords;
 
     let kind = || super::annotation::kind_name(spec).to_string();
     let in_gap = |value: f64| {
-        break_axis::gap_containing(value, result).map(|gap| {
-            RenderWarning::AnnotationSuppressedByBreak {
-                kind: kind(),
-                axis: axis.to_string(),
-                value,
-                gap: [gap.0, gap.1],
-            }
-        })
+        break_axis::gap_containing(value, result)
+            .map(|_gap| BreakConflict::Point { axis: axis.to_string(), kind: kind() })
     };
     match super::annotation::data_coords_on_axis(spec, axis) {
         AxisCoords::Points(values) => values.into_iter().find_map(in_gap),
         AxisCoords::Extent(lo, hi) => [lo, hi].into_iter().find_map(in_gap).or_else(|| {
-            break_axis::gap_spanned_by(lo, hi, result).map(|gap| {
-                RenderWarning::AnnotationSpansBreakGap {
-                    kind: kind(),
-                    axis: axis.to_string(),
-                    extent: [lo, hi],
-                    gap: [gap.0, gap.1],
-                }
-            })
+            break_axis::gap_spanned_by(lo, hi, result)
+                .map(|_gap| BreakConflict::Span { axis: axis.to_string(), kind: kind() })
         }),
     }
 }
@@ -3880,6 +3954,64 @@ mod tests {
             &chart_config,
             None,
         )
+    }
+
+    /// [`try_build_scene_for`], but also returns the accumulated
+    /// `RenderWarning`s instead of discarding them — for the #118 tests that
+    /// need to assert on a warning rather than only the resulting scene.
+    fn try_build_scene_for_capturing_warnings(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+    ) -> (Result<ferrum_scene::SceneGraph, RenderError>, Vec<RenderWarning>) {
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport {
+            width: 600.0,
+            height: 400.0,
+        };
+        let config = super::super::config::RenderConfig::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let mut prep = match super::super::prepare::prepare_render_inputs(
+            spec,
+            batch,
+            &theme,
+            viewport,
+            &crate::render::chart_config::ChartConfig::default(),
+            None,
+        ) {
+            Ok(p) => p,
+            Err(e) => return (Err(e), Vec::new()),
+        };
+        prep.axes.apply_show_defaults(&theme);
+        let mut warnings = prep.warnings.clone();
+        let metrics = super::super::font::FontdueMetrics::new();
+        let layout = crate::layout::compute_layout(
+            spec,
+            &theme,
+            viewport,
+            &prep.axes,
+            &prep.facet_groups,
+            &prep.legend_entries,
+            prep.legend_title.clone(),
+            prep.colorbar.as_ref(),
+            &metrics,
+            &crate::layout::legend::LegendOverrides::default(),
+            &prep.aux_legends,
+            crate::layout::CompositeLayoutSeam::default(),
+        )
+        .unwrap();
+
+        let result = build_scene(
+            spec,
+            &prep,
+            &layout,
+            &theme,
+            &config,
+            &mut warnings,
+            &chart_config,
+            None,
+        );
+        (result, warnings)
     }
 
     // ── Task 4 remediation (spec §4.4, 2026-08-28 T4 amendment): layered
@@ -7371,6 +7503,33 @@ mod tests {
         );
     }
 
+    /// #118: a layer whose named `data_source` output comes back with zero
+    /// rows stays a SILENT skip, deliberately. A warning here was drafted and
+    /// then reverted (proved wrong against a real production chart,
+    /// `catplot(kind="box")`'s own `outliers` layer, which legitimately has
+    /// zero rows for any dataset with no IQR outliers — the ordinary case,
+    /// not a corner case): this call site cannot tell "the transform found
+    /// nothing to keep, correctly" apart from "the transform degraded" — see
+    /// the comment at the `continue` above.
+    #[test]
+    fn zero_row_data_source_layer_stays_silent() {
+        pyo3::Python::initialize();
+        use crate::transform::core::TransformSpec;
+        use crate::transform::filter::FilterSpec;
+
+        let (mut spec, batch) = layer_gate_binned_spec();
+        spec.transforms = vec![TransformSpec::Filter(FilterSpec {
+            predicate: "datum.x > 1000".into(),
+            name: Some("binned".into()),
+            param: None,
+        })];
+
+        let (result, warnings) = try_build_scene_for_capturing_warnings(&spec, &batch);
+        let scene = result.expect("a zero-row layer is skipped, not refused");
+        assert_eq!(panel_mark_batch_node_counts(&scene).len(), 1, "only layer 0 renders");
+        assert!(warnings.is_empty(), "a zero-row data_source layer must stay silent: {warnings:?}");
+    }
+
     /// The gate reads the layer's `x2`/`y2` endpoints too, not just `x`/`y`.
     #[test]
     fn layer_one_missing_y2_endpoint_raises_naming_that_channel() {
@@ -8157,8 +8316,9 @@ mod tests {
 
     /// The finding's exact repro (F-L08-07): a labelled `annotate_hline`
     /// whose y sits inside the break gap must be dropped, with a warning
-    /// naming its kind, axis, value, and gap; a sibling outside the gap must
-    /// survive untouched.
+    /// naming its axis and kind (rolled up per #240-3, so "kind" now means
+    /// "one of the `kinds` bundled into the axis's warning" rather than a
+    /// per-instance field); a sibling outside the gap must survive untouched.
     #[test]
     fn suppress_annotations_for_break_drops_in_gap_and_warns() {
         use crate::render::annotation::{AnnotationSpec, CoordValue};
@@ -8181,11 +8341,9 @@ mod tests {
         }
         assert_eq!(warnings.len(), 1, "exactly one warning for the one suppressed spec");
         match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { kind, axis, value, gap } => {
-                assert_eq!(kind, "text");
+            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
                 assert_eq!(axis, "y");
-                assert_eq!(*value, 500.0);
-                assert_eq!(*gap, [150.0, 850.0]);
+                assert_eq!(kinds, &["text".to_string()]);
             }
             other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
         }
@@ -8215,11 +8373,52 @@ mod tests {
         }
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { kind, axis, value, gap } => {
-                assert_eq!(kind, "text");
+            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
                 assert_eq!(axis, "x");
-                assert_eq!(*value, 500.0);
-                assert_eq!(*gap, [150.0, 850.0]);
+                assert_eq!(kinds, &["text".to_string()]);
+            }
+            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
+        }
+    }
+
+    /// #240-3 RED proof: the frozen repro (4 in-gap `annotate_hline`s, each
+    /// desugaring to a `line` primitive plus its own label `text` primitive —
+    /// 8 primitive specs total) used to emit 8 near-identical warnings; now
+    /// it rolls up into exactly ONE `AnnotationSuppressedByBreak` per axis,
+    /// carrying all 8 kinds.
+    #[test]
+    fn suppress_annotations_for_break_rolls_up_n_in_gap_annotations_into_one_warning() {
+        use crate::render::annotation::{AnnotationSpec, CoordValue};
+
+        let mut specs = Vec::new();
+        for i in 0..4 {
+            specs.push(AnnotationSpec::Line {
+                x1: CoordValue::Data(500.0),
+                y1: CoordValue::Data(500.0),
+                x2: CoordValue::Data(500.0),
+                y2: CoordValue::Data(500.0),
+                stroke: "#333333".to_string(),
+                stroke_width: 1.0,
+                dash: None,
+            });
+            specs.push(text_spec(CoordValue::Data(500.0), &format!("label {i}")));
+        }
+        let break_result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remaps = vec![y_remap(&break_result)];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+
+        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
+        assert!(surviving.is_empty(), "every spec sits at y=500, inside the gap");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "8 in-gap primitive specs must roll up into exactly one warning, got {warnings:?}"
+        );
+        match &warnings[0] {
+            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds.len(), 8, "the count of suppressed instances survives the rollup");
             }
             other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
         }
@@ -8287,7 +8486,9 @@ mod tests {
         assert!(surviving.is_empty(), "an in-gap span must be dropped whole");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { kind, .. } => assert_eq!(kind, "span"),
+            RenderWarning::AnnotationSuppressedByBreak { kinds, .. } => {
+                assert_eq!(kinds, &["span".to_string()])
+            }
             other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
         }
     }
@@ -8326,21 +8527,57 @@ mod tests {
             surviving.is_empty(),
             "a rect bounding the gap asserts continuity exactly where the axis is broken"
         );
+        // #240-3: rolled up to ONE warning naming the axis and the suppressed
+        // kind(s), not the per-instance extent/gap (re-aimed from the
+        // pre-rollup per-annotation shape, per D §240-3).
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            RenderWarning::AnnotationSpansBreakGap { kind, axis, extent, gap } => {
-                assert_eq!(kind, "rect");
+            RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
                 assert_eq!(axis, "y");
-                assert_eq!(*extent, [100.0, 900.0]);
-                assert_eq!(*gap, [150.0, 850.0]);
+                assert_eq!(kinds, &["rect".to_string()]);
             }
             other => panic!("expected AnnotationSpansBreakGap, got {other:?}"),
         }
     }
 
-    /// The other side of that pin: an extent with an in-gap ENDPOINT keeps
-    /// naming that value through the original warning, and an extent wholly
-    /// on one side of the gap still survives untouched.
+    /// #240-3: N extent-shaped annotations that each span the same axis's
+    /// break gap used to emit N separate `AnnotationSpansBreakGap` warnings
+    /// (one per suppressed instance) — now they roll up into exactly ONE
+    /// warning naming the axis and carrying every suppressed kind.
+    #[test]
+    fn suppress_annotations_for_break_rolls_up_n_spanning_annotations_into_one_warning() {
+        let specs = vec![
+            y_rect_spec(100.0, 900.0),
+            y_rect_spec(120.0, 880.0),
+            y_rect_spec(140.0, 860.0),
+        ];
+        let break_result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
+        let remaps = vec![y_remap(&break_result)];
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+
+        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
+        assert!(surviving.is_empty(), "every rect straddles the gap");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "N spanning annotations must roll up into exactly one warning, got {warnings:?}"
+        );
+        match &warnings[0] {
+            RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds.len(), 3, "the count of suppressed instances survives the rollup");
+                assert!(kinds.iter().all(|k| k == "rect"));
+            }
+            other => panic!("expected AnnotationSpansBreakGap, got {other:?}"),
+        }
+    }
+
+    /// The other side of that pin: an extent with an in-gap ENDPOINT folds
+    /// into the `AnnotationSuppressedByBreak` rollup (not the coarser
+    /// `AnnotationSpansBreakGap` one, since the endpoint check runs first —
+    /// see `spec_break_conflict`'s doc), and an extent wholly on one side of
+    /// the gap still survives untouched.
     #[test]
     fn suppress_annotations_for_break_keeps_the_endpoint_answer_for_extents() {
         let specs = vec![y_rect_spec(100.0, 400.0), y_rect_spec(0.0, 140.0)];
@@ -8353,10 +8590,12 @@ mod tests {
         assert_eq!(surviving.len(), 1, "only the overlapping rect is dropped");
         assert_eq!(warnings.len(), 1);
         match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { kind, value, gap, .. } => {
-                assert_eq!(kind, "rect");
-                assert_eq!(*value, 400.0, "the in-gap endpoint is named, not the extent");
-                assert_eq!(*gap, [150.0, 850.0]);
+            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
+                assert_eq!(axis, "y");
+                assert_eq!(
+                    kinds, &["rect".to_string()],
+                    "the in-gap-endpoint rect folds into the Point rollup, not the Span one"
+                );
             }
             other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
         }

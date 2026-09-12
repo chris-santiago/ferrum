@@ -472,6 +472,10 @@ def test_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
     """The finding's exact repro: a labelled hline inside the gap is dropped.
 
     Pre-fix: "inside the break" rendered in the SVG and no warning fired.
+    Rolled up per #240-3: the warning names the axis and how many instances
+    were suppressed rather than each instance's own value/gap (an
+    `annotate_hline` desugars to a `line` primitive plus its own label
+    `text` primitive, so one user-facing annotation suppresses as 2).
     """
     df = pl.DataFrame(
         {"category": ["A", "B", "C", "D", "E"], "value": [72.0, 68.0, 75.0, 900.0, 81.0]}
@@ -487,8 +491,9 @@ def test_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
 
     assert "inside the break" not in svg, "the suppressed label must not render"
     messages = [str(w.message) for w in caught]
-    matches = [m for m in messages if "break" in m.lower() and "y=500" in m and "(150, 850)" in m]
-    assert matches, f"expected a warning naming the annotation's axis/value/gap; got {messages}"
+    matches = [m for m in messages if "break" in m.lower() and "y axis" in m and "suppressed" in m]
+    assert matches, f"expected a warning naming the annotation's axis; got {messages}"
+    assert len(matches) == 1, f"N suppressed instances must roll up into ONE warning; got {messages}"
 
 
 def test_boundary_value_annotation_is_not_suppressed():
@@ -511,7 +516,14 @@ def test_boundary_value_annotation_is_not_suppressed():
 
 
 def test_span_inside_a_gap_is_suppressed():
-    """A `Span` whose range lies inside a gap suppresses (spec §4 H5's rider)."""
+    """A `Span` whose range lies inside a gap suppresses (spec §4 H5's rider).
+
+    Both of the span's own endpoints (300, 700) sit inside the gap, so this
+    is classified as a POINT-in-gap suppression (`spec_break_conflict` tests
+    endpoints before the span-crossing case) and rolls into
+    `AnnotationSuppressedByBreak`, not `AnnotationSpansBreakGap` — the
+    message names the axis and count (#240-3), not the specific kind.
+    """
     df = pl.DataFrame({"category": ["A", "B"], "value": [72.0, 900.0]})
     chart = (
         fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
@@ -524,8 +536,8 @@ def test_span_inside_a_gap_is_suppressed():
 
     assert 'fill="#eeeeee"' not in svg, "the suppressed span must not render its rect"
     messages = [str(w.message) for w in caught]
-    assert any("'span'" in m and "break" in m.lower() for m in messages), (
-        f"expected a span-kind suppression warning; got {messages}"
+    assert any("y axis" in m and "break" in m.lower() and "suppressed" in m for m in messages), (
+        f"expected a suppression warning naming the y axis; got {messages}"
     )
 
 
@@ -742,8 +754,9 @@ def test_x_axis_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
 
     assert "inside the break" not in svg, "the suppressed label must not render"
     messages = [str(w.message) for w in caught]
-    matches = [m for m in messages if "break" in m.lower() and "x=500" in m and "(150, 850)" in m]
-    assert matches, f"expected a warning naming the annotation's axis/value/gap; got {messages}"
+    matches = [m for m in messages if "break" in m.lower() and "x axis" in m and "suppressed" in m]
+    assert matches, f"expected a warning naming the annotation's axis; got {messages}"
+    assert len(matches) == 1, f"N suppressed instances must roll up into ONE warning; got {messages}"
 
 
 def _vert_line_xs(svg: str) -> collections.Counter:

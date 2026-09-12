@@ -242,8 +242,15 @@ pub enum RenderError {
     ///   layer there, and without the builder's own guard it silently
     ///   rendered nothing.
     ///
-    /// `mark_image`'s documented empty-scene behavior under Polar/Geo is
-    /// deliberately untouched (#118 owns the general policy).
+    /// `mark_image` under Polar/Geo does NOT raise this — unlike geoshape and
+    /// arc, both of its build paths (url-tile, raster) place images in
+    /// Cartesian pixel space with no polar/geo projection to fall back to, so
+    /// there is no coord-independent way to draw anything under either coord.
+    /// It instead names the mismatch as a `RenderWarning::MarkBuildEmpty`
+    /// (#118) at `marks/image.rs`'s own Polar/Geo arm — a warning, not a
+    /// refusal, matching every other #118 site's "this presence-legal
+    /// combination genuinely cannot draw" shape rather than a malformed-input
+    /// refusal.
     MarkRequiresCoord {
         mark: &'static str,
         required: &'static str,
@@ -615,6 +622,29 @@ pub enum RenderWarning {
     /// [`ShapePaletteOverflowed`](Self::ShapePaletteOverflowed) — the palette is
     /// finite, so the degradation stays (spec §4.3) but is never silent.
     StrokeDashPaletteOverflowed { categories: u32 },
+    /// A categorical axis (Ordinal/Band/Point) resolved with so many
+    /// categories relative to its pixel range that each category's band or
+    /// point allotment rounds down under one pixel (#183) — sibling to
+    /// [`ColorPaletteOverflowed`](Self::ColorPaletteOverflowed): the scale
+    /// still resolves (there is no invalid input to refuse), so the
+    /// degradation stays, but a chart where every category silently collapses
+    /// to a sliver is otherwise indistinguishable from a rendering bug.
+    /// `categories` is the domain length; `bandwidth_px` is the resolved
+    /// per-category pixel width that triggered the warning.
+    GroupCardinalityDegenerate { categories: u32, bandwidth_px: f64 },
+    /// A mark builder discovered a genuine defect — a presence-legal channel
+    /// combination (`validate_mark_encoding` already passed it) that still
+    /// lacks something it needs to draw anything — and produced zero marks
+    /// (#118). `layer` is the layer's index in declaration order; `mark` is
+    /// its kind; `reason` is a ready-made sentence fragment naming what was
+    /// missing (see `crate::render::draw::MarkBuildResult::empty_reason`'s
+    /// doc for the exemption boundary this crosses — a legitimate empty
+    /// never reaches this variant).
+    MarkBuildEmpty {
+        layer: usize,
+        mark: String,
+        reason: String,
+    },
     EmptyPanel { panel_index: usize },
     /// An explicit color range string could not be parsed. The entire range is
     /// discarded and the default theme palette is used instead.
@@ -733,17 +763,41 @@ pub enum RenderWarning {
     /// that axis's `BreakAxis` gap (spec §4 H5, F-L08-07). The whole
     /// annotation is dropped — not just the offending coordinate — because a
     /// partially-suppressed annotation (a callout whose text moved but whose
-    /// leader line vanished, say) is worse than none. `kind` is the
-    /// annotation's wire `type` tag (`"text"`, `"line"`, `"span"`, …); `axis`
-    /// is `"x"` or `"y"`; `value` is the offending data value; `gap` is the
-    /// `(lo, hi)` data-space band that swallowed it. A surviving annotation
+    /// leader line vanished, say) is worse than none. A surviving annotation
     /// (no coordinate in any gap) is remapped through the break like marks
     /// are, and pushes no warning.
+    ///
+    /// Rolled up per axis (#240-3): this used to fire once per suppressed
+    /// annotation ELEMENT — the internal per-primitive `AnnotationSpec`, not
+    /// the user-facing `annotate_*()` call — so a chart whose annotations
+    /// desugar to multiple primitive specs per call (`annotate_hline`'s line
+    /// plus its own label Text, both landing on the same in-gap value)
+    /// doubled the count on top of that — emitting N (or 2N) near-identical
+    /// warnings for one underlying fact ("this axis's break gap swallowed
+    /// some annotation elements"). The frozen contract ("a chart with N
+    /// in-gap annotations emits ONE rolled-up suppression warning carrying
+    /// the count") treats every suppressed element as one bucket per axis,
+    /// mirroring [`AnnotationSpansBreakGap`](Self::AnnotationSpansBreakGap)'s
+    /// and [`LegendValuesUnknown`](Self::LegendValuesUnknown)'s "bundle every
+    /// offender into one `Vec`, not one warning each" shape — genuinely, not
+    /// just in the field list: the Display arm prints
+    /// [`dedup_kinds_for_display`]'s first-appearance-order-deduped join of
+    /// `kinds`, the same way `LegendValuesUnknown` prints its own `values`
+    /// (quality-review finding: the field must not be collected and then
+    /// dropped). The dedup is Display-only — `kinds.len()` (undeduped) is
+    /// still the count the message's leading number reports, so 4 suppressed
+    /// `annotate_hline`s (8 elements: 4 `line` + 4 `text`) read "8 annotation
+    /// elements (line, text)", not "8 annotation elements (line, text, line,
+    /// text, line, text, line, text)". `kinds` is each suppressed element's
+    /// wire `type` tag (`"text"`, `"line"`, `"span"`, …), in suppression
+    /// order — the Display text says "annotation element(s)", not
+    /// "annotation(s)", because the count is honestly of elements: this
+    /// layer has no attribution back to which user call produced which
+    /// element, and claiming a user-call count here would be dishonest for
+    /// exactly the multi-primitive desugars this rollup exists to cover.
     AnnotationSuppressedByBreak {
-        kind: String,
         axis: String,
-        value: f64,
-        gap: [f64; 2],
+        kinds: Vec<String>,
     },
     /// An EXTENT-shaped annotation (rect, span, line, arrow, bracket) on a
     /// broken axis had no coordinate inside a gap but *straddled* one — its
@@ -752,14 +806,24 @@ pub enum RenderWarning {
     /// endpoint is: the interval's interior lies in the gap, so drawing it
     /// would assert continuity exactly where the axis says it is broken.
     /// Before this, growing such an annotation past the gap brought it back
-    /// and painted it as one solid shape across the break. `extent` is the
-    /// annotation's `(lo, hi)` on the broken axis; `gap` is the `(lo, hi)`
-    /// band it crosses.
+    /// and painted it as one solid shape across the break.
+    ///
+    /// Rolled up per axis (#240-3): this used to fire once per suppressed
+    /// annotation element, so a chart with N such elements emitted N
+    /// near-identical warnings — the per-instance `extent`/`gap` values were
+    /// never independently actionable (there is exactly one fix regardless of
+    /// which element: move the gap, or move the annotation), so `kinds`
+    /// bundles every suppressed element's kind into ONE warning per axis,
+    /// mirroring [`LegendValuesUnknown`](Self::LegendValuesUnknown)'s
+    /// "bundle every offender into one `Vec`, not one warning each" shape —
+    /// genuinely: the Display arm prints [`dedup_kinds_for_display`]'s
+    /// deduped join of `kinds` (the stored field itself keeps every element,
+    /// undeduped — see the sibling
+    /// [`AnnotationSuppressedByBreak`](Self::AnnotationSuppressedByBreak)'s
+    /// doc for why that matters for the leading count).
     AnnotationSpansBreakGap {
-        kind: String,
         axis: String,
-        extent: [f64; 2],
-        gap: [f64; 2],
+        kinds: Vec<String>,
     },
     /// A `BreakAxis` resolved to zero effective gaps, so the chart rendered
     /// exactly as if the break had not been declared: no indicator, no
@@ -814,6 +878,23 @@ pub enum RenderWarning {
     UnknownColorScheme { name: String },
 }
 
+/// First-appearance-order dedup of a break-suppression rollup's `kinds`, for
+/// Display only. The stored field keeps every suppressed element (its
+/// length is the COUNT the message's leading number reports — deduping the
+/// field itself would silently shrink that count), but a chart with 4
+/// suppressed `annotate_hline`s (each a `line` + its own label `text`)
+/// listing "line, text, line, text, line, text, line, text" is noise, not
+/// information: only which DISTINCT kinds were involved is worth reading.
+fn dedup_kinds_for_display(kinds: &[String]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    for k in kinds {
+        if !seen.contains(&k.as_str()) {
+            seen.push(k.as_str());
+        }
+    }
+    seen.join(", ")
+}
+
 impl std::fmt::Display for RenderWarning {
     /// User-facing warning text forwarded to Python's ``warnings.warn`` by
     /// [`binding::emit_warnings`](crate::render::binding).
@@ -847,6 +928,21 @@ impl std::fmt::Display for RenderWarning {
                 f,
                 "stroke dash palette has fewer entries than the {categories} categories; \
                  dashes were recycled"
+            ),
+            RenderWarning::GroupCardinalityDegenerate { categories, bandwidth_px } => {
+                let n = *categories;
+                write!(
+                    f,
+                    "{n} categor{} {} placed on an axis with only {bandwidth_px:.2}px per \
+                     category; {} may not render visibly",
+                    if n == 1 { "y" } else { "ies" },
+                    if n == 1 { "was" } else { "were" },
+                    if n == 1 { "it" } else { "some" },
+                )
+            }
+            RenderWarning::MarkBuildEmpty { layer, mark, reason } => write!(
+                f,
+                "{mark} layer {layer} drew nothing: {reason}"
             ),
             RenderWarning::EmptyPanel { panel_index } => write!(
                 f,
@@ -920,18 +1016,29 @@ impl std::fmt::Display for RenderWarning {
                 if fields.len() == 1 { "ies" } else { "y" },
                 if fields.len() == 1 { "it was" } else { "they were" },
             ),
-            RenderWarning::AnnotationSuppressedByBreak { kind, axis, value, gap } => write!(
-                f,
-                "annotation '{kind}' at {axis}={value} falls inside BreakAxis gap \
-                 ({}, {}); suppressed",
-                gap[0], gap[1]
-            ),
-            RenderWarning::AnnotationSpansBreakGap { kind, axis, extent, gap } => write!(
-                f,
-                "annotation '{kind}' spans {axis} {} to {}, crossing BreakAxis gap \
-                 ({}, {}); suppressed",
-                extent[0], extent[1], gap[0], gap[1]
-            ),
+            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
+                let n = kinds.len();
+                write!(
+                    f,
+                    "{n} annotation element{} ({}) on the {axis} axis fell inside a BreakAxis \
+                     gap and {} suppressed",
+                    if n == 1 { "" } else { "s" },
+                    dedup_kinds_for_display(kinds),
+                    if n == 1 { "was" } else { "were" },
+                )
+            }
+            RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
+                let n = kinds.len();
+                write!(
+                    f,
+                    "{n} annotation element{} ({}) on the {axis} axis span{} a BreakAxis gap \
+                     and {} suppressed",
+                    if n == 1 { "" } else { "s" },
+                    dedup_kinds_for_display(kinds),
+                    if n == 1 { "s" } else { "" },
+                    if n == 1 { "was" } else { "were" },
+                )
+            }
             RenderWarning::BreakAxisIneffective { axis, reason } => write!(
                 f,
                 "BreakAxis on the {axis} axis had no effect: {reason}"
@@ -994,6 +1101,12 @@ mod tests {
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::StrokeDashPaletteOverflowed { categories: 6 },
+            RenderWarning::GroupCardinalityDegenerate { categories: 500, bandwidth_px: 0.4 },
+            RenderWarning::MarkBuildEmpty {
+                layer: 0,
+                mark: "rect".into(),
+                reason: "mark_rect() needs an ordinal x or y axis".into(),
+            },
             RenderWarning::EmptyPanel { panel_index: 1 },
             RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
             RenderWarning::ColorRangeBucketCountMismatch { expected: 3, received: 2 },
@@ -1025,16 +1138,12 @@ mod tests {
                 fields: vec!["domain_min".into(), "nice".into()],
             },
             RenderWarning::AnnotationSuppressedByBreak {
-                kind: "text".into(),
                 axis: "y".into(),
-                value: 500.0,
-                gap: [150.0, 850.0],
+                kinds: vec!["text".into(), "line".into()],
             },
             RenderWarning::AnnotationSpansBreakGap {
-                kind: "rect".into(),
                 axis: "y".into(),
-                extent: [100.0, 900.0],
-                gap: [150.0, 850.0],
+                kinds: vec!["rect".into(), "span".into()],
             },
             RenderWarning::BreakAxisIneffective {
                 axis: "y".into(),
@@ -1102,6 +1211,24 @@ mod tests {
         assert!(no_surface_text.contains("no matching surface"), "{no_surface_text}");
         assert!(!no_surface_text.contains("ConfigSurfaceNotPresent"), "{no_surface_text}");
 
+        // #183: the singular arm — a 1-category sub-pixel axis must read
+        // "1 category was placed ... it may not render visibly", not the
+        // no-op-plural "1 categories were placed ... some may not render
+        // visibly" every other numbered variant in this match avoids.
+        let one_category = RenderWarning::GroupCardinalityDegenerate {
+            categories: 1,
+            bandwidth_px: 0.5,
+        };
+        let one_category_text = format!("{one_category}");
+        assert!(one_category_text.contains("1 category "), "{one_category_text}");
+        assert!(!one_category_text.contains("1 categories"), "{one_category_text}");
+        assert!(one_category_text.contains("was placed"), "{one_category_text}");
+        assert!(one_category_text.contains("it may not render visibly"), "{one_category_text}");
+        assert!(
+            !one_category_text.contains("GroupCardinalityDegenerate"),
+            "{one_category_text}"
+        );
+
         // D6/F-L04-05 (this task): unknown categorical `Legend(values=)` names.
         let unknown = RenderWarning::LegendValuesUnknown {
             values: vec!["zulu".into(), "yankee".into()],
@@ -1111,24 +1238,57 @@ mod tests {
         assert!(unknown_text.contains("match no legend entry"), "{unknown_text}");
         assert!(!unknown_text.contains("LegendValuesUnknown"), "{unknown_text}");
 
-        // F-L08-07 (spec §4 H5): names the annotation kind, axis, offending
-        // value, and gap — the guide's promise ("names the annotation and
-        // its position").
+        // F-L08-07 (spec §4 H5), rolled up per #240-3: names the axis and the
+        // count of suppressed ANNOTATION ELEMENTS (the internal per-primitive
+        // spec, not the user-facing annotate_*() call) — the guide's promise
+        // ("names the annotation and its position") narrows to "names the
+        // axis and how many elements" once the rollup replaces per-instance
+        // value/gap detail. "element(s)", not "annotation(s)", because this
+        // layer has no attribution back to which user call produced which
+        // element (a single `annotate_hline()` desugars to 2 elements).
+        // Four kinds with a repeat (`line`/`text` twice each — the exact
+        // shape 2 in-gap `annotate_hline`s produce), so this pin exercises
+        // BOTH halves of the contract: the leading count stays the true
+        // element count (4), and the parenthetical dedups to first-appearance
+        // order (quality-review findings: `kinds` was collected and never
+        // displayed at all, then — once displayed — repeated per primitive
+        // instead of deduping; this must be able to catch either regressing).
         let suppressed = RenderWarning::AnnotationSuppressedByBreak {
-            kind: "text".into(),
             axis: "y".into(),
-            value: 500.0,
-            gap: [150.0, 850.0],
+            kinds: vec!["line".into(), "text".into(), "line".into(), "text".into()],
         };
         let suppressed_text = format!("{suppressed}");
-        assert!(suppressed_text.contains("'text'"), "{suppressed_text}");
-        assert!(suppressed_text.contains("y=500"), "{suppressed_text}");
-        assert!(suppressed_text.contains("(150, 850)"), "{suppressed_text}");
+        assert!(suppressed_text.contains("4 annotation elements"), "{suppressed_text}");
+        assert!(suppressed_text.contains("(line, text)"), "{suppressed_text}");
+        assert!(
+            !suppressed_text.contains("(line, text, line, text)"),
+            "kinds must be deduped in Display, not repeated per primitive: {suppressed_text}"
+        );
+        assert!(suppressed_text.contains("y axis"), "{suppressed_text}");
         assert!(suppressed_text.contains("suppressed"), "{suppressed_text}");
         assert!(
             !suppressed_text.contains("AnnotationSuppressedByBreak"),
             "{suppressed_text}"
         );
+
+        // The sibling mechanism (an extent-shaped annotation spanning a gap,
+        // rather than a point landing inside one) gets the same "element(s)"
+        // noun and the same genuine, deduped `kinds` display for the same
+        // reason — see `AnnotationSuppressedByBreak`'s doc.
+        let spans = RenderWarning::AnnotationSpansBreakGap {
+            axis: "y".into(),
+            kinds: vec!["rect".into(), "span".into(), "rect".into()],
+        };
+        let spans_text = format!("{spans}");
+        assert!(spans_text.contains("3 annotation elements"), "{spans_text}");
+        assert!(spans_text.contains("(rect, span)"), "{spans_text}");
+        assert!(
+            !spans_text.contains("(rect, span, rect)"),
+            "kinds must be deduped in Display, not repeated per primitive: {spans_text}"
+        );
+        assert!(spans_text.contains("y axis"), "{spans_text}");
+        assert!(spans_text.contains("suppressed"), "{spans_text}");
+        assert!(!spans_text.contains("AnnotationSpansBreakGap"), "{spans_text}");
 
         // #240-4b (routed rider): an unrecognized scheme/cmap name.
         let unknown_scheme = RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() };

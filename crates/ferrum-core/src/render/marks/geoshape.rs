@@ -45,20 +45,19 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         Some(SpecCoord::Geo { projection }) => *projection,
         _ => {
             // Non-Geo coord: only refuse when geometry data is actually
-            // present. A batch with no `__geometry__` column, or one whose
-            // column is entirely null, still produces a legitimately empty
-            // result — refusing THAT would turn an unrelated empty-data
-            // chart into an error, so the rule is "refuse only when there is
-            // real geometry to project" (spec §6.4's own wording is "with
-            // geometry present"; the discriminator here just answers that
-            // presence question). `null_count() < len()` reads the raw
-            // column directly — no dtype assumption (a mis-typed
-            // `__geometry__` column is a different, unrelated failure mode
-            // this check does not need to adjudicate) and no per-row
-            // materialization of a possibly-large GeoJSON string column.
-            let has_geometry = ctx.batch
-                .column_by_name(GEOMETRY_COL)
-                .is_some_and(|col| col.null_count() < col.len());
+            // present. A batch whose `__geometry__` column is entirely null
+            // still produces a legitimately empty result — refusing THAT
+            // would turn an unrelated empty-data chart into an error, so the
+            // rule is "refuse only when there is real geometry to project"
+            // (spec §6.4's own wording is "with geometry present"; the
+            // discriminator here just answers that presence question).
+            // `null_count() < len()` reads the raw column directly — no
+            // dtype assumption (a mis-typed `__geometry__` column is a
+            // different, unrelated failure mode this check does not need to
+            // adjudicate) and no per-row materialization of a possibly-large
+            // GeoJSON string column.
+            let geometry_col = ctx.batch.column_by_name(GEOMETRY_COL);
+            let has_geometry = geometry_col.is_some_and(|col| col.null_count() < col.len());
             if has_geometry {
                 return Err(RenderError::MarkRequiresCoord {
                     mark: "mark_geoshape",
@@ -66,7 +65,23 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
                     hint: "add .coord(fm.CoordGeo(...))",
                 });
             }
-            return Ok(MarkBuildResult::empty(MarkBatchKind::Polygon));
+            // #118: the column being entirely null for THIS batch (present,
+            // all-null) is the legitimate per-panel/per-layer case above —
+            // stays `None`. The column being ABSENT from the schema
+            // altogether is different: `_coerce.py` adds `__geometry__` to
+            // every geoshape-bound chart's batch, so its total absence means
+            // this chart's input was never coerced through the GeoJSON path
+            // at all — the user asked for shapes and gave mark_geoshape
+            // nothing that could ever produce one, on any coord.
+            return Ok(if geometry_col.is_none() {
+                MarkBuildResult::empty_because(
+                    MarkBatchKind::Polygon,
+                    "mark_geoshape() found no geometry data (expected a GeoJSON \
+                     FeatureCollection passed to Chart(data))",
+                )
+            } else {
+                MarkBuildResult::empty(MarkBatchKind::Polygon)
+            });
         }
     };
 
@@ -221,6 +236,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     Ok(MarkBuildResult {
+        empty_reason: None,
         polar_spans: None,
         kind: MarkBatchKind::Polygon,
         nodes,
