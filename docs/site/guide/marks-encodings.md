@@ -580,9 +580,9 @@ chart = fm.Chart(df).mark_point(shape="|").encode(x="x", y="group:N")
 
 ## Mark style kwargs
 
-Every `mark_*()` method accepts `**kwargs` — constant style overrides passed straight through to the renderer, layered on top of (or instead of) any data-driven encoding. Ferrum validates these against a fixed allowlist: passing an unrecognized name raises `TypeError` immediately rather than silently dropping it.
+Every `mark_*()` method accepts `**kwargs` — constant style overrides passed straight through to the renderer, layered on top of (or instead of) any data-driven encoding. Ferrum validates these against each mark's own honored-kwarg vocabulary: passing a name that mark does not honor raises `TypeError` immediately, naming the mark and its honored set, rather than silently accepting-and-dropping it (#243).
 
-This section is the canonical reference for that allowlist. Docstrings across the codebase that describe a mark's `**kwargs` point back here by name rather than re-listing every accepted key. Not every kwarg applies to every mark (`font_size` only makes sense for `mark_text`/`mark_label`, for example); passing one that doesn't apply to a given mark is harmless — the renderer ignores it for that mark type.
+This section is the canonical reference for that vocabulary. Docstrings across the codebase that describe a mark's `**kwargs` point back here by name rather than re-listing every accepted key. The "Core style" table below is honored by every mark; the "Mark-specific" table names, per row, exactly which mark(s) honor that kwarg — passing it to any other mark raises `TypeError` rather than being silently ignored.
 
 ### Core style
 
@@ -601,12 +601,13 @@ This section is the canonical reference for that allowlist. Docstrings across th
 | `baseline` | Vertical text alignment: `"top"`, `"middle"`, `"bottom"`. |
 | `dx`, `dy` | Fixed pixel offset from the anchor point (`mark_text`, `mark_label`). |
 | `angle` | Rotation in degrees. |
+| `blend` | Alpha-compositing blend mode for layered marks: `"alpha"` (default), `"additive"`. |
 
 ### Mark-specific (validated per-mark)
 
 | Kwarg | Meaning |
 |---|---|
-| `interpolate` | Curve interpolation for `mark_line`/`mark_area`/`mark_ribbon`: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. |
+| `interpolate` | Curve interpolation for `mark_line`/`mark_area`: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. (`mark_ribbon` takes its own named `interpolate=` parameter rather than this `**kwargs` vocabulary.) |
 | `stroke_cap` | Line cap style for `mark_line`: `"butt"`, `"round"`, `"square"`. |
 | `stroke_join` | Line join style for `mark_line`/`mark_area`: `"miter"`, `"round"`, `"bevel"`. |
 | `orient` | `mark_bar`/`mark_tick`: `orient="horizontal"` flips the mark to a horizontal orientation. |
@@ -615,30 +616,13 @@ This section is the canonical reference for that allowlist. Docstrings across th
 | `limit` | `mark_text`: maximum rendered width in pixels; clips overflow. |
 | `band_size` | `mark_tick`/`mark_rect`: extent of the tick/band along its cross axis. On an ordinal `mark_tick` this is still a fraction of the category band width (default `0.6`, unchanged); on a rug `mark_tick` (a single quantitative axis, no categorical channel) it is now a fraction of the panel's cross-extent instead of being silently ignored — unset keeps the old fixed tick length. |
 | `line` | `mark_area`: whether to draw the top boundary as a line. Default `False`. |
-| `borders` | `mark_area`/`mark_errorband`: whether to draw border lines at the band edges. |
+| `borders` | `mark_area`: whether to draw border lines at the band edges. (`mark_errorband` takes its own named `borders=` parameter rather than this `**kwargs` vocabulary.) |
 | `arrow` | `mark_segment`: draw a filled triangle arrowhead at each segment's `(x2, y2)` end. Default `False`. |
 | `arrow_size` | `mark_segment`: arrowhead size in pixels when `arrow=True`. Default `8.0`. |
-
-### Statistical mark kwargs (forwarded to the transform)
-
-| Kwarg | Meaning |
-|---|---|
-| `method` | Smoothing method (`mark_smooth`: `"lm"`/`"linear"`, `"loess"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`) or extent method (`mark_errorbar`: `"ci"`, `"sd"`, `"sem"`, `"iqr"`). |
-| `ci` | Confidence level for the CI band, e.g. `0.95` (`mark_smooth`). |
-| `bandwidth` | KDE or LOESS bandwidth (`mark_density`, `mark_smooth`). |
-| `degree` | Polynomial degree for linear/quadratic/cubic smoothing (`mark_smooth`). |
-| `n` | Number of evaluation points along the x range (`mark_smooth`). |
-| `kernel` | KDE kernel shape (`mark_density`): `"gaussian"`, `"tophat"`, `"epanechnikov"`, etc. |
-| `extent` | KDE evaluation range `[min, max]` (`mark_density`). |
-| `cumulative` | Render a cumulative density/histogram. Default `False`. |
-| `bin_count` | Target number of histogram bins (`mark_histogram`). |
-| `bin_width` | Exact histogram bin width in data units; overrides `bin_count`. |
-| `density` | Normalise histogram counts to a probability density (`mark_histogram`). Default `False`. |
-| `right` | Whether histogram bins are closed on the right (`mark_histogram`). |
-| `multiple` | How to combine grouped density/histogram layers when `color` is encoded: `"layer"` (default, overlaid), `"stack"` (cumulative area stack), or `"fill"` (normalized 100% area stack). `"dodge"` is accepted but not yet implemented. |
-| `blend` | Alpha-compositing blend mode for layered marks: `"alpha"` (default), `"additive"`. |
 | `leader_line` | `mark_label`: draw a thin connecting line from the data point to the placed label. Default `False`. |
 | `zero` | `mark_bar`: set `zero=False` to suppress the y-scale zero-anchor. Default `True`. |
+
+Statistical marks' own tunables (`mark_smooth(method=, ci=, bandwidth=, degree=, k=, n=, ...)`, `mark_density(bandwidth=, kernel=, extent=, cumulative=, multiple=, ...)`, `mark_histogram(bin_count=, bin_width=, density=, cumulative=, multiple=, ...)`, `mark_errorbar(method=, ...)`) are named parameters of those specific `mark_*()` methods, not entries in this `**kwargs` vocabulary — see each method's own docstring on [`Chart`][ferrum.Chart] for its full parameter list. Every composite, statistical, and diagnostic mark (`mark_boxplot`, `mark_density`, `mark_roc`, …) still accepts the two tables above through its own `**kwargs`, on top of its named parameters.
 
 ## Friendly kwarg aliases
 

@@ -1,0 +1,355 @@
+"""Per-mark honored-kwarg vocabularies (#243) and the mark_raster eager
+validation + Float64-claim probe (#136).
+
+Before this batch, ``MarkBase``/``validate_user_mark_kwargs`` validated
+every mark's ``**kwargs`` against one flat, shared allowlist
+(``_VALID_MARK_KWARGS``): any name accepted for ANY mark was silently
+accepted for EVERY mark, whether or not that mark actually honored it (e.g.
+``mark_bar(arrow=True)`` was accepted and then silently dropped -- ``arrow``
+only means anything on ``mark_segment``). This settles #154 (``band_size``
+on ``mark_bar``) the same way.
+
+``MARK_HONORED_KWARGS`` (``ferrum.marks.base``) replaces the flat allowlist
+with a per-mark vocabulary for the 13 primitive marks, mirrored from
+``MarkKwargsSpec``'s own per-field section-header comments in
+``crates/ferrum-core/src/spec/mark_style.rs``; ``mark_honors()`` is the one
+shared predicate all three consumers (``MarkBase.__init__``,
+``validate_user_mark_kwargs``, and -- at the union level --
+``_override_apply``'s ``mark_`` prefix registry) now consult.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import polars as pl
+import pytest
+
+import ferrum as fm
+from ferrum.marks.base import (
+    MARK_HONORED_KWARGS,
+    _PRIMITIVE_MARK_EXTRAS,
+    _UNIVERSAL_MARK_KWARGS,
+    mark_honors,
+)
+from ferrum.marks._mark_kwargs import validate_user_mark_kwargs
+
+_MARK_STYLE_RS = (
+    Path(__file__).resolve().parent.parent.parent
+    / "crates"
+    / "ferrum-core"
+    / "src"
+    / "spec"
+    / "mark_style.rs"
+)
+
+
+# ---------------------------------------------------------------------------
+# RED: mark_bar(arrow=True) -- accepted-and-silently-dropped before, typed
+# refusal after.
+# ---------------------------------------------------------------------------
+
+
+class TestBarArrowRefusal:
+    def test_mark_bar_arrow_raises_naming_mark_and_honored_set(self):
+        df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
+        with pytest.raises(TypeError) as exc_info:
+            fm.Chart(df).mark_bar(arrow=True).encode(x="cat", y="val")
+        message = str(exc_info.value)
+        assert "mark_bar" in message
+        assert "arrow" in message
+        # The honored set is named in the message (decision: "naming the
+        # mark and its honored set").
+        assert "zero" in message or "orient" in message
+
+    def test_mark_segment_arrow_still_works(self):
+        """Positive control: arrow genuinely is honored by mark_segment."""
+        df = pl.DataFrame({"x1": [0.0], "y1": [0.0], "x2": [1.0], "y2": [1.0]})
+        chart = (
+            fm.Chart(df)
+            .mark_segment(arrow=True, arrow_size=8)
+            .encode(x="x1", y="y1", x2="x2", y2="y2")
+        )
+        assert chart._mark_kwargs.get("arrow") is True
+
+
+# ---------------------------------------------------------------------------
+# #154 settlement: band_size on mark_bar refuses; mark_tick/mark_rect still honor it.
+# ---------------------------------------------------------------------------
+
+
+class TestBandSizeSettlesFinding154:
+    def test_mark_bar_band_size_raises(self):
+        df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
+        with pytest.raises(TypeError, match="band_size"):
+            fm.Chart(df).mark_bar(band_size=0.9).encode(x="cat", y="val")
+
+    def test_mark_tick_band_size_still_works(self):
+        df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
+        chart = fm.Chart(df).mark_tick(band_size=0.9).encode(x="cat", y="val")
+        assert chart._mark_kwargs.get("band_size") == 0.9
+
+    def test_mark_rect_band_size_still_works(self):
+        df = pl.DataFrame(
+            {"x1": [0], "x2": [1], "y1": [0], "y2": [1]},
+        )
+        chart = fm.Chart(df).mark_rect(band_size=0.5).encode(x="x1", x2="x2", y="y1", y2="y2")
+        assert chart._mark_kwargs.get("band_size") == 0.5
+
+
+# ---------------------------------------------------------------------------
+# mark_honors()/MARK_HONORED_KWARGS direct-unit coverage.
+# ---------------------------------------------------------------------------
+
+
+class TestMarkHonors:
+    def test_universal_kwargs_honored_by_every_primitive(self):
+        for mark in MARK_HONORED_KWARGS:
+            for kwarg in _UNIVERSAL_MARK_KWARGS:
+                assert mark_honors(mark, kwarg), f"{mark} should honor universal {kwarg!r}"
+
+    def test_point_honors_shape_and_filled_only_extra(self):
+        assert mark_honors("point", "shape")
+        assert mark_honors("point", "filled")
+        assert not mark_honors("point", "band_size")
+        assert not mark_honors("point", "arrow")
+
+    def test_unrecognized_mark_falls_back_to_universal(self):
+        # Composite/diagnostic mark names have no explicit entry; they fall
+        # back to the universal set.
+        assert "boxplot" not in MARK_HONORED_KWARGS
+        assert mark_honors("boxplot", "opacity")
+        assert not mark_honors("boxplot", "shape")
+
+    def test_forwarded_to_transform_kwargs_are_not_honored_by_any_mark(self):
+        # method/ci/bandwidth/... were never real MarkKwargsSpec fields --
+        # they are named parameters of specific mark_*() methods
+        # (mark_smooth, mark_density, mark_histogram), always intercepted by
+        # signature-based partitioning before reaching MarkBase. They must
+        # not appear in any mark's honored set nor the universal fallback.
+        for stale in (
+            "method",
+            "ci",
+            "bandwidth",
+            "degree",
+            "n",
+            "kernel",
+            "extent",
+            "cumulative",
+            "bin_count",
+            "bin_width",
+            "density",
+            "right",
+            "multiple",
+        ):
+            assert stale not in _UNIVERSAL_MARK_KWARGS
+            for mark in MARK_HONORED_KWARGS:
+                assert not mark_honors(mark, stale), f"{mark} must not honor {stale!r}"
+
+
+class TestValidateUserMarkKwargs:
+    def test_honored_kwarg_passes(self):
+        assert validate_user_mark_kwargs("boxplot", {"opacity": 0.5}) == {"opacity": 0.5}
+
+    def test_not_honored_kwarg_raises_naming_mark_and_honored_set(self):
+        with pytest.raises(TypeError) as exc_info:
+            validate_user_mark_kwargs("boxplot", {"shape": "diamond"})
+        message = str(exc_info.value)
+        assert "mark_boxplot" in message
+        assert "shape" in message
+        assert "opacity" in message  # a member of the honored set is named
+
+    def test_empty_dict_short_circuits(self):
+        assert validate_user_mark_kwargs("anything", {}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Chart.override(mark_<leaf>=...): the shared-vocabulary consumer.
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideMarkPrefix:
+    def test_stale_transform_forwarded_leaf_now_refuses(self):
+        """.override(mark_bandwidth=...) used to resolve then get silently
+        dropped by the Rust wire (MarkKwargsSpec has no such field); it now
+        refuses at the Python override boundary instead."""
+        from ferrum.exceptions import FerrumOverrideError
+
+        df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
+        chart = fm.Chart(df).mark_bar().encode(x="cat", y="val").override(mark_bandwidth=0.5)
+        with pytest.raises(FerrumOverrideError):
+            chart.to_svg()
+
+    def test_documented_gap_override_is_not_yet_per_mark(self):
+        """Tracked gap (see _override_apply.py's module docstring): the
+        override registry validates against the UNION of every mark's
+        honored kwargs, not the chart's own mark, since resolve() has no
+        per-chart context. A bar chart can still .override(mark_shape=...)
+        even though mark_bar() itself would refuse shape=. This test pins
+        the gap so a future tightening is a deliberate, visible change."""
+        df = pl.DataFrame({"cat": ["a", "b"], "val": [1, 2]})
+        chart = fm.Chart(df).mark_bar().encode(x="cat", y="val").override(mark_shape="diamond")
+        # Resolves (does not raise FerrumOverrideError); Rust silently
+        # ignores the field for a bar mark, matching this gap's tracked
+        # description.
+        chart.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# Drift pin: MARK_HONORED_KWARGS's per-primitive extras must match
+# MarkKwargsSpec's own section-header comments in mark_style.rs.
+# ---------------------------------------------------------------------------
+
+_HEADER_RE = re.compile(r"([a-z_]+(?:\s*/\s*[a-z_]+)*)\s*\(([^()]*)\)")
+_PUB_FIELD_RE = re.compile(r"^\s*pub\s+([a-z_0-9]+):\s*Option<")
+
+
+def _parse_rust_field_mark_map() -> dict[str, frozenset[str]]:
+    """Parse ``mark_style.rs``'s struct body for section-header comments of
+    the form ``// ── <label>: <field>[ / <field>] (<mark>[, <mark>...]) ──``
+    and pair each named field with the primitive mark names mentioned in its
+    header (filtering out non-mark descriptive words like "constant").
+
+    Only the struct body (before ``#[cfg(test)]``) is scanned -- the test
+    module below it repeats some header text as section dividers with no
+    adjoining ``pub`` field, which would otherwise pollute the map with
+    stale duplicate entries (harmlessly, since they're identical, but the
+    struct body is the single source of truth).
+    """
+    text = _MARK_STYLE_RS.read_text()
+    struct_text = text.split("#[cfg(test)]")[0]
+    primitive_marks = frozenset(_PRIMITIVE_MARK_EXTRAS)
+
+    pending_fields: set[str] = set()
+    pending_marks: frozenset[str] = frozenset()
+    result: dict[str, set[str]] = {}
+    for line in struct_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            header_match = _HEADER_RE.search(stripped)
+            if header_match:
+                field_names = {n.strip() for n in header_match.group(1).split("/")}
+                marks = {m.strip() for m in re.split(r"[,/]", header_match.group(2))}
+                marks &= primitive_marks
+                if marks:
+                    pending_fields = field_names
+                    pending_marks = frozenset(marks)
+            continue
+        pub_match = _PUB_FIELD_RE.match(line)
+        if pub_match and pub_match.group(1) in pending_fields:
+            result.setdefault(pub_match.group(1), set()).update(pending_marks)
+    return {k: frozenset(v) for k, v in result.items()}
+
+
+class TestDriftPinAgainstRustSectionHeaders:
+    def test_parser_finds_known_pairs(self):
+        """Sanity: guard against the regex silently matching nothing, which
+        would make the drift-pin assertions below vacuously true."""
+        rust_map = _parse_rust_field_mark_map()
+        assert rust_map, "drift-pin parser found no section headers in mark_style.rs"
+        assert rust_map["interpolate"] >= {"line", "area"}
+        assert rust_map["band_size"] == {"tick", "rect"}
+        assert rust_map["arrow"] == {"segment"}
+        assert rust_map["arrow_size"] == {"segment"}
+        assert rust_map["borders"] == {"area"}
+        assert rust_map["leader_line"] == {"label"}
+        assert rust_map["zero"] == {"bar"}
+
+    def test_every_rust_documented_pairing_is_granted_in_python(self):
+        rust_map = _parse_rust_field_mark_map()
+        for field, marks in rust_map.items():
+            for mark in marks:
+                assert field in _PRIMITIVE_MARK_EXTRAS[mark], (
+                    f"mark_style.rs documents {field!r} as owned by mark_{mark}, "
+                    f"but MARK_HONORED_KWARGS[{mark!r}] does not include "
+                    f"{field!r}. Update ferrum.marks.base._PRIMITIVE_MARK_EXTRAS."
+                )
+
+    def test_python_does_not_over_grant_rust_documented_fields(self):
+        rust_map = _parse_rust_field_mark_map()
+        for mark, extras in _PRIMITIVE_MARK_EXTRAS.items():
+            for field in extras:
+                if field not in rust_map:
+                    # Python-only fields (e.g. "orient") have no Rust
+                    # MarkKwargsSpec entry at all; nothing to cross-check.
+                    continue
+                assert mark in rust_map[field], (
+                    f"MARK_HONORED_KWARGS[{mark!r}] grants {field!r}, but "
+                    f"mark_style.rs's section header for {field!r} only names "
+                    f"{sorted(rust_map[field])} -- drift between Python and Rust."
+                )
+
+
+# ---------------------------------------------------------------------------
+# #136: mark_raster() eager aggregate/field validation.
+# ---------------------------------------------------------------------------
+
+
+class TestMarkRasterEagerValidation:
+    def test_bad_aggregate_raises_at_call_time(self):
+        """RED (pre-fix): an invalid aggregate was accepted at mark_raster()
+        call time and only failed once Rust's Raster transform ran at
+        render time. Now it raises immediately, before .encode() is even
+        called."""
+        with pytest.raises(ValueError, match="aggregate"):
+            fm.Chart(None).mark_raster(aggregate="median")
+
+    def test_missing_field_for_mean_raises_at_call_time(self):
+        """RED (pre-fix): aggregate='mean' with no field= was accepted at
+        call time; desugar_raster only raised once .encode(x=,y=) resolved
+        the pending mark. Now it raises immediately."""
+        with pytest.raises(ValueError, match="field"):
+            fm.Chart(None).mark_raster(aggregate="mean")
+
+    def test_missing_field_for_sum_raises_at_call_time(self):
+        with pytest.raises(ValueError, match="field"):
+            fm.Chart(None).mark_raster(aggregate="sum")
+
+    def test_valid_combination_does_not_raise_at_call_time(self):
+        # No encode() call yet -- this must not raise, since the combination
+        # itself is valid; only x/y-encoding resolution is deferred.
+        fm.Chart(None).mark_raster(aggregate="mean", field="v")
+
+    def test_count_aggregate_needs_no_field(self):
+        fm.Chart(None).mark_raster(aggregate="count")
+
+    def test_reuses_render_config_consts(self):
+        """No fourth hand-copy of the Rust Raster transform's accepted set
+        (decision D §136): mark_raster's eager check and RenderConfig's
+        auto-raster check both import the same consts."""
+        from ferrum.render_config import _RASTER_AGGREGATES, _RASTER_AGGREGATES_NEEDING_FIELD
+
+        assert _RASTER_AGGREGATES == frozenset({"count", "density", "mean", "sum", "any"})
+        assert _RASTER_AGGREGATES_NEEDING_FIELD == frozenset({"mean", "sum"})
+
+
+class TestMarkRasterFloat64Probe:
+    """#136's probe: is the render_config.py docstring's Float64-only claim
+    still true after batch D's numeric coercion? It is not -- integer
+    columns are coerced automatically. Pinned here as a real render (not a
+    hand-built fixture) so the probe's finding stays true under the actual
+    Raster transform, not a mirror of it."""
+
+    def test_integer_field_column_renders_without_error(self):
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 1.5],
+                "y": [1.0, 2.0, 3.0, 1.2],
+                "v": [1, 2, 3, 4],  # Int64, not Float64
+            }
+        )
+        svg = fm.Chart(df).mark_raster(aggregate="mean", field="v").encode(x="x", y="y").to_svg()
+        assert "<svg" in svg
+
+    def test_non_numeric_field_column_still_raises_at_render(self):
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 1.5],
+                "y": [1.0, 2.0, 3.0, 1.2],
+                "v": ["a", "b", "c", "d"],
+            }
+        )
+        chart = fm.Chart(df).mark_raster(aggregate="mean", field="v").encode(x="x", y="y")
+        with pytest.raises(ValueError, match="numeric"):
+            chart.to_svg()

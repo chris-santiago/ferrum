@@ -66,4 +66,17 @@ def test_mark_style_kwargs_doc_parses_a_nonempty_set():
     # that the regex stops matching anything, the equality check above would
     # trivially pass on an empty set vs. an empty set only if the allowlist
     # were also empty (it never is). This makes that failure mode explicit.
-    assert len(_documented_mark_style_kwargs()) > 30
+    #
+    # Threshold dropped from 30 to 20 (#243, wave-1 T16): the guide's old
+    # "Statistical mark kwargs (forwarded to the transform)" table
+    # documented 13 names (method, ci, bandwidth, degree, n, kernel, extent,
+    # cumulative, bin_count, bin_width, density, right, multiple) that were
+    # never actually part of the `**kwargs` allowlist this section
+    # describes -- they are named parameters of specific `mark_*()` methods
+    # (`mark_smooth`, `mark_density`, `mark_histogram`, `mark_errorbar`),
+    # always intercepted by signature-based partitioning before reaching
+    # `MarkBase`/`validate_user_mark_kwargs`. Removing that table (and thus
+    # ``_VALID_MARK_KWARGS``'s 13 dead entries) drops the true allowlist
+    # from 42 to 29; the threshold is lowered to stay a "did the parser
+    # break" sanity check rather than a stale count pin.
+    assert len(_documented_mark_style_kwargs()) > 20

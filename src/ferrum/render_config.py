@@ -73,10 +73,16 @@ class RenderConfig:
         ``"any"`` -- and genuinely ignored for them: it is dropped before
         the substitution, so it is never resolved as a column name and an
         unrelated or nonexistent value here has no effect and never raises.
-        The column must be ``Float64``-typed; an integer or other
-        non-``Float64`` column raises ``stat_raster: column '...' must be
-        Float64`` at render time (a pre-existing constraint of the
-        underlying ``Raster`` transform, not new to this field).
+        The column must be numeric; integer columns are coerced to
+        ``Float64`` automatically (batch-D T2 numeric coercion), so an
+        ``Int64``/``Int32``/etc. column works unchanged. A genuinely
+        non-numeric column (e.g. a string column) raises ``stat_raster:
+        column '...' must be numeric, got <Type>`` at render time (a
+        pre-existing constraint of the underlying ``Raster`` transform, not
+        new to this field) -- this is narrower than the stale
+        "must be Float64" wording this docstring carried before the #136
+        probe (2026-09-12): the Float64-only claim predated the coercion
+        and no longer holds.
     """
 
     raster_threshold: Optional[int] = 500_000

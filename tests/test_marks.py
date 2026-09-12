@@ -17,9 +17,25 @@ def test_markbase_rejects_unknown_kwargs():
 
 
 def test_to_mark_kwargs_dict_filters_to_style_only():
-    m = MarkBase("smooth", size=100, method="loess", bandwidth=0.5)
+    """``orient=`` is a real, mark-specific, Python-only kwarg (consumed via
+    ``orient_coord_flip()``) but is never emitted into the wire-level style
+    dict -- ``to_mark_kwargs_dict()`` only returns fields the renderer
+    actually reads."""
+    m = MarkBase("bar", size=100, orient="horizontal")
     d = m.to_mark_kwargs_dict()
-    assert d == {"size": 100}  # method and bandwidth go to transforms, not style
+    assert d == {"size": 100}  # orient is consumed separately, not a wire field
+
+
+def test_markbase_rejects_transform_only_kwargs_directly():
+    """``method``/``bandwidth``/etc. were never real ``MarkKwargsSpec``
+    fields -- they are named parameters of specific ``mark_*()`` methods
+    (``mark_smooth``, ``mark_density``), always intercepted by
+    ``_split_style_kwargs`` before reaching ``MarkBase`` in the real Chart
+    API. Constructing ``MarkBase`` directly with them now refuses (#243)
+    instead of silently accepting and then dropping them from
+    ``to_mark_kwargs_dict()``'s output."""
+    with pytest.raises(TypeError, match="method"):
+        MarkBase("smooth", size=100, method="loess", bandwidth=0.5)
 
 
 def test_desugar_density_returns_area_with_kde_transform():

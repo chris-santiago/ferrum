@@ -40,7 +40,17 @@ encoding-scale
     ``{channel: {"scale": {wire_leaf: value}}}`` — both spellings are accepted,
     the wire one is emitted.
 mark
-    ``mark_<leaf>``; valid leaves are ``ferrum.marks.base._VALID_MARK_KWARGS``.
+    ``mark_<leaf>``; valid leaves are ``ferrum.marks.base._VALID_MARK_KWARGS``
+    (the union honored by at least one mark — see #243's per-mark
+    ``MARK_HONORED_KWARGS``/``mark_honors``). This registry is built once at
+    import time with no per-chart mark context, so — unlike ``MarkBase`` and
+    ``validate_user_mark_kwargs`` — it cannot refuse a leaf that exists for
+    some mark but not the chart's own; ``.override(mark_shape=...)`` resolves
+    here even on a chart whose mark is ``bar``. Tightening this to the
+    chart's actual per-mark honored set is a tracked gap (#243 lands the
+    per-mark mechanism on the two consumers that have mark context at
+    validation time; the override registry does not, since ``resolve()`` is
+    a static, chart-independent lookup).
     Folds into ``mark_style[leaf]``.
 coord
     ``coord_<leaf>``; valid leaves are the coord-dataclass field names.  Folds

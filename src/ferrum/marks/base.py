@@ -86,7 +86,12 @@ _VALID_POINT_SHAPES: frozenset[str] = frozenset(
     ]
 )
 
-_VALID_MARK_KWARGS = frozenset(
+# Core style fields honored by every mark (Phase 8a: "covers all kwargs
+# accepted by the 8 primitive mark_*() Python methods" —
+# crates/ferrum-core/src/spec/mark_style.rs's own module doc). ``blend``
+# (layer blend mode) joins this baseline: it is mark-agnostic, not owned by
+# any one mark family.
+_UNIVERSAL_MARK_KWARGS: frozenset[str] = frozenset(
     [
         "size",
         "stroke",
@@ -102,38 +107,121 @@ _VALID_MARK_KWARGS = frozenset(
         "dx",
         "dy",
         "angle",
-        # Mark-specific (validated per-mark):
-        "interpolate",
-        "stroke_cap",
-        "stroke_join",  # line/area
-        "orient",  # bar/tick
-        "filled",
-        "shape",  # point
-        "limit",  # text
-        "band_size",  # tick
-        "line",
-        "borders",  # area / errorband
-        # Statistical mark kwargs (forwarded to transform):
-        "method",
-        "ci",
-        "bandwidth",
-        "degree",
-        "n",  # smooth
-        "kernel",
-        "extent",
-        "cumulative",  # density
-        "bin_count",
-        "bin_width",
-        "density",
-        "right",  # histogram
-        "multiple",  # density/histogram
-        "blend",  # layer blend mode ("normal", "additive")
-        "leader_line",  # label: draw thin leader line from data point to label
-        "zero",  # mark_bar: suppress the y-scale zero-anchor (zero=False)
-        "arrow",  # segment: draw a filled triangle arrowhead at (x2, y2)
-        "arrow_size",  # segment: arrowhead size in pixels (default 8.0)
+        "blend",
     ]
 )
+
+# Per-primitive-mark additions, mirrored from MarkKwargsSpec's own
+# section-header comments in crates/ferrum-core/src/spec/mark_style.rs (each
+# field's doc comment names its owning mark(s)) plus ``orient``, which is
+# Python-only (consumed as a coord-flip flag, never forwarded to Rust — see
+# ``orient_coord_flip``) but still mark-specific (bar/tick).  Drift-pinned
+# against the Rust section headers by
+# ``tests/marks/test_mark_honored_kwargs.py``.
+_PRIMITIVE_MARK_EXTRAS: dict[str, frozenset[str]] = {
+    "point": frozenset({"filled", "shape"}),
+    "line": frozenset({"interpolate", "stroke_cap", "stroke_join"}),
+    "area": frozenset({"interpolate", "stroke_join", "line", "borders"}),
+    "bar": frozenset({"orient", "zero"}),
+    "rule": frozenset(),
+    "text": frozenset({"limit"}),
+    "tick": frozenset({"orient", "band_size"}),
+    "rect": frozenset({"band_size"}),
+    "segment": frozenset({"arrow", "arrow_size"}),
+    "arc": frozenset(),
+    "image": frozenset(),
+    "geoshape": frozenset(),
+    "label": frozenset({"leader_line"}),
+}
+
+#: Per-mark honored-kwarg vocabularies (#243), replacing the single flat
+#: allowlist that every mark used to share regardless of whether it actually
+#: honored a given field. Keyed by the 13 primitive mark names (the ones
+#: ``MarkBase``/``Chart._set_mark`` validate directly); every composite,
+#: statistical, and diagnostic mark name (``"boxplot"``, ``"density"``,
+#: ``"roc"``, …) reached through :func:`mark_honors` falls back to
+#: :data:`_UNIVERSAL_MARK_KWARGS` — as of this writing every one of those
+#: marks' own ``**kwargs`` surface only ever exercises the universal set
+#: (mark-specific behavior on composite marks is threaded through named
+#: parameters instead, e.g. ``mark_ribbon(interpolate=...)``, never through
+#: ``**mark_kwargs``), so the fallback is exact, not an approximation. A
+#: future composite mark that wants to honor a mark-specific field must add
+#: an explicit entry here rather than relying on the fallback.
+MARK_HONORED_KWARGS: dict[str, frozenset[str]] = {
+    mark: _UNIVERSAL_MARK_KWARGS | extras for mark, extras in _PRIMITIVE_MARK_EXTRAS.items()
+}
+
+
+def mark_honors(mark_name: str, kwarg: str) -> bool:
+    """Return ``True`` if ``mark_name`` honors the (already alias-resolved) *kwarg*.
+
+    Looks up :data:`MARK_HONORED_KWARGS`; a *mark_name* with no explicit
+    entry (every non-primitive mark) falls back to
+    :data:`_UNIVERSAL_MARK_KWARGS` — see :data:`MARK_HONORED_KWARGS`'s
+    docstring for why that fallback is exact today.
+
+    Examples
+    --------
+    >>> mark_honors("bar", "zero")
+    True
+    >>> mark_honors("bar", "arrow")
+    False
+    >>> mark_honors("boxplot", "opacity")
+    True
+    """
+    return kwarg in MARK_HONORED_KWARGS.get(mark_name, _UNIVERSAL_MARK_KWARGS)
+
+
+def _honored_set_for(mark_name: str) -> frozenset[str]:
+    """The honored set :func:`mark_honors` actually consulted for *mark_name*."""
+    return MARK_HONORED_KWARGS.get(mark_name, _UNIVERSAL_MARK_KWARGS)
+
+
+def _mark_kwarg_error(mark_name: str, key: str) -> str:
+    """Build the refusal message for one kwarg *key* not honored by *mark_name*.
+
+    Two phrasings, both naming the honored set (decision: "naming the mark
+    and its honored set"):
+
+    - *key* names no style field on any mark at all (a genuine typo, e.g.
+      ``mark_point(squiggly=True)``): "unknown keyword argument" -- the
+      pre-#243 wording, kept so existing typo-detection tests/messages are
+      unaffected.
+    - *key* is a real field, just not one *mark_name* honors (e.g.
+      ``mark_bar(arrow=True)`` -- ``arrow`` is real, but only
+      ``mark_segment`` honors it): "is not honored by", the new #243
+      per-mark distinction.
+    """
+    honored = sorted(_honored_set_for(mark_name))
+    if key not in _VALID_MARK_KWARGS:
+        return f"mark_{mark_name}: unknown keyword argument {key!r}. Honored: {honored}"
+    return f"mark_{mark_name}: keyword argument {key!r} is not honored by mark_{mark_name}. Honored: {honored}"
+
+
+def _mark_kwargs_error_plural(mark_name: str, keys: list[str]) -> str:
+    """Plural counterpart of :func:`_mark_kwarg_error` for a batch of *keys*
+    (used by ``validate_user_mark_kwargs``, which reports every offending
+    key from one call rather than failing on the first)."""
+    honored = sorted(_honored_set_for(mark_name))
+    if all(key not in _VALID_MARK_KWARGS for key in keys):
+        return f"mark_{mark_name}: unknown keyword argument(s) {keys!r}. Honored: {honored}"
+    return (
+        f"mark_{mark_name}: keyword argument(s) {keys!r} not honored by "
+        f"mark_{mark_name}. Honored: {honored}"
+    )
+
+
+#: The full known mark-kwarg vocabulary — the union honored by at least one
+#: primitive mark. Used by the ``Chart.override(mark_<leaf>=...)`` registry
+#: (``_override_apply.py``) to decide whether a ``mark_`` override *path*
+#: exists at all; that registry is built once at import time with no
+#: per-chart mark context, so it validates against this union rather than a
+#: specific mark's narrower honored set (see ``_override_apply.py``'s module
+#: docstring for the tracked gap).  Kept under the historical name so the two
+#: existing drift guards (``tests/test_override.py``,
+#: ``tests/test_mark_style_kwargs_doc.py``) that import it directly keep
+#: working unchanged.
+_VALID_MARK_KWARGS: frozenset[str] = frozenset().union(*MARK_HONORED_KWARGS.values())
 
 
 def _validate_literal_color(mark_name: str, key: str, value: str) -> None:
@@ -173,8 +261,11 @@ class MarkBase:
 
     Used by ``mark_*()`` builder functions to validate kwargs before
     serializing them into ``ChartSpec.mark_style``. Raises ``TypeError``
-    on the first unrecognized key so typos surface immediately rather than
-    silently disappearing into the renderer.
+    on the first keyword argument *mark_name* does not honor — whether
+    because it names no known style field at all, or because it names a
+    real field owned by a different mark family — so typos and
+    doesn't-apply-here kwargs both surface immediately rather than
+    silently disappearing into the renderer (#243).
 
     Parameters
     ----------
@@ -183,12 +274,13 @@ class MarkBase:
         messages only.
     **kwargs : Any
         Style overrides forwarded to the renderer (e.g. ``size=100``,
-        ``fill="red"``). Every key must appear in ``_VALID_MARK_KWARGS``.
+        ``fill="red"``). Every key must be honored by *mark_name* per
+        :func:`mark_honors` (aliases resolve first).
 
     Raises
     ------
     TypeError
-        If any keyword argument is not in the renderer's allowlist.
+        If any keyword argument is not honored by *mark_name*.
 
     Examples
     --------
@@ -234,11 +326,8 @@ class MarkBase:
                         ) from exc
             resolved[canonical] = v
         for k in resolved:
-            if k not in _VALID_MARK_KWARGS:
-                raise TypeError(
-                    f"mark_{mark_name}: unknown keyword argument {k!r}. "
-                    f"Valid: {sorted(_VALID_MARK_KWARGS)}"
-                )
+            if not mark_honors(mark_name, k):
+                raise TypeError(_mark_kwarg_error(mark_name, k))
         # Validate shape= value for point marks. The constant shape is a fixed
         # string that must name one of the glyphs supported by the Rust renderer;
         # an unknown name would silently default to circle at render time.

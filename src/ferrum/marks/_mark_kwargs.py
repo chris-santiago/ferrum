@@ -11,9 +11,10 @@ guessing.
 Two helpers enforce the Phase 9+ no-defer principle on this surface:
 
 - ``validate_user_mark_kwargs(mark_name, kwargs)`` checks every key
-  against the renderer-level allowlist (``MarkBase._VALID_MARK_KWARGS``)
-  and raises ``TypeError`` on unknown keys, mirroring ``MarkBase`` /
-  ``_set_mark`` validation for primitive marks.
+  against *mark_name*'s own honored-kwarg vocabulary
+  (``ferrum.marks.base.mark_honors`` / ``MARK_HONORED_KWARGS``, #243) and
+  raises ``TypeError`` on any key *mark_name* does not honor, mirroring
+  ``MarkBase`` / ``_set_mark`` validation for primitive marks.
 - ``apply_user_mark_kwargs(layers, kwargs)`` merges validated kwargs
   into every layer's ``mark_kwargs`` dict for layered-mode desugars
   (``MarkDesugarResult.layers`` set), with **user-wins** semantics on
@@ -38,7 +39,7 @@ from __future__ import annotations
 
 
 def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
-    """Validate user-supplied ``mark_kwargs``; raise ``TypeError`` on unknown keys.
+    """Validate user-supplied ``mark_kwargs``; raise ``TypeError`` on keys *mark_name* doesn't honor.
 
     Returns the dict unchanged so callers can write
     ``user_kw = validate_user_mark_kwargs("foo", mark_kwargs)`` in one
@@ -48,20 +49,25 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
     Parameters
     ----------
     mark_name : str
-        Name of the composite mark (e.g. ``"boxplot"``). Used in the
-        error message only.
+        Name of the composite mark (e.g. ``"boxplot"``). Used both to look
+        up the honored set (``ferrum.marks.base.mark_honors``) and in the
+        error message.
     kwargs : dict
-        Caller-supplied keyword arguments to validate.
+        Caller-supplied keyword arguments to validate. Keys are checked as
+        given -- this helper does not resolve aliases (``color``→``fill``,
+        ``alpha``→``opacity``); callers that need alias resolution go
+        through ``MarkBase`` instead (see the module docstring).
 
     Returns
     -------
     dict
-        A copy of ``kwargs`` (unchanged) if all keys are valid.
+        A copy of ``kwargs`` (unchanged) if every key is honored.
 
     Raises
     ------
     TypeError
-        If any key is not in ``ferrum.marks.base._VALID_MARK_KWARGS``.
+        If any key is not honored by *mark_name* (see
+        ``ferrum.marks.base.MARK_HONORED_KWARGS``).
 
     Examples
     --------
@@ -74,14 +80,12 @@ def validate_user_mark_kwargs(mark_name: str, kwargs: dict) -> dict:
     """
     if not kwargs:
         return {}
-    from ferrum.marks.base import _VALID_MARK_KWARGS  # type: ignore[attr-defined]
+    from ferrum.marks.base import mark_honors  # type: ignore[attr-defined]
+    from ferrum.marks.base import _mark_kwargs_error_plural  # type: ignore[attr-defined]
 
-    unknown = [k for k in kwargs if k not in _VALID_MARK_KWARGS]
+    unknown = [k for k in kwargs if not mark_honors(mark_name, k)]
     if unknown:
-        raise TypeError(
-            f"mark_{mark_name}: unknown keyword argument(s) {unknown!r}. "
-            f"Valid: {sorted(_VALID_MARK_KWARGS)}"
-        )
+        raise TypeError(_mark_kwargs_error_plural(mark_name, unknown))
     return dict(kwargs)
 
 
@@ -127,6 +131,7 @@ def apply_user_mark_kwargs(layers: list, user_kwargs: dict) -> list:
 
 
 # Public re-exports — desugars should import from this module, not poke
-# at the underscore-prefixed names directly. The canonical list of kwargs
-# the renderer actually honors lives in ``ferrum.marks.base._VALID_MARK_KWARGS``.
+# at the underscore-prefixed names directly. The canonical per-mark honored
+# vocabularies live in ``ferrum.marks.base.MARK_HONORED_KWARGS`` /
+# ``mark_honors`` (#243).
 __all__ = ["validate_user_mark_kwargs", "apply_user_mark_kwargs"]
