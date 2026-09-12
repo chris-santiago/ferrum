@@ -747,6 +747,130 @@ def test_two_same_axis_breaks_fold_annotations_and_marks_to_the_same_position():
     )
 
 
+def test_two_same_axis_breaks_render_identically_to_one_merged_spec_and_hide_the_in_gap_mark():
+    """The resurrection repro (#230-4, #230-9): two same-axis `BreakAxis`
+    specs must merge into one break result and render byte-identically to a
+    single spec declaring the union of gaps — and a mark inside the FIRST
+    spec's gap must stay hidden, not resurface at the plot's top edge.
+
+    Pre-fix (measured): each `BreakAxis(axis="y", ...)` built its own
+    `BreakResult` against the ORIGINAL domain, and the second remap's
+    `data_at` clamped the first remap's `BREAK_HIDDEN` sentinel back into the
+    domain — landing the y=200 mark (inside the first gap, (150, 400)) at the
+    plot's top pixel, overplotting the y=1000 mark, instead of hiding it.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [200.0, 450.0, 1000.0]})
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+
+    two_specs = points + fm.BreakAxis(axis="y", gap=(150, 400)) + fm.BreakAxis(axis="y", gap=(500, 850))
+    one_spec = points + fm.BreakAxis(axis="y", gap=[(150, 400), (500, 850)])
+
+    two_svg = two_specs.to_svg()
+    one_svg = one_spec.to_svg()
+    assert two_svg == one_svg, (
+        "two same-axis BreakAxis specs must render byte-identically to one "
+        "spec declaring the union of their gaps"
+    )
+
+    cys = sorted(float(m.group(1)) for m in re.finditer(r'<circle cx="-?[\d.]+" cy="(-?[\d.]+)"', two_svg))
+    # The y=200 mark (inside the first gap) must be hidden off-canvas, not
+    # resurrected near the plot's top pixel (which the y=1000 mark occupies).
+    assert cys[0] < -1000, f"the in-gap mark must be hidden off-canvas; got cys={cys}"
+    assert not any(abs(cys[0] - cy) < 1e-6 for cy in cys[1:]), (
+        f"the hidden mark must not overplot a visible mark's position: {cys}"
+    )
+
+
+def test_two_same_axis_breaks_with_grid_bands_render_identically_to_one_merged_spec():
+    """T1 reviewer's condition (spec §4 #230-4): with two same-axis specs,
+    each clipped grid piece could claim structural rect ends on a second
+    pass. The same-axis merge makes that second pass unreachable — this pins
+    it end to end with a banded grid, whose outermost stripes carry the
+    structural (plot-rect) ends a per-spec double-pass could corrupt.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [50.0, 450.0, 950.0]})
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    banded = lambda chart: chart.configure_grid(band_colors=["#f0f0f0", "#e8e8e8"])  # noqa: E731
+
+    two_specs = banded(
+        points + fm.BreakAxis(axis="y", gap=(150, 400)) + fm.BreakAxis(axis="y", gap=(500, 850))
+    )
+    one_spec = banded(points + fm.BreakAxis(axis="y", gap=[(150, 400), (500, 850)]))
+
+    two_svg = two_specs.to_svg()
+    one_svg = one_spec.to_svg()
+    assert two_svg == one_svg, (
+        "two same-axis BreakAxis specs with a banded grid must render "
+        "byte-identically to one spec declaring the union of their gaps"
+    )
+    band_rects = re.findall(r'<rect x="[-\d.]+" y="(-?[\d.]+)" width="[\d.]+" height="([\d.]+)"', two_svg)
+    assert len(band_rects) >= 3, f"test sanity: the banded grid must draw stripes; got {two_svg[:800]}"
+
+
+def test_break_axis_merge_conflicting_style_warns_once_first_wins():
+    """A conflicting `break_style` between merged same-axis specs keeps the
+    FIRST declaration's style and warns exactly once naming the axis and
+    field (#230-4, spec §6).
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [50.0, 900.0]})
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    two_specs = (
+        points
+        + fm.BreakAxis(axis="y", gap=(150, 400), break_style="gap")
+        + fm.BreakAxis(axis="y", gap=(500, 850), break_style="slash")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        two_svg = two_specs.to_svg()
+    messages = [str(w.message) for w in caught]
+    matches = [m for m in messages if "disagree" in m and "break_style" in m]
+    assert len(matches) == 1, f"expected exactly one break_style conflict warning; got {messages}"
+
+    # First-wins: break_style="gap" draws no indicator at all, so the merged
+    # render must match a single spec declared with that style.
+    one_spec_gap = points + fm.BreakAxis(axis="y", gap=[(150, 400), (500, 850)], break_style="gap")
+    assert two_svg == one_spec_gap.to_svg(), "the FIRST spec's break_style must win"
+
+
+def test_break_axis_merge_conflicting_size_warns_once_first_wins():
+    """The `break_size` mirror of the style-conflict pin: first spec wins,
+    one warning.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [50.0, 900.0]})
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    two_specs = (
+        points
+        + fm.BreakAxis(axis="y", gap=(150, 400), break_size=12)
+        + fm.BreakAxis(axis="y", gap=(500, 850), break_size=40)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        two_svg = two_specs.to_svg()
+    messages = [str(w.message) for w in caught]
+    matches = [m for m in messages if "disagree" in m and "break_size" in m]
+    assert len(matches) == 1, f"expected exactly one break_size conflict warning; got {messages}"
+
+    one_spec = points + fm.BreakAxis(axis="y", gap=[(150, 400), (500, 850)], break_size=12)
+    assert two_svg == one_spec.to_svg(), "the FIRST spec's break_size must win"
+
+
+def test_break_axis_merge_without_conflicting_style_or_size_is_silent():
+    """Merging same-axis gaps is the documented semantics of a same-axis
+    break and never warns on its own — only a conflicting `break_style`/
+    `break_size` does (spec §6).
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [50.0, 900.0]})
+    points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    two_specs = points + fm.BreakAxis(axis="y", gap=(150, 400)) + fm.BreakAxis(axis="y", gap=(500, 850))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        two_specs.to_svg()
+    messages = [str(w.message) for w in caught]
+    assert not any("disagree" in m for m in messages), (
+        f"a non-conflicting same-axis merge must not warn; got {messages}"
+    )
+
+
 def test_x_axis_annotation_inside_a_gap_is_suppressed_with_a_named_warning():
     """The x-axis mirror of the y-axis suppression pin (finding #3): every
     pin so far was y-only, leaving the `find(axis == "x")` wiring unpinned.

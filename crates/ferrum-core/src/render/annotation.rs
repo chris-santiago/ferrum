@@ -354,11 +354,15 @@ impl<'a> ScaleContext<'a> {
     /// Fold `base` (a pixel already resolved against the UNBROKEN `x_scale`/
     /// `y_scale`) through every `axis`-matching break, in declaration order.
     ///
-    /// This is exactly `remap_mark_batch_through_break`'s sequential
-    /// composition (`for remap in &break_remaps { ... remap.coord(px) ... }`)
-    /// applied to one coordinate — reused here rather than re-derived, so two
-    /// same-axis breaks move a surviving annotation and a mark to the same
-    /// pixel instead of the annotation silently picking only the first one.
+    /// This is exactly `remap_mark_batch_through_break`'s per-coordinate
+    /// fold — reused here rather than re-derived, so an annotation and a
+    /// mark reach the same pixel through the same arithmetic. In practice
+    /// the fold runs 0 or 1 times per axis: `build_structural_nodes`'s
+    /// same-axis merge (#230-4) collapses every `BreakAxis` spec sharing an
+    /// axis into ONE `BreakResult` before `break_remaps` is built, so this
+    /// axis-filtered iterator never holds more than one remap per axis, and
+    /// sequential composition of multiple same-axis breaks is not a shape
+    /// this method (or its mark-side counterpart) has to get right anymore.
     /// A step that cannot place `base` (it round-trips to that break's own
     /// gap) hides the coordinate at `BREAK_HIDDEN` — the same fallback a
     /// mark's `Circle`/`Text` node gets from `BreakRemap::remap_node` —
@@ -2220,108 +2224,36 @@ mod tests {
         );
     }
 
-    /// Two x-axis breaks fold in sequence — the same composition
-    /// `remap_mark_batch_through_break`'s `for remap in &break_remaps` loop
-    /// applies to marks (spec §4 H5 parity, quality-review cycle-2 finding
-    /// #2). A `.find`-first implementation would stop at the first break and
-    /// diverge from this.
-    #[test]
-    fn resolve_x_folds_through_multiple_same_axis_breaks() {
-        let (x_scale, y_scale, plot_area) = test_ctx();
-        let result_a = crate::render::break_axis::apply_break_to_scale(
-            (0.0, 100.0),
-            &[[20.0, 30.0]],
-            (50.0, 550.0),
-            10.0,
-        );
-        let result_b = crate::render::break_axis::apply_break_to_scale(
-            (0.0, 100.0),
-            &[[70.0, 80.0]],
-            (50.0, 550.0),
-            10.0,
-        );
-        let remap_a =
-            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), (50.0, 550.0), &result_a);
-        let remap_b =
-            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), (50.0, 550.0), &result_b);
-        // A second, independent handle on the same first break, so it can be
-        // compared against the two-break fold without fighting the borrow
-        // checker over `remap_a` (`BreakRemap` is not `Copy`/`Clone`).
-        let remap_a_only =
-            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), (50.0, 550.0), &result_a);
-
-        let folded_ctx = ScaleContext {
-            plot_area,
-            x_scale: &x_scale,
-            y_scale: &y_scale,
-            breaks: &[remap_a, remap_b],
-        };
-        let single_ctx = ScaleContext {
-            plot_area,
-            x_scale: &x_scale,
-            y_scale: &y_scale,
-            breaks: std::slice::from_ref(&remap_a_only),
-        };
-        let folded_px = folded_ctx.resolve_x(&CoordValue::Data(90.0));
-        let single_px = single_ctx.resolve_x(&CoordValue::Data(90.0));
-        assert!(
-            (folded_px - single_px).abs() > 1.0,
-            "the second break must further move a coordinate the first break \
-             already moved, not be ignored: folded={folded_px} single_only={single_px}"
-        );
-    }
-
-    /// The fold is ORDERED: it composes the breaks in declaration order, the
-    /// same left-to-right sequence `remap_mark_batch_through_break`'s
-    /// `for remap in &break_remaps` loop applies to marks. Two same-axis
-    /// breaks compose to different pixels depending on which runs first, so a
-    /// reversed fold silently disagrees with the marks it must land on.
-    #[test]
-    fn resolve_x_folds_same_axis_breaks_in_declaration_order() {
-        let (x_scale, y_scale, plot_area) = test_ctx();
-        let pixels = (50.0, 550.0);
-        let result_a = crate::render::break_axis::apply_break_to_scale(
-            (0.0, 100.0),
-            &[[5.0, 35.0]],
-            pixels,
-            10.0,
-        );
-        let result_b = crate::render::break_axis::apply_break_to_scale(
-            (0.0, 100.0),
-            &[[60.0, 90.0]],
-            pixels,
-            10.0,
-        );
-        fn remap(
-            result: &crate::render::break_axis::BreakResult,
-            pixels: (f64, f64),
-        ) -> crate::render::break_axis::BreakRemap<'_> {
-            crate::render::break_axis::BreakRemap::new("x", (0.0, 100.0), pixels, result)
-        }
-        let ctx_for = |breaks: &[crate::render::break_axis::BreakRemap<'_>]| -> f64 {
-            ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale, breaks }
-                .resolve_x(&CoordValue::Data(50.0))
-        };
-
-        let ab = ctx_for(&[remap(&result_a, pixels), remap(&result_b, pixels)]);
-        let ba = ctx_for(&[remap(&result_b, pixels), remap(&result_a, pixels)]);
-        assert!(
-            (ab - ba).abs() > 1.0,
-            "test sanity: these two breaks must compose differently in each order \
-             ({ab} vs {ba}), or the order pin proves nothing"
-        );
-
-        // The mark-side reference: apply each break's own `coord` in the
-        // order the list declares them.
-        let base = x_scale.to_pixel_f64(50.0).unwrap();
-        let expected = remap(&result_b, pixels)
-            .coord(remap(&result_a, pixels).coord(base).unwrap())
-            .unwrap();
-        assert!(
-            (ab - expected).abs() < 1e-9,
-            "an annotation must land where a mark at the same value lands: {ab} vs {expected}"
-        );
-    }
+    // `resolve_x_folds_through_multiple_same_axis_breaks` and
+    // `resolve_x_folds_same_axis_breaks_in_declaration_order` (quality-review
+    // cycle-2 finding #2) used to live here, each hand-building a
+    // `ScaleContext` whose `breaks` list held TWO same-axis `BreakRemap`s to
+    // pin that `fold_breaks` composes every same-axis break in declaration
+    // order rather than taking only the first.
+    //
+    // #230-4's same-axis merge (`scene_build::build_structural_nodes`) makes
+    // that construction unreachable from production: N same-axis `BreakAxis`
+    // specs now merge into ONE `BreakResult` — one gap list, run through
+    // `normalize_gaps` once — before `break_remaps` is ever built, so
+    // `ScaleContext::breaks` carries at most one remap per axis. Composing
+    // two independently-built same-axis `BreakRemap`s (each resolved against
+    // the ORIGINAL, unbroken domain) was itself the numerically-wrong
+    // behavior #230-4 replaces — sequential composition re-interprets the
+    // first break's already-broken pixel as an unbroken-domain data value,
+    // and (via `BreakRemap::data_at`'s domain clamp) could resurrect a
+    // coordinate the first break had hidden. Keeping these two tests green
+    // would pin that replaced behavior as if it were still a supported
+    // shape, so they are retired rather than kept passing.
+    //
+    // `fold_breaks` itself is unchanged and stays exercised: with the merge
+    // upstream, its loop now always executes 0 or 1 times per axis, and the
+    // cross-axis case (independent x and y folds) is what
+    // `resolve_y_pixel_and_norm_coords_are_unaffected_by_a_break` below and
+    // `test_two_same_axis_breaks_fold_annotations_and_marks_to_the_same_position`
+    // (`tests/test_break_axis_geometry.py`) pin end to end. The same-axis
+    // merge and the `BREAK_HIDDEN` poison guard are pinned directly in
+    // `scene_build.rs` and `break_axis.rs`, closer to where they are now
+    // implemented.
 
     #[test]
     fn resolve_y_pixel_and_norm_coords_are_unaffected_by_a_break() {

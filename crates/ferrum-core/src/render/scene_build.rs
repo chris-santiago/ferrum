@@ -449,9 +449,13 @@ pub fn build_scene(
         // through `break_remaps` — the SAME list `remap_mark_batch_through_
         // break` folds marks through below — so an ordinal-axis break (no
         // continuous `data_domain()`, filtered out of `break_remaps` above)
-        // neither moves nor suppresses annotations, matching its marks; and
-        // two same-axis breaks compose identically for both. Norm/px
-        // coordinates are plot-area-relative and untouched regardless.
+        // neither moves nor suppresses annotations, matching its marks.
+        // `build_structural_nodes`'s same-axis merge (#230-4) collapses every
+        // `BreakAxis` spec sharing an axis into ONE `BreakResult` before this
+        // runs, so `break_remaps` carries at most one remap per axis — the
+        // fold below always executes 0 or 1 times per axis, never composing
+        // multiple same-axis remaps in sequence. Norm/px coordinates are
+        // plot-area-relative and untouched regardless.
         let annotation_nodes = if panel_idx == 0 && !chart_config.annotations.is_empty() {
             let surviving_annotations = suppress_annotations_for_break(
                 &chart_config.annotations,
@@ -2602,9 +2606,95 @@ fn build_structural_nodes(
     // namespace (see `inset::build_inset_nodes`); only Inset variants advance it.
     let mut inset_idx: usize = 0;
 
+    // Same-axis `BreakAxis` specs merge into ONE gap list before any break is
+    // applied (#230-4). Before this, two `BreakAxis(axis="y", gap=...)` specs
+    // each built their OWN `BreakResult` against the ORIGINAL (unbroken)
+    // domain, and the mark/annotation fold below applied both in sequence —
+    // numerically wrong (the second break re-interprets the first break's
+    // already-broken pixel as an unbroken-domain data value) and, compounded
+    // by `BreakRemap::data_at`'s domain clamp, could resurrect a mark the
+    // first break had hidden (see `BREAK_HIDDEN` never clamped back into
+    // view, `break_axis.rs`). Building one union'd `BreakResult` per axis
+    // makes N same-axis specs render identically to one spec declaring their
+    // combined gaps — `normalize_gaps` (already merges overlapping, nested,
+    // and unsorted gaps) does the rest, and it is exercised on the union the
+    // same way it always was on one spec's gap list. A conflicting
+    // `break_size`/`break_style` between merged specs keeps the FIRST
+    // declaration's value (matching "declare one BreakAxis with the union of
+    // gaps" — the first spec's cosmetic knobs are what that single spec would
+    // have carried) and warns once per axis per conflicting field, so a
+    // later spec's silently-dropped knob is named rather than merely
+    // overridden.
+    struct MergedBreakGroup {
+        gaps: Vec<[f64; 2]>,
+        break_size: f64,
+        break_style: String,
+        style_conflict: bool,
+        size_conflict: bool,
+    }
+    let mut merged_breaks: Vec<(String, MergedBreakGroup)> = Vec::new();
+    for item in structural {
+        if let StructuralSpec::BreakAxis(spec_brk) = item {
+            match merged_breaks.iter_mut().find(|(axis, _)| *axis == spec_brk.axis) {
+                Some((_, group)) => {
+                    group.gaps.extend_from_slice(&spec_brk.gaps);
+                    if !group.style_conflict && spec_brk.break_style != group.break_style {
+                        group.style_conflict = true;
+                    }
+                    if !group.size_conflict && spec_brk.break_size != group.break_size {
+                        group.size_conflict = true;
+                    }
+                }
+                None => merged_breaks.push((
+                    spec_brk.axis.clone(),
+                    MergedBreakGroup {
+                        gaps: spec_brk.gaps.clone(),
+                        break_size: spec_brk.break_size,
+                        break_style: spec_brk.break_style.clone(),
+                        style_conflict: false,
+                        size_conflict: false,
+                    },
+                )),
+            }
+        }
+    }
+    for (axis, group) in &merged_breaks {
+        if group.style_conflict {
+            warnings.push(RenderWarning::BreakAxisMergeConflict {
+                axis: axis.clone(),
+                field: "break_style".to_string(),
+            });
+        }
+        if group.size_conflict {
+            warnings.push(RenderWarning::BreakAxisMergeConflict {
+                axis: axis.clone(),
+                field: "break_size".to_string(),
+            });
+        }
+    }
+    // Which axes have already been processed below — a same-axis
+    // `BreakAxis`'s SECOND (and later) occurrence is a no-op here: its gaps
+    // are already folded into `merged_breaks` and were applied at the first
+    // occurrence's position, which is where this axis's indicator(s) and
+    // `break_results` entry belong (preserving declaration-order placement
+    // relative to any interleaved `Inset` items).
+    let mut processed_axes: Vec<String> = Vec::new();
+
     for item in structural {
         match item {
             StructuralSpec::BreakAxis(spec_brk) => {
+                if processed_axes.contains(&spec_brk.axis) {
+                    continue;
+                }
+                processed_axes.push(spec_brk.axis.clone());
+                // Safe: every `BreakAxis` item populated `merged_breaks`
+                // above by this same axis key.
+                let group = &merged_breaks
+                    .iter()
+                    .find(|(axis, _)| *axis == spec_brk.axis)
+                    .expect("this axis was just inserted into merged_breaks above")
+                    .1;
+
                 // Build break indicators and add them to annotations.
                 let is_y = spec_brk.axis == "y";
 
@@ -2646,9 +2736,9 @@ fn build_structural_nodes(
                 // domain boundary). One span, read from one place.
                 let break_result = break_axis::apply_break_to_scale(
                     data_domain,
-                    &spec_brk.gaps,
+                    &group.gaps,
                     scale.pixel_range(),
-                    spec_brk.break_size,
+                    group.break_size,
                 );
 
                 if break_result.effective_gaps == 0 {
@@ -2691,8 +2781,8 @@ fn build_structural_nodes(
                     &break_result,
                     plot_area,
                     &spec_brk.axis,
-                    spec_brk.break_size,
-                    &spec_brk.break_style,
+                    group.break_size,
+                    &group.break_style,
                     theme,
                 ));
 
@@ -2768,9 +2858,13 @@ fn build_structural_nodes(
 /// marks through — already filtered to axes whose resolved scale has a
 /// continuous `data_domain()` (quality-review cycle-2 finding #1: an ordinal
 /// axis has nothing to reverse-map through, so its `BreakAxis` must neither
-/// move nor suppress annotations, matching its marks) — and every entry is
-/// consulted (not just the first per axis), so two same-axis breaks each get
-/// their own suppression check (finding #2's "every break" behavior, kept).
+/// move nor suppress annotations, matching its marks). Post-#230-4, at most
+/// one entry exists per axis — same-axis `BreakAxis` specs merge into one
+/// `BreakResult` upstream in `build_structural_nodes`, so `break_remaps`
+/// itself is where the "one break per axis" invariant lives, not this
+/// function. Every entry IS still consulted here, because the list spans
+/// BOTH axes (an x break and a y break each need their own membership
+/// check), not because a single axis can have more than one.
 ///
 /// A no-op when `break_remaps` is empty: every chart without an effective
 /// `BreakAxis` gets `specs` back unchanged and pushes no warnings, which is
@@ -8372,6 +8466,251 @@ mod tests {
         }
     }
 
+    fn break_spec_styled(
+        axis: &str,
+        gaps: Vec<[f64; 2]>,
+        break_size: f64,
+        break_style: &str,
+    ) -> StructuralSpec {
+        StructuralSpec::BreakAxis(super::super::chart_config::BreakAxisSpec {
+            axis: axis.to_string(),
+            gaps,
+            break_size,
+            break_style: break_style.to_string(),
+        })
+    }
+
+    /// Two same-axis `BreakAxis` specs merge into ONE `BreakResult` covering
+    /// the union of their gaps (#230-4) — `break_results` gets exactly one
+    /// entry per axis, with the same segments a single spec declaring both
+    /// gaps at once would produce, rather than one entry per declared spec.
+    #[test]
+    fn two_same_axis_break_specs_merge_into_one_break_result() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 1000.0], [320.0, 20.0]),
+        );
+        let two_specs = [
+            break_spec("y", vec![[150.0, 400.0]]),
+            break_spec("y", vec![[500.0, 850.0]]),
+        ];
+        let mut two_warnings = Vec::new();
+        let two_out = build_structural_nodes(
+            &two_specs,
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut two_warnings,
+        );
+        assert_eq!(
+            two_out.break_results.len(),
+            1,
+            "same-axis specs must merge into exactly one break_results entry; \
+             got {:?}",
+            two_out.break_results.iter().map(|(a, _)| a).collect::<Vec<_>>()
+        );
+
+        let one_spec = [break_spec("y", vec![[150.0, 400.0], [500.0, 850.0]])];
+        let mut one_warnings = Vec::new();
+        let one_out = build_structural_nodes(
+            &one_spec,
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut one_warnings,
+        );
+
+        let (two_axis, two_result) = &two_out.break_results[0];
+        let (one_axis, one_result) = &one_out.break_results[0];
+        assert_eq!(two_axis, one_axis);
+        assert_eq!(two_result.effective_gaps, one_result.effective_gaps);
+        let seg_bounds = |r: &break_axis::BreakResult| -> Vec<(f64, f64, f64, f64)> {
+            r.segments
+                .iter()
+                .map(|s| (s.data_lo, s.data_hi, s.pixel_lo, s.pixel_hi))
+                .collect()
+        };
+        assert_eq!(
+            seg_bounds(two_result),
+            seg_bounds(one_result),
+            "two same-axis specs must produce the exact segments one spec \
+             declaring both gaps would"
+        );
+        assert_eq!(
+            two_result.indicator_pixels, one_result.indicator_pixels,
+            "merged same-axis specs must draw the same indicator positions as \
+             one spec with the union of gaps"
+        );
+        assert!(two_warnings.is_empty(), "a non-conflicting merge is silent: {two_warnings:?}");
+    }
+
+    /// Cadence pin (spec-review cycle-2 finding, #230-4): the same-axis
+    /// merge's `processed_axes` short-circuit sits ahead of BOTH ineffective
+    /// checks in the per-item loop, so two same-axis specs whose UNION still
+    /// misses the domain warn once per axis, not once per declared spec —
+    /// the second occurrence never re-enters the domain check at all.
+    #[test]
+    fn two_same_axis_ineffective_break_specs_warn_once_not_per_spec() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 100.0], [320.0, 20.0]),
+        );
+        let specs = [
+            break_spec("y", vec![[150.0, 200.0]]),
+            break_spec("y", vec![[300.0, 850.0]]),
+        ];
+        let warnings = structural_warnings(&specs, &scales);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "two same-axis specs whose union still misses the domain warn ONCE \
+             per axis, not once per declared spec: got {warnings:?}"
+        );
+        assert!(
+            matches!(&warnings[0], RenderWarning::BreakAxisIneffective { .. }),
+            "got {:?}",
+            warnings[0]
+        );
+    }
+
+    /// The ordinal-skip mirror of the pin above: two same-axis `BreakAxis`
+    /// specs on an ordinal axis warn once, not once per declared spec — the
+    /// second occurrence is skipped by the same `processed_axes` check
+    /// before it ever reaches the ordinal `data_domain()` branch.
+    #[test]
+    fn two_same_axis_ordinal_break_specs_warn_once_not_per_spec() {
+        use crate::scale::discrete::DiscreteLayout;
+        let ordinal =
+            scale_resolve::ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".to_string(), "b".to_string()],
+                vec![20.0, 320.0],
+                DiscreteLayout::UNPADDED,
+            ));
+        let scales = positional_scales(ordinal, linear_scale([0.0, 1000.0], [320.0, 20.0]));
+        let specs = [break_spec("x", vec![[0.2, 0.4]]), break_spec("x", vec![[0.5, 0.6]])];
+        let warnings = structural_warnings(&specs, &scales);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "two same-axis specs on an ordinal axis warn ONCE per axis, not once \
+             per declared spec: got {warnings:?}"
+        );
+        assert!(
+            matches!(&warnings[0], RenderWarning::BreakAxisIneffective { .. }),
+            "got {:?}",
+            warnings[0]
+        );
+    }
+
+    /// A conflicting `break_style` between merged same-axis specs keeps the
+    /// FIRST declaration's style and warns exactly once, naming the axis and
+    /// the `break_style` field (#230-4, spec §6).
+    #[test]
+    fn same_axis_break_specs_with_conflicting_style_warn_once_first_wins() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 1000.0], [320.0, 20.0]),
+        );
+        let specs = [
+            break_spec_styled("y", vec![[150.0, 400.0]], 12.0, "gap"),
+            break_spec_styled("y", vec![[500.0, 850.0]], 12.0, "slash"),
+        ];
+        let warnings = structural_warnings(&specs, &scales);
+        let conflicts: Vec<_> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::BreakAxisMergeConflict { axis, field } => {
+                    Some((axis.as_str(), field.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            conflicts,
+            vec![("y", "break_style")],
+            "exactly one conflict warning, naming the axis and field: got {warnings:?}"
+        );
+
+        // First-wins: `break_style="gap"` (the first spec's) draws no
+        // indicator nodes at all, so the merged render must draw none either.
+        let mut discard = Vec::new();
+        let out = build_structural_nodes(
+            &specs,
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut discard,
+        );
+        assert!(
+            out.extra_annotations.is_empty(),
+            "the first spec's break_style='gap' must win, drawing no indicator: \
+             {:?}",
+            out.extra_annotations
+        );
+    }
+
+    /// The `break_size` mirror of the style conflict test: the FIRST spec's
+    /// size wins (the segment allocation matches a single spec declaring the
+    /// union of gaps at the first size), and the conflict warns exactly once.
+    #[test]
+    fn same_axis_break_specs_with_conflicting_size_warn_once_first_wins() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 1000.0], [320.0, 20.0]),
+        );
+        let specs = [
+            break_spec_styled("y", vec![[150.0, 400.0]], 12.0, "slash"),
+            break_spec_styled("y", vec![[500.0, 850.0]], 40.0, "slash"),
+        ];
+        let mut warnings = Vec::new();
+        let out = build_structural_nodes(
+            &specs,
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut warnings,
+        );
+        let conflicts: Vec<_> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::BreakAxisMergeConflict { axis, field } => {
+                    Some((axis.as_str(), field.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(conflicts, vec![("y", "break_size")], "got {warnings:?}");
+
+        let one_spec = [break_spec_styled(
+            "y",
+            vec![[150.0, 400.0], [500.0, 850.0]],
+            12.0,
+            "slash",
+        )];
+        let mut one_warnings = Vec::new();
+        let one_out = build_structural_nodes(
+            &one_spec,
+            &scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut one_warnings,
+        );
+        let (_, merged_result) = &out.break_results[0];
+        let (_, reference_result) = &one_out.break_results[0];
+        let seg_bounds = |r: &break_axis::BreakResult| -> Vec<(f64, f64, f64, f64)> {
+            r.segments
+                .iter()
+                .map(|s| (s.data_lo, s.data_hi, s.pixel_lo, s.pixel_hi))
+                .collect()
+        };
+        assert_eq!(
+            seg_bounds(merged_result),
+            seg_bounds(reference_result),
+            "the merged break must allocate segments at the FIRST spec's \
+             break_size (12), matching a single spec declared at that size"
+        );
+    }
+
     /// An ordinal axis has no numeric domain for a gap to clip against, so
     /// its break is a no-op — reported with its own reason, and drawing NO
     /// indicator.
@@ -9642,28 +9981,26 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
-    /// Two same-axis breaks: suppression consults EVERY one of them, not
-    /// just the first (quality-review cycle-2 finding #2's "every break"
-    /// behavior for suppression — kept, unlike the remap side which needed
-    /// the fold fix).
-    #[test]
-    fn suppress_annotations_for_break_consults_every_same_axis_break() {
-        use crate::render::annotation::CoordValue;
-
-        let specs = vec![text_spec(CoordValue::Data(600.0), "in the second gap")];
-        let result_a =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 400.0]], (320.0, 20.0), 12.0);
-        let result_b =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[500.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&result_a), y_remap(&result_b)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert!(
-            surviving.is_empty(),
-            "y=600 is inside the SECOND break's gap; it must be caught even though \
-             the first break's gap doesn't contain it"
-        );
-        assert_eq!(warnings.len(), 1);
-    }
+    // `suppress_annotations_for_break_consults_every_same_axis_break`
+    // (quality-review cycle-2 finding #2) used to live here, hand-building a
+    // `remaps` vec holding TWO same-axis `BreakRemap`s (one per independently
+    // resolved `BreakResult`) to pin that suppression consults every one of
+    // them, not just the first.
+    //
+    // #230-4's same-axis merge (`build_structural_nodes` above) makes that
+    // construction unreachable from production: N same-axis `BreakAxis`
+    // specs now merge into ONE `BreakResult` — one gap list — before
+    // `break_remaps` is ever built, so `suppress_annotations_for_break`'s
+    // `break_remaps` slice carries at most one entry per axis (mirroring the
+    // same invariant `annotation.rs`'s `ScaleContext::breaks` now carries,
+    // whose own two same-axis-remap tests were retired for the identical
+    // reason). Keeping this hand-built two-same-axis-remap shape green would
+    // pin the replaced, production-unreachable construction as if it were
+    // still a supported input, so it is retired rather than kept passing.
+    //
+    // The function's real per-axis, per-remap loop stays exercised by the
+    // tests above (single remap, single axis) and by
+    // `suppress_annotations_for_break`'s own doc, which now states the
+    // post-merge invariant directly. The same-axis merge itself is pinned in
+    // `build_structural_nodes`'s tests just above in this file.
 }

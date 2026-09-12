@@ -858,6 +858,21 @@ pub enum RenderWarning {
     /// warning is how a release build says so instead of shipping the
     /// misattribution silently. `mark` is the batch kind.
     BreakClipSidecarMisaligned { mark: String },
+    /// Two or more `BreakAxis` specs shared an axis and disagreed on
+    /// `break_style` or `break_size` (#230-4). Same-axis specs merge into
+    /// one gap list and render as if declared as one `BreakAxis` with the
+    /// union of gaps; a cosmetic field the merged specs disagree on can only
+    /// keep one value, so the FIRST declaration's value is kept and every
+    /// later, differing value for that field is dropped. `field` names which
+    /// knob conflicted (`"break_style"` or `"break_size"`); merging the gaps
+    /// themselves is the documented semantics of a same-axis break and never
+    /// warns on its own. Its `{axis, field}` payload is a pure function of
+    /// the leaf's own declared `BreakAxis` specs, with no data or scale
+    /// dependence, so `composite_render.rs`'s `is_figure_level_dedupable`
+    /// joins it explicitly (quality-review cycle-3): a `RepeatChart`
+    /// replicating one conflicting template across N panels reports the
+    /// authored mistake once at the composite boundary, not once per panel.
+    BreakAxisMergeConflict { axis: String, field: String },
     /// A continuous color encoding named a `scheme`/`cmap` (via `encoding.scheme`
     /// or a scale spec's own `scheme` field) that is not a recognized continuous
     /// scheme name (#240-4b, routed rider). Falls back to the theme's default
@@ -1059,6 +1074,11 @@ impl std::fmt::Display for RenderWarning {
                  metadata had the wrong length; tooltips, links, and keys on that \
                  batch may name the wrong marks"
             ),
+            RenderWarning::BreakAxisMergeConflict { axis, field } => write!(
+                f,
+                "multiple BreakAxis specs on the {axis} axis disagree on {field}; \
+                 the first declaration's value was kept"
+            ),
             RenderWarning::UnknownColorScheme { name } => write!(
                 f,
                 "color scheme '{name}' is not recognized; the theme's default scheme \
@@ -1160,6 +1180,10 @@ mod tests {
                 scale_kind: "log".into(),
             },
             RenderWarning::BreakClipSidecarMisaligned { mark: "bar".into() },
+            RenderWarning::BreakAxisMergeConflict {
+                axis: "y".into(),
+                field: "break_style".into(),
+            },
             RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() },
             RenderWarning::GradientTooFewStops { count: 1 },
         ] {

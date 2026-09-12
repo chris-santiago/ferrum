@@ -232,12 +232,21 @@ impl From<CompositeResolveError> for CompositeRenderError {
 /// declaration counted twice — they must keep fanning out
 /// (`hconcat_two_independent_offending_line_leaves_each_warn_once` pins this
 /// for `UnsupportedColorScaleOnMark`; the same reasoning applies to every
-/// per-leaf-data variant, not just that one). `ConfigSurfaceNotPresent` is
-/// the sole current member; the predicate is named for the SHAPE (config-key,
-/// not data-condition) so a future config-surface warning of the same shape
-/// joins it explicitly rather than by accident.
+/// per-leaf-data variant, not just that one). The predicate is named for the
+/// SHAPE (config-key, not data-condition) so a future config-surface warning
+/// of the same shape joins it explicitly rather than by accident.
+/// `ConfigSurfaceNotPresent` was the founding member (#140);
+/// `BreakAxisMergeConflict` (#230-4) joined it here rather than by accident —
+/// its `{axis, field}` payload is a pure function of the leaf's declared
+/// `BreakAxis` specs, with zero data or scale dependence, so a `RepeatChart`
+/// cloning one conflicting template into N panels must report the authored
+/// mistake once, not N times
+/// (`hconcat_two_leaves_same_break_axis_merge_conflict_warns_once` pins this).
 fn is_figure_level_dedupable(warning: &RenderWarning) -> bool {
-    matches!(warning, RenderWarning::ConfigSurfaceNotPresent { .. })
+    matches!(
+        warning,
+        RenderWarning::ConfigSurfaceNotPresent { .. } | RenderWarning::BreakAxisMergeConflict { .. }
+    )
 }
 
 /// Render a validated composite tree into one [`SceneGraph`], plus every
@@ -3911,6 +3920,68 @@ mod tests {
             1,
             "three leaves applying the SAME axis_y2 config surface must warn once at the \
              composite boundary, not once per leaf: {warnings:?}"
+        );
+    }
+
+    /// #230-4 rider (quality-review cycle-3 finding 3): `BreakAxisMergeConflict`
+    /// is a pure function of the leaf's own declared `BreakAxis` specs — no
+    /// data or scale dependence, exactly `is_figure_level_dedupable`'s
+    /// reserved shape. Two leaves that each independently declare the SAME
+    /// conflicting same-axis `BreakAxis` pair (the shape a `RepeatChart`
+    /// produces by cloning one template's structural config into every
+    /// panel) must warn `BreakAxisMergeConflict` ONCE at the composite
+    /// boundary, not once per leaf — sibling to
+    /// `hconcat_three_leaves_same_axis_y2_config_surface_warns_once` above,
+    /// for the newer figure-level-dedupable member.
+    #[test]
+    fn hconcat_two_leaves_same_break_axis_merge_conflict_warns_once() {
+        use crate::render::chart_config::{BreakAxisSpec, StructuralSpec};
+
+        let conflicting_structural = vec![
+            StructuralSpec::BreakAxis(BreakAxisSpec {
+                axis: "x".to_string(),
+                gaps: vec![[1.4, 1.6]],
+                break_size: 12.0,
+                break_style: "slash".to_string(),
+            }),
+            StructuralSpec::BreakAxis(BreakAxisSpec {
+                axis: "x".to_string(),
+                gaps: vec![[1.4, 1.6]],
+                break_size: 12.0,
+                break_style: "zigzag".to_string(),
+            }),
+        ];
+        let cfg = ChartConfig {
+            structural: conflicting_structural,
+            ..Default::default()
+        };
+        let h0 = LeafHold { chart_config: cfg.clone(), ..hold() };
+        let h1 = LeafHold { chart_config: cfg, ..hold() };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                leaf_node_with(h0.spec.clone(), 0),
+                leaf_node_with(h1.spec.clone(), 1),
+            ],
+        );
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (_scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let conflicts: Vec<_> = warnings
+            .iter()
+            .filter(|w| {
+                matches!(
+                    w,
+                    RenderWarning::BreakAxisMergeConflict { axis, field }
+                        if axis == "x" && field == "break_style"
+                )
+            })
+            .collect();
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "two leaves declaring the SAME conflicting same-axis BreakAxis pair must warn \
+             once at the composite boundary, not once per leaf: {warnings:?}"
         );
     }
 

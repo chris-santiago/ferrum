@@ -577,10 +577,14 @@ pub const BREAK_HIDDEN: f64 = -99999.0;
 ///
 /// Exact equality, not a tolerance band: `remap_node`'s `Line` arm writes
 /// `BREAK_HIDDEN` verbatim (`*a = self.coord(*a).unwrap_or(BREAK_HIDDEN)`,
-/// no offset), which is the only producer this function's one caller reads
-/// from — the segment shaft `remap_segment_nodes` captures right after
-/// `remap_node` places it. That makes `== BREAK_HIDDEN` the precise
-/// question "did this coordinate hide", not an approximation of it.
+/// no offset), which is the producer the segment shaft `remap_segment_nodes`
+/// reads from right after `remap_node` places it, and the producer
+/// [`BreakRemap::data_at`]'s poison guard (#230-9) reads from when a
+/// coordinate a prior step already hid is handed back through `data_at`/
+/// `coord` — so `== BREAK_HIDDEN` is the precise question "did this
+/// coordinate hide", not an approximation of it, for all three of its
+/// callers: `remap_segment_nodes`, `data_at`, and [`BreakRemap::clip_extent`]
+/// (whose own poison guard on its raw input pixels was added cycle-2).
 /// [`BreakRemap::remap_glyph_node`]'s hide path is a different producer: it
 /// offsets a multi-coordinate glyph's other coordinates by `c - anchor`
 /// around the sentinel, so those coordinates do NOT satisfy this exact
@@ -894,7 +898,28 @@ impl<'a> BreakRemap<'a> {
     /// Clamping keeps geometry that overshoots the domain (a bar drawn down
     /// to the plot floor, which sits below the scale's zero) attached to the
     /// nearest segment instead of vanishing.
+    ///
+    /// `BREAK_HIDDEN` is poison here (#230-9): a pixel already parked at the
+    /// sentinel is not "geometry that overshoots the domain" — clamping it
+    /// like any other out-of-range pixel silently un-hides whatever it
+    /// belonged to. That was the exact resurrection mechanism the same-axis
+    /// merge above (`build_structural_nodes`) makes unreachable for the
+    /// production sequential-remap loop, but poisoning it here too covers any
+    /// other caller of `data_at`: `f64::NAN` propagates through
+    /// [`broken_scale_map`] as "no segment contains this" (`ScaleSegment::
+    /// contains`'s comparisons are false for NaN either side), so `coord`
+    /// reports the coordinate as still hidden rather than clamping it to a
+    /// domain edge. A caller that instead runs its own `f64::min`/`max` over
+    /// two `data_at` results — as [`BreakRemap::clip_extent`] does to order
+    /// an extent's endpoints — does NOT get this for free: `min`/`max` drop a
+    /// NaN operand rather than propagate it, so that caller needs its own
+    /// `is_hidden` guard on the raw input pixels, ahead of calling `data_at`
+    /// at all. `clip_extent` carries that guard; a future caller with the
+    /// same min/max shape needs its own too.
     fn data_at(&self, px: f64) -> f64 {
+        if is_hidden(px) {
+            return f64::NAN;
+        }
         let (d_lo, d_hi) = self.domain;
         let (px_lo, px_hi) = self.pixels;
         let span = px_hi - px_lo;
@@ -944,7 +969,19 @@ impl<'a> BreakRemap<'a> {
     /// zero-length pair when visible, so a zero-valued bar still lands in the
     /// right place.
     pub fn clip_extent(&self, a: f64, b: f64) -> Vec<(f64, f64)> {
-        if a.is_nan() || b.is_nan() {
+        // `BREAK_HIDDEN` is poison here too (#230-9 belt-and-braces): tested
+        // on the INPUT pixels, before `data_at` runs, because `data_at`'s own
+        // poison guard returns `f64::NAN` for a hidden endpoint, and Rust's
+        // `f64::min`/`max` (used just below to order `d0`/`d1` into `lo`/
+        // `hi`) silently DROP a NaN operand rather than propagate it — so a
+        // NaN-only guard here would let one hidden endpoint through as a
+        // zero-length pair at the surviving endpoint, and both endpoints
+        // hidden through as the segment's FULL extent (verified: `f64::NAN
+        // .max(s_lo) == s_lo`, `f64::NAN.min(s_hi) == s_hi`). Early-returning
+        // on the raw pixels closes that hole without widening `is_hidden`
+        // itself, which stays exact-equality for its other caller
+        // (`data_at`).
+        if a.is_nan() || b.is_nan() || is_hidden(a) || is_hidden(b) {
             return Vec::new();
         }
         let (d0, d1) = (self.data_at(a), self.data_at(b));
@@ -2082,6 +2119,49 @@ mod tests {
         assert!(remap("x", &br).coord(f64::NAN).is_none());
     }
 
+    /// `BREAK_HIDDEN` is poison (#230-9): a pixel already parked at the
+    /// sentinel must never reverse-map back into the domain, even against a
+    /// single-segment (no-op-looking) break whose degenerate span or
+    /// permissive clamp would otherwise treat it as any other out-of-range
+    /// pixel and clamp it to a domain edge — which is exactly the mechanism
+    /// that resurrected a hidden mark at the plot's top/bottom edge before
+    /// the same-axis merge (#230-4) made the double-remap that produced it
+    /// unreachable. Checked directly against `data_at`'s poison guard via
+    /// `coord`, its only production-reachable caller.
+    #[test]
+    fn coord_of_break_hidden_pixel_stays_hidden_never_clamped_into_domain() {
+        let br = one_segment_break(0.0, 100.0, 50.0, 350.0);
+        assert!(
+            remap("x", &br).coord(BREAK_HIDDEN).is_none(),
+            "a BREAK_HIDDEN pixel must reverse-map to nothing, not clamp to a domain edge"
+        );
+
+        // Same claim against a real multi-segment break, where the clamp
+        // would otherwise land the sentinel on the FIRST segment's own
+        // pixel range (since BREAK_HIDDEN is far below every real pixel) —
+        // the precise shape of the pre-fix resurrection.
+        let two_seg = two_segment_break();
+        assert!(
+            remap("x", &two_seg).coord(BREAK_HIDDEN).is_none(),
+            "a BREAK_HIDDEN pixel must stay hidden across a real break's segments too"
+        );
+    }
+
+    /// `data_at`'s poison guard, not just `coord`'s NaN short-circuit: a
+    /// hidden pixel handed to `data_at` directly must come back non-finite
+    /// (never a real, in-domain data value), so every caller of `data_at`
+    /// — not only `coord` — inherits the poison rather than each having to
+    /// re-derive its own guard.
+    #[test]
+    fn data_at_of_break_hidden_pixel_is_never_a_finite_domain_value() {
+        let br = two_segment_break();
+        let remap = remap("x", &br);
+        assert!(
+            remap.data_at(BREAK_HIDDEN).is_nan(),
+            "BREAK_HIDDEN must not reverse-map to a finite data value"
+        );
+    }
+
     #[test]
     fn remap_node_circle_hides_at_break_hidden_when_in_gap() {
         let br = two_segment_break();
@@ -2222,6 +2302,38 @@ mod tests {
         // Data 300..500, wholly inside the gap.
         let pieces = guide_remap(&br).clip_extent(400.0 - 0.3 * 400.0, 400.0 - 0.5 * 400.0);
         assert!(pieces.is_empty(), "a wholly-hidden extent emits nothing; got {pieces:?}");
+    }
+
+    /// #230-9 belt-and-braces (cycle-2 fix): `clip_extent` must treat a
+    /// `BREAK_HIDDEN` endpoint as poison, not as an ordinary out-of-range
+    /// pixel. Pre-fix, a hidden endpoint's `data_at` NaN fed straight into
+    /// `f64::min`/`max` to order `lo`/`hi`, and `min`/`max` silently DROP a
+    /// NaN operand rather than propagate it — verified empirically pre-fix:
+    /// both endpoints hidden returned the segment's FULL pixel extent
+    /// (`c_lo = NaN.max(s_lo) == s_lo`, `c_hi = NaN.min(s_hi) == s_hi`), and
+    /// one endpoint hidden returned a zero-length pair at the surviving
+    /// endpoint. RED-proven by file-copy revert to the pre-cycle-2 source:
+    /// both assertions below failed with exactly that shape before the
+    /// `is_hidden(a) || is_hidden(b)` early-return was added.
+    #[test]
+    fn clip_extent_with_a_break_hidden_endpoint_stays_hidden_not_full_extent() {
+        let br = guide_break();
+        // Both endpoints already hidden: emits nothing, never the segment's
+        // full extent.
+        assert!(
+            guide_remap(&br).clip_extent(BREAK_HIDDEN, BREAK_HIDDEN).is_empty(),
+            "both-ends-hidden must stay empty, not resurrect the full segment extent"
+        );
+        // One endpoint hidden, the other a real pixel: also empty, never a
+        // zero-length pair parked at the surviving endpoint.
+        assert!(
+            guide_remap(&br).clip_extent(BREAK_HIDDEN, 40.0).is_empty(),
+            "one-end-hidden must stay empty, not a zero-length pair at the surviving endpoint"
+        );
+        assert!(
+            guide_remap(&br).clip_extent(40.0, BREAK_HIDDEN).is_empty(),
+            "hidden-endpoint order must not matter"
+        );
     }
 
     #[test]
