@@ -20,11 +20,60 @@ from ferrum._core import studentized_residual_no_x
 from . import _curve_frames
 
 
-def _gain_lift_score_matrix(y_pred: np.ndarray, classes: list) -> np.ndarray:
+def _require_class_count_match(y_pred: np.ndarray, classes: list, *, chart_name: str) -> None:
+    """Refuse a 2-D ``y_pred`` whose column count doesn't match the class count (#208).
+
+    roc/pr/gain/lift all read column ``i`` of a 2-D ``y_pred`` as class
+    ``classes[i]``'s score. A width mismatch either raises deep inside
+    ``_curve_frames`` (``IndexError``) or silently reads the wrong columns
+    for a subset of classes -- both defect classes close to one typed
+    refusal naming the two numbers.
+    """
+    n_cols = y_pred.shape[1]
+    if n_cols != len(classes):
+        raise ValueError(
+            f"{chart_name}: y_pred has {n_cols} score column(s) but y_true has "
+            f"{len(classes)} class(es); a 2-D y_pred's column count must match "
+            "the number of classes."
+        )
+
+
+def _require_not_multiclass_for_1d(classes: list, *, chart_name: str) -> None:
+    """Refuse a 1-D ``y_pred`` against a genuinely multiclass ``y_true`` (#208).
+
+    A 1-D ``y_pred`` is a single positive-class score, so it cannot rank
+    more than two classes. roc/pr used to silently map a 3+-class target
+    to ``[unique[0], unique[-1]]`` (dropping every class in between) and
+    gain/lift raised an untyped ``IndexError`` -- the family answered one
+    question three ways. One typed refusal now, shared by all four.
+
+    A *degenerate* single-class target (``len(classes) <= 1``) is not
+    multiclass -- it is the "one class present, both slots describe it"
+    case :func:`ferrum.diagnostics._internal._curve_frames.binary_class_values`
+    already handles gracefully (AUC/AP come back NaN, the curve still
+    renders), so it is not refused here.
+    """
+    if len(classes) > 2:
+        raise ValueError(
+            f"{chart_name} with a 1-D y_pred requires binary y_true; got "
+            f"{len(classes)} unique classes."
+        )
+
+
+def _require_1d_y_pred(y_pred: np.ndarray, *, chart_name: str, kind: str) -> None:
+    """Refuse a 2-D ``y_pred`` where ``chart_name`` requires 1-D ``kind`` (#208)."""
+    if y_pred.ndim != 1:
+        raise ValueError(
+            f"{chart_name} requires 1-D {kind}; got an array with shape {y_pred.shape}."
+        )
+
+
+def _gain_lift_score_matrix(y_pred: np.ndarray, classes: list, *, chart_name: str) -> np.ndarray:
     """Build a ``(n_samples, n_classes)`` score matrix for gain/lift assembly.
 
     For a 2-D ``y_pred`` (multiclass probability matrix), the columns are
-    already per-class and returned as-is.
+    already per-class and returned as-is -- after refusing a column count
+    that doesn't match ``len(classes)`` (#208).
 
     For a 1-D ``y_pred`` (binary positive-class scores), the matrix is built
     as ``column_stack([1 - y_pred, y_pred])`` so the negative class (column 0)
@@ -34,10 +83,14 @@ def _gain_lift_score_matrix(y_pred: np.ndarray, classes: list) -> np.ndarray:
     path (where ``probabilities()`` already emits genuine per-class columns),
     so the whole precomputed-1D-binary family ranks each class by its own
     score.  ``gain_frame``/``lift_frame`` call ``argsort(-score_matrix[:, i])``
-    per class against this matrix.
+    per class against this matrix. Refuses multiclass ``y_true`` against a
+    1-D ``y_pred`` (#208) -- a single positive-class score cannot rank more
+    than two classes.
     """
     if y_pred.ndim == 2:
+        _require_class_count_match(y_pred, classes, chart_name=chart_name)
         return y_pred
+    _require_not_multiclass_for_1d(classes, chart_name=chart_name)
     # Binary: 1-D y_pred is the positive-class score. Build a per-class matrix
     # so the negative class ranks by 1 - p, mirroring the roc/pr binary path.
     return np.column_stack([1.0 - y_pred, y_pred])
@@ -87,10 +140,12 @@ class _PrecomputedSource:
         """ROC curve(s).  Mirrors ``ModelSource.roc_curve`` column schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        classes = list(np.unique(y_true))
 
         if y_pred.ndim == 1:
             # Binary: y_pred is 1-D scores for the positive class. Reshape to a
             # 2-column score matrix so the shared builder takes the binary path.
+            _require_not_multiclass_for_1d(classes, chart_name="roc_chart")
             class_values, class_labels = _curve_frames.binary_class_values(y_true)
             score_matrix = np.column_stack([1.0 - y_pred, y_pred])
             return _curve_frames.roc_frame(
@@ -104,7 +159,7 @@ class _PrecomputedSource:
 
         # Multiclass: y_pred is (n_samples, n_classes); columns map to sorted
         # unique classes (ascending, matching the per-class score column order).
-        classes = list(np.unique(y_true))
+        _require_class_count_match(y_pred, classes, chart_name="roc_chart")
         labels = [str(cls) for cls in classes]
         return _curve_frames.roc_frame(
             y_true,
@@ -119,8 +174,10 @@ class _PrecomputedSource:
         """Precision-recall curve(s).  Mirrors ``ModelSource.pr_curve`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        classes = list(np.unique(y_true))
 
         if y_pred.ndim == 1:
+            _require_not_multiclass_for_1d(classes, chart_name="pr_chart")
             class_values, class_labels = _curve_frames.binary_class_values(y_true)
             score_matrix = np.column_stack([1.0 - y_pred, y_pred])
             return _curve_frames.pr_frame(
@@ -131,7 +188,7 @@ class _PrecomputedSource:
                 average=None,
             )
 
-        classes = list(np.unique(y_true))
+        _require_class_count_match(y_pred, classes, chart_name="pr_chart")
         labels = [str(cls) for cls in classes]
         return _curve_frames.pr_frame(
             y_true,
@@ -153,10 +210,14 @@ class _PrecomputedSource:
         from the per-sample ``(y_pred, binarized y_true)`` pair -- the one
         number every Brier display surface reads.
         """
+        y_pred = self._y_pred_np
+        _require_1d_y_pred(
+            y_pred, chart_name="calibration_chart", kind="positive-class probabilities"
+        )
         class_values, _ = _curve_frames.binary_class_values(self._y_true_np)
         return _curve_frames.calibration_frame(
             self._y_true_np,
-            self._y_pred_np,  # 1-D probabilities for positive class
+            y_pred,  # 1-D probabilities for positive class
             class_values[1],
             n_bins,
             strategy,
@@ -168,7 +229,7 @@ class _PrecomputedSource:
         y_pred = self._y_pred_np
         classes = list(np.unique(y_true))
         labels = [str(cls) for cls in classes]
-        score_matrix = _gain_lift_score_matrix(y_pred, classes)
+        score_matrix = _gain_lift_score_matrix(y_pred, classes, chart_name="gain_chart")
         return _curve_frames.gain_frame(y_true, score_matrix, classes, labels)
 
     def lift_curve(self) -> pl.DataFrame:
@@ -177,7 +238,7 @@ class _PrecomputedSource:
         y_pred = self._y_pred_np
         classes = list(np.unique(y_true))
         labels = [str(cls) for cls in classes]
-        score_matrix = _gain_lift_score_matrix(y_pred, classes)
+        score_matrix = _gain_lift_score_matrix(y_pred, classes, chart_name="lift_chart")
         return _curve_frames.lift_frame(y_true, score_matrix, classes, labels)
 
     def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
@@ -187,6 +248,7 @@ class _PrecomputedSource:
         """
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        _require_1d_y_pred(y_pred, chart_name="confusion_matrix_chart", kind="hard class labels")
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()), key=str)
         return _curve_frames.confusion_frame(y_true, y_pred, labels, normalize=normalize)
 
@@ -216,6 +278,9 @@ class _PrecomputedSource:
         on the row *values* (see the model-vs-precomputed parity test),
         just not the class-axis render order.
         """
+        _require_1d_y_pred(
+            self._y_pred_np, chart_name="classification_report_chart", kind="hard class labels"
+        )
         cm = self.confusion_matrix(normalize=None)
         actual_col = cm["actual"].to_list()
         predicted_col = cm["predicted"].to_list()
@@ -247,14 +312,28 @@ class _PrecomputedSource:
             }
         return _curve_frames.classification_report_frame(per_class_metrics)
 
-    def predictions(self) -> pl.DataFrame:
+    def predictions(self, *, chart_name: str = "residuals_chart") -> pl.DataFrame:
         """Return y_true, y_pred, residual, studentized_residual, cooks_distance, leverage.
 
         ``y_pred`` must be 1-D fitted values.  ``studentized_residual`` is
         computed without the design matrix (``ferrum._core.studentized_residual_no_x``),
         matching the non-linear estimator path in ``ModelSource``.
         ``cooks_distance`` and ``leverage`` are NaN (no design matrix available).
+
+        ``chart_name`` (#208): this adapter method is consumed by TWO public
+        figure functions -- ``residuals_chart`` (``plots/regression.py``,
+        the default) and ``prediction_error_chart`` (which passes its own
+        name explicitly, mirroring ``_gain_lift_score_matrix``'s
+        ``chart_name=`` parametrization for the same reason: one adapter
+        method, multiple public callers, and the #208 message idiom
+        requires naming the caller actually invoked, not just any
+        consumer). ``predictions()`` is also the shared
+        ``DiagnosticSource`` protocol method ``ModelSource`` implements
+        with no such parameter -- keeping it optional here means
+        ``source.predictions()`` still dispatches polymorphically for
+        callers that don't need to override the name.
         """
+        _require_1d_y_pred(self._y_pred_np, chart_name=chart_name, kind="fitted values")
         y_true = self._y_true_np.astype(np.float64)
         y_pred = self._y_pred_np.astype(np.float64)
         residual = y_true - y_pred
@@ -296,9 +375,16 @@ class _PrecomputedSource:
 
         y_true = self._y_true_np
         y_pred = self._y_pred_np  # 1-D positive-class scores
+        _require_1d_y_pred(
+            y_pred, chart_name="discrimination_threshold_chart", kind="positive-class scores"
+        )
 
         unique = np.unique(y_true)
         if len(unique) != 2:
+            # Pre-existing, strict binary-only rule (unchanged by #208):
+            # unlike roc/pr/gain/lift's 1-D path, a degenerate single-class
+            # target was never accepted here, so this stays `!= 2` rather
+            # than sharing `_require_not_multiclass_for_1d`'s `> 2`.
             raise ValueError(
                 "discrimination_threshold_chart with precomputed inputs requires "
                 f"binary y_true; got {len(unique)} unique classes."

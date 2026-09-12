@@ -12,6 +12,8 @@ and is therefore simpler and faster.
 
 from __future__ import annotations
 
+import warnings
+
 import polars as pl
 import pyarrow as pa
 
@@ -69,22 +71,41 @@ def _y_to_float64_arrow(y) -> pa.Array:
     ``ModelSource`` path already raises, instead of ``numpy``'s more
     permissive string parsing.
 
-    This does **not** make the covariance statistic itself null-aware.
-    ``py_rank1d_with_y`` (``crates/ferrum-core/src/transform/stats/mod.rs``,
-    ``py_rank1d_with_y`` / around L402-407) reads the Arrow array's raw
-    value buffer and never consults the validity bitmap, so a null ``y``
-    slot is read as the buffer's default ``0.0`` and folded into the
-    covariance as a zero-valued observation rather than dropped or
-    otherwise excluded -- on **both** the raw-data and ``ModelSource``
-    arms, since both now build the same null-preserving Arrow array and
-    feed the same kernel. This is pre-existing Rust-kernel behavior, not
-    introduced here; it is tracked as a separate Rust-side follow-up
-    (`py_rank1d_with_y` should decide and implement an explicit null
-    policy -- e.g. drop-row -- rather than silently zero-impute), not
-    something this Python-side coercion fix can or should change.
+    This *does* make the covariance statistic null-aware, as of the #204
+    fix (``crates/ferrum-core/src/transform/stats/mod.rs``,
+    ``py_rank1d_with_y``): the kernel now reads the Arrow array's validity
+    bitmap and drops any row whose ``y`` slot is null before ranking,
+    rather than reading the value buffer's default ``0.0`` and folding it
+    in as a real zero observation -- on **both** the raw-data and
+    ``ModelSource`` arms, since both build the same null-preserving Arrow
+    array and feed the same kernel. Dropping rows is still a real,
+    user-visible change to the sample the statistic is computed over, so
+    :func:`rank1d_compute_with_y` and ``RankingMixin.rank1d`` both warn
+    when it happens (naming the dropped row count) via
+    :func:`_warn_null_y_dropped`, rather than leaving the row count change
+    invisible.
     """
     y_ser = y if isinstance(y, pl.Series) else pl.Series("y", y)
     return pa.array(y_ser.to_list(), type=pa.float64())
+
+
+def _warn_null_y_dropped(algorithm: str, n_null: int, *, stacklevel: int) -> None:
+    """Warn that ``py_rank1d_with_y`` dropped null-``y`` rows before ranking (#204).
+
+    The Rust kernel is validity-aware: a null ``y`` slot is dropped from
+    the sample instead of being read as the value buffer's default
+    ``0.0`` and folded in as a real zero observation. Row-dropping still
+    changes what the statistic is computed over, so both callers --
+    the raw-data path (:func:`rank1d_compute_with_y`) and the
+    ``ModelSource`` path (``RankingMixin.rank1d``, ``sources/_ranking.py``)
+    -- name the drop instead of leaving it invisible.
+    """
+    warnings.warn(
+        f"rank1d(algorithm={algorithm!r}): dropped {n_null} row(s) with a "
+        "null y value before ranking.",
+        UserWarning,
+        stacklevel=stacklevel,
+    )
 
 
 def rank1d_compute(
@@ -111,6 +132,8 @@ def rank1d_compute_with_y(
 
     batch = polars_or_array_to_record_batch(X)
     y_arrow = _y_to_float64_arrow(y)
+    if y_arrow.null_count:
+        _warn_null_y_dropped(algorithm, y_arrow.null_count, stacklevel=3)
     result = py_rank1d_with_y(batch, y_arrow, algorithm, top_k)
     return pl.from_arrow(result)
 

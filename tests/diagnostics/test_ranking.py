@@ -184,6 +184,44 @@ def test_rank1d_chart_covariance_raw_dataframe_null_y_matches_model_source():
     assert svg.count("<rect") >= len(_REGRESSION_FEATURES)
 
 
+def test_rank1d_compute_with_y_null_y_warns_with_dropped_count():
+    # #204: the Rust kernel drops null-y rows instead of zero-imputing
+    # (T14); the raw-data caller must name the drop, not leave it silent.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y_list = load_dataset("regression")["y"].to_list()
+    y_list[0] = None
+    y_list[3] = None
+    y_null = pl.Series("y", y_list)
+
+    from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
+
+    with pytest.warns(UserWarning, match="dropped 2 row"):
+        rank1d_compute_with_y(df, y_null, algorithm="covariance")
+
+
+def test_modelsource_rank1d_covariance_null_y_warns_with_dropped_count():
+    # #204: the ModelSource covariance arm must name the drop identically
+    # to the raw-data arm above -- both callers of py_rank1d_with_y.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y_list = load_dataset("regression")["y"].to_list()
+    y_list[0] = None
+    y_null = pl.Series("y", y_list)
+    model = load_fixture("regression_ridge")
+
+    with pytest.warns(UserWarning, match="dropped 1 row"):
+        ferrum.ModelSource(model, df, y_null).rank1d(algorithm="covariance")
+
+
+def test_rank1d_chart_covariance_no_null_y_emits_no_warning(recwarn):
+    # A fully-populated y must not warn -- the drop-count message is
+    # conditional on null_count > 0, not unconditional.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y = load_dataset("regression")["y"]
+    ferrum.rank1d_chart(df, y=y, algorithm="covariance")
+    user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+    assert not user_warnings, [str(w.message) for w in user_warnings]
+
+
 def test_rank1d_chart_covariance_string_y_raises_identically_on_both_arms():
     # Quality-review S2 pin: before _y_to_float64_arrow, a numeric-looking
     # string y silently rendered on the raw arm (numpy string-parsed it via
@@ -270,6 +308,35 @@ def test_rank1d_chart_covariance_fitted_estimator_with_x_matches_model_source_pa
 
     chart = ferrum.rank1d_chart(model, df, y, algorithm="covariance")
     via_model_source = ferrum.rank1d_chart(ferrum.ModelSource(model, df, y), algorithm="covariance")
+    assert chart.to_svg() == via_model_source.to_svg()
+
+
+@pytest.mark.parametrize("algorithm", ["shapiro", "variance"])
+def test_rank1d_chart_non_covariance_fitted_estimator_no_x_typed_refusal(algorithm):
+    # #216: the is_raw_data hoist must gate EVERY algorithm, not just
+    # "covariance" -- a fitted estimator with no X used to leak a
+    # TypeError from np.asarray() for shapiro/variance because the
+    # raw-vs-model probe only ran inside the covariance branch.
+    y = load_dataset("regression")["y"]
+    model = load_fixture("regression_ridge")
+    with pytest.raises(ValueError, match="requires the training data"):
+        ferrum.rank1d_chart(model, y=y, algorithm=algorithm)
+
+
+def test_rank2d_chart_fitted_estimator_no_x_typed_refusal():
+    # #216: rank2d_chart had no is_raw_data probe at all -- every algorithm
+    # fell through to the raw-data path and leaked a TypeError.
+    model = load_fixture("regression_ridge")
+    with pytest.raises(ValueError, match="requires the training data"):
+        ferrum.rank2d_chart(model)
+
+
+def test_rank2d_chart_fitted_estimator_with_x_matches_model_source_path():
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    model = load_fixture("regression_ridge")
+
+    chart = ferrum.rank2d_chart(model, df)
+    via_model_source = ferrum.rank2d_chart(ferrum.ModelSource(model, df))
     assert chart.to_svg() == via_model_source.to_svg()
 
 

@@ -391,6 +391,30 @@ def test_no_display_surface_names_a_metric_twice():
         )
 
 
+# ---- Null group values skipped (#220) ----------------------------------------
+
+
+def test_apply_metric_label_skips_null_color_group(recwarn):
+    """A null ``color_col`` value (e.g. an injected iso-line sentinel row)
+    must not reach ``pl.col(color_col) == cls``, which always evaluates to
+    null in polars and warns "Comparisons with None always result in
+    null" -- the same guard ``_curve_metrics_by_group`` already applies.
+    """
+    df = pl.concat(
+        [
+            _roc_data("c0"),
+            _roc_data("c1"),
+            pl.DataFrame({"fpr": [0.5], "tpr": [0.5], "class": [None]}),
+        ],
+        how="diagonal",
+    )
+    chart = Chart(df).encode(x="fpr", y="tpr", color="class").mark_line() + AUCLabel()
+    svg = chart.to_svg()
+    assert svg.count("AUC =") == 2
+    user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+    assert not user_warnings, [str(w.message) for w in user_warnings]
+
+
 def test_broadcast_metric_rejects_an_unknown_kind():
     """Every metric lookup validates its kind. `_broadcast_metric` was the
     one direct caller that bypassed `_curve_metric`'s check, so a typo gave

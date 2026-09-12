@@ -342,6 +342,32 @@ def _charts_with_endpoint_labels(
     )
 
 
+def _is_raw_tabular_data(value: Any) -> bool:
+    """Return ``True`` when ``value`` is raw tabular data, not a fitted estimator.
+
+    Distinguishes "raw data the caller wants ranked/decomposed directly"
+    (a polars/pandas DataFrame or a 2-D numpy array) from "a fitted
+    estimator whose attributes must be resolved through a ``ModelSource``".
+    ``rank1d_chart``/``rank2d_chart`` (``plots/ranking.py``) and
+    ``pca_scree_chart`` (``plots/clustering.py``) all need this probe before
+    dispatching, so a fitted estimator that reaches the raw-data path
+    doesn't get handed to ``np.asarray()``/``polars_or_array_to_record_batch()``
+    and leak an internal ``TypeError`` instead of the typed ``ModelSource``
+    refusal (#216). Previously hand-copied at three call sites.
+    """
+    import numpy as np
+
+    if isinstance(value, pl.DataFrame):
+        return True
+    if isinstance(value, np.ndarray) and value.ndim == 2:
+        return True
+    try:
+        import pandas as pd
+    except ImportError:
+        return False
+    return isinstance(value, pd.DataFrame)
+
+
 def _should_facet_by_class(df: pl.DataFrame, *, per_class: bool) -> bool:
     """Decide whether a SHAP chart facets by ``class_label``.
 

@@ -35,6 +35,7 @@ from ferrum.plots._helpers import (
     _UNSET,
     _compose_compare,
     _finalize_chart,
+    _is_raw_tabular_data,
     _reject_compare,
     _resolve_first_param,
     _resolve_source,
@@ -609,21 +610,7 @@ def pca_scree_chart(
     import numpy as np
     import pyarrow as pa
 
-    is_raw_data = False
-    if isinstance(model, pl.DataFrame):
-        is_raw_data = True
-    elif isinstance(model, np.ndarray) and model.ndim == 2:
-        is_raw_data = True
-    else:
-        try:
-            import pandas as pd
-
-            if isinstance(model, pd.DataFrame):
-                is_raw_data = True
-        except ImportError:
-            pass
-
-    if is_raw_data:
+    if _is_raw_tabular_data(model):
         if compare is not None:
             raise ValueError(
                 "pca_scree_chart: compare= requires a fitted PCA estimator; "

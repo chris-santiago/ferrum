@@ -33,6 +33,7 @@ from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
     _finalize_chart,
+    _is_raw_tabular_data,
     _resolve_first_param,
     _resolve_source,
     _warn_deprecated_dispatcher,
@@ -288,49 +289,33 @@ def rank1d_chart(
     algo = algorithm or "shapiro"
     if isinstance(data_or_source, ferrum.ModelSource):
         df = data_or_source.rank1d(algorithm=algo)
-    elif algo == "covariance":
-        # Raw-vs-model detection mirrors clustering.py's pca_scree_chart
-        # is_raw_data idiom (plots/clustering.py:612-624): a fitted
-        # estimator is not raw tabular data, so it must not take the
-        # raw-data path below -- doing so would hand the estimator object
-        # itself to np.asarray()/polars_or_array_to_record_batch() and leak
-        # an internal TypeError instead of the typed ModelSource refusal.
-        import numpy as np
-
-        is_raw_data = False
-        if isinstance(data_or_source, pl.DataFrame):
-            is_raw_data = True
-        elif isinstance(data_or_source, np.ndarray) and data_or_source.ndim == 2:
-            is_raw_data = True
-        else:
-            try:
-                import pandas as pd
-
-                if isinstance(data_or_source, pd.DataFrame):
-                    is_raw_data = True
-            except ImportError:
-                pass
-
-        if is_raw_data:
+    elif _is_raw_tabular_data(data_or_source):
+        input_data = data_or_source if X is None else X
+        if algo == "covariance":
             from ferrum.diagnostics._internal._rank_helpers import rank1d_compute_with_y
 
             if y is None:
                 raise ValueError("rank1d_chart(algorithm='covariance') requires y.")
-            input_data = data_or_source if X is None else X
             df = rank1d_compute_with_y(input_data, y, algorithm=algo)
         else:
-            ms = _resolve_source(
-                data_or_source,
-                X,
-                y,
-                random_state=random_state,
-            )
-            df = ms.rank1d(algorithm=algo)
-    else:
-        from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
+            from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
 
-        input_data = data_or_source if X is None else X
-        df = rank1d_compute(input_data, algorithm=algo)
+            df = rank1d_compute(input_data, algorithm=algo)
+    else:
+        # #216: a fitted estimator (not raw data, not already a ModelSource)
+        # must route through _resolve_source for EVERY algorithm, not just
+        # "covariance" -- falling through to the raw-data branch above would
+        # hand the estimator object itself to np.asarray()/
+        # polars_or_array_to_record_batch() and leak an internal TypeError
+        # instead of the typed ModelSource refusal (is_raw_data hoisted out
+        # of the covariance-only arm it used to live in).
+        ms = _resolve_source(
+            data_or_source,
+            X,
+            y,
+            random_state=random_state,
+        )
+        df = ms.rank1d(algorithm=algo)
     return _rank1d_chart_from_dataframe(
         df,
         algorithm=algo,
@@ -423,11 +408,17 @@ def rank2d_chart(
     algo = algorithm or "pearson"
     if isinstance(data_or_source, ferrum.ModelSource):
         df = data_or_source.rank2d(algorithm=algo)
-    else:
+    elif _is_raw_tabular_data(data_or_source):
         from ferrum.diagnostics._internal._rank_helpers import rank2d_compute
 
         input_data = data_or_source if X is None else X
         df = rank2d_compute(input_data, algorithm=algo)
+    else:
+        # #216: same is_raw_data hoist as rank1d_chart -- a fitted estimator
+        # must resolve through ModelSource for every algorithm, not leak
+        # into np.asarray() as a raw-data fallback.
+        ms = _resolve_source(data_or_source, X, y, random_state=random_state)
+        df = ms.rank2d(algorithm=algo)
     return _rank2d_chart_from_dataframe(
         df,
         algorithm=algo,

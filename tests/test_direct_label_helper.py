@@ -26,3 +26,24 @@ def test_direct_label_endpoint_bails_when_label_field_missing():
     chart = _direct_label_endpoint(base, label_field="missing")
     # Returned chart is the original — the augmented column is never added.
     assert "_direct_label_text" not in chart._data.columns
+
+
+def test_direct_label_endpoint_skips_null_group_values(recwarn):
+    """#220 sibling defect: a null ``label_field`` value (e.g. an injected
+    sentinel row) must not reach ``pl.col(label_field) == series``, which
+    always evaluates to null in polars and warns "Comparisons with None
+    always result in null"."""
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 1, 2, 3, 1],
+            "y": [0.5, 0.6, 0.7, 0.4, 0.5, 0.5, 0.9],
+            "split": ["train", "train", "train", "val", "val", "val", None],
+        }
+    )
+    base = Chart(df).encode(x="x", y="y", color="split").mark_line()
+    chart = _direct_label_endpoint(base, label_field="split")
+    svg = chart.to_svg()
+    assert ">train<" in svg
+    assert ">val<" in svg
+    user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+    assert not user_warnings, [str(w.message) for w in user_warnings]

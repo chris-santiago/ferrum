@@ -79,7 +79,11 @@ def _direct_label_endpoint(
     labels_col: list[str | None] = [None] * n
     label_y_col: list[float | None] = [None] * n
 
-    series_list = sorted(df[label_field].unique().to_list(), key=str)
+    # Null group values are skipped (#220 sibling defect): a null
+    # label_field value (e.g. from an injected sentinel/iso-line row)
+    # would otherwise reach `pl.col(label_field) == series` below, which
+    # always evaluates to null in polars and raises a UserWarning.
+    series_list = sorted((v for v in df[label_field].unique().to_list() if v is not None), key=str)
     series_endpoints: list[tuple[str, int, float, float]] = []
     descending = position == "end"
     for series in series_list:

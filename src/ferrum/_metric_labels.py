@@ -353,7 +353,15 @@ def _apply_metric_label(
     corner = label.position == "corner"
 
     if color_col is not None and color_col in df.columns:
-        unique_colors = sorted(df[color_col].unique().to_list(), key=str)
+        # Null group values are skipped (#220), mirroring
+        # _curve_metrics_by_group's guard above: an iso-line overlay (e.g.
+        # pr_chart(iso_lines=True)) concats rows whose color column is
+        # null, and `pl.col(color_col) == None` always evaluates to null
+        # in polars -- filtering it out here avoids a UserWarning for every
+        # unique-color loop iteration.
+        unique_colors = sorted(
+            (v for v in df[color_col].unique().to_list() if v is not None), key=str
+        )
         for stack_i, cls in enumerate(unique_colors):
             group = df.filter(pl.col(color_col) == cls)
             if group.is_empty():

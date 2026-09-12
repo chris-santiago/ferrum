@@ -562,3 +562,126 @@ def test_precomputed_1d_binary_negative_class_ranks_by_one_minus_p():
     cum_pos = np.cumsum(y_bin_neg[neg_order])
     expected_gain = np.concatenate([[0.0], cum_pos / max(int(cum_pos[-1]), 1)])
     np.testing.assert_allclose(neg_gain["gain"].to_numpy(), expected_gain, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# #208 — the 9x7 precomputed shape-matrix's non-OK cells refuse typed
+# ---------------------------------------------------------------------------
+
+_WIDTH_MISMATCH_CHARTS = [
+    (ferrum.roc_chart, "roc_chart"),
+    (ferrum.pr_chart, "pr_chart"),
+    (ferrum.gain_chart, "gain_chart"),
+    (ferrum.lift_chart, "lift_chart"),
+]
+
+
+@pytest.mark.parametrize("chart_fn, name", _WIDTH_MISMATCH_CHARTS)
+def test_precomputed_2d_width_mismatch_refuses(multi_precomputed, chart_fn, name):
+    """A 2-D y_pred whose column count != the class count refuses typed,
+    naming both numbers -- previously an IndexError leak (gain/lift) or a
+    silent wrong-column read (roc/pr, dropping the excess class)."""
+    y_true, y_pred_2d, _ = multi_precomputed
+    narrowed = y_pred_2d[:, :-1]  # one column short of the true class count
+    with pytest.raises(ValueError, match=f"{name}: y_pred has"):
+        chart_fn(y_true=y_true, y_pred=narrowed)
+
+
+@pytest.mark.parametrize("chart_fn, name", _WIDTH_MISMATCH_CHARTS)
+def test_precomputed_1d_multiclass_refuses(multi_precomputed, chart_fn, name):
+    """A 1-D y_pred (a single positive-class score) against multiclass
+    y_true refuses -- previously roc/pr silently mapped it to
+    ``[unique[0], unique[-1]]`` (dropping every class in between) and
+    gain/lift raised an untyped IndexError; the family now answers this
+    shape one way, matching discrimination_threshold's existing refusal."""
+    y_true, y_pred_2d, _ = multi_precomputed
+    with pytest.raises(ValueError, match=f"{name} with a 1-D y_pred requires binary"):
+        chart_fn(y_true=y_true, y_pred=y_pred_2d[:, 0])
+
+
+def test_calibration_chart_precomputed_2d_refuses(binary_precomputed):
+    y_true, _, y_pred_2d, _ = binary_precomputed
+    with pytest.raises(ValueError, match="calibration_chart requires 1-D"):
+        ferrum.calibration_chart(y_true=y_true, y_pred=y_pred_2d)
+
+
+def test_confusion_matrix_chart_precomputed_2d_refuses(binary_precomputed):
+    y_true, _, y_pred_2d, _ = binary_precomputed
+    with pytest.raises(ValueError, match="confusion_matrix_chart requires 1-D"):
+        ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred_2d)
+
+
+def test_classification_report_chart_precomputed_2d_refuses(binary_precomputed):
+    y_true, _, y_pred_2d, _ = binary_precomputed
+    with pytest.raises(ValueError, match="classification_report_chart requires 1-D"):
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred_2d)
+
+
+def test_residuals_chart_precomputed_2d_refuses(regression_precomputed):
+    y_true, y_pred = regression_precomputed
+    y_pred_2d = np.column_stack([y_pred, y_pred])
+    with pytest.raises(ValueError, match="residuals_chart requires 1-D"):
+        ferrum.residuals_chart(y_true=y_true, y_pred=y_pred_2d)
+
+
+def test_prediction_error_chart_precomputed_2d_refuses(regression_precomputed):
+    """``predictions()`` is a shared adapter method consumed by TWO public
+    figure functions -- residuals_chart (above) and prediction_error_chart
+    (here). A malformed y_pred reaching prediction_error_chart must name
+    prediction_error_chart, not residuals_chart (spec review finding:
+    predictions() previously hardcoded chart_name="residuals_chart"
+    unconditionally)."""
+    y_true, y_pred = regression_precomputed
+    y_pred_2d = np.column_stack([y_pred, y_pred])
+    with pytest.raises(ValueError, match="prediction_error_chart requires 1-D"):
+        ferrum.prediction_error_chart(y_true=y_true, y_pred=y_pred_2d)
+
+
+def test_discrimination_threshold_chart_precomputed_2d_refuses(binary_precomputed):
+    y_true, _, y_pred_2d, _ = binary_precomputed
+    with pytest.raises(ValueError, match="discrimination_threshold_chart requires 1-D"):
+        ferrum.discrimination_threshold_chart(y_true=y_true, y_pred=y_pred_2d)
+
+
+@pytest.mark.parametrize(
+    "chart_fn", [ferrum.roc_chart, ferrum.pr_chart, ferrum.gain_chart, ferrum.lift_chart]
+)
+def test_precomputed_1d_degenerate_single_class_still_renders(chart_fn):
+    """A degenerate single-class y_true (all-same) is not multiclass -- it
+    is the pre-existing "one class present, both slots describe it"
+    shape that binary_class_values already handles (NaN AUC/AP, curve
+    still renders). #208's 1-D-vs-multiclass refusal must not catch this
+    case (regression guard for the width-check's own edge)."""
+    y_true = np.array([0, 0, 0, 0])
+    y_pred = np.array([0.1, 0.3, 0.7, 0.9])
+    chart = chart_fn(y_true=y_true, y_pred=y_pred)
+    assert "<svg" in chart.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# #208 + #220 — shared multiclass + iso-lines + precomputed fixture
+# ---------------------------------------------------------------------------
+
+
+def test_pr_chart_precomputed_multiclass_iso_lines_renders(multi_precomputed):
+    """The #208 OK cell (2-D y_pred whose width matches the class count)
+    still renders correctly with iso_lines=True layered on top."""
+    y_true, y_pred_2d, _ = multi_precomputed
+    chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred_2d, iso_lines=True)
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    for f in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
+        assert f in svg
+
+
+def test_pr_chart_precomputed_multiclass_iso_lines_no_null_comparison_warning(
+    multi_precomputed, recwarn
+):
+    """#220: iso_lines=True vertically concats rows whose color/group
+    column is null; the group enumerator in ``_apply_metric_label``
+    (``annotate_ap=True`` is the pr_chart default) must skip them instead
+    of comparing ``None`` with ``==``, which polars always warns on."""
+    y_true, y_pred_2d, _ = multi_precomputed
+    ferrum.pr_chart(y_true=y_true, y_pred=y_pred_2d, iso_lines=True)
+    user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
+    assert not user_warnings, [str(w.message) for w in user_warnings]

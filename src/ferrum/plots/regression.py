@@ -385,8 +385,21 @@ def _prediction_error_chart_from_source(
       around the identity line.
     """
     import ferrum
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
-    df = source.predictions().sort("y_true")
+    # #208: predictions() is a shared DiagnosticSource protocol method
+    # (ModelSource and _PrecomputedSource both implement it), but only
+    # _PrecomputedSource's y_pred shape can be malformed -- pass this
+    # builder's own public name so a bad shape refuses as
+    # "prediction_error_chart requires 1-D fitted values...", not
+    # predictions()'s other caller's name (residuals_chart). Mirrors the
+    # isinstance(source, _PrecomputedSource) idiom already used in
+    # classification.py for the same "adapter method, two public callers"
+    # shape.
+    if isinstance(source, _PrecomputedSource):
+        df = source.predictions(chart_name="prediction_error_chart").sort("y_true")
+    else:
+        df = source.predictions().sort("y_true")
     # Internal invariant: the residual band (``ci`` / ``reference_band``) is a
     # single-model aggregate, so this builder must be handed a single-model
     # source when a band is requested. ``prediction_error_chart`` enforces this

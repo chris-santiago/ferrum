@@ -41,10 +41,13 @@ class RankingMixin(_MixinBase):
         if algorithm == "covariance":
             import pyarrow as pa
             from ferrum._core import py_rank1d_with_y
+            from ferrum.diagnostics._internal._rank_helpers import _warn_null_y_dropped
 
             if self._y is None:
                 raise ValueError("ModelSource.rank1d(algorithm='covariance') requires y.")
             y_arrow = pa.array(self._y.to_list(), type=pa.float64())
+            if y_arrow.null_count:
+                _warn_null_y_dropped(algorithm, y_arrow.null_count, stacklevel=3)
             result = py_rank1d_with_y(x_arrow, y_arrow, algorithm, None)
         else:
             from ferrum._core import py_rank1d
