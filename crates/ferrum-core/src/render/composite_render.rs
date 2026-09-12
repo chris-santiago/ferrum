@@ -214,6 +214,32 @@ impl From<CompositeResolveError> for CompositeRenderError {
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// True for a [`RenderWarning`] variant whose content is a function of a
+/// user-authored CONFIG surface, not of the leaf's own data or encoding
+/// (#140). A composite that structurally replicates one config declaration
+/// across N leaves (Repeat/facet cloning the same chart-level override into
+/// every panel) makes each leaf's `apply_chart_config_pipeline` call
+/// independently rediscover the SAME user mistake, so the figure-level
+/// aggregation in [`render_composite_scene`] dedupes these by [`PartialEq`]
+/// before pushing — the composite reports the mistake once, not N times.
+///
+/// Deliberately narrow: every OTHER warning variant this wave added
+/// (`Transform`, `GroupCardinalityDegenerate`, `MarkBuildEmpty`, the rolled-up
+/// `AnnotationSuppressedByBreak`/`AnnotationSpansBreakGap`,
+/// `UnknownColorScheme`) is derived from that leaf's own data or its own
+/// literal encoding/scale resolution, so two leaves independently producing
+/// byte-identical warning content are two independent facts, not one
+/// declaration counted twice — they must keep fanning out
+/// (`hconcat_two_independent_offending_line_leaves_each_warn_once` pins this
+/// for `UnsupportedColorScaleOnMark`; the same reasoning applies to every
+/// per-leaf-data variant, not just that one). `ConfigSurfaceNotPresent` is
+/// the sole current member; the predicate is named for the SHAPE (config-key,
+/// not data-condition) so a future config-surface warning of the same shape
+/// joins it explicitly rather than by accident.
+fn is_figure_level_dedupable(warning: &RenderWarning) -> bool {
+    matches!(warning, RenderWarning::ConfigSurfaceNotPresent { .. })
+}
+
 /// Render a validated composite tree into one [`SceneGraph`], plus every
 /// leaf's [`RenderWarning`]s aggregated in leaf pre-order.
 ///
@@ -354,7 +380,15 @@ pub(crate) fn render_composite_scene(
         bundles.push(bundle);
         // Aggregated in leaf pre-order (the same order `leaves`/`flatten_leaf_specs`
         // produce), matching `render_svg`'s single-scene warning contract.
-        warnings.extend(leaf_warnings);
+        // Figure-level config-key warnings dedupe by `PartialEq` here (#140);
+        // per-leaf data-condition warnings fan out untouched — see
+        // `is_figure_level_dedupable`'s doc for which is which.
+        for w in leaf_warnings {
+            if is_figure_level_dedupable(&w) && warnings.contains(&w) {
+                continue;
+            }
+            warnings.push(w);
+        }
     }
 
     let merge_ctx = MergeCtx {
@@ -3824,6 +3858,59 @@ mod tests {
             2,
             "each independent line leaf must warn on its own; hconcat is not an Overlay \
              group, so neither is exempted: {warnings:?}"
+        );
+    }
+
+    /// #140: three leaves that each independently apply the SAME `axis_y2`
+    /// config surface override (none has a secondary axis) must warn
+    /// `ConfigSurfaceNotPresent` ONCE at the composite boundary, not once per
+    /// leaf — the user made one config mistake, and structural replication
+    /// across leaves (Repeat/facet-style) must not multiply it. Sibling to
+    /// `hconcat_two_independent_offending_line_leaves_each_warn_once` above:
+    /// that test pins a genuinely PER-LEAF data-condition warning
+    /// (`UnsupportedColorScaleOnMark`) staying fanned out; this one pins the
+    /// figure-level config-key warning collapsing instead of doing the same.
+    #[test]
+    fn hconcat_three_leaves_same_axis_y2_config_surface_warns_once() {
+        use crate::render::chart_config::{AxisConfigSpec, AxisStyleSpec};
+
+        let axis_y2_cfg = ChartConfig {
+            axis_y2: Some(AxisConfigSpec {
+                style: AxisStyleSpec {
+                    tick_count: Some(3),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let h0 = LeafHold { chart_config: axis_y2_cfg.clone(), ..hold() };
+        let h1 = LeafHold { chart_config: axis_y2_cfg.clone(), ..hold() };
+        let h2 = LeafHold { chart_config: axis_y2_cfg, ..hold() };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                leaf_node_with(h0.spec.clone(), 0),
+                leaf_node_with(h1.spec.clone(), 1),
+                leaf_node_with(h2.spec.clone(), 2),
+            ],
+        );
+        let leaves = [
+            leaf_input(&h0, 300.0, 200.0),
+            leaf_input(&h1, 300.0, 200.0),
+            leaf_input(&h2, 300.0, 200.0),
+        ];
+        let (_scene, warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let surface_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::ConfigSurfaceNotPresent { section } if section == "axis_y2"))
+            .collect();
+        assert_eq!(
+            surface_warnings.len(),
+            1,
+            "three leaves applying the SAME axis_y2 config surface must warn once at the \
+             composite boundary, not once per leaf: {warnings:?}"
         );
     }
 
