@@ -7,7 +7,9 @@ public API surface matches the spec.
 
 import math
 import pytest
+import polars as pl
 
+import ferrum as fm
 from ferrum import (
     DivergingScale,
     LinearScale,
@@ -286,3 +288,108 @@ def test_ordinal_nice_is_identity():
     n = s.nice()
     assert n.domain == s.domain
     assert n.range == s.range
+
+
+# ---------- render-side raw-dict domain/range shape refusal (#152) ----------
+#
+# The tests above exercise the CLASS spelling (`LinearScale(domain=[...])`),
+# which already refuses a bad shape at construction, before rendering is ever
+# reached. `scale={'type': 'linear', 'domain': [5.0]}` is a distinct spelling
+# that skips every pyclass constructor entirely: it is a legal wire KEY the
+# raw-dict gate (`tests/test_scale_dict_gate.py`) accepts, with a malformed
+# VALUE the gate never inspects. Pre-fix, that shape reached
+# `LinearScale::new_internal`'s (or a sibling continuous scale's) unchecked
+# `domain[1]` indexing at RENDER time and panicked `index out of bounds`
+# across the PyO3 boundary as a raw `PanicException`, instead of raising.
+# These tests render (not just build) a chart with a raw-dict scale, on all
+# 7 continuous wire types, to prove the render-time funnel
+# (`resolve_continuous_domain_and_range` /
+# `validate_explicit_continuous_shape` in
+# `crates/ferrum-core/src/render/scale_resolve/positional.rs`) now refuses
+# typed instead of panicking — the funnel-level acceptance matrix itself
+# (7 kinds x domain/range x length/degenerate) is proven exhaustively in Rust
+# (`positional.rs::tests::explicit_continuous_domain_range_shape_matrix`);
+# this is the PyO3-crossing proof for the exact raw-dict spelling.
+#
+# Scoped to LENGTH only, deliberately NOT degeneracy, unlike the class
+# spelling's own `validate_continuous_domain` (which does refuse a degenerate
+# `[c, c]` domain, per `test_linear_rejects_degenerate_domain` above): a
+# raw-dict domain reaching this funnel is indistinguishable from a reactive
+# `domainParam`'s current substituted value (`fm.param(..., value=[5, 5])`),
+# and `tests/test_bug_hunt_reactive_params.py
+# ::TestDomainParamDegenerate::test_collapsed_domain_no_nan` already pins
+# that a degenerate domainParam value must keep rendering gracefully, not
+# refuse — see the Rust doc comment on `validate_explicit_continuous_shape`
+# for the full account of why widening the render-side refusal to match the
+# class spelling's degenerate check is NOT safe here.
+
+_CONTINUOUS_WIRE_TYPES = ["linear", "log", "time", "symlog", "pow", "sqrt", "utc"]
+
+
+def _positional_domain_for(scale_type: str) -> list[float]:
+    """A domain valid for `scale_type` — `log`/`symlog` need one that
+    respects their own sign constraints; every other continuous type
+    tolerates the plain `[0.0, 100.0]` default.
+    """
+    if scale_type == "symlog":
+        return [-10.0, 10.0]
+    if scale_type == "log":
+        return [1.0, 100.0]
+    return [0.0, 100.0]
+
+
+def _render_with_raw_dict_scale(scale_type: str, **overrides: object) -> str:
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [0.0, 100.0, 50.0]})
+    scale = {"type": scale_type, **overrides}
+    chart = fm.Chart(df).mark_point().encode(x=fm.X("x", scale=scale), y="y")
+    return chart.to_svg()
+
+
+@pytest.mark.parametrize("scale_type", _CONTINUOUS_WIRE_TYPES)
+def test_raw_dict_single_element_domain_refuses_not_panics(scale_type: str) -> None:
+    """#152 RED proof: a raw-dict single-element `domain` used to panic at
+    render time on every continuous wire type; now refuses typed, matching
+    `LinearScale(domain=[5.0])`'s own construction-time message (pinned
+    above in `test_linear_rejects_wrong_domain_length`).
+    """
+    with pytest.raises(ValueError, match="domain must have length 2"):
+        _render_with_raw_dict_scale(scale_type, domain=[5.0])
+
+
+@pytest.mark.parametrize("scale_type", _CONTINUOUS_WIRE_TYPES)
+def test_raw_dict_degenerate_domain_still_renders(scale_type: str) -> None:
+    """A raw-dict degenerate `domain=[c, c]` is NOT refused, unlike
+    `LinearScale(domain=[5.0, 5.0])`'s own construction-time refusal
+    (`test_linear_rejects_degenerate_domain` above): this exact shape is
+    also what a reactive `domainParam`'s current value looks like once
+    substituted (see the module-doc note above), and
+    `test_bug_hunt_reactive_params.py::test_collapsed_domain_no_nan` already
+    requires that a degenerate domainParam value keep rendering gracefully
+    — a raw-dict literal domain converges to the identical wire shape, so it
+    must render the same way, not refuse.
+    """
+    svg = _render_with_raw_dict_scale(scale_type, domain=[5.0, 5.0])
+    assert "<svg" in svg
+
+
+@pytest.mark.parametrize("scale_type", _CONTINUOUS_WIRE_TYPES)
+def test_raw_dict_single_element_range_refuses(scale_type: str) -> None:
+    """The RANGE-side sibling of the length-2 domain refusal above."""
+    with pytest.raises(ValueError, match="range must have length 2"):
+        _render_with_raw_dict_scale(
+            scale_type, domain=_positional_domain_for(scale_type), range=[5.0]
+        )
+
+
+@pytest.mark.parametrize("scale_type", _CONTINUOUS_WIRE_TYPES)
+def test_raw_dict_degenerate_range_still_renders(scale_type: str) -> None:
+    """A degenerate `range=[c, c]` is NOT refused: `LinearScale(range=[5.0,
+    5.0])` was never refused at construction either (`validate_continuous_range`
+    checks length and finiteness only, never degeneracy), so #152 — which
+    only closes the DOMAIN gap — must not start refusing a range shape the
+    class spelling has always accepted.
+    """
+    svg = _render_with_raw_dict_scale(
+        scale_type, domain=_positional_domain_for(scale_type), range=[5.0, 5.0]
+    )
+    assert "<svg" in svg

@@ -98,7 +98,7 @@ pub(in crate::render) fn build_axis_scale(
             x_field: positional_fields.x,
             y_field: positional_fields.y,
         };
-        return build_from_scale_spec(scale_spec, enc, located.batch, pr, &sort_ctx, warnings);
+        return build_from_scale_spec(channel, scale_spec, enc, located.batch, pr, &sort_ctx, warnings);
     }
 
     let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
@@ -284,7 +284,13 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 }
 
 /// Build a ScaleKind from an explicit ScaleSpec, using the given pixel range.
+///
+/// `channel` (`"x"`/`"y"`) is threaded through purely for the #152 explicit-
+/// domain/range shape refusal below — it names the axis in
+/// [`RenderError::InvalidScaleDomainConfig`], the same field
+/// `apply_axis_domain_config`'s sibling refusal on this type already carries.
 pub(in crate::render) fn build_from_scale_spec(
+    channel: &str,
     scale_spec: &crate::spec::encoding::ScaleSpec,
     enc: &crate::spec::encoding::EncodingSpec,
     batch: &RecordBatch,
@@ -300,18 +306,22 @@ pub(in crate::render) fn build_from_scale_spec(
 
     Ok(match scale_spec {
         ScaleSpec::Linear { common, nice, zero } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, *zero, common.reverse)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Log { base, common, nice } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
             ScaleKind::Log(LogScale::new_internal(d, r, *base, common.clamp, *nice))
         }
         ScaleSpec::Time { common, nice } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
         ScaleSpec::Symlog { constant, common, nice } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
             ScaleKind::Symlog(SymlogScale::new_internal(d, r, *constant, common.clamp, *nice))
         }
@@ -334,14 +344,17 @@ pub(in crate::render) fn build_from_scale_spec(
             )
         }
         ScaleSpec::Pow { exponent, common } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, *exponent, common.clamp))
         }
         ScaleSpec::Sqrt { common } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
             ScaleKind::Pow(PowScale::new_internal(d, r, 0.5, common.clamp))
         }
         ScaleSpec::Utc { common, nice } => {
+            validate_explicit_continuous_shape(channel, &common.domain, &common.range)?;
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr, false, common.reverse)?;
             // F-L04-06: `utc=true` survives resolution — the wire tag no
             // longer collapses into an indistinguishable `TimeScale` once
@@ -403,6 +416,17 @@ pub(in crate::render) fn build_from_scale_spec(
         // `ScaleKind::Linear` before minor-tick generation is reached, so
         // they receive linear-subdivided minor ticks (semantic corner,
         // archaeology R7).
+        //
+        // #152 deliberately does NOT call `validate_explicit_continuous_shape`
+        // here: `positional_extent()` (below) already normalizes a Some(..)
+        // domain to exactly 2 elements or `None` before it ever reaches
+        // `resolve_continuous_domain_and_range`, so the length panic #152
+        // fixes cannot reach this arm — a different domain shape (Diverging's
+        // 3-element `[lo, mid, hi]`) is what this family actually carries.
+        // #152's frozen report is specifically the 7 `ContinuousScaleCommon`
+        // variants' `domain`/`range` fields (`scale/linear.rs:134`'s panic);
+        // widening the same refusal onto this sibling family's OWN degenerate
+        // extents is a separate, undisclosed change this task does not make.
         ScaleSpec::Sequential { .. }
         | ScaleSpec::Diverging { .. }
         | ScaleSpec::Quantize { .. }
@@ -465,6 +489,67 @@ fn band_point_pixel_range(range: Option<&[f64]>, pr: (f64, f64)) -> (Vec<f64>, b
         Some(r) if r.len() >= 2 => (vec![r[0], r[1]], true),
         _ => (vec![pr.0, pr.1], false),
     }
+}
+
+/// Refuse an EXPLICIT continuous `domain`/`range` whose LENGTH a raw-dict
+/// scale spec can smuggle past every pyclass constructor's own guard (#152):
+/// `scale={'type': 'linear', 'domain': [5.0]}` is a wire shape the array gate
+/// accepts, and used to reach `LinearScale::new_internal`'s `domain[1]`
+/// indexing unchecked, panicking `index out of bounds` across the PyO3
+/// boundary instead of raising. Reuses `scale::core`'s own length-check
+/// wording (`"domain must have length 2"` / `"range must have length 2"`) so
+/// a raw-dict scale refuses with the exact sentence its pyclass twin
+/// (`LinearScale(domain=...)`, resolved via `scale::core::resolve_continuous`)
+/// already uses for the same shape. `min > max` (a reversed pair) is
+/// deliberately NOT refused, matching the class surface's own
+/// accepted-reversed-axis contract.
+///
+/// Deliberately does NOT also refuse a degenerate `[c, c]` domain/range,
+/// unlike `validate_continuous_domain`'s own sibling check and
+/// `apply_axis_domain_config`'s `InvalidScaleDomainConfig` a few lines above:
+/// `resolve_param_domains`'s reactive `domainParam` substitution (D6) clears
+/// `domain_param` and writes the resolved value straight into this same
+/// `common.domain` field with no surviving marker, so this funnel cannot
+/// distinguish a hand-authored literal domain from a domainParam's current
+/// (possibly transiently degenerate, e.g. a slider mid-drag) value — and
+/// `tests/test_bug_hunt_reactive_params.py::TestDomainParamDegenerate
+/// ::test_collapsed_domain_no_nan` already pins that a degenerate
+/// `domainParam` value must keep rendering (via the scale's own GH #104
+/// zero-span-to-midpoint handling), not refuse. Refusing degenerate domains
+/// here would silently break that sanctioned, pre-existing contract for
+/// every domainParam whose CURRENT value happens to collapse — an
+/// undisclosed regression, not a #152 fix. #152's frozen report is the
+/// length-panic only; the length check above carries no such conflict
+/// (`ParamStore::numeric_domain` already filters a too-short param value to
+/// `None` — auto-infer — before it ever reaches `common.domain`, per
+/// `test_single_element_array_falls_back`).
+///
+/// Called from the seven `ContinuousScaleCommon` arms of
+/// `build_from_scale_spec` ONLY — see the comment on the sibling
+/// "continuous-degrading" arm (`Sequential`/`Diverging`/`Quantize`/
+/// `BinOrdinal`/`Quantile`/`Threshold`) for why that family is out of scope.
+fn validate_explicit_continuous_shape(
+    channel: &str,
+    domain: &Option<Vec<f64>>,
+    range: &Option<Vec<f64>>,
+) -> Result<(), RenderError> {
+    if let Some(d) = domain {
+        if d.len() != 2 {
+            return Err(RenderError::InvalidScaleDomainConfig {
+                channel: channel.to_string(),
+                reason: format!("domain must have length 2; got {}", d.len()),
+            });
+        }
+    }
+    if let Some(r) = range {
+        if r.len() != 2 {
+            return Err(RenderError::InvalidScaleDomainConfig {
+                channel: channel.to_string(),
+                reason: format!("range must have length 2; got {}", r.len()),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `(domain, range)` for a continuous ScaleSpec variant, then apply
@@ -782,6 +867,7 @@ pub(in crate::render) fn apply_axis_domain_config(
 #[cfg(test)]
 mod tests {
     use super::{band_point_pixel_range, ordinal_pixel_range};
+    use crate::render::RenderError;
     use crate::scale::discrete::{CategoricalPlacement, DiscreteLayout};
     use arrow::record_batch::RecordBatch;
     use crate::render::scale_resolve::ScaleKind;
@@ -1069,7 +1155,7 @@ mod tests {
             y_field: None,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec(spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
             .unwrap()
     }
 
@@ -1372,12 +1458,16 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
     }
 
-    fn resolve_scale(
+    /// Resolve `spec` through the real `build_from_scale_spec` arm without
+    /// unwrapping — the shape `resolve_scale` below wants for its happy-path
+    /// callers, and the #152 shape-refusal tests want for their error-path
+    /// ones, so the enc/sort_ctx plumbing isn't hand-duplicated between them.
+    fn try_resolve_scale(
         spec: &crate::spec::encoding::ScaleSpec,
         field: &str,
         batch: &RecordBatch,
         pr: (f64, f64),
-    ) -> ScaleKind {
+    ) -> Result<ScaleKind, RenderError> {
         let enc = crate::spec::encoding::EncodingSpec {
             field: field.into(),
             type_: None,
@@ -1391,7 +1481,16 @@ mod tests {
             y_field: None,
         };
         let mut warnings = Vec::new();
-        super::build_from_scale_spec(spec, &enc, batch, pr, &sort_ctx, &mut warnings).unwrap()
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, &mut warnings)
+    }
+
+    fn resolve_scale(
+        spec: &crate::spec::encoding::ScaleSpec,
+        field: &str,
+        batch: &RecordBatch,
+        pr: (f64, f64),
+    ) -> ScaleKind {
+        try_resolve_scale(spec, field, batch, pr).expect("resolve_scale: expected Ok in this test")
     }
 
     /// A `ContinuousScaleCommon` with everything but `domain`/`range`/`reverse`
@@ -1411,6 +1510,171 @@ mod tests {
             domain_param: None,
             reverse,
         }
+    }
+
+    // ── #152: explicit continuous domain/range LENGTH refusal ──
+    //
+    // `scale={'type': 'linear', 'domain': [5.0]}` is a wire shape the
+    // raw-dict key gate (`test_scale_dict_gate.py`) accepts — a legal key
+    // with a malformed VALUE — and used to reach `LinearScale::new_internal`'s
+    // `domain[1]` indexing unchecked, panicking `index out of bounds: the
+    // len is 1 but the index is 1` at `scale/linear.rs:134` across the PyO3
+    // boundary instead of raising. `resolve_scale`/`try_resolve_scale` above
+    // already resolve through the real `build_from_scale_spec` arm — the
+    // class pyclass spelling (`LinearScale(domain=[5.0])`) and the raw-dict
+    // spelling (`{'type': 'linear', 'domain': [5.0]}`) both deserialize to
+    // this identical `ScaleSpec::Linear` shape before either ever reaches
+    // Rust, so resolving THIS shape covers both Python spellings at once —
+    // `tests/test_scales.py`'s new raw-dict matrix is the render-boundary
+    // (PyO3-crossing) proof for the class-side equivalent already pinned in
+    // that file's constructor tests.
+    //
+    // Scoped to LENGTH only, not degeneracy — see
+    // `validate_explicit_continuous_shape`'s doc comment for why a
+    // degenerate `[c, c]` domain must NOT also refuse here: the reactive
+    // `domainParam` substitution path (D6) writes its current value into
+    // this identical `common.domain` field with no surviving marker, and
+    // `tests/test_bug_hunt_reactive_params.py`'s
+    // `TestDomainParamDegenerate::test_collapsed_domain_no_nan` already pins
+    // that a degenerate domainParam value must keep rendering gracefully.
+
+    /// Isolated regression test for the exact reported shape, ahead of the
+    /// full 7-kind matrix below — a single-element `domain` on `linear`
+    /// refuses typed, byte-pinned, instead of panicking.
+    #[test]
+    fn linear_single_element_domain_refuses_typed_not_panics() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Linear {
+            common: reverse_common(Some(vec![5.0]), None, false),
+            nice: false,
+            zero: false,
+        };
+        let err = try_resolve_scale(&spec, "v", &batch, (0.0, 500.0)).unwrap_err();
+        assert!(
+            matches!(err, RenderError::InvalidScaleDomainConfig { .. }),
+            "expected InvalidScaleDomainConfig, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "x axis scale-domain config: domain must have length 2; got 1"
+        );
+    }
+
+    /// One `ScaleSpec` builder per continuous kind, keyed by its wire `type`
+    /// tag — lets the matrix test below drive all 7 kinds through one body
+    /// instead of seven hand-duplicated copies (mirroring how the file's own
+    /// `reverse`-sugar tests are one-per-kind but share `reverse_common` and
+    /// `resolve_scale`).
+    fn continuous_kind_builders() -> Vec<(
+        &'static str,
+        fn(Option<Vec<f64>>, Option<Vec<f64>>) -> crate::spec::encoding::ScaleSpec,
+    )> {
+        use crate::spec::encoding::ScaleSpec;
+        vec![
+            ("linear", |d, r| ScaleSpec::Linear { common: reverse_common(d, r, false), nice: false, zero: false }),
+            ("log", |d, r| ScaleSpec::Log { base: 10.0, common: reverse_common(d, r, false), nice: false }),
+            ("time", |d, r| ScaleSpec::Time { common: reverse_common(d, r, false), nice: false }),
+            ("symlog", |d, r| ScaleSpec::Symlog { constant: 1.0, common: reverse_common(d, r, false), nice: false }),
+            ("pow", |d, r| ScaleSpec::Pow { exponent: 2.0, common: reverse_common(d, r, false) }),
+            ("sqrt", |d, r| ScaleSpec::Sqrt { common: reverse_common(d, r, false) }),
+            ("utc", |d, r| ScaleSpec::Utc { common: reverse_common(d, r, false), nice: false }),
+        ]
+    }
+
+    /// A domain valid for `kind` — `log` needs a strictly-positive pair
+    /// (its own sign/zero constructor rule, unrelated to #152), every other
+    /// kind tolerates the plain `[0.0, 100.0]` default.
+    fn valid_domain_for(kind: &str) -> Vec<f64> {
+        if kind == "log" { vec![1.0, 100.0] } else { vec![0.0, 100.0] }
+    }
+
+    /// The full #152 acceptance matrix: all 7 `ContinuousScaleCommon` kinds
+    /// x (domain, range) x (length != 2, degenerate), resolved through the
+    /// real `build_from_scale_spec` arm. Both spellings converge to this
+    /// `ScaleSpec` shape (see the section doc above), so this is the
+    /// authoritative coverage for the shape-refusal logic itself; the Python
+    /// suite adds the render-boundary (PyO3-crossing) raw-dict proof on top.
+    #[test]
+    fn explicit_continuous_domain_range_shape_matrix() {
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let pr = (0.0, 500.0);
+
+        for (kind, build) in continuous_kind_builders() {
+            // (1) domain too short refuses, naming the length-2 message.
+            let spec = build(Some(vec![5.0]), None);
+            let err = try_resolve_scale(&spec, "v", &batch, pr).unwrap_err();
+            assert!(
+                err.to_string().contains("domain must have length 2; got 1"),
+                "{kind}: 1-element domain must refuse with the length message, got {err}"
+            );
+
+            // (2) domain too long also refuses (not just too-short).
+            let spec = build(Some(vec![1.0, 2.0, 3.0]), None);
+            let err = try_resolve_scale(&spec, "v", &batch, pr).unwrap_err();
+            assert!(
+                err.to_string().contains("domain must have length 2; got 3"),
+                "{kind}: 3-element domain must refuse too, got {err}"
+            );
+
+            // (3) a degenerate `[c, c]` domain is NOT refused (deliberately
+            // narrower than the pyclass constructor's own
+            // `validate_continuous_domain`): see
+            // `validate_explicit_continuous_shape`'s doc for why — the
+            // reactive `domainParam` substitution path shares this exact
+            // field and must keep rendering a transiently-degenerate value.
+            let spec = build(Some(vec![5.0, 5.0]), None);
+            assert!(
+                try_resolve_scale(&spec, "v", &batch, pr).is_ok(),
+                "{kind}: degenerate domain must still render (domainParam contract), got {:?}",
+                try_resolve_scale(&spec, "v", &batch, pr).err()
+            );
+
+            // (4) range too short refuses (domain omitted -> auto-inferred).
+            let spec = build(None, Some(vec![5.0]));
+            let err = try_resolve_scale(&spec, "v", &batch, pr).unwrap_err();
+            assert!(
+                err.to_string().contains("range must have length 2; got 1"),
+                "{kind}: 1-element range must refuse with the length message, got {err}"
+            );
+
+            // (5) a degenerate `[c, c]` RANGE is NOT refused either: unlike
+            // domain, `validate_continuous_range` never checked degeneracy
+            // even at the pyclass constructor, and #152 only closes the
+            // length-panic gap.
+            let spec = build(Some(valid_domain_for(kind)), Some(vec![5.0, 5.0]));
+            assert!(
+                try_resolve_scale(&spec, "v", &batch, pr).is_ok(),
+                "{kind}: degenerate range must still render, matching the class spelling"
+            );
+        }
+    }
+
+    /// The "continuous-degrading" family (`Sequential`/`Diverging`/
+    /// `Quantize`/etc.) is explicitly OUT of #152's scope (see the doc
+    /// comment on that match arm in `build_from_scale_spec`): its domain
+    /// shape is normalized to exactly 2 elements (or `None`) by
+    /// `ScaleSpec::positional_extent()` before it ever reaches the funnel,
+    /// so the length refusal above cannot apply to it, and a degenerate
+    /// extent must keep rendering exactly as before this task (a Sequential
+    /// color scale used positionally is a corner case, not one #152's
+    /// frozen report names). Pinned so a future refactor that folds this
+    /// family through `validate_explicit_continuous_shape` too must
+    /// consciously re-decide that scope question, not drift into it.
+    #[test]
+    fn continuous_degrading_family_degenerate_extent_still_renders() {
+        use crate::spec::encoding::ScaleSpec;
+        let batch = numeric_batch("v", vec![0.0, 100.0]);
+        let spec = ScaleSpec::Sequential {
+            domain: Some(vec![5.0, 5.0]),
+            scheme: None,
+            reverse: false,
+            stops: None,
+        };
+        assert!(
+            try_resolve_scale(&spec, "v", &batch, (0.0, 500.0)).is_ok(),
+            "the degrading family's own degenerate extent is out of #152's scope"
+        );
     }
 
     /// F-L04-07: `reverse=true` on an auto-inferred domain swaps the
