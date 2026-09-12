@@ -163,7 +163,7 @@ fn apply_grouped(
     group_cols: &[String],
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    grouped_two_column_fit(batch, group_cols, "data_regression", &spec.as_, |ixs| {
+    grouped_two_column_fit(batch, group_cols, "data_regression", &spec.as_, ctx, |ixs| {
         // `grouped_two_column_fit` hands the closure only row indices, not
         // the parsed group key — `describe_group_row` re-derives a label by
         // reading `batch` at `ixs[0]` (see its doc for why this is the
@@ -741,4 +741,44 @@ mod tests {
                 if transform == "RegressionData" && group.as_deref() == Some("g=B")
         ));
     }
+
+    // ── GH #179: output-collision guard at the shared fit template ──────────
+
+    /// `grouped_two_column_fit` appends the group columns to the two fit
+    /// columns, so a groupby name matching either `as_` name would emit two
+    /// same-named fields. It was the one partitioner-routed append site still
+    /// missing the guard (GH #179 residual 1).
+    #[test]
+    fn regression_groupby_colliding_with_a_fit_output_refuses() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 7.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            ],
+        )
+        .unwrap();
+        let spec = RegressionDataSpec {
+            x: "x".into(),
+            y: "y".into(),
+            method: "linear".into(),
+            order: 1,
+            groupby: Some(vec!["g".into()]),
+            as_: ("g".into(), "fit".into()),
+            name: None,
+        };
+        let err = apply(&spec, &batch)
+            .expect_err("as_.0 == the groupby column name must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+        assert!(err.to_string().contains("data_regression"), "{err}");
+    }
+
 }

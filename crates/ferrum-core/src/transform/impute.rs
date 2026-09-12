@@ -16,6 +16,10 @@
 //! to no group under that helper's null-key policy; since this transform
 //! must still emit a row for it, such a row falls back to the whole-column
 //! statistic instead (a case that never arises when `groupby` is unset).
+//! That fallback is GH #197's stated exemption for this transform — the
+//! call site passes `NullKeyPolicy::SkipWithWholeBatchFallback`, so the
+//! all-null warning names THIS disposition rather than claiming an empty
+//! output this transform can never produce.
 //! The same whole-column statistic is also the fallback for a group whose
 //! own cleaned value set is empty (every value in that group is null/NaN):
 //! without it, `mean`/`median` would silently fill with `0.0` and `min`/`max`
@@ -40,13 +44,13 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     group_partition_multi, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    GroupPartition, KeyValue, NullKeyPolicy,
 };
 use crate::transform::numeric_util::{clean_float64_values, coerce_to_float64};
 
@@ -94,14 +98,12 @@ fn default_method() -> String {
 }
 
 /// Per-group context shared by the row-fill scatter and key-row generation:
-/// one `group_partition_multi` call's groups (order + row-index map), their
-/// columns' original dtypes, each group's own computed fill value, and the
-/// groupby columns' schema indices. Bundled because every downstream step
-/// needs the same five pieces of that one call.
+/// one `group_partition_multi` call's partition (groups paired with their row
+/// indices, plus the group columns' original dtypes), each group's own
+/// computed fill value, and the groupby columns' schema indices. Bundled
+/// because every downstream step needs the same pieces of that one call.
 struct GroupContext<'a> {
-    order: &'a [Vec<KeyValue>],
-    idx_map: &'a BTreeMap<Vec<KeyValue>, Vec<usize>>,
-    dtypes: &'a [DataType],
+    partition: &'a GroupPartition,
     col_indices: &'a [usize],
     fill_values: &'a [f64],
 }
@@ -155,8 +157,18 @@ pub(crate) fn apply_with_context(
     // module doc for why the ungrouped path is byte-identical by
     // construction rather than a separate branch.
     let groupby: &[String] = spec.groupby.as_deref().unwrap_or(&[]);
-    let (group_order, group_idx_map, group_dtypes) =
-        group_partition_multi(batch, groupby, "data_impute")?;
+    // `SkipWithWholeBatchFallback` is #197's stated exemption for this
+    // transform: a null-keyed row belongs to no group, but `Impute` is
+    // row-preserving by contract, so it still gets the whole column's
+    // statistic (below) rather than being dropped — and the all-null warning
+    // says so instead of claiming an empty output.
+    let partition = group_partition_multi(
+        batch,
+        groupby,
+        "data_impute",
+        NullKeyPolicy::SkipWithWholeBatchFallback,
+        ctx,
+    )?;
     let groupby_col_indices: Vec<usize> = groupby
         .iter()
         .map(|name| {
@@ -192,11 +204,8 @@ pub(crate) fn apply_with_context(
 
     let mut row_fill = vec![f64::NAN; n_rows];
     let mut assigned = vec![false; n_rows];
-    let mut group_fill_values: Vec<f64> = Vec::with_capacity(group_order.len());
-    for key in &group_order {
-        let rows = group_idx_map.get(key).ok_or_else(|| {
-            PyValueError::new_err(format!("data_impute: missing group key {key:?} in index map"))
-        })?;
+    let mut group_fill_values: Vec<f64> = Vec::with_capacity(partition.groups.len());
+    for (key, rows) in &partition.groups {
         // A group whose own cleaned value set is empty (every value in the
         // group is null/NaN) falls back to the whole-column statistic
         // instead of `fill_value_for`'s degenerate return — see the module
@@ -298,9 +307,7 @@ pub(crate) fn apply_with_context(
         }
 
         let groups = GroupContext {
-            order: &group_order,
-            idx_map: &group_idx_map,
-            dtypes: &group_dtypes,
+            partition: &partition,
             col_indices: &groupby_col_indices,
             fill_values: &group_fill_values,
         };
@@ -583,12 +590,7 @@ fn generate_missing_key_rows(
     let mut appended_key_values: Vec<KeyValue> = Vec::new();
     let mut appended_field_values: Vec<f64> = Vec::new();
 
-    for (gi, group_key) in groups.order.iter().enumerate() {
-        let rows = groups.idx_map.get(group_key).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "data_impute: missing group key {group_key:?} in index map"
-            ))
-        })?;
+    for (gi, (group_key, rows)) in groups.partition.groups.iter().enumerate() {
         let mut present: BTreeSet<KeyValue> = BTreeSet::new();
         for &row in rows {
             if let Some(kv) = groupby_key_at(key_arr.as_ref(), key.dtype, row) {
@@ -623,7 +625,7 @@ fn generate_missing_key_rows(
             );
         } else if let Some(gi) = groups.col_indices.iter().position(|&gci| gci == idx) {
             appended_cols.push(
-                materialize_groupby_col(&appended_group_keys, gi, &groups.dtypes[gi])
+                materialize_groupby_col(&appended_group_keys, gi, &groups.partition.dtypes[gi])
                     .map_err(PyValueError::new_err)?,
             );
         } else {
@@ -1606,4 +1608,49 @@ mod tests {
         ), "the one warning must have group: None (genuinely whole-frame), not an \
             empty-string label; got {:?}", warnings[0]);
     }
+
+    /// GH #197 EXEMPTION: `Impute` is row-preserving by contract, so an
+    /// all-null `groupby` column cannot mean "empty output". Every row still
+    /// gets the whole-column statistic, and the warning states THAT
+    /// disposition rather than claiming an emptiness that never happened.
+    #[test]
+    fn impute_all_null_group_keys_fill_from_the_whole_column_and_warn() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![None, None, None] as Vec<Option<&str>>)),
+                Arc::new(Float64Array::from(vec![Some(10.0), Some(20.0), None])),
+            ],
+        )
+        .unwrap();
+        let s = spec("v", "mean", None, Some(vec!["g"]), None, None);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 3, "row-preserving: no row is dropped");
+        let filled = out
+            .column(out.schema().index_of("v").unwrap())
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(filled.value(2), 15.0, "the null row takes the whole column's mean");
+
+        let warnings = ctx.warnings.borrow();
+        let all_null: Vec<&TransformWarning> = warnings
+            .iter()
+            .filter(|w| matches!(w, TransformWarning::GroupKeyAllNull { .. }))
+            .collect();
+        assert_eq!(all_null.len(), 1, "got {warnings:?}");
+        assert!(
+            all_null[0]
+                .to_string()
+                .contains("the whole batch was used as one ungrouped computation instead"),
+            "{}",
+            all_null[0]
+        );
+    }
+
 }

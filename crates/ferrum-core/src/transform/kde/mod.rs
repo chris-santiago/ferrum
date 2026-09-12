@@ -10,7 +10,8 @@ use crate::transform::bin_mode::{parse_bin_axis, BinMode};
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
-    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+    materialize_groupby_col, parse_groupby_pyany, refuse_groupby_output_collision, KeyValue,
+    NullKeyPolicy,
 };
 use crate::transform::numeric_util::resolve_shared_extent;
 
@@ -158,8 +159,16 @@ pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 /// edges, so the pinned extent is the raw data range. Uses the shared
 /// `column_extent` helper, which coerces integer-typed fields just as
 /// `apply_one_group` does.
+///
+/// GROUPED-ROWS CONTRACT (GH #197): folds only the rows whose `groupby` key
+/// survives the null-key policy, via
+/// [`crate::transform::numeric_util::grouped_column_extent`] — the same fold
+/// `resolve_shared_extent` applies on the in-transform path, so the faceted pin
+/// and the `shared_extent` resolution cannot disagree about which rows a shared
+/// extent covers. Identical to the pre-#197 whole-column fold whenever the
+/// request is ungrouped or its keys hold no nulls.
 pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
-    crate::transform::numeric_util::column_extent(batch, &spec.field)
+    crate::transform::numeric_util::grouped_column_extent(batch, &spec.field, &spec.groupby)
 }
 
 /// Compute the global extent [`KdeSpec::count_scale_extent`] should be
@@ -176,6 +185,19 @@ pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64,
 /// `nice: true` matches `Bin`'s own default and the only value
 /// `mark_histogram` currently passes (see `KdeSpec::count_scale`'s doc for
 /// the one input this does NOT mirror: an explicit `Bin(nice=False)`).
+///
+/// **A synthetic spec must mirror the real one's `groupby`.** `groupby` is not
+/// inert padding here: `bin::global_extent` reads it to decide which rows the
+/// extent folds over (GH #197's `grouped_column_extent`), so a synthetic spec
+/// that drops it silently re-enables the whole-column fold this family stopped
+/// using — and disagrees with the in-transform resolution of the very same slot
+/// a few lines below, which does pass the real `groupby`. That is the failure
+/// this comment exists to prevent recurring, and it is worth stating because a
+/// DERIVED spec is invisible to the obvious sweep: enumerating "every transform
+/// carrying a `groupby` field" finds `KdeSpec`, not the `BinSpec` built inside
+/// it. **When adding a field to a spec that any `global_extent` reads, check
+/// every synthetic construction of that spec type — `grep -n "BinSpec {"` and
+/// its siblings — not just the transforms that declare the field.**
 pub(crate) fn count_scale_global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let mode = spec.count_scale.as_ref()?;
     let synthetic_bin_spec = crate::transform::bin::BinSpec {
@@ -185,7 +207,9 @@ pub(crate) fn count_scale_global_extent(spec: &KdeSpec, batch: &RecordBatch) -> 
         nice: true,
         cumulative: false,
         shared_extent: false,
-        groupby: vec![],
+        // Mirrors the real request, per the doc above: the count-scale bin
+        // width must be derived from the same rows the density it scales is.
+        groupby: spec.groupby.clone(),
         agg_field: None,
         agg: None,
         name: None,
@@ -248,7 +272,13 @@ pub(crate) fn apply_with_context(
         // ungrouped `apply()` never consults it either), so it is only
         // folded in here on the grouped branch.
         let count_scale_pinned_extent = spec.count_scale.as_ref().and_then(|_| {
-            resolve_shared_extent(spec.count_scale_extent, spec.shared_extent, batch, &spec.field)
+            resolve_shared_extent(
+                spec.count_scale_extent,
+                spec.shared_extent,
+                batch,
+                &spec.field,
+                &spec.groupby,
+            )
         });
         return apply_grouped(spec, batch, &spec.groupby, count_scale_pinned_extent, ctx);
     }
@@ -414,13 +444,24 @@ fn apply_grouped(
     warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
-    let (group_order, group_idx_map, gtypes) =
-        group_partition_multi(batch, group_cols, "stat_kde")?;
+    refuse_groupby_output_collision(
+        "stat_kde",
+        group_cols,
+        &["value".to_string(), "density".to_string()],
+    )?;
+    let partition = group_partition_multi(
+        batch,
+        group_cols,
+        "stat_kde",
+        NullKeyPolicy::Skip,
+        warn_ctx,
+    )?;
 
     // Shared vs per-group extent (stack/fill aligns to one global extent;
     // layer mode keeps per-group extents). resolve_shared_extent returns the
     // explicit extent unchanged, else the global extent when shared, else None.
-    let global_extent = resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field);
+    let global_extent =
+        resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field, group_cols);
     let shared_spec = KdeSpec {
         extent: global_extent.or(spec.extent),
         ..spec.clone()
@@ -429,10 +470,7 @@ fn apply_grouped(
     let mut all_values: Vec<f64> = Vec::new();
     let mut all_density: Vec<f64> = Vec::new();
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
-    for g in &group_order {
-        let ixs = group_idx_map.get(g)
-            .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_kde: missing group key {g:?} in index map")))?;
+    for (g, ixs) in &partition.groups {
         let label = describe_group_keys(group_cols, g);
         let out = apply_one_group(
             &shared_spec, batch, Some(ixs), count_scale_pinned_extent, warn_ctx, Some(&label),
@@ -455,7 +493,7 @@ fn apply_grouped(
     ];
     // FA-7: preserve the original groupby dtypes (nullable per FA-9; null keys
     // are skipped upstream in group_partition_multi).
-    for (name, dtype) in group_cols.iter().zip(gtypes.iter()) {
+    for (name, dtype) in group_cols.iter().zip(partition.dtypes.iter()) {
         fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
     }
     let out_schema = Arc::new(Schema::new(fields));
@@ -463,7 +501,7 @@ fn apply_grouped(
         Arc::new(Float64Array::from(all_values)),
         Arc::new(Float64Array::from(all_density)),
     ];
-    for (gi, dtype) in gtypes.iter().enumerate() {
+    for (gi, dtype) in partition.dtypes.iter().enumerate() {
         let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
             .map_err(PyValueError::new_err)?;
         cols.push(group_col_arr);

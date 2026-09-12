@@ -19,11 +19,20 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
-    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+    materialize_groupby_col, parse_groupby_pyany, refuse_groupby_output_collision, KeyValue,
+    NullKeyPolicy,
 };
 use crate::transform::kde::{self, BandwidthSpec};
+
+/// The surface columns every `stat_kde_2d` output batch carries, in schema
+/// order. Read by the `groupby` output-collision guard (GH #179); pinned
+/// against the batch this module actually emits by
+/// `output_field_names_match_the_emitted_schema` in the tests below, so the
+/// guard cannot fall behind a schema change.
+const OUTPUT_FIELDS: [&str; 6] = ["grid_x", "grid_y", "density", "nx", "ny", "extent"];
 
 fn default_bandwidth() -> BandwidthSpec {
     BandwidthSpec::Scott
@@ -49,8 +58,16 @@ fn default_kde2d_n() -> usize {
 /// nicing), mirroring the 1-D `kde::global_extent` and unlike `Bin`. This is the
 /// pre-facet extent that `render::prepare` uses to pin the 2-D grid range before
 /// partitioning, so every facet panel shares the same KDE grid axes (see
-/// `fix_transform_extents_for_facet`). Each axis uses the shared `column_extent`
-/// helper, which coerces integer-typed fields just as `apply_one_group` does.
+/// `fix_transform_extents_for_facet`). Each axis uses the shared extent helper,
+/// which coerces integer-typed fields just as `apply_one_group` does.
+///
+/// GROUPED-ROWS CONTRACT (GH #197): both axes fold only the rows whose
+/// `groupby` key survives the null-key policy, via
+/// [`crate::transform::numeric_util::grouped_column_extent`] — a null-keyed row
+/// contributes no surface, so letting it widen the grid would spread every
+/// surviving group's surface over a region none of them occupies. Identical to
+/// the pre-#197 whole-column fold whenever the request is ungrouped or its keys
+/// hold no nulls.
 pub(crate) fn global_extent(
     spec: &Kde2DSpec,
     batch: &RecordBatch,
@@ -59,8 +76,10 @@ pub(crate) fn global_extent(
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let (x_lo, x_hi) = crate::transform::numeric_util::column_extent(batch, &spec.x)?;
-    let (y_lo, y_hi) = crate::transform::numeric_util::column_extent(batch, &spec.y)?;
+    let (x_lo, x_hi) =
+        crate::transform::numeric_util::grouped_column_extent(batch, &spec.x, &spec.groupby)?;
+    let (y_lo, y_hi) =
+        crate::transform::numeric_util::grouped_column_extent(batch, &spec.y, &spec.groupby)?;
     Some((x_lo, x_hi, y_lo, y_hi))
 }
 
@@ -89,11 +108,22 @@ pub(crate) struct Kde2DSpec {
 }
 
 pub(crate) fn apply(spec: &Kde2DSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
+/// sink, for the one degrade this transform can report: an all-null `groupby`
+/// key column (GH #197), raised inside the shared partitioner.
+pub(crate) fn apply_with_context(
+    spec: &Kde2DSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     if spec.n == 0 {
         return Err(PyValueError::new_err("stat_kde_2d: n must be > 0"));
     }
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby);
+        return apply_grouped(spec, batch, &spec.groupby, ctx);
     }
     apply_one_group(spec, batch, None, None)
 }
@@ -285,10 +315,18 @@ fn apply_grouped(
     spec: &Kde2DSpec,
     batch: &RecordBatch,
     group_cols: &[String],
+    warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
-    let (group_order, group_idx_map, gtypes) =
-        group_partition_multi(batch, group_cols, "stat_kde_2d")?;
+    let output_fields: Vec<String> = OUTPUT_FIELDS.iter().map(|f| f.to_string()).collect();
+    refuse_groupby_output_collision("stat_kde_2d", group_cols, &output_fields)?;
+    let partition = group_partition_multi(
+        batch,
+        group_cols,
+        "stat_kde_2d",
+        NullKeyPolicy::Skip,
+        warn_ctx,
+    )?;
 
     // Per-group extents by default; spec.extent (when set) is a shared override.
     let shared_extent: Option<(f64, f64, f64, f64)> = spec.extent;
@@ -299,17 +337,12 @@ fn apply_grouped(
     let mut all_grid_x: ListBuilder<Float64Builder> = ListBuilder::new(Float64Builder::new());
     let mut all_grid_y: ListBuilder<Float64Builder> = ListBuilder::new(Float64Builder::new());
     let mut all_density: ListBuilder<Float64Builder> = ListBuilder::new(Float64Builder::new());
-    let mut all_nx: Vec<u32> = Vec::with_capacity(group_order.len());
-    let mut all_ny: Vec<u32> = Vec::with_capacity(group_order.len());
+    let mut all_nx: Vec<u32> = Vec::with_capacity(partition.groups.len());
+    let mut all_ny: Vec<u32> = Vec::with_capacity(partition.groups.len());
     let mut all_extent: ListBuilder<Float64Builder> = ListBuilder::new(Float64Builder::new());
-    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(group_order.len());
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(partition.groups.len());
 
-    for g in &group_order {
-        let ixs = group_idx_map
-            .get(g)
-            .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_kde_2d: missing group key {g:?} in index map"
-            )))?;
+    for (g, ixs) in &partition.groups {
         let surface = apply_one_group(spec, batch, Some(ixs), shared_extent)?;
 
         // Unpack the single-row surface batch back into its list values.
@@ -342,7 +375,7 @@ fn apply_grouped(
     ];
     // FA-7: preserve the original groupby dtypes (nullable per FA-9; null keys
     // are skipped upstream in group_partition_multi).
-    for (name, dtype) in group_cols.iter().zip(gtypes.iter()) {
+    for (name, dtype) in group_cols.iter().zip(partition.dtypes.iter()) {
         fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
     }
     let out_schema = Arc::new(Schema::new(fields));
@@ -354,7 +387,7 @@ fn apply_grouped(
         Arc::new(UInt32Array::from(all_ny)),
         Arc::new(all_extent.finish()),
     ];
-    for (gi, dtype) in gtypes.iter().enumerate() {
+    for (gi, dtype) in partition.dtypes.iter().enumerate() {
         let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
             .map_err(PyValueError::new_err)?;
         cols.push(group_col_arr);
@@ -1123,4 +1156,62 @@ mod tests {
         assert_eq!(ext0, vec![-1.0, 10.0, -1.0, 10.0]);
         assert_eq!(ext1, vec![-1.0, 10.0, -1.0, 10.0]);
     }
+
+    // ── GH #179: output-collision guard at this append site ─────────────────
+
+    /// The names the collision guard checks must be the names this module
+    /// actually emits; a schema change that skipped [`OUTPUT_FIELDS`] would
+    /// leave the guard checking a stale list.
+    #[test]
+    fn output_field_names_match_the_emitted_schema() {
+        pyo3::Python::initialize();
+        let batch = batch_xy(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: default_bandwidth(),
+            n: 4,
+            extent: None,
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let schema = out.schema();
+        let emitted: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(emitted, OUTPUT_FIELDS.to_vec());
+    }
+
+    /// Grouping by a column named like one of the surface columns refuses
+    /// (GH #179 residual 1: this append site had no guard).
+    #[test]
+    fn kde_2d_groupby_colliding_with_an_output_column_refuses() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("density", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: default_bandwidth(),
+            n: 4,
+            extent: None,
+            groupby: vec!["density".into()],
+            name: None,
+        };
+        let err = apply(&spec, &batch)
+            .expect_err("grouping by a column named 'density' must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
 }

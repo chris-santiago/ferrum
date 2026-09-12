@@ -8,12 +8,14 @@ use std::sync::Arc;
 use crate::scale::ticks::sturges_floor;
 use crate::transform::aggregate::{AggColumn, AggFn};
 use crate::transform::bin_mode::{resolve_bin_count, BinMode};
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
-    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+    materialize_groupby_col, parse_groupby_pyany, refuse_groupby_output_collision, KeyValue,
+    NullKeyPolicy,
 };
 use crate::transform::numeric_util::{
-    clean_float64_values, clean_float64_values_indexed, coerce_to_float64, column_extent,
+    clean_float64_values, clean_float64_values_indexed, coerce_to_float64, grouped_column_extent,
     resolve_shared_extent,
 };
 
@@ -219,7 +221,16 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let (lo, hi) = column_extent(batch, &spec.field)?;
+    // GROUPED-ROWS CONTRACT (GH #197): fold only the rows whose `groupby` key
+    // survives the null-key policy — the same fold `resolve_shared_extent`
+    // applies on the in-transform path, so the faceted pin and the
+    // `shared_extent` resolution cannot disagree about which rows the shared bin
+    // edges are derived from. A null-keyed row is binned into no group, so
+    // letting it widen the edges would spread every surviving group's histogram
+    // over a range none of them occupies. Identical to the pre-#197
+    // whole-column fold whenever the request is ungrouped or its keys hold no
+    // nulls.
+    let (lo, hi) = grouped_column_extent(batch, &spec.field, &spec.groupby)?;
     // NICENESS CONTRACT (XFORM-08): `Bin` nices its faceted-pin extent so the
     // pinned range reproduces the same bin edges every per-group/per-panel
     // partition would compute. This is the one extent-deriving transform that
@@ -249,13 +260,24 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
 }
 
 pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
+/// sink, for the one degrade `Bin` can report: an all-null `groupby` key column
+/// (GH #197), raised inside the shared partitioner.
+pub(crate) fn apply_with_context(
+    spec: &BinSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     // Resolved ONCE regardless of groupby, so agg_field/agg pairing and
     // vocabulary validation happen exactly once (not once per group, and not
     // skipped when a grouped batch happens to produce zero groups).
     let agg_col = resolve_bin_agg(spec, batch)?;
     // D-GROUPBY-1: groupby is now Vec<String>. Non-empty → grouped path.
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby, agg_col.as_ref());
+        return apply_grouped(spec, batch, &spec.groupby, agg_col.as_ref(), ctx);
     }
     apply_one_group(spec, batch, None, agg_col.as_ref())
 }
@@ -433,17 +455,23 @@ fn apply_grouped(
     batch: &RecordBatch,
     group_cols: &[String],
     agg_col: Option<&AggColumn>,
+    warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition via the shared helper (first-appearance order,
     // null-key skip, dtype-preservation — same policy as single-column path).
-    let (group_order, group_idx_map, gtypes) =
-        group_partition_multi(batch, group_cols, "stat_bin")?;
+    refuse_groupby_output_collision(
+        "stat_bin",
+        group_cols,
+        &bin_output_field_names(agg_col.is_some()),
+    )?;
+    let partition =
+        group_partition_multi(batch, group_cols, "stat_bin", NullKeyPolicy::Skip, warn_ctx)?;
 
     // When shared_extent=true, inject the global raw extent so every group gets
     // the same bin edges (required for stack/fill). resolve_shared_extent returns
     // the explicit extent unchanged when set, else None unless shared is on.
     let effective_spec: std::borrow::Cow<BinSpec> =
-        match resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field) {
+        match resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field, group_cols) {
             Some(e) if spec.extent.is_none() => {
                 let mut patched = spec.clone();
                 patched.extent = Some(e);
@@ -460,10 +488,7 @@ fn apply_grouped(
     let mut all_densities: Vec<f64> = Vec::new();
     let mut all_agg_values: Vec<Option<f64>> = Vec::new();
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
-    for g in &group_order {
-        let ixs = group_idx_map.get(g)
-            .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_bin: missing group key {g:?} in index map")))?;
+    for (g, ixs) in &partition.groups {
         let out = apply_one_group(spec_ref, batch, Some(ixs), agg_col)?;
         let n = out.num_rows();
         let starts = out.column(0).as_any().downcast_ref::<Float64Array>()
@@ -501,7 +526,7 @@ fn apply_grouped(
             densities: all_densities,
             agg_values: agg_col.is_some().then_some(all_agg_values),
         },
-        group_keys_out, group_cols, &gtypes,
+        group_keys_out, group_cols, &partition.dtypes,
     )
 }
 
@@ -546,6 +571,23 @@ impl BinColumns {
         }
         (fields, cols)
     }
+}
+
+/// The output field names both bin batch builders emit, in schema order — the
+/// list a `groupby` request is checked against by
+/// [`refuse_groupby_output_collision`]. Derived from
+/// [`BinColumns::into_fields_and_cols`] itself rather than re-spelled, so the
+/// collision guard cannot fall behind the 4-vs-5 column decision.
+fn bin_output_field_names(with_agg: bool) -> Vec<String> {
+    let (fields, _) = BinColumns {
+        starts: Vec::new(),
+        ends: Vec::new(),
+        counts: Vec::new(),
+        densities: Vec::new(),
+        agg_values: with_agg.then_some(Vec::new()),
+    }
+    .into_fields_and_cols();
+    fields.into_iter().map(|f| f.name().clone()).collect()
 }
 
 fn build_bin_batch(cols: BinColumns) -> PyResult<RecordBatch> {
@@ -1938,12 +1980,18 @@ mod tests {
     fn bughunt_group_partition_multi_empty_cols_single_all_rows_group() {
         pyo3::Python::initialize();
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
-        let (order, map, dtypes) =
-            crate::transform::group_key::group_partition_multi(&batch, &[], "stat_bin").unwrap();
-        assert_eq!(dtypes.len(), 0, "no group columns → no dtypes");
-        assert_eq!(order.len(), 1, "non-empty batch with [] cols → one empty-key group");
-        assert!(order[0].is_empty(), "the single group's composite key is empty");
-        assert_eq!(map[&order[0]], vec![0, 1, 2], "the empty-key group holds every row");
+        let p = crate::transform::group_key::group_partition_multi(
+            &batch,
+            &[],
+            "stat_bin",
+            crate::transform::group_key::NullKeyPolicy::Skip,
+            &TransformContext::default(),
+        )
+        .unwrap();
+        assert_eq!(p.dtypes.len(), 0, "no group columns → no dtypes");
+        assert_eq!(p.groups.len(), 1, "non-empty batch with [] cols → one empty-key group");
+        assert!(p.groups[0].0.is_empty(), "the single group's composite key is empty");
+        assert_eq!(p.groups[0].1, vec![0, 1, 2], "the empty-key group holds every row");
     }
 
     /// `group_partition_multi` with empty cols on an EMPTY batch yields zero
@@ -1952,10 +2000,15 @@ mod tests {
     fn bughunt_group_partition_multi_empty_cols_empty_batch_zero_groups() {
         pyo3::Python::initialize();
         let batch = batch_with(vec![]);
-        let (order, map, _) =
-            crate::transform::group_key::group_partition_multi(&batch, &[], "stat_bin").unwrap();
-        assert_eq!(order.len(), 0, "empty batch + [] cols → zero groups");
-        assert!(map.is_empty());
+        let p = crate::transform::group_key::group_partition_multi(
+            &batch,
+            &[],
+            "stat_bin",
+            crate::transform::group_key::NullKeyPolicy::Skip,
+            &TransformContext::default(),
+        )
+        .unwrap();
+        assert!(p.groups.is_empty(), "empty batch + [] cols → zero groups");
     }
 
     // ── Task 7: per-bin aggregation (agg_field/agg) ──────────────────────────
@@ -2269,4 +2322,82 @@ mod tests {
         let back: BinSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back, spec);
     }
+
+    // ── GH #179/#197: output-collision guard and the all-null warning ───────
+
+    /// Grouping by a column named like one of `Bin`'s own output columns
+    /// refuses rather than emitting two same-named fields (GH #179 residual 1:
+    /// `build_bin_batch_grouped` had no guard).
+    #[test]
+    fn bin_groupby_colliding_with_an_output_column_refuses() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("count", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(StringArray::from(vec!["a", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["count".into()],
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let err = apply(&spec, &batch)
+            .expect_err("grouping by a column named 'count' must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+        assert!(err.to_string().contains("stat_bin"), "{err}");
+    }
+
+    /// GH #197: an all-null groupby column produces the empty group set and
+    /// says so once through the degrade channel.
+    #[test]
+    fn bin_all_null_group_keys_yield_no_rows_and_warn() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+            ],
+        )
+        .unwrap();
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["g".into()],
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 0);
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].to_string().contains("stat_bin"), "{:?}", warnings[0]);
+    }
+
 }

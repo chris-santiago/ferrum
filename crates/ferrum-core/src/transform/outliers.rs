@@ -7,7 +7,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
-use crate::transform::group_key::group_partition_multi;
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{group_partition_multi, NullKeyPolicy};
 use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,6 +23,17 @@ pub(crate) struct OutliersSpec {
 }
 
 pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
+/// sink, for the one degrade this transform can report: an all-null `groupby`
+/// key column (GH #197), raised inside the shared partitioner.
+pub(crate) fn apply_with_context(
+    spec: &OutliersSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let n = batch.num_rows();
     if n == 0 {
         return Ok(batch.clone());
@@ -41,11 +53,17 @@ pub(crate) fn apply(spec: &OutliersSpec, batch: &RecordBatch) -> PyResult<Record
     // Int8-64/UInt8-64, Boolean). A null-keyed row is excluded from every group,
     // matching how the paired BoxStats/LetterValue groupby drops null groups —
     // an outlier point with no corresponding box would be orphaned otherwise.
-    let (_, group_idx_map, _) = group_partition_multi(batch, &spec.groupby, "stat_outliers")?;
+    let partition = group_partition_multi(
+        batch,
+        &spec.groupby,
+        "stat_outliers",
+        NullKeyPolicy::Skip,
+        ctx,
+    )?;
 
     // Compute mask: true = outlier (keep).
     let mut mask = vec![false; n];
-    for indices in group_idx_map.values() {
+    for (_, indices) in &partition.groups {
         // Collect non-NaN, non-null values for quartile computation.
         let group_values: Vec<f64> = indices
             .iter()

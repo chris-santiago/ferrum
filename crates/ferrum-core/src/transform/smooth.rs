@@ -104,6 +104,7 @@ use crate::transform::context::{describe_group_keys, TransformContext, Transform
 use crate::transform::gam;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
+    NullKeyPolicy,
     KeyValue,
 };
 use crate::transform::numeric_util::coerce_to_float64;
@@ -475,16 +476,21 @@ fn apply_grouped(
     is_partition: bool,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
-    let (group_order, group_idx_map, gtypes) =
-        group_partition_multi(batch, group_cols, "stat_smooth")?;
+    // Multi-column partition path (first-appearance order, null-key skip,
+    // dtype-preserve). `SkipWithWholeBatchFallback` is #197's stated exemption
+    // for this transform: the all-null-key arm below re-fits the whole batch
+    // rather than emitting nothing, and the warning says so.
+    let partition = group_partition_multi(
+        batch,
+        group_cols,
+        "stat_smooth",
+        NullKeyPolicy::SkipWithWholeBatchFallback,
+        ctx,
+    )?;
 
     // Collect per-group outputs and stack them.
     let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();
-    for g in &group_order {
-        let ixs = group_idx_map.get(g)
-            .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_smooth: missing group key {g:?} in index map")))?;
+    for (g, ixs) in &partition.groups {
         // `only_indices` is `Some` here, so the rank-deficiency refusal in
         // `apply_one_group` never gates on `is_partition` for this call —
         // T6's per-group degrade-to-NaN contract already applies.
@@ -524,7 +530,7 @@ fn apply_grouped(
     // degenerate first group silently dropped later groups' real metrics
     // columns and a degenerate later group indexed past its own narrower
     // schema.
-    stack_grouped_batches("stat_smooth", &per_group_batches, group_cols, &gtypes)
+    stack_grouped_batches("stat_smooth", &per_group_batches, group_cols, &partition.dtypes)
 }
 
 fn pre_aggregate_xy(

@@ -3,12 +3,12 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
-    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    ensure_ungrouped_whole_batch_group, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 use crate::transform::numeric_util::coerce_to_float64;
 
@@ -183,6 +183,18 @@ pub(crate) struct AggregateSpec {
 }
 
 pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162
+/// degrade-warning sink, for the one degrade this transform can report: an
+/// all-null `groupby` key column (GH #197), raised inside the shared
+/// partitioner.
+pub(crate) fn apply_with_context(
+    spec: &AggregateSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     if spec.ops.is_empty() {
         return Err(PyValueError::new_err("stat_aggregate: ops must be non-empty"));
     }
@@ -212,59 +224,27 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
         )?));
     }
 
-    // Validate groupby fields and capture their dtypes for output schema preservation.
-    let mut group_dtypes: Vec<DataType> = Vec::with_capacity(spec.groupby.len());
-    for g in &spec.groupby {
-        let idx = schema.index_of(g).map_err(|_| {
-            PyValueError::new_err(format!(
-                "stat_aggregate: groupby column '{}' not found", g
-            ))
-        })?;
-        let dt = schema.field(idx).data_type().clone();
-        if !is_groupby_supported_dtype(&dt) {
-            return Err(PyValueError::new_err(format!(
-                "stat_aggregate: groupby column '{}' has unsupported dtype {:?}; \
-                 supported: Utf8/LargeUtf8, Float64/Float32, \
-                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
-                g, dt
-            )));
-        }
-        group_dtypes.push(dt);
-    }
-
-    // Build a per-row group key, then collect row indices per key.
-    let n_rows = batch.num_rows();
-    let group_arrays: Vec<&dyn arrow::array::Array> =
-        spec.groupby.iter().map(|g| batch.column(
-            schema.index_of(g).expect("invariant: groupby columns validated above")
-        ).as_ref()).collect();
-
-    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
-    for row in 0..n_rows {
-        let mut key = Vec::with_capacity(spec.groupby.len());
-        for (gi, arr) in group_arrays.iter().enumerate() {
-            let kv = groupby_key_at(*arr, &group_dtypes[gi], row)
-                .ok_or_else(|| PyValueError::new_err(format!(
-                    "stat_aggregate: internal error extracting groupby key at row {row}"
-                )))?;
-            key.push(kv);
-        }
-        groups.entry(key).or_default().push(row);
-    }
-
-    // No groupby → single global group containing all rows.
-    if spec.groupby.is_empty() {
-        let all_rows: Vec<usize> = (0..n_rows).collect();
-        groups.clear();
-        groups.insert(Vec::new(), all_rows);
-    }
+    // One partitioning idiom for every grouped transform (GH #179): the shared
+    // partitioner owns column validation, the repeated-name refusal,
+    // first-appearance group order, and the null-key policy.
+    let output_fields: Vec<String> = spec.ops.iter().map(|op| op.as_.clone()).collect();
+    refuse_groupby_output_collision("stat_aggregate", &spec.groupby, &output_fields)?;
+    let mut partition = group_partition_multi(
+        batch,
+        &spec.groupby,
+        "stat_aggregate",
+        NullKeyPolicy::Skip,
+        ctx,
+    )?;
+    ensure_ungrouped_whole_batch_group(&mut partition, &spec.groupby);
+    let group_dtypes = &partition.dtypes;
 
     // Materialize op columns: per (group, op) compute aggregate.
-    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(groups.len());
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(partition.groups.len());
     let mut op_values_out: Vec<Vec<f64>> =
-        (0..spec.ops.len()).map(|_| Vec::with_capacity(groups.len())).collect();
+        (0..spec.ops.len()).map(|_| Vec::with_capacity(partition.groups.len())).collect();
 
-    for (key, rows) in &groups {
+    for (key, rows) in &partition.groups {
         group_keys_out.push(key.clone());
         for (op_i, op) in spec.ops.iter().enumerate() {
             // count():Q shorthand — empty field or "*" means count all rows in the group.
@@ -485,15 +465,11 @@ impl PyAggregate {
             parsed_ops.push(op.0);
         }
         let gb = groupby.unwrap_or_default();
-        // Reject duplicate field names within groupby per spec §6.
-        let mut seen = std::collections::HashSet::new();
-        for g in &gb {
-            if !seen.insert(g.as_str()) {
-                return Err(PyValueError::new_err(format!(
-                    "Aggregate: duplicate groupby field '{g}'"
-                )));
-            }
-        }
+        // The duplicate-groupby refusal (spec §6) is the shared rule every
+        // grouped transform enforces, in the shared words — still refused here,
+        // at the earliest boundary that has the facts, and again inside the
+        // partitioner for the wire path that has no constructor (GH #179).
+        crate::transform::group_key::refuse_repeated_groupby_names("Aggregate", &gb)?;
         Ok(PyAggregate(TransformSpec::Aggregate(AggregateSpec {
             ops: parsed_ops,
             groupby: gb,
@@ -1095,20 +1071,23 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
     }
 
+    // ── GH #197: the all-transforms null-groupby-key policy ─────────────────
+    //
+    // These three tests were written for the pre-#197 hand-rolled partitioner,
+    // where `stat_aggregate` pooled every null-keyed row into one
+    // `KeyValue::Null` group and emitted it as an Arrow null in the output
+    // column. #197 adjudicated ONE policy for the whole grouped family, and
+    // this transform's arm of it is `NullKeyPolicy::Skip`: a row with no key
+    // belongs to no group, so it contributes to no output row. What they still
+    // pin, unchanged, is FA-3's distinction between a null key and a genuine
+    // NaN *value* key — the NaN group survives while the null rows drop, which
+    // is only observable if the two are still distinct keys.
+
     #[test]
-    fn test_aggregate_null_float64_groupby_key_collapses_to_single_group() {
-        // FA-3/FA-9 regression: null keys in a Float64 groupby column must all
-        // land in the SAME group (KeyValue::Null), separate from any real-valued
-        // groups, and materialize as an actual Arrow null in the output.
-        //
-        // Materialization contract (Float64 null key → Arrow null):
-        //   row 0: grp=None (null)  → KeyValue::Null  → output Arrow null
-        //   row 1: grp=None (null)  → KeyValue::Null  → same group as row 0
-        //   row 2: grp=Some(1.0)    → KeyValue::Float → separate group
-        //
-        // Pre-FA-3 bug: null was encoded as Float(NAN.to_bits()), which would
-        // collide with a genuine NaN *value* in the groupby column and could
-        // produce multiple spurious groups if NaN bits differ.
+    fn aggregate_null_float64_groupby_rows_drop_out_of_every_group() {
+        //   row 0: grp=None (null)  → belongs to no group
+        //   row 1: grp=None (null)  → belongs to no group
+        //   row 2: grp=Some(1.0)    → the one surviving group
         let batch = batch_value_float64_group_nullable(
             vec![Some(10.0), Some(20.0), Some(5.0)],
             vec![None,        None,        Some(1.0)],
@@ -1120,48 +1099,24 @@ mod tests {
         };
         let out = apply(&spec, &batch).unwrap();
 
-        // Exactly two groups: the null group and the real-valued group.
-        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 1.0), got {}", out.num_rows());
-
+        assert_eq!(
+            out.num_rows(), 1,
+            "null-keyed rows belong to no group, so only the 1.0 group survives"
+        );
         let grp_arr = out.column(out.schema().index_of("grp").unwrap())
             .as_any().downcast_ref::<Float64Array>().unwrap();
+        assert!(!grp_arr.is_null(0), "no null-keyed group is emitted at all");
+        assert!((grp_arr.value(0) - 1.0).abs() < 1e-12);
         let sums = col_f64(&out, "s");
-
-        // FA-9: the null-key group materializes as an Arrow null; the real group
-        // carries the value 1.0.
-        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
-            .expect("null-key group must materialize as an Arrow null");
-        let real_idx = (0..grp_arr.len())
-            .find(|&i| !grp_arr.is_null(i) && (grp_arr.value(i) - 1.0).abs() < 1e-12)
-            .expect("real-valued group (key=1.0) must be present");
-
-        // Null group: rows 0 and 1 → sum = 10 + 20 = 30.
         assert!(
-            (sums[null_idx] - 30.0).abs() < 1e-12,
-            "null-key group sum should be 30.0, got {}",
-            sums[null_idx]
-        );
-        // Real group: row 2 → sum = 5.
-        assert!(
-            (sums[real_idx] - 5.0).abs() < 1e-12,
-            "real-key group (1.0) sum should be 5.0, got {}",
-            sums[real_idx]
+            (sums[0] - 5.0).abs() < 1e-12,
+            "the surviving group aggregates ONLY its own row, got {}",
+            sums[0]
         );
     }
 
     #[test]
-    fn test_aggregate_null_int64_groupby_key_collapses_to_single_group() {
-        // FA-3/FA-9 regression: null keys in an Int64 groupby column must all
-        // land in the SAME group (KeyValue::Null), separate from non-null groups,
-        // and materialize as an actual Arrow null in the output.
-        //
-        // Materialization contract (Int64 null key → Arrow null):
-        //   row 0: grp=None  → KeyValue::Null → output Arrow null
-        //   row 1: grp=None  → KeyValue::Null → same group as row 0
-        //   row 2: grp=Some(7) → KeyValue::Int(7) → separate group
-        //
-        // FA-9: the null group materializes as a typed null, NOT a 0 proxy, so it
-        // stays distinct from a genuine 0 key downstream.
+    fn aggregate_null_int64_groupby_rows_drop_out_of_every_group() {
         let batch = batch_value_int64_group_nullable(
             vec![Some(3.0), Some(7.0), Some(100.0)],
             vec![None,       None,       Some(7)],
@@ -1173,45 +1128,22 @@ mod tests {
         };
         let out = apply(&spec, &batch).unwrap();
 
-        // Exactly two groups: the null group and the real-valued group.
-        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 7), got {}", out.num_rows());
-
+        assert_eq!(out.num_rows(), 1, "only the key=7 group survives");
         let grp_arr = out.column(out.schema().index_of("grp").unwrap())
             .as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(!grp_arr.is_null(0), "no null-keyed group is emitted at all");
+        assert_eq!(grp_arr.value(0), 7);
         let sums = col_f64(&out, "s");
-
-        // FA-9: null-key group materializes as an Arrow null.
-        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
-            .expect("null-key group must materialize as an Arrow null");
-        // Real-valued group: key=7.
-        let real_idx = (0..grp_arr.len())
-            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i) == 7)
-            .expect("real-valued group (key=7) must be present");
-
-        // Null group: rows 0 and 1 → sum = 3 + 7 = 10.
-        assert!(
-            (sums[null_idx] - 10.0).abs() < 1e-12,
-            "null-key group sum should be 10.0, got {}",
-            sums[null_idx]
-        );
-        // Real group: row 2 → sum = 100.
-        assert!(
-            (sums[real_idx] - 100.0).abs() < 1e-12,
-            "real-key group (7) sum should be 100.0, got {}",
-            sums[real_idx]
-        );
+        assert!((sums[0] - 100.0).abs() < 1e-12, "got {}", sums[0]);
     }
 
     #[test]
-    fn test_aggregate_null_float64_groupby_separate_from_genuine_nan_key() {
-        // FA-3 regression: a genuine NaN *value* in a Float64 groupby column must
-        // form its own group (KeyValue::Float(NAN.to_bits())), distinct from a null
-        // key (KeyValue::Null).  Pre-FA-3 this was a collision: both mapped to
-        // Float(NAN.to_bits()), merging what should be two separate groups.
-        //
-        // row 0: grp = None    → KeyValue::Null              → null group
-        // row 1: grp = Some(NaN) → KeyValue::Float(NAN bits) → NaN group
-        // row 2: grp = Some(2.0) → KeyValue::Float(2.0 bits) → real group
+    fn aggregate_genuine_nan_groupby_key_survives_while_null_key_drops() {
+        // FA-3 regression, re-aimed at #197's policy: a genuine NaN *value* in a
+        // Float64 groupby column is a key like any other and keeps its group;
+        // a null is the absence of a key and drops. Pre-FA-3 both encoded to
+        // `Float(NAN.to_bits())`, so this test could not tell them apart —
+        // under that bug the NaN row would drop with the null one.
         let nan = f64::NAN;
         let batch = batch_value_float64_group_nullable(
             vec![Some(1.0), Some(2.0), Some(3.0)],
@@ -1224,46 +1156,26 @@ mod tests {
         };
         let out = apply(&spec, &batch).unwrap();
 
-        // Three distinct groups: null, NaN, and 2.0.
         assert_eq!(
-            out.num_rows(), 3,
-            "expected 3 groups (null, NaN, 2.0), got {}; FA-3 null/NaN collision?",
-            out.num_rows()
+            out.num_rows(), 2,
+            "expected the NaN group and the 2.0 group; the null-keyed row drops"
         );
-
         let grp_arr = out.column(out.schema().index_of("grp").unwrap())
             .as_any().downcast_ref::<Float64Array>().unwrap();
         let sums = col_f64(&out, "s");
 
-        // FA-9: the null group materializes as an Arrow null; the genuine-NaN
-        // group materializes as a (non-null) NaN value. They are now fully
-        // distinguishable in the output, not just during grouping.
-        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
-            .expect("null-key group must materialize as an Arrow null");
+        assert!(
+            (0..grp_arr.len()).all(|i| !grp_arr.is_null(i)),
+            "no null-keyed group is emitted at all"
+        );
         let nan_idx = (0..grp_arr.len())
-            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i).is_nan())
-            .expect("genuine-NaN group must materialize as a non-null NaN value");
-
-        // The real-valued group (key=2.0) must be present with sum=3.0.
+            .find(|&i| grp_arr.value(i).is_nan())
+            .expect("the genuine-NaN key keeps its own group");
         let real_idx = (0..grp_arr.len())
-            .find(|&i| !grp_arr.is_null(i) && (grp_arr.value(i) - 2.0).abs() < 1e-12)
+            .find(|&i| (grp_arr.value(i) - 2.0).abs() < 1e-12)
             .expect("real-valued group (key=2.0) must be present");
-        assert!(
-            (sums[real_idx] - 3.0).abs() < 1e-12,
-            "real-key group (2.0) sum should be 3.0, got {}",
-            sums[real_idx]
-        );
-        // Null group (row 0) sum = 1.0; NaN group (row 1) sum = 2.0.
-        assert!(
-            (sums[null_idx] - 1.0).abs() < 1e-12,
-            "null group sum should be 1.0, got {}",
-            sums[null_idx]
-        );
-        assert!(
-            (sums[nan_idx] - 2.0).abs() < 1e-12,
-            "NaN-key group sum should be 2.0, got {}",
-            sums[nan_idx]
-        );
+        assert!((sums[nan_idx] - 2.0).abs() < 1e-12, "got {}", sums[nan_idx]);
+        assert!((sums[real_idx] - 3.0).abs() < 1e-12, "got {}", sums[real_idx]);
     }
 
     #[test]
@@ -1384,4 +1296,110 @@ mod tests {
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(col_f64(&out, "n"), vec![2.0]);
     }
+
+    // ── GH #179/#197: one partitioning idiom ────────────────────────────────
+
+    /// A groupby column named like one of the aggregate outputs refuses rather
+    /// than emitting two same-named fields (GH #179 residual 1: this append
+    /// site had no collision guard at all).
+    #[test]
+    fn aggregate_groupby_colliding_with_an_op_output_refuses() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![Some(1.0), Some(2.0)], vec!["a", "b"]);
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "group".into() }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let err = apply(&spec, &batch)
+            .expect_err("an op output named like the groupby column must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("collides"), "{msg}");
+        assert!(msg.contains("stat_aggregate"), "{msg}");
+    }
+
+    /// DISCLOSED BEHAVIOR CHANGE (#179): group rows come out in
+    /// first-appearance order. This transform previously emitted BTreeMap
+    /// sorted order, so `b` before `a` in the data still rendered `a` first.
+    #[test]
+    fn aggregate_group_rows_are_in_first_appearance_order() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![Some(1.0), Some(2.0)], vec!["b", "a"]);
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["group".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let g = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!((g.value(0), g.value(1)), ("b", "a"), "first-appearance, not sorted");
+
+        // The flip is a PERMUTATION, not a recomputation: each key still
+        // carries its own aggregate. A reorder that mismatched keys and values
+        // would pass the order assertion above and fail here.
+        let s = col_f64(&out, "s");
+        assert_eq!(
+            (s[0], s[1]),
+            (1.0, 2.0),
+            "b's sum stays with b and a's with a after the reorder"
+        );
+    }
+
+    /// A repeated groupby name refuses at APPLY time now, not only at the PyO3
+    /// constructor — the wire path (`transforms_json`) reaches this spec too,
+    /// and the constructor's own loop is gone.
+    #[test]
+    fn aggregate_repeated_groupby_name_refuses_from_the_wire_path() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![Some(1.0)], vec!["a"]);
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["group".into(), "group".into()],
+            name: None,
+        };
+        let err = apply(&spec, &batch).expect_err("groupby=['group', 'group'] must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+    }
+
+    /// GH #197: an all-null groupby column yields no groups and warns once
+    /// through the degrade channel, naming the transform and the column.
+    #[test]
+    fn aggregate_all_null_group_keys_yield_no_rows_and_warn() {
+        pyo3::Python::initialize();
+        let batch = batch_value_int64_group_nullable(
+            vec![Some(1.0), Some(2.0)],
+            vec![None, None],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let ctx = crate::transform::context::TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 0, "no usable key → no groups → no rows");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        let text = warnings[0].to_string();
+        assert!(text.contains("stat_aggregate"), "{text}");
+        assert!(text.contains("grp"), "{text}");
+    }
+
+    /// An ungrouped aggregate over a ZERO-ROW batch still collapses to one
+    /// summary row. The shared partitioner discovers groups from rows, so this
+    /// boundary is asked for explicitly rather than inherited.
+    #[test]
+    fn aggregate_ungrouped_zero_row_input_still_yields_one_row() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(Vec::new(), Vec::new());
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "".into(), fn_: AggFn::Count, as_: "n".into() }],
+            groupby: vec![],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 1, "the whole-batch group survives an empty batch");
+        assert_eq!(col_f64(&out, "n")[0], 0.0);
+    }
+
 }

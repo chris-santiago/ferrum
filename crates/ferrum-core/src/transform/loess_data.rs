@@ -143,7 +143,7 @@ fn apply_grouped(
     group_cols: &[String],
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    grouped_two_column_fit(batch, group_cols, "data_loess", &spec.as_, |ixs| {
+    grouped_two_column_fit(batch, group_cols, "data_loess", &spec.as_, ctx, |ixs| {
         // `grouped_two_column_fit` hands the closure only row indices, not
         // the parsed group key — `describe_group_row` re-derives a label by
         // reading `batch` at `ixs[0]` (see its doc for why this is the

@@ -2029,3 +2029,164 @@ fn kde_bare_apply_with_degenerate_input_does_not_panic() {
     let out = apply(&spec, &batch).unwrap();
     assert_eq!(out.num_rows(), 5);
 }
+
+// ── GH #179/#197: output-collision guard and the all-null warning ──────────
+
+/// Grouping by a column named like one of `Kde`'s own output columns refuses
+/// rather than emitting two same-named fields. This append site had no guard
+/// before GH #179 — it is the `kde.rs:389`-class site the issue names.
+#[test]
+fn kde_groupby_colliding_with_an_output_column_refuses() {
+    pyo3::Python::initialize();
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("density", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b"])),
+        ],
+    )
+    .unwrap();
+    let spec = minimal_spec(vec!["density".into()]);
+    let err =
+        apply(&spec, &batch).expect_err("grouping by a column named 'density' must refuse");
+    assert!(err.to_string().contains("collides"), "{err}");
+    assert!(err.to_string().contains("stat_kde"), "{err}");
+}
+
+/// GH #197: an all-null groupby column produces the empty group set and says
+/// so once, through the same channel the degenerate-fit warnings use.
+#[test]
+fn kde_all_null_group_keys_yield_no_rows_and_warn() {
+    pyo3::Python::initialize();
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+        ],
+    )
+    .unwrap();
+    let ctx = TransformContext::default();
+    let out = apply_with_context(&minimal_spec(vec!["g".into()]), &batch, &ctx).unwrap();
+    assert_eq!(out.num_rows(), 0);
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    assert!(matches!(
+        &warnings[0],
+        TransformWarning::GroupKeyAllNull { transform, columns, .. }
+            if transform == "stat_kde" && columns == "g"
+    ));
+}
+
+/// The names `apply_grouped`'s collision guard checks must be the names this
+/// module actually emits, alongside the appended groupby columns. Mirrors
+/// `kde_2d`'s own pin, so a rename of `value`/`density` cannot leave the guard
+/// checking a stale list.
+#[test]
+fn kde_output_field_names_match_the_emitted_schema() {
+    pyo3::Python::initialize();
+    let batch = batch_with("x", vec![1.0, 2.0, 3.0]);
+    let out = apply(&minimal_spec(vec![]), &batch).unwrap();
+    let schema = out.schema();
+    let emitted: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    assert_eq!(
+        emitted,
+        vec!["value", "density"],
+        "the collision guard in apply_grouped checks exactly these two names"
+    );
+}
+
+// ── GH #197 at Kde's SECOND extent slot (quality review N1) ────────────────
+
+/// `x` values keyed by a nullable `g`: the keyed rows span [100, 149] and the
+/// null-keyed ones span [0, 49], so a fold that includes the dropped rows is
+/// unmistakable in the result.
+fn batch_with_null_keyed_rows() -> RecordBatch {
+    use arrow::array::StringArray;
+    let mut values: Vec<f64> = (0..50).map(|i| i as f64).collect();
+    values.extend((100..150).map(|i| i as f64));
+    let mut groups: Vec<Option<&str>> = vec![None; 50];
+    groups.extend(vec![Some("a"); 50]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(values)),
+            Arc::new(StringArray::from(groups)),
+        ],
+    )
+    .unwrap()
+}
+
+/// `count_scale_global_extent` builds a SYNTHETIC `BinSpec` and delegates to
+/// `bin::global_extent`, which folds the rows its spec's `groupby` survives.
+/// The synthetic spec therefore has to carry the real request's `groupby`: a
+/// spec that drops it silently re-enables the whole-column fold for this slot
+/// while the in-transform resolution of the very same slot excludes the
+/// null-keyed rows — the facet-pin-versus-in-transform disagreement GH #197's
+/// extent work exists to close, at `Kde`'s second extent slot.
+///
+/// The consumption is numeric, not cosmetic: `resolve_group_bin_width` turns
+/// this extent into `(hi - lo) / n_bins`, the width that scales every surviving
+/// group's density into counts, so a whole-column pin inflates every group's
+/// counts relative to the unfaceted path.
+#[test]
+fn count_scale_global_extent_excludes_rows_the_null_key_policy_drops() {
+    pyo3::Python::initialize();
+    let batch = batch_with_null_keyed_rows();
+    let spec = KdeSpec {
+        count_scale: Some(BinMode::Fixed { n: 5 }),
+        ..minimal_spec(vec!["g".into()])
+    };
+    let (lo, hi) = count_scale_global_extent(&spec, &batch)
+        .expect("a count_scale spec over usable rows must pin an extent");
+    assert!(
+        lo >= 100.0,
+        "the count-scale pin must fold the GROUPED rows; got ({lo}, {hi}), which \
+         reaches down into the null-keyed rows' [0, 49] range"
+    );
+
+    // Control: an UNGROUPED request still folds the whole column, so the change
+    // is scoped to rows a groupby actually excluded.
+    let ungrouped = KdeSpec { groupby: vec![], ..spec.clone() };
+    let (u_lo, _) = count_scale_global_extent(&ungrouped, &batch)
+        .expect("the ungrouped pin must still resolve");
+    assert!(u_lo <= 0.0, "ungrouped keeps the whole-column fold; got {u_lo}");
+}
+
+/// Both of `Kde`'s extent slots must agree about which rows they cover. Pinning
+/// them as a pair is what makes a future divergence at either slot visible:
+/// N1 survived precisely because the `spec.extent` pin was tested and the
+/// `count_scale_extent` pin was not.
+#[test]
+fn kde_both_extent_slots_fold_the_same_rows() {
+    pyo3::Python::initialize();
+    let batch = batch_with_null_keyed_rows();
+    let spec = KdeSpec {
+        count_scale: Some(BinMode::Fixed { n: 5 }),
+        ..minimal_spec(vec!["g".into()])
+    };
+    let grid = global_extent(&spec, &batch).expect("grid extent");
+    let counts = count_scale_global_extent(&spec, &batch).expect("count-scale extent");
+    assert_eq!(
+        grid.0, 100.0,
+        "the grid pin folds the grouped rows"
+    );
+    assert!(
+        counts.0 >= 100.0,
+        "and so does the count-scale pin, which nices afterwards; got {counts:?}"
+    );
+}

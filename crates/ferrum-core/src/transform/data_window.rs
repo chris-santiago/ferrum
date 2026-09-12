@@ -36,7 +36,11 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{
+    groupby_key_at, refuse_groupby_output_collision, validate_groupby_columns,
+    warn_if_group_keys_all_null, KeyValue, NullKeyCounts, NullKeyPolicy,
+};
 use crate::transform::numeric_util::{coerce_to_float64, is_numeric_dtype};
 
 /// The single source of truth for `DataWindow`'s free-string `op`
@@ -108,6 +112,19 @@ fn is_false(v: &bool) -> bool {
 }
 
 pub(crate) fn apply(spec: &DataWindowSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
+/// sink, for the one degrade this transform can report: an all-null `groupby`
+/// key column (GH #197), raised from [`build_partitions`] — see its doc for why
+/// this transform emits that warning itself instead of inheriting it from the
+/// shared partitioner.
+pub(crate) fn apply_with_context(
+    spec: &DataWindowSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let n_rows = batch.num_rows();
 
@@ -122,8 +139,15 @@ pub(crate) fn apply(spec: &DataWindowSpec, batch: &RecordBatch) -> PyResult<Reco
     // Build sort order indices.
     let sorted_indices = build_sort_order(n_rows, &columns);
 
-    // Build group partitions.
-    let partitions = build_partitions(batch, &schema, &spec.groupby, &sorted_indices)?;
+    // Build group partitions. The `groupby` request itself is validated by the
+    // shared validator every other grouped transform uses (GH #179), so a
+    // missing column, a repeated name, or an unsupported key dtype refuses in
+    // the same words here as everywhere else.
+    let output_fields: Vec<String> = spec.ops.iter().map(|op| op.as_.clone()).collect();
+    if let Some(groupby) = &spec.groupby {
+        refuse_groupby_output_collision("data_window", groupby, &output_fields)?;
+    }
+    let partitions = build_partitions(batch, &spec.groupby, &sorted_indices, ctx)?;
 
     // For each op, compute the window function.
     let mut new_cols: Vec<ArrayRef> = Vec::with_capacity(spec.ops.len());
@@ -476,12 +500,32 @@ fn build_sort_order(n_rows: usize, columns: &WindowColumns) -> Vec<usize> {
     indices
 }
 
-/// Build partitions: groups of sorted indices that share the same group key.
+/// Build partitions: runs of ADJACENT sorted indices that share the same group
+/// key.
+///
+/// This is deliberately not [`crate::transform::group_key::group_partition_multi`]:
+/// a window function reads its partition in sort order, and two rows of the
+/// same group that are not adjacent after sorting belong to different peer
+/// runs. Only the request-level rules are shared, via
+/// [`validate_groupby_columns`] — so the three refusals (missing column,
+/// repeated name, unsupported key dtype) read identically to every other
+/// grouped transform's, which is what GH #179 asked for.
+///
+/// **Null-key policy (GH #197):** [`NullKeyPolicy::Pool`], the same exemption
+/// `data_stack` and `data_join_aggregate` take and for the same reason — this
+/// transform is row-preserving, so every input row must get a window value and
+/// a dropped row would silently keep the `NaN` initializer instead of a
+/// computed one. A null key is therefore a key like any other here, and
+/// null-keyed rows share a run. Because the partitioning is hand-rolled, the
+/// all-null warning is raised here explicitly rather than inherited from the
+/// shared partitioner: [`warn_if_group_keys_all_null`] still builds it, so the
+/// text and disposition are byte-identical to the siblings'. An exemption that
+/// does not warn is the silent degrade the #162 channel exists to remove.
 fn build_partitions(
     batch: &RecordBatch,
-    schema: &arrow::datatypes::SchemaRef,
     groupby: &Option<Vec<String>>,
     sorted_indices: &[usize],
+    warn_ctx: &TransformContext,
 ) -> PyResult<Vec<Vec<usize>>> {
     let groupby = match groupby {
         Some(g) => g.clone(),
@@ -492,45 +536,18 @@ fn build_partitions(
         return Ok(vec![sorted_indices.to_vec()]);
     }
 
-    let group_col_indices: Vec<usize> = groupby
-        .iter()
-        .map(|g| {
-            schema.index_of(g).map_err(|_| {
-                PyValueError::new_err(format!("data_window: groupby column '{g}' not found"))
-            })
-        })
-        .collect::<PyResult<_>>()?;
-
-    // Validate groupby dtypes and capture them for shared key extraction (FA-7).
-    let group_dtypes: Vec<DataType> = group_col_indices
-        .iter()
-        .zip(groupby.iter())
-        .map(|(&gi, g)| {
-            let dt = schema.field(gi).data_type().clone();
-            if !is_groupby_supported_dtype(&dt) {
-                return Err(PyValueError::new_err(format!(
-                    "data_window: groupby column '{g}' has unsupported dtype {dt:?}; \
-                     supported: Utf8/LargeUtf8, Float64/Float32, \
-                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
-                )));
-            }
-            Ok(dt)
-        })
-        .collect::<PyResult<_>>()?;
+    let resolved = validate_groupby_columns(batch, &groupby, "data_window")?;
 
     // Build group key per row, then partition sorted_indices by key.
     let extract = |idx: usize| -> PyResult<Vec<KeyValue>> {
-        group_col_indices
+        resolved
             .iter()
-            .enumerate()
-            .map(|(gpos, &gi)| {
-                groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], idx).ok_or_else(
-                    || {
-                        PyValueError::new_err(format!(
-                            "data_window: internal error extracting groupby key at row {idx}"
-                        ))
-                    },
-                )
+            .map(|(gi, dtype)| {
+                groupby_key_at(batch.column(*gi).as_ref(), dtype, idx).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "data_window: internal error extracting groupby key at row {idx}"
+                    ))
+                })
             })
             .collect()
     };
@@ -538,9 +555,17 @@ fn build_partitions(
     let mut partitions: Vec<Vec<usize>> = Vec::new();
     let mut current_key: Option<Vec<KeyValue>> = None;
     let mut current_partition: Vec<usize> = Vec::new();
+    let mut any_null = 0_usize;
+    let mut fully_null = 0_usize;
 
     for &idx in sorted_indices {
         let key = extract(idx)?;
+        if key.iter().any(|kv| matches!(kv, KeyValue::Null)) {
+            any_null += 1;
+            if key.iter().all(|kv| matches!(kv, KeyValue::Null)) {
+                fully_null += 1;
+            }
+        }
 
         if current_key.as_ref() == Some(&key) {
             current_partition.push(idx);
@@ -555,6 +580,14 @@ fn build_partitions(
     if !current_partition.is_empty() {
         partitions.push(current_partition);
     }
+
+    warn_if_group_keys_all_null(
+        "data_window",
+        &groupby,
+        NullKeyPolicy::Pool,
+        NullKeyCounts { any_null, fully_null, n_rows: sorted_indices.len() },
+        warn_ctx,
+    );
 
     Ok(partitions)
 }
@@ -765,7 +798,8 @@ mod tests {
         .unwrap();
         let sorted_indices: Vec<usize> = (0..5).collect();
         let partitions =
-            build_partitions(&batch, &schema, &Some(vec!["g".into()]), &sorted_indices).unwrap();
+            build_partitions(&batch, &Some(vec!["g".into()]), &sorted_indices, &TransformContext::default())
+                .unwrap();
         assert_eq!(
             partitions,
             vec![vec![0, 1], vec![2, 3, 4]],
@@ -1369,4 +1403,141 @@ mod tests {
             .unwrap()
             .contains("\"ignore_peers\":true"));
     }
+
+    // ── GH #179: the request-level rules are shared, the algorithm is not ────
+
+    /// `data_window` keeps its own adjacent-peer-run partitioning, but the
+    /// `groupby` REQUEST is validated by the same shared validator every other
+    /// grouped transform uses — so a repeated name refuses here too, in the
+    /// same words. Before this it silently keyed on the same column twice.
+    #[test]
+    fn data_window_repeated_groupby_name_refuses() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Int64, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1_i64, 1, 2])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            groupby: Some(vec!["g".into(), "g".into()]),
+            ..window_spec(vec![op("row_number", None, "rn")])
+        };
+        let err = apply(&spec, &batch).expect_err("groupby=['g', 'g'] must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+        assert!(err.to_string().contains("data_window"), "{err}");
+    }
+
+    /// A window output named like the groupby column refuses: the output
+    /// schema is the input's plus the window columns, so the collision would
+    /// produce two same-named fields.
+    #[test]
+    fn data_window_output_name_colliding_with_the_groupby_column_refuses() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Int64, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1_i64, 2])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            groupby: Some(vec!["g".into()]),
+            ..window_spec(vec![op("row_number", None, "g")])
+        };
+        let err = apply(&spec, &batch).expect_err("as_='g' must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+
+    /// GH #197 EXEMPTION: this transform emits one window value per INPUT row,
+    /// so null-keyed rows are pooled into a run rather than dropped — a
+    /// dropped row would keep the `NaN` initializer where a computed number
+    /// belongs. Exact parity with the `data_stack` and
+    /// `data_join_aggregate` siblings that take the same `Pool` exemption:
+    /// output unchanged, and the degrade now says its name once, with this
+    /// policy's own disposition text rather than a claim of emptiness this
+    /// transform can never produce.
+    #[test]
+    fn data_window_all_null_group_keys_pool_and_warn() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(
+                    vec![None, None, None] as Vec<Option<&str>>,
+                )),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            groupby: Some(vec!["g".into()]),
+            ..window_spec(vec![op("row_number", None, "rn")])
+        };
+
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+
+        // Output unchanged: every row still gets its window value, numbered
+        // within the one pooled run.
+        assert_eq!(out.num_rows(), 3, "row-preserving: no row is dropped");
+        assert_eq!(
+            col_values(&out, 2),
+            vec![1.0, 2.0, 3.0],
+            "all three rows share one run, so row_number counts 1..3"
+        );
+
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "one warning for the whole transform; got {warnings:?}");
+        let text = warnings[0].to_string();
+        assert!(text.contains("data_window"), "names the transform: {text}");
+        assert!(text.contains('g'), "names the groupby column: {text}");
+        assert!(
+            text.contains("all rows were treated as one unlabeled group"),
+            "the warning states this transform's OWN disposition: {text}"
+        );
+    }
+
+    /// The warning is for the all-null case only: one usable key means the
+    /// data really did split into runs, so nothing degraded.
+    #[test]
+    fn data_window_partially_null_group_keys_do_not_warn() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec![None, Some("a")])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let spec = DataWindowSpec {
+            groupby: Some(vec!["g".into()]),
+            ..window_spec(vec![op("row_number", None, "rn")])
+        };
+        let ctx = TransformContext::default();
+        apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty(), "a partially-null key column is not a degrade");
+    }
+
 }

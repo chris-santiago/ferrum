@@ -9,10 +9,12 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{
+    group_partition_multi, refuse_groupby_output_collision, NullKeyPolicy,
+};
 use crate::transform::numeric_util::coerce_to_float64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -50,6 +52,18 @@ fn default_offset() -> String {
 }
 
 pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162
+/// degrade-warning sink, for the one degrade this transform can report: an
+/// all-null `groupby` key column (GH #197), raised inside the shared
+/// partitioner.
+pub(crate) fn apply_with_context(
+    spec: &DataStackSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let n_rows = batch.num_rows();
 
@@ -58,61 +72,27 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
     })?;
     let field_col = coerce_to_float64(batch.column(field_idx), "data_stack", &spec.field)?;
 
-    // Build group keys.
-    let group_cols: Vec<usize> = spec
-        .groupby
-        .iter()
-        .map(|g| {
-            schema.index_of(g).map_err(|_| {
-                PyValueError::new_err(format!("data_stack: groupby column '{g}' not found"))
-            })
-        })
-        .collect::<PyResult<_>>()?;
+    // One partitioning idiom for every grouped transform (GH #179): the shared
+    // partitioner owns column validation, the repeated-name refusal,
+    // first-appearance group order, and the null-key policy. `Pool` is #197's
+    // stated exemption for this transform: it emits one stacked position per
+    // INPUT row, so a null-keyed row must land in some stack — dropping it
+    // would leave it holding a default 0/0 position that renders as a
+    // zero-height bar indistinguishable from real data.
+    refuse_groupby_output_collision(
+        "data_stack",
+        &spec.groupby,
+        &[spec.as_.0.clone(), spec.as_.1.clone()],
+    )?;
+    let partition =
+        group_partition_multi(batch, &spec.groupby, "data_stack", NullKeyPolicy::Pool, ctx)?;
 
-    // Validate groupby dtypes for shared key extraction (FA-7).
-    let group_dtypes: Vec<DataType> = group_cols
-        .iter()
-        .zip(spec.groupby.iter())
-        .map(|(&gi, g)| {
-            let dt = schema.field(gi).data_type().clone();
-            if !is_groupby_supported_dtype(&dt) {
-                return Err(PyValueError::new_err(format!(
-                    "data_stack: groupby column '{g}' has unsupported dtype {dt:?}; \
-                     supported: Utf8/LargeUtf8, Float64/Float32, \
-                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
-                )));
-            }
-            Ok(dt)
-        })
-        .collect::<PyResult<_>>()?;
-
-    // Partition rows by group key.
-    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
-    for row in 0..n_rows {
-        let mut key = Vec::with_capacity(group_cols.len());
-        for (gpos, &gi) in group_cols.iter().enumerate() {
-            let kv = groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], row)
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "data_stack: internal error extracting groupby key at row {row}"
-                    ))
-                })?;
-            key.push(kv);
-        }
-        groups.entry(key).or_default().push(row);
-    }
-
-    // If no groupby, all rows are one group.
-    if spec.groupby.is_empty() {
-        groups.clear();
-        groups.insert(Vec::new(), (0..n_rows).collect());
-    }
-
-    // Compute y0, y1 for each group.
+    // Compute y0, y1 for each group. The output is written per input row, so
+    // the group ORDER never reaches the output — only group membership does.
     let mut y0 = vec![0.0f64; n_rows];
     let mut y1 = vec![0.0f64; n_rows];
 
-    for rows in groups.values() {
+    for (_, rows) in &partition.groups {
         // Accumulate.
         let mut cumsum = 0.0;
         for &row in rows {
@@ -352,4 +332,96 @@ mod tests {
             "error message must reference the bad offset: {err_msg}"
         );
     }
+
+    // ── GH #179/#197: shared rules, row-preserving exemption ────────────────
+
+    fn gv_batch(groups: Vec<Option<&str>>, vals: Vec<f64>) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(groups)),
+                Arc::new(Float64Array::from(vals)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn stack_spec(groupby: Vec<&str>) -> DataStackSpec {
+        DataStackSpec {
+            field: "v".into(),
+            groupby: groupby.into_iter().map(String::from).collect(),
+            sort: None,
+            as_: default_stack_as(),
+            offset: "zero".into(),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn data_stack_repeated_groupby_name_refuses() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec![Some("a"), Some("b")], vec![1.0, 2.0]);
+        let err = apply(&stack_spec(vec!["g", "g"]), &batch)
+            .expect_err("groupby=['g', 'g'] must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+        assert!(err.to_string().contains("data_stack"), "{err}");
+    }
+
+    /// An output name colliding with the groupby column refuses — the output
+    /// schema is the input's plus `as_`, so a collision means two same-named
+    /// fields here too.
+    #[test]
+    fn data_stack_output_name_colliding_with_the_groupby_column_refuses() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec![Some("a")], vec![1.0]);
+        let mut spec = stack_spec(vec!["g"]);
+        spec.as_ = ("g".into(), "y1".into());
+        let err = apply(&spec, &batch).expect_err("as_=('g', ...) must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    /// GH #197 EXEMPTION: this transform emits one stacked position per INPUT
+    /// row, so null-keyed rows are pooled into one stack rather than dropped —
+    /// dropping them would leave a real bar holding a default 0/0 position.
+    #[test]
+    fn data_stack_pools_null_keyed_rows_instead_of_dropping_them() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(
+            vec![None, Some("a"), None],
+            vec![1.0, 5.0, 2.0],
+        );
+        let out = apply(&stack_spec(vec!["g"]), &batch).unwrap();
+        let y1 = out.column(out.schema().index_of("y1").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        // The two null-keyed rows stack on each other: 0→1 then 1→3.
+        assert_eq!(y1.value(0), 1.0);
+        assert_eq!(y1.value(2), 3.0, "the second null-keyed row stacks on the first");
+        // The real group is independent.
+        assert_eq!(y1.value(1), 5.0);
+    }
+
+    /// GH #197: an all-null key column still stacks every row (the exemption),
+    /// but says once that the grouping request could not be honored.
+    #[test]
+    fn data_stack_all_null_group_keys_pool_and_warn() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec![None, None], vec![1.0, 2.0]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&stack_spec(vec!["g"]), &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 2, "every input row still gets a position");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        let text = warnings[0].to_string();
+        assert!(text.contains("data_stack"), "{text}");
+        assert!(
+            text.contains("all rows were treated as one unlabeled group"),
+            "the warning states this transform's OWN disposition: {text}"
+        );
+    }
+
 }

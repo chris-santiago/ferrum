@@ -14,7 +14,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
-use crate::transform::group_key::{group_partition_multi, parse_groupby_pyany, KeyValue};
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{
+    group_partition_multi, parse_groupby_pyany, NullKeyPolicy,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -117,8 +120,21 @@ fn numeric_key_at(col: &dyn Array, row: usize) -> Option<String> {
 }
 
 pub(crate) fn apply(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162 degrade-warning
+/// sink, for the one degrade this transform can report: an all-null `groupby`
+/// key column (GH #197), raised inside the shared partitioner. It is the
+/// degrade most worth naming here, since the documented null-key policy below
+/// then filters away every row.
+pub(crate) fn apply_with_context(
+    spec: &TopKSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     match &spec.groupby {
-        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols),
+        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols, ctx),
         _ => apply_ungrouped(spec, batch),
     }
 }
@@ -264,7 +280,12 @@ fn apply_ungrouped(spec: &TopKSpec, batch: &RecordBatch) -> PyResult<RecordBatch
 /// doubles as the group key so a null key is still a key; here, the groupby
 /// column is a distinct category axis and a null category has nothing to
 /// rank.
-fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) -> PyResult<RecordBatch> {
+fn apply_grouped(
+    spec: &TopKSpec,
+    batch: &RecordBatch,
+    group_cols: &[String],
+    warn_ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
 
     let field_idx = schema.index_of(&spec.field).map_err(|_| {
@@ -278,13 +299,18 @@ fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) ->
     // is needed: any dtype is a valid thing to count.
     let numeric_vals: Option<Vec<Option<f64>>> = numeric_col_as_f64(field_col.as_ref());
 
-    let (group_order, group_idx_map, _group_dtypes) =
-        group_partition_multi(batch, group_cols, "data_top_k")?;
+    let partition = group_partition_multi(
+        batch,
+        group_cols,
+        "data_top_k",
+        NullKeyPolicy::Skip,
+        warn_ctx,
+    )?;
 
-    let mut group_aggs: Vec<(Vec<KeyValue>, f64)> = group_order
+    let mut group_aggs: Vec<(&Vec<usize>, f64)> = partition
+        .groups
         .iter()
-        .map(|g| {
-            let rows = &group_idx_map[g];
+        .map(|(_, rows)| {
             let agg_val = match &numeric_vals {
                 Some(vals) => {
                     let col_vals: Vec<f64> = rows
@@ -301,7 +327,7 @@ fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) ->
                     rows.len() as f64
                 }
             };
-            Ok((g.clone(), agg_val))
+            Ok((rows, agg_val))
         })
         .collect::<PyResult<_>>()?;
 
@@ -314,15 +340,13 @@ fn apply_grouped(spec: &TopKSpec, batch: &RecordBatch, group_cols: &[String]) ->
 
     // Collect row indices belonging to the top-n groups, in ascending row
     // order (via the final sort), matching the ungrouped path's `take` shape.
-    // `group_aggs`/`group_idx_map` only ever contain the non-null-key groups
+    // `group_aggs` only ever contains the non-null-key groups
     // `group_partition_multi` returned, so a null-groupby row is already
     // absent here and can never be kept — see the null-groupby-key policy
     // documented on this function above.
     let mut keep_indices: Vec<u32> = Vec::new();
-    for (key, _) in group_aggs.iter().take(spec.n) {
-        if let Some(rows) = group_idx_map.get(key) {
-            keep_indices.extend(rows.iter().map(|&r| r as u32));
-        }
+    for (rows, _) in group_aggs.iter().take(spec.n) {
+        keep_indices.extend(rows.iter().map(|&r| r as u32));
     }
     keep_indices.sort_unstable();
 

@@ -8,11 +8,13 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::aggregate::{AggColumn, AggFn};
-use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{
+    group_partition_multi, refuse_groupby_output_collision, NullKeyPolicy,
+};
 
 /// A single aggregation specification for JoinAggregate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -36,6 +38,18 @@ pub(crate) struct JoinAggregateSpec {
 }
 
 pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162
+/// degrade-warning sink, for the one degrade this transform can report: an
+/// all-null `groupby` key column (GH #197), raised inside the shared
+/// partitioner.
+pub(crate) fn apply_with_context(
+    spec: &JoinAggregateSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let n_rows = batch.num_rows();
     let groupby = spec.groupby.clone().unwrap_or_default();
@@ -46,14 +60,21 @@ pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<R
         ));
     }
 
-    // Build group keys for each row.
-    let group_keys = build_group_keys(batch, &schema, &groupby)?;
-
-    // Collect row indices per group.
-    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
-    for (row, key) in group_keys.iter().enumerate() {
-        groups.entry(key.clone()).or_default().push(row);
-    }
+    // One partitioning idiom for every grouped transform (GH #179): the shared
+    // partitioner owns column validation, the repeated-name refusal,
+    // first-appearance group order, and the null-key policy. `Pool` is #197's
+    // stated exemption for this transform: it joins one aggregate value back
+    // onto every INPUT row, so a null-keyed row must land in some group —
+    // dropping it would leave it holding NaN where a real number belongs.
+    let output_fields: Vec<String> = spec.aggregates.iter().map(|a| a.as_.clone()).collect();
+    refuse_groupby_output_collision("data_join_aggregate", &groupby, &output_fields)?;
+    let partition = group_partition_multi(
+        batch,
+        &groupby,
+        "data_join_aggregate",
+        NullKeyPolicy::Pool,
+        ctx,
+    )?;
 
     // For each aggregate, compute per-group value, then broadcast back.
     let mut new_cols: Vec<ArrayRef> = Vec::with_capacity(spec.aggregates.len());
@@ -75,7 +96,7 @@ pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<R
         )?;
         let mut row_values: Vec<f64> = vec![f64::NAN; n_rows];
 
-        for rows in groups.values() {
+        for (_, rows) in &partition.groups {
             let agg_val = agg_column.aggregate_rows(rows);
             for &r in rows {
                 row_values[r] = agg_val;
@@ -101,40 +122,6 @@ pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<R
         .map_err(|e| PyValueError::new_err(format!("data_join_aggregate: {e}")))
 }
 
-fn build_group_keys(
-    batch: &RecordBatch,
-    schema: &arrow::datatypes::SchemaRef,
-    groupby: &[String],
-) -> PyResult<Vec<Vec<KeyValue>>> {
-    let n_rows = batch.num_rows();
-    let mut keys = vec![Vec::with_capacity(groupby.len()); n_rows];
-
-    for g in groupby {
-        let idx = schema.index_of(g).map_err(|_| {
-            PyValueError::new_err(format!(
-                "data_join_aggregate: groupby column '{g}' not found"
-            ))
-        })?;
-        let dt = schema.field(idx).data_type().clone();
-        if !is_groupby_supported_dtype(&dt) {
-            return Err(PyValueError::new_err(format!(
-                "data_join_aggregate: groupby column '{g}' has unsupported dtype {dt:?}; \
-                 supported: Utf8/LargeUtf8, Float64/Float32, \
-                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
-            )));
-        }
-        let col = batch.column(idx);
-        for (row, key) in keys.iter_mut().enumerate() {
-            let kv = groupby_key_at(col.as_ref(), &dt, row).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "data_join_aggregate: internal error extracting groupby key at row {row}"
-                ))
-            })?;
-            key.push(kv);
-        }
-    }
-    Ok(keys)
-}
 
 // ─── PyO3 wrapper ──────────────────────────────────────────────────────────
 
@@ -212,4 +199,89 @@ mod tests {
         assert!((means.value(3) - 4.0).abs() < 1e-12);
         assert!((means.value(4) - 4.0).abs() < 1e-12);
     }
+
+    // ── GH #179/#197: shared rules, row-preserving exemption ────────────────
+
+    fn gv_batch(groups: Vec<Option<&str>>, vals: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(groups)),
+                Arc::new(Float64Array::from(vals)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn mean_spec(groupby: Vec<&str>, as_: &str) -> JoinAggregateSpec {
+        JoinAggregateSpec {
+            aggregates: vec![AggSpec {
+                field: "val".into(),
+                fn_: AggFn::Mean,
+                as_: as_.into(),
+            }],
+            groupby: Some(groupby.into_iter().map(String::from).collect()),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn join_aggregate_repeated_groupby_name_refuses() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec![Some("a"), Some("b")], vec![1.0, 2.0]);
+        let err = apply(&mean_spec(vec!["g", "g"], "m"), &batch)
+            .expect_err("groupby=['g', 'g'] must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+        assert!(err.to_string().contains("data_join_aggregate"), "{err}");
+    }
+
+    #[test]
+    fn join_aggregate_output_name_colliding_with_the_groupby_column_refuses() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec![Some("a")], vec![1.0]);
+        let err = apply(&mean_spec(vec!["g"], "g"), &batch)
+            .expect_err("an aggregate output named like the groupby column must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    /// GH #197 EXEMPTION: this transform joins an aggregate back onto every
+    /// INPUT row, so null-keyed rows are pooled into one group rather than
+    /// dropped — dropping them would leave real rows holding NaN.
+    #[test]
+    fn join_aggregate_pools_null_keyed_rows_instead_of_dropping_them() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(
+            vec![None, Some("a"), None],
+            vec![1.0, 5.0, 3.0],
+        );
+        let out = apply(&mean_spec(vec!["g"], "m"), &batch).unwrap();
+        let m = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(m.value(0), 2.0, "the pooled null group's mean is (1 + 3) / 2");
+        assert_eq!(m.value(2), 2.0, "both null-keyed rows read the same pooled mean");
+        assert_eq!(m.value(1), 5.0, "the real group is independent");
+    }
+
+    /// GH #197: an all-null key column still joins a value onto every row (the
+    /// exemption), but says once that the grouping could not be honored.
+    #[test]
+    fn join_aggregate_all_null_group_keys_pool_and_warn() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec![None, None], vec![1.0, 3.0]);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&mean_spec(vec!["g"], "m"), &batch, &ctx).unwrap();
+        let m = out.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(m.value(0), 2.0);
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].to_string().contains("all rows were treated as one unlabeled group"),
+            "{:?}",
+            warnings[0]
+        );
+    }
+
 }

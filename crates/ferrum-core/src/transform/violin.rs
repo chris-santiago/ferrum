@@ -13,12 +13,11 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    empty_groupby_col, groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype,
-    materialize_groupby_col, KeyValue,
+    empty_groupby_col, group_partition_multi, groupby_field_nullable, materialize_groupby_col,
+    refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 use crate::transform::kde::{self, BandwidthSpec, KdeSpec};
 
@@ -75,13 +74,33 @@ pub(crate) struct ViolinSpec {
 /// range (see `fix_transform_extents_for_facet`).
 ///
 /// NICENESS CONTRACT (XFORM-08): returns the RAW `(lo, hi)` (no nicing), like the
-/// KDE sibling and unlike `Bin`. Uses the shared `column_extent` helper, which
-/// coerces Int64/Float32/etc. pre-facet batches to Float64 so they produce a
-/// valid shared extent instead of returning None. (`apply` hard-errors on
-/// non-Float64 per group, but `global_extent` is called on the raw pre-cast
-/// batch, which may carry integer-typed columns.)
+/// KDE sibling and unlike `Bin`. Coerces Int64/Float32/etc. pre-facet batches to
+/// Float64 so they produce a valid shared extent instead of returning None.
+/// (`apply` hard-errors on non-Float64 per group, but `global_extent` is called
+/// on the raw pre-cast batch, which may carry integer-typed columns.)
+///
+/// GROUPED-ROWS CONTRACT (GH #197): folds only the rows whose `groupby` key
+/// survives the null-key policy, via
+/// [`crate::transform::numeric_util::grouped_column_extent`] — the same fold
+/// the in-transform `shared_extent` path uses, so the faceted and non-faceted
+/// pins cannot disagree about which rows a shared extent covers. Identical to
+/// the pre-#197 whole-column fold whenever the request is ungrouped or its keys
+/// hold no nulls.
 pub(crate) fn global_extent(spec: &ViolinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
-    crate::transform::numeric_util::column_extent(batch, &spec.field)
+    crate::transform::numeric_util::grouped_column_extent(batch, &spec.field, &spec.groupby)
+}
+
+/// This transform's own output column names, in schema order — the list a
+/// `groupby` request is refused against (GH #179). The final entry is the
+/// orientation-dependent per-vertex offset column, so the caller passes the
+/// name it resolved rather than this helper re-deriving it.
+fn output_field_names(offset_col_name: &str) -> [String; 4] {
+    [
+        "group_id".to_string(),
+        "violin_x".to_string(),
+        "violin_y".to_string(),
+        offset_col_name.to_string(),
+    ]
 }
 
 pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -101,25 +120,29 @@ pub(crate) fn apply_with_context(
     // Any numeric dtype is accepted; the value column is coerced to Float64
     // below via the shared `numeric_util` helper, which raises on non-numeric.
 
-    let mut group_dtypes: Vec<DataType> = Vec::with_capacity(spec.groupby.len());
-    for g in &spec.groupby {
-        let i = schema.index_of(g).map_err(|_| {
-            PyValueError::new_err(format!(
-                "stat_violin: groupby column '{}' not found",
-                g
-            ))
-        })?;
-        let dt = schema.field(i).data_type().clone();
-        if !is_groupby_supported_dtype(&dt) {
-            return Err(PyValueError::new_err(format!(
-                "stat_violin: groupby column '{}' has unsupported dtype {:?}; \
-                 supported: Utf8/LargeUtf8, Float64/Float32, \
-                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
-                g, dt
-            )));
-        }
-        group_dtypes.push(dt);
-    }
+    // One partitioning idiom for every grouped transform (GH #179): the shared
+    // partitioner owns column validation, the repeated-name refusal,
+    // first-appearance group order, and the null-key policy. Run before the
+    // zero-row early return below so a malformed `groupby` is refused on an
+    // empty batch too, exactly as it was when the validation loop stood here.
+    let offset_col_name = if spec.horizontal {
+        "__pos_y_offset__"
+    } else {
+        "__pos_x_offset__"
+    };
+    refuse_groupby_output_collision(
+        "stat_violin",
+        &spec.groupby,
+        &output_field_names(offset_col_name),
+    )?;
+    let partition = group_partition_multi(
+        batch,
+        &spec.groupby,
+        "stat_violin",
+        NullKeyPolicy::Skip,
+        ctx,
+    )?;
+    let group_dtypes = &partition.dtypes;
 
     let n_rows = batch.num_rows();
 
@@ -137,18 +160,13 @@ pub(crate) fn apply_with_context(
     // ordinal-axis dispatch path can position each vertex relative to its
     // category band center. Computed below from panel width (vertical) or panel
     // height (horizontal) divided by n_groups.
-    let offset_col_name = if spec.horizontal {
-        "__pos_y_offset__"
-    } else {
-        "__pos_x_offset__"
-    };
     fields.push(Field::new(offset_col_name, DataType::Float64, false));
     let out_schema = Arc::new(Schema::new(fields));
 
     if n_rows == 0 {
         let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 4);
         cols.push(Arc::new(UInt32Array::from(Vec::<u32>::new())));
-        for dt in &group_dtypes {
+        for dt in group_dtypes {
             cols.push(empty_groupby_col(dt).map_err(PyValueError::new_err)?);
         }
         cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
@@ -164,50 +182,29 @@ pub(crate) fn apply_with_context(
         &spec.field,
     )?;
 
-    // Bucket rows by group key (BTreeMap → deterministic ordering).
-    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
-    let group_arrays: Vec<&dyn arrow::array::Array> = spec
-        .groupby
-        .iter()
-        .map(|g| batch.column(schema.index_of(g).expect("invariant: groupby columns validated above")).as_ref())
-        .collect();
-
-    for row in 0..n_rows {
-        let mut key = Vec::with_capacity(spec.groupby.len());
-        for (gi, arr) in group_arrays.iter().enumerate() {
-            let kv = groupby_key_at(*arr, &group_dtypes[gi], row).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "stat_violin: internal error extracting groupby key at row {row}"
-                ))
-            })?;
-            key.push(kv);
-        }
-        groups.entry(key).or_default().push(row);
-    }
-    if spec.groupby.is_empty() {
-        let all: Vec<usize> = (0..n_rows).collect();
-        groups.clear();
-        groups.insert(Vec::new(), all);
-    }
-
     // Determine the evaluation extent for each group's internal KDE.
     //
     // Precedence (highest to lowest):
     //   1. `spec.extent` is `Some` — an explicit user or facet-pin; wins unconditionally.
     //      Every group uses this pinned range (existing behaviour, unchanged).
     //   2. `spec.shared_extent == true` AND the batch has >1 group — compute the
-    //      cross-group global extent (min/max over ALL values, ignoring group partition)
-    //      and pin every group's KDE to that range so groups share a comparable value axis.
-    //      Mirrors `kde::apply_grouped` when `shared_extent=true`.
+    //      cross-group extent (min/max over every GROUPED row, ignoring which group
+    //      each belongs to) and pin every group's KDE to that range so groups share
+    //      a comparable value axis. Mirrors `kde::apply_grouped` when
+    //      `shared_extent=true`.
     //   3. Neither — per-group extent derived from each group's own data (backward-compat
     //      default when `shared_extent=false` and no explicit `extent`).
     let shared_kde_extent: Option<(f64, f64)> = if spec.extent.is_some() {
         // Case 1: explicit pin already present — apply_loop uses spec.extent directly.
         None // sentinel: per-group loop will use spec.extent via unwrap_or
-    } else if spec.shared_extent && groups.len() > 1 {
-        // Case 2: compute cross-group global extent over the full value column.
-        // Delegates to the module-level `global_extent` helper, which applies the
-        // same null/NaN-skipping fold and `lo < hi` finiteness guard.
+    } else if spec.shared_extent && partition.groups.len() > 1 {
+        // Case 2: the cross-group extent, folded over the GROUPED rows only.
+        // Before GH #197 a null-keyed row formed its own violin, so the whole
+        // column and the grouped rows were the same set; now such a row belongs
+        // to no group, and folding it in would stretch every surviving violin's
+        // KDE grid across a range no violin occupies. This is literally
+        // `global_extent`'s fold — the faceted pin calls the same helper with
+        // the same `groupby`, so the two paths cannot disagree.
         global_extent(spec, batch)
     } else {
         // Case 3: per-group extent (shared_extent=false, the backward-compat default).
@@ -220,7 +217,7 @@ pub(crate) fn apply_with_context(
     let mut violin_x: Vec<f64> = Vec::new();
     let mut violin_y: Vec<f64> = Vec::new();
 
-    for (gid, (key, rows)) in groups.iter().enumerate() {
+    for (gid, (key, rows)) in partition.groups.iter().enumerate() {
         let vals: Vec<f64> = rows
             .iter()
             .filter_map(|&r| {
@@ -291,6 +288,14 @@ pub(crate) fn apply_with_context(
             extent: Some(kde_extent),
             cumulative: false,
             kernel: crate::transform::kde::default_kernel(),
+            // Empty deliberately, and NOT the laundering shape GH #197's
+            // quality review found at `kde::count_scale_global_extent`: this
+            // synthetic spec runs against `synth_batch`, a one-column batch of
+            // THIS group's already-extracted values. The grouping happened
+            // upstream, the batch carries no key column to group by, and
+            // `extent` is always `Some` here so no extent fold runs at all.
+            // Copying `spec.groupby` in would name a column that does not
+            // exist in the batch being passed.
             groupby: vec![],
             count_scale: None,
             count_scale_extent: None,
@@ -412,7 +417,7 @@ pub(crate) fn apply_with_context(
     // *declared* scale (padding, domain and range are all spec-level values,
     // unlike a resolved bandwidth), which is a TransformContext contract change,
     // not a formula change here.
-    let n_groups = groups.len().max(1);
+    let n_groups = partition.groups.len().max(1);
     // The `100.0` arms below fire only for a direct `apply()` call with no
     // render-supplied `panel_pixel_size` (unit tests, notebook/WASM direct
     // usage) — see the fallback note above.
@@ -534,14 +539,11 @@ impl PyViolin {
                 }
             }
         };
-        let mut seen = std::collections::HashSet::new();
-        for g in &groupby {
-            if !seen.insert(g.as_str()) {
-                return Err(PyValueError::new_err(format!(
-                    "Violin: duplicate groupby field '{g}'"
-                )));
-            }
-        }
+        // The duplicate-groupby refusal is the shared rule every grouped
+        // transform enforces, in the shared words — still refused here, at the
+        // earliest boundary that has the facts, and again inside the
+        // partitioner for the wire path that has no constructor (GH #179).
+        crate::transform::group_key::refuse_repeated_groupby_names("Violin", &groupby)?;
         Ok(Self(crate::transform::core::TransformSpec::Violin(
             ViolinSpec {
                 field: field.to_string(),
@@ -978,13 +980,18 @@ mod tests {
     /// RecordBatch::try_new to panic or error. Both the null-keyed group and the
     /// real-keyed group must appear in the output (two distinct group_id values),
     /// and the null key must materialize as an Arrow null in the groupby column.
+    /// GH #197: a null groupby key is the ABSENCE of a key, so the rows
+    /// carrying it belong to no group and contribute to no output row. This
+    /// test was written for the pre-#197 hand-rolled partitioner, where those
+    /// rows pooled into a `KeyValue::Null` group emitted as an Arrow null; the
+    /// adjudicated family-wide policy replaced that with the skip every
+    /// partitioner-routed transform already used.
     #[test]
-    fn violin_null_int64_groupby_key_survives_and_is_distinct() {
+    fn violin_null_int64_groupby_rows_drop_out_of_every_group() {
         pyo3::Python::initialize();
         use arrow::array::Int64Array;
 
-        // null group: 50 observations in [0, 49]
-        // real group (grp=42): 50 observations in [100, 149]
+        // 50 null-keyed observations in [0, 49]; 50 keyed 42 in [100, 149].
         let mut values: Vec<Option<f64>> = (0..50).map(|i| Some(i as f64)).collect();
         values.extend((100..150).map(|i| Some(i as f64)));
         let mut groups: Vec<Option<i64>> = vec![None; 50];
@@ -1003,28 +1010,35 @@ mod tests {
             name: None,
             horizontal: false,
         };
-        // Must not error: the non-nullable schema declaration was the bug.
         let out = apply(&spec, &batch).unwrap();
-        assert!(out.num_rows() > 0, "output must be non-empty");
+        assert!(out.num_rows() > 0, "the surviving group still draws a violin");
 
-        // Both groups must appear: two distinct group_id values.
+        // Exactly ONE group_id: the null-keyed half contributes no vertices.
         let gids = col_u32(&out, "group_id");
         let distinct_gids: std::collections::BTreeSet<u32> = gids.iter().copied().collect();
         assert_eq!(
-            distinct_gids.len(), 2,
-            "expected 2 distinct group_ids (null + 42); got {:?}",
+            distinct_gids.len(), 1,
+            "expected only the grp=42 violin; got group_ids {:?}",
             distinct_gids
         );
 
-        // FA-9: the null-keyed group materializes as an Arrow null in the output column.
         let grp_arr = out.column(out.schema().index_of("grp").unwrap())
             .as_any().downcast_ref::<Int64Array>().unwrap();
-        let has_null_key = (0..grp_arr.len()).any(|i| grp_arr.is_null(i));
-        assert!(has_null_key, "null-key group must materialize as Arrow null in 'grp' column");
-
-        // The real-keyed group (grp=42) must also appear.
-        let has_real_key = (0..grp_arr.len()).any(|i| !grp_arr.is_null(i) && grp_arr.value(i) == 42);
-        assert!(has_real_key, "real-key group (grp=42) must be present in 'grp' column");
+        assert!(
+            (0..grp_arr.len()).all(|i| !grp_arr.is_null(i) && grp_arr.value(i) == 42),
+            "every emitted vertex belongs to the grp=42 violin"
+        );
+        // The surviving violin is built from its OWN values, not the pooled
+        // set. Its KDE grid spans exactly that group's data range, so the
+        // bounds are [100, 149] with no slack — a contaminated extent (the
+        // dropped rows span [0, 49]) moves the minimum immediately.
+        let ys = col_f64(&out, "violin_y");
+        let min_y = ys.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_y = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (min_y - 100.0).abs() < 1e-9 && (max_y - 149.0).abs() < 1e-9,
+            "violin_y must span exactly the grp=42 rows' own [100, 149]; got [{min_y}, {max_y}]"
+        );
     }
 
     /// FA-7 byte-stability guard: a Utf8 groupby still materializes a StringArray
@@ -1709,4 +1723,271 @@ mod tests {
             );
         }
     }
+
+    // ── GH #179: shared partitioner rules ───────────────────────────────────
+
+    /// DISCLOSED BEHAVIOR CHANGE (#179): first-appearance group order, which
+    /// for this transform also renumbers `group_id` — group 0 is now the first
+    /// group SEEN, not the alphabetically first.
+    #[test]
+    fn violin_group_ids_follow_first_appearance_order() {
+        pyo3::Python::initialize();
+        let mut vals: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        vals.extend((0..50).map(|i| 100.0 + i as f64));
+        let mut grps: Vec<&str> = vec!["b"; 50];
+        grps.extend(vec!["a"; 50]);
+        let batch = batch_value_group(vals, grps);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 8,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        use arrow::array::StringArray;
+        let g = out.column(out.schema().index_of("group").unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        let gids = col_u32(&out, "group_id");
+        assert_eq!(
+            (g.value(0), gids[0]),
+            ("b", 0),
+            "group_id 0 is the first group SEEN, not the sorted-first one"
+        );
+    }
+
+    /// Grouping by a column named like one of this transform's fixed outputs
+    /// refuses (GH #179 residual 1: this append site had no guard).
+    #[test]
+    fn violin_groupby_colliding_with_an_output_column_refuses() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("violin_y", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["violin_y".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 8,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        };
+        let err = apply(&spec, &batch)
+            .expect_err("grouping by a column named 'violin_y' must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    #[test]
+    fn violin_repeated_groupby_name_refuses_from_the_wire_path() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![1.0], vec!["a"]);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into(), "group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 8,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        };
+        let err = apply(&spec, &batch).expect_err("a repeated groupby name must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+    }
+
+
+    /// The names the collision guard checks must be the names this module
+    /// actually emits. Violin's schema interleaves `group_id`, the groupby
+    /// columns, then the value/offset columns, so the helper cannot drive the
+    /// builder the way `summary`/`box_stats`/`error_extent` do — it is pinned
+    /// against the emitted schema instead, the `kde_2d` way.
+    #[test]
+    fn output_field_names_match_the_emitted_non_groupby_schema() {
+        pyo3::Python::initialize();
+        for horizontal in [false, true] {
+            let batch = batch_value_group(vec![1.0, 2.0], vec!["a", "a"]);
+            let spec = ViolinSpec {
+                field: "v".into(),
+                groupby: vec!["group".into()],
+                bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.0,
+                n: 8,
+                width: 0.4,
+                extent: None,
+                shared_extent: false,
+                name: None,
+                horizontal,
+            };
+            let out = apply(&spec, &batch).unwrap();
+            let schema = out.schema();
+            let emitted: Vec<String> = schema
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .filter(|n| n != "group")
+                .collect();
+            let offset = if horizontal { "__pos_y_offset__" } else { "__pos_x_offset__" };
+            assert_eq!(
+                emitted,
+                output_field_names(offset).to_vec(),
+                "horizontal={horizontal}"
+            );
+        }
+    }
+
+    /// GH #197 follow-through: `shared_extent` folds the GROUPED rows only. A
+    /// null-keyed row draws no violin, so letting it widen the shared KDE grid
+    /// would stretch every surviving violin across a range none of them
+    /// occupies. The keyed rows span [100, 149]; the null-keyed ones span
+    /// [0, 49], so a contaminated extent is unmistakable.
+    #[test]
+    fn violin_shared_extent_ignores_rows_excluded_by_the_null_key_policy() {
+        pyo3::Python::initialize();
+        let mut values: Vec<Option<f64>> = (0..50).map(|i| Some(i as f64)).collect();
+        values.extend((100..150).map(|i| Some(i as f64)));
+        let mut groups: Vec<Option<i64>> = vec![None; 50];
+        groups.extend(vec![Some(42); 25]);
+        groups.extend(vec![Some(43); 25]);
+
+        let batch = batch_value_int64_group_nullable(values, groups);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            width: 0.4,
+            extent: None,
+            shared_extent: true,
+            name: None,
+            horizontal: false,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let min_y = ys.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            min_y >= 100.0,
+            "the shared extent must start at the grouped rows' own minimum (100), \
+             not at the excluded null-keyed rows' 0; got {min_y}"
+        );
+    }
+
+
+    /// GH #197 follow-through at the FACET pin — the site F1 named.
+    ///
+    /// A faceted violin never reaches the in-transform `shared_extent` branch:
+    /// `render::prepare::extent::fix_transform_extents_for_facet` pins
+    /// `spec.extent` from `global_extent` BEFORE partitioning, and precedence
+    /// case 1 (`spec.extent.is_some()`) then wins for every group. So fixing
+    /// only the in-transform fold left faceted violins with the exact defect
+    /// the fix names. This calls `global_extent` directly — the function the
+    /// facet pin calls — and pins that it too excludes the rows the null-key
+    /// policy drops.
+    #[test]
+    fn global_extent_excludes_rows_the_null_key_policy_drops() {
+        pyo3::Python::initialize();
+        // Keyed rows span [100, 149]; null-keyed rows span [0, 49] and draw
+        // nothing. The pinned extent must describe only what is drawn.
+        let mut values: Vec<Option<f64>> = (0..50).map(|i| Some(i as f64)).collect();
+        values.extend((100..150).map(|i| Some(i as f64)));
+        let mut groups: Vec<Option<i64>> = vec![None; 50];
+        groups.extend(vec![Some(42); 50]);
+        let batch = batch_value_int64_group_nullable(values, groups);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        };
+        assert_eq!(
+            global_extent(&spec, &batch),
+            Some((100.0, 149.0)),
+            "the facet pin must fold the GROUPED rows, not the whole column"
+        );
+
+        // And the whole-column answer is still what an UNGROUPED request gets,
+        // so the change is scoped to rows a groupby actually excluded.
+        let ungrouped = ViolinSpec { groupby: vec![], ..spec.clone() };
+        assert_eq!(global_extent(&ungrouped, &batch), Some((0.0, 149.0)));
+    }
+
+    /// End to end through the facet pin itself: a faceted violin with null
+    /// groupby keys draws its violins over the surviving rows' range. Drives
+    /// `fix_transform_extents_for_facet` (the real production seam) rather than
+    /// calling `global_extent` directly, so a regression that reconnects the
+    /// pin to a whole-column fold is caught here even if `global_extent` stays
+    /// correct.
+    #[test]
+    fn faceted_violin_with_null_keys_pins_the_surviving_rows_extent() {
+        pyo3::Python::initialize();
+        use crate::transform::core::TransformSpec;
+
+        let mut values: Vec<Option<f64>> = (0..50).map(|i| Some(i as f64)).collect();
+        values.extend((100..150).map(|i| Some(i as f64)));
+        let mut groups: Vec<Option<i64>> = vec![None; 50];
+        groups.extend(vec![Some(42); 50]);
+        let batch = batch_value_int64_group_nullable(values, groups);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false,
+        };
+        let pinned = crate::render::prepare::fix_transform_extents_for_facet(
+            &[TransformSpec::Violin(spec)],
+            &batch,
+        );
+        let TransformSpec::Violin(pinned_spec) = &pinned[0] else {
+            panic!("the violin arm must stay a violin");
+        };
+        assert_eq!(
+            pinned_spec.extent,
+            Some((100.0, 149.0)),
+            "the faceted pin must cover only the rows that draw a violin"
+        );
+
+        // The pinned spec then drives the render, so every vertex lands in it.
+        let out = apply(pinned_spec, &batch).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let min_y = ys.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            min_y >= 100.0,
+            "a faceted violin must not be stretched over the dropped rows' range; got {min_y}"
+        );
+    }
+
 }

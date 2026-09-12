@@ -221,8 +221,16 @@ pub(crate) fn clean_float64_values_indexed(
 /// [`column_extent`] is the batch-level wrapper (index_of + coerce_to_float64 +
 /// `finite_extent`); use it when starting from a column name.
 pub(crate) fn finite_extent(arr: &Float64Array) -> Option<(f64, f64)> {
+    finite_extent_where(arr, |_| true)
+}
+
+/// [`finite_extent`] over a subset of rows: same null/NaN skip, same fold, same
+/// `lo < hi` guard, restricted to the rows `keep` accepts. One fold body serves
+/// both so a whole-column extent and a row-restricted one can never disagree
+/// about what "finite extent" means.
+fn finite_extent_where(arr: &Float64Array, keep: impl Fn(usize) -> bool) -> Option<(f64, f64)> {
     let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) {
+        if !keep(i) || arr.is_null(i) {
             return (lo, hi);
         }
         let v = arr.value(i);
@@ -256,6 +264,72 @@ pub(crate) fn column_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f6
     finite_extent(&arr)
 }
 
+/// [`column_extent`] restricted to the rows a GROUPED transform will actually
+/// draw — those whose `groupby` key survives GH #197's null-key policy.
+///
+/// The one fold every shared/global value extent in the grouped family uses, so
+/// "the shared extent" means the same thing at both of the places it is
+/// computed: the facet pin (`render::prepare::extent`, via each transform's
+/// `global_extent`) and the in-transform `shared_extent` resolution
+/// ([`resolve_shared_extent`]). Before #197 the distinction did not exist —
+/// a null-keyed row still formed its own group and drew its own violin/curve,
+/// so folding it in was correct. Under the adjudicated policy it draws nothing,
+/// and folding it in stretches every SURVIVING group's grid across a range no
+/// group occupies. `groupby.is_empty()` is exactly [`column_extent`]: no
+/// grouping, no exclusions, byte-identical to before.
+///
+/// Deliberately lenient about a malformed `groupby`: a missing column or an
+/// unsupported key dtype falls back to the whole-column fold, because the
+/// transform's own partitioner refuses that request moments later with a proper
+/// message (`group_key::validate_groupby_columns`). Inventing a second, worse
+/// refusal site inside an extent helper would only make the error worse.
+///
+/// COST, stated as a decision rather than an accident (quality review N2): the
+/// per-row predicate calls [`crate::transform::group_key::groupby_key_at`],
+/// which for a `Utf8` key allocates a `String` purely to be tested for null.
+/// `batch.column(gi).is_null(row)` would be allocation-free and is equivalent
+/// for every supported key dtype — but it restates "what counts as a null
+/// group key" outside `group_key`, which is the one module that owns that rule
+/// and the coupling this task exists to remove. The trade is deliberate: a
+/// transient per-row allocation on a pre-facet fold, against a second copy of
+/// the null-key definition drifting from the partitioner's. Revisit only with a
+/// measurement showing this fold on the hot path.
+pub(crate) fn grouped_column_extent(
+    batch: &RecordBatch,
+    field: &str,
+    groupby: &[String],
+) -> Option<(f64, f64)> {
+    use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+
+    if groupby.is_empty() {
+        return column_extent(batch, field);
+    }
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    let arr = coerce_to_float64(batch.column(idx), "column_extent", field).ok()?;
+
+    let mut key_cols: Vec<(usize, DataType)> = Vec::with_capacity(groupby.len());
+    for name in groupby {
+        let Ok(gi) = schema.index_of(name) else {
+            return finite_extent(&arr);
+        };
+        let dt = schema.field(gi).data_type().clone();
+        if !is_groupby_supported_dtype(&dt) {
+            return finite_extent(&arr);
+        }
+        key_cols.push((gi, dt));
+    }
+
+    finite_extent_where(&arr, |row| {
+        key_cols.iter().all(|(gi, dt)| {
+            !matches!(
+                groupby_key_at(batch.column(*gi).as_ref(), dt, row),
+                Some(KeyValue::Null) | None
+            )
+        })
+    })
+}
+
 /// Resolve the extent a grouped stat transform should apply across all groups.
 ///
 /// Returns:
@@ -263,18 +337,22 @@ pub(crate) fn column_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f6
 ///     explicit extent always wins, and is shared across groups), else
 ///   - `None` when `shared` is `false` (default / layer mode → each group uses
 ///     its own data-derived extent), else
-///   - the global [`column_extent`] over `field` when `shared` is `true`
+///   - the [`grouped_column_extent`] over `field` when `shared` is `true`
 ///     and no explicit extent was set (so every group gets the same edges —
 ///     required for `multiple="stack"`/`"fill"` alignment).
 ///
 /// This unifies the previously divergent shared-extent blocks in `bin` (a
 /// `Cow`-patched spec) and `kde` (a cloned-spec rebuild with an inline fold).
-/// The numeric result is identical to both prior copies for the existing path.
+/// `groupby` is the caller's own request, so the fold covers exactly the rows
+/// that caller will draw — see [`grouped_column_extent`]. With no `groupby`, or
+/// with no null keys in it, the result is identical to the pre-#197 whole-column
+/// fold.
 pub(crate) fn resolve_shared_extent(
     spec_extent: Option<(f64, f64)>,
     shared: bool,
     batch: &RecordBatch,
     field: &str,
+    groupby: &[String],
 ) -> Option<(f64, f64)> {
     if spec_extent.is_some() {
         return spec_extent;
@@ -282,7 +360,7 @@ pub(crate) fn resolve_shared_extent(
     if !shared {
         return None;
     }
-    column_extent(batch, field)
+    grouped_column_extent(batch, field, groupby)
 }
 
 /// Linearly-interpolated quantile over an already-sorted (ascending) sequence.
@@ -832,7 +910,7 @@ mod tests {
     fn resolve_shared_extent_explicit_wins() {
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 9.0])));
         assert_eq!(
-            resolve_shared_extent(Some((0.0, 100.0)), true, &b, "x"),
+            resolve_shared_extent(Some((0.0, 100.0)), true, &b, "x", &[]),
             Some((0.0, 100.0)),
             "an explicit extent must be returned unchanged"
         );
@@ -841,12 +919,12 @@ mod tests {
     #[test]
     fn resolve_shared_extent_not_shared_is_none() {
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 9.0])));
-        assert_eq!(resolve_shared_extent(None, false, &b, "x"), None);
+        assert_eq!(resolve_shared_extent(None, false, &b, "x", &[]), None);
     }
 
     #[test]
     fn resolve_shared_extent_shared_computes_global() {
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 9.0, 4.0])));
-        assert_eq!(resolve_shared_extent(None, true, &b, "x"), Some((1.0, 9.0)));
+        assert_eq!(resolve_shared_extent(None, true, &b, "x", &[]), Some((1.0, 9.0)));
     }
 }

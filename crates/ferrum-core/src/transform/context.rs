@@ -88,6 +88,23 @@ pub(crate) enum TransformWarning {
         group: Option<String>,
         reason: String,
     },
+    /// Every row's `groupby` key was null, so the request to split the batch
+    /// into groups could not be honored (GH #197). This is the degraded arm of
+    /// the adjudicated all-null policy: the transform still produces output,
+    /// but not the grouped output the caller asked for. Pushed from exactly one
+    /// place — `group_key::group_partition_multi` — so all eleven-plus grouped
+    /// transforms report the same condition in the same words.
+    ///
+    /// `columns` lists the groupby column names as the user wrote them;
+    /// `disposition` is
+    /// [`crate::transform::group_key::NullKeyPolicy::all_null_disposition`]'s
+    /// text for the policy that call site chose, so what the message says and
+    /// what the transform did cannot drift apart.
+    GroupKeyAllNull {
+        transform: String,
+        columns: String,
+        disposition: String,
+    },
 }
 
 impl std::fmt::Display for TransformWarning {
@@ -127,6 +144,11 @@ impl std::fmt::Display for TransformWarning {
                 Some(g) => write!(f, "{transform}: group {g} {reason}"),
                 None => write!(f, "{transform}: {reason}"),
             },
+            TransformWarning::GroupKeyAllNull { transform, columns, disposition } => write!(
+                f,
+                "{transform}: every row has a null in its groupby key ({columns}), so the data \
+                 could not be split into groups; {disposition}"
+            ),
         }
     }
 }
@@ -347,6 +369,11 @@ mod tests {
                 reason: "row's groupby key is null; the whole column's mean was used instead"
                     .into(),
             },
+            TransformWarning::GroupKeyAllNull {
+                transform: "Aggregate".into(),
+                columns: "g".into(),
+                disposition: "the grouped output is empty".into(),
+            },
         ]
     }
 
@@ -366,7 +393,8 @@ mod tests {
     /// name leaking into the text — mirrors `RenderWarning`'s own assertion.
     #[test]
     fn transform_warning_display_never_leaks_variant_names() {
-        let leak_tokens = ["DegenerateFit", "ParameterClamped", "FallbackApplied"];
+        let leak_tokens =
+            ["DegenerateFit", "ParameterClamped", "FallbackApplied", "GroupKeyAllNull"];
         for w in all_variants() {
             let text = w.to_string();
             for token in leak_tokens {

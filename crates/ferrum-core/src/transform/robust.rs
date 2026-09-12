@@ -34,6 +34,7 @@ use std::sync::Arc;
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
+    NullKeyPolicy,
     KeyValue,
 };
 use crate::transform::logistic::inv_normal_cdf;
@@ -318,13 +319,19 @@ fn apply_grouped(
     group_cols: &[String],
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    let (group_order, group_idx_map, gtypes) = group_partition_multi(batch, group_cols, "Robust")?;
+    // `SkipWithWholeBatchFallback` is #197's stated exemption for this
+    // transform: the all-null-key arm below re-fits the whole batch rather
+    // than emitting nothing, and the warning says so.
+    let partition = group_partition_multi(
+        batch,
+        group_cols,
+        "Robust",
+        NullKeyPolicy::SkipWithWholeBatchFallback,
+        ctx,
+    )?;
 
     let mut per_group_batches: Vec<(Vec<KeyValue>, RecordBatch)> = Vec::new();
-    for g in &group_order {
-        let ixs = group_idx_map.get(g).ok_or_else(|| {
-            PyValueError::new_err(format!("Robust: missing group key {g:?} in index map"))
-        })?;
+    for (g, ixs) in &partition.groups {
         let label = describe_group_keys(group_cols, g);
         let out = apply_one_group(spec, batch, Some(ixs), ctx, Some(&label))?;
         per_group_batches.push((g.clone(), out));
@@ -337,7 +344,7 @@ fn apply_grouped(
         return apply_one_group(spec, batch, None, ctx, None);
     }
 
-    stack_grouped_batches("Robust", &per_group_batches, group_cols, &gtypes)
+    stack_grouped_batches("Robust", &per_group_batches, group_cols, &partition.dtypes)
 }
 
 // ---------- Helpers ----------
@@ -1307,4 +1314,47 @@ mod tests {
         let out = apply(&s, &batch).unwrap();
         assert_eq!(out.num_rows(), 8);
     }
+
+    /// GH #197 EXEMPTION: an all-null `groupby` column leaves this transform
+    /// with nothing to partition, and its documented answer is the pooled
+    /// whole-batch fit rather than an empty output — the degraded-but-
+    /// meaningful render. The fit is unchanged; what is new is that it SAYS so,
+    /// with its own disposition text rather than a claim of emptiness.
+    #[test]
+    fn robust_all_null_group_keys_pool_the_whole_batch_and_warn() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 7.0])),
+                Arc::new(StringArray::from(vec![None, None, None, None] as Vec<Option<&str>>)),
+            ],
+        )
+        .unwrap();
+        let s = RobustSpec { groupby: vec!["g".into()], ..spec(10, None, 1.345, SmoothOutput::Fitted) };
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 10, "the pooled whole-batch fit still renders");
+
+        let warnings = ctx.warnings.borrow();
+        let all_null: Vec<&TransformWarning> = warnings
+            .iter()
+            .filter(|w| matches!(w, TransformWarning::GroupKeyAllNull { .. }))
+            .collect();
+        assert_eq!(all_null.len(), 1, "got {warnings:?}");
+        assert!(
+            all_null[0]
+                .to_string()
+                .contains("the whole batch was used as one ungrouped computation instead"),
+            "the warning states this transform's OWN disposition: {}",
+            all_null[0]
+        );
+    }
+
 }

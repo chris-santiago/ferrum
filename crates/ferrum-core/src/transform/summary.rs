@@ -3,12 +3,12 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
-    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    group_partition_multi, groupby_field_nullable, materialize_groupby_col,
+    refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 use crate::transform::numeric_util::coerce_to_float64;
 
@@ -36,31 +36,39 @@ pub(crate) struct SummarySpec {
 }
 
 pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162
+/// degrade-warning sink, for the one degrade this transform can report: an
+/// all-null `groupby` key column (GH #197), raised inside the shared
+/// partitioner.
+pub(crate) fn apply_with_context(
+    spec: &SummarySpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
 
     let v_idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("stat_summary: column '{}' not found", spec.field))
     })?;
 
-    let mut group_dtypes: Vec<DataType> = Vec::with_capacity(spec.groupby.len());
-    for g in &spec.groupby {
-        let i = schema.index_of(g).map_err(|_| {
-            PyValueError::new_err(format!(
-                "stat_summary: groupby column '{}' not found",
-                g
-            ))
-        })?;
-        let dt = schema.field(i).data_type().clone();
-        if !is_groupby_supported_dtype(&dt) {
-            return Err(PyValueError::new_err(format!(
-                "stat_summary: groupby column '{}' has unsupported dtype {:?}; \
-                 supported: Utf8/LargeUtf8, Float64/Float32, \
-                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
-                g, dt
-            )));
-        }
-        group_dtypes.push(dt);
-    }
+    // One partitioning idiom for every grouped transform (GH #179): the shared
+    // partitioner owns column validation, the repeated-name refusal,
+    // first-appearance group order, and the null-key policy. Run BEFORE the
+    // zero-row refusal below so a malformed `groupby` is still reported as
+    // such on an empty batch, exactly as it was when the validation loop stood
+    // here — the same ordering `violin` keeps.
+    refuse_groupby_output_collision("stat_summary", &spec.groupby, &output_field_names())?;
+    let partition = group_partition_multi(
+        batch,
+        &spec.groupby,
+        "stat_summary",
+        NullKeyPolicy::Skip,
+        ctx,
+    )?;
+    let group_dtypes = &partition.dtypes;
 
     let n_rows = batch.num_rows();
     if n_rows == 0 {
@@ -69,39 +77,13 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
 
     let v_arr = coerce_to_float64(batch.column(v_idx), "stat_summary", &spec.field)?;
 
-    // Collect rows per group key.
-    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
-    let group_arrays: Vec<&dyn arrow::array::Array> = spec
-        .groupby
-        .iter()
-        .map(|g| batch.column(schema.index_of(g).expect("invariant: groupby columns validated above")).as_ref())
-        .collect();
-
-    for row in 0..n_rows {
-        let mut key = Vec::with_capacity(spec.groupby.len());
-        for (gi, arr) in group_arrays.iter().enumerate() {
-            let kv = groupby_key_at(*arr, &group_dtypes[gi], row).ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "stat_summary: internal error extracting groupby key at row {row}"
-                ))
-            })?;
-            key.push(kv);
-        }
-        groups.entry(key).or_default().push(row);
-    }
-    if spec.groupby.is_empty() {
-        let all: Vec<usize> = (0..n_rows).collect();
-        groups.clear();
-        groups.insert(Vec::new(), all);
-    }
-
     // Compute mean + (lower, upper) per group.
-    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(groups.len());
-    let mut means: Vec<f64> = Vec::with_capacity(groups.len());
-    let mut lowers: Vec<f64> = Vec::with_capacity(groups.len());
-    let mut uppers: Vec<f64> = Vec::with_capacity(groups.len());
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(partition.groups.len());
+    let mut means: Vec<f64> = Vec::with_capacity(partition.groups.len());
+    let mut lowers: Vec<f64> = Vec::with_capacity(partition.groups.len());
+    let mut uppers: Vec<f64> = Vec::with_capacity(partition.groups.len());
 
-    for (key, rows) in &groups {
+    for (key, rows) in &partition.groups {
         group_keys_out.push(key.clone());
         let vals: Vec<f64> = rows
             .iter()
@@ -128,9 +110,9 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
         // FA-9: nullable so a null-keyed group materializes as an Arrow null.
         fields.push(Field::new(g, group_dtypes[gi].clone(), groupby_field_nullable()));
     }
-    fields.push(Field::new("mean", DataType::Float64, true));
-    fields.push(Field::new("lower", DataType::Float64, true));
-    fields.push(Field::new("upper", DataType::Float64, true));
+    for name in output_field_names() {
+        fields.push(Field::new(name, DataType::Float64, true));
+    }
     let out_schema = Arc::new(Schema::new(fields));
 
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 3);
@@ -143,6 +125,13 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
 
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_summary: {e}")))
+}
+
+/// This transform's own output column names, in schema order — the list a
+/// `groupby` request is refused against (GH #179). Used by `apply_with_context`
+/// for the guard and for the emitted schema, so the two cannot drift.
+fn output_field_names() -> [String; 3] {
+    ["mean".to_string(), "lower".to_string(), "upper".to_string()]
 }
 
 fn summarize(vals: &[f64], spec: &SummarySpec) -> (f64, f64, f64) {
@@ -289,14 +278,11 @@ impl PySummary {
             ))),
         };
         let gb = groupby.unwrap_or_default();
-        let mut seen = std::collections::HashSet::new();
-        for g in &gb {
-            if !seen.insert(g.as_str()) {
-                return Err(PyValueError::new_err(format!(
-                    "Summary: duplicate groupby field '{g}'"
-                )));
-            }
-        }
+        // The duplicate-groupby refusal is the shared rule every grouped
+        // transform enforces, in the shared words — still refused here, at the
+        // earliest boundary that has the facts, and again inside the
+        // partitioner for the wire path that has no constructor (GH #179).
+        crate::transform::group_key::refuse_repeated_groupby_names("Summary", &gb)?;
         Ok(PySummary(TransformSpec::Summary(SummarySpec {
             field: field.to_string(),
             groupby: gb,
@@ -658,11 +644,14 @@ mod tests {
     /// FA-9 regression: a null value in an Int64 groupby column must not cause
     /// RecordBatch::try_new to panic or error. The null-keyed group must
     /// materialize as an Arrow null in the output (distinct from a real 0 key).
+    /// GH #197: a null groupby key is the ABSENCE of a key, so the rows
+    /// carrying it belong to no group and contribute to no output row. This
+    /// test was written for the pre-#197 hand-rolled partitioner, where those
+    /// rows pooled into a `KeyValue::Null` group emitted as an Arrow null; the
+    /// adjudicated family-wide policy replaced that with the skip every
+    /// partitioner-routed transform already used.
     #[test]
-    fn test_summary_null_int64_groupby_key_survives_and_is_distinct() {
-        // rows: grp=None(null), grp=None(null), grp=Some(10)
-        // null group: v=[1.0, 2.0] → mean=1.5
-        // real group: v=[5.0]       → mean=5.0 (n<2 → NaN bounds)
+    fn summary_null_int64_groupby_rows_drop_out_of_every_group() {
         let batch = batch_value_int64_group_nullable(
             vec![Some(1.0), Some(2.0), Some(5.0)],
             vec![None,      None,      Some(10)],
@@ -676,31 +665,19 @@ mod tests {
             seed: 0,
             name: None,
         };
-        // Must not error: the non-nullable schema declaration was the bug.
         let out = apply(&spec, &batch).unwrap();
-        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 10)");
+        assert_eq!(out.num_rows(), 1, "only the key=10 group survives");
 
         use arrow::array::Int64Array;
         let grp_arr = out.column(out.schema().index_of("grp").unwrap())
             .as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(!grp_arr.is_null(0), "no null-keyed group is emitted at all");
+        assert_eq!(grp_arr.value(0), 10);
         let mean = col_f64(&out, "mean");
-
-        // FA-9: null-keyed group materializes as an Arrow null.
-        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
-            .expect("null-key group must materialize as an Arrow null");
-        let real_idx = (0..grp_arr.len())
-            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i) == 10)
-            .expect("real-keyed group (grp=10) must be present");
-
         assert!(
-            (mean[null_idx] - 1.5).abs() < 1e-12,
-            "null-key group mean should be 1.5; got {}",
-            mean[null_idx]
-        );
-        assert!(
-            (mean[real_idx] - 5.0).abs() < 1e-12,
-            "real-key group (10) mean should be 5.0; got {}",
-            mean[real_idx]
+            (mean[0] - 5.0).abs() < 1e-12,
+            "the surviving group's mean comes from ITS OWN row; got {}",
+            mean[0]
         );
     }
 
@@ -731,4 +708,89 @@ mod tests {
         let a = groups.iter().position(|g| g == "a").unwrap();
         assert!((mean[a] - 2.0).abs() < 1e-12);
     }
+
+    // ── GH #179: shared partitioner rules ───────────────────────────────────
+
+    /// DISCLOSED BEHAVIOR CHANGE (#179): first-appearance group order.
+    #[test]
+    fn summary_group_rows_are_in_first_appearance_order() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)],
+            vec!["b", "b", "a", "a"],
+        );
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            error_fn: ErrorFn::Stdev,
+            ci: 0.95,
+            n_boot: 0,
+            seed: 0,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        use arrow::array::StringArray;
+        let g = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!((g.value(0), g.value(1)), ("b", "a"), "first-appearance, not sorted");
+
+        // The flip is a PERMUTATION: b's rows are [1, 2] (mean 1.5) and a's are
+        // [3, 4] (mean 3.5), and each mean travels with its own key.
+        let means = col_f64(&out, "mean");
+        assert_eq!(
+            (means[0], means[1]),
+            (1.5, 3.5),
+            "each group's mean stays with its own key after the reorder"
+        );
+    }
+
+    /// Grouping by a column named like one of this transform's fixed outputs
+    /// refuses (GH #179 residual 1: this append site had no guard).
+    #[test]
+    fn summary_groupby_colliding_with_an_output_column_refuses() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("mean", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(arrow::array::StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["mean".into()],
+            error_fn: ErrorFn::Stdev,
+            ci: 0.95,
+            n_boot: 0,
+            seed: 0,
+            name: None,
+        };
+        let err = apply(&spec, &batch)
+            .expect_err("grouping by a column named 'mean' must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    /// A repeated groupby name refuses at APPLY time now, not only at the PyO3
+    /// constructor, so the wire path is covered too.
+    #[test]
+    fn summary_repeated_groupby_name_refuses_from_the_wire_path() {
+        pyo3::Python::initialize();
+        let batch = batch_value_group(vec![Some(1.0)], vec!["a"]);
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["group".into(), "group".into()],
+            error_fn: ErrorFn::Stdev,
+            ci: 0.95,
+            n_boot: 0,
+            seed: 0,
+            name: None,
+        };
+        let err = apply(&spec, &batch).expect_err("a repeated groupby name must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+    }
+
 }

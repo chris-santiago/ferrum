@@ -10,9 +10,10 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
-    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    group_partition_multi, groupby_field_nullable, materialize_groupby_col,
+    refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -67,92 +68,109 @@ fn is_default_kernel(k: &str) -> bool {
 /// the KDE sibling and unlike `Bin`. Uses the shared `column_extent` helper, which
 /// coerces Int64/Float32/etc. pre-facet batches to Float64 so they produce a valid
 /// shared extent instead of returning None.
+///
+/// GROUPED-ROWS CONTRACT (GH #197): folds only the rows whose `groupby` key
+/// survives the null-key policy, via
+/// [`crate::transform::numeric_util::grouped_column_extent`], so the pinned
+/// range covers exactly the rows this transform will draw a curve for.
+/// Identical to the pre-#197 whole-column fold whenever the request is
+/// ungrouped or its keys hold no nulls.
 pub(crate) fn global_extent(spec: &DensityDataSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
-    crate::transform::numeric_util::column_extent(batch, &spec.field)
+    crate::transform::numeric_util::grouped_column_extent(
+        batch,
+        &spec.field,
+        spec.groupby.as_deref().unwrap_or(&[]),
+    )
 }
 
 pub(crate) fn apply(spec: &DensityDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162
+/// degrade-warning sink, for the one degrade this transform can report: an
+/// all-null `groupby` key column (GH #197), raised inside the shared
+/// partitioner.
+pub(crate) fn apply_with_context(
+    spec: &DensityDataSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("data_density: column '{}' not found", spec.field))
     })?;
 
     if let Some(groupby) = &spec.groupby {
-        return apply_grouped(spec, batch, idx, groupby);
+        return apply_grouped(spec, batch, idx, groupby, ctx);
     }
 
     apply_one_group(spec, batch, idx, None)
 }
 
+/// One KDE per group, stacked, with every groupby dimension appended at its
+/// original dtype.
+///
+/// Every dimension: before GH #179 this read `groupby[0]` and silently
+/// discarded `groupby[1..]`, so `fm.transform_density(field, groupby=["a",
+/// "b"])` grouped by `a` alone and said nothing. It now routes through the
+/// shared partitioner like every other grouped transform, which also installs
+/// the repeated-name refusal (`groupby=["g", "g"]` previously produced two
+/// identically-named output fields) and the null-key policy.
 fn apply_grouped(
     spec: &DensityDataSpec,
     batch: &RecordBatch,
     field_idx: usize,
     groupby: &[String],
+    warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    let schema = batch.schema();
-    let n_rows = batch.num_rows();
-
-    // Only support single groupby column for simplicity.
     if groupby.is_empty() {
         return apply_one_group(spec, batch, field_idx, None);
     }
 
-    let g_col_name = &groupby[0];
-    let g_idx = schema.index_of(g_col_name).map_err(|_| {
-        PyValueError::new_err(format!("data_density: groupby column '{g_col_name}' not found"))
-    })?;
-    let g_dtype = schema.field(g_idx).data_type().clone();
-    if !is_groupby_supported_dtype(&g_dtype) {
-        return Err(PyValueError::new_err(format!(
-            "data_density: groupby column '{g_col_name}' has unsupported dtype {g_dtype:?}; \
-             supported: Utf8/LargeUtf8, Float64/Float32, \
-             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
-        )));
-    }
-    let g_col = batch.column(g_idx);
-
-    // Partition rows by group key (FA-7: int/uint/bool/float/string supported).
-    let mut groups: std::collections::BTreeMap<KeyValue, Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for row in 0..n_rows {
-        let key = groupby_key_at(g_col.as_ref(), &g_dtype, row).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "data_density: internal error extracting groupby key at row {row}"
-            ))
-        })?;
-        groups.entry(key).or_default().push(row);
-    }
+    refuse_groupby_output_collision(
+        "data_density",
+        groupby,
+        &[spec.as_.0.clone(), spec.as_.1.clone()],
+    )?;
+    let partition =
+        group_partition_multi(batch, groupby, "data_density", NullKeyPolicy::Skip, warn_ctx)?;
 
     // Run KDE per group and concatenate.
     let mut all_x: Vec<f64> = Vec::new();
     let mut all_y: Vec<f64> = Vec::new();
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
 
-    for (group_key, rows) in &groups {
+    for (group_key, rows) in &partition.groups {
         let result = apply_one_group(spec, batch, field_idx, Some(rows))?;
-        let x_col = result.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
-        let y_col = result.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let x_col = result.column(0).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+            PyValueError::new_err("data_density: expected Float64Array for the value column")
+        })?;
+        let y_col = result.column(1).as_any().downcast_ref::<Float64Array>().ok_or_else(|| {
+            PyValueError::new_err("data_density: expected Float64Array for the density column")
+        })?;
         for i in 0..result.num_rows() {
             all_x.push(x_col.value(i));
             all_y.push(y_col.value(i));
-            group_keys_out.push(vec![group_key.clone()]);
+            group_keys_out.push(group_key.clone());
         }
     }
 
-    let out_schema = Arc::new(Schema::new(vec![
+    let mut out_fields = vec![
         Field::new(&spec.as_.0, DataType::Float64, false),
         Field::new(&spec.as_.1, DataType::Float64, false),
-        Field::new(g_col_name, g_dtype.clone(), groupby_field_nullable()),
-    ]));
-    let g_out = materialize_groupby_col(&group_keys_out, 0, &g_dtype)
-        .map_err(PyValueError::new_err)?;
-    let cols: Vec<ArrayRef> = vec![
+    ];
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(all_x)),
         Arc::new(Float64Array::from(all_y)),
-        g_out,
     ];
-    RecordBatch::try_new(out_schema, cols)
+    for (gi, (name, dtype)) in groupby.iter().zip(partition.dtypes.iter()).enumerate() {
+        out_fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
+        cols.push(
+            materialize_groupby_col(&group_keys_out, gi, dtype).map_err(PyValueError::new_err)?,
+        );
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(out_fields)), cols)
         .map_err(|e| PyValueError::new_err(format!("data_density: {e}")))
 }
 
@@ -653,4 +671,106 @@ mod tests {
             );
         }
     }
+
+    // ── GH #179: every groupby dimension, and the partitioner's own rules ────
+
+    fn ab_batch(a: Vec<&str>, b: Vec<&str>, v: Vec<f64>) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(a)),
+                Arc::new(StringArray::from(b)),
+                Arc::new(Float64Array::from(v)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn grouped_spec(groupby: Vec<&str>) -> DensityDataSpec {
+        DensityDataSpec {
+            field: "v".into(),
+            bandwidth: Some(1.0),
+            groupby: Some(groupby.into_iter().map(String::from).collect()),
+            extent: None,
+            steps: Some(4),
+            cumulative: false,
+            kernel: crate::transform::kde::default_kernel(),
+            as_: default_density_as(),
+            name: None,
+        }
+    }
+
+    /// GH #179 sibling defect: `groupby=["a", "b"]` grouped by `a` ALONE and
+    /// silently discarded every later dimension — no error, no warning, one
+    /// group column in the output. Both dimensions must now partition and both
+    /// must appear in the output schema.
+    #[test]
+    fn density_honors_every_groupby_dimension() {
+        pyo3::Python::initialize();
+        // Two `a` values × two `b` values = four groups; keyed on `a` alone
+        // there would be only two.
+        let batch = ab_batch(
+            vec!["p", "p", "q", "q"],
+            vec!["x", "y", "x", "y"],
+            vec![1.0, 5.0, 9.0, 13.0],
+        );
+        let out = apply(&grouped_spec(vec!["a", "b"]), &batch).unwrap();
+
+        let schema = out.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["value", "density", "a", "b"],
+            "both groupby dimensions must reach the output schema"
+        );
+
+        use arrow::array::StringArray;
+        let a = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        let b = out.column(3).as_any().downcast_ref::<StringArray>().unwrap();
+        let pairs: std::collections::BTreeSet<(String, String)> = (0..out.num_rows())
+            .map(|i| (a.value(i).to_string(), b.value(i).to_string()))
+            .collect();
+        assert_eq!(pairs.len(), 4, "four (a, b) groups, not two; got {pairs:?}");
+    }
+
+    #[test]
+    fn density_repeated_groupby_name_refuses() {
+        pyo3::Python::initialize();
+        let batch = ab_batch(vec!["p", "q"], vec!["x", "y"], vec![1.0, 2.0]);
+        let err = apply(&grouped_spec(vec!["a", "a"]), &batch)
+            .expect_err("groupby=['a', 'a'] must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+        assert!(err.to_string().contains("data_density"), "{err}");
+    }
+
+    /// A groupby column named like one of this transform's own output columns
+    /// refuses rather than emitting two same-named fields.
+    #[test]
+    fn density_groupby_colliding_with_an_output_column_refuses() {
+        pyo3::Python::initialize();
+        let batch = ab_batch(vec!["p", "q"], vec!["x", "y"], vec![1.0, 2.0]);
+        let mut spec = grouped_spec(vec!["a"]);
+        spec.as_ = ("a".into(), "density".into());
+        let err = apply(&spec, &batch)
+            .expect_err("a groupby column named like the value output must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    /// DISCLOSED BEHAVIOR CHANGE (#179): first-appearance group order.
+    #[test]
+    fn density_group_rows_are_in_first_appearance_order() {
+        pyo3::Python::initialize();
+        let batch = ab_batch(vec!["q", "p"], vec!["x", "x"], vec![1.0, 2.0]);
+        let out = apply(&grouped_spec(vec!["a"]), &batch).unwrap();
+        use arrow::array::StringArray;
+        let a = out.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(a.value(0), "q", "first-appearance order, not sorted");
+    }
+
 }

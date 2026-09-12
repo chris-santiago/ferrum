@@ -8,13 +8,13 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::aggregate::AggColumn;
+use crate::transform::context::TransformContext;
 use crate::transform::group_key::{
-    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    ensure_ungrouped_whole_batch_group, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, refuse_groupby_output_collision, KeyValue, NullKeyPolicy,
 };
 use crate::transform::join_aggregate::AggSpec;
 
@@ -29,8 +29,19 @@ pub(crate) struct DataAggregateSpec {
 }
 
 pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point. `ctx` is used only as the GH #162
+/// degrade-warning sink, for the one degrade this transform can report: an
+/// all-null `groupby` key column (GH #197), raised inside the shared
+/// partitioner.
+pub(crate) fn apply_with_context(
+    spec: &DataAggregateSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let schema = batch.schema();
-    let n_rows = batch.num_rows();
     let groupby = spec.groupby.clone().unwrap_or_default();
 
     if spec.aggregates.is_empty() {
@@ -49,56 +60,20 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
         })?;
     }
 
-    // Build group keys.
-    let group_col_indices: Vec<usize> = groupby
-        .iter()
-        .map(|g| {
-            schema.index_of(g).map_err(|_| {
-                PyValueError::new_err(format!(
-                    "data_aggregate: groupby column '{g}' not found"
-                ))
-            })
-        })
-        .collect::<PyResult<_>>()?;
+    // One partitioning idiom for every grouped transform (GH #179): the shared
+    // partitioner owns column validation, the repeated-name refusal,
+    // first-appearance group order, and the null-key policy. Before this
+    // migration a repeated name (reachable from Python via
+    // `fm.transform_aggregate(groupby=["g", "g"])`) silently produced two
+    // identically-named output fields.
+    let output_fields: Vec<String> = spec.aggregates.iter().map(|a| a.as_.clone()).collect();
+    refuse_groupby_output_collision("data_aggregate", &groupby, &output_fields)?;
+    let mut partition =
+        group_partition_multi(batch, &groupby, "data_aggregate", NullKeyPolicy::Skip, ctx)?;
+    ensure_ungrouped_whole_batch_group(&mut partition, &groupby);
+    let group_dtypes = &partition.dtypes;
 
-    // Validate groupby dtypes and capture them for shared key extraction (FA-7).
-    let group_dtypes: Vec<DataType> = group_col_indices
-        .iter()
-        .zip(groupby.iter())
-        .map(|(&gi, g)| {
-            let dt = schema.field(gi).data_type().clone();
-            if !is_groupby_supported_dtype(&dt) {
-                return Err(PyValueError::new_err(format!(
-                    "data_aggregate: groupby column '{g}' has unsupported dtype {dt:?}; \
-                     supported: Utf8/LargeUtf8, Float64/Float32, \
-                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
-                )));
-            }
-            Ok(dt)
-        })
-        .collect::<PyResult<_>>()?;
-
-    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
-    for row in 0..n_rows {
-        let mut key = Vec::with_capacity(group_col_indices.len());
-        for (gpos, &gi) in group_col_indices.iter().enumerate() {
-            let kv = groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], row)
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "data_aggregate: internal error extracting groupby key at row {row}"
-                    ))
-                })?;
-            key.push(kv);
-        }
-        groups.entry(key).or_default().push(row);
-    }
-
-    if groupby.is_empty() {
-        groups.clear();
-        groups.insert(Vec::new(), (0..n_rows).collect());
-    }
-
-    let n_out_rows = groups.len();
+    let n_out_rows = partition.groups.len();
 
     // Compute aggregates per group.
     let mut group_key_vecs: Vec<Vec<KeyValue>> = Vec::with_capacity(n_out_rows);
@@ -119,7 +94,7 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
         })
         .collect::<PyResult<_>>()?;
 
-    for (key, rows) in &groups {
+    for (key, rows) in &partition.groups {
         group_key_vecs.push(key.clone());
         for ai in 0..spec.aggregates.len() {
             agg_results[ai].push(agg_columns[ai].aggregate_rows(rows));
@@ -230,4 +205,82 @@ mod tests {
         let total = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert!((total.value(0) - 15.0).abs() < 1e-12);
     }
+
+    // ── GH #179/#197: the shared partitioner's rules reach this wire transform ──
+    //
+    // `fm.transform_aggregate(*aggregates, groupby=[...])` emits this spec as a
+    // dict, so a repeated name was publicly reachable and silently corrupted
+    // the output schema before the migration.
+
+    fn gv_batch(groups: Vec<&str>, vals: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(groups)),
+                Arc::new(Float64Array::from(vals)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn mean_spec(groupby: Option<Vec<String>>, as_: &str) -> DataAggregateSpec {
+        DataAggregateSpec {
+            aggregates: vec![AggSpec {
+                field: "val".into(),
+                fn_: AggFn::Mean,
+                as_: as_.into(),
+            }],
+            groupby,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn data_aggregate_repeated_groupby_name_refuses() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec!["a", "b"], vec![1.0, 2.0]);
+        let err = apply(&mean_spec(Some(vec!["g".into(), "g".into()]), "m"), &batch)
+            .expect_err("groupby=['g', 'g'] must refuse");
+        assert!(err.to_string().contains("repeated"), "{err}");
+        assert!(err.to_string().contains("data_aggregate"), "{err}");
+    }
+
+    #[test]
+    fn data_aggregate_groupby_colliding_with_an_output_name_refuses() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec!["a", "b"], vec![1.0, 2.0]);
+        let err = apply(&mean_spec(Some(vec!["g".into()]), "g"), &batch)
+            .expect_err("an aggregate output named like the groupby column must refuse");
+        assert!(err.to_string().contains("collides"), "{err}");
+    }
+
+    /// DISCLOSED BEHAVIOR CHANGE (#179): first-appearance group order.
+    #[test]
+    fn data_aggregate_group_rows_are_in_first_appearance_order() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(vec!["b", "a"], vec![1.0, 2.0]);
+        let out = apply(&mean_spec(Some(vec!["g".into()]), "m"), &batch).unwrap();
+        let g = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!((g.value(0), g.value(1)), ("b", "a"), "first-appearance, not sorted");
+
+        // The flip is a PERMUTATION: each key keeps its own mean.
+        let m = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((m.value(0), m.value(1)), (1.0, 2.0), "b's mean stays with b");
+    }
+
+    /// An ungrouped aggregate over a ZERO-ROW batch still collapses to one
+    /// summary row — the boundary the shared partitioner cannot discover from
+    /// rows, so this transform asks for it explicitly.
+    #[test]
+    fn data_aggregate_ungrouped_zero_row_input_still_yields_one_row() {
+        pyo3::Python::initialize();
+        let batch = gv_batch(Vec::new(), Vec::new());
+        let out = apply(&mean_spec(None, "m"), &batch).unwrap();
+        assert_eq!(out.num_rows(), 1, "the whole-batch group survives an empty batch");
+    }
+
 }

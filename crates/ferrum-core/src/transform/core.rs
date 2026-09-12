@@ -280,6 +280,13 @@ impl TransformSpec {
         // `ctx.is_partition`/`ctx.panel_pixel_size`, so adding them here does
         // not change any existing behavior; it only gives them somewhere to
         // push a warning.
+        //
+        // The remaining grouped transforms (`Aggregate` through
+        // `JoinAggregate` below) joined for GH #197's all-null-group-key
+        // warning, which the shared partitioner pushes on their behalf. Each
+        // one's `apply` is now a forwarder to its own `apply_with_context`, so
+        // omitting an arm here would silently drop that transform's warnings
+        // and nothing else — which is exactly the silence this wave removes.
         macro_rules! arm {
             ($($V:ident => $m:ident,)*) => {
                 match self {
@@ -301,6 +308,20 @@ impl TransformSpec {
             Kde => kde,
             LetterValue => letter_value,
             Impute => impute,
+            Aggregate => aggregate,
+            Summary => summary,
+            BoxStats => box_stats,
+            ErrorExtent => error_extent,
+            Bin => bin,
+            Kde2D => kde_2d,
+            Outliers => outliers,
+            TopK => top_k,
+            Pivot => pivot,
+            DataAggregate => data_aggregate,
+            DensityData => density_data,
+            DataStack => data_stack,
+            DataWindow => data_window,
+            JoinAggregate => join_aggregate,
         }
     }
 
