@@ -486,7 +486,8 @@ class _RenderMixin:
             # pairs, then coerce each pair to a list for the JSON wire format.
             # Classification itself is owned by _normalize_break_gaps (shared
             # with the BreakAxis construction-time validator) so this and
-            # ``_validate_break_gaps`` always agree on what shape ``gap`` has.
+            # ``_coerce_and_validate_break_gaps`` always agree on what shape
+            # ``gap`` has.
             normalized_gaps = [list(g) for g in _normalize_break_gaps(feat.gap)]
             return {
                 "type": "break_axis",

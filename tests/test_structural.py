@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import warnings
 
+import numpy as np
+import pandas as pd
 import pytest
 import polars as pl
 
@@ -207,8 +210,23 @@ class TestBreakAxisGapValidation:
             BreakAxis(axis="y", gap=[])
 
     def test_non_numeric_gap_raises(self):
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a numeric"):
+        """A bare string bound is now temporal-shaped (#230-6: BreakAxis.gap
+        accepts ISO-8601 date/datetime strings), so ``"a"`` is diagnosed as
+        an unparseable date rather than "not numeric" -- the pre-#230-6
+        message was a symptom of strings being unsupported at all, which is
+        no longer true. See ``TestBreakAxisGapTemporalBounds`` below for the
+        full temporal-bounds matrix.
+        """
+        with pytest.raises(
+            ValueError, match=r"BreakAxis\.gap\[0\]: cannot parse 'a' as an ISO-8601"
+        ):
             BreakAxis(axis="y", gap=("a", 10))
+
+    def test_non_numeric_non_temporal_gap_raises(self):
+        """A bound that is neither numeric nor temporal-shaped (a dict, here)
+        still raises the original numeric-type message unchanged."""
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a numeric"):
+            BreakAxis(axis="y", gap=({"not": "numeric"}, 10))
 
     def test_non_iterable_gap_raises(self):
         with pytest.raises(ValueError, match="must be a .* tuple or a list"):
@@ -217,6 +235,373 @@ class TestBreakAxisGapValidation:
     def test_valid_single_and_multi_gap_construct_without_error(self):
         BreakAxis(axis="y", gap=(10, 90))
         BreakAxis(axis="y", gap=[(10, 20), (50, 60)])
+
+    def test_list_of_list_gap_normalizes_to_list_of_tuples(self):
+        """Cycle-1 carryover: the coerce-and-write-back path normalizes a
+        list-of-list gap into a list of tuples, which also flips
+        ``BreakAxis`` equality between the list and tuple spellings of the
+        same gap to ``True`` -- pinned here so that stored-shape contract
+        does not silently drift."""
+        b = BreakAxis(axis="y", gap=[[10, 20]])
+        assert b.gap == [(10, 20)]
+
+
+# ---------------------------------------------------------------------------
+# BreakAxis.gap temporal bounds (#230-6): str/date/datetime/np.datetime64/
+# pd.Timestamp bounds coerce to epoch-ms UTC via the same conversion the
+# encoding layer applies to temporal scale domains and annotation
+# coordinates (ferrum.annotation.coords.temporal_coord_to_epoch_ms); a pair
+# mixing a numeric bound with a temporal bound refuses, an unparseable
+# string names the value, and ordering/finite validation runs on the
+# coerced (numeric) values -- the #92 matrix above keeps passing unchanged.
+# ---------------------------------------------------------------------------
+
+# 2020-03-01T00:00:00Z and 2021-01-01T00:00:00Z in epoch-ms, cross-checked
+# against ferrum.annotation.coords.temporal_coord_to_epoch_ms's own doctest
+# (``temporal_coord_to_epoch_ms("2020-06-01") == 1590969600000``).
+_EPOCH_MS_2020_03_01 = 1583020800000.0
+_EPOCH_MS_2021_01_01 = 1609459200000.0
+
+
+class TestBreakAxisGapTemporalBounds:
+    def test_iso_date_strings_coerce_to_epoch_ms(self):
+        b = BreakAxis(axis="x", gap=("2020-03-01", "2021-01-01"))
+        assert b.gap == (_EPOCH_MS_2020_03_01, _EPOCH_MS_2021_01_01)
+
+    def test_datetime_date_bounds_coerce(self):
+        b = BreakAxis(axis="x", gap=(dt.date(2020, 3, 1), dt.date(2021, 1, 1)))
+        assert b.gap == (_EPOCH_MS_2020_03_01, _EPOCH_MS_2021_01_01)
+
+    def test_datetime_datetime_bounds_coerce(self):
+        b = BreakAxis(
+            axis="x",
+            gap=(dt.datetime(2020, 3, 1, 12, 0, 0), dt.datetime(2021, 1, 1, 0, 0, 0)),
+        )
+        start, end = b.gap
+        assert start == _EPOCH_MS_2020_03_01 + 12 * 3600 * 1000
+        assert end == _EPOCH_MS_2021_01_01
+
+    def test_np_datetime64_bounds_coerce(self):
+        b = BreakAxis(
+            axis="x",
+            gap=(np.datetime64("2020-03-01"), np.datetime64("2021-01-01")),
+        )
+        assert b.gap == (_EPOCH_MS_2020_03_01, _EPOCH_MS_2021_01_01)
+
+    def test_pandas_timestamp_bounds_coerce(self):
+        """``pd.Timestamp`` is a ``datetime.datetime`` subclass, so it rides
+        the same coercion branch as plain ``datetime.datetime`` -- no
+        pandas-specific code path exists or is needed."""
+        b = BreakAxis(
+            axis="x",
+            gap=(pd.Timestamp("2020-03-01"), pd.Timestamp("2021-01-01")),
+        )
+        assert b.gap == (_EPOCH_MS_2020_03_01, _EPOCH_MS_2021_01_01)
+
+    def test_multiple_temporal_gaps_as_list(self):
+        b = BreakAxis(
+            axis="x",
+            gap=[("2020-01-01", "2020-02-01"), ("2020-06-01", "2020-07-01")],
+        )
+        assert len(b.gap) == 2
+        assert all(isinstance(bound, float) for pair in b.gap for bound in pair)
+        assert all(start < end for start, end in b.gap)
+
+    @pytest.mark.parametrize(
+        "gap",
+        [(10, "2020-01-01"), ("2020-01-01", 10)],
+        ids=["numeric_then_temporal", "temporal_then_numeric"],
+    )
+    def test_mixed_numeric_and_temporal_pair_raises(self, gap):
+        with pytest.raises(
+            ValueError,
+            match=r"BreakAxis\.gap\[0\]: mixes a numeric bound .* with a temporal bound",
+        ):
+            BreakAxis(axis="x", gap=gap)
+
+    def test_unparseable_string_bound_names_the_value(self):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: cannot parse 'not-a-date'"):
+            BreakAxis(axis="x", gap=("not-a-date", "2020-01-01"))
+
+    def test_reversed_temporal_pair_raises_after_coercion(self):
+        """Ordering validation runs on the COERCED (numeric) values -- the
+        #92 finite/ordered contract is unchanged, just fed post-coercion
+        floats instead of the original strings."""
+        with pytest.raises(ValueError, match=r"start \(.*\) must be less than end"):
+            BreakAxis(axis="x", gap=("2021-01-01", "2020-01-01"))
+
+    def test_nat_datetime64_bound_raises(self):
+        with pytest.raises(ValueError, match="not-a-time"):
+            BreakAxis(axis="x", gap=(np.datetime64("NaT"), np.datetime64("2020-01-01")))
+
+    def test_pandas_nat_bound_raises(self):
+        """``pd.NaT`` is a ``datetime.datetime`` subclass whose epoch
+        subtraction yields NaN rather than raising (unlike an ordinary
+        ``datetime``), so left unchecked it would sail past
+        ``temporal_coord_to_epoch_ms`` and only get refused two layers
+        downstream with a generic "not finite" message. It must get the same
+        explicit not-a-time refusal as ``np.datetime64('NaT')``."""
+        with pytest.raises(ValueError, match="not-a-time"):
+            BreakAxis(axis="x", gap=(pd.NaT, pd.Timestamp("2020-01-01")))
+
+    def test_aware_datetime_bound_converts_to_utc(self):
+        """A timezone-aware bound is converted to UTC before its epoch
+        offset is computed; the naive spelling of the same wall-clock time
+        is instead TREATED AS UTC (module docstring). A +05:00-aware 12:00
+        is 07:00 UTC -- five hours earlier than the naive 12:00 spelling --
+        so the two must not coerce to the same epoch-ms value."""
+        naive = dt.datetime(2020, 3, 1, 12, 0, 0)
+        aware = dt.datetime(2020, 3, 1, 12, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=5)))
+        naive_start, _ = BreakAxis(axis="x", gap=(naive, dt.datetime(2021, 1, 1))).gap
+        aware_start, _ = BreakAxis(axis="x", gap=(aware, dt.datetime(2021, 1, 1))).gap
+        assert aware_start == naive_start - 5 * 3600 * 1000
+
+    def test_datetime64_out_of_range_bound_raises(self):
+        """An extreme np.datetime64 bound (year ~3e9) silently overflows
+        int64 when cast to microsecond resolution instead of raising
+        (probed: wraps to a bogus finite epoch-ms value that the ordering/
+        finiteness check cannot catch). REFUSE MALFORMED binds every new
+        edge this task introduces, so this must raise rather than accept a
+        wrapped, meaningless bound."""
+        with pytest.raises(ValueError, match="out of range"):
+            BreakAxis(
+                axis="x",
+                gap=(np.datetime64(3_000_000_000, "Y"), np.datetime64("2020-01-01")),
+            )
+
+    @pytest.mark.parametrize(
+        "years",
+        [2**61, -(2**61), 2**62, -(2**62), 2**61 + 1, 2**62 + 1, 3 * 2**61],
+    )
+    def test_datetime64_wrapped_reference_cast_bound_raises(self, years):
+        """Cycle-3's wrap guard compared the microsecond cast against a
+        second numpy cast (to ``datetime64[s]``) as a 'trustworthy'
+        reference. That reference is not trustworthy: it is itself a
+        fixed-width numpy cast, and for a ``"Y"``-unit value with a tick
+        count around 2**61-2**62 it overflows int64 too. When both casts
+        wrap, they can land in coincidental agreement and the guard
+        silently accepts a meaningless bound -- probed end to end,
+        ``fm.BreakAxis(gap=(np.datetime64(2**62, "Y"), np.datetime64(2**62 +
+        1, "Y")))`` used to return ``(24192000.0, 31560192000.0)`` (1970-01
+        -06T43 and 1971-01-01) instead of raising. The guard now reasons in
+        arbitrary-precision Python integers, which cannot wrap, so no
+        second cast can be fooled this way -- every one of these probed
+        power-of-two tick counts must still raise, naming the microsecond
+        precision the guard actually tests (not "millisecond", cycle-3's
+        wording bug)."""
+        with pytest.raises(ValueError, match="out of range.*microsecond-precision"):
+            BreakAxis(
+                axis="x",
+                gap=(np.datetime64(years, "Y"), np.datetime64(years + 1, "Y")),
+            )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            np.array([2**60], dtype="datetime64[1000000ns]")[0],
+            np.array([18448321910509551], dtype="datetime64[1000us]")[0],
+        ],
+        ids=["ns_count_1e6_at_2pow60", "us_count_1000_year_586562_aliasing"],
+    )
+    def test_datetime64_multiple_count_fine_unit_bound_raises(self, value):
+        """Cycle-4 closed the coarse-unit (``[Y]``) slip-throughs but left
+        every fine unit (``us``/``ns``/``ps``/``fs``/``as``) exempt from the
+        overflow proof whenever the dtype's ``count`` > 1 -- an invariant
+        asserted in a comment ('finer than millisecond ... cannot grow past
+        int64 range') that is false the moment ``count`` multiplies a fine
+        tick back up past microsecond resolution. Probed end to end through
+        this same constructor: ``datetime64[1000000ns]`` at tick ``2**60``
+        used to be ACCEPTED as ``-9223372036854776.0`` (a wrapped,
+        NaT-adjacent sentinel), and ``datetime64[1000us]`` at tick
+        ``18448321910509551`` (a bound roughly year 586,562) used to alias
+        to ``1577836799999.384`` -- New Year's Eve 2019. Every unit must
+        reach the microsecond cast only after the same arbitrary-precision
+        proof, with no unit-based skip branch."""
+        with pytest.raises(ValueError, match="out of range.*microsecond-precision"):
+            BreakAxis(axis="x", gap=(value, np.datetime64("2020-01-01")))
+
+    def test_datetime64_multiple_count_fine_unit_bound_is_accepted(self):
+        """A count>1 fine-unit dtype (``datetime64[1000us]``, i.e.
+        millisecond granularity spelled as 1000-microsecond ticks) is a
+        legal, ordinary numpy dtype for an in-range instant -- REFUSE
+        MALFORMED does not cover a well-formed bound just because its
+        dtype's count is not 1. It must be ACCEPTED and agree with the
+        ``pd.Timestamp`` coercion of the identical instant, the same
+        cross-check ``test_datetime64_ns_and_pandas_timestamp_bound_agree``
+        pins for a plain ``[ns]`` dtype."""
+        ts = pd.Timestamp("2020-06-15T12:34:56.789")
+        ticks = int(ts.value // 1_000_000)  # ts.value is ns since epoch; 1000us == 1ms/tick
+        bound = np.array([ticks], dtype="datetime64[1000us]")[0]
+        start, _ = BreakAxis(axis="x", gap=(bound, np.datetime64("2021-01-01"))).gap
+        pandas_start, _ = BreakAxis(axis="x", gap=(ts, pd.Timestamp("2021-01-01"))).gap
+        assert start == pandas_start
+
+    @pytest.mark.parametrize("dtype", ["datetime64[0us]", "datetime64[0D]", "datetime64[0Y]"])
+    def test_datetime64_zero_count_unit_bound_raises(self, dtype):
+        """A zero-count datetime64 dtype (``datetime64[0us]`` etc.) is a
+        legal, constructible numpy dtype whose ticks denote NO duration.
+        Cycle-5's multiplicative overflow proof degenerated to ``0 > bound``
+        on it and silently accepted a fabricated 1970 epoch instant
+        (probed: tick ``1592224496789123`` under ``[0us]`` was accepted as
+        ``0.0``), while numpy's own casts raise ``SystemError`` on the same
+        dtype -- so the ``[0Y]``/``[0M]`` calendar branch leaked
+        ``SystemError`` out of ``__post_init__``. Refused by the explicit
+        ``count < 1`` gate before any arithmetic (#230-6 cycle-6); negative
+        counts are rejected by numpy at dtype-parse time, so this closes
+        the last free metadata field."""
+        bound = np.array([1_592_224_496_789_123], dtype=dtype)[0]
+        with pytest.raises(ValueError, match="zero-count datetime64 unit"):
+            BreakAxis(axis="x", gap=(bound, np.datetime64("2030-01-01")))
+
+    def test_datetime64_huge_but_representable_year_bound_is_accepted(self):
+        """A np.datetime64 bound many tens of thousands of years out is
+        exotic but still exactly representable at microsecond resolution --
+        REFUSE MALFORMED does not cover a merely large, well-formed value.
+        This pins the accept side of the wrap guard's boundary at a
+        magnitude far larger than any of the sub-ms/ns tests above, so a
+        regression that makes the guard over-eager (refusing large-but-valid
+        bounds, cycle-2's failure mode) fails loudly here too."""
+        start_bound, stop_bound = np.datetime64(200_000, "Y"), np.datetime64(200_001, "Y")
+        b = BreakAxis(axis="x", gap=(start_bound, stop_bound))
+        start, stop = b.gap
+        assert start == int(start_bound.astype("datetime64[us]").astype("int64")) / 1000.0
+        assert stop == int(stop_bound.astype("datetime64[us]").astype("int64")) / 1000.0
+
+    def test_sub_millisecond_datetime64_bound_is_accepted(self):
+        """A np.datetime64 bound finer than millisecond precision is
+        sub-millisecond precision, not malformed -- REFUSE MALFORMED does
+        not cover ordinary precision. Cycle-2's overflow guard
+        (`ms_value.astype(value.dtype) != value`, an EXACT round-trip check)
+        could not tell int64 wrap apart from this and refused it with a
+        factually wrong "out of range" message; this pins the accept side of
+        that boundary so a regression back to the exact-round-trip check
+        fails loudly. A pandas datetime column yields datetime64[ns], so
+        this is the ordinary way a user's bound arrives, not an edge case."""
+        b = BreakAxis(
+            axis="x",
+            gap=(
+                np.datetime64("2020-03-01T00:00:00.000123456"),
+                np.datetime64("2021-01-01"),
+            ),
+        )
+        start, _ = b.gap
+        assert start == _EPOCH_MS_2020_03_01 + 0.123
+
+    def test_datetime64_ns_and_pandas_timestamp_bound_agree(self):
+        """The recurring defect (cycle-2 -> cycle-3): for the identical
+        instant, a np.datetime64 bound and a pd.Timestamp bound must coerce
+        to the SAME epoch-ms value. Cycle-2 accepted the pd.Timestamp
+        spelling (fractional ms preserved) while refusing the np.datetime64
+        spelling outright -- exception drift between two names for one
+        well-formed value. Both branches cast at microsecond resolution
+        (the precision ceiling datetime.datetime/pd.Timestamp share), so
+        for THIS instant (2020-03-01T00:00:00.000123) they produce
+        numerically identical results -- not a general bit-for-bit claim
+        across all instants, since the sibling (datetime/Timestamp) branch
+        routes through a float-seconds intermediate that can differ from
+        this branch's integer microsecond path by a few hundred
+        nanoseconds at other instants."""
+        instant = "2020-03-01T00:00:00.000123"
+        pandas_ts_start, _ = BreakAxis(
+            axis="x", gap=(pd.Timestamp(instant), pd.Timestamp("2021-01-01"))
+        ).gap
+        datetime64_start, _ = BreakAxis(
+            axis="x", gap=(np.datetime64(instant), np.datetime64("2021-01-01"))
+        ).gap
+        assert datetime64_start == pandas_ts_start == _EPOCH_MS_2020_03_01 + 0.123
+
+    def test_datetime64_ns_from_pandas_column_is_accepted(self):
+        """The exact value shape a pandas datetime column yields
+        (`datetime64[ns]` via `.to_numpy()`) must be accepted -- this is the
+        ordinary path a real caller hits, not a synthetic edge case."""
+        ns_value = pd.to_datetime(["2020-03-01 00:00:00.000123"]).to_numpy()[0]
+        b = BreakAxis(axis="x", gap=(ns_value, np.datetime64("2021-01-01")))
+        start, _ = b.gap
+        assert start == _EPOCH_MS_2020_03_01 + 0.123
+
+
+# ---------------------------------------------------------------------------
+# BreakAxis temporal e2e rendering (#230-6): the docs example on a real
+# temporal x axis actually breaks the axis; a coerced date gap on a
+# non-temporal axis is out-of-domain and warns instead of refusing.
+# ---------------------------------------------------------------------------
+
+
+class TestBreakAxisTemporalRendering:
+    def test_docs_example_temporal_gap_breaks_axis(self):
+        """docs/site/guide/concepts/break-axes.md's 'Time series with a data
+        gap' recipe (~L211-219) ships this exact form:
+
+            + fm.BreakAxis(
+                axis="x",
+                gap=("2020-03-01", "2021-01-01"),
+                break_style="wave",
+            )
+
+        Before #230-6 this raised ``ValueError`` at construction (BreakAxis
+        only accepted numeric bounds) — the published docs shipped a form
+        that crashed. Wired onto a real temporal x axis whose data straddles
+        the gap, it must now actually break the axis rather than merely not
+        raising: the ``wave`` break style paints indicator ``<path>``
+        geometry a plain line chart never emits (mark_line renders
+        ``<polyline>``, not ``<path>``), so a strict increase in ``<path>``
+        count against the unbroken baseline is discriminating evidence the
+        break took effect, not just that construction succeeded.
+        """
+        df = pl.DataFrame(
+            {
+                "date": [
+                    dt.date(2019, 6, 1),
+                    dt.date(2019, 12, 1),
+                    dt.date(2020, 1, 15),
+                    dt.date(2021, 3, 1),
+                    dt.date(2021, 9, 1),
+                    dt.date(2022, 3, 1),
+                ],
+                "value": [10.0, 12.0, 11.0, 15.0, 18.0, 20.0],
+            }
+        )
+        unbroken = fm.Chart(df).mark_line().encode(x="date:T", y="value:Q")
+        broken = unbroken + fm.BreakAxis(
+            axis="x",
+            gap=("2020-03-01", "2021-01-01"),
+            break_style="wave",
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            broken_svg = broken.to_svg()
+        assert not [w for w in caught if "had no effect" in str(w.message)], (
+            "the docs' date-string gap intersects the temporal x domain "
+            f"(2019..2022) and must take effect: {[str(w.message) for w in caught]}"
+        )
+        assert broken_svg.startswith("<svg")
+
+        unbroken_svg = unbroken.to_svg()
+        broken_paths = len(re.findall(r"<path\b", broken_svg))
+        unbroken_paths = len(re.findall(r"<path\b", unbroken_svg))
+        assert broken_paths > unbroken_paths, (
+            "the wave break indicator must paint new <path> geometry that the "
+            f"unbroken chart lacks; broken={broken_paths} unbroken={unbroken_paths}"
+        )
+
+    def test_temporal_gap_on_numeric_axis_warns_ineffective(self):
+        """A coerced date gap on a non-temporal (numeric) axis is
+        out-of-domain: it renders (does not raise) and warns
+        ``BreakAxisIneffective`` rather than silently no-op'ing."""
+        df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [10, 20, 30, 40, 50]})
+        chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q") + fm.BreakAxis(
+            axis="x", gap=("2020-03-01", "2021-01-01")
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.to_svg()
+        assert svg.startswith("<svg")
+        assert [w for w in caught if "had no effect" in str(w.message)], (
+            "a coerced date gap on a numeric x axis (domain 1..5) is wildly "
+            "out-of-domain and must warn BreakAxisIneffective, not silently "
+            f"no-op: {[str(w.message) for w in caught]}"
+        )
 
 
 # ---------------------------------------------------------------------------
