@@ -579,8 +579,14 @@ def test_surviving_annotation_lands_at_the_marks_compressed_position():
     on an existing gridline's y, so both shapes pass with the annotation
     deleted entirely (the set of distinct y-values doesn't change; only the
     COUNT at that one y-value does).
+
+    The reference value is deliberately NOT a domain endpoint (#226): the
+    segments tile the scale's own padded range, so the extreme values land on
+    exactly the pixels the unbroken scale gives them and the closing
+    "the break moved it" discrimination below would be vacuous. y=100 sits
+    inside the (0, 900) domain, so the break genuinely compresses it.
     """
-    df = pl.DataFrame({"x": [1.0, 2.0], "y": [100.0, 900.0]})
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [0.0, 100.0, 900.0]})
     brk = fm.BreakAxis(axis="y", gap=(150, 850))
     points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
     ref = fm.annotate_hline(y=100.0)  # unlabelled: one AnnotationLine, "line" kind
@@ -594,9 +600,9 @@ def test_surviving_annotation_lands_at_the_marks_compressed_position():
         (float(m.group(1)), float(m.group(2)))
         for m in re.finditer(r'<circle cx="(-?[\d.]+)" cy="(-?[\d.]+)"', broken_with)
     ]
-    assert len(pairs) == 2, f"expected both point marks; got {pairs}"
-    # x=1.0 has the smaller cx on this quantitative x scale.
-    y100_cy = min(pairs, key=lambda p: p[0])[1]
+    assert len(pairs) == 3, f"expected all three point marks; got {pairs}"
+    # x=2.0 carries y=100, and is the middle cx on this quantitative x scale.
+    y100_cy = sorted(pairs)[1][1]
 
     assert _count_at(counts_with, y100_cy) == _count_at(counts_without, y100_cy) + 1, (
         f"adding the annotation must add exactly one horizontal line at the "
@@ -612,7 +618,7 @@ def test_surviving_annotation_lands_at_the_marks_compressed_position():
         (float(m.group(1)), float(m.group(2)))
         for m in re.finditer(r'<circle cx="(-?[\d.]+)" cy="(-?[\d.]+)"', plain_svg)
     ]
-    plain_y100_cy = min(plain_pairs, key=lambda p: p[0])[1]
+    plain_y100_cy = sorted(plain_pairs)[1][1]
     assert abs(y100_cy - plain_y100_cy) > 1.0, (
         "the break must move the mark (and the annotation with it); "
         f"broken={y100_cy} unbroken={plain_y100_cy}"
@@ -783,8 +789,12 @@ def test_x_axis_surviving_annotation_lands_at_the_marks_compressed_position():
     (quality-review cycle-3): a vertical gridline already sits at the mark's
     compressed x even with the annotation removed, so neither a bare
     membership check nor a set-difference catches a missing annotation here.
+
+    As in the y-axis pin, the reference value sits INSIDE the domain rather
+    than on its edge (#226): a domain endpoint lands on the same pixel broken
+    or not, which would leave the closing discrimination vacuous.
     """
-    df = pl.DataFrame({"x": [100.0, 900.0], "y": [1.0, 2.0]})
+    df = pl.DataFrame({"x": [0.0, 100.0, 900.0], "y": [1.0, 2.0, 3.0]})
     brk = fm.BreakAxis(axis="x", gap=(150, 850))
     points = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
     ref = fm.annotate_vline(x=100.0)  # unlabelled: one AnnotationLine, "line" kind
@@ -794,9 +804,9 @@ def test_x_axis_surviving_annotation_lands_at_the_marks_compressed_position():
     counts_with = _vert_line_xs(broken_with)
     counts_without = _vert_line_xs(broken_without)
 
-    cxs = [float(m) for m in re.findall(r'<circle cx="(-?[\d.]+)"', broken_with)]
-    assert len(cxs) == 2, f"expected both point marks; got {cxs}"
-    x100_cx = min(cxs)  # x=100 is the smaller data value on this quantitative x scale
+    cxs = sorted(float(m) for m in re.findall(r'<circle cx="(-?[\d.]+)"', broken_with))
+    assert len(cxs) == 3, f"expected all three point marks; got {cxs}"
+    x100_cx = cxs[1]  # x=100 is the middle data value on this quantitative x scale
 
     assert _count_at(counts_with, x100_cx) == _count_at(counts_without, x100_cx) + 1, (
         f"adding the annotation must add exactly one vertical line at the "
@@ -807,8 +817,8 @@ def test_x_axis_surviving_annotation_lands_at_the_marks_compressed_position():
     # Discriminate against a second pre-fix bug: without the break, the
     # mark's own position is different (the unbroken linear position).
     plain_svg = (points + ref).to_svg()
-    plain_cxs = [float(m) for m in re.findall(r'<circle cx="(-?[\d.]+)"', plain_svg)]
-    plain_x100_cx = min(plain_cxs)
+    plain_cxs = sorted(float(m) for m in re.findall(r'<circle cx="(-?[\d.]+)"', plain_svg))
+    plain_x100_cx = plain_cxs[1]
     assert abs(x100_cx - plain_x100_cx) > 1.0, (
         "the break must move the mark (and the annotation with it); "
         f"broken={x100_cx} unbroken={plain_x100_cx}"
@@ -857,6 +867,274 @@ def test_break_whose_gaps_miss_the_padded_domain_renders_identically_to_unbroken
     )
 
 
+# --------------------------------------------------------------------------
+# GH #226: the segments tile the SCALE's own (padded) pixel range
+# --------------------------------------------------------------------------
+#
+# `apply_break_to_scale` used to receive the raw plot rect while `BreakRemap`
+# reverse-maps from `scale.pixel_range()` — the same rect inset by the
+# positional-scale padding band (5% of the span, capped at 8px per end). The
+# round trip was therefore lossy in exactly that band: every EFFECTIVE break
+# silently deleted the axis padding, and since the C1 fix above made the
+# INEFFECTIVE case exact, the two sides of the domain boundary disagreed by
+# the full 8px.
+
+_PADDED_REF_DF = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [10.0, 25.0, 15.0, 30.0, 20.0]})
+"""The reference frame the #226 measurements were taken on: a (10, 30) y
+domain on the default 640x480 canvas, whose plot rect runs y 16.0…420.961
+and whose padded scale range runs 24.0…412.961."""
+
+
+def _grid_ys(svg: str) -> list[float]:
+    """Every horizontal gridline's y, in emission (tick) order."""
+    return [
+        float(m.group(1))
+        for m in re.finditer(
+            r'<line x1="[-\d.]+" y1="([-\d.]+)" x2="[-\d.]+" y2="\1" stroke="#d6d3d1"', svg
+        )
+    ]
+
+
+def _y_axis_domain_line_span(svg: str) -> tuple[float, float]:
+    """``(top, bottom)`` of the y-axis domain line — the plot rect's full height.
+
+    The domain line is the axis's longest near-vertical stroke: tick dashes on
+    a Left axis are horizontal, and the x-axis's own tick dashes are only
+    ``tick_size`` tall. It is structural chrome, so a break must leave it
+    spanning the whole rect (#226) — which also makes it the landmark the
+    padded span is measured against.
+    """
+    spans = [
+        (min(float(y1), float(y2)), max(float(y1), float(y2)))
+        for x1, y1, x2, y2 in re.findall(
+            r'<line x1="([-\d.]+)" y1="([-\d.]+)" x2="([-\d.]+)" y2="([-\d.]+)"'
+            r'[^>]*stroke="#6b7280"',
+            svg,
+        )
+        if abs(float(x2) - float(x1)) <= 1.0
+    ]
+    assert spans, f"expected a y-axis domain line; got: {svg[:500]}"
+    return max(spans, key=lambda s: s[1] - s[0])
+
+
+def _cys(svg: str) -> list[float]:
+    return [float(v) for v in re.findall(r'<circle cx="[-\d.]+" cy="([-\d.]+)"', svg)]
+
+
+def test_broken_axis_ticks_tile_the_scales_padded_pixel_range():
+    """A broken axis's ticks span the padded range, exactly as unbroken.
+
+    Measured pre-fix on this chart: unbroken y ticks ran 24.0…412.961 (the
+    scale's padded pixel range, 8px inside the rect at each end) while the
+    same chart under ANY effective break ran 16.0…420.961 (the raw plot
+    rect). Every tick, gridline and mark on a broken axis was displaced by up
+    to the padding width, and the break's own indicator with them.
+    """
+    chart = fm.Chart(_PADDED_REF_DF).mark_point().encode(x="x:Q", y="y:Q")
+    unbroken_svg = chart.to_svg()
+    broken_svg = (chart + fm.BreakAxis(axis="y", gap=(18, 22))).to_svg()
+
+    unbroken = _grid_ys(unbroken_svg)
+    visible = [y for y in _grid_ys(broken_svg) if y > -1000]
+    assert unbroken and visible, "expected horizontal gridlines in both renders"
+
+    # The reference numbers from the finding, so a regression that moves the
+    # padded range itself is caught here rather than silently agreeing.
+    assert min(unbroken) == pytest.approx(24.0, abs=1e-3)
+    assert max(unbroken) == pytest.approx(412.961, abs=1e-3)
+    assert (min(visible), max(visible)) == pytest.approx(
+        (min(unbroken), max(unbroken)), abs=1e-3
+    ), (
+        f"a break must tile the same padded span the unbroken scale uses; "
+        f"broken={min(visible)}…{max(visible)} unbroken={min(unbroken)}…{max(unbroken)}"
+    )
+
+    # ...and that span is strictly INSIDE the plot rect, which is what makes
+    # the assertion above discriminating: the pre-fix segments tiled the rect,
+    # so they reached the domain line's own ends.
+    top, bottom = _y_axis_domain_line_span(broken_svg)
+    assert top < min(visible) and max(visible) < bottom, (
+        f"the padded span must sit inside the plot rect ({top}…{bottom}); "
+        f"got {min(visible)}…{max(visible)}"
+    )
+    assert (top, bottom) == pytest.approx(_y_axis_domain_line_span(unbroken_svg), abs=1e-3), (
+        "the axis domain line is structural chrome: a break must not shrink it onto the padded span"
+    )
+
+
+def _grid_lines(svg: str) -> list[tuple[float, float, float, float]]:
+    """Every gridline as ``(x1, y1, x2, y2)``, in emission order."""
+    return [
+        (float(x1), float(y1), float(x2), float(y2))
+        for x1, y1, x2, y2 in re.findall(
+            r'<line x1="([-\d.]+)" y1="([-\d.]+)" x2="([-\d.]+)" y2="([-\d.]+)" '
+            r'stroke="#d6d3d1"',
+            svg,
+        )
+    ]
+
+
+def _vertical_gridlines(svg: str) -> list[tuple[float, float, float, float]]:
+    """The gridlines placed at x tick values — vertical, spanning the rect's height."""
+    return [line for line in _grid_lines(svg) if line[0] == line[2]]
+
+
+def _horizontal_gridlines(svg: str) -> list[tuple[float, float, float, float]]:
+    """The gridlines placed at y tick values — horizontal, spanning the rect's width."""
+    return [line for line in _grid_lines(svg) if line[1] == line[3]]
+
+
+def test_a_break_leaves_the_cross_axis_gridlines_spanning_the_whole_plot_rect():
+    """A break must not touch the OTHER axis's gridlines (#226, cycle 2).
+
+    A vertical gridline is placed at an x tick value, but its ``y1``/``y2``
+    are the plot rect's corners — the same structural provenance that exempts
+    the axis domain line. Threading the scale's padded range into the break
+    without that exemption pulled every vertical gridline's ends onto the
+    padded edges, so on a y-broken chart they stopped 8px short of the x-axis
+    line they used to meet, while the axis line itself and an
+    ``annotate_vline`` beside them still spanned the rect. Pinned in both
+    directions, each with the sanity half (the gridlines the break DOES own
+    move), so neither can pass on a chart the break never reached.
+    """
+    chart = fm.Chart(_PADDED_REF_DF).mark_point().encode(x="x:Q", y="y:Q")
+    unbroken = chart.to_svg()
+    y_broken = (chart + fm.BreakAxis(axis="y", gap=(18, 22))).to_svg()
+    x_broken = (chart + fm.BreakAxis(axis="x", gap=(2.4, 3.6))).to_svg()
+
+    # The reference frame's rect, from the structural chrome that already
+    # spans it: 16.0…420.961, 8px outside the padded span the ticks tile.
+    rect_top, rect_bottom = _y_axis_domain_line_span(unbroken)
+    assert (rect_top, rect_bottom) == pytest.approx((16.0, 420.961), abs=1e-3)
+
+    assert _vertical_gridlines(unbroken), "test sanity: the x ticks draw gridlines"
+    for x1, y1, _x2, y2 in _vertical_gridlines(unbroken):
+        assert (y1, y2) == pytest.approx((rect_top, rect_bottom), abs=1e-3), (
+            f"test sanity: an unbroken vertical gridline at x={x1} spans the rect"
+        )
+
+    assert _vertical_gridlines(y_broken) == _vertical_gridlines(unbroken), (
+        "a y break must leave the vertical (x-tick) gridlines exactly where the "
+        "unbroken chart drew them — their ends are the plot rect's corners, not "
+        "tick values"
+    )
+    assert _horizontal_gridlines(y_broken) != _horizontal_gridlines(unbroken), (
+        "test sanity: a y break DOES move the gridlines it owns"
+    )
+
+    assert _horizontal_gridlines(x_broken) == _horizontal_gridlines(unbroken), (
+        "an x break must leave the horizontal (y-tick) gridlines spanning the whole plot width"
+    )
+    assert _vertical_gridlines(x_broken) != _vertical_gridlines(unbroken), (
+        "test sanity: an x break DOES move the gridlines it owns"
+    )
+
+
+_BAND_FILL = "#f0f0f0"
+
+
+def _band_spans(svg: str) -> list[tuple[float, float]]:
+    """``(top, bottom)`` for every banded row fill, in paint order."""
+    return [(y, y + h) for _x, y, _w, h in _rects(svg, _BAND_FILL)]
+
+
+def _banded_chart():
+    """The reference frame striped by a SINGLE band fill.
+
+    ``fm.Axis(values=[])`` leaves the y axis with no boundary strictly inside
+    the plot rect, so the banded grid emits one stripe spanning it — the shape
+    where one node carries BOTH of the band family's structural ends.
+    """
+    return (
+        fm.Chart(_PADDED_REF_DF)
+        .mark_point()
+        .encode(x="x:Q", y=fm.Y("y:Q", axis=fm.Axis(values=[])))
+        .configure(grid=fm.GridConfig(band_colors=[_BAND_FILL]))
+    )
+
+
+def test_a_break_keeps_a_single_bands_edges_on_the_plot_rect():
+    """A lone band still stripes the whole rect under a break (#226, cycle 3).
+
+    A band fill's outermost boundary is the plot rect's own edge, structural
+    for the same reason the axis domain line's ends are — so a break puts it
+    back on the rect after clipping the tick-valued boundary beside it. When
+    one band carries BOTH ends, restoring them from a copy of the piece
+    geometry taken before either write made the second write hand back the
+    padded edge the first had just replaced: this chart rendered
+    ``24.0…420.961`` and the plot's top 8px padding strip lost its stripe.
+    Both orientations, since a y break owns a band's extent and an x break
+    owns none of it.
+    """
+    chart = _banded_chart()
+    unbroken_svg = chart.to_svg()
+    rect_top, rect_bottom = _y_axis_domain_line_span(unbroken_svg)
+    assert (rect_top, rect_bottom) == pytest.approx((16.0, 420.961), abs=1e-3)
+    assert _band_spans(unbroken_svg) == [pytest.approx((rect_top, rect_bottom), abs=1e-2)], (
+        "test sanity: an empty `values=` stripes the rect with exactly one band"
+    )
+
+    # A gap strictly inside the domain cuts the band in two: each structural
+    # end lands on its own piece, and both still reach the rect.
+    two = _band_spans((chart + fm.BreakAxis(axis="y", gap=(18, 22))).to_svg())
+    assert len(two) == 2, f"test sanity: a mid-domain gap cuts the band; got {two}"
+    assert (min(t for t, _ in two), max(b for _, b in two)) == pytest.approx(
+        (rect_top, rect_bottom), abs=1e-2
+    )
+
+    # ...and a gap reaching the domain's own low end leaves ONE piece carrying
+    # both ends, which is the case the pre-fix restore could not serve.
+    one = _band_spans((chart + fm.BreakAxis(axis="y", gap=(10, 22))).to_svg())
+    assert len(one) == 1, f"test sanity: this gap must leave a single piece; got {one}"
+    assert one[0] == pytest.approx((rect_top, rect_bottom), abs=1e-2), (
+        "a single band's two boundaries are BOTH the plot rect's edges, so a "
+        "break leaves it spanning the rect"
+    )
+
+    # The other orientation: an x break owns no part of a band.
+    x_broken_svg = (chart + fm.BreakAxis(axis="x", gap=(2.4, 3.6))).to_svg()
+    assert _rects(x_broken_svg, _BAND_FILL) == _rects(unbroken_svg, _BAND_FILL), (
+        "an x break must leave the band exactly where the unbroken chart drew it"
+    )
+
+
+def test_an_epsilon_gap_does_not_step_the_chart_across_the_domain_boundary():
+    """A gap that barely reaches into the domain renders ~the unbroken chart.
+
+    The two sides of the domain boundary must agree. A gap that MISSES the
+    (10, 30) domain is dropped outright (C1) and renders the unbroken chart
+    byte for byte; a gap of 0.002 data units INSIDE it, reserving no
+    indicator space (``break_size=0``), removes almost nothing and so must
+    render within float noise of the same chart. Pre-fix the effective side
+    tiled the raw rect instead: the marks stepped 412.961/24.0 →
+    420.961/16.0, a hard 8px jump the moment the gap crossed the boundary.
+    """
+    chart = fm.Chart(_PADDED_REF_DF).mark_point().encode(x="x:Q", y="y:Q")
+    unbroken = _cys(chart.to_svg())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        outside_svg = (chart + fm.BreakAxis(axis="y", gap=(500, 900), break_size=0)).to_svg()
+    assert any("had no effect" in str(w.message) for w in caught), (
+        "test sanity: the outside-the-domain gap is the ineffective (C1) side"
+    )
+    assert _cys(outside_svg) == unbroken, "test sanity: the ineffective side is unbroken"
+
+    inside = _cys((chart + fm.BreakAxis(axis="y", gap=(19.999, 20.001), break_size=0)).to_svg())
+    assert len(inside) == len(unbroken)
+    # y=20.0 is genuinely inside the declared gap, so that mark hides — the
+    # one honest difference between the two sides.
+    hidden = [i for i, cy in enumerate(inside) if cy < -1000]
+    assert hidden == [4], f"only the in-gap y=20 mark may hide; got {inside}"
+    for i, (got, want) in enumerate(zip(inside, unbroken)):
+        if i in hidden:
+            continue
+        assert got == pytest.approx(want, abs=0.05), (
+            f"mark {i} stepped {want} -> {got}; an epsilon gap must not move the "
+            f"chart off the unbroken positions (broken={inside} unbroken={unbroken})"
+        )
+
+
 def test_out_of_domain_annotation_clamps_to_the_correct_edge_under_a_break():
     """quality-review cycle-3 (S1 follow-up to F-L08-07's `None`-arm comment
     fix): a continuous y axis's out-of-domain fallback formula was un-flipped
@@ -867,6 +1145,13 @@ def test_out_of_domain_annotation_clamps_to_the_correct_edge_under_a_break():
     clamp to the plot BOTTOM instead of the TOP. Fixed in `resolve_y`'s
     fallback; pinned here on both sides via the same delta-vs-no-annotation
     shape as the position pins above.
+
+    The edges the clamp lands on are the PADDED ones (#226): the break's
+    segments tile the scale's own pixel range, so a value past the domain
+    clamps to the domain's end, which the unbroken scale puts 8px inside the
+    plot rect. Pre-#226 the segments tiled the raw rect and both clamps
+    landed on the rect's own edges instead — i.e. 8px outside where the
+    scale places the extreme data value.
     """
     df = pl.DataFrame(
         {"category": ["A", "B", "C", "D", "E"], "value": [72.0, 68.0, 75.0, 900.0, 81.0]}
@@ -901,14 +1186,26 @@ def test_out_of_domain_annotation_clamps_to_the_correct_edge_under_a_break():
         f"above_max={above_max} below_min={below_min}"
     )
 
+    # The clamp lands where the scale itself places the extreme data value:
+    # the tallest bar's top is the domain max (900) and every bar's base is
+    # the domain min (0), both on the PADDED range.
     rects = _rects(without)
-    plot_top = min(r[1] for r in rects)
-    plot_bottom = max(r[1] + r[3] for r in rects)
-    assert plot_top - 5.0 <= above_max <= plot_top + 5.0, (
-        f"above_max={above_max} should clamp to the plot's top edge "
-        f"(plot_top={plot_top}, plot_bottom={plot_bottom})"
+    domain_max_px = min(r[1] for r in rects)
+    domain_min_px = max(r[1] + r[3] for r in rects)
+    assert above_max == pytest.approx(domain_max_px, abs=1e-3), (
+        f"above_max={above_max} must clamp to the domain max's own pixel "
+        f"({domain_max_px}), not past it"
     )
-    assert plot_bottom - 5.0 <= below_min <= plot_bottom + 5.0, (
-        f"below_min={below_min} should clamp to the plot's bottom edge "
-        f"(plot_top={plot_top}, plot_bottom={plot_bottom})"
+    assert below_min == pytest.approx(domain_min_px, abs=1e-3), (
+        f"below_min={below_min} must clamp to the domain min's own pixel "
+        f"({domain_min_px}), not past it"
+    )
+
+    # Those are the PADDED edges, strictly inside the plot rect — the
+    # discriminating half, since the pre-#226 segments tiled the rect and
+    # clamped onto its own edges.
+    rect_top, rect_bottom = _y_axis_domain_line_span(without)
+    assert rect_top < above_max and below_min < rect_bottom, (
+        f"the clamp edges ({above_max}, {below_min}) must sit inside the plot "
+        f"rect ({rect_top}, {rect_bottom}) by the scale's padding"
     )

@@ -162,8 +162,20 @@ fn normalize_gaps(gaps: &[[f64; 2]], d_lo: f64, d_hi: f64) -> Vec<(f64, f64)> {
 /// Build a piecewise scale that skips `gaps` in the data domain.
 ///
 /// `original_domain` is the full `(lo, hi)` of the axis before breaking.
-/// `pixel_range` is `(axis_start_px, axis_end_px)` — for Y this is typically
-/// `(plot_top, plot_bottom)`, but the function is axis-agnostic.
+/// `pixel_range` is the BROKEN SCALE'S OWN pixel range
+/// ([`ScaleKind::pixel_range`](crate::render::scale_resolve::ScaleKind::pixel_range)),
+/// i.e. the padded one the unbroken scale places data in, as
+/// `(axis_start_px, axis_end_px)` in that scale's orientation — for a
+/// continuous Y that is `(bottom, top)`. It is NOT the raw plot rect: the
+/// segments built here must tile the same span [`BreakRemap`] reverse-maps
+/// from, because re-placing a coordinate is a round trip through both
+/// (`BreakRemap::data_at` divides by the scale's range, `ScaleSegment::
+/// pixel_for` multiplies by a slice of THIS range). Handing the raw rect in
+/// while the remap read the padded range made that round trip lossy in
+/// exactly the padding band: every effective break silently deleted up to
+/// `SCALE_PADDING_MAX_PX` of axis padding, so a broken axis's ticks, marks
+/// and gridlines sat up to 8px off their unbroken positions and a gap
+/// stepping over the domain boundary moved the whole chart (#226).
 /// `break_size` is the pixel height/width reserved for each indicator.
 ///
 /// `original_domain` may be given in EITHER order. A reversed scale reports a
@@ -1356,8 +1368,8 @@ impl<'a> BreakRemap<'a> {
         if self.is_y() { (across, along) } else { (along, across) }
     }
 
-    /// Re-place data-positioned axis chrome (domain line, tick marks, tick
-    /// labels) onto the broken axis.
+    /// Re-place data-positioned axis chrome (tick marks, tick labels) onto the
+    /// broken axis.
     ///
     /// Every node given here IS this break's chrome: ownership is decided by
     /// the caller from the axis's own identity
@@ -1368,11 +1380,15 @@ impl<'a> BreakRemap<'a> {
     /// y range, so a y-break admitted all 11 of them and then clamped both
     /// ends of each onto one pixel, collapsing every x tick to zero length.
     ///
-    /// The axis *title* is never in this list: it is positioned from the
-    /// axis's own midpoint rather than from a data value, so reverse-mapping
-    /// it is meaningless — and when that midpoint happened to land in a gap,
-    /// it teleported the title to `BREAK_HIDDEN`. `marks::axis::AxisNodes`
-    /// keeps the two apart at the source.
+    /// Two of the axis's nodes are never in this list, both for the same
+    /// reason: nothing data-shaped positioned them. The *title* is placed
+    /// from the axis's own midpoint, so reverse-mapping it is meaningless —
+    /// and when that midpoint happened to land in a gap, it teleported the
+    /// title to `BREAK_HIDDEN`. The *domain line*'s endpoints are the axis
+    /// rect's corners, so under a break they clamped to the domain's ends and
+    /// the line shrank to the padded span (#226); it stays full-rect, exactly
+    /// as on an unbroken chart. `marks::axis::AxisNodes` keeps all three
+    /// apart at the source.
     pub fn remap_axis_chrome(&self, nodes: &mut [SceneNode]) {
         for node in nodes.iter_mut() {
             self.remap_node(node);

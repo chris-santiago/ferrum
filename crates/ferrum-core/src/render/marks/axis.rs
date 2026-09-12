@@ -12,11 +12,23 @@ use ferrum_scene::SceneNode;
 /// The title is positioned from the axis's own midpoint, so reverse-mapping it
 /// asks a question it has no answer to — and when that midpoint happened to
 /// land inside a gap, the answer was "hidden", which is how a broken chart used
-/// to lose its axis title entirely.
+/// to lose its axis title entirely. The domain line is held apart for the same
+/// reason (#226): its endpoints are the axis rect's corners, not tick values.
+/// Only [`AxisNodes::data_positioned`] is ever handed to the remap.
 pub struct AxisNodes {
-    /// Domain line, tick marks and tick labels — every node placed from a tick
-    /// value, and the only nodes a broken scale may move or hide.
+    /// Tick marks and tick labels — every node placed from a tick value, and
+    /// the only nodes a broken scale may move or hide.
     pub data_positioned: Vec<SceneNode>,
+    /// The domain line, spanning the axis's own geometry end to end.
+    ///
+    /// Structural chrome, and exempt from the break remap for the same reason
+    /// the title is (#226): its endpoints are the axis rect's corners, not two
+    /// tick values, so reverse-mapping them asks a question they have no
+    /// answer to. Under a break they clamped to the domain's ends and the
+    /// line shrank to the padded span, drawing an axis shorter than the plot
+    /// it bounds. The line now spans the full rect exactly as on an unbroken
+    /// chart; the break indicators still overlay it.
+    pub domain_line: Option<SceneNode>,
     /// The axis title, placed from the axis geometry rather than from data.
     pub title: Option<SceneNode>,
     /// Which PHYSICAL axis these nodes were placed along — `"x"` or `"y"`,
@@ -35,10 +47,12 @@ pub struct AxisNodes {
 }
 
 impl AxisNodes {
-    /// Flatten back into paint order: data-positioned chrome first, title last
-    /// — the order `build_axis` emits them in.
+    /// Flatten back into paint order: domain line, then tick chrome, then the
+    /// title — the order `build_axis` emits them in.
     pub fn into_nodes(self) -> Vec<SceneNode> {
-        let mut nodes = self.data_positioned;
+        let mut nodes = Vec::with_capacity(self.data_positioned.len() + 2);
+        nodes.extend(self.domain_line);
+        nodes.extend(self.data_positioned);
         nodes.extend(self.title);
         nodes
     }
@@ -78,15 +92,13 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
     // second theme gate to AND against here. That AND is what used to make a
     // per-channel `Axis(domain=True)` unable to draw a domain line on a theme
     // that disabled them.
-    if axis.show_domain {
-        nodes.push(SceneNode::Line {
-            x1: r.x,
-            y1: r.y,
-            x2: r.x + r.w,
-            y2: r.y + r.h,
-            style: to_scene_stroke(axis_line_color, axis_line_width, 1.0, None, None, None),
-        });
-    }
+    let domain_line = axis.show_domain.then(|| SceneNode::Line {
+        x1: r.x,
+        y1: r.y,
+        x2: r.x + r.w,
+        y2: r.y + r.h,
+        style: to_scene_stroke(axis_line_color, axis_line_width, 1.0, None, None, None),
+    });
 
     let tick_stroke = to_scene_stroke(theme.colors.tick_color, theme.sizes.tick_width, 1.0, None, None, None);
 
@@ -355,6 +367,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
     // on both is a no-op so default output is byte-identical.
     let mut out = AxisNodes {
         data_positioned: nodes,
+        domain_line,
         title,
         placed_along: axis.orient.dimension().channel_token(),
     };
@@ -366,7 +379,12 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             AxisOrient::Left => (-shift, 0.0),   // outward = left
             AxisOrient::Right => (shift, 0.0),   // outward = right
         };
-        for node in out.data_positioned.iter_mut().chain(out.title.iter_mut()) {
+        for node in out
+            .data_positioned
+            .iter_mut()
+            .chain(out.domain_line.iter_mut())
+            .chain(out.title.iter_mut())
+        {
             offset_axis_node(node, dx, dy);
         }
     }
@@ -392,20 +410,66 @@ fn offset_axis_node(node: &mut SceneNode, dx: f64, dy: f64) {
     }
 }
 
+/// One grid scene node, tagged with what positioned it.
+///
+/// The grid's half of the split [`AxisNodes`] makes for axis chrome, and it
+/// exists for the same reason (#226): a break may re-place only geometry that
+/// a tick value ON ITS OWN axis put there. A vertical gridline sits at an x
+/// tick, but its `y1`/`y2` are the plot rect's corners — so a y break has
+/// nothing to say about it, exactly as it has nothing to say about the x
+/// axis's tick marks. Handing the flat grid list to the remap wholesale
+/// clamped those corners onto the broken scale's padded ends, and every
+/// cross-axis gridline stopped short of the axis line it used to meet.
+pub struct GridNode {
+    /// The node, at the geometry [`build_grid`] placed it at.
+    pub node: SceneNode,
+    /// Which axis's tick values placed this node — `"x"` or `"y"`, the same
+    /// vocabulary as [`AxisNodes::placed_along`] and
+    /// [`BreakRemap::axis`](crate::render::break_axis::BreakRemap::axis).
+    pub placed_along: &'static str,
+    /// Which ends of this node's extent ALONG `placed_along` the plot rect
+    /// placed, rather than a tick value.
+    ///
+    /// Only the banded row fills have any. They run from tick to tick, and the
+    /// outermost pair reaches the plot rect's own edge so the padding band at
+    /// each end of the axis is striped too; that edge is structural, so a
+    /// break compresses the tick end of the band and leaves the rect end where
+    /// the unbroken chart drew it. A gridline sits AT a tick value and spans
+    /// no data extent of its own, so it carries none.
+    pub rect_ends: GridRectEnds,
+}
+
+/// Which ends of a [`GridNode`]'s along-axis extent the plot rect placed —
+/// the provenance, deliberately NOT the pixels.
+///
+/// A structural end's correct position IS the plot rect's edge, so the
+/// consumer takes it from the rect it is laying out against
+/// (`scene_build::restore_grid_rect_ends`). Carrying a copy of the pixel here
+/// would turn that restore into a re-instatement of remembered geometry, and
+/// remembered geometry is what put a structural end on the scale's padded edge
+/// twice over (quality review cycles 1 and 2).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct GridRectEnds {
+    /// The low-pixel end of the extent is the plot rect's own edge.
+    pub lo: bool,
+    /// The high-pixel end of the extent is the plot rect's own edge.
+    pub hi: bool,
+}
+
 pub fn build_grid(
     plot_area: Rect,
     x_axis: Option<&AxisLayout>,
     y_axis: Option<&AxisLayout>,
     theme: &ThemeInputs,
     band_colors: &[String],
-) -> Vec<SceneNode> {
+) -> Vec<GridNode> {
     // No global `theme.grid.grid` gate here any more (D4, spec §4.3): each
     // axis's `show_grid` already carries the resolved answer for that axis
     // (per-channel > chart-level per-axis > chart-level shared > theme,
     // folded by `AxesInput::apply_show_defaults`). The old early return was
     // the reason a per-axis grid request could not be expressed at all — it
     // took BOTH axes and the band fills down together.
-    let mut nodes = Vec::new();
+    let mut nodes: Vec<GridNode> = Vec::new();
     // Major level — legacy single-level theme fields are the major level.
     let major_color = theme.colors.grid_color;
     let major_width = theme.sizes.grid_width;
@@ -438,6 +502,7 @@ pub fn build_grid(
             boundaries.dedup_by(|a, b| (*a - *b).abs() < 0.5);
             boundaries.sort_by(f64::total_cmp);
 
+            let last_band = boundaries.len().saturating_sub(2);
             for (band_idx, window) in boundaries.windows(2).enumerate() {
                 let top = window[0];
                 let bot = window[1];
@@ -447,13 +512,32 @@ pub fn build_grid(
                 }
                 if let Ok(fill) = crate::render::color::parse_color(band_color_str) {
                     use crate::render::draw::to_scene_fill_stroke;
-                    nodes.push(SceneNode::Rect {
-                        x: plot_area.x,
-                        y: top,
-                        w: plot_area.w,
-                        h: bot - top,
-                        style: to_scene_fill_stroke(Some(fill), false, None, false, 0.0, 1.0, None),
-                        corner_radius: 0.0,
+                    nodes.push(GridNode {
+                        node: SceneNode::Rect {
+                            x: plot_area.x,
+                            y: top,
+                            w: plot_area.w,
+                            h: bot - top,
+                            style: to_scene_fill_stroke(
+                                Some(fill),
+                                false,
+                                None,
+                                false,
+                                0.0,
+                                1.0,
+                                None,
+                            ),
+                            corner_radius: 0.0,
+                        },
+                        // The bands' boundaries are y tick values, so a y break
+                        // compresses them; the first and last boundary are the
+                        // plot rect's own edges (pushed above, and `boundaries`
+                        // is sorted ascending) and stay where they are.
+                        placed_along: "y",
+                        rect_ends: GridRectEnds {
+                            lo: band_idx == 0,
+                            hi: band_idx == last_band,
+                        },
                     });
                 }
             }
@@ -520,7 +604,7 @@ fn major_grid_style(
 /// at `tick.position` across the plot width. `baseline_coord` is the axis-line
 /// coordinate to skip against (`y_baseline_x` for x, `x_baseline_y` for y).
 fn emit_gridlines(
-    nodes: &mut Vec<SceneNode>,
+    nodes: &mut Vec<GridNode>,
     ticks: &[crate::layout::TickLayout],
     is_x_orient: bool,
     plot_area: Rect,
@@ -548,7 +632,14 @@ fn emit_gridlines(
                 style: style.clone(),
             }
         };
-        nodes.push(line);
+        nodes.push(GridNode {
+            node: line,
+            // The line sits AT this tick value on its own axis; the other two
+            // coordinates are the plot rect's corners, which is why a break on
+            // the other axis must leave it alone entirely.
+            placed_along: if is_x_orient { "x" } else { "y" },
+            rect_ends: GridRectEnds::default(),
+        });
     }
 }
 
@@ -581,6 +672,14 @@ mod tests {
             label_font_size: None,
             is_major: false,
         }
+    }
+
+    /// `build_grid`'s scene nodes in paint order, dropping the provenance tags.
+    /// The tests reached through here are about geometry and style; the tags
+    /// themselves are pinned by
+    /// `build_grid_tags_every_node_with_the_axis_that_placed_it`.
+    fn grid_scene_nodes(grid: Vec<GridNode>) -> Vec<SceneNode> {
+        grid.into_iter().map(|g| g.node).collect()
     }
 
     /// A y-axis layout with three major ticks and two minor ticks between them.
@@ -625,7 +724,7 @@ mod tests {
         y_axis.grid_opacity = Some(0.3);
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let nodes = grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &[]));
         let lines: Vec<&SceneNode> =
             nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
         assert!(!lines.is_empty());
@@ -642,7 +741,7 @@ mod tests {
         let y_axis = y_axis_with_minors();
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let nodes = grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &[]));
         for n in &nodes {
             if let SceneNode::Line { style, .. } = n {
                 assert!((style.opacity - theme.grid.grid_opacity).abs() < 1e-9);
@@ -696,7 +795,7 @@ mod tests {
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
         assert!(!theme.grid.minor, "default theme must have minor off");
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let nodes = grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &[]));
 
         let lines: Vec<&SceneNode> = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
         // 3 majors (none coincide with the x baseline since x_axis=None →
@@ -718,7 +817,7 @@ mod tests {
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let mut theme = ThemeInputs::default();
         theme.grid.minor = true;
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let nodes = grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &[]));
 
         let lines: Vec<&SceneNode> = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
         assert_eq!(lines.len(), 5, "2 minors + 3 majors");
@@ -757,7 +856,7 @@ mod tests {
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let mut theme = ThemeInputs::default();
         theme.grid.minor = true;
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let nodes = grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &[]));
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert_eq!(line_count, 3, "no minor_ticks → only the 3 majors even with minor enabled");
     }
@@ -1079,7 +1178,8 @@ mod tests {
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let band_colors = vec!["#f0f0f0".to_string(), "transparent".to_string()];
         let theme = ThemeInputs::default();
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &band_colors);
+        let nodes =
+            grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &band_colors));
 
         // Should emit Rect nodes for non-transparent bands only (every other band).
         let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
@@ -1092,6 +1192,85 @@ mod tests {
         assert_eq!(rect_count, 2, "expected 2 rects (alternating with transparent), got {rect_count}");
     }
 
+    /// Every grid node says which axis's tick values placed it, and a band
+    /// fill says which of its boundaries are the plot rect's own edges (#226).
+    ///
+    /// These tags are the whole of what keeps a break on ONE axis from
+    /// re-placing the OTHER axis's gridlines, whose cross-axis endpoints are
+    /// the plot rect's corners and not data at all — `scene_build`'s
+    /// `break_grid_node` reads nothing else about a grid node.
+    #[test]
+    fn build_grid_tags_every_node_with_the_axis_that_placed_it() {
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let theme = ThemeInputs::default();
+        let y_axis = y_axis_with_minors();
+        let x_axis = AxisLayout {
+            orient: AxisOrient::Bottom,
+            axis_line: Rect { x: 50.0, y: 310.0, w: 400.0, h: 0.0 },
+            ticks: vec![major_tick(100.0, "a"), major_tick(300.0, "b")],
+            minor_ticks: vec![],
+            ..y_axis_with_minors()
+        };
+        let band_colors = vec!["#f0f0f0".to_string(), "#e0e0e0".to_string()];
+        let grid = build_grid(plot_area, Some(&x_axis), Some(&y_axis), &theme, &band_colors);
+
+        for g in &grid {
+            match &g.node {
+                // A vertical line is an x tick's gridline; a horizontal one is
+                // a y tick's. Neither spans a data extent of its own.
+                SceneNode::Line { x1, x2, .. } if (x2 - x1).abs() < f64::EPSILON => {
+                    assert_eq!(g.placed_along, "x", "a vertical gridline sits at an x tick");
+                    assert_eq!(g.rect_ends, GridRectEnds::default());
+                }
+                SceneNode::Line { .. } => {
+                    assert_eq!(g.placed_along, "y", "a horizontal gridline sits at a y tick");
+                    assert_eq!(g.rect_ends, GridRectEnds::default());
+                }
+                SceneNode::Rect { .. } => {
+                    assert_eq!(g.placed_along, "y", "a band fill's boundaries are y ticks");
+                }
+                other => panic!("unexpected grid node kind: {other:?}"),
+            }
+        }
+
+        // The bands tile the plot rect top to bottom. Only the outermost two
+        // reach a rect edge, and each says which of its ends that is — the
+        // geometry↔provenance correspondence the consumer relies on, since it
+        // writes the edge from the plot rect rather than from anything here.
+        let bands: Vec<&GridNode> = grid
+            .iter()
+            .filter(|g| matches!(g.node, SceneNode::Rect { .. }))
+            .collect();
+        let band_extent = |g: &GridNode| match g.node {
+            SceneNode::Rect { y, h, .. } => (y, y + h),
+            ref other => panic!("not a band fill: {other:?}"),
+        };
+        assert_eq!(bands.len(), 4, "3 y ticks between the rect's edges → 4 bands");
+        assert_eq!(
+            bands[0].rect_ends,
+            GridRectEnds { lo: true, hi: false },
+            "the top band starts at the rect's own edge, not at a tick"
+        );
+        assert_eq!(band_extent(bands[0]).0, plot_area.y, "...and that end IS the rect's edge");
+        assert_eq!(
+            bands[3].rect_ends,
+            GridRectEnds { lo: false, hi: true },
+            "the bottom band ends at the rect's own edge, not at a tick"
+        );
+        assert_eq!(
+            band_extent(bands[3]).1,
+            plot_area.y + plot_area.h,
+            "...and that end IS the rect's edge"
+        );
+        for band in &bands[1..3] {
+            assert_eq!(
+                band.rect_ends,
+                GridRectEnds::default(),
+                "an interior band is bounded by two tick values"
+            );
+        }
+    }
+
     /// Batch A Task 8 sweep: band colors were hex-only, so a CSS name or an
     /// `rgb()` string emitted no band at all (the parse failed and the band was
     /// skipped). All three spellings of one color now paint the same band, and
@@ -1101,13 +1280,13 @@ mod tests {
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
         let band_fills = |spelling: &str| -> Vec<_> {
-            build_grid(
+            grid_scene_nodes(build_grid(
                 plot_area,
                 None,
                 Some(&y_axis_with_minors()),
                 &theme,
                 &[spelling.to_string()],
-            )
+            ))
             .iter()
             .filter_map(|n| match n {
                 SceneNode::Rect { style, .. } => Some(style.fill),
@@ -1149,7 +1328,7 @@ mod tests {
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
-        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let nodes = grid_scene_nodes(build_grid(plot_area, None, Some(&y_axis), &theme, &[]));
         let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
         assert_eq!(rect_count, 0, "no band_colors means no rects");
     }

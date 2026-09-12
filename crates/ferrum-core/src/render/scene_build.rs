@@ -5,7 +5,7 @@ use ferrum_scene::{
     PanelTickLevels, ParamBinding, SceneGraph, SceneNode, TickLevel,
 };
 
-use crate::layout::{AxisLayout, LayoutResult, ResolveMode, ThemeInputs};
+use crate::layout::{AxisLayout, LayoutResult, Rect, ResolveMode, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
 use super::arrow_cast::{col_as_ordinal_category_str, col_as_temporal_epoch_str};
@@ -1032,6 +1032,128 @@ struct PanelAxisGrid {
     grid_above: bool,
 }
 
+/// Re-place one grid node on a broken axis, or leave it where it is when the
+/// break is not its own (#226).
+///
+/// The identity rule this panel already applies to axis chrome
+/// (`marks::axis::AxisNodes::placed_along`), applied to the grid: a vertical
+/// gridline is placed from an x tick value and its `y1`/`y2` are the plot
+/// rect's corners, so a y break has nothing to say about it. Running it through
+/// the remap anyway reverse-mapped those corners, clamped them to the domain's
+/// ends and brought them back on the scale's PADDED ends, leaving every
+/// cross-axis gridline stopping short of the axis line it used to meet — while
+/// the axis line itself, and an `annotate_vline` beside it, still spanned the
+/// whole rect.
+///
+/// A banded row fill DOES belong to the y break: its boundaries are y tick
+/// values, so it clips per visible segment rather than stretching across the
+/// gap. Its outermost boundary is the plot rect's own edge, structural for the
+/// same reason the domain line is, so the clipped piece adjacent to that edge
+/// is put back on it — see `marks::axis::GridNode::rect_ends`.
+fn break_grid_node(
+    grid_node: marks::axis::GridNode,
+    remap: &break_axis::BreakRemap<'_>,
+    plot_area: Rect,
+) -> Vec<marks::axis::GridNode> {
+    if remap.axis() != grid_node.placed_along {
+        return vec![grid_node];
+    }
+    let marks::axis::GridNode { node, placed_along, rect_ends } = grid_node;
+    let mut pieces = remap.clip_nodes(vec![node]).nodes;
+    restore_grid_rect_ends(&mut pieces, rect_ends, plot_area, remap.axis() == "y");
+    pieces
+        .into_iter()
+        .map(|node| marks::axis::GridNode { node, placed_along, rect_ends })
+        .collect()
+}
+
+/// Put a clipped band fill's structural ends back on the plot rect's edge.
+///
+/// The band's tick-valued boundary compresses with the break; the plot rect's
+/// own edge does not. Without this the outermost band stopped on the scale's
+/// padded end and the padding strip at that end of the plot lost its stripe,
+/// the band-fill form of the same defect the axis domain line has.
+///
+/// Each end is written from `plot_area` — the value `build_grid` draws on an
+/// unbroken chart, and the whole meaning of
+/// [`GridRectEnds`](marks::axis::GridRectEnds) — never from a copy of the
+/// piece geometry. That is deliberate: this restore is the second place a
+/// structural end has been found sitting on the scale's padded edge, first
+/// because the remap re-derived it and then because a snapshot taken before
+/// the writes handed a stale one back. A single-band axis puts BOTH ends on
+/// one piece, so the two writes here must be unable to disturb each other:
+/// each names only its own edge and applies it in place.
+fn restore_grid_rect_ends(
+    pieces: &mut [SceneNode],
+    ends: marks::axis::GridRectEnds,
+    plot_area: Rect,
+    is_y: bool,
+) {
+    if !ends.lo && !ends.hi {
+        return;
+    }
+    let (rect_lo, rect_hi) = if is_y {
+        (plot_area.y, plot_area.y + plot_area.h)
+    } else {
+        (plot_area.x, plot_area.x + plot_area.w)
+    };
+    let (lo_piece, hi_piece) = outermost_rect_pieces(pieces, is_y);
+    for (i, piece) in pieces.iter_mut().enumerate() {
+        set_rect_edges(
+            piece,
+            is_y,
+            (ends.lo && lo_piece == Some(i)).then_some(rect_lo),
+            (ends.hi && hi_piece == Some(i)).then_some(rect_hi),
+        );
+    }
+}
+
+/// The clipped pieces nearest the plot rect's low and high edge along the
+/// broken axis, as `(low, high)` indices into `pieces`.
+///
+/// The clip emits pieces in data order, which for a y scale runs bottom to
+/// top, so the ends are found by pixel rather than by position in the list.
+/// Both are `None` when the clip left no `Rect` at all (a gap that swallowed
+/// the band whole), and both can name the SAME piece — an axis with no
+/// boundary strictly inside the rect has exactly one band, carrying both
+/// structural ends.
+fn outermost_rect_pieces(pieces: &[SceneNode], is_y: bool) -> (Option<usize>, Option<usize>) {
+    let (mut lo_piece, mut hi_piece) = (None, None);
+    let (mut lowest, mut highest) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (i, node) in pieces.iter().enumerate() {
+        let SceneNode::Rect { x, y, w, h, .. } = node else { continue };
+        let (start, end) = if is_y { (*y, *y + *h) } else { (*x, *x + *w) };
+        if start < lowest {
+            lowest = start;
+            lo_piece = Some(i);
+        }
+        if end > highest {
+            highest = end;
+            hi_piece = Some(i);
+        }
+    }
+    (lo_piece, hi_piece)
+}
+
+/// Move the named edges of a `Rect`'s extent along one axis onto `lo`/`hi`,
+/// leaving the other edge where the clip put it. A no-op for a `None` edge and
+/// for any other node kind (a band fill is the only grid node with an extent).
+///
+/// Each edge is applied against the node's CURRENT geometry rather than a
+/// caller-held copy, so writing both ends of one piece composes instead of the
+/// second write undoing the first.
+fn set_rect_edges(node: &mut SceneNode, is_y: bool, lo: Option<f64>, hi: Option<f64>) {
+    let SceneNode::Rect { x, y, w, h, .. } = node else { return };
+    let (start, len) = if is_y { (y, h) } else { (x, w) };
+    if let Some(edge) = lo {
+        *len += *start - edge;
+        *start = edge;
+    }
+    if let Some(edge) = hi {
+        *len = edge - *start;
+    }
+}
+
 /// Build and route this panel's grid + axis nodes (MOD-09 extraction of the
 /// inline suppress/grid/route block). Pure extraction — same suppress test, same
 /// `build_grid`, same `grid_above` computation, same above/below `route_axis`
@@ -1090,13 +1212,18 @@ fn route_panel_axes_and_grid(
         )
     };
     // Gridlines sit at tick values, so a broken scale moves them (or hides the
-    // ones inside a gap) exactly as it moves the marks. Grid band fills are
-    // extent geometry, so they clip per segment rather than stretching across
-    // the gap; the rebuild is free here because gridlines carry no per-node
-    // sidecars.
+    // ones inside a gap) exactly as it moves the marks — but only the break on
+    // THEIR OWN axis does, by the same identity rule `break_axis_nodes` below
+    // applies to axis chrome. Grid band fills are extent geometry, so they clip
+    // per segment rather than stretching across the gap; the rebuild is free
+    // here because gridlines carry no per-node sidecars.
     for remap in breaks {
-        grid = remap.clip_nodes(grid).nodes;
+        grid = grid
+            .into_iter()
+            .flat_map(|node| break_grid_node(node, remap, panel.plot_area))
+            .collect();
     }
+    let grid: Vec<SceneNode> = grid.into_iter().map(|g| g.node).collect();
     // zindex (B5): gridlines follow their axis above/below the marks. When a
     // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
     // above the marks (into the annotation list) alongside that axis. Computed
@@ -1121,8 +1248,10 @@ fn route_panel_axes_and_grid(
     let mut axes_below: Vec<SceneNode> = Vec::new();
     let mut axes_above: Vec<SceneNode> = Vec::new();
     // Place this axis's data-positioned chrome on every broken scale that
-    // applies to it, leaving the title where the layout put it. Two axes are
-    // exempt, both by identity rather than by geometry: an axis placed along
+    // applies to it, leaving the title and the domain line where the layout
+    // put them (`marks::axis::AxisNodes` holds those two apart from the tick
+    // chrome — see its doc and `remap_axis_chrome`'s). Two axes are exempt
+    // wholesale, both by identity rather than by geometry: an axis placed along
     // the OTHER dimension (an x axis under a y break — its nodes were placed
     // from x tick values, so a y break has nothing to say about them), and a
     // secondary-y axis (`y_slot >= 1`), which is labelled from its own scale,
@@ -2478,11 +2607,6 @@ fn build_structural_nodes(
             StructuralSpec::BreakAxis(spec_brk) => {
                 // Build break indicators and add them to annotations.
                 let is_y = spec_brk.axis == "y";
-                let pixel_range = if is_y {
-                    (plot_area.y + plot_area.h, plot_area.y)
-                } else {
-                    (plot_area.x, plot_area.x + plot_area.w)
-                };
 
                 // ONE predicate decides whether this break does anything, and
                 // it is the same one `build_scene` applies downstream when it
@@ -2509,10 +2633,21 @@ fn build_structural_nodes(
                     continue;
                 };
 
+                // The segments tile the SCALE's own pixel range — the padded
+                // one it places data in — not the raw plot rect (#226). The
+                // two differ by the positional-scale padding inset
+                // (`layout::geometry::inset_pixel_range`, up to 8px per end),
+                // and `BreakRemap::new` below reverse-maps from
+                // `scale.pixel_range()`: laying the segments over the rect
+                // instead made the round trip lossy in exactly that band, so
+                // every effective break silently deleted the axis padding
+                // (ticks/marks/gridlines up to 8px off their unbroken
+                // positions, and an 8px step the moment a gap crossed the
+                // domain boundary). One span, read from one place.
                 let break_result = break_axis::apply_break_to_scale(
                     data_domain,
                     &spec_brk.gaps,
-                    pixel_range,
+                    scale.pixel_range(),
                     spec_brk.break_size,
                 );
 
@@ -8595,10 +8730,13 @@ mod tests {
         let y_domain = scales.y.data_domain().expect("continuous y");
         let mid = (y_domain.0 + y_domain.1) / 2.0;
         let span = y_domain.1 - y_domain.0;
+        // Both halves of the round trip read the SAME span — the scale's own
+        // padded pixel range — exactly as `build_structural_nodes` and
+        // `build_scene` pair them in production (#226).
         let result = break_axis::apply_break_to_scale(
             y_domain,
             &[[mid - span * 0.1, mid + span * 0.1]],
-            (panel.plot_area.y + panel.plot_area.h, panel.plot_area.y),
+            scales.y.pixel_range(),
             12.0,
         );
         assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
@@ -8608,6 +8746,544 @@ mod tests {
         assert_eq!(
             broken, unbroken,
             "a y break must leave every x tick mark exactly as it was"
+        );
+    }
+
+    // ── The break's span is the SCALE's own pixel range (#226) ──────────────
+
+    /// The segments tile the broken scale's OWN pixel range — the padded one
+    /// it places data in — not the raw plot rect.
+    ///
+    /// The two differ by `inset_pixel_range`'s padding band (up to 8px per
+    /// end), and `build_scene` builds every `BreakRemap` from
+    /// `scale.pixel_range()`. Feeding the rect in here made re-placing a
+    /// coordinate a lossy round trip in exactly that band: an effective break
+    /// deleted the axis padding, so ticks/marks/gridlines sat up to 8px off
+    /// their unbroken positions, and a gap that crossed the domain boundary
+    /// stepped the whole chart (the ineffective side renders unbroken).
+    /// Asserted on both axes, since each reads its own scale.
+    #[test]
+    fn break_segments_tile_the_scales_own_pixel_range_not_the_plot_rect() {
+        // Ranges padded 8px inside the shared 20…320 plot rect, exactly as
+        // `layout::geometry::inset_pixel_range` builds them for a continuous
+        // positional scale (y descending, x ascending).
+        let scales = positional_scales(
+            linear_scale([0.0, 1000.0], [28.0, 312.0]),
+            linear_scale([0.0, 1000.0], [312.0, 28.0]),
+        );
+        for axis in ["x", "y"] {
+            let scale = if axis == "y" { &scales.y } else { &scales.x };
+            let pixels = scale.pixel_range();
+            let mut warnings = Vec::new();
+            let out = build_structural_nodes(
+                &[break_spec(axis, vec![[150.0, 850.0]])],
+                &scales,
+                &structural_plot(),
+                &ThemeInputs::default(),
+                &mut warnings,
+            );
+            let (named, result) = &out.break_results[0];
+            assert_eq!(named, axis);
+            let (first, last) = (
+                result.segments.first().expect("two segments"),
+                result.segments.last().expect("two segments"),
+            );
+            assert!(
+                (first.pixel_lo - pixels.0).abs() < 1e-9 && (last.pixel_hi - pixels.1).abs() < 1e-9,
+                "{axis}: the segments must tile the scale's range {pixels:?}, not the \
+                 plot rect; got {}…{}",
+                first.pixel_lo,
+                last.pixel_hi
+            );
+
+            // The round trip the consumer performs is then exact at both ends:
+            // a coordinate the unbroken scale placed comes back to itself.
+            let remap = break_axis::BreakRemap::new(axis, (0.0, 1000.0), pixels, result);
+            for end in [pixels.0, pixels.1] {
+                let placed = remap.coord(end).expect("a domain end is never in a gap");
+                assert!(
+                    (placed - end).abs() < 1e-9,
+                    "{axis}: {end} must round-trip to itself; got {placed}"
+                );
+            }
+        }
+    }
+
+    /// The axis domain line is structural chrome, so a break leaves it
+    /// spanning the whole plot rect — exactly as on an unbroken chart (#226).
+    ///
+    /// Its endpoints are the axis rect's corners, not two tick values, so
+    /// reverse-mapping them asks a question they have no answer to: they
+    /// clamped to the domain's ends and the line shrank onto the (padded)
+    /// segment span, drawing an axis shorter than the plot it bounds. The
+    /// tick chrome beside it still moves, which is what makes this
+    /// discriminating.
+    #[test]
+    fn a_break_leaves_the_axis_domain_line_spanning_the_whole_plot_rect() {
+        use crate::layout::text_metrics::{fixed_width, MockMetrics};
+        use crate::layout::{AxisInput, AxisOrient};
+
+        let (spec, batch) = two_layer_dual_y_spec(false);
+        let scales = resolve_dual_y(&spec, &batch);
+        let panel = crate::layout::PanelLayout {
+            plot_area: crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 },
+            ..Default::default()
+        };
+        let theme = ThemeInputs::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let mut y_input = AxisInput::new(
+            AxisOrient::Left,
+            Some("Y".into()),
+            vec!["0".into(), "500".into(), "1000".into()],
+            None,
+        );
+        y_input.overrides.show_domain = Some(true);
+        y_input.overrides.show_grid = Some(false);
+        y_input.overrides.show_ticks = Some(true);
+        let (y_axis, _) = crate::layout::axis::layout_y_axis(
+            &y_input,
+            panel.plot_area,
+            0,
+            11.0,
+            13.0,
+            8.0,
+            4.0,
+            &m,
+        );
+
+        // The y-axis chrome, split by shape: the domain line is the one
+        // near-vertical stroke spanning the panel; a Left axis's tick dashes
+        // are horizontal.
+        let vertical_spans = |result: &PanelAxisGrid| -> Vec<(f64, f64)> {
+            result
+                .axes_below
+                .iter()
+                .chain(&result.axes_above)
+                .filter_map(|n| match n {
+                    SceneNode::Line { x1, y1, x2, y2, .. } if (y2 - y1).abs() > 1.0 => {
+                        Some(((x2 - x1).abs(), (y2 - y1).abs()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let tick_ys = |result: &PanelAxisGrid| -> Vec<f64> {
+            result
+                .axes_below
+                .iter()
+                .chain(&result.axes_above)
+                .filter_map(|n| match n {
+                    SceneNode::Line { y1, y2, .. } if (y2 - y1).abs() <= f64::EPSILON => Some(*y1),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let route = |breaks: &[break_axis::BreakRemap<'_>]| {
+            route_panel_axes_and_grid(
+                &spec,
+                &scales,
+                &panel,
+                &[&y_axis],
+                None,
+                None,
+                &[],
+                &[],
+                false,
+                false,
+                &theme,
+                &chart_config,
+                breaks,
+            )
+        };
+
+        let unbroken = route(&[]);
+        assert_eq!(
+            vertical_spans(&unbroken).len(),
+            1,
+            "test sanity: the y axis draws exactly one domain line"
+        );
+
+        let y_domain = scales.y.data_domain().expect("continuous y");
+        let mid = (y_domain.0 + y_domain.1) / 2.0;
+        let span = y_domain.1 - y_domain.0;
+        let result = break_axis::apply_break_to_scale(
+            y_domain,
+            &[[mid - span * 0.1, mid + span * 0.1]],
+            scales.y.pixel_range(),
+            12.0,
+        );
+        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
+        let remap = break_axis::BreakRemap::new("y", y_domain, scales.y.pixel_range(), &result);
+        let broken = route(std::slice::from_ref(&remap));
+
+        assert_eq!(
+            vertical_spans(&broken),
+            vertical_spans(&unbroken),
+            "the domain line spans the plot rect broken or not"
+        );
+        assert_ne!(
+            tick_ys(&broken),
+            tick_ys(&unbroken),
+            "test sanity: the tick chrome beside it DOES move, so the pin above \
+             is not passing on an unremapped axis"
+        );
+    }
+
+    /// The panel the #226 grid-provenance tests share: a 20…320 plot rect with
+    /// a three-tick x axis and y axis, both drawing gridlines.
+    struct GridFixture {
+        spec: ChartSpec,
+        scales: scale_resolve::ResolvedScales,
+        panel: crate::layout::PanelLayout,
+        x_axis: crate::layout::AxisLayout,
+        y_axis: crate::layout::AxisLayout,
+    }
+
+    impl GridFixture {
+        fn new() -> Self {
+            Self::with_tick_values(vec!["0".into(), "500".into(), "1000".into()])
+        }
+
+        /// The same panel with a chosen set of tick values on both axes.
+        ///
+        /// An EMPTY list is the single-band shape: with no boundary strictly
+        /// inside the plot rect the banded grid emits exactly one stripe, so
+        /// one node carries BOTH structural ends.
+        fn with_tick_values(values: Vec<String>) -> Self {
+            use crate::layout::text_metrics::{fixed_width, MockMetrics};
+            use crate::layout::{AxisInput, AxisOrient};
+
+            let (spec, batch) = two_layer_dual_y_spec(false);
+            let scales = resolve_dual_y(&spec, &batch);
+            let plot_area = crate::layout::Rect { x: 20.0, y: 20.0, w: 300.0, h: 300.0 };
+            let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+            let axis_input = |orient: AxisOrient| {
+                let mut input = AxisInput::new(orient, None, values.clone(), None);
+                input.overrides.show_domain = Some(true);
+                input.overrides.show_grid = Some(true);
+                input.overrides.show_ticks = Some(true);
+                input
+            };
+            let (y_axis, _) = crate::layout::axis::layout_y_axis(
+                &axis_input(AxisOrient::Left),
+                plot_area,
+                0,
+                11.0,
+                13.0,
+                8.0,
+                4.0,
+                &m,
+            );
+            let (x_axis, _) = crate::layout::axis::layout_x_axis(
+                &axis_input(AxisOrient::Bottom),
+                plot_area,
+                0,
+                11.0,
+                13.0,
+                8.0,
+                0,
+                4.0,
+                &m,
+            );
+            Self {
+                spec,
+                scales,
+                panel: crate::layout::PanelLayout { plot_area, ..Default::default() },
+                x_axis,
+                y_axis,
+            }
+        }
+
+        fn plot_area(&self) -> crate::layout::Rect {
+            self.panel.plot_area
+        }
+
+        /// Route this panel's axes and grid under `chart_config` and `breaks`.
+        fn route(
+            &self,
+            chart_config: &super::super::chart_config::ChartConfig,
+            breaks: &[break_axis::BreakRemap<'_>],
+        ) -> PanelAxisGrid {
+            route_panel_axes_and_grid(
+                &self.spec,
+                &self.scales,
+                &self.panel,
+                &[&self.x_axis, &self.y_axis],
+                Some(&self.x_axis),
+                Some(&self.y_axis),
+                &[],
+                &[],
+                true,
+                true,
+                &ThemeInputs::default(),
+                chart_config,
+                breaks,
+            )
+        }
+    }
+
+    /// The break these tests run against a 20…320 plot rect: a `(400, 600)` gap
+    /// in a `(0, 1000)` domain, over the scale's OWN padded pixel range (8px
+    /// inside the rect at each end, y descending — exactly what
+    /// `inset_pixel_range` builds and what `build_scene` hands the remap).
+    fn grid_fixture_break(axis: &str) -> (break_axis::BreakResult, (f64, f64)) {
+        let pixels = if axis == "y" { (312.0, 28.0) } else { (28.0, 312.0) };
+        let result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[400.0, 600.0]], pixels, 12.0);
+        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
+        (result, pixels)
+    }
+
+    /// A chart config whose grid paints `colors` as banded row fills.
+    fn banded_grid_config(colors: &[&str]) -> super::super::chart_config::ChartConfig {
+        super::super::chart_config::ChartConfig {
+            grid: Some(super::super::chart_config::GridConfigSpec {
+                band_colors: Some(colors.iter().map(|c| c.to_string()).collect()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Every band fill's y extent, in `(top, bottom)` pixels, in paint order.
+    fn band_spans(result: &PanelAxisGrid) -> Vec<(f64, f64)> {
+        result
+            .grid
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Rect { y, h, .. } => Some((*y, *y + *h)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A break leaves the OTHER axis's gridlines spanning the whole plot rect,
+    /// exactly as on an unbroken chart (#226, quality-review cycle 2).
+    ///
+    /// The domain line's rule, one node family over: a vertical gridline is
+    /// placed at an x tick value, but its `y1`/`y2` are the plot rect's
+    /// corners. Run through a y break they reverse-mapped, clamped to the
+    /// domain's ends and came back on the scale's PADDED ends, so every
+    /// vertical gridline stopped 8px short of the x-axis line it used to meet
+    /// — while the axis line itself, and an `annotate_vline` beside it, still
+    /// spanned the rect. Asserted in both directions, since each axis reads
+    /// its own scale, and each direction carries the sanity half (the
+    /// gridlines the break DOES own move), so neither can pass on a grid the
+    /// break never reached.
+    #[test]
+    fn a_break_leaves_the_cross_axis_gridlines_spanning_the_whole_plot_rect() {
+        let fixture = GridFixture::new();
+        let plot_area = fixture.plot_area();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        // The two gridline families, each as `(position, from, to)`: a
+        // vertical line sits at an x tick and spans the rect's height, a
+        // horizontal one sits at a y tick and spans its width.
+        let vertical = |result: &PanelAxisGrid| -> Vec<(f64, f64, f64)> {
+            result
+                .grid
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Line { x1, y1, x2, y2, .. }
+                        if (x2 - x1).abs() <= f64::EPSILON =>
+                    {
+                        Some((*x1, *y1, *y2))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let horizontal = |result: &PanelAxisGrid| -> Vec<(f64, f64, f64)> {
+            result
+                .grid
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Line { x1, y1, x2, y2, .. }
+                        if (y2 - y1).abs() <= f64::EPSILON =>
+                    {
+                        Some((*y1, *x1, *x2))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let unbroken = fixture.route(&chart_config, &[]);
+        assert!(
+            !vertical(&unbroken).is_empty() && !horizontal(&unbroken).is_empty(),
+            "test sanity: both gridline families are drawn"
+        );
+        assert!(
+            vertical(&unbroken)
+                .iter()
+                .all(|&(_, y1, y2)| y1 == plot_area.y && y2 == plot_area.y + plot_area.h),
+            "test sanity: an unbroken vertical gridline spans the whole rect; got {:?}",
+            vertical(&unbroken)
+        );
+
+        for axis in ["y", "x"] {
+            let (result, pixels) = grid_fixture_break(axis);
+            let remap = break_axis::BreakRemap::new(axis, (0.0, 1000.0), pixels, &result);
+            let broken = fixture.route(&chart_config, std::slice::from_ref(&remap));
+
+            // The cross-axis family is untouched; the family the break owns
+            // moves, which is what keeps the pin from passing on a grid the
+            // break never reached.
+            let (cross_broken, cross_unbroken, own_broken, own_unbroken) = if axis == "y" {
+                (
+                    vertical(&broken),
+                    vertical(&unbroken),
+                    horizontal(&broken),
+                    horizontal(&unbroken),
+                )
+            } else {
+                (
+                    horizontal(&broken),
+                    horizontal(&unbroken),
+                    vertical(&broken),
+                    vertical(&unbroken),
+                )
+            };
+            assert_eq!(
+                cross_broken, cross_unbroken,
+                "a {axis} break must leave the cross-axis gridlines exactly where \
+                 the unbroken chart drew them"
+            );
+            assert_ne!(
+                own_broken, own_unbroken,
+                "test sanity: a {axis} break DOES move the gridlines it owns, so \
+                 the pin above is not passing on an unremapped grid"
+            );
+        }
+    }
+
+    /// A banded grid keeps its stripes reaching the plot rect's own edges under
+    /// a break, and keeps its full width under a break on the other axis
+    /// (#226, quality-review cycle 2).
+    ///
+    /// A band fill's boundaries ARE y tick values, so a y break owns it and it
+    /// still clips per visible segment. But its OUTERMOST boundary is the plot
+    /// rect's edge, structural for the same reason the domain line is: run
+    /// through the remap it clamped to the domain's end and came back on the
+    /// scale's padded edge, leaving the padding strip at each end of the plot
+    /// unstriped. An x break owns none of it — a stripe's width is the rect's,
+    /// not data.
+    #[test]
+    fn a_break_leaves_a_grid_bands_structural_edges_on_the_plot_rect() {
+        let fixture = GridFixture::new();
+        let plot_area = fixture.plot_area();
+        let chart_config = banded_grid_config(&["#f0f0f0", "#e8e8e8"]);
+
+        let unbroken = band_spans(&fixture.route(&chart_config, &[]));
+        assert!(unbroken.len() >= 3, "test sanity: the bands tile the plot; got {unbroken:?}");
+        assert_eq!(
+            (
+                unbroken.iter().map(|b| b.0).fold(f64::INFINITY, f64::min),
+                unbroken.iter().map(|b| b.1).fold(f64::NEG_INFINITY, f64::max),
+            ),
+            (plot_area.y, plot_area.y + plot_area.h),
+            "test sanity: the unbroken bands reach both rect edges"
+        );
+
+        let (y_result, y_pixels) = grid_fixture_break("y");
+        let y_remap = break_axis::BreakRemap::new("y", (0.0, 1000.0), y_pixels, &y_result);
+        let broken = band_spans(&fixture.route(&chart_config, std::slice::from_ref(&y_remap)));
+        assert_eq!(
+            (
+                broken.iter().map(|b| b.0).fold(f64::INFINITY, f64::min),
+                broken.iter().map(|b| b.1).fold(f64::NEG_INFINITY, f64::max),
+            ),
+            (plot_area.y, plot_area.y + plot_area.h),
+            "the outermost bands still reach the rect's own edges under a break; \
+             got {broken:?}"
+        );
+        assert_ne!(
+            broken, unbroken,
+            "test sanity: the break DOES cut and compress the bands in between"
+        );
+
+        // An x break owns no part of a band: its boundaries are y ticks and its
+        // width is the rect's.
+        let (x_result, x_pixels) = grid_fixture_break("x");
+        let x_remap = break_axis::BreakRemap::new("x", (0.0, 1000.0), x_pixels, &x_result);
+        let x_broken = fixture.route(&chart_config, std::slice::from_ref(&x_remap));
+        assert_eq!(band_spans(&x_broken), unbroken, "an x break leaves the bands alone");
+        assert!(
+            x_broken.grid.iter().all(|n| match n {
+                SceneNode::Rect { x, w, .. } => *x == plot_area.x && *w == plot_area.w,
+                _ => true,
+            }),
+            "a band keeps the plot rect's full width under an x break"
+        );
+    }
+
+    /// ONE band carrying BOTH structural ends still reaches both rect edges
+    /// (#226, quality-review cycle 3).
+    ///
+    /// A y axis with no boundary strictly inside the plot rect (`axis=fm.Axis(
+    /// values=[])`) stripes it with a single band, so the same node carries the
+    /// low AND the high structural end — and a gap reaching the domain's own
+    /// end leaves exactly one surviving piece to carry them both. That is the
+    /// shape a restore built on a pre-write copy of the piece geometry cannot
+    /// serve: the second write hands back the padded edge the first had just
+    /// replaced, and the plot's top padding strip loses its stripe. The ends
+    /// are written from the plot rect itself now, one edge at a time, so
+    /// neither write can know (or undo) the other.
+    #[test]
+    fn a_break_leaves_a_single_band_reaching_both_plot_rect_edges() {
+        let fixture = GridFixture::with_tick_values(vec![]);
+        let plot_area = fixture.plot_area();
+        let chart_config = banded_grid_config(&["#f0f0f0"]);
+        let whole_rect = (plot_area.y, plot_area.y + plot_area.h);
+
+        let unbroken = band_spans(&fixture.route(&chart_config, &[]));
+        assert_eq!(
+            unbroken,
+            vec![whole_rect],
+            "test sanity: a y axis with no ticks stripes the rect with ONE band"
+        );
+
+        // A gap reaching the domain's low end leaves a single visible segment,
+        // so the clip leaves a single piece — the both-ends-on-one-node case.
+        let pixels = (312.0, 28.0);
+        let result =
+            break_axis::apply_break_to_scale((0.0, 1000.0), &[[0.0, 600.0]], pixels, 12.0);
+        assert_eq!(result.effective_gaps, 1, "test sanity: the break must be real");
+        let remap = break_axis::BreakRemap::new("y", (0.0, 1000.0), pixels, &result);
+        let broken = fixture.route(&chart_config, std::slice::from_ref(&remap));
+        let spans = band_spans(&broken);
+        assert_eq!(
+            spans.len(),
+            1,
+            "test sanity: this gap must leave exactly one piece, or the two \
+             structural ends land on different nodes; got {spans:?}"
+        );
+        assert_eq!(
+            spans,
+            vec![whole_rect],
+            "a single band's ends are BOTH the plot rect's own edges, so a break \
+             leaves it spanning the rect"
+        );
+
+        // The other orientation: an x break owns no part of a band, single or
+        // not — neither its y extent nor its rect-wide width.
+        let (x_result, x_pixels) = grid_fixture_break("x");
+        let x_remap = break_axis::BreakRemap::new("x", (0.0, 1000.0), x_pixels, &x_result);
+        let x_broken = fixture.route(&chart_config, std::slice::from_ref(&x_remap));
+        assert_eq!(
+            band_spans(&x_broken),
+            unbroken,
+            "an x break leaves the single band's y extent alone"
+        );
+        assert!(
+            x_broken.grid.iter().all(|n| match n {
+                SceneNode::Rect { x, w, .. } => *x == plot_area.x && *w == plot_area.w,
+                _ => true,
+            }),
+            "the single band keeps the plot rect's full width under an x break"
         );
     }
 
