@@ -153,10 +153,18 @@ def _distinct_x_categories(svg: str, x_axis_label: str) -> list[str]:
     return texts
 
 
-def test_aggregate_int_null_and_real_zero_keys_stay_distinct():  # BUG: null int key materializes as 0, colliding with real 0 key (FA-9)
-    # grp has null rows (sum should be its own group) AND real 0 rows AND real 5.
-    # Three aggregation groups → three categories on x:N. The null group and the
-    # 0 group both render as category "0", collapsing to two categories.
+def test_aggregate_int_null_and_real_zero_keys_stay_distinct():
+    # grp has null rows AND real 0 rows AND real 5. Before GH #197's uniform
+    # null-skip policy, the null group's output key materialized as 0,
+    # colliding with the real 0 key (FA-9) -- two groups collapsed into one
+    # category. Under #197 a null-keyed row belongs to no group at all: the
+    # null rows are skipped entirely -- only an ALL-null groupby column
+    # warns (asserted in test_aggregate_int_null_only_groupby_is_valid_svg
+    # below); a partial null-skip like this one is silent -- so only the
+    # two real-keyed groups (0 and 5) reach the output. The discriminating
+    # claim is no longer "3 categories" but "the null rows never collide
+    # with the real 0 key" -- which a 2-category render demonstrates just
+    # as well as a 3-category one would have.
     df = pl.DataFrame(
         {
             "grp": pl.Series([None, None, 0, 0, 5], dtype=pl.Int64),
@@ -177,18 +185,17 @@ def test_aggregate_int_null_and_real_zero_keys_stay_distinct():  # BUG: null int
     after = texts[i + 1 :]
     # Drop the trailing x-axis title "grp".
     cats = [t for t in after if t != "grp" and t != ""]
-    # Three distinct aggregation groups (null, 0, 5) must yield three categories.
-    # The null group's output key 0 collides with the real 0 key.
-    distinct = set(cats)
-    assert len(distinct) >= 3, (
-        f"expected >=3 distinct x categories for 3 aggregation groups "
-        f"(null, 0, 5); got {sorted(distinct)} — null int key collided with real 0 (FA-9)"
-    )
+    # Exactly the two real-keyed groups; the null-keyed rows contributed to
+    # neither -- the FA-9 collision this test was written for can no longer
+    # arise because null keys never reach the output column at all.
+    assert set(cats) == {"0", "5"}
 
 
 def test_aggregate_int_null_only_groupby_is_valid_svg():
-    # Pure-null int groupby column: all rows collapse to one group (key proxy 0),
-    # output must be valid SVG with no NaN/Infinity coordinates.
+    # Pure-null int groupby column: under GH #197's uniform null-skip policy
+    # every row is skipped (no group survives), warned via the #162 channel,
+    # and the empty-grouped-output render must still be valid SVG with no
+    # NaN/Infinity coordinates.
     df = pl.DataFrame(
         {
             "grp": pl.Series([None, None, None], dtype=pl.Int64),
@@ -202,7 +209,8 @@ def test_aggregate_int_null_only_groupby_is_valid_svg():
         .encode(x="grp:N", y="s:Q")
         .transform(fm.Aggregate([op], groupby=["grp"]))
     )
-    svg = _svg(chart)
+    with pytest.warns(UserWarning, match="null"):
+        svg = _svg(chart)
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "Infinity" not in svg

@@ -479,19 +479,15 @@ class _RenderMixin:
         independent-y layer at ``Chart.__add__`` time (GH #52,
         ``_desugar_secondary_y``) rather than accumulating in ``_structural``.
         """
-        from ferrum.structural import BreakAxis, Inset
+        from ferrum.structural import BreakAxis, Inset, _normalize_break_gaps
 
         if isinstance(feat, BreakAxis):
-            gaps = feat.gap
-            # Normalize single (start, end) tuple to a list of [start, end] pairs.
-            if (
-                isinstance(gaps, tuple)
-                and len(gaps) == 2
-                and not isinstance(gaps[0], (list, tuple))
-            ):
-                normalized_gaps = [list(gaps)]
-            else:
-                normalized_gaps = [list(g) for g in gaps]
+            # Normalize single (start, end) tuple to a list of [start, end]
+            # pairs, then coerce each pair to a list for the JSON wire format.
+            # Classification itself is owned by _normalize_break_gaps (shared
+            # with the BreakAxis construction-time validator) so this and
+            # ``_validate_break_gaps`` always agree on what shape ``gap`` has.
+            normalized_gaps = [list(g) for g in _normalize_break_gaps(feat.gap)]
             return {
                 "type": "break_axis",
                 "axis": feat.axis,

@@ -110,19 +110,15 @@ class BreakAxis:
 def _normalize_break_gaps(gap: Any) -> list[Any]:
     """Classify *gap* as a single ``(start, end)`` pair or a list of pairs.
 
-    Mirrors the wire-normalization heuristic in
-    ``ferrum._render.Chart._serialize_structural`` (a bare ``(start, end)``
-    tuple is one break region; anything else is treated as a list of break
-    regions) so this construction-time check classifies gaps exactly the way
-    the render path will, rather than validating a different shape than the
-    one that actually reaches Rust.
+    A bare ``(start, end)`` tuple is one break region; anything else is
+    treated as a list of break regions. This is the single owner of that
+    classification heuristic — ``ferrum._render.Chart._serialize_structural``
+    calls this instead of hand-rolling its own copy, so the construction-time
+    validation in :func:`_validate_break_gaps` and the wire-serialization path
+    that actually reaches Rust always agree on what shape *gap* has.
 
-    DUPLICATION-PENDING: this mirrors ``_render.py``'s ``_serialize_structural``
-    gap-normalization (``ferrum/_render.py``, ~line 486-494) rather than
-    sharing it — that call site sits outside this task's footprint
-    (``structural.py``/``_facet.py``/``_validate.py`` only), so the two are
-    left as independent copies of one heuristic rather than hoisted, per the
-    mirror-by-reference policy.
+    Elements are returned as-is (not coerced to ``list``); a caller that needs
+    JSON-safe output does that conversion itself.
     """
     if isinstance(gap, tuple) and len(gap) == 2 and not isinstance(gap[0], (list, tuple)):
         return [gap]

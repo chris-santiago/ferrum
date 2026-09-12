@@ -190,6 +190,49 @@ def _reject_bare_string_groupby(value: object, *, where: str) -> None:
     _reject_bare_string(value, where=where, param="groupby", noun="column names")
 
 
+def _reject_repeated_groupby_names(value: Sequence[str], *, where: str) -> None:
+    """Raise ``ValueError`` if *value* names the same groupby column twice.
+
+    A repeat is malformed independently of any data: a grouped transform
+    appends one output column per groupby dimension, so a repeat means two
+    identically-named columns on the wire — silent schema corruption, not a
+    type error. Companion to :func:`_reject_bare_string_groupby` for
+    ``transform_pivot``/``transform_aggregate``/``transform_density``: these
+    three build a raw wire dict with no Rust pyclass constructor to refuse
+    at (unlike ``Aggregate``, whose ``#[new]`` already calls the Rust-side
+    twin of this check), so before this guard the duplicate was only caught
+    downstream at Rust's apply-time partitioning — reachable, but deferred
+    past the construction-time boundary that already has every fact it
+    needs (GH #179).
+
+    Message wording matches Rust's ``refuse_repeated_groupby_names``
+    (``crates/ferrum-core/src/transform/group_key/mod.rs``) so the same
+    mistake reads identically whether caught here or at the Rust boundary.
+
+    Parameters
+    ----------
+    value : sequence of str
+        The already-materialized ``groupby`` column names (call after
+        :func:`_reject_bare_string_groupby` has ruled out a bare string).
+    where : str
+        Caller name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If any name in *value* appears more than once.
+    """
+    seen: set[str] = set()
+    for name in value:
+        if name in seen:
+            raise ValueError(
+                f"{where}: groupby column {name!r} is repeated in `groupby`; "
+                f"each groupby column must have a distinct name "
+                f"(got groupby={list(value)!r})"
+            )
+        seen.add(name)
+
+
 def _validate_as_seq(value: Sequence[str], *, where: str) -> list[str]:
     """Validate and materialize a variable-length ``as_`` argument.
 
@@ -467,7 +510,8 @@ def transform_aggregate(
     ------
     ValueError
         If ``groupby`` is a bare string — iterating a string yields
-        individual characters, not column names.
+        individual characters, not column names — or names the same column
+        more than once.
 
     Examples
     --------
@@ -485,7 +529,9 @@ def transform_aggregate(
     }
     if groupby is not None:
         _reject_bare_string_groupby(groupby, where="transform_aggregate")
-        spec["groupby"] = list(groupby)
+        groupby_list = list(groupby)
+        _reject_repeated_groupby_names(groupby_list, where="transform_aggregate")
+        spec["groupby"] = groupby_list
     return spec
 
 
@@ -613,7 +659,8 @@ def transform_pivot(
     ------
     ValueError
         If ``groupby`` is a bare string — iterating a string yields
-        individual characters, not column names.
+        individual characters, not column names — or names the same column
+        more than once.
 
     Examples
     --------
@@ -627,7 +674,9 @@ def transform_pivot(
     spec: dict = {"type": "pivot", "field": field, "value": value, "op": op}
     if groupby is not None:
         _reject_bare_string_groupby(groupby, where="transform_pivot")
-        spec["groupby"] = list(groupby)
+        groupby_list = list(groupby)
+        _reject_repeated_groupby_names(groupby_list, where="transform_pivot")
+        spec["groupby"] = groupby_list
     if limit is not None:
         spec["limit"] = limit
     return spec
@@ -799,7 +848,8 @@ def transform_density(
     ------
     ValueError
         If ``groupby`` is a bare string — iterating a string yields
-        individual characters, not column names.
+        individual characters, not column names — or names the same column
+        more than once.
 
     Examples
     --------
@@ -828,7 +878,9 @@ def transform_density(
         spec["kernel"] = kernel
     if groupby is not None:
         _reject_bare_string_groupby(groupby, where="transform_density")
-        spec["groupby"] = list(groupby)
+        groupby_list = list(groupby)
+        _reject_repeated_groupby_names(groupby_list, where="transform_density")
+        spec["groupby"] = groupby_list
     if extent is not None:
         spec["extent"] = list(extent)
     if steps is not None:

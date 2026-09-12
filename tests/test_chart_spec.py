@@ -249,7 +249,11 @@ def test_aggregate_construct_rejects_duplicate_groupby():
     from ferrum._core import Aggregate, AggregateOp
     import pytest
 
-    with pytest.raises(ValueError, match="duplicate"):
+    # Wording moved from "duplicate" to "repeated" when the eleven hand-rolled
+    # partitioners migrated onto the shared `refuse_repeated_groupby_names`
+    # rule (wave 1 T3, GH #179/#197) -- only the text changed, still a
+    # construction-time ValueError.
+    with pytest.raises(ValueError, match="repeated"):
         Aggregate(
             ops=[AggregateOp("v", "sum", "s")],
             groupby=["g", "g"],
