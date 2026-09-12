@@ -1606,3 +1606,138 @@ fn variance_rank_constant_vs_varying_column() {
     assert!(v[0] > 0.0, "varying column should have positive variance");
     assert!(v[1] == 0.0, "constant column should have zero variance");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// #204 — py_rank1d_with_y kernel guards (length-mismatch refusal, null-y
+// drop-row). Pre-fix, a length mismatch panicked with an index-out-of-bounds
+// inside covariance_rank_vec instead of refusing typed, and a null y slot
+// was read straight off the Arrow value buffer's default 0.0, silently
+// folding a missing observation into the covariance as a real zero-valued
+// row. Both were RED-proven against the real py_rank1d_with_y (file-copy
+// revert to the pre-fix kernel, not a hand-built mirror) before this fix
+// landed. See `hat_matrix_stats` above for the length-mismatch wording this
+// mirrors.
+// ─────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn rank1d_with_y_length_mismatch_refuses_typed() {
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        let batch = make_batch(&[1.0, 2.0, 3.0], 3, 1); // n=3
+        let y = Float64Array::from(vec![1.0, 2.0]); // len=2, mismatched
+        let err = py_rank1d_with_y(
+            py,
+            PyRecordBatch::new(batch),
+            PyArray::from_array_ref(Arc::new(y)),
+            "covariance",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("y length must match X row count"),
+            "expected the hat_matrix_stats-mirrored wording, got: {err}"
+        );
+    });
+}
+
+#[test]
+fn rank1d_with_y_length_mismatch_refuses_before_algorithm_match() {
+    // "shapiro" and "variance" never read y, so a pre-fix build would happily
+    // ignore the mismatch and return a result for these two algorithms. The
+    // guard sits before the algorithm dispatch, so it refuses regardless of
+    // which algorithm was requested.
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        for algorithm in ["shapiro", "variance", "covariance"] {
+            let batch = make_batch(&[1.0, 2.0, 3.0], 3, 1);
+            let y = Float64Array::from(vec![1.0, 2.0]); // len=2 vs n=3
+            let result = py_rank1d_with_y(
+                py,
+                PyRecordBatch::new(batch),
+                PyArray::from_array_ref(Arc::new(y)),
+                algorithm,
+                None,
+            );
+            assert!(
+                result.is_err(),
+                "algorithm='{algorithm}' should refuse a y/X length mismatch, not silently ignore it"
+            );
+        }
+    });
+}
+
+#[test]
+fn rank1d_with_y_null_y_drops_row_not_zero_imputes() {
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        // x=[1,2,3], y=[2,NULL,6]. Zero-imputed (pre-fix): x_mean=2,
+        // y_mean=8/3, cov=((1-2)(2-8/3)+(2-2)(0-8/3)+(3-2)(6-8/3))/2 = 2.0.
+        // Drop-row (post-fix): surviving rows x=[1,3], y=[2,6]; x_mean=2,
+        // y_mean=4, cov=((1-2)(2-4)+(3-2)(6-4))/(2-1) = 4.0.
+        let batch = make_batch(&[1.0, 2.0, 3.0], 3, 1);
+        let y = Float64Array::from(vec![Some(2.0), None, Some(6.0)]);
+        let out: RecordBatch = py_rank1d_with_y(
+            py,
+            PyRecordBatch::new(batch),
+            PyArray::from_array_ref(Arc::new(y)),
+            "covariance",
+            None,
+        )
+        .unwrap()
+        .into();
+        let score = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        assert!(
+            approx_eq(score, 4.0, 1e-9),
+            "null-y row should drop rather than zero-impute: expected 4.0, got {score}"
+        );
+    });
+}
+
+#[test]
+fn rank1d_with_y_all_null_y_no_panic_zero_scores() {
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        let batch = make_batch(&[1.0, 2.0, 3.0], 3, 1);
+        let y = Float64Array::from(vec![None, None, None]);
+        let out: RecordBatch = py_rank1d_with_y(
+            py,
+            PyRecordBatch::new(batch),
+            PyArray::from_array_ref(Arc::new(y)),
+            "covariance",
+            None,
+        )
+        .unwrap()
+        .into();
+        let score = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        assert!(
+            approx_eq(score, 0.0, 1e-12),
+            "an all-null y should leave zero surviving rows and score 0.0, not NaN or panic, got {score}"
+        );
+    });
+}
+
+#[test]
+fn rank1d_with_y_no_nulls_unchanged() {
+    // Inputs without nulls or a length mismatch compute identically to the
+    // direct covariance_rank_vec call (byte-identical-output contract).
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        let batch = make_batch(&[1.0, 2.0, 3.0], 3, 1);
+        let y = Float64Array::from(vec![2.0, 4.0, 6.0]);
+        let out: RecordBatch = py_rank1d_with_y(
+            py,
+            PyRecordBatch::new(batch),
+            PyArray::from_array_ref(Arc::new(y)),
+            "covariance",
+            None,
+        )
+        .unwrap()
+        .into();
+        let score = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        let expected = covariance_rank_vec(&[1.0, 2.0, 3.0], 3, 1, &[2.0, 4.0, 6.0])[0];
+        assert!(
+            approx_eq(score, expected, 1e-12),
+            "no-null input should match the direct kernel call exactly: expected {expected}, got {score}"
+        );
+    });
+}

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Float64Array, StringArray, Int64Array, ArrayRef};
+use arrow::array::{Array, Float64Array, StringArray, Int64Array, ArrayRef};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use pyo3::exceptions::PyValueError;
@@ -401,10 +401,38 @@ pub fn py_rank1d_with_y(
     let (flat, n, p, col_names) = batch_to_flat_f64(&batch)?;
     let y_arr = y.array().as_any().downcast_ref::<Float64Array>()
         .ok_or_else(|| PyValueError::new_err("y must be Float64"))?.clone();
-    let y_vals = y_arr.values();
+
+    // #204: refuse a y/X length mismatch before dispatching on algorithm —
+    // mirrors hat_matrix_stats' guard, which stops the indexing panic every
+    // algorithm below would otherwise hit (only "covariance" reads y, but
+    // the row-count contract binds all of them).
+    if y_arr.len() != n {
+        return Err(PyValueError::new_err("y length must match X row count"));
+    }
+
+    // #204: validity-aware read — a null y slot used to be read as the Arrow
+    // value buffer's default 0.0 and folded into the ranking as a real zero
+    // observation, corrupting the covariance score for every feature. Drop
+    // the row instead: the statistic is still computable on the rows that
+    // do have a y.
+    let (flat, n, y_vals): (Vec<f64>, usize, Vec<f64>) = if y_arr.null_count() > 0 {
+        let mut kept_flat = Vec::with_capacity(flat.len());
+        let mut kept_y = Vec::with_capacity(n);
+        let mut kept_n = 0usize;
+        for i in 0..n {
+            if y_arr.is_valid(i) {
+                kept_flat.extend_from_slice(&flat[i * p..(i + 1) * p]);
+                kept_y.push(y_arr.value(i));
+                kept_n += 1;
+            }
+        }
+        (kept_flat, kept_n, kept_y)
+    } else {
+        (flat, n, y_arr.values().to_vec())
+    };
 
     let scores: Vec<f64> = match algorithm {
-        "covariance" => covariance_rank_vec(&flat, n, p, y_vals),
+        "covariance" => covariance_rank_vec(&flat, n, p, &y_vals),
         "shapiro" => (0..p)
             .map(|j| {
                 let col: Vec<f64> = (0..n).map(|i| flat[i * p + j]).collect();
