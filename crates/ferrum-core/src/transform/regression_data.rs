@@ -10,6 +10,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::{describe_group_row, TransformContext, TransformWarning};
 use crate::transform::group_key::grouped_two_column_fit;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
 
@@ -53,24 +54,44 @@ fn default_regression_as() -> (String, String) {
 const N_OUT: usize = 100;
 
 pub(crate) fn apply(spec: &RegressionDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point (#162): identical dispatch to [`apply`], plus
+/// `ctx.warnings` as the sink for this transform's own below-fit-threshold
+/// degrade (see [`apply_one_group`]'s `xs.len() < 2` branch).
+pub(crate) fn apply_with_context(
+    spec: &RegressionDataSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     match &spec.groupby {
-        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols),
-        _ => apply_one_group(spec, batch, None),
+        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols, ctx),
+        _ => apply_one_group(spec, batch, None, ctx, None),
     }
 }
 
 /// Fit one regression over `batch`, restricted to `only_indices` when given.
 /// Ingests via [`coerce_xy_pairs_at`] so a grouped partition and the
 /// ungrouped path (`only_indices = None`) share one cleaning walk (T2/M1).
+/// `group` is a human-readable label for the groupby key, `None` for a
+/// whole-frame call — attached to the below-threshold warning when it fires.
 fn apply_one_group(
     spec: &RegressionDataSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
+    ctx: &TransformContext,
+    group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     // Extract clean paired data (any numeric dtype; non-numeric raises).
     let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "data_regression", only_indices)?;
 
     if xs.len() < 2 {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "RegressionData".into(),
+            group: group.map(str::to_string),
+            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+        });
         return all_nan_output(spec);
     }
 
@@ -140,9 +161,15 @@ fn apply_grouped(
     spec: &RegressionDataSpec,
     batch: &RecordBatch,
     group_cols: &[String],
+    ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     grouped_two_column_fit(batch, group_cols, "data_regression", &spec.as_, |ixs| {
-        apply_one_group(spec, batch, Some(ixs))
+        // `grouped_two_column_fit` hands the closure only row indices, not
+        // the parsed group key — `describe_group_row` re-derives a label by
+        // reading `batch` at `ixs[0]` (see its doc for why this is the
+        // labeling seam for callers reached through this shared helper).
+        let label = describe_group_row(batch, group_cols, ixs[0]);
+        apply_one_group(spec, batch, Some(ixs), ctx, label.as_deref())
     })
 }
 
@@ -652,5 +679,66 @@ mod tests {
                 out_y.value(i)
             );
         }
+    }
+
+    // ── #162: degrade-warning channel ────────────────────────────────────
+
+    /// RED (pre-#162): fails on the pre-change code, which had no channel to
+    /// report the below-threshold (`xs.len() < 2`) all-NaN degrade.
+    #[test]
+    fn regression_data_below_threshold_pushes_a_degenerate_fit_warning() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![5.0])), Arc::new(Float64Array::from(vec![9.0]))],
+        )
+        .unwrap();
+        let spec = spec_with_groupby(None);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), N_OUT);
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "RegressionData" && group.is_none()
+        ));
+    }
+
+    /// A below-threshold group (routed through the shared
+    /// `grouped_two_column_fit` helper) attributes its warning to the group,
+    /// re-derived by reading the batch at that group's own row — proof that
+    /// `describe_group_row` correctly labels a caller reached through a
+    /// closure that never sees the parsed group key.
+    #[test]
+    fn regression_data_grouped_below_threshold_names_the_group() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["A", "A", "A", "A", "B"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0, 5.0])),
+                Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 6.0, 9.0])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_with_groupby(Some(vec!["g".into()]));
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "only group B is below threshold; got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "RegressionData" && group.as_deref() == Some("g=B")
+        ));
     }
 }

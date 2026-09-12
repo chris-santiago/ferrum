@@ -2461,6 +2461,94 @@ mod composite_warning_tests {
             );
         });
     }
+
+    /// GH #162: a transform that degrades (here, `Smooth` on a single-row
+    /// batch — below its 2-point fit threshold) must reach Python as a
+    /// `UserWarning` through the SAME `render_svg` → `emit_warnings` path
+    /// every other render warning uses, not a separate or missing channel.
+    /// This is the end-to-end proof that `TransformContext.warnings`
+    /// (pushed inside `smooth::apply_one_group`) survives
+    /// `run_transforms_with_facet`'s drain, `RenderWarning::Transform`'s
+    /// wrap, and `PreparedInputs.warnings`' merge, all the way to the PyO3
+    /// boundary — RED on pre-#162 code, which had no channel to carry it.
+    #[test]
+    fn render_svg_surfaces_a_degenerate_transform_warning() {
+        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            use crate::transform::core::TransformSpec;
+            use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
+
+            let mut spec = color_overflow_spec();
+            // Drop the color encoding (irrelevant here, and its own overflow
+            // warning would confuse the assertion below) and point x/y at
+            // Smooth's canonical output columns.
+            spec.encoding.color = None;
+            spec.transforms = vec![TransformSpec::Smooth(SmoothSpec {
+                x: "x".into(),
+                y: "y".into(),
+                method: SmoothMethod::Lm,
+                ci: None,
+                bandwidth: 0.0,
+                degree: 1,
+                k: crate::transform::gam::DEFAULT_BASIS_DIM,
+                n: 5,
+                seed: 0,
+                x_bins: None,
+                x_estimator: None,
+                output: SmoothOutput::Fitted,
+                inject_zero_ref: false,
+                inject_metrics: false,
+                groupby: vec![],
+                name: None,
+                x_range: None,
+            })];
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Float64Array::from(vec![1.0])), Arc::new(Float64Array::from(vec![1.0]))],
+            )
+            .unwrap();
+            let data = single_leaf_payload(batch);
+
+            let warnings_mod = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let cw = warnings_mod
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let caught = cw.call_method0("__enter__").unwrap();
+            warnings_mod.call_method1("simplefilter", ("always",)).unwrap();
+
+            let svg = render_svg(py, &spec, data, (300.0, 200.0), None, None, None)
+                .expect("render_svg should still render the degenerate (NaN) fit, not fail");
+            assert!(svg.contains("<svg"), "expected a real SVG document, got: {svg}");
+
+            let messages: Vec<String> = caught
+                .try_iter()
+                .unwrap()
+                .map(|w| {
+                    w.unwrap()
+                        .getattr("message")
+                        .unwrap()
+                        .call_method0("__str__")
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            cw.call_method1("__exit__", (py.None(), py.None(), py.None())).unwrap();
+
+            assert!(
+                messages.iter().any(|m| m.contains("Smooth") && m.contains("degraded")),
+                "expected the Smooth transform's DegenerateFit warning to surface through \
+                 render_svg's emit_warnings call, got: {messages:?}"
+            );
+        });
+    }
 }
 
 /// The `background=` render option's color vocabulary (batch-A Task 8 sweep).

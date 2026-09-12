@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::context::{TransformContext, TransformWarning};
+
 /// Maximum depth for per-depth named outputs.
 pub(crate) const K_MAX_NAMED: usize = 12;
 
@@ -100,11 +102,15 @@ pub(crate) struct LetterValueSpec {
 
 fn default_outlier_threshold() -> f64 { 1.5 }
 
-/// Compute the K depth for a given strategy and group size n.
-pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
+/// The K depth a strategy computes for group size `n`, BEFORE the
+/// [`K_MAX_NAMED`] cap. [`k_for_depth`] applies the cap; comparing this
+/// against the capped result is how [`compute_depths`] detects (and reports,
+/// #162) that a group's depth was silently reduced from what the strategy
+/// actually wanted.
+fn k_for_depth_uncapped(strategy: &KDepth, n: usize) -> usize {
     if n == 0 { return 0; }
     let n_f = n as f64;
-    let k = match strategy {
+    match strategy {
         KDepth::Tukey => {
             let raw = n_f.log2().floor() as i64 - 3;
             raw.max(1) as usize
@@ -113,6 +119,10 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
             let target = (p * n_f).ceil() as i64;
             let target = target.max(1);
             let mut k = 1usize;
+            // Uncapped: this loop already stops itself once `k` PASSES
+            // `K_MAX_NAMED` (one past it, at most), so it cannot run away for
+            // a pathologically large `target`; `k_for_depth`'s `.min(K_MAX_NAMED)`
+            // still owns the actual cap.
             while (1i64 << (k as i64 - 1)) < target {
                 k += 1;
                 if k > K_MAX_NAMED { break; }
@@ -128,8 +138,14 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
             let raw = n_f.log2().floor() as i64;
             raw.max(1) as usize
         }
-    };
-    k.min(K_MAX_NAMED)
+    }
+}
+
+/// Compute the K depth for a given strategy and group size n, capped at
+/// [`K_MAX_NAMED`] — the number of per-depth named outputs and Tukey letters
+/// this transform can emit.
+pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
+    k_for_depth_uncapped(strategy, n).min(K_MAX_NAMED)
 }
 
 use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
@@ -181,13 +197,24 @@ fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Vec<(
 }
 
 pub(crate) fn apply(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point (#162): identical to [`apply`], plus
+/// `ctx.warnings` as the sink for [`compute_depths`]'s per-group
+/// [`K_MAX_NAMED`] depth-cap warning.
+pub(crate) fn apply_with_context(
+    spec: &LetterValueSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     if !(spec.outlier_threshold.is_finite() && spec.outlier_threshold >= 0.0) {
         return Err(PyValueError::new_err(
             "stat_letter_value: outlier_threshold must be finite and >= 0",
         ));
     }
     let pairs = extract_values(spec, batch)?;
-    let depths = compute_depths(spec, &pairs);
+    let depths = compute_depths(spec, &pairs, ctx);
     build_primary_batch(&depths)
 }
 
@@ -249,7 +276,11 @@ fn group_order(
     ordered
 }
 
-fn compute_depths(spec: &LetterValueSpec, pairs: &[(Option<String>, f64)]) -> Vec<DepthRow> {
+fn compute_depths(
+    spec: &LetterValueSpec,
+    pairs: &[(Option<String>, f64)],
+    ctx: &TransformContext,
+) -> Vec<DepthRow> {
     // Group values; BTreeMap keys give a deterministic lexicographic baseline.
     let mut groups: BTreeMap<Option<String>, Vec<f64>> = BTreeMap::new();
     for (g, v) in pairs {
@@ -266,7 +297,33 @@ fn compute_depths(spec: &LetterValueSpec, pairs: &[(Option<String>, f64)]) -> Ve
             Some(vs) if !vs.is_empty() => vs,
             _ => continue,
         };
+        let raw_k = k_for_depth_uncapped(&spec.k_depth, vs.len());
         let k = k_for_depth(&spec.k_depth, vs.len());
+        if raw_k > K_MAX_NAMED {
+            // #162's named case: the strategy computed a depth deeper than
+            // this transform can emit (12 Tukey letters / named per-depth
+            // outputs) and it was silently capped.
+            // `g` is the bare group VALUE (e.g. `"big"`); `TransformWarning::group`'s
+            // documented contract is a `"col=value"` label (`context.rs`'s doc,
+            // matching every sibling adopter's `describe_group_row`/
+            // `describe_group_keys`), so pair it with `spec.group` (the column
+            // name) rather than passing the bare value through. `g.is_some()`
+            // here implies `spec.group.is_some()` too — `pairs`' `Option<String>`
+            // component only becomes `Some` when `extract_values` read a real
+            // `spec.group` column — but the `None` arm stays as a defensive
+            // fallback rather than an `unwrap`.
+            let group = g.as_ref().map(|v| match &spec.group {
+                Some(col) => format!("{col}={v}"),
+                None => v.clone(),
+            });
+            ctx.warn(TransformWarning::ParameterClamped {
+                transform: "LetterValue".into(),
+                group,
+                param: "k_depth".into(),
+                requested: raw_k.to_string(),
+                applied: k.to_string(),
+            });
+        }
         for depth in 1..=k {
             let p = 0.5_f64.powi(depth as i32);
             let lower = quantile_sorted(vs, p);
@@ -657,6 +714,80 @@ mod tests {
             Arc::new(StringArray::from(g_arr)),
             Arc::new(Float64Array::from(values)),
         ]).unwrap()
+    }
+
+    // ── #162: degrade-warning channel ────────────────────────────────────
+
+    /// RED (pre-#162): fails on the pre-change code, which had no channel to
+    /// report `KDepth::Full`'s computed depth silently capping at
+    /// `K_MAX_NAMED` (12). `log2(10000)` floors to 13, one past the cap.
+    #[test]
+    fn letter_value_depth_cap_pushes_a_parameter_clamped_warning() {
+        let values: Vec<f64> = (0..10_000).map(|i| i as f64).collect();
+        let batch = batch1col("x", values);
+        let spec = LetterValueSpec {
+            value: "x".into(),
+            group: None,
+            k_depth: KDepth::Full,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::ParameterClamped { transform, group, param, requested, applied }
+                if transform == "LetterValue" && group.is_none() && param == "k_depth"
+                   && requested == "13" && applied == "12"
+        ));
+    }
+
+    /// A grouped call names which group's own depth was capped.
+    #[test]
+    fn letter_value_grouped_depth_cap_names_the_group() {
+        let groups: Vec<&str> = std::iter::repeat("big").take(10_000).collect();
+        let values: Vec<f64> = (0..10_000).map(|i| i as f64).collect();
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Full,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        // Rust-quality-reviewer finding 2 (post-#162 close): the bare group
+        // VALUE ("big") broke `TransformWarning::group`'s documented
+        // "col=value" contract (`context.rs`'s doc, matched by every sibling
+        // adopter); must be "g=big", naming the column too.
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::ParameterClamped { group, .. } if group.as_deref() == Some("g=big")
+        ), "expected group label \"g=big\" (col=value), got {:?}", warnings[0]);
+    }
+
+    /// A well-supported depth (Tukey on a small group) must not warn.
+    #[test]
+    fn letter_value_tukey_default_does_not_warn() {
+        let batch = batch1col("x", vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = LetterValueSpec {
+            value: "x".into(),
+            group: None,
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty());
     }
 
     #[test]

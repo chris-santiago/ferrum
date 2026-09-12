@@ -10,6 +10,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::{describe_group_row, TransformContext, TransformWarning};
 use crate::transform::group_key::grouped_two_column_fit;
 use crate::transform::numeric_util::coerce_xy_pairs_at;
 
@@ -40,24 +41,44 @@ fn default_loess_as() -> (String, String) {
 const N_OUT: usize = 200;
 
 pub(crate) fn apply(spec: &LoessDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point (#162): identical dispatch to [`apply`], plus
+/// `ctx.warnings` as the sink for this transform's own below-fit-threshold
+/// degrade (see [`apply_one_group`]'s `xs.len() < 3` branch).
+pub(crate) fn apply_with_context(
+    spec: &LoessDataSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     match &spec.groupby {
-        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols),
-        _ => apply_one_group(spec, batch, None),
+        Some(cols) if !cols.is_empty() => apply_grouped(spec, batch, cols, ctx),
+        _ => apply_one_group(spec, batch, None, ctx, None),
     }
 }
 
 /// Fit one LOESS curve over `batch`, restricted to `only_indices` when given.
 /// Ingests via [`coerce_xy_pairs_at`] so a grouped partition and the
 /// ungrouped path (`only_indices = None`) share one cleaning walk (T2/M1).
+/// `group` is a human-readable label for the groupby key, `None` for a
+/// whole-frame call — attached to the below-threshold warning when it fires.
 fn apply_one_group(
     spec: &LoessDataSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
+    ctx: &TransformContext,
+    group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     // Extract clean paired data (any numeric dtype; non-numeric raises).
     let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "data_loess", only_indices)?;
 
     if xs.len() < 3 {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "LoessData".into(),
+            group: group.map(str::to_string),
+            reason: "fewer than 3 usable (non-null/non-NaN) x/y points".into(),
+        });
         return all_nan_output(spec);
     }
 
@@ -120,9 +141,15 @@ fn apply_grouped(
     spec: &LoessDataSpec,
     batch: &RecordBatch,
     group_cols: &[String],
+    ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     grouped_two_column_fit(batch, group_cols, "data_loess", &spec.as_, |ixs| {
-        apply_one_group(spec, batch, Some(ixs))
+        // `grouped_two_column_fit` hands the closure only row indices, not
+        // the parsed group key — `describe_group_row` re-derives a label by
+        // reading `batch` at `ixs[0]` (see its doc for why this is the
+        // labeling seam for callers reached through this shared helper).
+        let label = describe_group_row(batch, group_cols, ixs[0]);
+        apply_one_group(spec, batch, Some(ixs), ctx, label.as_deref())
     })
 }
 
@@ -559,5 +586,74 @@ mod tests {
                 out_y.value(i)
             );
         }
+    }
+
+    // ── #162: degrade-warning channel ────────────────────────────────────
+
+    /// RED (pre-#162): fails on the pre-change code, which had no channel to
+    /// report the below-threshold (`xs.len() < 3`) all-NaN degrade.
+    #[test]
+    fn loess_data_below_threshold_pushes_a_degenerate_fit_warning() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![5.0, 7.0])),
+            ],
+        )
+        .unwrap();
+        let spec = spec_with_groupby(None);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), N_OUT);
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "LoessData" && group.is_none()
+        ));
+    }
+
+    /// A below-threshold group attributes its warning to the group.
+    #[test]
+    fn loess_data_grouped_below_threshold_names_the_group() {
+        let n = 10;
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let ys_a: Vec<f64> = xs.iter().map(|&x| 2.0 * x).collect();
+        let mut group_col = vec!["A".to_string(); n];
+        group_col.extend(vec!["B".to_string(); 2]);
+        let mut x_col = xs.clone();
+        x_col.extend(vec![0.0, 1.0]);
+        let mut y_col = ys_a;
+        y_col.extend(vec![5.0, 7.0]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::StringArray::from(group_col)),
+                Arc::new(Float64Array::from(x_col)),
+                Arc::new(Float64Array::from(y_col)),
+            ],
+        )
+        .unwrap();
+        let spec = spec_with_groupby(Some(vec!["g".into()]));
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "only group B is below threshold; got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "LoessData" && group.as_deref() == Some("g=B")
+        ));
     }
 }

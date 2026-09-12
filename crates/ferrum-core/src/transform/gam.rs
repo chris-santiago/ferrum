@@ -232,6 +232,14 @@ impl GamFit {
     pub(crate) fn residual_dof(&self) -> f64 {
         self.residual_dof
     }
+
+    /// The basis dimension this fit actually used, i.e. `k.clamp(MIN_BASIS_DIM,
+    /// distinct.len())` from [`fit`]'s call — not necessarily the caller's
+    /// requested `k`. `smooth.rs` compares this against the requested `k` to
+    /// report a #162 `TransformWarning::ParameterClamped` when they differ.
+    pub(crate) fn basis_dim(&self) -> usize {
+        self.basis.dim
+    }
 }
 
 /// One λ's penalized solve: `β = (BᵀB + λS)⁻¹Bᵀy`, the inverse itself

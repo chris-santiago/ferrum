@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     group_partition_multi, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
     KeyValue,
@@ -118,6 +119,19 @@ struct KeyMeta<'a> {
 }
 
 pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point (#162): identical to [`apply`], plus
+/// `ctx.warnings` as the sink for this transform's two fallback shapes: a
+/// group whose own cleaned value set is empty, and a row whose groupby key
+/// is null — both fall back to the whole-column statistic (see the module
+/// doc's "Groupby + key/keyvals" section for the full rationale).
+pub(crate) fn apply_with_context(
+    spec: &ImputeSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     validate_method(&spec.method)?;
     if spec.keyvals.is_some() && spec.key.is_none() {
         return Err(PyValueError::new_err(
@@ -159,8 +173,22 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
     // `degenerate_default` reproduces the pre-groupby implementation's
     // degenerate return (`0.0` for mean/median, `±f64::INFINITY` for
     // min/max) — unchanged from before this transform supported grouping.
-    let whole_column_fill = fill_value_for(&col, None, &spec.method, spec.value)
-        .unwrap_or_else(|| degenerate_default(&spec.method));
+    // `fill_value_for` returns `None` only when `method` is data-dependent
+    // AND the restricted value set is empty (`method = "value"` never does),
+    // so this warns exactly the pathological-input case.
+    let whole_column_fv = fill_value_for(&col, None, &spec.method, spec.value);
+    if whole_column_fv.is_none() {
+        ctx.warn(TransformWarning::FallbackApplied {
+            transform: "Impute".into(),
+            group: None,
+            reason: format!(
+                "the column has no non-null/non-NaN values at all; used the {} method's \
+                 degenerate default instead",
+                spec.method
+            ),
+        });
+    }
+    let whole_column_fill = whole_column_fv.unwrap_or_else(|| degenerate_default(&spec.method));
 
     let mut row_fill = vec![f64::NAN; n_rows];
     let mut assigned = vec![false; n_rows];
@@ -174,8 +202,29 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
         // instead of `fill_value_for`'s degenerate return — see the module
         // doc. Appended key rows for this group read the same value via
         // `group_fill_values`/`groups.fill_values`.
-        let fv = fill_value_for(&col, Some(rows), &spec.method, spec.value)
-            .unwrap_or(whole_column_fill);
+        let group_fv = fill_value_for(&col, Some(rows), &spec.method, spec.value);
+        // `groupby.is_empty()` means this loop's ONE key is the implicit
+        // whole-batch group (`group_partition_multi`'s empty-`group_cols`
+        // contract): its `rows` cover every row in original order, so
+        // `fill_value_for(&col, Some(rows), ...)` here is provably identical
+        // to the `fill_value_for(&col, None, ...)` call above — same data,
+        // same computation. Warning here too would double-fire the SAME
+        // degenerate condition already reported at `whole_column_fv` above,
+        // and `describe_group_keys(&[], &[])` would format it as an empty
+        // string (`group: Some("")`), breaking the documented contract that
+        // `group: None` means "genuinely the whole frame" (reviewer finding,
+        // post-#162 close). Skip it; the ungrouped case is fully covered by
+        // the `whole_column_fv` check.
+        if group_fv.is_none() && !groupby.is_empty() {
+            ctx.warn(TransformWarning::FallbackApplied {
+                transform: "Impute".into(),
+                group: Some(describe_group_keys(groupby, key)),
+                reason: "the group has no non-null/non-NaN values; the whole column's \
+                         statistic was used instead"
+                    .into(),
+            });
+        }
+        let fv = group_fv.unwrap_or(whole_column_fill);
         group_fill_values.push(fv);
         for &r in rows {
             row_fill[r] = fv;
@@ -187,7 +236,18 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
     // value to keep this transform row-preserving, so it falls back to the
     // same whole-column statistic the ungrouped path would use. This never
     // triggers when `groupby` is empty (every row is in the one implicit
-    // group) or has no null keys.
+    // group) or has no null keys. Reported once (not per row).
+    let null_keyed_rows = assigned.iter().filter(|&&a| !a).count();
+    if null_keyed_rows > 0 {
+        ctx.warn(TransformWarning::FallbackApplied {
+            transform: "Impute".into(),
+            group: None,
+            reason: format!(
+                "{null_keyed_rows} row(s) have a null groupby key; the whole column's \
+                 statistic was used instead"
+            ),
+        });
+    }
     for (r, is_assigned) in assigned.iter().enumerate() {
         if !is_assigned {
             row_fill[r] = whole_column_fill;
@@ -1424,5 +1484,126 @@ mod tests {
         let msg = apply(&s, &batch).unwrap_err().to_string();
         assert!(msg.contains("not compatible with key column 'month'"), "err: {msg}");
         assert!(msg.contains("Int64"), "error must name the dtype 'Int64': {msg}");
+    }
+
+    // ── #162: degrade-warning channel ────────────────────────────────────
+
+    /// RED (pre-#162): fails on the pre-change code, which had no channel to
+    /// report a group whose own cleaned value set is empty falling back to
+    /// the whole-column statistic (`f_l05_04`-style fixture's sibling: here
+    /// group "b" has zero non-null values).
+    #[test]
+    fn impute_empty_group_pushes_a_fallback_applied_warning() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("sales", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![Some(100.0), Some(120.0), None, None])),
+            ],
+        )
+        .unwrap();
+        let s = spec("sales", "mean", None, Some(vec!["g"]), None, None);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 4, "output is unchanged: still row-preserving");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::FallbackApplied { transform, group, .. }
+                if transform == "Impute" && group.as_deref() == Some("g=b")
+        ));
+    }
+
+    /// A row whose groupby key is null falls back to the whole-column
+    /// statistic and warns once (not once per row).
+    #[test]
+    fn impute_null_groupby_key_row_pushes_one_fallback_applied_warning() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), None, None])),
+                Arc::new(Float64Array::from(vec![Some(10.0), Some(20.0), None, None])),
+            ],
+        )
+        .unwrap();
+        let s = spec("v", "mean", None, Some(vec!["g"]), None, None);
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&s, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(
+            warnings.len(), 1,
+            "two null-keyed rows must produce ONE warning, not two; got {warnings:?}"
+        );
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::FallbackApplied { transform, group, reason }
+                if transform == "Impute" && group.is_none() && reason.contains("2 row")
+        ));
+    }
+
+    /// A well-supported group must not warn.
+    #[test]
+    fn impute_healthy_group_does_not_warn() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a"])),
+                Arc::new(Float64Array::from(vec![Some(10.0), None])),
+            ],
+        )
+        .unwrap();
+        let s = spec("v", "mean", None, Some(vec!["g"]), None, None);
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&s, &batch, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty());
+    }
+
+    /// Rust-quality-reviewer finding 1 (post-#162 close): an UNGROUPED
+    /// `Impute` (no `groupby`) with a data-dependent method over a wholly
+    /// null/NaN column used to double-fire — one `FallbackApplied { group:
+    /// None, .. }` from the `whole_column_fv` check, and a SECOND
+    /// `FallbackApplied { group: Some(""), .. }` from the per-group loop's
+    /// singleton implicit whole-batch group (`group_partition_multi`'s
+    /// empty-`group_cols` contract), whose `describe_group_keys(&[], &[])`
+    /// formats as an empty string rather than `None`. Exactly ONE warning,
+    /// with `group: None`, must fire for this genuinely-whole-frame
+    /// degenerate case.
+    #[test]
+    fn impute_ungrouped_all_null_column_pushes_exactly_one_whole_frame_warning() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![None::<f64>, None, None]))],
+        )
+        .unwrap();
+        let s = spec("v", "mean", None, None, None, None);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 3, "output is unchanged: still row-preserving");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(
+            warnings.len(), 1,
+            "an ungrouped all-null column must push exactly ONE warning, not double-fire; \
+             got {warnings:?}"
+        );
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::FallbackApplied { transform, group, .. }
+                if transform == "Impute" && group.is_none()
+        ), "the one warning must have group: None (genuinely whole-frame), not an \
+            empty-string label; got {:?}", warnings[0]);
     }
 }

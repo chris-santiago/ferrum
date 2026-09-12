@@ -1954,3 +1954,78 @@ fn test_kde_count_scale_cumulative_scales_by_n_group_only() {
         );
     }
 }
+
+// ── #162: degrade-warning channel ────────────────────────────────────────
+
+fn minimal_spec(groupby: Vec<String>) -> KdeSpec {
+    KdeSpec {
+        field: "x".into(),
+        bandwidth: BandwidthSpec::Silverman,
+        bw_adjust: 1.0,
+        shared_extent: false,
+        n: 5,
+        extent: None,
+        cumulative: false,
+        kernel: default_kernel(),
+        groupby,
+        count_scale: None,
+        count_scale_extent: None,
+        name: None,
+    }
+}
+
+/// RED (pre-#162): fails on the pre-change code, which had no channel to
+/// report a below-threshold group's degenerate (all-NaN) density.
+#[test]
+fn kde_below_threshold_pushes_a_degenerate_fit_warning() {
+    let batch = batch_with("x", vec![1.0]);
+    let spec = minimal_spec(vec![]);
+    let ctx = TransformContext::default();
+    let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+    assert_eq!(out.num_rows(), 5);
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1);
+    assert!(matches!(
+        &warnings[0],
+        TransformWarning::DegenerateFit { transform, group, .. }
+            if transform == "Kde" && group.is_none()
+    ));
+}
+
+/// A grouped call attributes the warning to the specific sparse group.
+#[test]
+fn kde_grouped_degenerate_group_warning_names_the_group() {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, true),
+        Field::new("g", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 1.0])),
+            Arc::new(arrow::array::StringArray::from(vec![
+                "healthy", "healthy", "healthy", "healthy", "healthy", "sparse",
+            ])),
+        ],
+    )
+    .unwrap();
+    let spec = minimal_spec(vec!["g".into()]);
+    let ctx = TransformContext::default();
+    let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "only the sparse group should warn; got {warnings:?}");
+    assert!(matches!(
+        &warnings[0],
+        TransformWarning::DegenerateFit { transform, group, .. }
+            if transform == "Kde" && group.as_deref() == Some("g=sparse")
+    ));
+}
+
+/// Bare `apply()` (no context) must not panic on degenerate input.
+#[test]
+fn kde_bare_apply_with_degenerate_input_does_not_panic() {
+    let batch = batch_with("x", vec![1.0]);
+    let spec = minimal_spec(vec![]);
+    let out = apply(&spec, &batch).unwrap();
+    assert_eq!(out.num_rows(), 5);
+}

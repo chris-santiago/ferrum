@@ -750,7 +750,14 @@ pub fn prepare_render_inputs(
     // the plain single-partition path otherwise. The D10 impute step runs once
     // inside, in both branches (SPINE-12). `viewport`/`theme` seed the M2
     // pre-layout panel-size estimate (see `run_transforms_with_facet`'s doc).
-    let transform_outputs = run_transforms_with_facet(spec, &normalized, viewport, theme)?;
+    //
+    // #162: `run_transforms_with_facet` also drains every `TransformWarning`
+    // its `TransformContext` sink accumulated (NaN-panel degrades, the gam
+    // `k` clamp, `LetterValue`'s depth cap, `Impute`'s fallbacks). Hoisted
+    // here, above `scale_warnings`' construction below, so both land in the
+    // one `PreparedInputs.warnings` vec this function returns.
+    let (transform_outputs, transform_warnings) =
+        run_transforms_with_facet(spec, &normalized, viewport, theme)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
@@ -817,7 +824,16 @@ pub fn prepare_render_inputs(
     // derives the provisional secondary y-axis inputs (secondary-y-axis, GH
     // #52) from `layers`/`transformed`/`transform_outputs`, pushing any scale
     // warnings into `scale_warnings` alongside the primary's.
-    let mut scale_warnings = scale_warnings;
+    // #162: merge the transform layer's own degrade warnings in, wrapped as
+    // `RenderWarning::Transform` (mirrors `RenderWarning::Layout`'s
+    // newtype-wrap idiom). Order doesn't matter to `emit_warnings` (each
+    // becomes its own independent Python `UserWarning`), so these are simply
+    // prepended ahead of the scale-resolution warnings computed above.
+    let mut scale_warnings: Vec<RenderWarning> = transform_warnings
+        .into_iter()
+        .map(RenderWarning::Transform)
+        .chain(scale_warnings)
+        .collect();
     let mut provisional_scales = provisional_scales;
     // D3 (spec §4.2): chart-level `domain_min`/`domain_max`/`nice`/`zero`
     // reshape the resolved positional domains BEFORE the axes derive their
@@ -954,7 +970,7 @@ fn run_transforms_with_facet(
     normalized: &RecordBatch,
     viewport: crate::layout::Viewport,
     theme: &crate::layout::ThemeInputs,
-) -> Result<HashMap<String, RecordBatch>, RenderError> {
+) -> Result<(HashMap<String, RecordBatch>, Vec<crate::transform::context::TransformWarning>), RenderError> {
     let Some(fspec) = &spec.facet else {
         // No facet: unchanged pipeline (single partition = full batch); one
         // panel occupies the whole estimated viewport.
@@ -965,7 +981,12 @@ fn run_transforms_with_facet(
         let mut outputs = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
         apply_impute_to_final(&mut outputs, spec);
-        return Ok(normalize_transform_outputs(outputs));
+        // #162: drain whatever this run's (possibly per-step-cloned, but
+        // `Rc`-shared) sink accumulated — see `TransformContext::warnings`'s
+        // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
+        // `ctx.clone()` in `apply_transforms_named`.
+        let warnings = ctx.warnings.borrow_mut().drain(..).collect();
+        return Ok((normalize_transform_outputs(outputs), warnings));
     };
 
     // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
@@ -1065,7 +1086,11 @@ fn run_transforms_with_facet(
             combined.insert(key, merged_batch);
         }
     }
-    Ok(normalize_transform_outputs(combined))
+    // #162: `ctx` is the SAME context across every partition in the loop
+    // above (not re-constructed per panel), so its `Rc`-shared sink
+    // accumulated every panel's warnings — one drain covers the whole facet.
+    let warnings = ctx.warnings.borrow_mut().drain(..).collect();
+    Ok((normalize_transform_outputs(combined), warnings))
 }
 
 /// Concatenate `batches` — all outputs published under the same named-output
@@ -3985,11 +4010,11 @@ mod tests {
         let small = run_transforms_with_facet(
             &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap();
+        ).unwrap().0;
         let large = run_transforms_with_facet(
             &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap();
+        ).unwrap().0;
         let (sw, sh) = raster_grid_dims(&small);
         let (lw, lh) = raster_grid_dims(&large);
         assert_ne!((sw, sh), (256, 256), "must not be pinned to the old hardcoded fallback");
@@ -4009,11 +4034,11 @@ mod tests {
         let small = run_transforms_with_facet(
             &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap();
+        ).unwrap().0;
         let large = run_transforms_with_facet(
             &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 },
             &crate::layout::ThemeInputs::default(),
-        ).unwrap();
+        ).unwrap().0;
         assert_eq!(raster_grid_dims(&small), (64, 64));
         assert_eq!(raster_grid_dims(&large), (64, 64));
     }
@@ -4029,7 +4054,7 @@ mod tests {
         let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
         let theme = crate::layout::ThemeInputs::default();
 
-        let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme).unwrap();
+        let unfaceted = run_transforms_with_facet(&raster_screen_spec(), &batch, viewport, &theme).unwrap().0;
         let (w0, h0) = raster_grid_dims(&unfaceted);
 
         let mut faceted_spec = raster_screen_spec();
@@ -4042,7 +4067,7 @@ mod tests {
             spacing: None,
             resolve: crate::layout::FacetResolve::default(),
         });
-        let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme).unwrap();
+        let faceted = run_transforms_with_facet(&faceted_spec, &batch, viewport, &theme).unwrap().0;
         let (w1, h1) = raster_grid_dims(&faceted);
 
         assert_eq!(w1, w0, "one column: width estimate must be unchanged");
@@ -4063,10 +4088,10 @@ mod tests {
         let theme = crate::layout::ThemeInputs::default();
         let small = run_transforms_with_facet(
             &spec, &batch, crate::layout::Viewport { width: 300.0, height: 200.0 }, &theme,
-        ).unwrap();
+        ).unwrap().0;
         let large = run_transforms_with_facet(
             &spec, &batch, crate::layout::Viewport { width: 1200.0, height: 900.0 }, &theme,
-        ).unwrap();
+        ).unwrap().0;
         let small_batch = small.get(FINAL_OUTPUT_KEY).unwrap();
         let large_batch = large.get(FINAL_OUTPUT_KEY).unwrap();
         assert_eq!(
@@ -4096,7 +4121,7 @@ mod tests {
         let viewport = crate::layout::Viewport { width: 30.0, height: 30.0 };
         let theme = crate::layout::ThemeInputs::default();
         let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
-            .expect("must not panic or error on a degenerate viewport");
+            .expect("must not panic or error on a degenerate viewport").0;
         assert_eq!(
             raster_grid_dims(&outputs),
             (1, 1),
@@ -4213,9 +4238,19 @@ mod tests {
         let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
         let theme = crate::layout::ThemeInputs::default();
 
-        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+        let (outputs, warnings) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
             .expect("a facet panel too sparse for degree=3 must degrade, not fail the chart");
         let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+        // #162: the sparse 'few' panel's degenerate fit must warn.
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                crate::transform::context::TransformWarning::DegenerateFit { transform, .. }
+                    if transform == "Smooth"
+            )),
+            "a facet panel too sparse for degree=3 must push a DegenerateFit TransformWarning; \
+             got {warnings:?}"
+        );
 
         let sp = str_col(out, "sp");
         let y = float_col(out, "y");
@@ -4249,9 +4284,18 @@ mod tests {
         let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
         let theme = crate::layout::ThemeInputs::default();
 
-        let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
+        let (outputs, warnings) = run_transforms_with_facet(&spec, &batch, viewport, &theme)
             .expect("a groupby group too sparse for degree=3 must degrade, not fail the chart");
         let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                crate::transform::context::TransformWarning::DegenerateFit { transform, group, .. }
+                    if transform == "Smooth" && group.as_deref() == Some("sp=few")
+            )),
+            "the sparse 'few' groupby group's degenerate fit must push a named DegenerateFit \
+             warning; got {warnings:?}"
+        );
 
         let sp = str_col(out, "sp");
         let y = float_col(out, "y");
@@ -4434,7 +4478,7 @@ mod tests {
         let theme = crate::layout::ThemeInputs::default();
 
         let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
-            .expect("Int64 groupby column divergence across facet panels must widen, not error");
+            .expect("Int64 groupby column divergence across facet panels must widen, not error").0;
         let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
 
         // Round 3's metrics-column fix already makes these uniform; confirm
@@ -4476,7 +4520,7 @@ mod tests {
         let theme = crate::layout::ThemeInputs::default();
 
         let outputs = run_transforms_with_facet(&spec, &batch, viewport, &theme)
-            .expect("Boolean groupby column divergence across facet panels must widen, not error");
+            .expect("Boolean groupby column divergence across facet panels must widen, not error").0;
         let out = outputs.get(FINAL_OUTPUT_KEY).unwrap();
 
         let sp = str_col(out, "sp");

@@ -36,6 +36,7 @@ pub const CLIP_ID_PREFIX: &str = "ferrum-clip-";
 use serde::{Deserialize, Serialize};
 
 use crate::layout::LayoutWarning;
+use crate::transform::context::TransformWarning;
 
 /// The user-facing detail carried by [`RenderError::PositionAdjustFailed`]
 /// (R3 restructure, #89 part C). Most Dodge/Jitter/Stack failures carry a
@@ -515,6 +516,14 @@ impl std::error::Error for RenderError {}
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RenderWarning {
     Layout(LayoutWarning),
+    /// A transform degraded rather than refused (GH #162) — an all-NaN/
+    /// empty fit, a silently clamped parameter, or a whole-column fallback.
+    /// Wraps [`TransformWarning`], whose own `Display` is the delivered
+    /// text, mirroring how [`RenderWarning::Layout`] delegates to
+    /// [`LayoutWarning`]'s. Produced by `transform::context::TransformContext::warnings`,
+    /// drained by `render::prepare::run_transforms_with_facet` into the
+    /// render pipeline's own warnings vec.
+    Transform(TransformWarning),
     OutOfDomainRows { mark: String, count: u64 },
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
@@ -724,6 +733,7 @@ impl std::fmt::Display for RenderWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RenderWarning::Layout(w) => write!(f, "{w}"),
+            RenderWarning::Transform(w) => write!(f, "{w}"),
             RenderWarning::OutOfDomainRows { mark, count } => write!(
                 f,
                 "{count} {mark} row(s) fell outside the scale domain and were not drawn"
@@ -875,6 +885,11 @@ mod tests {
         use crate::layout::LayoutWarning;
         for w in [
             RenderWarning::Layout(LayoutWarning::PanelCollapsed { panel_index: 0 }),
+            RenderWarning::Transform(TransformWarning::DegenerateFit {
+                transform: "Smooth".into(),
+                group: Some("g=a".into()),
+                reason: "fewer than 2 usable points".into(),
+            }),
             RenderWarning::OutOfDomainRows { mark: "point".into(), count: 3 },
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
             RenderWarning::ShapePaletteOverflowed { categories: 7 },

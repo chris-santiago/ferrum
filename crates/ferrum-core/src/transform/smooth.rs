@@ -100,7 +100,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::context::TransformContext;
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::gam;
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
@@ -254,9 +254,44 @@ pub(crate) fn apply_with_context(
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby, ctx.is_partition);
+        return apply_grouped(spec, batch, &spec.groupby, ctx.is_partition, ctx);
     }
-    apply_one_group(spec, batch, None, ctx.is_partition)
+    apply_one_group(spec, batch, None, ctx.is_partition, ctx, None)
+}
+
+/// User-facing label for a `SmoothMethod`, for `TransformWarning` text —
+/// matches `PySmooth::new`'s own vocabulary (`METHODS`) rather than the Rust
+/// enum's variant names, except `Poly`, which names its degree since "poly"
+/// alone is ambiguous between `quadratic`/`cubic`/an explicit `degree=`.
+fn method_label(method: &SmoothMethod) -> String {
+    match method {
+        SmoothMethod::Lm => "lm".to_string(),
+        SmoothMethod::Loess => "loess".to_string(),
+        SmoothMethod::Poly { degree } => format!("poly(degree={degree})"),
+        SmoothMethod::LogX => "log".to_string(),
+        SmoothMethod::SqrtX => "sqrt".to_string(),
+        SmoothMethod::Glm => "glm".to_string(),
+        SmoothMethod::Gam => "gam".to_string(),
+    }
+}
+
+/// `true` when every value in `batch`'s column `idx` is NaN (and the column
+/// is non-empty) — the shape every degenerate branch in this file emits
+/// (`build_degenerate_smooth_batch`'s `y`/`residual` column, or an all-NaN
+/// `build_residuals_batch`). Used post-dispatch so the six per-method fit
+/// paths (`lm`/`poly`/`log`/`sqrt`/`glm`/`gam`) can report a degenerate fit
+/// through ONE check instead of threading a warning push through each of
+/// their own degenerate-return sites individually — every one of them
+/// already routes through `build_degenerate_smooth_batch`/an all-NaN
+/// residual vec specifically because a HEALTHY fit on `xs.len() >= 2` with
+/// non-zero x variance never produces an all-NaN value column (the grid is
+/// built from finite `x_min`/`x_max`, and each method's predictor is finite
+/// wherever `build_predictor`'s own degenerate check does not already fire).
+fn value_column_is_all_nan(batch: &RecordBatch, idx: usize) -> bool {
+    let Some(col) = batch.column(idx).as_any().downcast_ref::<Float64Array>() else {
+        return false;
+    };
+    !col.is_empty() && (0..col.len()).all(|i| col.is_null(i) || col.value(i).is_nan())
 }
 
 fn apply_one_group(
@@ -264,6 +299,8 @@ fn apply_one_group(
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
     is_partition: bool,
+    ctx: &TransformContext,
+    group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     let (xs_raw, ys_raw) = extract_xy(spec, batch, only_indices)?;
 
@@ -276,6 +313,11 @@ fn apply_one_group(
     };
 
     if xs.len() < 2 {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Smooth".into(),
+            group: group.map(str::to_string),
+            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+        });
         return match spec.output {
             SmoothOutput::Fitted => all_nan_output(spec),
             SmoothOutput::Residuals => build_residuals_batch(
@@ -323,8 +365,29 @@ fn apply_one_group(
     }
 
     if matches!(spec.output, SmoothOutput::Residuals) {
+        // `gam` is handled separately here (rather than falling into
+        // `residuals_fit`'s shared `build_predictor` dispatch below) because
+        // its clamp/degenerate outcome needs to reach a warning — the same
+        // report the Fitted path gets from `gam_fit`'s `GamFitOutcome`
+        // further down this function. Reviewer finding (post-#162 close):
+        // `build_predictor`'s `Gam` arm called `gam::fit` and threw away
+        // whether it clamped, so `Smooth(method="gam", output="residuals",
+        // k=<over-large>)` silently clamped with no warning at all.
+        if matches!(spec.method, SmoothMethod::Gam) {
+            let (out, outcome) = gam_residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw)?;
+            report_gam_outcome(ctx, group, outcome);
+            return Ok(out);
+        }
         // Fit at original (un-aggregated) input xs; emit (x, y - fit(x)) rows.
-        return residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw);
+        let out = residuals_fit(spec, &xs, &ys, &xs_raw, &ys_raw)?;
+        if value_column_is_all_nan(&out, 1) {
+            ctx.warn(TransformWarning::DegenerateFit {
+                transform: "Smooth".into(),
+                group: group.map(str::to_string),
+                reason: format!("the {} fit could not be computed for this data", method_label(&spec.method)),
+            });
+        }
+        return Ok(out);
     }
 
     let (data_x_min, data_x_max) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY),
@@ -364,7 +427,19 @@ fn apply_one_group(
         None
     };
 
-    match spec.method {
+    // `gam` reports its own (more specific) clamp/degenerate outcome via its
+    // return value rather than the generic post-dispatch check below, so it
+    // is handled first and returns early — see `GamFitOutcome`'s doc for why
+    // `gam_fit` doesn't just take `ctx`/`group` directly. `report_gam_outcome`
+    // is shared with the `SmoothOutput::Residuals` branch above, which needs
+    // the identical clamp/degenerate reporting for its own gam call.
+    if matches!(spec.method, SmoothMethod::Gam) {
+        let (out, outcome) = gam_fit(&xs, &ys, &grid, spec.ci, spec.n, spec.k, metrics)?;
+        report_gam_outcome(ctx, group, outcome);
+        return Ok(out);
+    }
+
+    let out = match spec.method {
         SmoothMethod::Lm => lm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::Loess => loess_fit(
             &xs, &ys, &grid, spec.bandwidth, spec.degree, spec.ci, spec.n, spec.seed,
@@ -374,8 +449,20 @@ fn apply_one_group(
         SmoothMethod::LogX => log_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::SqrtX => sqrt_x_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
         SmoothMethod::Glm => glm_fit(&xs, &ys, &grid, spec.ci, spec.n, metrics),
-        SmoothMethod::Gam => gam_fit(&xs, &ys, &grid, spec.ci, spec.n, spec.k, metrics),
+        SmoothMethod::Gam => unreachable!("Gam handled above"),
+    }?;
+    // Post-dispatch degenerate check (see `value_column_is_all_nan`'s doc):
+    // one check catches every one of `lm`/`poly`/`log`/`sqrt`/`glm`'s
+    // degenerate-return sites, all of which route through
+    // `build_degenerate_smooth_batch`.
+    if value_column_is_all_nan(&out, 1) {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Smooth".into(),
+            group: group.map(str::to_string),
+            reason: format!("the {} fit could not be computed for this data", method_label(&spec.method)),
+        });
     }
+    Ok(out)
 }
 
 /// Partition input batch by the groupby columns, call apply_one_group per
@@ -386,6 +473,7 @@ fn apply_grouped(
     batch: &RecordBatch,
     group_cols: &[String],
     is_partition: bool,
+    ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
     let (group_order, group_idx_map, gtypes) =
@@ -400,7 +488,8 @@ fn apply_grouped(
         // `only_indices` is `Some` here, so the rank-deficiency refusal in
         // `apply_one_group` never gates on `is_partition` for this call —
         // T6's per-group degrade-to-NaN contract already applies.
-        let out = apply_one_group(spec, batch, Some(ixs), is_partition)?;
+        let label = describe_group_keys(group_cols, g);
+        let out = apply_one_group(spec, batch, Some(ixs), is_partition, ctx, Some(&label))?;
         per_group_batches.push((g.clone(), out));
     }
 
@@ -412,7 +501,7 @@ fn apply_grouped(
         // produces, so it forwards `is_partition` too — a rank-deficient
         // `Poly` here degrades like a group when this batch is itself a
         // facet panel, rather than always refusing.
-        return apply_one_group(spec, batch, None, is_partition);
+        return apply_one_group(spec, batch, None, is_partition, ctx, None);
     }
 
     // Reconcile the per-group fit batches and append the group columns via
@@ -636,6 +725,21 @@ fn residuals_fit(
 ) -> PyResult<RecordBatch> {
     // Fit the chosen model on (xs_fit, ys_fit); then evaluate at xs_input and subtract.
     let predictor = build_predictor(spec, xs_fit, ys_fit);
+    residuals_from_predictor(&*predictor, xs_input, ys_input, spec.inject_zero_ref, spec.inject_metrics)
+}
+
+/// The shared tail of [`residuals_fit`]/[`gam_residuals_fit`]: evaluate
+/// `predictor` at each `xs_input` point, subtract from `ys_input`, and emit
+/// the `[x, residual]` batch (plus the optional `_ref_zero`/metrics
+/// columns). Factored out so `gam_residuals_fit` — which builds its own
+/// predictor directly from `gam::fit` instead of going through
+/// [`build_predictor`], so it can also report a [`GamFitOutcome`] — does not
+/// need to re-duplicate this loop.
+fn residuals_from_predictor(
+    predictor: &dyn Fn(f64) -> f64,
+    xs_input: &[f64], ys_input: &[f64],
+    inject_zero_ref: bool, inject_metrics: bool,
+) -> PyResult<RecordBatch> {
     let mut out_x = Vec::with_capacity(xs_input.len());
     let mut out_r = Vec::with_capacity(xs_input.len());
     for (&xi, &yi) in xs_input.iter().zip(ys_input.iter()) {
@@ -644,12 +748,34 @@ fn residuals_fit(
         out_x.push(xi);
         out_r.push(r);
     }
-    let metrics = if spec.inject_metrics {
+    let metrics = if inject_metrics {
         Some(residuals::compute(ys_input, &out_r))
     } else {
         None
     };
-    build_residuals_batch(out_x, out_r, spec.inject_zero_ref, metrics)
+    build_residuals_batch(out_x, out_r, inject_zero_ref, metrics)
+}
+
+/// `SmoothOutput::Residuals` counterpart to [`gam_fit`]: fits `gam` directly
+/// (rather than through [`build_predictor`]'s generic dispatch, which
+/// discards whether `gam::fit` clamped `k`) so its caller can report the
+/// same [`GamFitOutcome`] the Fitted path reports via [`report_gam_outcome`].
+fn gam_residuals_fit(
+    spec: &SmoothSpec,
+    xs_fit: &[f64], ys_fit: &[f64],
+    xs_input: &[f64], ys_input: &[f64],
+) -> PyResult<(RecordBatch, GamFitOutcome)> {
+    let (predictor, outcome): (Box<dyn Fn(f64) -> f64>, GamFitOutcome) = match gam::fit(xs_fit, ys_fit, spec.k) {
+        Some(fit) => {
+            let outcome = GamFitOutcome::Fit { requested: spec.k, applied: fit.basis_dim() };
+            (Box::new(move |x: f64| fit.predict(x)), outcome)
+        }
+        None => (Box::new(|_: f64| f64::NAN), GamFitOutcome::Degenerate),
+    };
+    let out = residuals_from_predictor(
+        &*predictor, xs_input, ys_input, spec.inject_zero_ref, spec.inject_metrics,
+    )?;
+    Ok((out, outcome))
 }
 
 fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usize]>) -> PyResult<(Vec<f64>, Vec<f64>)> {
@@ -1044,14 +1170,62 @@ fn glm_fit(
 /// it reaches the design, so it cannot make the design absurd the way an
 /// over-large `degree` makes a Vandermonde design rank-deficient (an
 /// unusable `k` VALUE, `k < 4`, is refused at `PySmooth::new` instead).
+/// What [`gam_fit`] found while fitting — the #162 signal its caller
+/// (`apply_one_group`) turns into a `TransformWarning`. Kept as a return
+/// value rather than threading `ctx`/`group` straight into `gam_fit` itself,
+/// which would push its argument count past clippy's `too_many_arguments`
+/// threshold for no real benefit — the caller already has both and is a
+/// one-line `match` away from reporting either shape.
+enum GamFitOutcome {
+    /// `gam::fit` returned `None` (fewer than 4 distinct x values, zero x
+    /// variance, or no usable smoothing parameter).
+    Degenerate,
+    /// A fit was produced; `requested`/`applied` are `k` and the basis
+    /// dimension actually used (differ exactly when `gam::fit` clamped it).
+    Fit { requested: usize, applied: usize },
+}
+
+/// Turn a [`GamFitOutcome`] into the #162 warning it represents, shared
+/// between the Fitted path (`apply_one_group`'s `gam_fit` call) and the
+/// Residuals path (`gam_residuals_fit`, below) — both call `gam::fit` with
+/// the same `k` and need the identical clamp/degenerate report.
+fn report_gam_outcome(ctx: &TransformContext, group: Option<&str>, outcome: GamFitOutcome) {
+    match outcome {
+        GamFitOutcome::Degenerate => ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Smooth".into(),
+            group: group.map(str::to_string),
+            reason: "fewer than 4 distinct x values, zero x variance, or no usable \
+                     smoothing parameter for a gam fit"
+                .into(),
+        }),
+        GamFitOutcome::Fit { requested, applied } if requested != applied => {
+            // #162's named case: `k` is clamped down to the number of
+            // distinct x values (`gam.rs`'s `fit`,
+            // `k.clamp(MIN_BASIS_DIM, distinct.len())`).
+            ctx.warn(TransformWarning::ParameterClamped {
+                transform: "Smooth".into(),
+                group: group.map(str::to_string),
+                param: "k".into(),
+                requested: requested.to_string(),
+                applied: applied.to_string(),
+            });
+        }
+        GamFitOutcome::Fit { .. } => {}
+    }
+}
+
 fn gam_fit(
     xs: &[f64], ys: &[f64], grid: &[f64], ci: Option<f64>, n_grid: usize, k: usize,
     metrics: Option<(f64, f64, f64)>,
-) -> PyResult<RecordBatch> {
+) -> PyResult<(RecordBatch, GamFitOutcome)> {
     let fit = match gam::fit(xs, ys, k) {
         Some(f) => f,
-        None => return build_degenerate_smooth_batch(grid, n_grid, metrics.is_some()),
+        None => {
+            let out = build_degenerate_smooth_batch(grid, n_grid, metrics.is_some())?;
+            return Ok((out, GamFitOutcome::Degenerate));
+        }
     };
+    let outcome = GamFitOutcome::Fit { requested: k, applied: fit.basis_dim() };
 
     let y_fit: Vec<f64> = grid.iter().map(|&x| fit.predict(x)).collect();
 
@@ -1070,7 +1244,8 @@ fn gam_fit(
         }
     };
 
-    build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)
+    let out = build_smooth_batch(grid.to_vec(), y_fit, lo, hi, metrics)?;
+    Ok((out, outcome))
 }
 
 fn lm_fit(
@@ -3632,6 +3807,163 @@ mod tests {
         for (a, b) in col(&huge, "y").iter().zip(col(&at_cap, "y").iter()) {
             assert_eq!(a.to_bits(), b.to_bits(), "k above distinct_x must clamp to distinct_x");
         }
+    }
+
+    // ── #162: degrade-warning channel ────────────────────────────────────
+
+    /// RED (pre-#162): fails on the pre-change code, which had no channel to
+    /// report `k` silently clamping down to `distinct_x`.
+    #[test]
+    fn gam_k_clamp_pushes_a_parameter_clamped_warning() {
+        let (xs, ys) = curved_xy();
+        let distinct = xs.len();
+        let batch = xy_batch(xs, ys);
+        let ctx = TransformContext::default();
+        let spec = gam_spec_with_k(None, 20, distinct * 4);
+        let _ = apply_with_context(&spec, &batch, &ctx)
+            .expect("an over-large k must clamp, not fail");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::ParameterClamped { transform, group, param, requested, applied }
+                if transform == "Smooth" && group.is_none() && param == "k"
+                   && requested == &(distinct * 4).to_string() && applied == &distinct.to_string()
+        ));
+    }
+
+    /// A `k` that does not need clamping must not warn.
+    #[test]
+    fn gam_k_at_cap_does_not_warn() {
+        let (xs, ys) = curved_xy();
+        let distinct = xs.len();
+        let batch = xy_batch(xs, ys);
+        let ctx = TransformContext::default();
+        let spec = gam_spec_with_k(None, 20, distinct);
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert!(ctx.warnings.borrow().is_empty());
+    }
+
+    /// Rust-quality-reviewer finding 3 (post-#162 close): `gam`'s k-clamp
+    /// warning was only wired into the `SmoothOutput::Fitted` path
+    /// (`gam_fit`, called from `apply_one_group`'s method dispatch) — the
+    /// `Residuals` output branch returns earlier in the same function and
+    /// built its predictor via `build_predictor`'s generic `Gam` arm, which
+    /// calls `gam::fit` and discards whether it clamped. Same over-large `k`,
+    /// same production `apply_with_context` path, `output="residuals"`
+    /// instead of the default `"fitted"`.
+    #[test]
+    fn gam_k_clamp_pushes_a_parameter_clamped_warning_on_residuals_output() {
+        let (xs, ys) = curved_xy();
+        let distinct = xs.len();
+        let batch = xy_batch(xs, ys);
+        let ctx = TransformContext::default();
+        let mut spec = gam_spec_with_k(None, 20, distinct * 4);
+        spec.output = SmoothOutput::Residuals;
+        let out = apply_with_context(&spec, &batch, &ctx)
+            .expect("an over-large k must clamp, not fail, on the residuals path too");
+        assert_eq!(out.num_rows(), distinct, "residuals are emitted at the original input xs");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::ParameterClamped { transform, group, param, requested, applied }
+                if transform == "Smooth" && group.is_none() && param == "k"
+                   && requested == &(distinct * 4).to_string() && applied == &distinct.to_string()
+        ));
+    }
+
+    /// The degenerate (not merely clamped) gam case must also warn on the
+    /// residuals path — mirrors the Fitted path's `gam_fit` `None` arm.
+    #[test]
+    fn gam_degenerate_pushes_a_degenerate_fit_warning_on_residuals_output() {
+        // Fewer than 4 distinct x values: gam::fit returns None regardless of k.
+        let xs = vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0];
+        let ys = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let batch = xy_batch(xs, ys);
+        let ctx = TransformContext::default();
+        let mut spec = gam_spec_with_k(None, 20, gam::DEFAULT_BASIS_DIM);
+        spec.output = SmoothOutput::Residuals;
+        let _ = apply_with_context(&spec, &batch, &ctx)
+            .expect("a degenerate gam fit must degrade, not fail, on the residuals path too");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "Smooth" && group.is_none()
+        ));
+    }
+
+    /// A rank-deficient/zero-variance `lm` fit must push a `DegenerateFit`
+    /// warning naming the transform, matching the T9 round-3 "facet panel
+    /// degrades to NaN with no diagnostic" complaint this channel closes.
+    #[test]
+    fn lm_zero_variance_pushes_a_degenerate_fit_warning() {
+        let xs = vec![3.0; 10];
+        let ys: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let batch = xy_batch(xs, ys);
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec![], name: None,
+        };
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 5, "output is unchanged: still the NaN-filled grid");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, reason }
+                if transform == "Smooth" && group.is_none() && reason.contains("lm")
+        ));
+    }
+
+    /// A grouped call attributes the warning to the specific degenerate
+    /// group — the healthy group must NOT warn.
+    #[test]
+    fn smooth_grouped_degenerate_group_names_the_group() {
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let ys: Vec<f64> = xs.iter().map(|&x| 2.0 * x + 1.0).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let mut all_x = xs.clone();
+        all_x.push(9.0);
+        let mut all_y = ys.clone();
+        all_y.push(1.0);
+        let mut groups: Vec<&str> = std::iter::repeat("healthy").take(xs.len()).collect();
+        groups.push("sparse");
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(all_x)),
+            Arc::new(Float64Array::from(all_y)),
+            Arc::new(arrow::array::StringArray::from(groups)),
+        ]).unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: vec!["g".into()], name: None,
+        };
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "only the sparse group should warn; got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "Smooth" && group.as_deref() == Some("g=sparse")
+        ));
     }
 
     /// `k` omitted must equal `k` at its documented default — the wire and

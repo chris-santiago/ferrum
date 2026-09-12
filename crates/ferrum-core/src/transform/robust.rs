@@ -31,6 +31,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, parse_groupby_pyany, stack_grouped_batches,
     KeyValue,
@@ -83,31 +84,50 @@ pub(crate) struct RobustSpec {
 // ---------- Main apply ----------
 
 /// Entry point: dispatches to the grouped or ungrouped fit depending on
-/// `spec.groupby`. Mirrors `smooth::apply_with_context`'s dispatch shape,
-/// minus the `TransformContext` threading — Robust has no context-dependent
-/// whole-frame refusal (Smooth's rank-deficient-`degree` case), so it needs
-/// no `is_partition` signal and stays reachable through the plain `apply()`
-/// path (`TransformSpec::apply_with_context`'s default fallback).
+/// `spec.groupby`. Mirrors `smooth::apply_with_context`'s dispatch shape;
+/// Robust has no context-dependent whole-frame refusal (Smooth's
+/// rank-deficient-`degree` case), so it never reads `ctx.is_partition` — the
+/// context is threaded through solely for the #162 degrade-warning sink.
 pub(crate) fn apply(spec: &RobustSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point (#162): identical dispatch to [`apply`], plus
+/// `ctx.warnings` as the sink for this transform's own degrade sites (see
+/// `apply_one_group`'s `xs.len() < 2` and zero-variance-x branches below).
+pub(crate) fn apply_with_context(
+    spec: &RobustSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     if !spec.groupby.is_empty() {
-        return apply_grouped(spec, batch, &spec.groupby);
+        return apply_grouped(spec, batch, &spec.groupby, ctx);
     }
-    apply_one_group(spec, batch, None)
+    apply_one_group(spec, batch, None, ctx, None)
 }
 
 /// Fit one group's (or the whole frame's) rows. `only_indices` restricts the
 /// x/y extraction to those row positions when set (a groupby partition);
 /// `None` scans every row, byte-identical to this function's pre-groupby body.
+/// `group` is a human-readable label for the groupby key (`describe_group_keys`),
+/// `None` for a whole-frame call — attached to any degrade warning pushed here.
 fn apply_one_group(
     spec: &RobustSpec,
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
+    ctx: &TransformContext,
+    group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     let (xs, ys) = coerce_xy_pairs_at(batch, &spec.x, &spec.y, "Robust", only_indices)?;
 
     let n_grid = spec.n_grid.max(1);
 
     if xs.len() < 2 {
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Robust".into(),
+            group: group.map(str::to_string),
+            reason: "fewer than 2 usable (non-null/non-NaN) x/y points".into(),
+        });
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
             SmoothOutput::Residuals => build_residuals_batch(
@@ -126,6 +146,11 @@ fn apply_one_group(
     };
     if !(x_max > x_min) {
         // Zero-variance x → no slope identifiable → NaN line.
+        ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Robust".into(),
+            group: group.map(str::to_string),
+            reason: "zero x variance".into(),
+        });
         return match spec.output {
             SmoothOutput::Fitted => build_nan_fitted(n_grid, spec.inject_metrics),
             SmoothOutput::Residuals => {
@@ -291,6 +316,7 @@ fn apply_grouped(
     spec: &RobustSpec,
     batch: &RecordBatch,
     group_cols: &[String],
+    ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     let (group_order, group_idx_map, gtypes) = group_partition_multi(batch, group_cols, "Robust")?;
 
@@ -299,7 +325,8 @@ fn apply_grouped(
         let ixs = group_idx_map.get(g).ok_or_else(|| {
             PyValueError::new_err(format!("Robust: missing group key {g:?} in index map"))
         })?;
-        let out = apply_one_group(spec, batch, Some(ixs))?;
+        let label = describe_group_keys(group_cols, g);
+        let out = apply_one_group(spec, batch, Some(ixs), ctx, Some(&label))?;
         per_group_batches.push((g.clone(), out));
     }
 
@@ -307,7 +334,7 @@ fn apply_grouped(
         // Every group key was null: there is no per-group output to stack.
         // Fall back to the full batch on `None` indices, mirroring
         // `smooth::apply_grouped`'s identical fallback.
-        return apply_one_group(spec, batch, None);
+        return apply_one_group(spec, batch, None, ctx, None);
     }
 
     stack_grouped_batches("Robust", &per_group_batches, group_cols, &gtypes)
@@ -1208,5 +1235,76 @@ mod tests {
         assert_eq!(col(&out_plain, "y"), col(&out_with_unused_col, "y"));
         assert_eq!(col(&out_plain, "ci_lower"), col(&out_with_unused_col, "ci_lower"));
         assert_eq!(col(&out_plain, "ci_upper"), col(&out_with_unused_col, "ci_upper"));
+    }
+
+    // ── #162: degrade-warning channel ────────────────────────────────────
+
+    use crate::transform::context::{TransformContext, TransformWarning};
+
+    /// RED (pre-#162): this assertion fails on the pre-change code, since
+    /// `Robust::apply` had no way to report a degenerate fit at all.
+    #[test]
+    fn robust_below_threshold_pushes_a_degenerate_fit_warning() {
+        let batch = xy_batch(vec![1.0], vec![1.0]);
+        let s = spec(8, None, 1.345, SmoothOutput::Fitted);
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &batch, &ctx).unwrap();
+        assert_eq!(out.num_rows(), 8, "output is unchanged: still the NaN-filled grid");
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "Robust" && group.is_none()
+        ));
+    }
+
+    /// Zero-variance x is the second degenerate site (`x_max > x_min` fails)
+    /// and must warn too, distinctly from the below-threshold case.
+    #[test]
+    fn robust_zero_variance_x_pushes_a_degenerate_fit_warning() {
+        let batch = xy_batch(vec![3.0; 10], (0..10).map(|i| i as f64).collect());
+        let s = spec(15, None, 1.345, SmoothOutput::Fitted);
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&s, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, reason, .. }
+                if transform == "Robust" && reason.contains("zero x variance")
+        ));
+    }
+
+    /// A grouped call attributes the warning to the specific degenerate
+    /// group, not the whole batch — the healthy group must NOT warn.
+    #[test]
+    fn robust_grouped_degenerate_group_warning_names_the_group() {
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 0.0];
+        let ys: Vec<f64> = vec![0.0, 2.0, 4.0, 6.0, 8.0, 1.0];
+        let groups: Vec<&str> = vec!["healthy", "healthy", "healthy", "healthy", "healthy", "sparse"];
+        let batch = xy_batch_with_group(xs, ys, groups);
+        let mut s = spec(5, None, 1.345, SmoothOutput::Fitted);
+        s.groupby = vec!["g".into()];
+        let ctx = TransformContext::default();
+        let _ = apply_with_context(&s, &batch, &ctx).unwrap();
+        let warnings = ctx.warnings.borrow();
+        assert_eq!(warnings.len(), 1, "only the sparse group should warn; got {warnings:?}");
+        assert!(matches!(
+            &warnings[0],
+            TransformWarning::DegenerateFit { transform, group, .. }
+                if transform == "Robust" && group.as_deref() == Some("g=sparse")
+        ));
+    }
+
+    /// Bare `apply()` (no context) must not panic — the ephemeral default
+    /// sink absorbs the warning and is simply dropped, per
+    /// `TransformContext::warnings`'s doc.
+    #[test]
+    fn robust_bare_apply_with_degenerate_input_does_not_panic() {
+        let batch = xy_batch(vec![1.0], vec![1.0]);
+        let s = spec(8, None, 1.345, SmoothOutput::Fitted);
+        let out = apply(&s, &batch).unwrap();
+        assert_eq!(out.num_rows(), 8);
     }
 }

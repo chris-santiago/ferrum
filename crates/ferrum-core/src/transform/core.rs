@@ -270,6 +270,16 @@ impl TransformSpec {
         // this arm, `TransformContext` would be constructed and threaded all
         // the way to `apply_with_context` and then silently dropped at the
         // `_ => self.apply(batch)` fallback below.
+        //
+        // `Robust`/`RegressionData`/`LoessData`/`Kde`/`LetterValue`/`Impute`
+        // were added for the #162 degrade-warning channel: each needs
+        // `ctx.warnings` (the `Rc<RefCell<Vec<TransformWarning>>>` sink) to
+        // report its own degrade sites (NaN-panel fits, the gam `k` clamp,
+        // `LetterValue`'s depth cap, `Impute`'s fallbacks) — see each
+        // module's `apply_with_context` doc. None of them read
+        // `ctx.is_partition`/`ctx.panel_pixel_size`, so adding them here does
+        // not change any existing behavior; it only gives them somewhere to
+        // push a warning.
         macro_rules! arm {
             ($($V:ident => $m:ident,)*) => {
                 match self {
@@ -285,6 +295,12 @@ impl TransformSpec {
             Swarm  => swarm,
             Violin => violin,
             Smooth => smooth,
+            Robust => robust,
+            RegressionData => regression_data,
+            LoessData => loess_data,
+            Kde => kde,
+            LetterValue => letter_value,
+            Impute => impute,
         }
     }
 

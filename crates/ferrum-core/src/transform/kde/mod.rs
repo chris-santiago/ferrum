@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::transform::bin::resolve_bin_extent;
 use crate::transform::bin_mode::{parse_bin_axis, BinMode};
+use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, KeyValue,
@@ -219,6 +220,17 @@ fn validate_count_scale_extent(spec: &KdeSpec) -> PyResult<()> {
 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// Context-aware entry point (#162): identical dispatch to [`apply`], plus
+/// `ctx.warnings` as the sink for this transform's own degrade sites (see
+/// [`apply_one_group`]'s `clean.len() < 2` and non-finite-bandwidth branches).
+pub(crate) fn apply_with_context(
+    spec: &KdeSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     validate_count_scale_extent(spec)?;
     if !spec.groupby.is_empty() {
         // `count_scale`'s bin-edge sharing mirrors `Bin::apply_grouped`'s own
@@ -238,13 +250,13 @@ pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         let count_scale_pinned_extent = spec.count_scale.as_ref().and_then(|_| {
             resolve_shared_extent(spec.count_scale_extent, spec.shared_extent, batch, &spec.field)
         });
-        return apply_grouped(spec, batch, &spec.groupby, count_scale_pinned_extent);
+        return apply_grouped(spec, batch, &spec.groupby, count_scale_pinned_extent, ctx);
     }
     // `count_scale_extent`'s facet pin mirrors `Bin::apply`'s own
     // `spec.extent` check, which is NOT gated on grouping (unlike
     // `shared_extent`) — an ungrouped, faceted `Kde` must still honor it.
     let count_scale_pinned_extent = spec.count_scale.as_ref().and(spec.count_scale_extent);
-    apply_one_group(spec, batch, None, count_scale_pinned_extent)
+    apply_one_group(spec, batch, None, count_scale_pinned_extent, ctx, None)
 }
 
 /// Resolve the histogram bin width `Bin` would compute for THIS group's own
@@ -297,6 +309,8 @@ fn apply_one_group(
     batch: &RecordBatch,
     only_indices: Option<&[usize]>,
     count_scale_pinned_extent: Option<(f64, f64)>,
+    warn_ctx: &TransformContext,
+    group: Option<&str>,
 ) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
@@ -333,10 +347,20 @@ fn apply_one_group(
         .collect();
 
     let density: Vec<f64> = if clean.len() < 2 {
+        warn_ctx.warn(TransformWarning::DegenerateFit {
+            transform: "Kde".into(),
+            group: group.map(str::to_string),
+            reason: "fewer than 2 usable (non-null/non-NaN) values".into(),
+        });
         vec![f64::NAN; spec.n]
     } else {
         let h = bandwidth(&clean, &spec.bandwidth)? * spec.bw_adjust;
         if h <= 0.0 || !h.is_finite() {
+            warn_ctx.warn(TransformWarning::DegenerateFit {
+                transform: "Kde".into(),
+                group: group.map(str::to_string),
+                reason: "the bandwidth resolved to a non-positive or non-finite value".into(),
+            });
             vec![f64::NAN; spec.n]
         } else {
             kernel_density_at_grid(&clean, h, &grid, &spec.kernel)?
@@ -387,6 +411,7 @@ fn apply_grouped(
     batch: &RecordBatch,
     group_cols: &[String],
     count_scale_pinned_extent: Option<(f64, f64)>,
+    warn_ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
     // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
     let (group_order, group_idx_map, gtypes) =
@@ -408,7 +433,10 @@ fn apply_grouped(
         let ixs = group_idx_map.get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
                 "stat_kde: missing group key {g:?} in index map")))?;
-        let out = apply_one_group(&shared_spec, batch, Some(ixs), count_scale_pinned_extent)?;
+        let label = describe_group_keys(group_cols, g);
+        let out = apply_one_group(
+            &shared_spec, batch, Some(ixs), count_scale_pinned_extent, warn_ctx, Some(&label),
+        )?;
         let n = out.num_rows();
         let values = out.column(0).as_any().downcast_ref::<Float64Array>()
             .ok_or_else(|| PyValueError::new_err("stat_kde: expected Float64Array for 'value' output column"))?;
