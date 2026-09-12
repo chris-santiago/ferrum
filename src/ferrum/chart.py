@@ -143,6 +143,92 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
     return out
 
 
+def _transform_already_covered(transform: object, existing: list) -> bool:
+    """Return whether *transform* is identity- or value-equal to some entry of *existing*.
+
+    Mirrors ``_merge_top_transforms``'s own dedup test (``composition.py``) --
+    the same "counts as the same transform" rule the actual merge uses, so
+    this check and the merge can never disagree about whether a transform is
+    genuinely new.
+    """
+    from ferrum._layer_transforms import _NamedTransform as _NT
+
+    inner_t = transform.transform if isinstance(transform, _NT) else transform
+    for e in existing:
+        if transform is e:
+            return True
+        inner_e = e.transform if isinstance(e, _NT) else e
+        if inner_t == inner_e:
+            return True
+    return False
+
+
+def _refuse_data_source_collision(
+    lhs_layers: list, rhs_layers: list, lhs_top_xforms: list, rhs_top_xforms: list
+) -> None:
+    """Refuse a ``+`` composition whose two sides would silently share one
+    named transform output (#198).
+
+    A multi-output composite mark (``mark_qq``, ``mark_violin``,
+    ``mark_boxplot``, ...) gives its own top-level transform(s) a fixed,
+    caller-independent name (e.g. every ``mark_qq()`` names its transform
+    ``"qq_main"``) and points each consuming layer's ``data_source`` at it.
+    Rust's ``apply_transforms_named`` (``transform/core.rs``) does not guard
+    against two transforms publishing under the same name -- it just inserts
+    into an output map, so the second one processed silently overwrites the
+    first's entry, and every layer reading that name (from EITHER side of the
+    ``+``) resolves to whichever transform ran last. Measured:
+    ``qq(field="a") + qq(field="b")`` renders 100 circles at only 50 distinct
+    positions -- the "a" scatter is entirely replaced by "b"'s.
+
+    Composing a chart with itself (``chart + chart``) is exempted, but NOT by
+    comparing ``_Layer`` objects: a multi-output desugar's per-layer
+    ``encoding`` names the TRANSFORM's fixed output columns (e.g. QQ's point
+    layer is always ``x="theoretical", y="sample"`` regardless of which field
+    was passed to ``mark_qq``), so two layers can be ``_Layer``-equal while
+    reading two DIFFERENT transforms -- exactly the ``qq(field="a") +
+    qq(field="b")`` case this refusal exists to catch. The transform objects
+    themselves distinguish this correctly (``QQ(field="a", ...) != QQ(field=
+    "b", ...)``), so the exemption is: every transform ``rhs_top_xforms``
+    would add is already covered (identity- or value-equal) by
+    ``lhs_top_xforms`` -- i.e. ``_merge_top_transforms`` would introduce
+    nothing new, so whichever copy "wins" the name in Rust's output map is
+    content-identical to the other.
+
+    Parameters
+    ----------
+    lhs_layers, rhs_layers :
+        The two sides' resolved layer lists, in whatever state they are in
+        immediately before ``new._layers = lhs_layers + rhs_layers`` --
+        i.e. after any ``data_source`` rewriting the merge has already done.
+    lhs_top_xforms, rhs_top_xforms :
+        The two sides' top-level transform lists (pre-merge), used only to
+        decide the self-composition exemption above.
+
+    Raises
+    ------
+    ValueError
+        Naming the colliding layer (by its own ``name``, falling back to its
+        ``mark``) and the named output both sides would read.
+    """
+    if all(_transform_already_covered(t, lhs_top_xforms) for t in rhs_top_xforms):
+        return
+    lhs_names = {l.data_source for l in lhs_layers if l.data_source is not None}
+    for rhs_layer in rhs_layers:
+        name = rhs_layer.data_source
+        if name is not None and name in lhs_names:
+            layer_label = rhs_layer.name or rhs_layer.mark
+            raise ValueError(
+                f"Chart.__add__: layer {layer_label!r} (mark={rhs_layer.mark!r}) "
+                f"reads named transform output {name!r}, which a layer already on "
+                "the other side of `+` also reads -- but from a different "
+                "transform. Rendering would silently let one side's data "
+                "overwrite the other's. Route the two charts' data through "
+                "distinctly-named transforms (e.g. give each its own "
+                "`.transform(..., name=...)`) before composing them."
+            )
+
+
 def _column_names_for_validation(data) -> "Optional[list]":
     """Return *data*'s column names for a cheap boundary check, or ``None``.
 
@@ -2124,11 +2210,19 @@ class Chart(
 
                 auto_name = f"_ident_{id(other) & 0xFFFFFFFF:08x}"
                 identity_xform = _NamedTransform(identity_transform(auto_name), auto_name)
+                # A layer that already reads a named output (a multi-output
+                # composite mark's own layer, e.g. qq/violin/boxplot) keeps
+                # that data_source -- rerouting it through this merge's
+                # Identity would silently swap its intended transform output
+                # for the raw renamed-and-concatenated batch (#198). Only a
+                # layer with no data_source of its own (reading the default
+                # chain tail) needs to be pointed at the Identity so it does
+                # not inherit the LHS's chart-level encoding.
                 rhs_layers = [
                     _dc_replace(
                         l,
                         encoding=_rename_encoding_fields(l.encoding, col_renames),
-                        data_source=auto_name,
+                        data_source=l.data_source if l.data_source is not None else auto_name,
                     )
                     for l in rhs_layers
                 ]
@@ -2139,7 +2233,17 @@ class Chart(
 
         # Named-transform routing for RHS transforms (smooth, etc.):
         # wrap as _NamedTransform so FINAL_OUTPUT_KEY stays the LHS batch.
-        if not new._transforms and rhs_top_xforms:
+        # Skipped when the RHS layers are ALREADY routed to a named output --
+        # every multi-output composite mark (qq, violin, boxplot, ...) gives
+        # its own top-level transform(s) an explicit name and points each
+        # consuming layer's data_source at it, precisely so those layers can
+        # be read standalone. Re-wrapping such a transform under a fresh
+        # ``_auto_...`` name here would rename it WITHOUT updating the
+        # data_source strings baked into it by its own desugar (e.g. a QQ
+        # transform's secondary-output key is derived from its own name),
+        # stranding those layers pointing at a name nothing publishes (#198).
+        rhs_already_routed = any(l.data_source is not None for l in rhs_layers)
+        if not new._transforms and rhs_top_xforms and not rhs_already_routed:
             auto_name = f"_auto_{id(rhs_top_xforms[-1]) & 0xFFFFFFFF:08x}"
             named_xforms = [_NamedTransform(t, auto_name) for t in rhs_top_xforms]
             from dataclasses import replace as _dc_replace
@@ -2149,6 +2253,7 @@ class Chart(
         else:
             _merge_top_transforms(new, rhs_top_xforms)
 
+        _refuse_data_source_collision(lhs_layers, rhs_layers, lhs_top_xforms, rhs_top_xforms)
         new._layers = lhs_layers + rhs_layers
         # GH #78: record whether the merged chart's chart-level tooltip (if
         # any) came from THIS merge promoting a layer's own explicit tooltip,
