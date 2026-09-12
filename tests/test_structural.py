@@ -159,6 +159,67 @@ class TestBreakAxis:
 
 
 # ---------------------------------------------------------------------------
+# BreakAxis.gap construction-time refusal matrix (#92 python half, batch
+# wave-1 hardening): NaN, ±inf, reversed, and malformed-shape gaps all raise
+# ``ValueError`` at construction instead of sailing through to a blank or
+# nonsense break render.
+# ---------------------------------------------------------------------------
+
+
+class TestBreakAxisGapValidation:
+    @pytest.mark.parametrize("bad_end", [float("nan"), float("inf"), float("-inf")])
+    def test_single_gap_non_finite_end_raises(self, bad_end):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: end must be finite"):
+            BreakAxis(axis="y", gap=(10, bad_end))
+
+    @pytest.mark.parametrize("bad_start", [float("nan"), float("inf"), float("-inf")])
+    def test_single_gap_non_finite_start_raises(self, bad_start):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be finite"):
+            BreakAxis(axis="y", gap=(bad_start, 90))
+
+    def test_single_gap_reversed_raises(self):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start \(90\) must be less"):
+            BreakAxis(axis="y", gap=(90, 10))
+
+    def test_single_gap_equal_bounds_raises(self):
+        """``start == end`` is a zero-width gap -- refused too, not just ``>``."""
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]"):
+            BreakAxis(axis="y", gap=(50, 50))
+
+    def test_multiple_gaps_one_bad_entry_names_its_index(self):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[1\]: end must be finite"):
+            BreakAxis(axis="y", gap=[(10, 20), (50, float("nan"))])
+
+    def test_multiple_gaps_reversed_entry_raises(self):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[1\]"):
+            BreakAxis(axis="y", gap=[(10, 20), (60, 50)])
+
+    def test_malformed_pair_wrong_length_raises(self):
+        with pytest.raises(ValueError, match=r"pair of length 2"):
+            BreakAxis(axis="y", gap=(10, 20, 30))
+
+    def test_malformed_scalar_entry_in_list_raises(self):
+        with pytest.raises(ValueError, match=r"pair of length 2"):
+            BreakAxis(axis="y", gap=[10, 20])
+
+    def test_empty_gap_list_raises(self):
+        with pytest.raises(ValueError, match="at least one"):
+            BreakAxis(axis="y", gap=[])
+
+    def test_non_numeric_gap_raises(self):
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a numeric"):
+            BreakAxis(axis="y", gap=("a", 10))
+
+    def test_non_iterable_gap_raises(self):
+        with pytest.raises(ValueError, match="must be a .* tuple or a list"):
+            BreakAxis(axis="y", gap=5)  # type: ignore[arg-type]
+
+    def test_valid_single_and_multi_gap_construct_without_error(self):
+        BreakAxis(axis="y", gap=(10, 90))
+        BreakAxis(axis="y", gap=[(10, 20), (50, 60)])
+
+
+# ---------------------------------------------------------------------------
 # Inset
 # ---------------------------------------------------------------------------
 

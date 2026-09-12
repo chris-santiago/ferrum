@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ferrum._validate import validate_choice, validate_fraction_value, validate_pixel_value
+from ferrum._validate import (
+    validate_choice,
+    validate_finite_ordered_pair,
+    validate_fraction_value,
+    validate_pixel_value,
+)
 
 _VALID_BREAK_STYLES = frozenset({"slash", "zigzag", "wave", "gap"})
 _VALID_CONNECT_STYLES = frozenset({"bracket", "lines", "none"})
@@ -78,7 +83,11 @@ class BreakAxis:
         Which axis to break: ``"x"`` or ``"y"``.
     gap : tuple or list
         A single ``(start, end)`` break region or a list of ``(start, end)``
-        tuples for multiple breaks.
+        tuples for multiple breaks. Each ``(start, end)`` pair must be
+        finite (no NaN/±inf) and correctly ordered (``start < end``); a
+        malformed, non-finite, or reversed gap raises ``ValueError`` at
+        construction time (#92) instead of sailing through to a blank or
+        nonsense render.
     break_size : float, default 12
         Visual size of the break indicator in pixels.
     break_style : str, default "slash"
@@ -95,6 +104,57 @@ class BreakAxis:
         validate_choice(
             "BreakAxis.break_style", "break_style", self.break_style, _VALID_BREAK_STYLES
         )
+        _validate_break_gaps(self.gap)
+
+
+def _normalize_break_gaps(gap: Any) -> list[Any]:
+    """Classify *gap* as a single ``(start, end)`` pair or a list of pairs.
+
+    Mirrors the wire-normalization heuristic in
+    ``ferrum._render.Chart._serialize_structural`` (a bare ``(start, end)``
+    tuple is one break region; anything else is treated as a list of break
+    regions) so this construction-time check classifies gaps exactly the way
+    the render path will, rather than validating a different shape than the
+    one that actually reaches Rust.
+
+    DUPLICATION-PENDING: this mirrors ``_render.py``'s ``_serialize_structural``
+    gap-normalization (``ferrum/_render.py``, ~line 486-494) rather than
+    sharing it — that call site sits outside this task's footprint
+    (``structural.py``/``_facet.py``/``_validate.py`` only), so the two are
+    left as independent copies of one heuristic rather than hoisted, per the
+    mirror-by-reference policy.
+    """
+    if isinstance(gap, tuple) and len(gap) == 2 and not isinstance(gap[0], (list, tuple)):
+        return [gap]
+    return list(gap)
+
+
+def _validate_break_gaps(gap: Any) -> None:
+    """Raise ``ValueError`` for a malformed, non-finite, or reversed ``BreakAxis.gap``.
+
+    *gap* is normalized to a list of ``(start, end)`` pairs via
+    :func:`_normalize_break_gaps` (matching the shape ``_render.py`` will
+    later emit to Rust), then each pair is checked: it must have exactly two
+    elements, and both elements must be finite numeric values with
+    ``start < end`` (:func:`ferrum._validate.validate_finite_ordered_pair`).
+    An empty ``gap`` (no break regions at all) is refused as malformed too, as
+    is a ``gap`` that is not iterable (e.g. a bare number).
+    """
+    if not isinstance(gap, (tuple, list)):
+        raise ValueError(
+            f"BreakAxis.gap must be a (start, end) tuple or a list of such "
+            f"tuples, not {type(gap).__name__}; got {gap!r}"
+        )
+    pairs = _normalize_break_gaps(gap)
+    if not pairs:
+        raise ValueError(f"BreakAxis.gap must contain at least one (start, end) pair; got {gap!r}")
+    for i, pair in enumerate(pairs):
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            raise ValueError(
+                f"BreakAxis.gap[{i}] must be a (start, end) pair of length 2; got {pair!r}"
+            )
+        start, end = pair
+        validate_finite_ordered_pair(f"BreakAxis.gap[{i}]", start, end)
 
 
 def _inset_bound_kind_and_value(entry: Any) -> tuple[str, float]:

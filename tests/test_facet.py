@@ -506,23 +506,25 @@ def test_encode_facet_columns_overrides_prior_facet_ncols():
 
 
 def test_encode_facet_columns_zero_still_overrides_prior_facet_ncols():
-    """`columns=0` is a *written* value and wins over a prior `ncols`, the
-    same as any other number.
+    """`columns=0` is a *written* value that overrides a prior `ncols`, the
+    same as any other number -- it does not silently fall through to the
+    earlier `.facet(ncols=3)` value, which would hand the user a 3-column
+    wrap they never asked for.
 
-    The precedence test is `columns is not None`, not truthiness: a falsy-but-
-    present `columns=0` must not silently fall through to the earlier
-    `.facet(ncols=3)` value, which would hand the user a 3-column wrap they
-    never asked for instead of the refusal `ncols=0` earns downstream.
+    The precedence test is `columns is not None`, not truthiness. #238
+    (wave-1 hardening) moved the "0 is not a valid wrap count" refusal to
+    `_Facet.__post_init__` construction time, so the override still reaches
+    the sink -- it just refuses there instead of being silently accepted.
     """
     _, df = _facet_columns_test_data()
-    c = (
-        Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .facet(field="grp", ncols=3)
-        .encode(facet=fm.Facet("grp", columns=0))
-    )
-    assert c._facet.ncols == 0
+    with pytest.raises(ValueError, match=r"_Facet\.ncols must be >= 1"):
+        (
+            Chart(df)
+            .mark_point()
+            .encode(x="x", y="y")
+            .facet(field="grp", ncols=3)
+            .encode(facet=fm.Facet("grp", columns=0))
+        )
 
 
 def test_facet_ncols_overrides_prior_encode_facet_columns():
@@ -612,3 +614,48 @@ def test_facet_col_columns_warning_states_permanent_fact_not_future_phase():
     assert "grid-mode-inapplicable" in msg or "permanent" in msg, (
         f"message must state the permanent-fact reason: {msg!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #238: _Facet.ncols/nrows construction-time refusal, both entries
+# (Chart.facet(ncols=)/nrows= and encode(facet=fm.Facet(columns=))).
+# ---------------------------------------------------------------------------
+
+_BAD_WRAP_COUNTS = [0, -1, 2.5, "3"]
+
+
+@pytest.mark.parametrize("bad", _BAD_WRAP_COUNTS)
+def test_facet_method_ncols_refuses_non_positive_int(bad):
+    """Chart.facet(ncols=...) refuses a non-positive-int wrap count typed,
+    at construction, instead of silently accepting it (#238)."""
+    df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
+    chart = Chart(df).mark_point().encode(x="x", y="x")
+    with pytest.raises(ValueError, match=r"_Facet\.ncols"):
+        chart.facet(field="g", ncols=bad)
+
+
+@pytest.mark.parametrize("bad", _BAD_WRAP_COUNTS)
+def test_facet_method_nrows_refuses_non_positive_int(bad):
+    """Chart.facet(nrows=...) refuses the same shapes as ncols= (#238)."""
+    df = pl.DataFrame({"x": [1, 2, 3], "r": ["a", "b", "a"], "c": ["x", "y", "x"]})
+    chart = Chart(df).mark_point().encode(x="x", y="x")
+    with pytest.raises(ValueError, match=r"_Facet\.nrows"):
+        chart.facet(row="r", col="c", nrows=bad)
+
+
+@pytest.mark.parametrize("bad", _BAD_WRAP_COUNTS)
+def test_encode_facet_columns_refuses_non_positive_int(bad):
+    """encode(facet=fm.Facet(columns=...)) refuses the same shapes as
+    Chart.facet(ncols=...) -- one sink, one check, both entries (#238)."""
+    df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
+    with pytest.raises(ValueError, match=r"_Facet\.ncols"):
+        Chart(df).mark_point().encode(x="x", y="x", facet=fm.Facet("g", columns=bad))
+
+
+def test_facet_ncols_none_is_still_accepted():
+    """`ncols=None` (the default, "let the renderer choose") must keep
+    passing -- validate_positive_int's None-sentinel convention, not a
+    regression introduced by the #238 refusal."""
+    df = pl.DataFrame({"x": [1, 2, 3], "g": ["a", "b", "a"]})
+    chart = Chart(df).mark_point().encode(x="x", y="x").facet(field="g")
+    assert chart._facet.ncols is None

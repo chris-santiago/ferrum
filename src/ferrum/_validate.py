@@ -30,6 +30,22 @@ Four independent predicates live here today:
   same values with the same reasoning instead of maintaining two hand-copied
   isinstance/range checks that can drift.
 
+- ``validate_positive_int`` (#238) is the "wrap-count contract": a value
+  must be a genuine ``int`` (``bool`` excluded, same reasoning as
+  ``validate_pixel_value``) and ``>= 1``. ``None`` passes as the caller's
+  "unset, let inference decide" sentinel, following ``validate_pixel_value``'s
+  convention. Shared by ``_Facet.__post_init__`` for both ``ncols`` and
+  ``nrows``, which in turn covers both of #238's entries
+  (``Chart.facet(ncols=)`` and ``encode(facet=fm.Facet(columns=))``) from
+  the single sink they both write.
+
+- ``validate_finite_ordered_pair`` (#92) is the "break-gap contract": both
+  ``start`` and ``end`` must be numeric (``bool`` excluded) and finite
+  (no NaN/±inf), and ``start`` must be strictly less than ``end``. Shared by
+  ``BreakAxis.__post_init__``, which validates every ``(start, end)`` pair in
+  ``gap`` (a single pair or a list of pairs) — the numeric-pair analog of
+  ``validate_fraction_value``'s single-value contract.
+
 Each is a small, self-contained predicate with no shared machinery between
 them — this module is a landing spot for that shape of helper, not a
 general utility dump; a new addition should be a comparably minimal,
@@ -158,3 +174,60 @@ def validate_fraction_value(label: str, value: Any) -> None:
         )
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValueError(f"{label} must be between 0 and 1; received {value!r}")
+
+
+def validate_positive_int(label: str, value: Any) -> None:
+    """Raise ``ValueError`` when *value* is not a positive ``int`` (``>= 1``).
+
+    A valid value is a genuine ``int`` (``bool`` excluded, since ``bool`` is
+    an ``int`` subclass) and ``>= 1``. ``None`` is the caller's "unset, let
+    inference decide" sentinel and always passes, matching
+    :func:`validate_pixel_value`'s convention.
+
+    *label* is a pre-composed field description (e.g. ``"_Facet.ncols"``),
+    matching :func:`validate_pixel_value`'s convention.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not an ``int``, or is less than 1.
+    """
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(
+            f"{label} must be a positive int, not {type(value).__name__}; received {value!r}"
+        )
+    if value < 1:
+        raise ValueError(f"{label} must be >= 1; received {value!r}")
+
+
+def validate_finite_ordered_pair(label: str, start: Any, end: Any) -> None:
+    """Raise ``ValueError`` unless ``(start, end)`` is a finite, ordered numeric pair.
+
+    Each of *start*/*end* must be numeric (``int``/``float``, ``bool``
+    excluded) and finite (not NaN/±inf); *start* must be strictly less than
+    *end*.
+
+    *label* is a pre-composed description of the pair being checked (e.g.
+    ``"BreakAxis.gap[0]"``), matching :func:`validate_pixel_value`'s
+    convention.
+
+    Raises
+    ------
+    ValueError
+        If either endpoint is not numeric, is NaN/±inf, or if
+        ``start >= end``.
+    """
+    for name, value in (("start", start), ("end", end)):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(
+                f"{label}: {name} must be a numeric value (int or float), "
+                f"not {type(value).__name__}; received {value!r}"
+            )
+        if not math.isfinite(value):
+            raise ValueError(f"{label}: {name} must be finite; received {value}")
+    if start >= end:
+        raise ValueError(
+            f"{label}: start ({start!r}) must be less than end ({end!r}); got ({start!r}, {end!r})"
+        )

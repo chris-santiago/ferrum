@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from ferrum._coerce import to_arrow_table
+from ferrum._validate import validate_positive_int
 
 
 class FacetMode(str, Enum):
@@ -93,6 +94,16 @@ class _Facet:
     than silently mis-serializing. ``mode_kind`` and ``wrap_orient`` still compare
     equal to their string forms (the enums subclass ``str``), so existing call
     sites and the serialized JSON are unaffected.
+
+    #238: ``ncols``/``nrows`` are validated as positive ints
+    (:func:`ferrum._validate.validate_positive_int`) at this one construction
+    site, so a non-positive or non-int wrap count refuses here regardless of
+    which caller wrote it — ``Chart.facet(ncols=)``/``Chart.facet(nrows=)``
+    and ``encode(facet=fm.Facet(columns=))`` both route through this
+    dataclass's ``ncols``/``nrows`` fields, so one check covers both entries.
+    ``FacetRow``/``FacetCol(columns=)`` never reach this sink at all (grid-mode
+    channels don't honor ``columns``), so this validator never fires for
+    those and stays scoped to the wrap-count path.
     """
 
     mode_kind: FacetMode
@@ -121,6 +132,12 @@ class _Facet:
         mode = _coerce_mode(self.mode_kind)
         object.__setattr__(self, "mode_kind", mode)
         object.__setattr__(self, "wrap_orient", _coerce_orient(self.wrap_orient))
+
+        # #238: ncols/nrows must be positive ints when given at all -- the one
+        # sink both entries (Chart.facet(ncols=)/nrows= and
+        # encode(facet=fm.Facet(columns=))) write to.
+        validate_positive_int("_Facet.ncols", self.ncols)
+        validate_positive_int("_Facet.nrows", self.nrows)
 
         # Field-validity by mode (C10): wrap uses `field`, grid uses row/col.
         if mode is FacetMode.WRAP:
