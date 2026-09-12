@@ -224,6 +224,41 @@ def test_off_viewport_respects_the_break_sentinel(tmp_path):
     assert len(corpus.unexplained(corpus.query_off_viewport(other))) == 1
 
 
+def test_off_viewport_respects_the_break_sentinel_neighborhood(tmp_path):
+    """Pins `at_break_sentinel`'s neighborhood predicate on both sides
+    (quality review, cycle 2, Required Fix 3): D2's real shape must be
+    explained, and a coordinate outside the tolerance — including one
+    chrome-span-sized, the exact defect class a too-generous tolerance would
+    excuse — must not be.
+    """
+    # The real D2 shape: a label hidden under a break parks at BREAK_HIDDEN
+    # plus its own drawn offset (`font_size / 3` for an interior label).
+    real_shape = _doc('<text x="10" y="-99995.333">hidden label</text>', tmp_path=tmp_path)
+    hits = corpus.query_off_viewport(real_shape)
+    assert len(hits) == 1 and hits[0].sentinel
+    assert corpus.unexplained(hits) == []
+
+    # Just outside the tolerance boundary: not excused.
+    just_outside = _doc(
+        f'<text x="10" y="{corpus.BREAK_HIDDEN - corpus._BREAK_HIDDEN_TOLERANCE - 1}">stray</text>',
+        tmp_path=tmp_path,
+    )
+    just_outside_hits = corpus.query_off_viewport(just_outside)
+    assert len(just_outside_hits) == 1 and not just_outside_hits[0].sentinel
+    assert len(corpus.unexplained(just_outside_hits)) == 1
+
+    # A chrome-span-sized stray (a gridline/domain-line endpoint's magnitude
+    # in this corpus, 400-900px) must never be excused by the neighborhood —
+    # this is the exact defect class the too-generous prior tolerance (1000)
+    # would have hidden.
+    chrome_span = _doc(
+        f'<text x="10" y="{corpus.BREAK_HIDDEN - 600}">stray</text>', tmp_path=tmp_path
+    )
+    chrome_span_hits = corpus.query_off_viewport(chrome_span)
+    assert len(chrome_span_hits) == 1 and not chrome_span_hits[0].sentinel
+    assert len(corpus.unexplained(chrome_span_hits)) == 1
+
+
 def test_off_viewport_honors_a_non_zero_root_viewbox_origin(tmp_path):
     """SVG 1.1 §7.7: ``viewBox="min-x min-y w h"`` — the visible window starts
     at the origin, it is not ``0,0..w,h``.

@@ -214,3 +214,112 @@ def extents_all_equal(extents: list[AxisExtent]) -> bool:
         return True
     first = extents[0]
     return all(e == first for e in extents[1:])
+
+
+# --------------------------------------------------------------------------
+# Tick dash <-> label pairing (wave-2 break-axis D2, #231)
+# --------------------------------------------------------------------------
+
+
+class AxisTickDashLabels(NamedTuple):
+    """One axis tick's dash `<line>`, paired with the label `<text>` node(s)
+    (`(x, y, text)`) drawn for that same tick, in document order."""
+
+    dash: tuple[float, float, float, float]
+    labels: list[tuple[float, float, str]]
+
+
+def _ordered_lines_and_labels(svg: str) -> list[tuple[str, tuple]]:
+    """``(kind, coords)`` for every ``<line>`` or non-empty ``<text>`` element,
+    in document order — ``kind`` is ``"line"`` (``coords`` = ``(x1, y1, x2,
+    y2)``) or ``"text"`` (``coords`` = ``(x, y, text)``).
+
+    A single combined scan, unlike :func:`ordered_text_entries` (which only
+    sees ``<text>``): pairing a tick's dash with its label needs their
+    RELATIVE document order, and ``marks/axis.rs``'s ``build_axis`` emits a
+    tick's dash immediately before that tick's label(s) — see
+    :func:`axis_tick_dash_label_pairs`, the one caller that needs this.
+    """
+    entries: list[tuple[str, tuple]] = []
+    for m in re.finditer(r"<line\s+([^>]*)/?>|<text\s+([^>]*)>([^<]*)</text>", svg):
+        if m.group(1) is not None:
+            attrs = m.group(1)
+            x1 = float(re.search(r'x1="([^"]+)"', attrs).group(1))
+            y1 = float(re.search(r'y1="([^"]+)"', attrs).group(1))
+            x2 = float(re.search(r'x2="([^"]+)"', attrs).group(1))
+            y2 = float(re.search(r'y2="([^"]+)"', attrs).group(1))
+            entries.append(("line", (x1, y1, x2, y2)))
+        else:
+            text = m.group(3).strip()
+            if not text:
+                continue
+            attrs = m.group(2)
+            x = float(re.search(r'x="([^"]+)"', attrs).group(1))
+            y = float(re.search(r'y="([^"]+)"', attrs).group(1))
+            entries.append(("text", (x, y, text)))
+    return entries
+
+
+def axis_tick_dash_label_pairs(
+    svg: str, *, axis: str, dash_max_length: float = 20.0
+) -> list[AxisTickDashLabels]:
+    """Pair each ``axis``'s tick dash with the label(s) drawn for that tick.
+
+    ``build_axis`` (``crates/ferrum-core/src/render/marks/axis.rs``) emits
+    one tick's dash ``<line>`` immediately before that tick's label
+    ``<text>`` node(s) (one, or several for a multi-line label), and nothing
+    else interleaves between one tick's own chrome and the next's. This
+    walks the SVG once, in document order, and groups each qualifying dash
+    with the label(s) that immediately follow it — up to the next ``<line>``
+    element, which always ends a group. That means the axis's own domain
+    line, its gridlines, and the OTHER axis's chrome (a foreign dash, or that
+    axis's own domain line) can never leak into a group: each is itself a
+    ``<line>`` and so closes whatever group came before it, contributing no
+    labels of its own.
+
+    A dash "qualifies" for ``axis`` when it is aligned to that axis's tick
+    orientation (an x-tick dash is vertical, ``x1 == x2``; a y-tick dash is
+    horizontal, ``y1 == y2``) and short (``<= dash_max_length``, default well
+    above the theme's default 4px tick length and well below a gridline's or
+    the domain line's span) — the same length-based landmark
+    ``test_break_axis_geometry.py``'s ``_y_axis_domain_line_span`` uses to
+    tell the domain line from a tick dash, applied the other way round.
+
+    A HIDDEN dash (its tick's anchor fell inside a break's gap) still
+    qualifies and is returned here at its actual (off-canvas, sentinel)
+    position, never omitted: both its along-axis coordinates collapse to the
+    same pixel under D2's rigid-translation model (spec §4 "Tick labels"),
+    so ``x1 == x2``/``y1 == y2`` still holds, and its across-axis length is
+    unchanged.
+    """
+    if axis not in ("x", "y"):
+        raise ValueError(f"axis must be 'x' or 'y', got {axis!r}")
+    is_x = axis == "x"
+    groups: list[AxisTickDashLabels] = []
+    current: AxisTickDashLabels | None = None
+    for kind, coords in _ordered_lines_and_labels(svg):
+        if kind == "line":
+            x1, y1, x2, y2 = coords
+            aligned = (x1 == x2) if is_x else (y1 == y2)
+            length = abs(y2 - y1) if is_x else abs(x2 - x1)
+            if aligned and length <= dash_max_length:
+                current = AxisTickDashLabels(dash=coords, labels=[])
+                groups.append(current)
+            else:
+                current = None
+        elif current is not None:
+            current.labels.append(coords)
+    return groups
+
+
+def tick_along(dash: tuple[float, float, float, float], *, axis: str) -> float:
+    """A tick dash's own along-axis pixel — both ends of a qualifying dash
+    (see :func:`axis_tick_dash_label_pairs`) agree on it by construction."""
+    x1, y1, _x2, _y2 = dash
+    return x1 if axis == "x" else y1
+
+
+def label_along(label: tuple[float, float, str], *, axis: str) -> float:
+    """A label's along-axis drawn coordinate (``x`` for an x-tick, ``y`` for a y-tick)."""
+    x, y, _text = label
+    return x if axis == "x" else y

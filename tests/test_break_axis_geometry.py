@@ -27,6 +27,7 @@ import pytest
 
 import ferrum as fm
 import ferrum.annotation as ann
+from _svg_extents import axis_tick_dash_label_pairs, label_along, tick_along
 
 
 # --------------------------------------------------------------------------
@@ -1209,3 +1210,155 @@ def test_out_of_domain_annotation_clamps_to_the_correct_edge_under_a_break():
         f"the clamp edges ({above_max}, {below_min}) must sit inside the plot "
         f"rect ({rect_top}, {rect_bottom}) by the scale's padding"
     )
+
+
+# --------------------------------------------------------------------------
+# GH #231 / D2: rigid tick-label offsets under a break
+# --------------------------------------------------------------------------
+#
+# `remap_node`'s `Text` arm used to reverse-map a label's own drawn baseline
+# (`tick.position + font/3` on a vertical axis, or a `label_flush` edge's
+# `tick.position` exactly) as if THAT were the tick's data position, so each
+# label's offset from its own dash compressed by whatever ratio that
+# DIFFERENT pixel implied — a different amount per tick, a flush edge label
+# reading an offset of exactly zero as if it had none, and an offset that
+# could push a label's DRAWN position into a gap its own tick never crossed.
+# `marks::axis::AxisTickNode` now carries each node's own tick anchor to the
+# remap, and `BreakRemap::remap_axis_tick_node` translates rigidly on it
+# (spec §4 "Tick labels (D2)"), so a label rides its own dash exactly instead
+# of being re-derived from wherever it happens to be drawn.
+
+
+def _numeric_labels(labels):
+    """Filter a tick group's labels to the numeric ones.
+
+    `axis_tick_dash_label_pairs` groups by adjacency: nothing separates the
+    LAST tick's label from a following axis title `<text>` (no `<line>`
+    intervenes), so the title can land in that group too. Filtering to
+    float-parseable label text drops it without needing the chart to
+    suppress its title.
+    """
+    numeric = []
+    for label in labels:
+        try:
+            float(label[2])
+        except ValueError:
+            continue
+        numeric.append(label)
+    return numeric
+
+
+@pytest.mark.parametrize("axis, gap", [("y", (18, 22)), ("x", (2.4, 3.6))])
+def test_tick_label_offset_from_its_own_dash_survives_a_break(axis, gap):
+    """A label's drawn offset from its own tick's dash is preserved verbatim
+    under a break, for every visible tick — never compressed by the segment
+    ratio, and a label never hides while its own dash stays visible.
+
+    This measures the offset from each tick's PAIRED dash (read straight off
+    the rendered SVG, never a hardcoded formula), so it holds regardless of
+    which axis carries the break — a vertical axis's default label offset
+    (`font_size / 3`) is where the old bug was visible; a horizontal axis's
+    default offset happens to be zero, which this still confirms survives a
+    break intact rather than assuming it trivially does.
+    """
+    chart = fm.Chart(_PADDED_REF_DF).mark_point().encode(x="x:Q", y="y:Q")
+    unbroken_svg = chart.to_svg()
+    broken_svg = (chart + fm.BreakAxis(axis=axis, gap=gap)).to_svg()
+
+    unbroken_ticks = axis_tick_dash_label_pairs(unbroken_svg, axis=axis)
+    broken_ticks = axis_tick_dash_label_pairs(broken_svg, axis=axis)
+    assert unbroken_ticks, f"test sanity: expected {axis}-axis tick dashes"
+    assert len(broken_ticks) == len(unbroken_ticks), (
+        "a break must not change which ticks are drawn, only where they land"
+    )
+
+    saw_a_hidden_tick = False
+    for unbroken_tick, broken_tick in zip(unbroken_ticks, broken_ticks):
+        unbroken_numeric = _numeric_labels(unbroken_tick.labels)
+        broken_numeric = _numeric_labels(broken_tick.labels)
+        assert len(broken_numeric) == len(unbroken_numeric), (
+            f"a break must not cull or add label lines for a tick; "
+            f"unbroken={unbroken_tick.labels} broken={broken_tick.labels}"
+        )
+        for unbroken_label, broken_label in zip(unbroken_numeric, broken_numeric):
+            unbroken_offset = label_along(unbroken_label, axis=axis) - tick_along(
+                unbroken_tick.dash, axis=axis
+            )
+            broken_offset = label_along(broken_label, axis=axis) - tick_along(
+                broken_tick.dash, axis=axis
+            )
+            assert broken_offset == pytest.approx(unbroken_offset, abs=1e-2), (
+                f"tick {unbroken_label[2]!r}: drawn offset from its own dash must "
+                f"survive a break verbatim; unbroken={unbroken_offset} "
+                f"broken={broken_offset}"
+            )
+
+        # D2's hide rule: a label hides iff its OWN tick's dash hides — never
+        # independently, and never at a different threshold than the dash.
+        dash_hidden = tick_along(broken_tick.dash, axis=axis) < -1000
+        for broken_label in broken_numeric:
+            label_hidden = label_along(broken_label, axis=axis) < -1000
+            assert label_hidden == dash_hidden, (
+                f"tick {broken_label[2]!r}: a label must hide exactly when its "
+                f"own tick's dash does, never independently (dash_hidden="
+                f"{dash_hidden}, label_hidden={label_hidden})"
+            )
+        saw_a_hidden_tick = saw_a_hidden_tick or dash_hidden
+
+    assert saw_a_hidden_tick, f"test sanity: gap={gap} must hide at least one {axis} tick"
+
+
+def test_flush_edge_tick_label_offset_survives_a_break():
+    """`label_flush`'s edge ticks carry a DIFFERENT drawn offset than every
+    interior tick (0px at one edge, a full `font_size` at the other, per
+    `build_axis`'s flush formula) — and that offset survives a break exactly
+    like every interior tick's, closing the case the finding named
+    specifically: a flush edge label used to read its (non-representative)
+    zero offset as "no compression happened", while every interior label's
+    offset silently shrank around it.
+    """
+    chart = fm.Chart(_PADDED_REF_DF).mark_point().encode(
+        x="x:Q", y=fm.Y("y:Q", axis=fm.Axis(label_flush=True))
+    )
+    unbroken_svg = chart.to_svg()
+    broken_svg = (chart + fm.BreakAxis(axis="y", gap=(18, 22))).to_svg()
+
+    unbroken_ticks = axis_tick_dash_label_pairs(unbroken_svg, axis="y")
+    broken_ticks = axis_tick_dash_label_pairs(broken_svg, axis="y")
+    assert len(unbroken_ticks) == len(broken_ticks) and unbroken_ticks
+
+    first_offset = label_along(
+        _numeric_labels(unbroken_ticks[0].labels)[0], axis="y"
+    ) - tick_along(unbroken_ticks[0].dash, axis="y")
+    last_offset = label_along(
+        _numeric_labels(unbroken_ticks[-1].labels)[0], axis="y"
+    ) - tick_along(unbroken_ticks[-1].dash, axis="y")
+    assert first_offset != pytest.approx(last_offset, abs=1e-2), (
+        "test sanity: label_flush must give the two edge ticks DIFFERENT "
+        f"offsets (0 vs font_size); got first={first_offset} last={last_offset}"
+    )
+
+    for unbroken_tick, broken_tick in zip(
+        (unbroken_ticks[0], unbroken_ticks[-1]), (broken_ticks[0], broken_ticks[-1])
+    ):
+        # The offset assertion below would pass vacuously if this gap hid the
+        # edge tick (rigid translation preserves an offset at BREAK_HIDDEN
+        # too), so confirm the tick this test is actually about is visible.
+        dash_hidden = tick_along(broken_tick.dash, axis="y") < -1000
+        assert not dash_hidden, (
+            f"test sanity: gap=(18, 22) must not hide flush edge tick "
+            f"{_numeric_labels(broken_tick.labels)[0][2]!r}"
+        )
+        unbroken_label = _numeric_labels(unbroken_tick.labels)[0]
+        broken_label = _numeric_labels(broken_tick.labels)[0]
+        unbroken_offset = label_along(unbroken_label, axis="y") - tick_along(
+            unbroken_tick.dash, axis="y"
+        )
+        broken_offset = label_along(broken_label, axis="y") - tick_along(
+            broken_tick.dash, axis="y"
+        )
+        assert broken_offset == pytest.approx(unbroken_offset, abs=1e-2), (
+            f"flush edge tick {unbroken_label[2]!r}: its distinctive offset "
+            f"must survive a break just like an interior tick's; "
+            f"unbroken={unbroken_offset} broken={broken_offset}"
+        )

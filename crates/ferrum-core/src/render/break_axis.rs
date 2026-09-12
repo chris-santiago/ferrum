@@ -14,6 +14,7 @@ use ferrum_scene::{FillStroke, MarkBatchKind, PathCmd, SceneNode};
 
 use crate::layout::{Rect, ThemeInputs};
 use crate::render::draw::to_scene_stroke;
+use crate::render::marks;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -1138,12 +1139,7 @@ impl<'a> BreakRemap<'a> {
             return;
         };
         let anchor = (lo + hi) / 2.0;
-        // Hiding is the same rule with `BREAK_HIDDEN` as the destination, so a
-        // hidden glyph keeps its shape off-screen instead of collapsing to a
-        // zero-size artifact — and a one-coordinate node reduces to
-        // `coord = BREAK_HIDDEN`, the assignment it has always had.
-        let moved = self.coord(anchor).unwrap_or(BREAK_HIDDEN);
-        self.for_each_along(node, &mut |c| *c = moved + (*c - anchor));
+        self.translate_on_anchor(node, anchor);
     }
 
     /// Re-place one node of a label batch — the
@@ -1389,10 +1385,81 @@ impl<'a> BreakRemap<'a> {
     /// the line shrank to the padded span (#226); it stays full-rect, exactly
     /// as on an unbroken chart. `marks::axis::AxisNodes` keeps all three
     /// apart at the source.
-    pub fn remap_axis_chrome(&self, nodes: &mut [SceneNode]) {
-        for node in nodes.iter_mut() {
-            self.remap_node(node);
+    ///
+    /// D2: each node here is translated RIGIDLY on its own tick's `anchor`
+    /// (see [`marks::axis::AxisTickNode`]), not reverse-mapped from its own
+    /// drawn coordinate — [`BreakRemap::remap_axis_tick_node`].
+    pub fn remap_axis_chrome(&self, nodes: &mut [marks::axis::AxisTickNode]) {
+        for tick_node in nodes.iter_mut() {
+            self.remap_axis_tick_node(&mut tick_node.node, tick_node.anchor);
         }
+    }
+
+    /// Re-place one anchored axis-chrome node — a tick dash or a tick label —
+    /// by translating it rigidly on `anchor`, its own tick's data-mapped
+    /// pixel position (D2, spec §4 "Tick labels").
+    ///
+    /// Shaped exactly like [`BreakRemap::remap_glyph_node`], except the
+    /// anchor is supplied by the caller instead of computed from the node's
+    /// own extent: a label's drawn coordinate (`tick.position + font/3`, a
+    /// `label_flush` edge shift, rotation geometry...) is NOT the position a
+    /// break should reverse-map, because doing so answers "where does this
+    /// baseline offset itself belong on the broken scale" rather than "where
+    /// does this tick's own value land" — the question whose wrong answer let
+    /// siblings' baseline gaps compress by different amounts per segment and
+    /// read a flush edge label's offset as exactly zero. Translating by the
+    /// anchor's own displacement instead keeps the drawn offset bit for bit,
+    /// and hides the whole node — dash and label alike — iff the ANCHOR
+    /// (never the label's own baseline) falls inside a gap, so a label can
+    /// never hide while its own tick/gridline stays visible.
+    ///
+    /// A tick dash's own two endpoints already equal its anchor
+    /// (`marks::axis::build_axis` draws both from `tick.position`), so for a
+    /// dash this reduces to translating both ends by the same displacement
+    /// `coord(anchor)` produces for either — byte-identical to the exact
+    /// vertex-by-vertex remap dashes had before this method existed.
+    ///
+    /// Only `Line` (a dash) and `Text` (a label) ever reach here — the two
+    /// kinds [`marks::axis::build_axis`] tags with an anchor. Any other kind
+    /// arriving here would be a node this module has no anchor contract for;
+    /// rather than silently falling back to the vertex-remap's own coordinate
+    /// (the bug this method exists to close), a debug build panics so the
+    /// producer is fixed instead of the symptom being masked.
+    ///
+    /// Release-mode note: the `debug_assert!` above is compiled out in
+    /// release, so an unanchored kind reaching here is not rejected there —
+    /// [`BreakRemap::translate_on_anchor`] still runs and translates
+    /// `Circle`/`Rect`/`Path`/`Polyline`/`Polygon`/`Group` rigidly like any
+    /// other glyph. The one asymmetry is `Image`/`Raw`: `for_each_along`
+    /// visits neither, so such a node is left in place at its unbroken
+    /// position — untranslated and NOT hidden — rather than either moving or
+    /// disappearing.
+    fn remap_axis_tick_node(&self, node: &mut SceneNode, anchor: f64) {
+        debug_assert!(
+            matches!(node, SceneNode::Line { .. } | SceneNode::Text { .. }),
+            "axis-chrome anchor node must be a tick dash or a tick label, got {node:?}"
+        );
+        self.translate_on_anchor(node, anchor);
+    }
+
+    /// Translate every along-axis coordinate of `node` rigidly by the
+    /// displacement its own `anchor` undergoes under this break, hiding the
+    /// whole node at `BREAK_HIDDEN` (offset by that same displacement) when
+    /// `anchor` falls inside a gap.
+    ///
+    /// The one definition [`BreakRemap::remap_glyph_node`] and
+    /// [`BreakRemap::remap_axis_tick_node`] both call — the translation rule
+    /// and its hide destination cannot drift between "anchor computed from
+    /// the node's own extent" (a plain glyph) and "anchor supplied by the
+    /// caller" (a tick dash or label), because both compute the anchor
+    /// however they need to and then hand it to the same primitive.
+    fn translate_on_anchor(&self, node: &mut SceneNode, anchor: f64) {
+        // Hiding is the same rule with `BREAK_HIDDEN` as the destination, so a
+        // hidden glyph keeps its shape off-screen instead of collapsing to a
+        // zero-size artifact — and a one-coordinate node reduces to
+        // `coord = BREAK_HIDDEN`, the assignment it has always had.
+        let moved = self.coord(anchor).unwrap_or(BREAK_HIDDEN);
+        self.for_each_along(node, &mut |c| *c = moved + (*c - anchor));
     }
 
     /// Re-place a single node's coordinates along the broken axis, hiding any
@@ -2645,39 +2712,48 @@ mod tests {
         assert!((total - 388.0).abs() < 1e-9, "400 - 12 pixels of data; got {total}");
     }
 
-    /// Cross-axis chrome is now excluded BY THE CALLER (an axis knows which
+    /// Cross-axis chrome is excluded BY THE CALLER (an axis knows which
     /// dimension it was placed along — `marks::axis::AxisNodes::placed_along`),
-    /// so this function places every node it is handed. That is what makes
-    /// handing it foreign chrome wrong, and it is exactly what the deleted
-    /// pixel-range guard failed to prevent: an x-axis tick dash BEGINS on the
-    /// plot floor, inside the y range, so the guard admitted it and then
-    /// clamped both of its ends onto one pixel. Pinned here as the
-    /// characteristic the caller must respect.
+    /// not by this function or by [`BreakRemap::remap_axis_tick_node`]: neither
+    /// checks that a node's `anchor` actually belongs to this break's axis: it
+    /// trusts whatever anchor it is handed and translates rigidly on it. Pinned
+    /// here as the characteristic the caller must respect — passing a foreign
+    /// anchor (here: an x-tick's OWN 50px tick position, reused as if it were
+    /// a y anchor) does not error; it silently produces a corrupted position.
     #[test]
-    fn axis_chrome_handed_to_a_break_is_placed_whatever_its_coordinate() {
+    fn axis_chrome_handed_a_foreign_anchor_is_placed_without_axis_validation() {
         let br = guide_break();
-        // A downward x-axis tick dash: 4px below the plot floor (pixel 400).
-        let mut nodes = vec![SceneNode::Line {
-            x1: 50.0,
-            y1: 400.0,
-            x2: 50.0,
-            y2: 404.0,
-            style: crate::render::draw::to_scene_stroke(
-                palette::Srgba::new(0, 0, 0, 255),
-                1.0,
-                1.0,
-                None,
-                None,
-                None,
-            ),
+        // A downward x-axis tick dash: drawn from the plot floor (y=400) to
+        // 4px below it (its drawn length, not data). Its own tick anchor is
+        // an X pixel (50.0) — nonsense as a Y anchor, which is the point.
+        let mut nodes = vec![marks::axis::AxisTickNode {
+            node: SceneNode::Line {
+                x1: 50.0,
+                y1: 400.0,
+                x2: 50.0,
+                y2: 404.0,
+                style: crate::render::draw::to_scene_stroke(
+                    palette::Srgba::new(0, 0, 0, 255),
+                    1.0,
+                    1.0,
+                    None,
+                    None,
+                    None,
+                ),
+            },
+            anchor: 50.0,
         }];
         guide_remap(&br).remap_axis_chrome(&mut nodes);
-        let SceneNode::Line { y1, y2, .. } = nodes[0] else { panic!() };
-        assert_eq!(
-            (y1, y2),
-            (400.0, 400.0),
-            "both ends clamp onto the domain's own edge — which is why a y-break \
-             must never be handed an x-axis's chrome"
+        let SceneNode::Line { y1, y2, .. } = nodes[0].node else { panic!() };
+        // data_at(50) = 0 + (50 - 400)/(0 - 400) * 1000 = 875, which sits in
+        // the upper segment [850, 1000] at pixel 194 + (25/150)*(0-194) ≈
+        // 161.667; both ends translate by that displacement minus the anchor
+        // (≈ 111.667), landing well past the plot's own pixel range [0, 400].
+        assert!(y1 > 400.0, "a foreign-axis anchor drives the dash off the plot; got y1={y1}");
+        assert!(
+            (y2 - y1 - 4.0).abs() < 1e-9,
+            "the dash's own 4px drawn length must survive even a corrupted placement; got {} vs {}",
+            y2, y1
         );
     }
 

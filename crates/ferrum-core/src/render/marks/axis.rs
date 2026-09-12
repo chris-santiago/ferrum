@@ -17,8 +17,11 @@ use ferrum_scene::SceneNode;
 /// Only [`AxisNodes::data_positioned`] is ever handed to the remap.
 pub struct AxisNodes {
     /// Tick marks and tick labels — every node placed from a tick value, and
-    /// the only nodes a broken scale may move or hide.
-    pub data_positioned: Vec<SceneNode>,
+    /// the only nodes a broken scale may move or hide. Each is paired with
+    /// its own tick's anchor (spec §6) so the remap can translate it rigidly
+    /// rather than re-deriving its position from whatever pixel the node
+    /// happens to be drawn at — see [`AxisTickNode`].
+    pub data_positioned: Vec<AxisTickNode>,
     /// The domain line, spanning the axis's own geometry end to end.
     ///
     /// Structural chrome, and exempt from the break remap for the same reason
@@ -48,14 +51,44 @@ pub struct AxisNodes {
 
 impl AxisNodes {
     /// Flatten back into paint order: domain line, then tick chrome, then the
-    /// title — the order `build_axis` emits them in.
+    /// title — the order `build_axis` emits them in. Drops the anchor tags;
+    /// nothing downstream of scene assembly reads them.
     pub fn into_nodes(self) -> Vec<SceneNode> {
         let mut nodes = Vec::with_capacity(self.data_positioned.len() + 2);
         nodes.extend(self.domain_line);
-        nodes.extend(self.data_positioned);
+        nodes.extend(self.data_positioned.into_iter().map(|t| t.node));
         nodes.extend(self.title);
         nodes
     }
+}
+
+/// One data-positioned axis-chrome scene node (a tick mark or a tick label),
+/// paired with its own tick's anchor — the tick's data-mapped pixel position
+/// on the UNBROKEN axis, in the same coordinate space [`BreakRemap::coord`]
+/// takes as input (spec §6 anchor contract).
+///
+/// A tick's label is not drawn AT the tick's position: it sits at a baseline
+/// offset (`tick.position + font/3`, a `label_flush` edge shift, rotation
+/// geometry...) that is drawn size, not a second data value. Handing the
+/// remap only the label's own coordinate — as if THAT were the data
+/// position — made a break reverse-map the offset itself, compressing each
+/// label's baseline gap from its tick by a different amount than its
+/// neighbor's and reading a flush edge label's offset as exactly zero (D2,
+/// spec §4 "Tick labels"). Carrying the tick's own anchor alongside the node
+/// lets the remap translate the whole node rigidly by the anchor's
+/// displacement instead, which keeps the drawn offset bit for bit and hides
+/// the node iff the tick itself — not the label's own baseline — falls in a
+/// gap. A tick dash's own endpoints already equal its anchor, so this is a
+/// byte-identical no-op for dashes; only labels change.
+///
+/// [`BreakRemap::coord`]: crate::render::break_axis::BreakRemap::coord
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxisTickNode {
+    /// The scene node itself (a tick's `Line` dash, or a tick label's `Text`).
+    pub node: SceneNode,
+    /// This node's tick's data-mapped pixel position (`TickLayout::position`)
+    /// on the unbroken axis — never the node's own drawn coordinate.
+    pub anchor: f64,
 }
 
 /// Build an axis's scene nodes (domain line, ticks, tick labels, title).
@@ -276,44 +309,31 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             }
         }
 
+        // Every node pushed below is tagged with `tick.position` — this
+        // tick's own anchor, the exact value the break remap reverse-mapped
+        // from before D2 (spec §6). A dash's endpoints already equal it; a
+        // label's drawn coordinate does not, which is the whole fix.
         if axis.show_ticks {
-            nodes.push(SceneNode::Line {
-                x1: tx1,
-                y1: ty1,
-                x2: tx2,
-                y2: ty2,
-                style: tick_stroke.clone(),
+            nodes.push(AxisTickNode {
+                node: SceneNode::Line {
+                    x1: tx1,
+                    y1: ty1,
+                    x2: tx2,
+                    y2: ty2,
+                    style: tick_stroke.clone(),
+                },
+                anchor: tick.position,
             });
         }
         if axis.show_labels && !tick.culled {
             let lines: Vec<&str> = tick.label.split('\n').collect();
             if lines.len() == 1 || axis.orient != AxisOrient::Bottom {
                 // Single-line label, or non-Bottom orient (no multi-line for those).
-                nodes.push(SceneNode::Text {
-                    x: label_x,
-                    y: label_y,
-                    content: tick.label.clone(),
-                    slot: tick_slot,
-                    style: to_scene_text_style(
-                        label_color,
-                        effective_font_size,
-                        anchor,
-                        angle,
-                        &theme.typography.label_font_family,
-                        label_fw,
-                        None,
-                        1.0,
-                    ),
-                });
-            } else {
-                // Multi-line label (Bottom orient only): emit one text node per line.
-                let line_height = effective_font_size * 1.2;
-                for (line_idx, line) in lines.iter().enumerate() {
-                    let line_y = label_y + (line_idx as f64) * line_height;
-                    nodes.push(SceneNode::Text {
+                nodes.push(AxisTickNode {
+                    node: SceneNode::Text {
                         x: label_x,
-                        y: line_y,
-                        content: line.to_string(),
+                        y: label_y,
+                        content: tick.label.clone(),
                         slot: tick_slot,
                         style: to_scene_text_style(
                             label_color,
@@ -325,6 +345,34 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                             None,
                             1.0,
                         ),
+                    },
+                    anchor: tick.position,
+                });
+            } else {
+                // Multi-line label (Bottom orient only): emit one text node per
+                // line, each carrying the SAME tick anchor — every line moves
+                // and hides together with the tick it labels.
+                let line_height = effective_font_size * 1.2;
+                for (line_idx, line) in lines.iter().enumerate() {
+                    let line_y = label_y + (line_idx as f64) * line_height;
+                    nodes.push(AxisTickNode {
+                        node: SceneNode::Text {
+                            x: label_x,
+                            y: line_y,
+                            content: line.to_string(),
+                            slot: tick_slot,
+                            style: to_scene_text_style(
+                                label_color,
+                                effective_font_size,
+                                anchor,
+                                angle,
+                                &theme.typography.label_font_family,
+                                label_fw,
+                                None,
+                                1.0,
+                            ),
+                        },
+                        anchor: tick.position,
                     });
                 }
             }
@@ -379,9 +427,13 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
             AxisOrient::Left => (-shift, 0.0),   // outward = left
             AxisOrient::Right => (shift, 0.0),   // outward = right
         };
+        // The perpendicular shift never touches the along-axis coordinate, so
+        // each tick's `anchor` (an along-axis value) stays correct without
+        // being shifted here too.
         for node in out
             .data_positioned
             .iter_mut()
+            .map(|t| &mut t.node)
             .chain(out.domain_line.iter_mut())
             .chain(out.title.iter_mut())
         {

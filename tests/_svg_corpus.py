@@ -122,13 +122,35 @@ _TEXT_CONTENT_TAGS = frozenset({"text", "tspan", "title", "desc"})
 #: data marks (circle/rect/path/polyline) are legal output.
 _CHROME_TAGS = frozenset({"line", "text"})
 
-#: `render/scene_build.rs::BREAK_HIDDEN` (Rust layer). A break-axis chart hides a
+#: `render/break_axis.rs::BREAK_HIDDEN` (Rust layer). A break-axis chart hides a
 #: mark that falls inside the gap by moving it to this coordinate rather than
 #: dropping it, because dropping it would desynchronise `data_indices`. Every
-#: legitimate off-viewport coordinate in the corpus is exactly this value, so the
-#: sentinel is a PROPERTY the queries can recognise — not a file allow-list that
-#: silently absorbs the next real defect.
+#: legitimate off-viewport coordinate in the corpus is `BREAK_HIDDEN` ITSELF or
+#: `BREAK_HIDDEN` plus a small drawn-geometry offset (D2, wave 2 #231: a tick
+#: label or dash hidden under a break translates RIGIDLY on its own tick's
+#: anchor, so its off-screen position keeps whatever offset it already drew
+#: at — a label's baseline gap, e.g. — rather than landing on the bare
+#: constant), so `Node.at_break_sentinel` recognises a NEIGHBORHOOD of this
+#: value, not only the exact float. It is a PROPERTY the queries can
+#: recognise — not a file allow-list that silently absorbs the next real
+#: defect.
 BREAK_HIDDEN = -99999.0
+
+#: How far a legitimate sentinel coordinate may sit from `BREAK_HIDDEN` and
+#: still be recognised as one (see `Node.at_break_sentinel`). Bounded by the
+#: largest along-axis offset an ANCHORED axis-chrome node (a tick dash or
+#: label; see `render/marks/axis.rs::AxisTickNode`) can carry away from its
+#: own anchor: a dash's endpoints equal the anchor (offset 0), an interior
+#: label's baseline sits `font_size / 3` from it, and a `label_flush` edge
+#: label sits a full `font_size` from it — the largest of the three. Every
+#: multi-line label shares its tick's `label_x`, so stacking is strictly
+#: ACROSS-axis and contributes nothing here. 100 is headroom over any
+#: realistic `font_size` (tens of pixels) while staying far short of a
+#: chrome-span-sized coordinate (400-900px for a gridline/domain line in this
+#: corpus) or the pinned `-4242` counter-example (95757 away), so a defect
+#: that routes structural chrome through this hide path, or any other
+#: off-canvas stray, is still reported, never excused by this neighborhood.
+_BREAK_HIDDEN_TOLERANCE = 100.0
 
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 _NONFINITE_RE = re.compile(r"(?i)(?<![0-9A-Za-z])(nan|[-+]?inf(?:inity)?)(?![0-9A-Za-z])")
@@ -469,7 +491,16 @@ class Node:
 
     @property
     def at_break_sentinel(self) -> bool:
-        """True when any of the element's own coordinates is `BREAK_HIDDEN`."""
+        """True when any of the element's own coordinates sits at, or in the
+        drawn-offset neighborhood of, `BREAK_HIDDEN` (see `_BREAK_HIDDEN_TOLERANCE`).
+
+        Not an exact match: D2 (wave 2, #231) translates a hidden axis-chrome
+        node RIGIDLY on its own tick's anchor, so a label's off-screen
+        position is `BREAK_HIDDEN` plus whatever baseline offset it already
+        drew at, not the bare constant. A coordinate 95000+ away (an
+        unrelated bug landing at, say, `-4242`) stays outside the
+        neighborhood and is still reported.
+        """
         coords: list[float] = []
         for key in ("x", "y", "x1", "y1", "x2", "y2", "cx", "cy"):
             if key in self.attrib:
@@ -477,7 +508,7 @@ class Node:
         for key in ("points", "d"):
             if key in self.attrib:
                 coords.extend(_numbers(self.attrib[key]))
-        return any(math.isclose(v, BREAK_HIDDEN) for v in coords)
+        return any(abs(v - BREAK_HIDDEN) <= _BREAK_HIDDEN_TOLERANCE for v in coords)
 
     @property
     def clip_ref(self) -> str | None:
