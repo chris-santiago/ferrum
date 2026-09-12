@@ -685,4 +685,469 @@ mod tests {
         assert_eq!(with_ctx.num_columns(), without.num_columns());
         assert_eq!(with_ctx.num_rows(), without.num_rows());
     }
+
+    // ── Wave-1 close mutation-pin: dispatch-integrity test ────────────────
+    //
+    // The mutation-close finding (`.sdd/close-mutation-tester.md`) moved
+    // `Robust` OUT of `apply_with_context`'s context-aware `arm!` invocation
+    // (above) and INTO its plain-`apply(batch)` fallback list, and the whole
+    // suite still passed: every per-transform test that exercises this
+    // degrade calls that transform's OWN module-level `apply_with_context`
+    // directly (`robust::apply_with_context(&spec, &batch, &ctx)`), never
+    // `TransformSpec::apply_with_context` — so none of them notice that the
+    // ENUM-LEVEL dispatch routed the real `ctx` to an ephemeral, discarded
+    // `TransformContext::default()` instead (`robust::apply`'s own
+    // fallback). The exhaustive match only catches an OMITTED variant, not
+    // one MISFILED into the wrong bucket.
+    //
+    // This test closes the class, not the instance: it drives every
+    // context-aware variant through `TransformSpec::apply_with_context`
+    // itself (not the module function each fixture's own home-module test
+    // calls), with a fixture that provokes that transform's own
+    // `ctx.warnings`-reporting degrade path, and asserts the warning landed
+    // in THE CALLER's context. A variant misfiled into the fallback bucket
+    // cannot do that: the fallback silently substitutes its own throwaway
+    // context, so the warning never reaches the context this test holds.
+    #[test]
+    fn context_aware_variants_route_their_own_warnings_through_enum_dispatch() {
+        use crate::transform::box_stats::WhiskerExtent;
+        use crate::transform::data_window::WindowOp;
+        use crate::transform::error_extent::ErrorMethod;
+        use crate::transform::join_aggregate::AggSpec as JoinAggSpec;
+        use crate::transform::kde::{default_kernel, BandwidthSpec};
+        use crate::transform::letter_value::KDepth;
+        use crate::transform::smooth::{SmoothMethod, SmoothOutput};
+        use crate::transform::summary::ErrorFn;
+        use arrow::array::{ArrayRef, StringArray};
+
+        pyo3::Python::initialize();
+
+        /// A batch of same-length Float64 columns, all nullable — the shape
+        /// every below-threshold single/pair-point degenerate fixture below
+        /// needs.
+        fn f64_batch(cols: &[(&str, Vec<f64>)]) -> RecordBatch {
+            let fields: Vec<Field> = cols
+                .iter()
+                .map(|(name, _)| Field::new(*name, DataType::Float64, true))
+                .collect();
+            let arrays: Vec<ArrayRef> = cols
+                .iter()
+                .map(|(_, vals)| Arc::new(Float64Array::from(vals.clone())) as ArrayRef)
+                .collect();
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap()
+        }
+
+        /// A Float64 value column paired with an all-Utf8-null groupby
+        /// column `g` — the shared fixture shape for every "group-key
+        /// partitioner family" case below: `NullKeyPolicy::Skip`'s
+        /// `GroupKeyAllNull` degrade fires whenever every row's groupby key
+        /// is null (GH #197), pushed from the one shared
+        /// `group_partition_multi` call every one of these routes through.
+        fn value_and_all_null_group(value_name: &str, vals: Vec<f64>) -> RecordBatch {
+            let n = vals.len();
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(value_name, DataType::Float64, true),
+                Field::new("g", DataType::Utf8, true),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vals)),
+                    Arc::new(StringArray::from(vec![None; n] as Vec<Option<&str>>)),
+                ],
+            )
+            .unwrap()
+        }
+
+        // Canonical enumeration of the `arm!` invocation inside
+        // `TransformSpec::apply_with_context` (above) — 24 variants routed
+        // through the uniform `apply_with_context(s, batch, ctx)` macro
+        // shape. `Reorder` is also context-aware (an explicit arm with a
+        // different signature, `apply_with_outputs`) but is not named here:
+        // its ctx use is `named_outputs`, an orthogonal channel from the
+        // warnings-based check this test performs.
+        //
+        // Kept as a literal, not derived from the macro (a local, unexported
+        // item) — if a variant is ever added to or removed from the `arm!`
+        // invocation above, update this list too, and either add a fixture
+        // below or add it to `EXCLUDED` with a reason.
+        const CONTEXT_AWARE_VARIANTS: &[&str] = &[
+            "Raster", "Swarm", "Violin", "Smooth", "Robust", "RegressionData", "LoessData",
+            "Kde", "LetterValue", "Impute", "Aggregate", "Summary", "BoxStats", "ErrorExtent",
+            "Bin", "Kde2D", "Outliers", "TopK", "Pivot", "DataAggregate", "DensityData",
+            "DataStack", "DataWindow", "JoinAggregate",
+        ];
+        // Raster/Swarm/Violin read `ctx.panel_pixel_size` (see
+        // `context.rs`'s module doc: they are its only readers), never
+        // `ctx.warnings` — there is no warning-emitting degrade fixture to
+        // build for them, so a "non-empty warnings vec" assertion cannot
+        // discriminate a misfile of these three. Genuinely impractical for
+        // THIS test's shape (a fixture built around a different ctx field
+        // would need a different assertion); not silently skipped.
+        const EXCLUDED: &[&str] = &["Raster", "Swarm", "Violin"];
+
+        let mut cases: Vec<(&'static str, TransformSpec, RecordBatch)> = Vec::new();
+
+        // ── #162 degrade-warning channel: fit/parameter/fallback degrades ──
+
+        cases.push((
+            "Robust",
+            TransformSpec::Robust(RobustSpec {
+                x: "x".into(), y: "y".into(),
+                n_grid: 8, ci: None, huber_c: 1.345, max_iter: 50, tol: 1e-10,
+                output: SmoothOutput::Fitted,
+                inject_zero_ref: false, inject_metrics: false,
+                groupby: vec![], x_range: None, name: None,
+            }),
+            f64_batch(&[("x", vec![1.0]), ("y", vec![1.0])]),
+        ));
+
+        {
+            let xs: Vec<f64> = (0..60).map(|i| i as f64 * 0.15).collect();
+            let ys: Vec<f64> = xs.iter().map(|x| (x * 1.4).sin() * 5.0 + 0.3 * x).collect();
+            let k = xs.len() * 4;
+            cases.push((
+                "Smooth",
+                TransformSpec::Smooth(SmoothSpec {
+                    x: "x".into(), y: "y".into(),
+                    method: SmoothMethod::Gam,
+                    ci: None, bandwidth: 0.75, degree: 1, k, n: 20, seed: 0,
+                    x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+                    inject_zero_ref: false, inject_metrics: false, x_range: None,
+                    groupby: vec![], name: None,
+                }),
+                f64_batch(&[("x", xs), ("y", ys)]),
+            ));
+        }
+
+        cases.push((
+            "RegressionData",
+            TransformSpec::RegressionData(RegressionDataSpec {
+                x: "x".into(), y: "y".into(), method: "linear".into(), order: 1,
+                groupby: None, as_: ("rx".into(), "ry".into()), name: None,
+            }),
+            f64_batch(&[("x", vec![5.0]), ("y", vec![9.0])]),
+        ));
+
+        cases.push((
+            "LoessData",
+            TransformSpec::LoessData(LoessDataSpec {
+                x: "x".into(), y: "y".into(), bandwidth: 0.5,
+                groupby: None, as_: ("lx".into(), "ly".into()), name: None,
+            }),
+            f64_batch(&[("x", vec![0.0, 1.0]), ("y", vec![5.0, 7.0])]),
+        ));
+
+        cases.push((
+            "Kde",
+            TransformSpec::Kde(KdeSpec {
+                field: "x".into(), bandwidth: BandwidthSpec::Silverman, bw_adjust: 1.0,
+                shared_extent: false, n: 5, extent: None, cumulative: false,
+                kernel: default_kernel(), groupby: vec![],
+                count_scale: None, count_scale_extent: None, name: None,
+            }),
+            f64_batch(&[("x", vec![1.0])]),
+        ));
+
+        cases.push((
+            "LetterValue",
+            TransformSpec::LetterValue(LetterValueSpec {
+                value: "x".into(), group: None, k_depth: KDepth::Full,
+                outlier_threshold: 1.5, name: None, sort: None,
+            }),
+            f64_batch(&[("x", (0..10_000).map(|i| i as f64).collect())]),
+        ));
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("sales", DataType::Float64, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                    Arc::new(Float64Array::from(vec![Some(100.0), Some(120.0), None, None])),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "Impute",
+                TransformSpec::Impute(ImputeSpec {
+                    field: "sales".into(), method: "mean".into(), value: None,
+                    groupby: Some(vec!["g".into()]), key: None, keyvals: None, name: None,
+                }),
+                batch,
+            ));
+        }
+
+        // ── GH #197 group-key partitioner family: an all-null groupby
+        // column degrades to "no grouping happened" and warns once, through
+        // the one shared `group_partition_multi` call every one of these
+        // routes through — see `group_key/mod.rs`'s module doc.
+
+        cases.push((
+            "Aggregate",
+            TransformSpec::Aggregate(AggregateSpec {
+                ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "total".into() }],
+                groupby: vec!["g".into()], name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        cases.push((
+            "Summary",
+            TransformSpec::Summary(SummarySpec {
+                field: "v".into(), groupby: vec!["g".into()], error_fn: ErrorFn::Ci,
+                ci: 0.95, n_boot: 100, seed: 0, name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        cases.push((
+            "BoxStats",
+            TransformSpec::BoxStats(BoxStatsSpec {
+                field: "v".into(), groupby: vec!["g".into()],
+                whisker_extent: WhiskerExtent::IqrMultiplier(1.5), name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        cases.push((
+            "ErrorExtent",
+            TransformSpec::ErrorExtent(ErrorExtentSpec {
+                field: "v".into(), groupby: vec!["g".into()], method: ErrorMethod::Ci,
+                seed: 0, n_boot: 100, name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        cases.push((
+            "Bin",
+            TransformSpec::Bin(BinSpec {
+                field: "v".into(), mode: BinMode::Fixed { n: 2 }, extent: None,
+                nice: false, cumulative: false, shared_extent: false,
+                groupby: vec!["g".into()], agg_field: None, agg: None, name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, true),
+                Field::new("y", DataType::Float64, true),
+                Field::new("g", DataType::Utf8, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "Kde2D",
+                TransformSpec::Kde2D(Kde2DSpec {
+                    x: "x".into(), y: "y".into(), bandwidth: BandwidthSpec::Silverman,
+                    n: 3, extent: None, groupby: vec!["g".into()], name: None,
+                }),
+                batch,
+            ));
+        }
+
+        cases.push((
+            "Outliers",
+            TransformSpec::Outliers(OutliersSpec {
+                field: "v".into(), groupby: vec!["g".into()], extent: 1.5, name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("product", DataType::Utf8, true),
+                Field::new("revenue", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+                    Arc::new(Float64Array::from(vec![50.0, 80.0])),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "TopK",
+                TransformSpec::TopK(TopKSpec {
+                    n: 3, field: "revenue".into(), op: "sum".into(), sort: "descending".into(),
+                    groupby: Some(vec!["product".into()]), name: None,
+                }),
+                batch,
+            ));
+        }
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, true),
+                Field::new("key", DataType::Utf8, false),
+                Field::new("val", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+                    Arc::new(StringArray::from(vec!["x", "x"])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "Pivot",
+                TransformSpec::Pivot(PivotSpec {
+                    field: "key".into(), value: "val".into(),
+                    groupby: Some(vec!["g".into()]), limit: None, op: "sum".into(), name: None,
+                }),
+                batch,
+            ));
+        }
+
+        cases.push((
+            "DataAggregate",
+            TransformSpec::DataAggregate(DataAggregateSpec {
+                aggregates: vec![
+                    JoinAggSpec { field: "v".into(), fn_: AggFn::Mean, as_: "m".into() },
+                ],
+                groupby: Some(vec!["g".into()]), name: None,
+            }),
+            value_and_all_null_group("v", vec![1.0, 2.0]),
+        ));
+
+        cases.push((
+            "DensityData",
+            TransformSpec::DensityData(DensityDataSpec {
+                field: "x".into(), bandwidth: None, groupby: Some(vec!["g".into()]),
+                extent: None, steps: None, cumulative: false, kernel: default_kernel(),
+                as_: ("value".into(), "density".into()), name: None,
+            }),
+            value_and_all_null_group("x", vec![1.0, 2.0]),
+        ));
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, true),
+                Field::new("v", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "DataStack",
+                TransformSpec::DataStack(DataStackSpec {
+                    field: "v".into(), groupby: vec!["g".into()], sort: None,
+                    as_: ("y0".into(), "y1".into()), offset: "zero".into(), name: None,
+                }),
+                batch,
+            ));
+        }
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, true),
+                Field::new("v", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec![None, None, None] as Vec<Option<&str>>)),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "DataWindow",
+                TransformSpec::DataWindow(DataWindowSpec {
+                    ops: vec![WindowOp {
+                        op: "row_number".into(), field: None, as_: "rn".into(), param: None,
+                    }],
+                    sort: None, groupby: Some(vec!["g".into()]), frame: None,
+                    ignore_peers: false, name: None,
+                }),
+                batch,
+            ));
+        }
+
+        {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, true),
+                Field::new("val", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+                    Arc::new(Float64Array::from(vec![1.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            cases.push((
+                "JoinAggregate",
+                TransformSpec::JoinAggregate(JoinAggregateSpec {
+                    aggregates: vec![
+                        JoinAggSpec { field: "val".into(), fn_: AggFn::Mean, as_: "m".into() },
+                    ],
+                    groupby: Some(vec!["g".into()]), name: None,
+                }),
+                batch,
+            ));
+        }
+
+        // Drift guard: every canonical context-aware variant must be either
+        // fixture-covered here or explicitly excluded above with a reason —
+        // catches a typo in either list, and catches a future addition to
+        // the `arm!` invocation this test mirrors that nobody updated this
+        // list for.
+        let covered: std::collections::BTreeSet<&str> =
+            cases.iter().map(|(n, _, _)| *n).collect();
+        let excluded: std::collections::BTreeSet<&str> = EXCLUDED.iter().copied().collect();
+        let canonical: std::collections::BTreeSet<&str> =
+            CONTEXT_AWARE_VARIANTS.iter().copied().collect();
+        assert!(
+            covered.is_disjoint(&excluded),
+            "a variant cannot be both fixture-covered and excluded: {:?}",
+            covered.intersection(&excluded).collect::<Vec<_>>()
+        );
+        let accounted_for: std::collections::BTreeSet<&str> =
+            covered.union(&excluded).copied().collect();
+        assert_eq!(
+            accounted_for, canonical,
+            "every context-aware variant must be fixture-covered or explicitly excluded"
+        );
+
+        // The actual dispatch-integrity check: route every case through the
+        // ENUM-LEVEL `TransformSpec::apply_with_context` (not the module
+        // function each fixture's own home-module test calls) and confirm
+        // its warning landed in THIS caller's context. A variant misfiled
+        // into the plain-`apply(batch)` fallback bucket silently substitutes
+        // an ephemeral, discarded context, so its warning never reaches
+        // here — this assertion fails directly for exactly that variant.
+        for (name, spec, batch) in &cases {
+            let ctx = TransformContext::default();
+            spec.apply_with_context(batch, &ctx)
+                .unwrap_or_else(|e| panic!("{name}: fixture must apply cleanly, got {e}"));
+            assert!(
+                !ctx.warnings.borrow().is_empty(),
+                "{name}: expected a degrade warning in the context passed to \
+                 TransformSpec::apply_with_context — got none. Either its fixture \
+                 stopped triggering the degrade, or {name} was misfiled into the \
+                 plain-apply fallback bucket in apply_with_context's arm! invocation."
+            );
+        }
+    }
 }
