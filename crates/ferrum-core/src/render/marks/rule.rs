@@ -1065,6 +1065,76 @@ mod tests {
             "a real diagonal segment must not collapse to a single point");
     }
 
+    /// #166: no test asserted that `mark_qq(line=True)`'s reference RULE
+    /// element actually draws. `transform::qq`'s secondary `qq_line` output
+    /// is a single-row batch (`qq_line_x_start`, `qq_line_x_end`,
+    /// `qq_line_y_start`, `qq_line_y_end`); `heavy_stat.py`'s `qq()` wires a
+    /// rule layer to it as `x="qq_line_x_start"`, `y="qq_line_y_start"`,
+    /// `x2="qq_line_x_end"`, `y2="qq_line_y_end"` (the Diagonal shape, above).
+    /// Key drift between the transform's output columns and the rule
+    /// layer's encoding is loud — `scene_build.rs`'s `data_source`
+    /// validation refuses a batch that doesn't carry the named columns at
+    /// all — but a batch that DOES resolve and yet paints zero lines (e.g. a
+    /// future refactor that reorders `RuleShape::resolve`'s match arms, or
+    /// silently drops the resolved batch) passed every existing qq check.
+    /// This pins the real field-naming contract against the mark builder
+    /// directly: the resolved batch must paint exactly one non-degenerate
+    /// diagonal segment.
+    #[test]
+    fn qq_reference_rule_actually_paints_a_diagonal_line() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rule,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "qq_line_x_start".into(), type_: None, ..Default::default() }),
+                y:  Some(EncodingSpec { field: "qq_line_y_start".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "qq_line_x_end".into(),   type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "qq_line_y_end".into(),   type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        // A single row, mirroring `transform::qq::QQ_LINE_SCHEMA` exactly —
+        // a robust quartile-fit reference line from theoretical quantile
+        // -2.0 to 2.0, mapped through a positive slope + intercept.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("qq_line_x_start", DataType::Float64, false),
+            Field::new("qq_line_x_end", DataType::Float64, false),
+            Field::new("qq_line_y_start", DataType::Float64, false),
+            Field::new("qq_line_y_end", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![-2.0_f64])),
+            Arc::new(Float64Array::from(vec![2.0_f64])),
+            Arc::new(Float64Array::from(vec![-3.5_f64])),
+            Arc::new(Float64Array::from(vec![4.5_f64])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rule).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx).expect("the qq reference batch is a supported Diagonal shape");
+
+        let lines: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            SceneNode::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
+            _ => None,
+        }).collect();
+        assert_eq!(
+            lines.len(), 1,
+            "mark_qq(line=True)'s single-row reference batch must paint exactly \
+             one diagonal line, not silently paint nothing"
+        );
+        let (x1, y1, x2, y2) = lines[0];
+        assert_ne!(
+            (x1, y1), (x2, y2),
+            "the qq reference line must have two distinct endpoints, not a degenerate point"
+        );
+    }
+
     // ── Fix round (spec review, 2026-09-01): dtype-aware ranged shapes ───────
     //
     // The spec reviewer's live repro: `fm.Chart(d3).mark_rule().encode(x="a",

@@ -4197,4 +4197,67 @@ mod tests {
             );
         }
     }
+
+    // ── #166: ci-level discriminating test (the Smooth family's gap) ────
+    //
+    // No existing test varied `ci` for a Smooth-family fit, so the GAM CI
+    // band's `t_crit = student_t_critical(level, fit.residual_dof())`
+    // (`gam_fit`, above) was unpinned: dropping the `t_crit` multiplier
+    // entirely (hardcoding the half-width to `std_error(x)`), or passing raw
+    // `n` in place of `fit.residual_dof()` (the fit's fractional `n − edf`
+    // residual degrees of freedom), would leave every pre-existing test
+    // green — none compared two `ci` levels or checked the half-width
+    // against an independently computed reference.
+
+    /// `gam_fit`'s CI half-width must equal
+    /// `student_t_critical(level, fit.residual_dof()) * fit.std_error(x)`
+    /// exactly, for more than one `ci` level, on a fixture whose
+    /// `residual_dof()` diverges measurably from raw `n` (a fixture where
+    /// they coincide would pass vacuously under the "passed n" bug).
+    #[test]
+    fn gam_ci_half_width_matches_student_t_on_residual_dof_not_raw_n() {
+        let n = 30;
+        let xs: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64 * 10.0).collect();
+        let ys: Vec<f64> = xs.iter().enumerate()
+            .map(|(i, &x)| x.sin() + if i % 2 == 0 { 0.3 } else { -0.3 })
+            .collect();
+        let k = 8;
+
+        let fit = gam::fit(&xs, &ys, k).expect("fixture must produce a usable gam fit");
+        let residual_dof = fit.residual_dof();
+        assert!(
+            (residual_dof - n as f64).abs() > 1.0,
+            "fixture must smooth enough that residual_dof() diverges measurably from \
+             raw n (residual_dof={residual_dof}, n={n}); else this test cannot \
+             discriminate the 'passed n' bug"
+        );
+
+        let probe_x = xs[n / 2];
+        let grid = vec![probe_x];
+
+        for &level in &[0.80_f64, 0.95, 0.99] {
+            let (out, _) = gam_fit(&xs, &ys, &grid, Some(level), 1, k, None)
+                .expect("gam_fit must succeed on this fixture");
+            let yhat = col(&out, "y")[0];
+            let hi = col(&out, "ci_upper")[0];
+            let observed_half_width = hi - yhat;
+
+            let expected_half_width = student_t_critical(level, residual_dof) * fit.std_error(probe_x);
+            let wrong_half_width_using_raw_n = student_t_critical(level, n as f64) * fit.std_error(probe_x);
+
+            assert!(
+                (observed_half_width - expected_half_width).abs() < 1e-9,
+                "level={level}: half-width must equal student_t_critical(level, \
+                 residual_dof()) * std_error(x); observed={observed_half_width}, \
+                 expected={expected_half_width}"
+            );
+            assert!(
+                (observed_half_width - wrong_half_width_using_raw_n).abs() > 1e-6,
+                "level={level}: fixture's residual_dof() must diverge from raw n \
+                 enough that the buggy (n-instead-of-residual_dof) half-width is \
+                 distinguishably different: observed={observed_half_width}, \
+                 wrong={wrong_half_width_using_raw_n}"
+            );
+        }
+    }
 }

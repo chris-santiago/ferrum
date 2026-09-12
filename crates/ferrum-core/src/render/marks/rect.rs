@@ -13,10 +13,21 @@ use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
+use crate::render::RenderError;
 
 // ── Scene-graph build path (11a) ────────────────────────────────────
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+/// `build_heatmap`'s `text` channel read propagates its typed error (#166):
+/// `encode(text="nope")` naming a column absent from the batch used to
+/// resolve `text_values = None` silently (`col_as_str` and its `col_as_f64`
+/// fallback both error, `.ok()` discarding whichever ran last), so a heatmap
+/// with a misspelled cell-annotation column rendered every cell with no
+/// label and no diagnostic. `build` (and its three shape-dispatched helpers,
+/// which must share one return type) is now fallible for exactly this
+/// reason; `build_quantitative_range` and `build_ordinal_range` carry no
+/// `text` channel and their existing per-field `Err(_) => return
+/// empty_result()` swallows are unchanged.
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     let both_ranges = ctx.spec.encoding.x2.is_some() && ctx.spec.encoding.y2.is_some();
     let both_quant = matches!(
         (&ctx.scales.x, &ctx.scales.y),
@@ -40,25 +51,25 @@ fn empty_result() -> crate::render::draw::MarkBuildResult {
     crate::render::draw::MarkBuildResult::empty(ferrum_scene::MarkBatchKind::Rect)
 }
 
-fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke_full};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
-    let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return Ok(empty_result()) };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return Ok(empty_result()) };
     let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return empty_result(),
+        Some(f) => f, None => return Ok(empty_result()),
     };
     let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
-        Some(f) => f, None => return empty_result(),
+        Some(f) => f, None => return Ok(empty_result()),
     };
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
-    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
     let n = xs.len();
-    if x2s.len() != n || ys.len() != n || y2s.len() != n { return empty_result(); }
+    if x2s.len() != n || ys.len() != n || y2s.len() != n { return Ok(empty_result()); }
 
     let (color_strings, color_numeric) = color_column_loader(ctx);
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
@@ -160,7 +171,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
@@ -168,16 +179,16 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
-fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke_full};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
-    let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
+    let xf = match x_field(ctx, spec) { Some(f) => f, None => return Ok(empty_result()) };
+    let yf = match y_field(ctx, spec) { Some(f) => f, None => return Ok(empty_result()) };
 
     // Detect orientation: normal (x-ordinal + y2) vs. CoordFlip (y-ordinal + x2).
     let x_is_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
@@ -212,12 +223,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     if x_is_ordinal {
         // Normal orientation: x is categorical band, y and y2 are quantitative extents.
         let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
-            Some(f) => f, None => return empty_result(),
+            Some(f) => f, None => return Ok(empty_result()),
         };
-        let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-        let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-        let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
-        if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
+        let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        if xs.len() != ys.len() || y2s.len() != ys.len() { return Ok(empty_result()); }
         // Under an ordinal-band Dodge, shrink each box body to its sub-band so
         // adjacent dodge groups don't overlap. No Dodge → n_groups == 1 →
         // byte-identical to the non-dodged box width.
@@ -229,7 +240,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(w) => w,
             None => {
                 debug_assert!(false, "build_ordinal_range's x_is_ordinal branch dispatches only for an ordinal x scale, which always reports a bandwidth");
-                return empty_result();
+                return Ok(empty_result());
             }
         };
         let box_w_raw = (band_width / n_groups as f64)
@@ -314,12 +325,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     } else if y_is_ordinal {
         // CoordFlip orientation: y is categorical band, x and x2 are quantitative extents.
         let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
-            Some(f) => f, None => return empty_result(),
+            Some(f) => f, None => return Ok(empty_result()),
         };
-        let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-        let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-        let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
-        if ys.len() != xs.len() || x2s.len() != xs.len() { return empty_result(); }
+        let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        if ys.len() != xs.len() || x2s.len() != xs.len() { return Ok(empty_result()); }
         // Under an ordinal-band Dodge (CoordFlip orientation), shrink each box
         // body to its sub-band so adjacent dodge groups don't overlap. No Dodge
         // → n_groups == 1 → byte-identical to the non-dodged box height.
@@ -330,7 +341,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(w) => w,
             None => {
                 debug_assert!(false, "build_ordinal_range's y_is_ordinal branch dispatches only for an ordinal y scale, which always reports a bandwidth");
-                return empty_result();
+                return Ok(empty_result());
             }
         };
         let box_h_raw = (band_width / n_groups as f64)
@@ -411,13 +422,13 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }, i);
         }
     } else {
-        return empty_result();
+        return Ok(empty_result());
     }
 
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
@@ -425,21 +436,21 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
-fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{MarkBuildResult, to_scene_fill_stroke_full, to_scene_text_style};
     use crate::render::format::format_numeric;
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
-        (Some(a), Some(b)) => (a, b), _ => return empty_result(),
+        (Some(a), Some(b)) => (a, b), _ => return Ok(empty_result()),
     };
-    let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-    let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
-    if xs.len() != ys.len() { return empty_result(); }
+    let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    if xs.len() != ys.len() { return Ok(empty_result()); }
 
     // A heatmap cell IS its band on both axes: the drawn band of each resolved
     // scale, with no `band_size` factor (cells tile the grid). Both axes must
@@ -456,7 +467,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // keeps the cell size its complete siblings have.
     let (cell_w, cell_h) = match (ctx.scales.x.bandwidth(), ctx.scales.y.bandwidth()) {
         (Some(w), Some(h)) => (w, h),
-        _ => return empty_result(),
+        _ => return Ok(empty_result()),
     };
 
     let (color_strings, color_numeric) = color_column_loader(ctx);
@@ -475,18 +486,22 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // T12: rect gains the stroke_dash read it lacked.
     let dash_cols = stroke_dash_column_loader(ctx);
 
-    // Optional text annotation channel for heatmap cells.
+    // Optional text annotation channel for heatmap cells. A bound field this
+    // batch does not carry propagates its typed error (#166) rather than
+    // silently annotating every cell with no label — see this module's doc
+    // comment on `build`.
     let text_enc = spec.encoding.text.as_ref();
     let text_field = text_enc.map(|e| e.field.as_str());
-    let text_values: Option<Vec<Option<String>>> = text_field.and_then(|f| {
-        col_as_str(ctx.batch, f).ok().or_else(|| {
-            col_as_f64(ctx.batch, f).ok().map(|nums| {
+    let text_values: Option<Vec<Option<String>>> = match text_field {
+        None => None,
+        Some(f) => Some(col_as_str(ctx.batch, f).or_else(|_| {
+            col_as_f64(ctx.batch, f).map(|nums| {
                 nums.into_iter()
                     .map(|v| v.map(format_numeric))
                     .collect()
             })
-        })
-    });
+        })?),
+    };
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only. Rows are skipped for null categories and
@@ -596,7 +611,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         polar_spans: None,
         kind: MarkBatchKind::Rect,
         nodes,
@@ -604,7 +619,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -658,7 +673,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 2, "expected 2 band rects");
     }
 
@@ -695,7 +710,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 4);
     }
 
@@ -747,7 +762,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 4);
         // Distinct values 0/2/5/10 must produce distinct fill colors.
         let mut fills: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -804,7 +819,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(
             result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(),
             3,
@@ -877,7 +892,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { style, .. } = n { Some(style.clone()) } else { None }
@@ -934,7 +949,7 @@ mod tests {
         assert!(scales.stroke_dash.is_some(), "a categorical stroke_dash field must resolve a StrokeDashScale");
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { style, .. } = n { Some(style) } else { None }
         }).collect();
@@ -999,7 +1014,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales_default, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { style, .. } = n { Some(style.clone()) } else { None }
@@ -1055,7 +1070,7 @@ mod tests {
         ).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(
             result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(),
             4,
@@ -1097,7 +1112,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert!(result.nodes.iter().all(|n| !matches!(n, SceneNode::Rect { .. })));
     }
 
@@ -1166,7 +1181,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 nodes survive (row 1 with null y2 is skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -1233,7 +1248,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 nodes survive (row 1 with null q3 is skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -1320,7 +1335,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 rect nodes survive (row 1 with x="B" not in domain is skipped).
         let rect_count = result.nodes.iter()
@@ -1387,7 +1402,7 @@ mod tests {
         assert!(scales.stroke_dash.is_some(), "a categorical stroke_dash field must resolve a StrokeDashScale");
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { style, .. } = n { Some(style) } else { None }
         }).collect();
@@ -1451,7 +1466,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2,
             "expected 2 rects after null-y2 skip; got {}", result.nodes.len());
@@ -1520,7 +1535,7 @@ mod tests {
         let (scales_qr, _) = resolve_scales(&spec_qr, &batch_qr, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style_qr = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx_qr = DrawCtx { spec: &spec_qr, panel: &panel, theme: &theme, scales: &scales_qr, batch: &batch_qr, mark_style: &mark_style_qr };
-        let result_qr = super::build(&ctx_qr);
+        let result_qr = super::build(&ctx_qr).unwrap();
         assert_eq!(result_qr.nodes.len(), 3, "qr: all 3 rows kept → 3 nodes");
         let tt_qr = result_qr.tooltips.expect("tooltips present");
         assert_eq!(tt_qr[0].fields[0].value, "tip_a");
@@ -1558,7 +1573,7 @@ mod tests {
         let (scales_or, _) = resolve_scales(&spec_or, &batch_or, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style_or = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx_or = DrawCtx { spec: &spec_or, panel: &panel, theme: &theme, scales: &scales_or, batch: &batch_or, mark_style: &mark_style_or };
-        let result_or = super::build(&ctx_or);
+        let result_or = super::build(&ctx_or).unwrap();
         assert_eq!(result_or.nodes.len(), 3, "or: all 3 rows kept → 3 nodes");
         let tt_or = result_or.tooltips.expect("tooltips present");
         assert_eq!(tt_or[0].fields[0].value, "tip_a");
@@ -1593,7 +1608,7 @@ mod tests {
         let (scales_hm, _) = resolve_scales(&spec_hm, &batch_hm, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style_hm = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx_hm = DrawCtx { spec: &spec_hm, panel: &panel, theme: &theme, scales: &scales_hm, batch: &batch_hm, mark_style: &mark_style_hm };
-        let result_hm = super::build(&ctx_hm);
+        let result_hm = super::build(&ctx_hm).unwrap();
         assert_eq!(result_hm.nodes.len(), 3, "hm: all 3 rows kept → 3 rect nodes");
         let tt_hm = result_hm.tooltips.expect("tooltips present");
         assert_eq!(tt_hm.len(), 3, "hm: tooltip count must equal node count");
@@ -1682,7 +1697,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 rows kept (rows 0 and 2), each emitting rect + text → 4 nodes total.
         assert_eq!(result.nodes.len(), 4,
@@ -1775,7 +1790,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 nodes survive (row 1 with null x2 is skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -1856,7 +1871,7 @@ mod tests {
         let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
         }).collect()
@@ -1951,7 +1966,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let widths: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
@@ -2016,7 +2031,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
@@ -2078,7 +2093,7 @@ mod tests {
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         let dims: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
             if let SceneNode::Rect { w, h, .. } = n { Some((*w, *h)) } else { None }
@@ -2090,5 +2105,61 @@ mod tests {
             // Unranged y: panel.h (400) / 2 col categories → cell_h = 200.0.
             assert!((h - 200.0).abs() < 1e-9, "expected unranged cell_h to stay at panel.h/n_y = 200.0, got {h}");
         }
+    }
+
+    // ── #166: heatmap `text` channel reader propagation ──────────────────
+
+    /// `encode(text="nope")` naming a column absent from the batch used to
+    /// resolve `text_values = None` silently (`col_as_str` and its
+    /// `col_as_f64` fallback both error, `.ok()` discarding whichever ran
+    /// last), so every heatmap cell rendered with no annotation and no
+    /// diagnostic. `build_heatmap` now propagates the reader's typed error
+    /// with `?` instead (rule.rs's reader-propagation idiom); the cells
+    /// themselves still resolve (this is not a positional-read failure), so
+    /// the pre-fix symptom was silently-missing labels, not a blank panel —
+    /// distinct from `text.rs`'s twin, where the missing labels ARE the
+    /// whole mark.
+    #[test]
+    fn rect_heatmap_encode_text_unknown_column_refuses() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "row".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "col".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                text: Some(EncodingSpec { field: "nope".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row", DataType::Utf8, false),
+            Field::new("col", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let err = match super::build(&ctx) {
+            Err(e) => e,
+            Ok(r) => panic!(
+                "a text= column absent from the batch must refuse, not silently omit \
+                 annotations from {} rendered cells",
+                r.nodes.len()
+            ),
+        };
+        assert!(
+            matches!(&err, crate::render::RenderError::UnknownColumn { name } if name == "nope"),
+            "expected UnknownColumn naming 'nope'; got {err:?}"
+        );
     }
 }

@@ -1,9 +1,25 @@
 //! mark_point: render each row as a shape glyph at (scale_x(row.x), scale_y(row.y)).
 //! Phase 7: always emits <circle> using ctx.mark_style.point.point_size.
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
+//!
+//! # The `shape` channel reads through the ordinal-category reader (#166)
+//!
+//! `shape_values` reads `col_as_ordinal_category_str`, not `col_as_str`
+//! (matching `color`'s NF-A3 sweep and `point`'s own positional reads
+//! above). `col_as_str` errors on every non-`Utf8` dtype and the `.ok()`
+//! swallowed it, so an `Int*`/`Float*`/`Bool` shape column left
+//! `shape_values` `None` for every row and every point fell back to the
+//! mark-style default (or plain `Circle`) while the legend — built from the
+//! dtype-wide `distinct_values_in_order` — enumerated every category. This
+//! is a **disclosed reader-switch, not a refusal**: unlike `color`, a shape
+//! column this batch does not carry at all is not a distinct case `shape`
+//! needs to tell apart from "no shape values" (there is no cross-layer
+//! shape-inheritance carve-out to protect), so the read stays infallible —
+//! an unreadable dtype (e.g. `Timestamp`) still falls back to the mark-style
+//! default exactly as before. `Utf8` shape columns are byte-identical.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_fill_color, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
@@ -262,7 +278,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let shape_values: Option<Vec<Option<String>>> = spec.encoding.shape
         .as_ref()
-        .and_then(|e| col_as_str(ctx.batch, &e.field).ok());
+        .and_then(|e| col_as_ordinal_category_str(ctx.batch, &e.field).ok());
 
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
@@ -687,6 +703,50 @@ mod tests {
         let result = super::build(&ctx);
 
         // "cat" → Circle, "dog" → Square, "bird" → Cross (2 × Line).
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Circle { .. })).count(), 1, "circle count");
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 1, "rect count");
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2, "line count (cross)");
+    }
+
+    /// #166 (disclosed reader-switch): an `Int64` `shape` column must resolve
+    /// each row's real shape kind, not default-circle every row.
+    ///
+    /// RED (verified in place): with `col_as_str` here, the read returns
+    /// `Err` for `Int64`, `.ok()` swallows it, `shape_values` stays `None`
+    /// for every row, and the per-row match falls to
+    /// `ctx.mark_style.point.shape` (unset) → `ShapeKind::Circle` for all
+    /// three rows — the legend still lists 3 categories while every glyph on
+    /// the panel is a circle. The Utf8 twin
+    /// (`point_with_shape_encoding_emits_3_shape_kinds`, immediately above)
+    /// is the reference: an Int64 shape column must produce the identical
+    /// three shape kinds.
+    #[test]
+    fn point_with_int64_shape_encoding_emits_3_shape_kinds() {
+        use arrow::array::{Float64Array, Int64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = spec_with_shape();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Int64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Int64Array::from(vec![1_i64, 2, 3])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        assert!(scales.shape.is_some(), "an Int64 shape column must still resolve a ShapeScale");
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // Domain [1, 2, 3] (first-appearance order) → SHAPE_PALETTE[0..3] =
+        // Circle, Square, Cross — same three kinds as the Utf8 twin.
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Circle { .. })).count(), 1, "circle count");
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 1, "rect count");
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2, "line count (cross)");

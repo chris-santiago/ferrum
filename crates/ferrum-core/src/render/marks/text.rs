@@ -4,6 +4,22 @@
 //!
 //! When the text channel is absent and y is numeric, the label falls back to
 //! `format_numeric(y)`.
+//!
+//! # The `text` channel read propagates its typed error (#166)
+//!
+//! A bound `text` channel naming a column this batch does not carry — most
+//! commonly a misspelled field — used to resolve to `texts = None` (both
+//! `col_as_str` and the `col_as_f64` fallback return `Err`, and `.ok()`
+//! discarded whichever one ran last). Every row then fell through to the
+//! y-numeric-format branch, and on an ordinal y axis that branch has no
+//! numeric column to format, so every row is skipped: a chart with an intact
+//! panel and zero label nodes, no diagnostic. `build` now propagates that
+//! `RenderError` (`UnknownColumn` for a missing column, `UnsupportedDtype`
+//! for a present column neither reader can format) with `?`, matching
+//! `rule.rs`'s reader-propagation idiom (this module's `build` is now
+//! fallible for exactly this reason — every other reader here is unaffected).
+//! A batch that does carry the column, or a chart with no `text` channel at
+//! all, is byte-identical.
 
 use crate::layout::TextAnchor;
 use crate::render::draw::{
@@ -14,12 +30,13 @@ use crate::render::format::{format_numeric, format_time, format_with_spec};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::color_column_loader;
 use crate::render::scale_resolve::ScaleKind;
+use crate::render::RenderError;
 
-pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, RenderError> {
     use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
-    let empty = || MarkBuildResult::empty(MarkBatchKind::Text);
+    let empty = || Ok(MarkBuildResult::empty(MarkBatchKind::Text));
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -73,8 +90,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let text_format_type = text_enc.and_then(|e| e.format_type.as_deref());
     let texts: Option<Vec<Option<String>>> = match text_field {
         None => None,
-        Some(f) => col_as_str(ctx.batch, f).ok().or_else(|| {
-            col_as_f64(ctx.batch, f).ok().map(|nums| {
+        Some(f) => Some(col_as_str(ctx.batch, f).or_else(|_| {
+            col_as_f64(ctx.batch, f).map(|nums| {
                 nums.into_iter()
                     .map(|opt_v| {
                         opt_v.and_then(|v| {
@@ -90,7 +107,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     })
                     .collect()
             })
-        }),
+        })?),
     };
 
     let anchor = match ctx.mark_style.text.align.as_deref() {
@@ -274,7 +291,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         polar_spans: None,
         kind: MarkBatchKind::Text,
         nodes,
@@ -282,7 +299,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -332,7 +349,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Text { .. })).count(), 2);
     }
 
@@ -382,7 +399,7 @@ mod tests {
             spec: &spec, panel: &panel, theme: &theme,
             scales: &scales, batch: &batch, mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Text { .. })).count(), 2);
         // Check that the explicit label content is present in the Text nodes.
         let contents: Vec<&str> = result.nodes.iter().filter_map(|n| {
@@ -451,7 +468,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         assert_eq!(
             result.kind,
             ferrum_scene::MarkBatchKind::Text,
@@ -507,7 +524,7 @@ mod tests {
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
 
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let xs: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Text { x, .. } = n { Some(*x) } else { None }
         }).collect();
@@ -524,7 +541,7 @@ mod tests {
         ]).unwrap();
         let (baseline_scales, _) = resolve_scales(&spec, &baseline_batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let baseline_ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &baseline_scales, batch: &baseline_batch, mark_style: &mark_style };
-        let baseline_result = super::build(&baseline_ctx);
+        let baseline_result = super::build(&baseline_ctx).unwrap();
         let baseline_xs: Vec<f64> = baseline_result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Text { x, .. } = n { Some(*x) } else { None }
         }).collect();
@@ -565,7 +582,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         let xs: Vec<f64> = result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Text { x, .. } = n { Some(*x) } else { None }
         }).collect();
@@ -640,7 +657,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         // 2 nodes survive (row 1 with null label is skipped).
         assert_eq!(result.nodes.len(), 2,
@@ -698,7 +715,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 2, "expected 2 text nodes");
         let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
@@ -749,7 +766,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
 
         assert_eq!(result.nodes.len(), 3, "all 3 rows must produce nodes");
         let tooltips = result.tooltips.expect("tooltips must be Some");
@@ -803,7 +820,7 @@ mod tests {
         let overrides = MarkKwargsSpec { limit, ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         result.nodes.iter().find_map(|n| {
             if let ferrum_scene::SceneNode::Text { content, .. } = n { Some(content.clone()) } else { None }
         }).expect("expected exactly one Text node")
@@ -881,7 +898,7 @@ mod tests {
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(overrides.as_ref(), &theme, &Mark::Text).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-        let result = super::build(&ctx);
+        let result = super::build(&ctx).unwrap();
         result.nodes.iter().filter_map(|n| {
             if let ferrum_scene::SceneNode::Text { style, .. } = n { Some(style.color) } else { None }
         }).collect()
@@ -993,7 +1010,7 @@ mod tests {
             );
             let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
-            super::build(&ctx).nodes.iter().filter_map(|n| match n {
+            super::build(&ctx).unwrap().nodes.iter().filter_map(|n| match n {
                 ferrum_scene::SceneNode::Text { content, .. } => Some(content.clone()),
                 _ => None,
             }).collect()
@@ -1013,5 +1030,127 @@ mod tests {
         assert_eq!(int64, utf8,
             "an Int64 nominal x must place the same three labels as its Utf8 twin; \
              got {int64:?}. An empty vec here is the col_as_str drop.");
+    }
+
+    // ── #166: `text` channel reader propagation ──────────────────────────
+
+    /// `encode(text="nope")` naming a column absent from the batch used to
+    /// resolve `texts = None` silently (both `col_as_str` and its
+    /// `col_as_f64` fallback error, and `.ok()` discarded whichever ran
+    /// last). On this fixture's ordinal y axis the per-row fallback branch
+    /// (`match &ys_f { ... None => continue }`) has no numeric column to
+    /// format, so every row was skipped — an intact panel with zero label
+    /// nodes and no diagnostic. `build` now propagates the reader's typed
+    /// error with `?` instead (rule.rs's reader-propagation idiom).
+    #[test]
+    fn text_encode_text_unknown_column_refuses_instead_of_rendering_blank() {
+        use crate::spec::encoding::DataType as SpecType;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SpecType::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SpecType::Ordinal), ..Default::default() }),
+                text: Some(EncodingSpec { field: "nope".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, false),
+            Field::new("y", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(StringArray::from(vec!["p", "q"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let err = match super::build(&ctx) {
+            Err(e) => e,
+            Ok(r) => panic!(
+                "a text= column absent from the batch must refuse, not render {} label nodes silently",
+                r.nodes.len()
+            ),
+        };
+        assert!(
+            matches!(&err, crate::render::RenderError::UnknownColumn { name } if name == "nope"),
+            "expected UnknownColumn naming 'nope'; got {err:?}"
+        );
+    }
+
+    /// The text-reader twin of `rule.rs`'s
+    /// `rule_treats_a_color_column_absent_from_its_layer_batch_as_no_color`
+    /// (spec §7's structural `Ok(None)` carve-out, `channels.rs:157-192`): a
+    /// `color` field this layer's own batch does not carry (the ordinary
+    /// layered-chart shape `Encoding::inherit_from` produces, e.g.
+    /// `mark_qq(line=True)`'s reference layer) is not an error, even though
+    /// `build` is now fallible for the `text` channel above.
+    /// `color_column_loader` stays infallible and untouched by this task, so
+    /// this pins that making `build`'s return type fallible did not also
+    /// start refusing the case the carve-out exists for.
+    #[test]
+    fn text_treats_a_color_column_absent_from_its_layer_batch_as_no_color() {
+        use crate::spec::encoding::DataType as SpecType;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SpecType::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SpecType::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecType::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+            params: Vec::new(),
+        };
+        // The layer's own batch — no `cat` column, mirroring `qq_line`.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        // Scale resolution must not itself refuse the color column absent
+        // from this batch, so resolve against an x/y-only spec — `build`
+        // runs on the real spec, which is what this test exercises.
+        let scale_spec = ChartSpec {
+            encoding: Encoding { color: None, ..spec.encoding.clone() },
+            ..spec.clone()
+        };
+        let (scales, _) = resolve_scales(&scale_spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let result = super::build(&ctx).expect(
+            "a color column absent from this layer's own batch must render with the \
+             fallback color, not refuse",
+        );
+        assert_eq!(
+            result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Text { .. })).count(),
+            2
+        );
     }
 }

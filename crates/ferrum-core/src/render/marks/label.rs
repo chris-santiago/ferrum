@@ -5,6 +5,7 @@ use crate::render::arrow_cast::{col_as_f64, col_as_str};
 use crate::render::color::with_opacity;
 use crate::render::draw::{to_scene_color, to_scene_text_style, DrawCtx, MarkBuildResult, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::RenderError;
 
 /// Axis-aligned bounding box for overlap testing.
 #[derive(Clone, Copy)]
@@ -68,28 +69,37 @@ fn candidate_offsets(w: f64, h: f64) -> [(f64, f64); 8] {
 ///
 /// When `mark_style.text.leader_line = Some(true)` a thin `SceneNode::Line` is
 /// drawn from the data point `(px, py)` to the placed label position.
-pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
+///
+/// # The `text` channel read propagates its typed error (#166)
+///
+/// A bound `text` channel naming a column this batch does not carry used to
+/// resolve via `.unwrap_or_default()` to an empty `Vec`, so every label
+/// silently rendered with empty content instead of the intended text, with no
+/// diagnostic. `build` now propagates that `RenderError` with `?`, matching
+/// `rule.rs`'s reader-propagation idiom. A chart with no `text` channel (the
+/// x-value-formatting fallback) is unaffected — only a channel that names a
+/// column the reader cannot read now refuses instead of rendering blank.
+pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     let xf = match ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()) {
         Some(f) => f,
-        None => return MarkBuildResult::empty(MarkBatchKind::Label),
+        None => return Ok(MarkBuildResult::empty(MarkBatchKind::Label)),
     };
     let yf = match ctx.spec.encoding.y.as_ref().map(|e| e.field.as_str()) {
         Some(f) => f,
-        None => return MarkBuildResult::empty(MarkBatchKind::Label),
+        None => return Ok(MarkBuildResult::empty(MarkBatchKind::Label)),
     };
 
     let Ok(xs) = col_as_f64(ctx.batch, xf) else {
-        return MarkBuildResult::empty(MarkBatchKind::Label);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Label));
     };
     let Ok(ys) = col_as_f64(ctx.batch, yf) else {
-        return MarkBuildResult::empty(MarkBatchKind::Label);
+        return Ok(MarkBuildResult::empty(MarkBatchKind::Label));
     };
 
     // Optional text content: `text` encoding field, else format x value.
-    let texts: Vec<Option<String>> = if let Some(tf) = ctx.spec.encoding.text.as_ref().map(|e| e.field.as_str()) {
-        col_as_str(ctx.batch, tf).unwrap_or_default()
-    } else {
-        xs.iter().map(|v| v.map(|f| format!("{:.2}", f))).collect()
+    let texts: Vec<Option<String>> = match ctx.spec.encoding.text.as_ref().map(|e| e.field.as_str()) {
+        Some(tf) => col_as_str(ctx.batch, tf)?,
+        None => xs.iter().map(|v| v.map(|f| format!("{:.2}", f))).collect(),
     };
 
     // When the caller explicitly provides both dx AND dy, honour them as fixed
@@ -216,7 +226,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
-    MarkBuildResult {
+    Ok(MarkBuildResult {
         polar_spans: None,
         kind: MarkBatchKind::Label,
         nodes,
@@ -224,7 +234,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         tooltips,
         hrefs,
         descriptions,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -308,7 +318,7 @@ mod tests {
             batch: &batch,
             mark_style: &mark_style,
         };
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         assert_eq!(
             result.kind,
             MarkBatchKind::Label,
@@ -406,7 +416,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         let n_nodes = result.nodes.len();
         let n_rows = batch.num_rows(); // 2
@@ -469,7 +479,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         let n_nodes = result.nodes.len();
         let data_indices = result.data_indices.as_ref().expect("data_indices must be Some");
 
@@ -511,7 +521,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // Tooltip must NOT be None after the fix.
         let tooltips = result
@@ -567,7 +577,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
         let n_nodes = result.nodes.len();
 
         // 2 rows × 2 nodes per row = 4 nodes total.
@@ -617,7 +627,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         // 2 rows → 2 Text nodes, 0 Line nodes.
         assert_eq!(result.nodes.len(), 2);
@@ -662,7 +672,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         let line_count = result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert!(
@@ -707,7 +717,7 @@ mod tests {
             mark_style: &mark_style,
         };
 
-        let result = build(&ctx);
+        let result = build(&ctx).unwrap();
 
         let line_count = result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         assert_eq!(
@@ -719,5 +729,45 @@ mod tests {
         // Must still emit Text nodes for the two data points.
         let text_count = result.nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count();
         assert_eq!(text_count, 2, "expected 2 Text nodes for 2-row batch, got {text_count}");
+    }
+
+    // ── #166: `text` channel reader propagation ──────────────────────────
+
+    /// `encode(text="nope")` naming a column absent from the batch used to
+    /// resolve via `.unwrap_or_default()` to an empty `Vec`, so every label
+    /// silently rendered with empty text content and no diagnostic — the
+    /// glyphs were there, but blank. `build` now propagates the reader's
+    /// typed error with `?` instead (rule.rs's reader-propagation idiom).
+    #[test]
+    fn label_encode_text_unknown_column_refuses_instead_of_rendering_blank() {
+        use crate::spec::encoding::EncodingSpec;
+
+        let (mut spec, batch) = two_point_spec_and_batch();
+        spec.encoding.text = Some(EncodingSpec { field: "nope".into(), ..Default::default() });
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default(),
+        ).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let err = match build(&ctx) {
+            Err(e) => e,
+            Ok(r) => panic!(
+                "a text= column absent from the batch must refuse, not render {} \
+                 label nodes with blank content silently",
+                r.nodes.len()
+            ),
+        };
+        assert!(
+            matches!(&err, RenderError::UnknownColumn { name } if name == "nope"),
+            "expected UnknownColumn naming 'nope'; got {err:?}"
+        );
     }
 }

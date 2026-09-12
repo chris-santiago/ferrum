@@ -1158,14 +1158,22 @@ pub(crate) fn parse_stroke_join(s: &str) -> Option<ferrum_scene::StrokeJoin> {
 /// arm, the path-independent backstop for a caller that reaches the mark
 /// builder without going through `scale_resolve`'s own (earlier-firing, same
 /// error) guard — see `marks::arc::requires_polar_coord`'s doc comment for
-/// why arc needs both. Every other mark's `build` stays infallible
-/// (unchanged) and is wrapped in `Ok` here. This is every mark's ONLY
-/// `build` call site, so widening this function's return type needed no
-/// downstream signature changes beyond it and its two callers
-/// (`scene_build::build_panel_mark_batches`, and a `position.rs` test
-/// helper). One exhaustive match (not the shared
+/// why arc needs both. `Mark::Text`, `Mark::Rect`, and `Mark::Label` joined
+/// them in wave-1 hardening #166: each propagates the typed error from its
+/// own `text`-channel reader (`col_as_str` plus its `col_as_f64` fallback)
+/// instead of discarding it into a render with silently missing/blank
+/// labels — see each module's doc comment. `Mark::Point`'s sibling swallow
+/// (its `shape`-channel reader) is a **disclosed reader-switch, not a
+/// refusal** (`marks::point`'s doc comment): it now reads through
+/// `col_as_ordinal_category_str` so an `Int*`/`Float*`/`Bool` shape column
+/// resolves its real shapes, and stays infallible. Every other mark's
+/// `build` stays infallible (unchanged) and is wrapped in `Ok` here. This is
+/// every mark's ONLY `build` call site, so widening this function's return
+/// type needed no downstream signature changes beyond it and its two
+/// callers (`scene_build::build_panel_mark_batches`, and a `position.rs`
+/// test helper). One exhaustive match (not the shared
 /// `for_each_mark!` macro the sibling `Mark::as_str`/`FromStr` impls use)
-/// because the fallible arms have a different type than the other 12 — the
+/// because the fallible arms have a different type than the other 7 — the
 /// macro's single expansion can't express that asymmetry. Every arm is written
 /// out, and no wildcard, so a future `Mark` variant is a compile error here
 /// rather than a silent miss; the fallible arms return their `Result` directly
@@ -1179,14 +1187,14 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
         Mark::Line => Ok(super::marks::line::build(ctx)),
         Mark::Bar => Ok(super::marks::bar::build(ctx)),
         Mark::Area => Ok(super::marks::area::build(ctx)),
-        Mark::Text => Ok(super::marks::text::build(ctx)),
+        Mark::Text => super::marks::text::build(ctx),
         Mark::Tick => super::marks::tick::build(ctx),
-        Mark::Rect => Ok(super::marks::rect::build(ctx)),
+        Mark::Rect => super::marks::rect::build(ctx),
         Mark::Polygon => Ok(super::marks::polygon::build(ctx)),
         Mark::Image => Ok(super::marks::image::build(ctx)),
         Mark::Ribbon => Ok(super::marks::ribbon::build(ctx)),
         Mark::Arc => super::marks::arc::build(ctx),
-        Mark::Label => Ok(super::marks::label::build(ctx)),
+        Mark::Label => super::marks::label::build(ctx),
         Mark::Geoshape => super::marks::geoshape::build(ctx),
     }
 }
