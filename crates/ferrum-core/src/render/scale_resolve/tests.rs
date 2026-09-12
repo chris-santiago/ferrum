@@ -1585,12 +1585,13 @@ fn d1_declared_domain_overrides_data_appearance_order() {
     }
 }
 
-/// Finding 2 regression: when any color string in an explicit range fails to
-/// parse, the resolver must emit a `ColorRangeParseFailure` warning naming the
-/// offending entry and fall through to the default theme palette.  It must NOT
-/// silently substitute the palette without any warning.
+/// #126 (re-aimed from the former warn-and-fall-through contract): when any
+/// color string in an explicit range fails to parse, the resolver must refuse
+/// with a `RenderError::ColorRangeParseFailure` naming the offending entry.
+/// It must NOT silently substitute the default theme palette for what the
+/// user asked for.
 #[test]
-fn d1_invalid_color_in_range_emits_warning_and_falls_through_to_default_palette() {
+fn d1_invalid_color_in_range_refuses() {
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
@@ -1648,34 +1649,14 @@ fn d1_invalid_color_in_range_emits_warning_and_falls_through_to_default_palette(
     };
 
     let theme = ThemeInputs::default();
-    let (scales, warnings) =
-        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    let err = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap_err();
 
-    // Must have exactly one warning: ColorRangeParseFailure naming the bad entry.
-    assert_eq!(warnings.len(), 1, "expected exactly one warning, got: {warnings:?}");
-    match &warnings[0] {
-        crate::render::RenderWarning::ColorRangeParseFailure { entry } => {
-            assert_eq!(
-                entry, "#not-a-color",
-                "warning must name the offending entry; got: {entry}"
-            );
-        }
-        other => panic!("expected ColorRangeParseFailure warning, got: {other:?}"),
-    }
-
-    // The color scale must fall through to the default palette (not the explicit range).
-    let color_scale = scales.color.expect("color scale must be resolved");
-    match &color_scale {
-        ColorScale::Categorical { palette, .. } => {
-            // The default palette's first color must not be the explicitly declared gray.
-            let c0 = palette[0];
-            assert!(
-                !(c0.red == 0xcc && c0.green == 0xcc && c0.blue == 0xcc),
-                "default palette must not start with the declared gray; parse-failure fallback must use theme palette"
-            );
-        }
-        other => panic!("expected Categorical color scale, got {other:?}"),
-    }
+    // Must refuse with a ColorRangeParseFailure naming the bad entry.
+    assert_eq!(
+        err,
+        crate::render::RenderError::ColorRangeParseFailure { entry: "#not-a-color".into() },
+        "must refuse naming the offending entry, not fall through to the theme palette"
+    );
 }
 
 // ── D4: rect/heatmap color encoding honors scheme/cmap ────────────────────────
@@ -2261,8 +2242,13 @@ fn f5_default_categorical_palette_is_byte_stable() {
 /// color-string range fails to parse.  The parse-failure arm now delegates to the
 /// same `build_default_categorical_scale` helper as the default arm; this test
 /// proves the two arms produce identical palette colors for an equivalent input.
+/// #126 (re-aimed): a bad range entry used to fall through to a palette that
+/// happened to match the no-range default — this test formerly pinned that
+/// coincidence. There is no more fallback palette to compare against: the
+/// resolver now refuses outright, naming the offending entry, and a
+/// no-range spec is unaffected (still resolves the default palette).
 #[test]
-fn f5_parse_failure_fallback_palette_matches_default_palette() {
+fn f5_parse_failure_refuses_and_default_is_unaffected() {
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
@@ -2318,41 +2304,19 @@ fn f5_parse_failure_fallback_palette_matches_default_palette() {
 
     let theme = ThemeInputs::default();
 
-    // Fallback result (parse failure arm).
-    let (scales_fallback, warnings_fallback) =
-        resolve_scales(&bad_range_spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
-    assert_eq!(warnings_fallback.len(), 1, "expected exactly one parse-failure warning");
-    assert!(matches!(
-        warnings_fallback[0],
-        crate::render::RenderWarning::ColorRangeParseFailure { .. }
-    ));
+    let err = resolve_scales(&bad_range_spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        crate::render::RenderError::ColorRangeParseFailure { entry: "#not-a-color".into() },
+    );
 
-    // Default result (no range spec).
+    // A no-range spec is unaffected: still resolves the default palette,
+    // byte-identically to before this fix.
     let (scales_default, warnings_default) =
         resolve_scales(&make_spec_with_color(), &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
     assert!(warnings_default.is_empty());
-
-    // Both must produce the same palette colors (same domain, same palette bytes).
-    match (
-        scales_fallback.color.as_ref().unwrap(),
-        scales_default.color.as_ref().unwrap(),
-    ) {
-        (
-            ColorScale::Categorical { domain: d1, palette: p1 },
-            ColorScale::Categorical { domain: d2, palette: p2 },
-        ) => {
-            assert_eq!(d1, d2, "fallback and default must have the same domain");
-            assert_eq!(p1.len(), p2.len(), "palette lengths must match");
-            for (i, (c1, c2)) in p1.iter().zip(p2.iter()).enumerate() {
-                assert_eq!(
-                    (c1.red, c1.green, c1.blue),
-                    (c2.red, c2.green, c2.blue),
-                    "palette color at index {i} must be identical in fallback and default paths"
-                );
-            }
-        }
-        _ => panic!("expected both to be Categorical"),
-    }
+    assert!(matches!(scales_default.color, Some(ColorScale::Categorical { .. })));
 }
 
 // ── Gap 2: piecewise diverging midpoint normalization ─────────────────────────
@@ -5168,6 +5132,13 @@ fn resolve_color(spec: &ChartSpec, batch: &RecordBatch) -> (ColorScale, Vec<crat
     (scales.color.expect("color scale must be resolved"), warnings)
 }
 
+/// #126: the refusal-path twin of [`resolve_color`], for specs expected to
+/// fail color-scale resolution (e.g. an unparseable explicit range).
+fn resolve_color_err(spec: &ChartSpec, batch: &RecordBatch) -> crate::render::RenderError {
+    let theme = ThemeInputs::default();
+    resolve_scales(spec, batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap_err()
+}
+
 fn buckets_of(scale: &ColorScale) -> &DiscretizedColors {
     match scale {
         ColorScale::Discretizing(b) => b,
@@ -5437,30 +5408,21 @@ fn categorical_scheme_branch_applies_to_threshold_via_encoding_scheme() {
     }
 }
 
-/// An unparseable entry in a Quantize `range` discards the whole range, warns
-/// naming the offending entry, and falls back to scheme-sampled swatches.
+/// #126 (re-aimed): an unparseable entry in a Quantize `range` refuses,
+/// naming the offending entry, rather than discarding the range and falling
+/// back to scheme-sampled swatches.
 #[test]
-fn quantize_range_parse_failure_warns_and_falls_back_to_scheme() {
+fn quantize_range_parse_failure_refuses() {
     let spec = spec_with_color_scale_json(serde_json::json!({
         "type": "quantize",
         "domain": [0.0, 10.0],
         "range": ["#ff0000", "not-a-color"],
     }));
     let batch = batch_with_numeric_color(vec![0.0, 10.0]);
-    let (scale, warnings) = resolve_color(&spec, &batch);
-    assert!(
-        warnings.iter().any(|w| matches!(
-            w,
-            crate::render::RenderWarning::ColorRangeParseFailure { entry } if entry == "not-a-color"
-        )),
-        "expected a ColorRangeParseFailure naming the bad entry, got {warnings:?}"
-    );
-    let buckets = buckets_of(&scale);
-    assert_eq!(buckets.colors().len(), 2, "bucket count still comes from the range");
-    assert_ne!(
-        rgb(buckets.colors()[0]),
-        (0xff, 0x00, 0x00),
-        "the whole range is discarded, not just the bad entry"
+    let err = resolve_color_err(&spec, &batch);
+    assert_eq!(
+        err,
+        crate::render::RenderError::ColorRangeParseFailure { entry: "not-a-color".into() },
     );
 }
 
@@ -5619,7 +5581,8 @@ fn sequential_stops_resolve_to_gradient_and_interpolate_at_declared_t() {
 }
 
 /// The two raw-dict-reachable edges finding 1 (rust-quality-reviewer cycle 1)
-/// found untested: an unparseable stop fires the same `ColorRangeParseFailure`
+/// found untested: an unparseable stop refuses (#126, re-aimed from the
+/// former warn-and-fall-through) with the same `ColorRangeParseFailure`
 /// convention as every other explicit-color-list path, all-or-nothing; and a
 /// `stops` list with fewer than 2 usable entries takes the documented silent
 /// fall-through to plain scheme-name resolution (mirroring `bucket_colors`'
@@ -5631,32 +5594,23 @@ fn sequential_stops_resolve_to_gradient_and_interpolate_at_declared_t() {
 fn sequential_stops_raw_dict_edges() {
     let batch = batch_with_numeric_color(vec![0.0, 10.0]);
 
-    // Unparseable stop: all-or-nothing, warns naming the bad entry, and the
-    // scheme falls through to scheme-name resolution (Viridis, the hard
-    // fallback, since no scheme name is declared either) — not a partial or
-    // silently-wrong gradient.
+    // Unparseable stop: all-or-nothing, refuses naming the bad entry — not a
+    // partial or silently-wrong gradient, and not a silent swap for the
+    // theme's default scheme either.
     let bad_stop = spec_with_color_scale_json(serde_json::json!({
         "type": "sequential",
         "stops": [[0.0, "notacolor"], [1.0, "blue"]],
     }));
-    let (scale, warnings) = resolve_color(&bad_stop, &batch);
-    assert!(
-        warnings.iter().any(|w| matches!(
-            w,
-            crate::render::RenderWarning::ColorRangeParseFailure { entry } if entry == "notacolor"
-        )),
-        "expected a ColorRangeParseFailure naming the bad entry, got {warnings:?}"
-    );
-    assert!(
-        !matches!(
-            scale,
-            ColorScale::Continuous { scheme: crate::render::color::ContinuousScheme::Gradient(_), .. }
-        ),
-        "an unparseable stop must discard the whole gradient, not render a partial one"
+    let err = resolve_color_err(&bad_stop, &batch);
+    assert_eq!(
+        err,
+        crate::render::RenderError::ColorRangeParseFailure { entry: "notacolor".into() },
     );
 
     // Fewer than 2 usable stops: no warning, silent fall-through (the
-    // documented `Ok(_) => None` arm in `gradient_scheme_from_stops`).
+    // documented `Ok(_) => None` arm in `gradient_scheme_from_stops` — this is
+    // a malformed-partition shape, not a parse failure, so #126 leaves it
+    // alone).
     let one_stop = spec_with_color_scale_json(serde_json::json!({
         "type": "sequential",
         "stops": [[0.0, "red"]],
@@ -5670,6 +5624,60 @@ fn sequential_stops_raw_dict_edges() {
         ),
         "a single stop cannot describe a gradient; must fall through to scheme resolution"
     );
+}
+
+/// #240-4b (routed rider): an unrecognized `scheme`/`cmap` name used to fall
+/// back to the theme's default scheme with NO warning at all — indistinguishable
+/// from the user never having asked for a scheme. It must now emit a named
+/// `RenderWarning::UnknownColorScheme` while still rendering with the theme
+/// default (warn-degraded, not a refusal: the render is meaningful, just not
+/// painted with the asked-for palette).
+#[test]
+fn continuous_unknown_scheme_name_warns_and_falls_back_to_theme_default() {
+    use crate::render::color::{ContinuousScheme, NamedContinuous};
+
+    let spec = spec_with_color_scale_json(serde_json::json!({
+        "type": "linear",
+        "scheme": "not-a-real-scheme",
+    }));
+    let batch = batch_with_numeric_color(vec![0.0, 10.0]);
+    let (scale, warnings) = resolve_color(&spec, &batch);
+
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            crate::render::RenderWarning::UnknownColorScheme { name } if name == "not-a-real-scheme"
+        )),
+        "expected an UnknownColorScheme warning naming the bad name, got {warnings:?}"
+    );
+    match scale {
+        ColorScale::Continuous { scheme: ContinuousScheme::Named(named), .. } => {
+            assert_eq!(
+                named,
+                NamedContinuous::from_name("cool_blue").unwrap(),
+                "must fall back to the theme's default sequential scheme"
+            );
+        }
+        other => panic!("expected Continuous with a Named scheme, got {other:?}"),
+    }
+
+    // Control: no scheme requested at all → no warning, same theme default.
+    let no_scheme_spec = spec_with_color_scale_json(serde_json::json!({ "type": "linear" }));
+    let (no_scheme_scale, no_scheme_warnings) = resolve_color(&no_scheme_spec, &batch);
+    assert!(
+        no_scheme_warnings.is_empty(),
+        "requesting nothing must not warn: {no_scheme_warnings:?}"
+    );
+    match no_scheme_scale {
+        ColorScale::Continuous { scheme: ContinuousScheme::Named(named), .. } => {
+            assert_eq!(
+                named,
+                NamedContinuous::from_name("cool_blue").unwrap(),
+                "the no-scheme control must resolve the identical theme-default scheme"
+            );
+        }
+        other => panic!("expected Continuous with a Named scheme, got {other:?}"),
+    }
 }
 
 /// An alpha-carrying `#rrggbbaa` stop survives resolution — the Gradient

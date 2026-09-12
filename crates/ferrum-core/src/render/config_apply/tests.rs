@@ -946,7 +946,7 @@ mod chart_config_application_tests {
         let cfg = AxisConfigSpec { label_format_raw: Some(",.0f".to_string()), ..Default::default() };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         let scale = linear_scale(0.0, 3000.0);
-        apply_label_format_to_axis(&mut axis, &scale, 3, false);
+        apply_label_format_to_axis(&mut axis, &scale, 3, false, "x").unwrap();
         // ",.0f" formats with thousands separator and 0 decimal places.
         assert_eq!(axis.tick_labels, vec!["1,000", "2,000", "3,000"]);
     }
@@ -966,7 +966,7 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         let scale = linear_scale(0.0, 1.0);
-        apply_label_format_to_axis(&mut axis, &scale, 3, false);
+        apply_label_format_to_axis(&mut axis, &scale, 3, false, "x").unwrap();
         // Raw `label_format_raw` carries no sibling type field (D8:
         // `effective_label_format_type()` returns `None` for it) — NF-B2's
         // exact regression guard: a raw `%`-bearing NUMERIC spec must still
@@ -1013,7 +1013,7 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.overrides.label_format_type.as_deref(), Some("time"));
-        apply_label_format_to_axis(&mut axis, &scale, 4, false);
+        apply_label_format_to_axis(&mut axis, &scale, 4, false, "x").unwrap();
         for label in &axis.tick_labels {
             assert!(
                 !label.contains('%'),
@@ -1049,7 +1049,7 @@ mod chart_config_application_tests {
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.overrides.label_format_type.as_deref(), Some("number"));
         let scale = linear_scale(0.0, 1.0);
-        apply_label_format_to_axis(&mut axis, &scale, 3, false);
+        apply_label_format_to_axis(&mut axis, &scale, 3, false, "x").unwrap();
         assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
     }
 
@@ -1073,7 +1073,7 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         let scale = linear_scale(1.0, 11.0);
-        apply_label_format_to_axis(&mut axis, &scale, 4, false);
+        apply_label_format_to_axis(&mut axis, &scale, 4, false, "x").unwrap();
         assert_eq!(axis.tick_labels, vec!["1st", "2nd", "3rd", "11th"]);
     }
 
@@ -1111,7 +1111,7 @@ mod chart_config_application_tests {
         // And apply_label_format_to_axis (which no-ops on a None label_format)
         // must leave the already-applied per-channel labels untouched.
         let scale = linear_scale(0.0, 1.0);
-        apply_label_format_to_axis(&mut axis, &scale, 2, false);
+        apply_label_format_to_axis(&mut axis, &scale, 2, false, "x").unwrap();
         assert_eq!(axis.tick_labels, vec!["Feb 06".to_string(), "Mar 06".to_string()]);
     }
 
@@ -1144,10 +1144,79 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.overrides.label_format.as_deref(), Some("%Y-%m-%d"));
-        apply_label_format_to_axis(&mut axis, &scale, 2, false);
+        apply_label_format_to_axis(&mut axis, &scale, 2, false, "x").unwrap();
         for label in &axis.tick_labels {
             assert!(label.starts_with("2020-01-0"), "expected an ISO date, got {label:?}");
         }
+    }
+
+    /// #133, chart-level surface: `configure_axis(label_format="date_iso")`
+    /// (resolved to `label_format="%Y-%m-%d"` + `label_format_type="time"`)
+    /// on a NON-temporal resolved scale must refuse — before this, it fell
+    /// through to `apply_tick_format`'s epoch-ms reinterpretation and
+    /// rendered a nonsense 1970 date from the numeric tick labels.
+    #[test]
+    fn axis_config_time_preset_on_non_temporal_scale_refuses() {
+        let scale = linear_scale(0.0, 100.0);
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["0".to_string(), "50".to_string(), "100".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some("%Y-%m-%d".to_string()),
+                label_format_type: Some("time".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        let err = apply_label_format_to_axis(&mut axis, &scale, 3, false, "x").unwrap_err();
+        assert_eq!(
+            err,
+            RenderError::TimeFormatOnNonTemporalScale {
+                channel: "x",
+                format: "%Y-%m-%d".into(),
+                coord_flipped: false,
+            }
+        );
+    }
+
+    /// #133, the `tick_values` sibling branch of the same chart-level
+    /// surface: an explicit `configure_axis(tick_values=[...],
+    /// label_format="date_iso")` on a non-temporal scale must refuse too —
+    /// this branch reaches `apply_tick_format` directly, bypassing the plain
+    /// branch's own guard, so it needs its own.
+    #[test]
+    fn axis_config_time_preset_with_explicit_tick_values_on_non_temporal_scale_refuses() {
+        let scale = linear_scale(0.0, 1.0);
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["ignored".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                label_format: Some("%Y-%m-%d".to_string()),
+                label_format_type: Some("time".to_string()),
+                values: Some(vec![0.0, 0.5, 1.0]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        let err = apply_label_format_to_axis(&mut axis, &scale, 3, false, "y").unwrap_err();
+        assert_eq!(
+            err,
+            RenderError::TimeFormatOnNonTemporalScale {
+                channel: "y",
+                format: "%Y-%m-%d".into(),
+                coord_flipped: false,
+            }
+        );
     }
 
     #[test]
@@ -1331,7 +1400,7 @@ mod chart_config_application_tests {
             midpoint: None,
         });
         let cfg = ColorConfigSpec { domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]), ..Default::default() };
-        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
         assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
         if let Some(ColorScale::Continuous { domain, .. }) = color_scale {
             assert_eq!(domain, (10.0, 90.0));
@@ -1353,7 +1422,7 @@ mod chart_config_application_tests {
             range: Some(vec!["#ffffff".to_string(), "#000000".to_string()]),
             ..Default::default()
         };
-        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
         assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
         if let Some(ColorScale::Continuous { scheme: ContinuousScheme::Gradient(stops), .. }) = color_scale {
             assert_eq!(stops.len(), 2);
@@ -1362,6 +1431,41 @@ mod chart_config_application_tests {
             assert!((stops[1].0 - 1.0).abs() < 1e-9);
         } else {
             panic!("expected Gradient color scheme after range override");
+        }
+    }
+
+    /// #126 sibling defect: the Continuous arm's `range` used to
+    /// `filter_map(|s| parse_color(s).ok())` an unparseable entry out with NO
+    /// warning at all — the one range site in the crate that was not even
+    /// all-or-nothing. `["#ffffff", "not-a-color", "#000000"]` used to build a
+    /// 2-stop gradient from the two survivors, silently discarding the
+    /// user's requested 3-stop gradient. It must now refuse the whole
+    /// override, naming the offending entry, exactly like the Categorical and
+    /// Discretizing arms.
+    #[test]
+    fn color_config_continuous_range_parse_failure_refuses() {
+        use scale_resolve::ColorScale;
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
+            domain: (0.0, 1.0),
+            scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
+        });
+        let cfg = ColorConfigSpec {
+            range: Some(vec![
+                "#ffffff".to_string(),
+                "not-a-color".to_string(),
+                "#000000".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let err = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap_err();
+        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "not-a-color".into() });
+        // The scale must be left untouched — no partial 2-stop gradient built
+        // from the survivors.
+        match color_scale {
+            Some(ColorScale::Continuous { scheme: ContinuousScheme::Named(NamedContinuous::Viridis), .. }) => {}
+            other => panic!("scale must be untouched on refusal, got {other:?}"),
         }
     }
 
@@ -1391,7 +1495,7 @@ mod chart_config_application_tests {
             domain: Some(vec![serde_json::json!("c"), serde_json::json!("a")]),
             ..Default::default()
         };
-        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
         // Dropping "b" is a reportable degradation — see
         // `color_config_domain_omitting_a_data_category_warns` for the contract.
         assert_eq!(
@@ -1437,7 +1541,8 @@ mod chart_config_application_tests {
                 domain: Some(vec![serde_json::json!("a"), serde_json::json!("c")]),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
 
         // (1) The warning names the omitted category — and only it.
         assert_eq!(
@@ -1478,7 +1583,8 @@ mod chart_config_application_tests {
                 ),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(warnings.is_empty(), "a domain covering every category is silent: {warnings:?}");
     }
 
@@ -1492,7 +1598,7 @@ mod chart_config_application_tests {
             domain: Some(vec![serde_json::json!("a"), serde_json::json!("ghost")]),
             ..Default::default()
         };
-        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
         assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
         match color_scale.as_ref().unwrap() {
             ColorScale::Categorical { domain, .. } => assert_eq!(domain, &["a", "ghost"]),
@@ -1510,7 +1616,7 @@ mod chart_config_application_tests {
             domain: Some(vec![serde_json::json!(0.0), serde_json::json!(1.0)]),
             ..Default::default()
         };
-        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg);
+        let warnings = apply_color_config_to_color_scale(&mut color_scale, &cfg).unwrap();
         assert!(warnings.is_empty(), "a well-formed override must not warn: {warnings:?}");
         match color_scale.as_ref().unwrap() {
             ColorScale::Categorical { domain, .. } => assert_eq!(domain, &["a", "b"]),
@@ -1569,7 +1675,8 @@ mod chart_config_application_tests {
         let warnings = apply_color_config_to_color_scale(
             &mut color_scale,
             &ColorConfigSpec { range: Some(vec!["#ffffff".into()]), ..Default::default() },
-        );
+        )
+        .unwrap();
         assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
         assert_eq!(
             warnings,
@@ -1587,7 +1694,8 @@ mod chart_config_application_tests {
                 range: Some(vec!["#ffffff".into(), "#ffffff".into()]),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(color_scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 255);
         assert!(warnings.is_empty(), "a matching range must not warn: {warnings:?}");
     }
@@ -1630,7 +1738,7 @@ mod chart_config_application_tests {
                 scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
                 midpoint: None,
             });
-            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair));
+            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair)).unwrap();
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
             match scale {
                 Some(ColorScale::Continuous {
@@ -1649,7 +1757,7 @@ mod chart_config_application_tests {
         // ── Categorical: the range replaces the palette. ────────────────────
         for pair in spellings {
             let mut scale = Some(categorical_scale(&["a", "b"]));
-            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair));
+            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair)).unwrap();
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
             match scale {
                 Some(ColorScale::Categorical { palette, .. }) => {
@@ -1665,7 +1773,7 @@ mod chart_config_application_tests {
             let mut scale = Some(ColorScale::Discretizing(
                 DiscretizedColors::new(vec![0.0, 1.0, 2.0], vec![black; 2]).unwrap(),
             ));
-            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair));
+            let warnings = apply_color_config_to_color_scale(&mut scale, &range(pair)).unwrap();
             assert!(warnings.is_empty(), "{pair:?} must not warn: {warnings:?}");
             let scale = scale.unwrap();
             assert_eq!(
@@ -1680,8 +1788,8 @@ mod chart_config_application_tests {
     /// entries out *before* the count check would let a too-long range "fit"
     /// after the bad entry is dropped — silently repainting the buckets with a
     /// shifted mapping — and would misreport a too-short one as a count
-    /// mismatch. Both shapes must report the parse failure and leave the
-    /// swatches untouched.
+    /// mismatch. Both shapes must refuse (#126) naming the bad entry and leave
+    /// the swatches untouched.
     #[test]
     fn color_config_range_on_discretizing_scale_parses_all_or_nothing() {
         use scale_resolve::{ColorScale, DiscretizedColors};
@@ -1691,14 +1799,11 @@ mod chart_config_application_tests {
                 DiscretizedColors::new(vec![0.0, 1.0, 2.0, 3.0], vec![black; 3]).unwrap(),
             ))
         };
-        let parse_failure = |entry: &str| {
-            vec![RenderWarning::ColorRangeParseFailure { entry: entry.to_string() }]
-        };
 
         // 4 entries, one unparseable: the survivors would number exactly 3 and
         // would have been accepted, repainting bucket 2 with the 4th color.
         let mut scale = three_buckets();
-        let warnings = apply_color_config_to_color_scale(
+        let err = apply_color_config_to_color_scale(
             &mut scale,
             &ColorConfigSpec {
                 range: Some(vec![
@@ -1709,8 +1814,9 @@ mod chart_config_application_tests {
                 ]),
                 ..Default::default()
             },
-        );
-        assert_eq!(warnings, parse_failure("bogus"), "must report the parse, not repaint");
+        )
+        .unwrap_err();
+        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "bogus".into() });
         for probe in [0.5, 1.5, 2.5] {
             assert_eq!(
                 scale.as_ref().unwrap().lookup_f64(probe).unwrap().red,
@@ -1722,14 +1828,15 @@ mod chart_config_application_tests {
         // 3 entries, one unparseable: a post-filter count check would call this
         // a 2-vs-3 mismatch, misattributing a parse failure.
         let mut scale = three_buckets();
-        let warnings = apply_color_config_to_color_scale(
+        let err = apply_color_config_to_color_scale(
             &mut scale,
             &ColorConfigSpec {
                 range: Some(vec!["#ff0000".into(), "nope".into(), "#0000ff".into()]),
                 ..Default::default()
             },
-        );
-        assert_eq!(warnings, parse_failure("nope"));
+        )
+        .unwrap_err();
+        assert_eq!(err, RenderError::ColorRangeParseFailure { entry: "nope".into() });
         assert_eq!(scale.as_ref().unwrap().lookup_f64(0.5).unwrap().red, 0);
     }
 
@@ -1744,9 +1851,10 @@ mod chart_config_application_tests {
     /// `range=["red", "notacolor", "blue"]` over domain `[a, b, c]` parsed to
     /// `[red, blue]` and rendered `a=red`, `b=blue`, `c=red` — silently wrong,
     /// with no warning, under a doc comment asserting this could not happen.
-    /// The assertion is per-category (which category gets which color), not a
-    /// palette-length check, so a fix that merely shortened the palette would
-    /// still fail it.
+    /// It must now refuse (#126), naming the offending entry, leaving the
+    /// resolved palette untouched. The assertion is per-category (which
+    /// category gets which color), not a palette-length check, so a fix that
+    /// merely shortened the palette would still fail it.
     #[test]
     fn color_config_range_on_categorical_scale_parses_all_or_nothing() {
         let red = color::parse_color("red").unwrap();
@@ -1760,28 +1868,30 @@ mod chart_config_application_tests {
                 range: Some(vec!["red".into(), "green".into(), "blue".into()]),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert!(warnings.is_empty(), "a valid range must not warn: {warnings:?}");
         let applied = scale.as_ref().unwrap();
         assert_eq!(applied.lookup("a"), Some(red), "a must take the 1st entry");
         assert_eq!(applied.lookup("c"), Some(blue), "c must take the 3rd entry");
 
-        // One unparseable entry: the whole range is discarded and reported.
+        // One unparseable entry: the whole range is refused.
         let resolved = categorical_scale(&["a", "b", "c"]);
         let (before_a, before_b, before_c) =
             (resolved.lookup("a"), resolved.lookup("b"), resolved.lookup("c"));
         let mut scale = Some(resolved);
-        let warnings = apply_color_config_to_color_scale(
+        let err = apply_color_config_to_color_scale(
             &mut scale,
             &ColorConfigSpec {
                 range: Some(vec!["red".into(), "notacolor".into(), "blue".into()]),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap_err();
         assert_eq!(
-            warnings,
-            vec![RenderWarning::ColorRangeParseFailure { entry: "notacolor".into() }],
-            "one bad entry must be reported, not silently dropped"
+            err,
+            RenderError::ColorRangeParseFailure { entry: "notacolor".into() },
+            "one bad entry must be refused, not silently dropped"
         );
         let kept = scale.as_ref().unwrap();
         assert_eq!(

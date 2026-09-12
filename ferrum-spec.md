@@ -731,14 +731,26 @@ All positional and appearance channels accept:
 >   `RenderError`), `ferrum.color.to_hex` (Python `ValueError`), selection
 >   styling (`selection.py`, Python `ValueError`), and the `background=`
 >   render/theme override (Rust `RenderConfig`/`ThemeOverrides`, typed error).
->   Two classes of site keep the full vocabulary but a pre-existing
->   silent-fallback contract instead of refusal: (1) `Color`/`Fill`/`Stroke`
->   scale `range=` entries — an unparseable entry emits a `UserWarning` and
->   discards the **entire** explicit range (not just the bad entry) in favor
->   of the theme palette, so one bad string silently drops every good one
->   alongside it; this is a distinct gap from, and not yet covered by, #107,
->   and is tracked separately as **#126**, scoped to encoding-level `range=`.
->   (2) **Closed 2026-09-11 (#107, wave-1 hardening).** The chart-config/
+>   **Closed 2026-09-11 (#126, wave-1 hardening).** `Color`/`Fill`/`Stroke`
+>   scale `range=` entries — every one of the six sites that build a
+>   position-indexed color range or gradient from explicit strings (three
+>   encoding-level: categorical `range=`, `Gradient([...])` stops,
+>   discretizing `bucket_colors`; three chart-config-level:
+>   `configure_color(range=)`'s categorical, discretizing, and continuous
+>   arms) — now refuse with a typed `RenderError` naming the first
+>   unparseable entry, instead of the former warn-and-discard: an
+>   unparseable entry used to emit a `UserWarning` and silently discard the
+>   **entire** explicit range (not just the bad entry) in favor of the theme
+>   palette, so one bad string dropped every good one alongside it with no
+>   way to recover the user's intended mapping. The `configure_color(range=)`
+>   continuous arm was the one site that wasn't even all-or-nothing before
+>   this fix — it `filter_map`'d bad stops out with **no warning at all** —
+>   folded into the same #126 refusal as a sibling defect of the same root
+>   cause. All-or-nothing parsing itself is unchanged: a range/gradient is
+>   indexed by position, so a partial parse would re-point every later entry
+>   rather than shortening a cycle — a WRONG mapping, not a degraded one;
+>   only the disposition (warn → raise) flipped.
+>   **Closed 2026-09-11 (#107, wave-1 hardening).** The chart-config/
 >   legend-styling/axis-band/title color fields (`AxisConfig`, `LegendConfig`,
 >   `TitleConfig`, `GridAxisConfig`, `GridConfig`) now refuse an unparseable
 >   color string at construction (Python `ValueError`, wrapping

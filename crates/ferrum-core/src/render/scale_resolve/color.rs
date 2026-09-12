@@ -41,10 +41,11 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 /// applied on top of the declared domain (or data-derived domain when no explicit
 /// domain is given), mirroring the positional-scale behavior.
 ///
-/// The parse is all-or-nothing: if any color string fails to parse, the entire
-/// explicit range is discarded and the function emits a `ColorRangeParseFailure`
-/// warning naming the first offending entry, then falls through to the default
-/// theme palette.
+/// The parse is all-or-nothing: if any color string fails to parse, the whole
+/// resolution refuses with a [`RenderError::ColorRangeParseFailure`] naming
+/// the first offending entry (#126, spec §4.2 amended 2026-09-11) — the
+/// entire explicit range used to be silently discarded in favor of the
+/// default theme palette, with only a warning naming it.
 ///
 /// # D4 — scheme inside `scale` dict for continuous color
 ///
@@ -167,7 +168,7 @@ pub fn build_color_scale(
             .or_else(|| composite_numeric_extent(composite_domain))
             .unwrap_or(data_extent);
 
-        let (scheme, scheme_warnings) = resolve_continuous_scheme(c_enc, theme, (lo, hi));
+        let (scheme, scheme_warnings) = resolve_continuous_scheme(c_enc, theme, (lo, hi))?;
         // Gap 2: resolve the diverging midpoint.  Priority:
         //   1. explicit `domain_mid`/`domainMid` field on DivergingScale spec
         //   2. middle element of a 3-tuple domain=[lo, mid, hi]
@@ -224,12 +225,11 @@ pub fn build_color_scale(
         //   2. Data first-appearance order (`distinct_values_in_order`)
         // `enc.sort` is applied on top of the resolved domain.
         //
-        // The parse is all-or-nothing: if any entry fails to parse, the entire
-        // explicit range is discarded, a `ColorRangeParseFailure` warning is emitted
-        // naming the first offending entry, and the resolver falls through to the
+        // The parse is all-or-nothing: if any entry fails to parse, resolution
+        // refuses with a `RenderError::ColorRangeParseFailure` naming the
+        // first offending entry (#126) rather than falling through to the
         // default theme palette below.
         if let Some(color_strings) = explicit_string_range(c_enc) {
-            let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
             let parse_result: Result<Vec<Color>, String> = color_strings
                 .iter()
                 .map(|s| {
@@ -239,6 +239,7 @@ pub fn build_color_scale(
                 .collect::<Result<Vec<_>, _>>();
             match parse_result {
                 Ok(parsed) => {
+                    let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
                     // Build the domain from the declared scale.domain (if present),
                     // falling back to data first-appearance order from the
                     // domain_batch (global when facet_shared).
@@ -253,14 +254,11 @@ pub fn build_color_scale(
                     return Ok((Some(ColorScale::Categorical { domain, palette }), warnings));
                 }
                 Err(bad_entry) => {
-                    warnings.push(crate::render::RenderWarning::ColorRangeParseFailure {
-                        entry: bad_entry,
-                    });
-                    // Fall through to default palette, carrying the warning.
-                    let mut domain = distinct_values_in_order(domain_batch, &c_enc.field)?;
-                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
-                    let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
-                    return Ok((Some(scale), warnings));
+                    // #126: all-or-nothing parse refuses rather than falling
+                    // through to the default palette — one bad entry used to
+                    // silently swap the user's requested mapping for the
+                    // theme's, with only a warning naming it.
+                    return Err(RenderError::ColorRangeParseFailure { entry: bad_entry });
                 }
             }
         }
@@ -302,37 +300,56 @@ pub fn build_color_scale(
 /// this is a no-op on that path). Shared by the continuous and the
 /// discretizing paths so both honor the same precedence.
 ///
-/// Returns any `RenderWarning`s the resolution produced (currently only a
-/// stops all-or-nothing parse failure); the caller folds them into its
-/// accumulator.
+/// #240-4b (routed rider): when the user named a scheme at step 2 or 3 (via
+/// `encoding.scheme` or the scale spec's own `scheme` field) and that name is
+/// not a recognized [`NamedContinuous`], the requested name is dropped in
+/// favor of the theme default — previously silent. That drop is now reported
+/// via [`crate::render::RenderWarning::UnknownColorScheme`], naming the
+/// unrecognized name. A chart that names NO scheme at all (both step 2 and
+/// step 3 absent) still resolves the theme default silently — nothing was
+/// requested, so nothing was dropped.
+///
+/// Errors when the stops parse fails (see [`gradient_scheme_from_stops`]).
+/// Returns any `RenderWarning`s the resolution produced; the caller folds
+/// them into its accumulator.
 fn resolve_continuous_scheme(
     enc: &crate::spec::encoding::EncodingSpec,
     theme: &ThemeInputs,
     (lo, hi): (f64, f64),
-) -> (crate::render::color::ContinuousScheme, Vec<crate::render::RenderWarning>) {
+) -> Result<(crate::render::color::ContinuousScheme, Vec<crate::render::RenderWarning>), RenderError> {
     use crate::render::color::{ContinuousScheme, NamedContinuous};
     let mut warnings = Vec::new();
-    let mut scheme = gradient_scheme_from_stops(enc, &mut warnings).unwrap_or_else(|| {
-        enc.scheme
-            .as_deref()
-            .or(scale_common_scheme(enc))
-            .and_then(NamedContinuous::from_name)
-            .map(ContinuousScheme::Named)
-            .unwrap_or_else(|| {
-                let theme_scheme = if lo < 0.0 && hi > 0.0 {
-                    &theme.palette.diverging_scheme
-                } else {
-                    &theme.palette.sequential_scheme
-                };
-                NamedContinuous::from_name(theme_scheme)
-                    .map(ContinuousScheme::Named)
-                    .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
-            })
-    });
+    let mut scheme = match gradient_scheme_from_stops(enc)? {
+        Some(s) => s,
+        None => {
+            let requested = enc.scheme.as_deref().or(scale_common_scheme(enc));
+            match requested.and_then(NamedContinuous::from_name) {
+                Some(named) => ContinuousScheme::Named(named),
+                None => {
+                    // #240-4b: the user asked for a name and it did not
+                    // resolve — warn before falling back. A `None` `requested`
+                    // means nothing was asked for at all, so no warning.
+                    if let Some(name) = requested {
+                        warnings.push(crate::render::RenderWarning::UnknownColorScheme {
+                            name: name.to_string(),
+                        });
+                    }
+                    let theme_scheme = if lo < 0.0 && hi > 0.0 {
+                        &theme.palette.diverging_scheme
+                    } else {
+                        &theme.palette.sequential_scheme
+                    };
+                    NamedContinuous::from_name(theme_scheme)
+                        .map(ContinuousScheme::Named)
+                        .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
+                }
+            }
+        }
+    };
     if scale_spec_is_reversed(enc) {
         scheme = ContinuousScheme::Reverse(Box::new(scheme));
     }
-    (scheme, warnings)
+    Ok((scheme, warnings))
 }
 
 /// The `stops` list of a `Sequential` scale spec, when present and non-empty.
@@ -356,17 +373,13 @@ fn sequential_stops(enc: &crate::spec::encoding::EncodingSpec) -> Option<&[(f64,
 /// through unchanged, not re-spaced to `i / (n - 1)`.
 ///
 /// The color parse is all-or-nothing, mirroring `build_color_scale`'s
-/// `explicit_string_range` / `ColorRangeParseFailure` convention (T2's
-/// committed all-or-nothing convention, `render/scale_resolve/color.rs`
-/// lines 211-246): one unparseable stop discards the whole list and pushes a
-/// `ColorRangeParseFailure` warning naming the first offending entry,
-/// falling through to scheme-name resolution rather than rendering a partial
-/// or silently-wrong gradient.
+/// `explicit_string_range` convention: one unparseable stop refuses with a
+/// [`RenderError::ColorRangeParseFailure`] naming the first offending entry
+/// (#126) rather than rendering a partial or silently-wrong gradient.
 fn gradient_scheme_from_stops(
     enc: &crate::spec::encoding::EncodingSpec,
-    warnings: &mut Vec<crate::render::RenderWarning>,
-) -> Option<crate::render::color::ContinuousScheme> {
-    let stops = sequential_stops(enc)?;
+) -> Result<Option<crate::render::color::ContinuousScheme>, RenderError> {
+    let Some(stops) = sequential_stops(enc) else { return Ok(None) };
     let parsed: Result<Vec<(f64, Color)>, String> = stops
         .iter()
         .map(|(t, s)| {
@@ -377,7 +390,7 @@ fn gradient_scheme_from_stops(
         .collect();
     match parsed {
         Ok(gradient_stops) if gradient_stops.len() >= 2 => {
-            Some(crate::render::color::ContinuousScheme::Gradient(gradient_stops))
+            Ok(Some(crate::render::color::ContinuousScheme::Gradient(gradient_stops)))
         }
         // Fewer than 2 stops can't form a gradient. The `Gradient(...)`
         // pyfunction now rejects this at construction (spec reviewer cycle
@@ -387,11 +400,8 @@ fn gradient_scheme_from_stops(
         // falls through with no warning, matching `bucket_colors`' treatment
         // of a range whose length doesn't fit the partition it can't
         // describe.
-        Ok(_) => None,
-        Err(entry) => {
-            warnings.push(crate::render::RenderWarning::ColorRangeParseFailure { entry });
-            None
-        }
+        Ok(_) => Ok(None),
+        Err(entry) => Err(RenderError::ColorRangeParseFailure { entry }),
     }
 }
 
@@ -441,7 +451,7 @@ fn build_discretizing_color_scale(
     };
     let n_buckets = partition.thresholds.len() + 1;
     let mut warnings = Vec::new();
-    let mut colors = bucket_colors(enc, theme, n_buckets, partition.extent, &mut warnings);
+    let mut colors = bucket_colors(enc, theme, n_buckets, partition.extent, &mut warnings)?;
     if partition.descending {
         colors.reverse();
     }
@@ -642,29 +652,29 @@ fn widen_to_cover((lo, hi): (f64, f64), thresholds: &[f64]) -> (f64, f64) {
 /// [`build_default_categorical_scale`]'s recycling contract, never a silent
 /// degrade. Every other scheme is sampled at `n_buckets` evenly spaced points.
 ///
-/// The explicit range parse is all-or-nothing, mirroring the categorical path:
-/// one unparseable entry discards the whole range, pushes a
-/// `ColorRangeParseFailure` warning naming it, and falls through to the scheme.
+/// The explicit range parse is all-or-nothing, mirroring the categorical
+/// path: one unparseable entry refuses with a
+/// [`RenderError::ColorRangeParseFailure`] naming it (#126), rather than
+/// falling through to the scheme.
 fn bucket_colors(
     enc: &crate::spec::encoding::EncodingSpec,
     theme: &ThemeInputs,
     n_buckets: usize,
     extent: (f64, f64),
     warnings: &mut Vec<crate::render::RenderWarning>,
-) -> Vec<Color> {
+) -> Result<Vec<Color>, RenderError> {
     if let Some(strings) = explicit_string_range(enc) {
         let parsed: Result<Vec<Color>, String> = strings
             .iter()
             .map(|s| crate::render::color::parse_color(s).map_err(|_| s.clone()))
             .collect();
         match parsed {
-            Ok(colors) if colors.len() == n_buckets => return colors,
+            Ok(colors) if colors.len() == n_buckets => return Ok(colors),
             // A range of the wrong length cannot describe this partition; the
             // bucket count is derived from the range for every spec that can
             // carry one, so this is unreachable for a well-formed spec.
             Ok(_) => {}
-            Err(entry) => warnings
-                .push(crate::render::RenderWarning::ColorRangeParseFailure { entry }),
+            Err(entry) => return Err(RenderError::ColorRangeParseFailure { entry }),
         }
     }
     let scheme_name = enc.scheme.as_deref().or_else(|| scale_common_scheme(enc));
@@ -675,11 +685,11 @@ fn bucket_colors(
                 categories: n_buckets as u32,
             });
         }
-        return (0..n_buckets).map(|i| entries[i % entries.len()]).collect();
+        return Ok((0..n_buckets).map(|i| entries[i % entries.len()]).collect());
     }
-    let (scheme, scheme_warnings) = resolve_continuous_scheme(enc, theme, extent);
+    let (scheme, scheme_warnings) = resolve_continuous_scheme(enc, theme, extent)?;
     warnings.extend(scheme_warnings);
-    (0..n_buckets)
+    Ok((0..n_buckets)
         .map(|i| {
             let t = if n_buckets <= 1 {
                 0.5
@@ -688,7 +698,7 @@ fn bucket_colors(
             };
             scheme.sample(t)
         })
-        .collect()
+        .collect())
 }
 
 /// The `(lo, hi)` extent of a 10-pre-b composite shared color domain, when it is

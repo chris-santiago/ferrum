@@ -111,14 +111,14 @@ pub(in crate::render) fn apply_chart_config_pipeline(
             secondary_scales: &prep.secondary_y_scales,
             secondary_tick_counts: &prep.secondary_y_tick_counts,
         },
-    );
+    )?;
     apply_color_config_then_filter_legend_entries(
         &mut prep.provisional_scales.color,
         &mut prep.legend_entries,
         prep.legend_overrides.values.as_deref(),
         chart_config,
         warnings,
-    );
+    )?;
     let effective_theme = build_effective_theme_config_over_theme(prep, theme, chart_config);
     let (legend_overrides, legend_title) = resolve_legend_overrides_and_title(prep, chart_config);
     Ok(AppliedChartConfig { effective_theme, legend_overrides, legend_title })
@@ -281,7 +281,13 @@ struct TickResyncCtx<'a> {
 /// The non-ordinal y labels/fractions were reversed in prepare, so the raw
 /// values are reversed in lockstep. The EXPLICIT labels are not reversed
 /// (unlike auto labels), so the value-order fractions align directly.
-fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickResyncCtx<'_>) {
+///
+/// Errors (#133) when `apply_label_format_to_axis` refuses on any of the
+/// primary x/y axes or a secondary y axis.
+fn resync_ticks_after_axis_merge(
+    axes: &mut crate::layout::AxesInput,
+    ctx: TickResyncCtx<'_>,
+) -> Result<(), RenderError> {
     let TickResyncCtx {
         scales,
         x_tick_count,
@@ -293,8 +299,8 @@ fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickR
     let (x_tc, y_tc) = (x_tick_count, y_tick_count);
     prepare::adjust_axis_ticks(&mut axes.x, &scales.x, x_tc, false);
     prepare::adjust_axis_ticks(&mut axes.y, &scales.y, y_tc, y_reversed);
-    apply_label_format_to_axis(&mut axes.x, &scales.x, x_tc, false);
-    apply_label_format_to_axis(&mut axes.y, &scales.y, y_tc, y_reversed);
+    apply_label_format_to_axis(&mut axes.x, &scales.x, x_tc, false, "x")?;
+    apply_label_format_to_axis(&mut axes.y, &scales.y, y_tc, y_reversed, "y")?;
     sync_tick_placement_to_tick_values(&mut axes.x, &scales.x);
     sync_tick_placement_to_tick_values(&mut axes.y, &scales.y);
     // The SAME three post-config tick adjustments for every secondary y axis
@@ -324,9 +330,13 @@ fn resync_ticks_after_axis_merge(axes: &mut crate::layout::AxesInput, ctx: TickR
     {
         let reversed = !matches!(scale, scale_resolve::ScaleKind::Ordinal(_));
         prepare::adjust_axis_ticks(secondary, scale, tc, reversed);
-        apply_label_format_to_axis(secondary, scale, tc, reversed);
+        // Secondary axes are always drawn as `Channel::Y` (never flipped
+        // themselves — see `build_secondary_y_axis_inputs`'s R3 note), so
+        // "y" is the same token the primary y axis above uses, not "y2".
+        apply_label_format_to_axis(secondary, scale, tc, reversed, "y")?;
         sync_tick_placement_to_tick_values(secondary, scale);
     }
+    Ok(())
 }
 
 // ── Tier 4 (passes 11a, 11b, 12): color config, THEN the legend-entry filter ─
@@ -357,12 +367,13 @@ fn apply_color_config_then_filter_legend_entries(
     legend_values: Option<&[String]>,
     chart_config: &ChartConfig,
     warnings: &mut Vec<RenderWarning>,
-) {
+) -> Result<(), RenderError> {
     if let Some(ref cfg) = chart_config.color {
-        warnings.extend(apply_color_config_to_color_scale(color_scale, cfg));
+        warnings.extend(apply_color_config_to_color_scale(color_scale, cfg)?);
         resync_categorical_legend_entries(legend_entries, color_scale.as_ref());
     }
     apply_legend_values_to_entries(legend_entries, legend_values, warnings);
+    Ok(())
 }
 
 // ── Tier 5 (passes 13–15): effective theme, config over theme ──────────────
@@ -981,40 +992,72 @@ pub(in crate::render) fn apply_axis_style_to_axis_input(
 /// Otherwise (numeric, or no explicit `format_type`), each existing tick
 /// label is parsed as a float and reformatted via the d3-format spec.
 /// Non-numeric labels (category names) are passed through unchanged.
+///
+/// Errors (#133, spec §4.2 amended 2026-09-11) when `format_type == "time"`
+/// names an explicit `label_format` and the resolved `scale` is not temporal
+/// at all (`scale.temporal_tick_values` returns `None`) — this surface's own
+/// pre-existing time-detection predicate (`format_type == "time"`, unlike
+/// `prepare::apply_axis_format_or_thread`'s `is_time_format_spec`, which also
+/// tolerates an unset `format_type`) is kept as-is; only the resolved-scale
+/// refusal is added on top. A length-drift on a genuinely temporal scale
+/// (`Some` at a different length) keeps its pre-existing string-reparse
+/// fallback, unrefused. `channel` is `"x"`/`"y"` — this surface is EXEMPT
+/// from the R3 un-flip correction (`coord_flipped` always `false`):
+/// `axis_x`/`axis_y`/`axis_y2` are resolved-slot vocabulary the user typed
+/// directly, never remapped under `CoordFlip`, matching
+/// `InvalidAxisOrient`'s chart-level exemption.
 fn apply_label_format_to_axis(
     axis: &mut crate::layout::AxisInput,
     scale: &scale_resolve::ScaleKind,
     tick_count: usize,
     reversed: bool,
-) {
+    channel: &'static str,
+) -> Result<(), RenderError> {
     let format_type = axis.overrides.label_format_type.clone();
+    let is_time_type = format_type.as_deref() == Some("time");
     if let Some(tick_vals) = axis.overrides.tick_values.clone() {
         // Replace tick_labels with formatted versions of the explicit tick_values.
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
         let fmt = axis.overrides.label_format.as_deref();
-        axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
-        return;
-    }
-    let Some(fmt_str) = axis.overrides.label_format.clone() else { return };
-    if format_type.as_deref() == Some("time") {
-        if let Some(mut values) = scale.temporal_tick_values(tick_count) {
-            if reversed {
-                values.reverse();
-            }
-            if values.len() == axis.tick_labels.len() {
-                axis.tick_labels = values
-                    .into_iter()
-                    .map(|ms| format::format_time_spec(ms, &fmt_str))
-                    .collect();
-                return;
+        if let Some(f) = fmt {
+            if is_time_type && scale.temporal_tick_values(tick_count).is_none() {
+                return Err(RenderError::TimeFormatOnNonTemporalScale {
+                    channel,
+                    format: f.to_string(),
+                    coord_flipped: false,
+                });
             }
         }
+        axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, format_type.as_deref());
+        return Ok(());
+    }
+    let Some(fmt_str) = axis.overrides.label_format.clone() else { return Ok(()) };
+    if is_time_type {
+        let Some(mut values) = scale.temporal_tick_values(tick_count) else {
+            return Err(RenderError::TimeFormatOnNonTemporalScale {
+                channel,
+                format: fmt_str,
+                coord_flipped: false,
+            });
+        };
+        if reversed {
+            values.reverse();
+        }
+        if values.len() == axis.tick_labels.len() {
+            axis.tick_labels = values
+                .into_iter()
+                .map(|ms| format::format_time_spec(ms, &fmt_str))
+                .collect();
+            return Ok(());
+        }
+        // Length drift on a genuinely temporal scale: existing fallback below.
     }
     axis.tick_labels = prepare::apply_tick_format(
         std::mem::take(&mut axis.tick_labels),
         Some(&fmt_str),
         format_type.as_deref(),
     );
+    Ok(())
 }
 
 /// Re-pair the axis's tick-placement carrier with its labels after a
@@ -1106,41 +1149,42 @@ fn sync_tick_placement_to_tick_values(
 /// [`RenderWarning::ColorDomainOmitsCategories`] so that sanctioned degradation
 /// is distinguishable from a rendering bug (spec §4.2, amended 2026-08-28).
 /// `range` replaces the palette with a heap-allocated `Cow::Owned` slice of
-/// parsed colors, all-or-nothing: one unparseable entry discards the whole
-/// range and reports [`RenderWarning::ColorRangeParseFailure`], matching the
-/// Discretizing arm and `build_color_scale`'s `explicit_string_range` path.
-/// This arm cannot use the "silently skip" convention the Continuous arm keeps:
-/// a categorical palette is indexed by domain position, so a dropped entry
-/// re-points every later category rather than shortening a cycle (spec §4.2,
-/// amended 2026-09-02).
+/// parsed colors, all-or-nothing: one unparseable entry refuses the whole
+/// override with [`RenderError::ColorRangeParseFailure`] (spec §4.2, amended
+/// 2026-09-11 — #126), matching the Discretizing arm and
+/// `build_color_scale`'s `explicit_string_range` path. A categorical palette
+/// is indexed by domain position, so a dropped entry would re-point every
+/// later category rather than shortening a cycle — a wrong mapping, not a
+/// degraded one.
 ///
 /// Discretizing scales: `range` replaces the bucket swatches, all-or-nothing —
-/// one unparseable entry discards the whole range and reports
-/// [`RenderWarning::ColorRangeParseFailure`], matching `bucket_colors` and the
+/// one unparseable entry refuses the whole override with
+/// [`RenderError::ColorRangeParseFailure`], matching `bucket_colors` and the
 /// categorical explicit-range path. The bucket count is fixed by the scale's own
 /// thresholds, so a range of any other length cannot describe the partition; it
 /// is left unapplied and reported as a
 /// [`RenderWarning::ColorRangeBucketCountMismatch`] naming both counts (spec
-/// §4.2, amended 2026-08-28 — never a silent drop). `domain` is inapplicable
-/// here: the boundaries come from the scale spec.
+/// §4.2, amended 2026-08-28 — never a silent drop; a count mismatch is not a
+/// parse failure, so it stays a warning). `domain` is inapplicable here: the
+/// boundaries come from the scale spec.
 ///
-/// On the Continuous arm alone, invalid color strings are silently skipped and
-/// the override is a no-op when fewer than two stops parse — a pre-existing
-/// convention kept as-is, since a dropped stop there re-spaces a gradient
-/// (`t = i / (n - 1)` over whatever parsed) rather than shifting a
-/// position-indexed mapping. The Categorical and Discretizing arms are both
-/// all-or-nothing with a `ColorRangeParseFailure`, because both index by
-/// position.
+/// The Continuous arm's `range` used to `filter_map(...ok())` unparseable
+/// entries out with no warning at all — the one range site in the crate that
+/// was not even all-or-nothing (#126 sibling defect). It now parses
+/// all-or-nothing too, refusing with [`RenderError::ColorRangeParseFailure`]
+/// on the first unparseable entry, the same as the Categorical and
+/// Discretizing arms (spec §4.2, amended 2026-09-11 — #126).
 ///
-/// Returns the warnings the override produced, for the caller to fold into its
-/// accumulator. Empty for every chart with no `configure_color(...)`.
-#[must_use]
+/// Returns the warnings the override produced (bucket-count mismatches,
+/// omitted categories), for the caller to fold into its accumulator. Empty
+/// for every chart with no `configure_color(...)`. Errors when an explicit
+/// `range` entry cannot be parsed as a color.
 pub(in crate::render) fn apply_color_config_to_color_scale(
     color_scale: &mut Option<scale_resolve::ColorScale>,
     cfg: &chart_config::ColorConfigSpec,
-) -> Vec<RenderWarning> {
+) -> Result<Vec<RenderWarning>, RenderError> {
     let mut warnings = Vec::new();
-    let Some(ref mut scale) = color_scale else { return warnings };
+    let Some(ref mut scale) = color_scale else { return Ok(warnings) };
     match scale {
         scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme, .. } => {
             if let Some(ref d) = cfg.domain {
@@ -1151,21 +1195,30 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
             }
             if let Some(ref r) = cfg.range {
                 if r.len() >= 2 {
-                    let parsed: Vec<color::Color> = r
+                    // All-or-nothing (#126): one unparseable stop refuses
+                    // rather than silently shrinking the gradient.
+                    let parsed: Result<Vec<color::Color>, &String> = r
                         .iter()
-                        .filter_map(|s| color::parse_color(s).ok())
+                        .map(|s| color::parse_color(s).map_err(|_| s))
                         .collect();
-                    if parsed.len() >= 2 {
-                        // Build a gradient from the parsed stops, evenly spaced.
-                        let stops: Vec<(f64, color::Color)> = parsed
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &c)| {
-                                let t = i as f64 / (parsed.len() - 1) as f64;
-                                (t, c)
-                            })
-                            .collect();
-                        *scheme = color::ContinuousScheme::Gradient(stops);
+                    match parsed {
+                        Ok(colors) => {
+                            // Build a gradient from the parsed stops, evenly spaced.
+                            let stops: Vec<(f64, color::Color)> = colors
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &c)| {
+                                    let t = i as f64 / (colors.len() - 1) as f64;
+                                    (t, c)
+                                })
+                                .collect();
+                            *scheme = color::ContinuousScheme::Gradient(stops);
+                        }
+                        Err(entry) => {
+                            return Err(RenderError::ColorRangeParseFailure {
+                                entry: entry.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -1200,10 +1253,9 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                 // dropping an unparseable entry does not merely shorten a
                 // cycle: it re-points every category after the dropped one.
                 // `range=["red", "notacolor", "blue"]` over domain `[a, b, c]`
-                // silently rendered `a=red, b=blue, c=red` — a wrong mapping,
-                // not a degraded one. One bad entry now discards the whole
-                // range and reports the offending string, leaving the resolved
-                // palette in place (spec §4.2, amended 2026-09-02).
+                // used to silently render `a=red, b=blue, c=red` — a wrong
+                // mapping, not a degraded one. One bad entry now refuses the
+                // whole override (#126), naming the offending string.
                 let parsed: Result<Vec<color::Color>, &String> = range
                     .iter()
                     .map(|s| color::parse_color(s).map_err(|_| s))
@@ -1215,9 +1267,9 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                     // An empty `range=[]` describes no palette at all; left
                     // unapplied with no warning, as before.
                     Ok(_) => {}
-                    Err(entry) => warnings.push(RenderWarning::ColorRangeParseFailure {
-                        entry: entry.clone(),
-                    }),
+                    Err(entry) => {
+                        return Err(RenderError::ColorRangeParseFailure { entry: entry.clone() });
+                    }
                 }
             }
         }
@@ -1230,7 +1282,7 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                 // bad entry would "fit" a 3-bucket scale and silently repaint it
                 // with a shifted mapping, and a 3-entry range with one bad entry
                 // would report a count mismatch for what is really a parse
-                // failure.
+                // failure. One bad entry now refuses the whole override (#126).
                 let parsed: Result<Vec<color::Color>, &String> = range
                     .iter()
                     .map(|s| color::parse_color(s).map_err(|_| s))
@@ -1244,14 +1296,14 @@ pub(in crate::render) fn apply_color_config_to_color_scale(
                             });
                         }
                     }
-                    Err(entry) => warnings.push(RenderWarning::ColorRangeParseFailure {
-                        entry: entry.clone(),
-                    }),
+                    Err(entry) => {
+                        return Err(RenderError::ColorRangeParseFailure { entry: entry.clone() });
+                    }
                 }
             }
         }
     }
-    warnings
+    Ok(warnings)
 }
 
 /// Re-derive the color legend's entry labels from the categorical scale domain.

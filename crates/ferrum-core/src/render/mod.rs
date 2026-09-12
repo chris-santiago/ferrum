@@ -286,6 +286,62 @@ pub enum RenderError {
         name: String,
         coord_flipped: bool,
     },
+    /// An explicit color-range entry (an encoding's `scale.range=[...]`, a
+    /// `Gradient([...])`'s stops, a discretizing `bucket_colors`, or a
+    /// chart-level `configure_color(range=...)`) could not be parsed by
+    /// [`color::parse_color`] (#126, spec §4.2 amended 2026-09-11). `entry` is
+    /// the offending string.
+    ///
+    /// Refused rather than warned-and-discarded (the pre-#126 behavior): the
+    /// parse is all-or-nothing at every one of the six sites this covers — a
+    /// range/palette/gradient is indexed by position, so silently dropping the
+    /// bad entry re-points every later entry rather than shortening a cycle, a
+    /// WRONG mapping rather than a degraded one. The one site that was not
+    /// even all-or-nothing — `configure_color(range=...)`'s continuous arm,
+    /// which used to `filter_map(...ok())` bad stops out with no warning at
+    /// all — is folded in here as a sibling defect of the same root cause.
+    ColorRangeParseFailure { entry: String },
+    /// A time-typed tick-label format (`label_format="%b %Y"`, or a preset
+    /// like `"date_iso"` that resolves to one) was applied to an axis whose
+    /// RESOLVED scale is not [`scale_resolve::ScaleKind::Time`] (#133, spec
+    /// §4.2 amended 2026-09-11). `channel` is the RESOLVED (post-`CoordFlip`)
+    /// positional token the formatting pass acted on; `format` is the
+    /// offending format string.
+    ///
+    /// The declaration-time grammar gate ([`config_apply::validate_chart_format_specs`])
+    /// cannot catch this: it runs before scale resolution, so it only knows
+    /// the DECLARED encoding type, not the RESOLVED scale kind — an
+    /// `x="a:N"` axis with an explicit `Time` scale override, or a temporal
+    /// column resolved as `Ordinal`, are both legitimate declared/resolved
+    /// mismatches the loose grammar gate must tolerate. This refusal runs
+    /// AFTER scale resolution, once the real `ScaleKind` is known, closing the
+    /// gap the grammar gate leaves open: before this, a strftime pattern
+    /// applied to a non-temporal scale silently fell through to the
+    /// string-reparse path, which either passed the raw label through
+    /// unchanged (ordinal labels) or, for a numeric label, reparsed it as an
+    /// epoch-millisecond timestamp and rendered a nonsense 1970-epoch date.
+    ///
+    /// Three surfaces reach this, all keyed on the same resolved-`ScaleKind`
+    /// predicate: the per-channel `Axis(label_format=...)` /
+    /// `encoding.format` path (`prepare::apply_axis_format_or_thread`), the
+    /// chart-level `configure_axis(label_format=...)` /
+    /// `axis_x`/`axis_y`/`axis_y2` path (`config_apply::apply_label_format_to_axis`),
+    /// and the per-panel independent-facet-axis path
+    /// (`scene_build::resolve_panel_axes`, `TickFormatMode::Immediate`) the
+    /// issue's "both paths" phrasing did not name.
+    ///
+    /// `coord_flipped` follows the same R3 discipline as
+    /// [`Self::InvalidAxisOrient`]: the per-channel and per-panel surfaces
+    /// PATCH it at their own boundary (the `EncodingSpec` carrying the format
+    /// traveled through `build_layers`' swap), while the chart-level surface
+    /// is EXEMPT and always resolves `false` — `axis_x`/`axis_y`/`axis_y2` are
+    /// resolved-slot vocabulary the user typed directly, never remapped under
+    /// flip, so the resolved token already IS what the user wrote.
+    TimeFormatOnNonTemporalScale {
+        channel: &'static str,
+        format: String,
+        coord_flipped: bool,
+    },
 }
 
 /// Boundary correction for [`RenderError::InvalidAxisOrient`] (R3). The error
@@ -317,6 +373,16 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
     match err {
         RenderError::InvalidAxisOrient { channel, orient, .. } => {
             RenderError::InvalidAxisOrient { channel, orient, coord_flipped }
+        }
+        // #133: the per-channel and per-panel-independent-axis surfaces
+        // construct this deep inside a fn with no flip context of its own
+        // (same shape as `InvalidAxisOrient`), so it is patched through this
+        // same boundary-correction fn rather than at its own construction
+        // site. The chart-level surface resolves `false` directly at its own
+        // (EXEMPT) construction site instead of routing through here — see
+        // the field doc on `RenderError::TimeFormatOnNonTemporalScale`.
+        RenderError::TimeFormatOnNonTemporalScale { channel, format, .. } => {
+            RenderError::TimeFormatOnNonTemporalScale { channel, format, coord_flipped }
         }
         // Every other variant is listed explicitly (rather than a catch-all)
         // so that a future variant added to `RenderError` is a compile error
@@ -350,7 +416,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // which has `PreparedInputs::coord_flipped` in hand) — same discipline
         // as `EncodingTypeMismatch` and friends above, so this boundary must
         // leave it alone rather than overwrite it.
-        | RenderError::LayerUnknownColumn { .. }) => other,
+        | RenderError::LayerUnknownColumn { .. }
+        // #126: carries no channel token at all — a color string, not a
+        // positional channel.
+        | RenderError::ColorRangeParseFailure { .. }) => other,
     }
 }
 
@@ -497,6 +566,18 @@ impl std::fmt::Display for RenderError {
                     f,
                     "layer {layer}: encoding '{channel}' references unknown column '{name}' \
                      (not present in that layer's data)"
+                )
+            }
+            Self::ColorRangeParseFailure { entry } => write!(
+                f,
+                "could not parse color '{entry}' in an explicit color range"
+            ),
+            Self::TimeFormatOnNonTemporalScale { channel, format, coord_flipped } => {
+                let channel = prepare::user_facing_channel(channel, *coord_flipped);
+                write!(
+                    f,
+                    "format {format:?} on the '{channel}' axis requires a temporal scale, \
+                     but the resolved scale is not temporal"
                 )
             }
         }
@@ -717,6 +798,20 @@ pub enum RenderWarning {
     /// warning is how a release build says so instead of shipping the
     /// misattribution silently. `mark` is the batch kind.
     BreakClipSidecarMisaligned { mark: String },
+    /// A continuous color encoding named a `scheme`/`cmap` (via `encoding.scheme`
+    /// or a scale spec's own `scheme` field) that is not a recognized continuous
+    /// scheme name (#240-4b, routed rider). Falls back to the theme's default
+    /// sequential/diverging scheme rather than the requested one — the render
+    /// is still meaningful, just not painted with the asked-for palette, so this
+    /// is a WARN-DEGRADED case, not a refusal. `name` is the unrecognized
+    /// scheme name.
+    ///
+    /// The primary refusal for this lives at Python desugar time
+    /// (`resolve_cmap_alias`, #240-4a): this warning is the belt for a
+    /// hand-built wire spec (or a channel-less mark site not yet routed
+    /// through that desugar validation) that reaches Rust with an
+    /// unvalidated name.
+    UnknownColorScheme { name: String },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -855,6 +950,11 @@ impl std::fmt::Display for RenderWarning {
                  metadata had the wrong length; tooltips, links, and keys on that \
                  batch may name the wrong marks"
             ),
+            RenderWarning::UnknownColorScheme { name } => write!(
+                f,
+                "color scheme '{name}' is not recognized; the theme's default scheme \
+                 was used instead"
+            ),
         }
     }
 }
@@ -945,6 +1045,7 @@ mod tests {
                 scale_kind: "log".into(),
             },
             RenderWarning::BreakClipSidecarMisaligned { mark: "bar".into() },
+            RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -1028,6 +1129,51 @@ mod tests {
             !suppressed_text.contains("AnnotationSuppressedByBreak"),
             "{suppressed_text}"
         );
+
+        // #240-4b (routed rider): an unrecognized scheme/cmap name.
+        let unknown_scheme = RenderWarning::UnknownColorScheme { name: "not-a-scheme".into() };
+        let unknown_scheme_text = format!("{unknown_scheme}");
+        assert!(unknown_scheme_text.contains("not-a-scheme"), "{unknown_scheme_text}");
+        assert!(unknown_scheme_text.contains("not recognized"), "{unknown_scheme_text}");
+        assert!(
+            !unknown_scheme_text.contains("UnknownColorScheme"),
+            "{unknown_scheme_text}"
+        );
+    }
+
+    /// #126/#133: the two new `RenderError` variants follow the same Display
+    /// contract as `RenderWarning` — a human sentence, never the derived
+    /// Debug shape, and (for the time-format variant) the same `coord_flipped`
+    /// un-flip discipline `InvalidAxisOrient` already pins.
+    #[test]
+    fn render_error_display_is_intentional_not_debug() {
+        let parse_fail = RenderError::ColorRangeParseFailure { entry: "#zzz".into() };
+        let text = format!("{parse_fail}");
+        assert!(text.contains("could not parse color '#zzz'"), "{text}");
+        assert!(!text.contains("ColorRangeParseFailure"), "Display leaked Debug: {text}");
+
+        let not_flipped = RenderError::TimeFormatOnNonTemporalScale {
+            channel: "y",
+            format: "%b %Y".into(),
+            coord_flipped: false,
+        };
+        let not_flipped_text = format!("{not_flipped}");
+        assert!(not_flipped_text.contains("'y' axis"), "{not_flipped_text}");
+        assert!(not_flipped_text.contains("%b %Y"), "{not_flipped_text}");
+        assert!(not_flipped_text.contains("requires a temporal scale"), "{not_flipped_text}");
+        assert!(
+            !not_flipped_text.contains("TimeFormatOnNonTemporalScale"),
+            "Display leaked Debug: {not_flipped_text}"
+        );
+
+        // R3: under `coord_flipped`, the RESOLVED "y" reads back as the "x"
+        // axis the user actually wrote.
+        let flipped = RenderError::TimeFormatOnNonTemporalScale {
+            channel: "y",
+            format: "%b %Y".into(),
+            coord_flipped: true,
+        };
+        assert!(format!("{flipped}").contains("'x' axis"));
     }
 
     /// `UnsupportedColorScaleOnMark`'s Display must not claim a legend was
@@ -2877,6 +3023,93 @@ mod orchestration_tests {
         assert!(svg.contains(">a<") || svg.contains(">a</text>"));
         assert!(svg.contains(">b<") || svg.contains(">b</text>"));
         assert!(svg.contains(">c<") || svg.contains(">c</text>"));
+    }
+
+    /// #133, end to end through the real per-panel independent-facet-axis
+    /// surface (`scene_build::resolve_panel_axes`'s `TickFormatMode::Immediate`
+    /// path) — the third surface the issue's "both paths" phrasing did not
+    /// name. A faceted chart with `resolve.x = "independent"` and a
+    /// time-typed per-channel `x` format on a NON-temporal `x` column must
+    /// refuse, not silently reparse the per-panel numeric tick labels as
+    /// epoch-ms and render a nonsense 1970 date on every panel.
+    #[test]
+    fn render_svg_faceted_independent_x_refuses_time_format_on_non_temporal_column() {
+        use crate::render::chart_config::AxisStyleSpec;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "c", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(),
+                    type_: None,
+                    axis: Some(Box::new(AxisStyleSpec {
+                        label_format: Some("%Y-%m-%d".to_string()),
+                        label_format_type: Some("time".to_string()),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::FacetSpec {
+                field: "species".into(),
+                row: None,
+                title: None,
+                row_title: None,
+                mode: crate::layout::FacetMode::Wrap { ncols: 3 },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve {
+                    x: crate::layout::facet::ResolveMode::Independent,
+                    y: crate::layout::facet::ResolveMode::Shared,
+                },
+            }),
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let err = render_svg(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            Viewport { width: 800.0, height: 400.0 },
+            &config::RenderConfig::default(),
+            &ChartConfig::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            RenderError::TimeFormatOnNonTemporalScale {
+                channel: "x",
+                format: "%Y-%m-%d".into(),
+                coord_flipped: false,
+            }
+        );
     }
 
     /// F-L01-04 render-boundary proof: `FacetSpec.title` set must reach the

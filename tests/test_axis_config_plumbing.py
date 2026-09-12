@@ -873,11 +873,23 @@ class TestOverrideMatchesItsTypedEquivalent:
     def test_a_preset_leaf_serializes_its_companion_key_too(self, chart):
         """`label_format` emits `label_format_type` alongside itself, so the
         seam must merge the whole fragment rather than take `[leaf]` — a time
-        preset that lost its type would be misparsed as a numeric d3 spec."""
-        assert (
+        preset that lost its type would be misparsed as a numeric d3 spec.
+
+        `chart`'s x/y are both quantitative, and the shared `axis` config key
+        reaches both, so a genuinely time-typed preset now refuses (#133)
+        rather than rendering — which is itself the companion-key proof this
+        test exists for: `label_format_type` unambiguously declares `"time"`
+        only when it actually reached the wire alongside `label_format`. If
+        the seam dropped it (the bug this test guards against), the render
+        would NOT refuse — it would silently fall through to the
+        ambiguous/untyped numeric-format path instead. Both spellings must
+        refuse with the identical message, proving they serialize the same
+        fragment."""
+        with pytest.raises(ValueError, match="requires a temporal scale") as override_exc:
             self._override(chart, axis_label_format="date_iso")
-            == chart.configure_axis(label_format="date_iso").to_svg()
-        )
+        with pytest.raises(ValueError, match="requires a temporal scale") as configure_exc:
+            chart.configure_axis(label_format="date_iso").to_svg()
+        assert str(override_exc.value) == str(configure_exc.value)
 
 
 class TestOverrideCrossFieldValidators:

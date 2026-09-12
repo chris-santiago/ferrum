@@ -128,6 +128,17 @@ def _time_df(n: int = 10, step_days: int = 30) -> pl.DataFrame:
 
 
 def test_chart_level_date_iso_preset_renders_dates_not_percent():
+    """The batch's motivating repro, scoped to `axis_x=` (not the shared
+    `axis=` key): a chart-level time preset renders real dates on x instead
+    of misparsing the resolved strftime pattern as a d3 numeric spec.
+
+    The shared `configure_axis(label_format=...)` key reaches BOTH x and y
+    (`resync_ticks_after_axis_merge`'s both-axes mechanism); `y` here is
+    `val:Q` (non-temporal), so that spelling now refuses (#133) instead of
+    silently rendering a 1970-epoch-artifact date on y — see
+    `test_chart_level_date_iso_preset_on_mixed_temporal_quantitative_axes_refuses`
+    for that contract. This test uses `axis_x=`, scoped to the temporal
+    channel alone, to keep pinning the "renders real dates" half."""
     df = _wide_temporal_df()
     default_svg = fm.Chart(df).mark_point().encode(x="date:T", y="val:Q").to_svg()
     default_labels = _extract_text_labels(default_svg)
@@ -135,15 +146,11 @@ def test_chart_level_date_iso_preset_renders_dates_not_percent():
         fm.Chart(df)
         .mark_point()
         .encode(x="date:T", y="val:Q")
-        .configure_axis(label_format="date_iso")
+        .configure(axis_x=AxisConfig(label_format="date_iso"))
         .to_svg()
     )
     labels = _extract_text_labels(svg)
     date_labels = {l for l in labels if re.match(r"^\d{4}-\d{2}-\d{2}$", l)}
-    # Multiple DISTINCT real dates, at least one genuinely in 2020 — not a
-    # single repeated "1970-01-01" epoch artifact (the y-axis, also hit by
-    # `configure_axis` applying to both axes, legitimately produces that
-    # artifact; the x-axis must not).
     assert len(date_labels) > 1, f"expected multiple distinct ISO date labels, got: {labels}"
     assert any(l.startswith("2020-") for l in date_labels), f"expected 2020 dates: {date_labels}"
     # The pre-fix bug: '%' misparsed as the d3 percent type char.
@@ -151,6 +158,27 @@ def test_chart_level_date_iso_preset_renders_dates_not_percent():
     # Must actually be doing something -- `_wide_temporal_df`'s default
     # granularity is "Jan 2018"-shaped, never coincidentally ISO-shaped.
     assert set(default_labels) != set(labels), "date_iso rendered identically to the default"
+
+
+def test_chart_level_date_iso_preset_on_mixed_temporal_quantitative_axes_refuses():
+    """#133: the shared `configure_axis(label_format=...)` key reaches BOTH
+    x and y. Applied to a chart with a temporal x and a quantitative y, it
+    used to silently render y with a nonsense repeated "1970-01-01"
+    epoch-artifact date (the resolved y scale is not temporal, so its
+    numeric tick labels were reparsed as epoch-ms) while x rendered
+    correctly — an accepted-but-ugly asymmetry. It must now refuse instead,
+    naming the offending axis and format, exactly as the two other
+    surfaces (`fm.Axis(label_format=...)`, the per-panel independent-facet
+    axis) already do."""
+    df = _wide_temporal_df()
+    with pytest.raises(ValueError, match="requires a temporal scale"):
+        (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="date:T", y="val:Q")
+            .configure_axis(label_format="date_iso")
+            .to_svg()
+        )
 
 
 def test_chart_level_axis_x_date_iso_preset_renders_dates():
@@ -217,9 +245,18 @@ def test_per_channel_time_format_alone_renders_its_own_pattern():
 def test_per_channel_time_format_beats_chart_level_time_preset():
     """The exact cascade-inversion repro (spec-review cycle 2, live-verified
     on the pre-fix build): `.encode(x=fm.X("date:T", axis=fm.Axis(
-    label_format="%m/%d")))` alone renders `%m/%d`-shaped labels; adding
-    `.configure_axis(label_format="date_iso")` must NOT flip them to ISO
-    dates — per-channel > chart-level, unconditionally."""
+    label_format="%m/%d")))` alone renders `%m/%d`-shaped labels; adding a
+    chart-level `date_iso` preset must NOT flip them to ISO dates —
+    per-channel > chart-level, unconditionally.
+
+    Scoped to `axis_x=` rather than the shared `configure_axis(...)` key:
+    the shared key also reaches `y` (`val:Q`, non-temporal), which now
+    refuses (#133) rather than silently rendering a 1970-epoch-artifact
+    date there — see
+    `test_chart_level_date_iso_preset_on_mixed_temporal_quantitative_axes_refuses`.
+    `axis_x=` isolates the cascade-priority question this test actually
+    asks (does per-channel beat chart-level ON X) from that unrelated
+    y-axis refusal."""
     chart = (
         fm.Chart(_cascade_df())
         .mark_point()
@@ -227,7 +264,7 @@ def test_per_channel_time_format_beats_chart_level_time_preset():
     )
     labels_alone = _extract_text_labels(chart.to_svg())
     labels_with_chart_level = _extract_text_labels(
-        chart.configure_axis(label_format="date_iso").to_svg()
+        chart.configure(axis_x=AxisConfig(label_format="date_iso")).to_svg()
     )
     mmdd_alone = {l for l in labels_alone if re.match(r"^\d{2}/\d{2}$", l)}
     mmdd_both = {l for l in labels_with_chart_level if re.match(r"^\d{2}/\d{2}$", l)}
@@ -237,9 +274,7 @@ def test_per_channel_time_format_beats_chart_level_time_preset():
         f"format on x: alone={mmdd_alone}, with chart-level={mmdd_both}"
     )
     # No real (2020-prefixed) ISO date may appear anywhere -- that would
-    # mean chart-level won the x-axis. (The y-axis's "1970-01-01" epoch
-    # artifact from the separate, out-of-scope both-axes application is a
-    # different, pre-existing concern and never 2020-prefixed.)
+    # mean chart-level won the x-axis.
     assert not any(l.startswith("2020-") for l in labels_with_chart_level), labels_with_chart_level
 
 

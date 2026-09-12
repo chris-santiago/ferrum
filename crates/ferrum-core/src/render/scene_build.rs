@@ -225,7 +225,7 @@ pub fn build_scene(
             panel_idx,
             theme,
             &facet_metrics,
-        );
+        )?;
 
         // Resolve the effective per-panel axis references: use the freshly-built
         // independent layout when available, otherwise the global shared one.
@@ -704,8 +704,11 @@ fn resolve_panel_scales(
         // Warnings are emitted once, by the chart-level application in
         // `config_apply::apply_color_config_then_filter_legend_entries`; this is
         // the same config against the same scale, so reporting here would
-        // duplicate one warning per panel.
-        let _ = super::config_apply::apply_color_config_to_color_scale(&mut scales.color, cfg);
+        // duplicate one warning per panel. A refusal (#126) is propagated —
+        // it cannot fire here without having already fired at the chart-level
+        // application above, since both run the identical config against the
+        // identical (deterministically resolved) scale.
+        super::config_apply::apply_color_config_to_color_scale(&mut scales.color, cfg)?;
     }
 
     // Per-layer independent y-scale slots (secondary-y-axis, GH #52). Byte-stable
@@ -837,6 +840,13 @@ struct PanelAxes {
 /// format mode, same empty minor vec (independent panels do not rebuild minor
 /// ticks), same `layout_x_axis`/`layout_y_axis` calls. A non-independent channel
 /// yields `None`, so the caller keeps the global layout for it.
+///
+/// Errors (#133) when `build_axis_tick_inputs` refuses a time-typed format on
+/// a non-temporal resolved scale — the third surface the issue's "both paths"
+/// phrasing did not name. `rendering_spec_for_panel.encoding` is the layer-0
+/// (post-`CoordFlip`) encoding, the same shape `build_axis_input`'s two PATCH
+/// chains correct for, so this fn's caller applies the identical R3
+/// `coord_flipped` correction from `prep.coord_flipped`.
 #[allow(clippy::too_many_arguments)]
 fn resolve_panel_axes(
     rendering_spec_for_panel: &ChartSpec,
@@ -847,7 +857,7 @@ fn resolve_panel_axes(
     panel_idx: usize,
     theme: &ThemeInputs,
     facet_metrics: &super::font::FontdueMetrics,
-) -> PanelAxes {
+) -> Result<PanelAxes, RenderError> {
     // Independent-axis override: when the facet spec requests independent
     // resolution for x or y, rebuild that channel's AxisLayout from the
     // per-panel scales. Shared channels keep the global layout as-is.
@@ -895,7 +905,8 @@ fn resolve_panel_axes(
             },
             false,
             Vec::new(),
-        );
+        )
+        .map_err(|e| super::with_coord_flipped(e, prep.coord_flipped))?;
         x_input.tick_labels = new_x_labels;
         x_input.tick_projection = x_projection;
         // Re-derive the band placement from THIS panel's scale (F-L04-03): a
@@ -939,7 +950,8 @@ fn resolve_panel_axes(
             },
             true,
             Vec::new(),
-        );
+        )
+        .map_err(|e| super::with_coord_flipped(e, prep.coord_flipped))?;
         y_input.tick_labels = new_y_labels;
         y_input.tick_projection = y_projection;
         // Same band-placement carrier as the x path above, from THIS panel's
@@ -964,12 +976,12 @@ fn resolve_panel_axes(
         None
     };
 
-    PanelAxes {
+    Ok(PanelAxes {
         independent_x,
         independent_y,
         x_independent,
         y_independent,
-    }
+    })
 }
 
 /// Routed axis + grid scene nodes for one panel (MOD-09).
@@ -1763,8 +1775,10 @@ pub(crate) fn resolve_legend_color_scale(
     };
     if let Some(ref cfg) = chart_config.color {
         // See the per-panel site above: the chart-level application already
-        // reported any refusal, so this legend-only re-application is silent.
-        let _ = super::config_apply::apply_color_config_to_color_scale(&mut color_scale, cfg);
+        // reported any warning, so this legend-only re-application is silent
+        // for warnings. A refusal (#126) is propagated for the same reason
+        // given there.
+        super::config_apply::apply_color_config_to_color_scale(&mut color_scale, cfg)?;
     }
     Ok(color_scale)
 }

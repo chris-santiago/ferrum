@@ -681,7 +681,8 @@ fn build_axis_input(
         },
         channel.reverses(),
         minor_fractions,
-    );
+    )
+    .map_err(crate::render::UnflippedRenderError::new)?;
 
     // B5: per-channel axis STYLING + positioning overrides.
     let mut overrides = encoding_axis_style_overrides(enc_axis.map(Box::as_ref), channel.token())?;
@@ -2117,6 +2118,16 @@ pub(crate) fn resolve_axis_label_format(
 ///   then applies it centrally — lossless because numeric label strings reparse
 ///   to f64. Threading (not pre-applying) also lets chart-level
 ///   `configure_axis` defer to the per-channel override via its `is_none()` gate.
+///
+/// Errors (#133, spec §4.2 amended 2026-09-11) when a time-typed format is
+/// applied to a scale whose `temporal_tick_values` returns `None` — i.e. the
+/// resolved [`crate::render::scale_resolve::ScaleKind`] is not `Time` at all,
+/// not merely a length-drift between a fresh tick computation and the cached
+/// labels (drift keeps its pre-existing string-reparse fallback, since the
+/// scale genuinely IS temporal there). `channel` is the RESOLVED token this
+/// call acted on; `coord_flipped` is always constructed `false` here — the
+/// caller boundary (`build_axis_input`'s two call chains) corrects it via R3,
+/// the same discipline `InvalidAxisOrient` uses.
 fn apply_axis_format_or_thread(
     labels: Vec<String>,
     format: Option<String>,
@@ -2124,9 +2135,10 @@ fn apply_axis_format_or_thread(
     scale: &crate::render::scale_resolve::ScaleKind,
     tick_count: usize,
     reversed: bool,
-) -> (Vec<String>, Option<String>) {
+    channel: &'static str,
+) -> Result<(Vec<String>, Option<String>), RenderError> {
     use crate::render::format::{format_time_spec, is_time_format_spec};
-    let Some(fmt) = format else { return (labels, None) };
+    let Some(fmt) = format else { return Ok((labels, None)) };
     if is_time_format_spec(&fmt, format_type) {
         if let Some(mut values) = scale.temporal_tick_values(tick_count) {
             if reversed {
@@ -2139,15 +2151,66 @@ fn apply_axis_format_or_thread(
                     .into_iter()
                     .map(|ms| format_time_spec(ms, &fmt))
                     .collect();
-                return (out, None);
+                return Ok((out, None));
             }
+            // Time scale, but drift: pre-existing string-reparse fallback,
+            // unrelated to #133 (the scale genuinely IS temporal here).
+            return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
         }
-        // Temporal pattern but no raw values available (non-Time scale or drift):
-        // fall back to the string-level path, then thread nothing further.
-        return (apply_tick_format(labels, Some(&fmt), format_type), None);
+        // Non-Time scale (`temporal_tick_values` returned `None`): refuse
+        // (#133) ONLY when `format_type` unambiguously declared `"time"` —
+        // an ambiguous bare `%`-containing spec with no declared type (e.g.
+        // a plain d3 percent format like `".1%"`) is tolerated by
+        // `is_time_format_spec`'s own "valid under either grammar" rule and
+        // must keep falling through to the numeric/d3 grammar exactly as
+        // `apply_tick_format`'s narrower `format_type == Some("time")` check
+        // already routes it — refusing here would reject ordinary percent
+        // specs on every non-temporal axis.
+        if format_type == Some("time") {
+            return Err(RenderError::TimeFormatOnNonTemporalScale {
+                channel,
+                format: fmt,
+                coord_flipped: false,
+            });
+        }
+        return Ok((apply_tick_format(labels, Some(&fmt), format_type), None));
     }
     // Numeric / non-temporal: thread the spec to the override, apply later.
-    (labels, Some(fmt))
+    Ok((labels, Some(fmt)))
+}
+
+/// #133 (spec §4.2 amended 2026-09-11): refuse when `format_type`
+/// unambiguously declares `"time"` but the resolved `scale` is not temporal
+/// at all — `scale.temporal_tick_values(tick_count)` returns `None` only for
+/// a non-`Time` [`crate::render::scale_resolve::ScaleKind`], never for a
+/// length-drift on a genuinely temporal scale.
+///
+/// Deliberately narrower than [`crate::render::format::is_time_format_spec`]
+/// (which also tolerates an unset `format_type`): an ambiguous bare
+/// `%`-containing spec with no declared type (a plain d3 percent format like
+/// `".1%"`) must keep falling through to the numeric grammar, matching
+/// [`apply_tick_format`]'s own narrower `format_type == Some("time")` check —
+/// see [`apply_axis_format_or_thread`]'s matching non-Time arm, which this fn
+/// mirrors for `build_axis_tick_inputs`'s `Immediate`-mode arm (the per-panel
+/// independent-facet-axis surface), so the two format-application
+/// disciplines cannot drift on which scale kinds refuse. `channel` is the
+/// RESOLVED token; `coord_flipped` is always constructed `false` — corrected
+/// by the caller boundary (R3, same discipline as `InvalidAxisOrient`).
+fn refuse_time_format_on_non_temporal(
+    fmt: &str,
+    format_type: Option<&str>,
+    scale: &crate::render::scale_resolve::ScaleKind,
+    tick_count: usize,
+    channel: &'static str,
+) -> Result<(), RenderError> {
+    if format_type == Some("time") && scale.temporal_tick_values(tick_count).is_none() {
+        return Err(RenderError::TimeFormatOnNonTemporalScale {
+            channel,
+            format: fmt.to_string(),
+            coord_flipped: false,
+        });
+    }
+    Ok(())
 }
 
 /// How [`build_axis_tick_inputs`] applies the resolved tick-label format. The two
@@ -2168,6 +2231,11 @@ pub(crate) enum TickFormatMode<'a> {
     Immediate { format: Option<&'a str>, format_type: Option<&'a str> },
 }
 
+/// `build_axis_tick_inputs`'s return shape: `(labels, projection,
+/// threaded_label_format)` — named to keep the `Result<_, RenderError>`
+/// signature (#133) under clippy's type-complexity threshold.
+type AxisTickInputs = (Vec<String>, Option<TickProjection>, Option<String>);
+
 /// Derive one axis's tick labels and [`TickProjection`] from a resolved scale —
 /// the single source of truth for the sequence the shared (global) and
 /// independent (per-panel facet) axis paths both run: `tick_labels(count)`, the
@@ -2185,14 +2253,21 @@ pub(crate) enum TickFormatMode<'a> {
 /// independent axes do not rebuild minor ticks — preserved from the pre-extraction
 /// behavior). An ordinal scale yields no projection (`None`), matching uniform-
 /// slot placement.
+///
+/// Errors (#133) when either mode's format is time-typed but the resolved
+/// `scale` is not temporal — see [`refuse_time_format_on_non_temporal`],
+/// which both mode arms share so the surfaces cannot drift on the refusal
+/// predicate. `channel` (derived from `is_y`, matching [`Channel::token`])
+/// is the RESOLVED token; the caller boundary corrects `coord_flipped` (R3).
 pub(crate) fn build_axis_tick_inputs(
     scale: &crate::render::scale_resolve::ScaleKind,
     tick_count: usize,
     mode: TickFormatMode<'_>,
     is_y: bool,
     minor: Vec<f64>,
-) -> (Vec<String>, Option<TickProjection>, Option<String>) {
+) -> Result<AxisTickInputs, RenderError> {
     use crate::render::scale_resolve::ScaleKind;
+    let channel: &'static str = if is_y { "y" } else { "x" };
     // Non-ordinal y axes display high domain values at the top, so labels and the
     // projected fractions are reversed in lockstep (the pixel range is already
     // inverted in scale_resolve). Ordinal y keeps domain order (top-down for
@@ -2217,8 +2292,12 @@ pub(crate) fn build_axis_tick_inputs(
             // The temporal raw values must be reversed in lockstep with the
             // already-reversed labels so index `i` still aligns.
             reverse,
-        ),
+            channel,
+        )?,
         TickFormatMode::Immediate { format, format_type } => {
+            if let Some(fmt) = format {
+                refuse_time_format_on_non_temporal(fmt, format_type, scale, tick_count, channel)?;
+            }
             (apply_tick_format(labels, format, format_type), None)
         }
     };
@@ -2232,7 +2311,7 @@ pub(crate) fn build_axis_tick_inputs(
         minor,
     });
 
-    (labels, projection, threaded)
+    Ok((labels, projection, threaded))
 }
 
 /// D12: apply an encoding-level `format` string to pre-computed tick label strings.
@@ -5819,7 +5898,8 @@ mod tests {
             TickFormatMode::Immediate { format: None, format_type: None },
             false,
             Vec::new(),
-        );
+        )
+        .unwrap();
         let (o_labels, o_proj) = old_independent_x(&scale, 10, None, None);
         assert_eq!(labels, o_labels);
         assert_eq!(proj, o_proj);
@@ -5836,7 +5916,8 @@ mod tests {
             TickFormatMode::Immediate { format: Some(".0%"), format_type: None },
             false,
             Vec::new(),
-        );
+        )
+        .unwrap();
         let (o_labels, o_proj) = old_independent_x(&scale, 5, Some(".0%"), None);
         assert_eq!(labels, o_labels);
         assert_eq!(proj, o_proj);
@@ -5853,7 +5934,8 @@ mod tests {
             TickFormatMode::Immediate { format: None, format_type: None },
             true,
             Vec::new(),
-        );
+        )
+        .unwrap();
         let (o_labels, o_proj) = old_independent_y(&scale, 8, None, None);
         assert_eq!(labels, o_labels);
         assert_eq!(proj, o_proj);
@@ -5879,7 +5961,8 @@ mod tests {
             TickFormatMode::Immediate { format: None, format_type: None },
             false,
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert!(x_proj.is_none(), "ordinal scale yields no tick projection");
         let (y_labels, y_proj, _t) = build_axis_tick_inputs(
             &scale,
@@ -5887,7 +5970,8 @@ mod tests {
             TickFormatMode::Immediate { format: None, format_type: None },
             true,
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert!(y_proj.is_none());
         // Ordinal labels are NOT reversed for y (top-down convention preserved).
         assert_eq!(x_labels, y_labels);
@@ -5912,7 +5996,8 @@ mod tests {
             TickFormatMode::Thread { format: None, format_type: None },
             false,
             shared_minor.clone(),
-        );
+        )
+        .unwrap();
 
         // Independent/per-panel path: format applied immediately, minor empty.
         let (indep_labels, indep_proj, indep_threaded) = build_axis_tick_inputs(
@@ -5921,7 +6006,8 @@ mod tests {
             TickFormatMode::Immediate { format: None, format_type: None },
             false,
             Vec::new(),
-        );
+        )
+        .unwrap();
 
         // Same scale, same count, no format on either → identical labels + majors.
         assert_eq!(shared_labels, indep_labels);
@@ -5939,6 +6025,85 @@ mod tests {
         // ever thread, and only for a numeric format string.
         assert_eq!(shared_threaded, None);
         assert_eq!(indep_threaded, None);
+    }
+
+    /// #133, per-channel `Thread` surface: a time-typed format
+    /// (`format_type="time"`) on a non-temporal resolved scale must refuse,
+    /// naming the channel and the offending format — not silently reparse
+    /// numeric tick labels as epoch-ms and render a nonsense 1970 date.
+    #[test]
+    fn build_axis_tick_inputs_thread_refuses_time_format_on_non_temporal_scale() {
+        let scale = linear_scale(0.0, 100.0);
+        let err = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Thread {
+                format: Some("%Y-%m-%d".to_string()),
+                format_type: Some("time"),
+            },
+            false,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            RenderError::TimeFormatOnNonTemporalScale {
+                channel: "x",
+                format: "%Y-%m-%d".into(),
+                coord_flipped: false,
+            }
+        );
+    }
+
+    /// #133, the third (per-panel independent-facet-axis) surface the issue's
+    /// "both paths" phrasing did not name: `Immediate` mode must refuse
+    /// identically to `Thread` mode for the same non-temporal scale.
+    #[test]
+    fn build_axis_tick_inputs_immediate_refuses_time_format_on_non_temporal_scale() {
+        let scale = linear_scale(0.0, 100.0);
+        let err = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Immediate {
+                format: Some("%Y-%m-%d"),
+                format_type: Some("time"),
+            },
+            true,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            RenderError::TimeFormatOnNonTemporalScale {
+                channel: "y",
+                format: "%Y-%m-%d".into(),
+                coord_flipped: false,
+            }
+        );
+    }
+
+    /// #133 control: an ambiguous bare `%`-containing spec with NO declared
+    /// `format_type` (a plain d3 percent format like `".1%"`) must NOT
+    /// refuse on a non-temporal scale — it is "valid under either grammar"
+    /// per `is_time_format_spec`'s own tolerance, and must keep resolving as
+    /// the numeric percent format it actually is. Guards against a fix that
+    /// over-refuses every bare-`%` spec regardless of declared type.
+    #[test]
+    fn build_axis_tick_inputs_ambiguous_percent_spec_does_not_refuse_on_non_temporal_scale() {
+        let scale = linear_scale(0.0, 1.0);
+        let (labels, _proj, threaded) = build_axis_tick_inputs(
+            &scale,
+            5,
+            TickFormatMode::Thread { format: Some(".1%".to_string()), format_type: None },
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(
+            labels.iter().any(|l| l.ends_with('%')),
+            "must format as the numeric percent spec it is, got {labels:?}"
+        );
+        assert_eq!(threaded, None, "the ambiguous time-shaped branch applies immediately");
     }
 
     // ── #52 Task 3: provisional secondary y-axis inputs ──────────────────────
