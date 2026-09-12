@@ -33,6 +33,60 @@ _TYPE_NORMALIZE = {
     "temporal": "T",
 }
 
+# Per-(channel, kwarg) message overrides for the honored-kwarg warn_once call
+# in ChannelBase.__init__ (#240, 2026-09-11 wave-1 hardening). warn_once's
+# generic default -- "accepted but not yet honored; planned for a future
+# Phase" -- is true for most un-honored kwargs: no design exists yet and one
+# might land later. It is a LIE for the two carve-outs below, which are
+# permanent, documented facts rather than forward-looking promises. Mirrors
+# ``_channel_policy._CONDITIONAL_REFUSALS``'s shape: one table, keyed by the
+# same axis the refusal itself is keyed on, rather than a per-call-site
+# string literal that could drift from the real reason.
+#
+# `None` (i.e., no entry — see `_honored_kwarg_message`) falls through to
+# warn_once's own default text, which stays correct for everything else.
+_FACET_COLUMNS_MESSAGE = (
+    "{channel}(columns=...) is grid-mode-inapplicable and permanently ignored: "
+    "row/column faceting has no wrap-count to apply it to. Use Facet(columns=...) "
+    "for wrap-mode panel-per-row counts."
+)
+_HONORED_KWARG_MESSAGES: dict[tuple[str, str], str] = {
+    ("facet_row", "columns"): _FACET_COLUMNS_MESSAGE.format(channel="FacetRow"),
+    ("facet_col", "columns"): _FACET_COLUMNS_MESSAGE.format(channel="FacetCol"),
+}
+
+
+def _honored_kwarg_message(channel: str, kwarg: str) -> str | None:
+    """Return an explicit warn_once message for an un-honored (channel, kwarg), or None.
+
+    ``None`` falls through to ``warn_once``'s generic "not yet honored"
+    default. Two carve-outs get a channel-specific, permanent-fact message
+    instead:
+
+    - ``condition`` on a channel :func:`~ferrum.encoding._channel_policy
+      .channel_honors_condition` refuses: the kwarg is stripped from
+      ``_honored_kwargs`` by ``__init_subclass__``, so the generic loop below
+      would otherwise say "planned for a future Phase" about a conditional
+      that ``Chart.encode()`` refuses outright and permanently (see
+      ``conditional_wire_channel``'s ``ValueError``, which this message
+      previews without duplicating its exact wording).
+    - ``columns`` on ``FacetRow``/``FacetCol``: `_HONORED_KWARG_MESSAGES`
+      above.
+    """
+    if kwarg == "condition":
+        from ferrum.encoding._channel_policy import (
+            _CONDITIONAL_CHANNELS_DISPLAY,
+            _CONDITIONAL_REFUSALS,
+        )
+
+        if channel in _CONDITIONAL_REFUSALS:
+            return (
+                f"{channel}(condition=...) is accepted here but permanently unsupported: "
+                f"a selection conditional can target only {_CONDITIONAL_CHANNELS_DISPLAY}. "
+                "Building the chart raises before this value is used."
+            )
+    return _HONORED_KWARG_MESSAGES.get((channel, kwarg))
+
 
 @dataclass(frozen=True)
 class _PendingAggregate:
@@ -356,7 +410,7 @@ class ChannelBase:
 
         for k in self._kwargs:
             if k not in self._honored_kwargs:
-                warn_once(self._channel_name, k)
+                warn_once(self._channel_name, k, _honored_kwarg_message(self._channel_name, k))
 
     def _validate(self) -> None:
         """Enforce kwarg-value constraints; subclasses may override."""

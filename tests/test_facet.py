@@ -581,3 +581,34 @@ def test_facet_col_columns_still_warns_and_drops():
         "FacetCol(columns=...) must still warn (grid-mode channels don't honor columns)"
     )
     assert c._facet.ncols is None
+
+
+def test_facet_row_columns_warning_states_permanent_fact_not_future_phase():
+    """FacetRow(columns=...) states the true, permanent reason -- not the
+    generic "planned for a future Phase" text, which would falsely imply
+    row-faceting might someday honor a wrap-count it structurally has no use
+    for (#240 defect 2, 2026-09-11 wave-1 hardening)."""
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        fm.FacetRow("grp", columns=2)
+    assert len(w) == 1
+    msg = str(w[0].message)
+    assert "planned for a future Phase" not in msg, f"still lying about columns=: {msg!r}"
+    assert "grid-mode-inapplicable" in msg or "permanent" in msg, (
+        f"message must state the permanent-fact reason: {msg!r}"
+    )
+
+
+def test_facet_col_columns_warning_states_permanent_fact_not_future_phase():
+    """Companion to the FacetRow case above for FacetCol."""
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        fm.FacetCol("grp", columns=2)
+    assert len(w) == 1
+    msg = str(w[0].message)
+    assert "planned for a future Phase" not in msg, f"still lying about columns=: {msg!r}"
+    assert "grid-mode-inapplicable" in msg or "permanent" in msg, (
+        f"message must state the permanent-fact reason: {msg!r}"
+    )

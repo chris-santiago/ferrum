@@ -288,13 +288,26 @@ class TestDetailMarkConditionalWarn:
         assert "<svg" in svg
         assert not _user_warnings(caught, contains="detail")
 
-    def test_detail_warn_fires_only_once_per_context(self):
+    def test_detail_warn_dedups_per_mark_but_each_distinct_mark_warns(self):
+        """#240 keystone at this call site: the message interpolates the
+        mark name (``"...ignored by mark_point"`` vs ``"...ignored by
+        mark_bar"``), so two DIFFERENT non-consuming marks are two distinct
+        facts and both must reach the user -- the pre-#240 (channel, kwarg)
+        identity collapsed them into one, silently dropping the second
+        mark's message. A repeat of the SAME mark still dedups."""
         reset_warnings()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             fm.Chart(_df()).mark_point().encode(x="x", y="y", detail="g").to_svg()
             fm.Chart(_df()).mark_bar().encode(x="x", y="y", detail="g").to_svg()
-        assert len(_user_warnings(caught, contains="detail")) == 1
+            fm.Chart(_df()).mark_point().encode(x="x", y="y", detail="g").to_svg()
+        detail_warnings = _user_warnings(caught, contains="detail")
+        assert len(detail_warnings) == 2, (
+            f"expected one warning per distinct mark; got {[str(w.message) for w in detail_warnings]}"
+        )
+        messages = {str(w.message) for w in detail_warnings}
+        assert any("mark_point" in m for m in messages)
+        assert any("mark_bar" in m for m in messages)
 
     def test_detail_still_aliases_into_mark_style_even_when_warned(self):
         """The channel is still routed to mark_style.detail; the warning only

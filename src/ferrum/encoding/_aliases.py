@@ -147,9 +147,17 @@ def apply_channel_aliases(enc: dict, mk: dict, mark: str | None = None) -> tuple
                 # Can't map to a scale -- the source encoding produces no visual
                 # effect when the target is already mapped.  Warn once so callers
                 # know the channel was dropped.
+                #
+                # Keys on the real kwarg name ("stroke"), not a synthetic
+                # "stroke_dropped_by_color" stand-in (#240, 2026-09-11 wave-1
+                # hardening: that was a message baked into the key, working
+                # around the old (channel, kwarg)-only identity). warn_once
+                # now keys on the resolved message too, so the fixed literal
+                # message below still dedups across repeated calls exactly
+                # as before.
                 warn_once(
                     "encoding",
-                    "stroke_dropped_by_color",
+                    "stroke",
                     "encode(stroke=...) is ignored when color= is also encoded; "
                     "stroke is aliased to color only when color is absent.",
                 )

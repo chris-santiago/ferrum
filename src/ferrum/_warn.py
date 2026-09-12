@@ -1,9 +1,19 @@
-"""Warn-once registry: each (channel, kwarg) tuple emits at most one
-UserWarning per context. Tests use reset_warnings() to clear state.
+"""Warn-once registry: each (channel, kwarg, message) triple emits at most
+one UserWarning per context. Tests use reset_warnings() to clear state.
 
 State is stored in a ``contextvars.ContextVar`` so it is scoped to the
 current execution context (thread-safe and async-safe) rather than
 process-global.
+
+Identity is ``(channel, kwarg, message)``, not just ``(channel, kwarg)``
+(#240, 2026-09-11 wave-1 hardening). Before this, a second caller warning
+about the same pair with a DIFFERENT message was silently dropped -- the
+first caller's text permanently won that slot, so distinct facts (e.g. two
+different marks both warning on ``encoding("detail", ...)``, each naming its
+own mark) collapsed into one, wrong-for-the-second-caller message. Including
+the resolved message in the key means "same pair, same message" still dedups
+(the common case: a loop re-warning about the identical fact) while "same
+pair, different message" reaches the user once per distinct message.
 """
 
 from __future__ import annotations
@@ -29,11 +39,14 @@ def _get_seen() -> set:
 def warn_once(
     channel: str, kwarg: str, message: Optional[str] = None, *, stacklevel: int = 3
 ) -> None:
-    """Emit a ``UserWarning`` the first time a ``(channel, kwarg)`` pair is seen.
+    """Emit a ``UserWarning`` the first time a ``(channel, kwarg, message)`` triple is seen.
 
-    Subsequent calls with the same ``(channel, kwarg)`` key are silently
-    suppressed.  Used by desugar functions to warn about accepted-but-
-    not-yet-honored kwargs without spamming per-render.
+    Subsequent calls with the same ``(channel, kwarg)`` pair AND the same
+    resolved message are silently suppressed. A later call for the same pair
+    with a DIFFERENT message is NOT suppressed -- two distinct one-time facts
+    about the same ``(channel, kwarg)`` slot both reach the user, once each.
+    Used by desugar functions to warn about accepted-but-not-yet-honored
+    kwargs without spamming per-render.
 
     Parameters
     ----------
@@ -43,8 +56,10 @@ def warn_once(
         The specific kwarg or feature being warned about
         (e.g. ``"blend_additive"``).
     message : str or None, default None
-        Custom warning text.  If ``None``, a default message is
-        constructed from ``channel`` and ``kwarg``.
+        Custom warning text. If ``None``, a default message is constructed
+        from ``channel`` and ``kwarg``; this default text is itself part of
+        the key, so a caller that always passes ``None`` still dedups
+        against itself the same way it always has.
     stacklevel : int, default 3
         Passed through to ``warnings.warn``. The default of ``3`` is tuned
         for the common shape "user code -> one ferrum helper -> `warn_once`"
@@ -57,16 +72,17 @@ def warn_once(
     Examples
     --------
     >>> warn_once("mark_foo", "bar", "mark_foo bar= not yet supported")
-    >>> warn_once("mark_foo", "bar")  # second call — silently suppressed
+    >>> warn_once("mark_foo", "bar", "mark_foo bar= not yet supported")  # dup — suppressed
+    >>> warn_once("mark_foo", "bar", "a different fact about bar=")  # distinct message — emits
     """
-    key = (channel, kwarg)
+    msg = message or (
+        f"{channel}({kwarg}=...) is accepted but not yet honored; planned for a future Phase."
+    )
+    key = (channel, kwarg, msg)
     seen = _get_seen()
     if key in seen:
         return
     seen.add(key)
-    msg = message or (
-        f"{channel}({kwarg}=...) is accepted but not yet honored; planned for a future Phase."
-    )
     warnings.warn(msg, UserWarning, stacklevel=stacklevel)
 
 

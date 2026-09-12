@@ -60,6 +60,15 @@ def _strip_unstackable(d: dict, mark: str | None) -> None:
     renders unstacked) and emit a one-time ``UserWarning`` naming the dropped
     field. A falsy ``stack`` (``None``/``False``) means "do not stack" and is a
     no-op, so it is left untouched. Shared by the single-chart and layered paths.
+
+    Uses the fixed kwarg ``"stack"`` (not a per-mark ``f"stack_on_{mark}"``
+    key -- #240, 2026-09-11 wave-1 hardening: that baked the mark name into
+    the warn_once *key* as a workaround for the old (channel, kwarg)-only
+    identity, which would otherwise have let one mark's message permanently
+    suppress every other mark's. Now that warn_once keys on the resolved
+    message too, each mark's distinct message (it interpolates
+    ``stack_val``/``mark_label``) reaches the user on its own without the
+    key-hack.
     """
     if d.get("stack") and mark not in _STACKABLE_MARKS:
         from ferrum._warn import warn_once
@@ -68,7 +77,7 @@ def _strip_unstackable(d: dict, mark: str | None) -> None:
         mark_label = f"mark_{mark}" if mark else "this mark"
         warn_once(
             "encoding",
-            f"stack_on_{mark}",
+            "stack",
             message=(
                 f"stack={stack_val!r} is not supported by {mark_label} and was ignored. "
                 "Stacking is only honored by mark_bar and mark_area."

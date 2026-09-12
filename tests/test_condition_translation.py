@@ -224,6 +224,25 @@ def test_stroke_does_not_declare_condition_honored():
     assert "condition" in fm.Fill._honored_kwargs
 
 
+@pytest.mark.parametrize("channel_cls", [fm.Stroke, fm.Shape])
+def test_condition_on_refused_channel_warns_the_permanent_fact(channel_cls):
+    """Constructing `Stroke(..., condition=...)` / `Shape(..., condition=...)`
+    warns the true, permanent reason -- not the generic "planned for a
+    future Phase" text, which would falsely promise a future release might
+    honor a conditional these channels refuse outright at `encode()` time
+    (#240 defect 1, 2026-09-11 wave-1 hardening)."""
+    sel = selection_point(fields=["category"], name=f"sel_{channel_cls.__name__}_ctor_warn")
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        channel_cls("category", condition=_cond(sel))
+    assert len(w) == 1
+    msg = str(w[0].message)
+    assert "planned for a future Phase" not in msg, f"still lying about condition=: {msg!r}"
+    assert "condition=" in msg
+    assert "permanently unsupported" in msg or "not supported" in msg
+
+
 @pytest.mark.parametrize("spelling", ["channel", "bare"])
 def test_shape_condition_is_refused(df, spelling):
     """A shape conditional is refused by name, both spellings.
