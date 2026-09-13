@@ -231,14 +231,25 @@ def test_calibration_curve_all_same_prediction():
 
 
 def test_lift_curve_class_with_zero_base_rate():
-    """A class with base_rate=0 is silently skipped in lift_curve."""
+    """A *one-vs-rest* class with base_rate=0 is still skipped in lift_curve.
+
+    Narrowed to multiclass by the #203 hygiene matrix (2026-09-13). The
+    zero-base-rate ``continue`` was written for one-vs-rest, where "no row
+    is class k" is a legitimate answer, and that is what this pins. The
+    binary case this test used to use -- a two-class model over an
+    all-``0`` ``y`` -- now refuses by name instead, because there the skip
+    silently dropped the only curve the caller asked for; see
+    ``test_binary_label_conventions.py``'s gain/lift refusal cell.
+    """
     X = pl.DataFrame({"f0": [1.0, 2.0, 3.0], "f1": [4.0, 5.0, 6.0]})
-    y = pl.Series("y", [0, 0, 0])
-    model = _PredictProba()
+    y = pl.Series("y", [0, 1, 0])
+    model = _PredictProbaMulticlass()
     source = ferrum.ModelSource(model, X, y)
     lift = source.lift_curve()
     assert lift.height >= 2
     assert "baseline" in lift["class"].to_list()
+    # Class 2 holds no row, so its curve is skipped; 0 and 1 are drawn.
+    assert "2" not in lift["class"].to_list()
 
 
 # ---------------------------------------------------------------------------

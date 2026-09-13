@@ -18,6 +18,13 @@ callers already reduce their inputs to a per-class metrics dict (sklearn's
 path) before calling it, so it owns only the shared long-form row shaping,
 not a Rust kernel call.
 
+This module also owns *target hygiene* (#203): the one contract every
+binary/multiclass diagnostic applies to a target that disagrees with the
+model — nulls refuse, a resolution nothing matches refuses, and rows outside
+an otherwise-matching class set absorb as negative and say so. See the
+"Target hygiene" section below; the guards are called by both source
+adapters, so neither path can answer the question differently.
+
 No scikit-learn import lives here — the kernels are sklearn-free, and
 ``classification_report_frame`` never imports it either.
 
@@ -35,6 +42,8 @@ Python-facing DataFrame schemas (the chart-builder contract, unchanged):
 
 from __future__ import annotations
 
+import math
+import warnings
 from typing import cast
 
 import numpy as np
@@ -104,6 +113,253 @@ def _observed_values(y_true: np.ndarray, limit: int = 8) -> list:
     return ordered[:limit]
 
 
+# ---------------------------------------------------------------------------
+# Target hygiene (#203)
+# ---------------------------------------------------------------------------
+#
+# One contract for a target that disagrees with the model, applied by every
+# binary and multiclass diagnostic on both source paths:
+#
+#   - a null-bearing target refuses  (:func:`require_no_null_target`)
+#   - a resolution no row matches refuses  (:func:`binary_indicator` for a
+#     binary pair's positive class, :func:`check_resolved_target` for the
+#     multiclass reach)
+#   - rows outside an otherwise-matching class set absorb as negative and
+#     say so  (:func:`check_resolved_target`), except in the confusion
+#     family, where the kernel drops them instead and the warning says so
+#     (:func:`check_encodable_target`)
+#
+# Before this, the answer depended on the target's dtype and on which
+# resolution tier the model happened to land in: a string target with nulls
+# crashed with an unowned ``TypeError: '<' not supported`` from whichever of
+# four ``np.unique``/``sorted`` sites it reached first, a numeric one silently
+# gained a NaN class that could shift the resolution tier, stray values
+# absorbed silently on tier 1, and a multiclass tier-3 resolution matching
+# nothing returned all-NaN curves with no diagnosis at all.
+
+
+def _null_mask(y_true: np.ndarray) -> np.ndarray:
+    """Boolean mask of the null slots in a target array.
+
+    A polars target reaches numpy in one of three shapes and its nulls look
+    different in each: an ``Int64``/``Float64`` column with nulls arrives as
+    float64 carrying ``NaN``; ``Date``/``Datetime``/``Duration`` arrive as
+    ``datetime64``/``timedelta64`` carrying ``NaT``; and ``Utf8``/
+    ``Categorical``/``Enum``/``Boolean`` arrive as an object array carrying
+    ``None``. All three say the same thing -- this row's class was not
+    recorded -- so all three count. Any other dtype (plain integer, plain
+    unicode, plain bool) cannot carry a null in numpy and masks empty,
+    which is the common case and costs one dtype check.
+
+    One null spelling is *not* detected here, deliberately: a pandas
+    nullable target (``pd.Series([...], dtype="string")``) reaches numpy as
+    an object array whose null is ``pd.NA``, which is neither ``None`` nor
+    a float ``NaN``. Such a target is refused earlier and less precisely,
+    at ferrum's polars ingestion seam (measured 2026-09-13:
+    ``TypeError: unexpected value while building Series of type String;
+    found value of type Object: <NA>``), so it never reaches a diagnostic
+    -- it is an ingestion-layer gap, not a silent accept.
+    """
+    arr = np.asarray(y_true)
+    if arr.dtype.kind in "fc":
+        return np.isnan(arr)
+    if arr.dtype.kind in "Mm":
+        return np.isnat(arr)
+    if arr.dtype.kind == "O":
+        return np.array(
+            [v is None or (isinstance(v, float) and math.isnan(v)) for v in arr.tolist()],
+            dtype=bool,
+        )
+    return np.zeros(len(arr), dtype=bool)
+
+
+def require_no_null_target(y_true: np.ndarray, *, diagnostic: str) -> None:
+    """Refuse a target that carries null rows.
+
+    A null is not a class observation. Binarizing it lands it on 0 (nulls
+    compare unequal to everything), which counts it as a negative the data
+    never recorded -- fabrication rather than degradation, so this refuses
+    where the stray-value case merely warns (see
+    :func:`check_resolved_target`). It is also what scikit-learn does with
+    a NaN-bearing ``y``.
+
+    This guard runs *before* class resolution, which makes it the owner of
+    the four sites a null used to reach: :func:`binary_class_values`'
+    ``np.unique``, both cardinality guards in
+    ``sources/_classification._resolve_class_values``, and
+    ``ModelSource.confusion_matrix``'s no-``classes_`` ``sorted(set(...))``.
+    On a string-backed target each of those raised
+    ``TypeError: '<' not supported between instances of 'str' and 'NoneType'``
+    naming neither the target nor the diagnostic; on a numeric one none of
+    them raised at all -- the target silently gained a distinct ``NaN``
+    class, which could push a ``classes_``-less model from resolution tier 2
+    to tier 3 and change the answer from a number to a refusal.
+
+    ``diagnostic`` names the public entry the caller actually invoked --
+    the source method on the model path (``roc_curve``), the figure
+    function on the precomputed path (``roc_chart``) -- following
+    :func:`binary_indicator`'s ``diagnostic=`` idiom.
+    """
+    mask = _null_mask(y_true)
+    n_null = int(mask.sum())
+    if not n_null:
+        return
+    raise ValueError(
+        f"{diagnostic}: y has {n_null} null row(s) out of {len(mask)}, and a "
+        f"null is not a class observation -- counting those rows as negatives "
+        f"would measure every metric against data the target never recorded. "
+        f"y holds {_observed_values(y_true)!r}. Drop or impute the null rows "
+        f"before calling {diagnostic}."
+    )
+
+
+def _unmatched_mask(y_true: np.ndarray, class_values: list) -> np.ndarray:
+    """Boolean mask of the rows equalling none of ``class_values``.
+
+    Membership is tested with :func:`positive_indicator`, the same
+    comparison the binarization and the confusion encoding perform, so what
+    the guards below report and what the kernels see cannot disagree.
+    """
+    matched = np.zeros(len(y_true), dtype=bool)
+    for value in class_values:
+        matched |= positive_indicator(y_true, value).astype(bool)
+    return ~matched
+
+
+def check_resolved_target(
+    y_true: np.ndarray,
+    class_values: list,
+    *,
+    diagnostic: str,
+    stacklevel: int,
+) -> None:
+    """Diagnose a resolved class set against the target it will binarize.
+
+    Runs once per diagnostic call, after the caller has resolved its
+    per-class comparison values and before any frame is built. Membership is
+    tested with :func:`positive_indicator`, the same comparison the
+    binarization itself uses, so what this reports and what the kernels see
+    cannot disagree.
+
+    Two outcomes:
+
+    **A binary pair whose positive class matches no row.** This says
+    nothing at all: :func:`binary_indicator` is about to refuse in the
+    positive class's own voice, and warning first would assert an absorb
+    the refused call never performs (measured 2026-09-13, ``classes_ =
+    [0, 2]`` against a ``{0, 1}`` target: "96 row(s) ... were counted as
+    negative" immediately followed by the refusal, so nothing was counted
+    as anything). The deferral covers the total mismatch and the partial
+    one alike, since the positive class is the only class a binary curve
+    binarizes against.
+
+    **No class value matches any row, with three or more classes.** Every
+    one-vs-rest curve would be computed against an entirely-negative
+    phantom target. There was no voice for this case, and the call
+    returned all-NaN curves in silence (measured 2026-09-13 on the
+    multiclass fixture: three NaN curves where sklearn's one-vs-rest AUCs
+    over the same probabilities were 0.872 / 0.942 / 0.930). That reach
+    refuses here.
+
+    **Some rows fall outside an otherwise-matching class set.** Those rows
+    absorb as negative, which is scikit-learn's own ``pos_label`` semantics
+    and the right arithmetic -- "not this class" is exactly the one-vs-rest
+    question -- so the answer is kept and a ``UserWarning`` names the
+    diagnostic, how many rows absorbed, and which values they held. The
+    silence was the defect, not the absorb: on a 200-row binary fixture,
+    replacing 10 targets with a stray third value moved the AUC from 0.9843
+    to 0.9395 with nothing on the chart to say so.
+
+    The confusion-matrix family does not absorb its strays -- it drops
+    them -- so it has its own guard, :func:`check_encodable_target`.
+    """
+    y_true = np.asarray(y_true)
+    if not len(y_true):
+        return
+
+    unmatched = _unmatched_mask(y_true, class_values)
+    n_absorbed = int(unmatched.sum())
+
+    if len(class_values) < 3:
+        # The binary pair's positive class is its last value (ascending class
+        # order, matching predict_proba's columns). If no row holds it,
+        # binary_indicator refuses moments later and this must stay silent.
+        if not class_values or not positive_indicator(y_true, class_values[-1]).any():
+            return
+    elif n_absorbed == len(y_true):
+        raise ValueError(
+            f"{diagnostic}: no row of y equals any of the resolved class "
+            f"values {class_values!r}, so every one-vs-rest curve would be "
+            f"computed against an entirely-negative target and would be "
+            f"meaningless. y holds {_observed_values(y_true)!r}. Check that y "
+            f"and the model's classes_ describe the same labels."
+        )
+    if not n_absorbed:
+        return
+
+    strays = _observed_values(np.asarray(y_true[unmatched], dtype=object))
+    warnings.warn(
+        f"{diagnostic}: {n_absorbed} row(s) of y hold values outside the "
+        f"resolved class set {class_values!r} and were counted as negative; "
+        f"the out-of-domain values are {strays!r}.",
+        UserWarning,
+        stacklevel=stacklevel,
+    )
+
+
+def check_encodable_target(
+    y_true: np.ndarray,
+    encode_values: list,
+    *,
+    diagnostic: str,
+    stacklevel: int,
+) -> None:
+    """Diagnose a confusion encoding against the target it will encode.
+
+    The confusion family's stray cell, and it is not the curve family's.
+    :func:`confusion_frame` encodes every value to its index in
+    ``encode_values`` and maps everything else to ``-1``, which the kernel
+    **drops**: an out-of-domain row is counted in no cell at all, rather
+    than absorbed into a negative the way a curve's binarization absorbs it
+    (see :func:`check_resolved_target`). The matrix silently describes
+    fewer rows than the caller passed -- measured 2026-09-13 on the shared
+    fixtures, with ten rows set to a stray value: cell counts summing to
+    190 of 200 on the binary fixture and 290 of 300 on the multiclass one,
+    with no diagnostic of any kind. ``class_prediction_error_chart``, which
+    renders the same frame, lost the same rows.
+
+    Dropping rows is a degradation the caller has to hear about, so this
+    warns rather than refusing, and the message says *dropped* -- the word
+    has to match what the kernel does, or the diagnosis is worse than
+    silence.
+
+    Only a caller whose ``encode_values`` can exclude a row needs this: it
+    is the model path's ``classes_`` branch, where the encoding comes from
+    the model rather than from ``y``. The no-``classes_`` branch and the
+    precomputed twin both build their labels from the union of ``y_true``
+    and ``y_pred``, so nothing can fall outside.
+    """
+    y_true = np.asarray(y_true)
+    if not len(y_true):
+        return
+
+    unmatched = _unmatched_mask(y_true, encode_values)
+    n_dropped = int(unmatched.sum())
+    if not n_dropped:
+        return
+
+    strays = _observed_values(np.asarray(y_true[unmatched], dtype=object))
+    warnings.warn(
+        f"{diagnostic}: {n_dropped} row(s) of y out of {len(y_true)} hold "
+        f"values outside the class set {encode_values!r} the matrix is "
+        f"encoded against, and were dropped from it entirely -- they are "
+        f"counted in no cell, not absorbed into one; the out-of-domain "
+        f"values are {strays!r}.",
+        UserWarning,
+        stacklevel=stacklevel,
+    )
+
+
 def binary_indicator(y_true: np.ndarray, positive_value: object, *, diagnostic: str) -> np.ndarray:
     """:func:`positive_indicator`, refusing a target that matches nothing.
 
@@ -119,8 +375,11 @@ def binary_indicator(y_true: np.ndarray, positive_value: object, *, diagnostic: 
     So a total mismatch refuses by name instead: it is never a meaningful
     request, and the two things a caller needs in order to fix it are the
     class value that was searched for and the values ``y`` actually holds.
-    An all-null target is the same case (nulls compare unequal to
-    everything) and refuses the same way.
+    A null-bearing target -- an all-null one included -- is a mismatch too
+    (nulls compare unequal to everything), but it is diagnosed earlier and
+    more precisely by :func:`require_no_null_target`, which every
+    diagnostic runs before resolving its classes (#203); this guard is what
+    catches it if a caller reaches here without that check.
 
     An empty target is *not* an error -- there is nothing to mismatch --
     and a target whose rows are all positive is left alone too: the kernels
@@ -512,7 +771,10 @@ def confusion_frame(
     Owns the integer encode -> kernel -> decode round-trip plus ``value_fmt``
     so arbitrary string/categorical labels work where their dtype is known.
     Values not in ``labels`` (including NaN) map to code ``-1``, which the
-    kernel drops.
+    kernel drops -- those rows are counted in no cell. A caller whose
+    ``labels`` can exclude a row of ``y_true`` runs
+    :func:`check_encodable_target` first so the drop is warned about rather
+    than silent (#203).
     """
     label_strs = [str(lbl) for lbl in labels]
     label_to_code = {lbl: i for i, lbl in enumerate(labels)}
@@ -610,11 +872,28 @@ def gain_frame(
         Columns ``percent_population``, ``gain``, ``class``. Per-class curves
         prepend a ``(0.0, 0.0)`` origin point. A 2-row ``class='baseline'``
         diagonal (from 0 to 1) is appended at the end.
+
+    Notes
+    -----
+    A binary class pair binarizes its positive class through
+    :func:`binary_indicator`, so a target matching no positive row refuses
+    by name here exactly as it does on the ROC, PR, calibration and
+    threshold builders (#203). ``binary_indicator``'s docstring has always
+    claimed "every binary curve builder"; gain and lift were the two that
+    were not, and a binary ``cumulative_gain`` over an all-negative target
+    returned a curve reaching gain 1.0 with nothing to say it was drawn
+    against a target the positive class never met. Multiclass one-vs-rest
+    is untouched: "no row is class k" is a legitimate answer there.
     """
     n = len(y_true)
+    binary_pair = len(class_values) == 2
     frames: list[pl.DataFrame] = []
     for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
-        y_bin = positive_indicator(y_true, cls_val)
+        y_bin = (
+            binary_indicator(y_true, cls_val, diagnostic="cumulative_gain")
+            if binary_pair and i == 1
+            else positive_indicator(y_true, cls_val)
+        )
         order = _descending_score_order(y_score_matrix[:, i])
         cum_pos = np.cumsum(y_bin[order])
         total_pos = max(int(cum_pos[-1]), 1) if n else 1
@@ -674,11 +953,24 @@ def lift_frame(
         Columns ``percent_population``, ``lift``, ``class``. Classes whose
         base rate is zero are silently omitted. A 2-row ``class='baseline'``
         line at ``lift=1.0`` is appended at the end.
+
+    Notes
+    -----
+    Same as :func:`gain_frame`: a binary pair's positive class goes through
+    :func:`binary_indicator`, so a total mismatch refuses by name instead of
+    being dropped by the zero-base-rate ``continue`` below (#203). That
+    ``continue`` stays for multiclass one-vs-rest, which it was written for
+    and which this function documents.
     """
     n = len(y_true)
+    binary_pair = len(class_values) == 2
     frames: list[pl.DataFrame] = []
     for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
-        y_bin = positive_indicator(y_true, cls_val)
+        y_bin = (
+            binary_indicator(y_true, cls_val, diagnostic="lift_curve")
+            if binary_pair and i == 1
+            else positive_indicator(y_true, cls_val)
+        )
         base_rate = float(y_bin.mean()) if n else 0.0
         if base_rate == 0.0:
             continue

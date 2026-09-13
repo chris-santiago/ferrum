@@ -40,14 +40,23 @@ def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame, real_classes: An
         (the default) falls back to parsing the label itself, the only
         option left when the model exposes no ``classes_`` at all.
 
-    Raises ``ValueError`` when ``y`` is ``None``.
+    Raises ``ValueError`` when ``y`` is ``None``, when ``y`` carries null
+    rows, or when the resolved class values match no row of a multiclass
+    ``y`` -- the shared target-hygiene contract (#203), applied here because
+    this is the one place the four score-matrix diagnostics (``roc_curve``,
+    ``pr_curve``, ``cumulative_gain``, ``lift_curve``) resolve their classes.
+    Rows outside an otherwise-matching class set warn and absorb.
     """
     if y is None:
         raise ValueError(f"ModelSource.{method_name}() requires y to be provided.")
     proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
     y_true = np.asarray(y)
+    _curve_frames.require_no_null_target(y_true, diagnostic=method_name)
     labels = [c[len("proba_") :] for c in proba_cols]
     class_values = _resolve_class_values(real_classes, y, labels)
+    # stacklevel 4: warn() -> check_resolved_target -> here -> the source
+    # method -> the caller that asked for the diagnostic.
+    _curve_frames.check_resolved_target(y_true, class_values, diagnostic=method_name, stacklevel=4)
     score_matrix = proba_df[proba_cols].to_numpy()
     return y_true, score_matrix, labels, class_values
 
@@ -87,15 +96,21 @@ def _resolve_class_values(real_classes: Any, y, labels: list[str]) -> list:
     model whose ``y`` carries exactly as many distinct values as there are
     score columns (verified to match sklearn's one-vs-rest AUCs), tier 3 on
     a ``classes_``-less model whose ``y`` cardinality disagrees with that
-    count. Tier 3's two routes differ in how the unsound values surface:
-    a **binary** curve refuses by name, because
+    count. Tier 3's two routes both surface their unsound values now, by
+    different owners: a **binary** curve refuses by name, because
     :func:`_curve_frames.binary_indicator`'s total-mismatch guard catches
-    comparison values that match no row. A **multiclass** curve has no such
-    guard -- one-vs-rest legitimately tolerates a class no row matches --
-    so it returns all-NaN curves silently instead. That silence is a known
-    gap, tracked with the target-hygiene follow-up (the same "what does
-    ferrum owe a caller whose target and model disagree" question), not a
-    property this function is asserting is correct.
+    comparison values that match no row; a **multiclass** curve refuses via
+    :func:`_curve_frames.check_resolved_target` when *zero* of the resolved
+    values match any row (#203), which is the same total mismatch wearing a
+    wider hat. Until then it returned all-NaN curves silently. One-vs-rest
+    still tolerates *some* classes being absent -- "no row is class k" is a
+    real answer -- so only the zero-match case refuses.
+
+    This function stays a pure resolver: it answers "which comparison
+    values", never "is this target fit to use". The hygiene checks live at
+    its two consumers (:func:`_resolve_proba`, :func:`_positive_class_value`)
+    so that resolution can still be read, tested, and reasoned about on a
+    deliberately unsound input.
     """
     if real_classes is not None and len(real_classes) == len(labels):
         return _coerce_real_classes(real_classes, y.dtype)
@@ -113,7 +128,7 @@ def _resolve_class_values(real_classes: Any, y, labels: list[str]) -> list:
     return [_coerce_class_label(label, y_true.dtype) for label in labels]
 
 
-def _positive_class_value(model: Any, y, proba_cols: list[str]) -> object:
+def _positive_class_value(model: Any, y, proba_cols: list[str], *, diagnostic: str) -> object:
     """Resolve the value in ``y``'s domain that means "positive".
 
     The binary slice of :func:`_resolve_class_values`: the positive class is
@@ -124,9 +139,20 @@ def _positive_class_value(model: Any, y, proba_cols: list[str]) -> object:
     -- so they cannot resolve "positive" two different ways, and shared with
     ``roc_curve``/``pr_curve``/``cumulative_gain``/``lift_curve`` through the
     common resolver, so neither can the two families.
+
+    ``diagnostic`` names the calling source method: this is also where those
+    two diagnostics run the shared target-hygiene checks (#203), which name
+    whichever entry the caller actually invoked, the same way
+    :func:`_resolve_proba` does for the score-matrix family.
     """
     labels = [c[len("proba_") :] for c in proba_cols]
-    return _resolve_class_values(getattr(model, "classes_", None), y, labels)[1]
+    y_true = np.asarray(y)
+    _curve_frames.require_no_null_target(y_true, diagnostic=diagnostic)
+    class_values = _resolve_class_values(getattr(model, "classes_", None), y, labels)
+    # stacklevel 4: warn() -> check_resolved_target -> here -> the source
+    # method -> the caller that asked for the diagnostic.
+    _curve_frames.check_resolved_target(y_true, class_values, diagnostic=diagnostic, stacklevel=4)
+    return class_values[1]
 
 
 def _predictions_in_y_domain(
@@ -298,7 +324,9 @@ class ClassificationCurvesMixin(_MixinBase):
             )
         y_true = np.asarray(self._y)
         y_score = proba_df[proba_cols[1]].to_numpy().astype(np.float64)
-        positive_class = _positive_class_value(self._model, self._y, proba_cols)
+        positive_class = _positive_class_value(
+            self._model, self._y, proba_cols, diagnostic="calibration_curve"
+        )
 
         df = _curve_frames.calibration_frame(y_true, y_score, positive_class, n_bins, strategy)
         self._cache[key] = df
@@ -384,7 +412,9 @@ class ClassificationCurvesMixin(_MixinBase):
         # Positionally aligned with proba_cols[1] by the same
         # probabilities()/predict_proba guarantee _resolve_proba's
         # real_classes parameter relies on.
-        positive_class = _positive_class_value(self._model, self._y, proba_cols)
+        positive_class = _positive_class_value(
+            self._model, self._y, proba_cols, diagnostic="discrimination_threshold"
+        )
         thresholds = np.linspace(0.0, 1.0, n_thresholds)
 
         if cv is None:
@@ -477,6 +507,12 @@ class ClassificationCurvesMixin(_MixinBase):
         stringified label suitable for ``mark_text`` overlay (integer counts
         when unnormalized, two-decimal fractions when normalized).
 
+        A null row of ``y`` refuses and a row holding a value outside the
+        model's ``classes_`` warns and is dropped from the matrix -- the
+        target-hygiene contract (#203); the drop is the kernel's
+        out-of-vocabulary rule, not an absorb, so the two say different
+        things on purpose.
+
         Parameters
         ----------
         normalize : {None, "true", "pred", "all"}, default None
@@ -493,6 +529,9 @@ class ClassificationCurvesMixin(_MixinBase):
             raise ValueError("ModelSource.confusion_matrix() requires y to be provided.")
         X = self._require_X("confusion_matrix")
         y_true = np.asarray(self._y)
+        # Owns the no-`classes_` branch's `sorted(set(...))` below, which a
+        # null among string labels used to break with an unowned TypeError (#203).
+        _curve_frames.require_no_null_target(y_true, diagnostic="confusion_matrix")
         y_pred = np.asarray(self._model.predict(X))
 
         # `encode_values` is the comparison-value list confusion_frame uses
@@ -506,6 +545,14 @@ class ClassificationCurvesMixin(_MixinBase):
         if real_classes is not None:
             encode_values = _coerce_real_classes(real_classes, self._y.dtype)
             y_pred = _predictions_in_y_domain(real_classes, encode_values, y_pred)
+            # The one branch whose encoding comes from the model rather than
+            # from y, so the one where a row of y can fall outside it and be
+            # dropped by the kernel (#203). stacklevel 3: warn() ->
+            # check_encodable_target -> here -> the caller that asked for the
+            # matrix (confusion_matrix_chart, class_prediction_error_chart).
+            _curve_frames.check_encodable_target(
+                y_true, encode_values, diagnostic="confusion_matrix", stacklevel=3
+            )
         else:
             encode_values = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
 

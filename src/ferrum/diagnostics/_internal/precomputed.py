@@ -103,6 +103,17 @@ class _PrecomputedSource:
     nine in-scope diagnostic chart builders.  Delegates computation to Rust
     kernels in ``ferrum._core``; no scikit-learn is required.
 
+    Every classification method here runs the shared target-hygiene guard
+    (``_curve_frames.require_no_null_target``, #203) before reading class
+    values off ``y_true``, naming the *figure function* the caller invoked
+    the way ``_require_1d_y_pred`` already does. Without it a null among
+    string labels raised an unowned ``TypeError`` from ``np.unique`` /
+    ``sorted`` here just as it did on the model path, and the two numeric
+    paths disagreed: ``roc_chart`` refused for the wrong reason ("3 unique
+    classes", counting ``NaN`` as one), while ``confusion_matrix_chart``
+    and ``classification_report_chart`` quietly rendered ``None`` as a
+    class of its own because their ``sorted(..., key=str)`` survived it.
+
     Parameters
     ----------
     y_true : array-like
@@ -140,6 +151,7 @@ class _PrecomputedSource:
         """ROC curve(s).  Mirrors ``ModelSource.roc_curve`` column schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        _curve_frames.require_no_null_target(y_true, diagnostic="roc_chart")
         classes = list(np.unique(y_true))
 
         if y_pred.ndim == 1:
@@ -174,6 +186,7 @@ class _PrecomputedSource:
         """Precision-recall curve(s).  Mirrors ``ModelSource.pr_curve`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        _curve_frames.require_no_null_target(y_true, diagnostic="pr_chart")
         classes = list(np.unique(y_true))
 
         if y_pred.ndim == 1:
@@ -214,7 +227,15 @@ class _PrecomputedSource:
         _require_1d_y_pred(
             y_pred, chart_name="calibration_chart", kind="positive-class probabilities"
         )
+        _curve_frames.require_no_null_target(self._y_true_np, diagnostic="calibration_chart")
         class_values, _ = _curve_frames.binary_class_values(self._y_true_np)
+        # The only precomputed diagnostic that can absorb a stray: roc/pr/gain/
+        # lift read their class set off `y_true` itself, so every row is in it
+        # by construction, while `binary_class_values` reduces a 3+-valued
+        # target to its extremes and counts everything between as negative.
+        _curve_frames.check_resolved_target(
+            self._y_true_np, class_values, diagnostic="calibration_chart", stacklevel=3
+        )
         return _curve_frames.calibration_frame(
             self._y_true_np,
             y_pred,  # 1-D probabilities for positive class
@@ -227,6 +248,7 @@ class _PrecomputedSource:
         """Cumulative-gain curve.  Mirrors ``ModelSource.cumulative_gain`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        _curve_frames.require_no_null_target(y_true, diagnostic="gain_chart")
         classes = list(np.unique(y_true))
         labels = [str(cls) for cls in classes]
         score_matrix = _gain_lift_score_matrix(y_pred, classes, chart_name="gain_chart")
@@ -236,6 +258,7 @@ class _PrecomputedSource:
         """Lift curve.  Mirrors ``ModelSource.lift_curve`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
+        _curve_frames.require_no_null_target(y_true, diagnostic="lift_chart")
         classes = list(np.unique(y_true))
         labels = [str(cls) for cls in classes]
         score_matrix = _gain_lift_score_matrix(y_pred, classes, chart_name="lift_chart")
@@ -249,6 +272,7 @@ class _PrecomputedSource:
         y_true = self._y_true_np
         y_pred = self._y_pred_np
         _require_1d_y_pred(y_pred, chart_name="confusion_matrix_chart", kind="hard class labels")
+        _curve_frames.require_no_null_target(y_true, diagnostic="confusion_matrix_chart")
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()), key=str)
         return _curve_frames.confusion_frame(y_true, y_pred, labels, normalize=normalize)
 
@@ -280,6 +304,11 @@ class _PrecomputedSource:
         """
         _require_1d_y_pred(
             self._y_pred_np, chart_name="classification_report_chart", kind="hard class labels"
+        )
+        # Ahead of the delegation below so the refusal names this figure
+        # rather than the confusion matrix it is built from.
+        _curve_frames.require_no_null_target(
+            self._y_true_np, diagnostic="classification_report_chart"
         )
         cm = self.confusion_matrix(normalize=None)
         actual_col = cm["actual"].to_list()
@@ -378,6 +407,7 @@ class _PrecomputedSource:
         _require_1d_y_pred(
             y_pred, chart_name="discrimination_threshold_chart", kind="positive-class scores"
         )
+        _curve_frames.require_no_null_target(y_true, diagnostic="discrimination_threshold_chart")
 
         unique = np.unique(y_true)
         if len(unique) != 2:

@@ -1184,6 +1184,105 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > translation is the identity). Found by the close's own dtype matrix, not
 > by a user report.
 
+> **2026-09-13 (wave 3, #203 — the target-hygiene matrix):** supersedes the
+> "scope is deliberately narrow" clause of the 2026-09-10 note below. A
+> target that disagrees with the model is now answered by one contract
+> instead of by the target's dtype and the model's resolution tier.
+>
+> What the contract covers today: the seven `ModelSource` classification
+> methods — `roc_curve`, `pr_curve`, `calibration_curve`, `cumulative_gain`,
+> `lift_curve`, `discrimination_threshold`, `confusion_matrix` — and every
+> figure function built on them (`class_prediction_error_chart` included,
+> since it renders the confusion frame); plus the eight classification
+> methods of the precomputed (`y_true=`/`y_pred=`) path: `roc_chart`,
+> `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`,
+> `discrimination_threshold_chart`, `confusion_matrix_chart`, and
+> `classification_report_chart`.
+>
+> Two classification surfaces are **outside** it, stated here so the
+> contract is not read wider than it is. The **model-backed**
+> `classification_report_chart` (and `ClassificationReportVisualizer`)
+> computes through `sklearn.metrics.classification_report` rather than
+> through this subsystem's resolution, and still surfaces scikit-learn's
+> own error for a null-bearing `y` — measured 2026-09-13: `ValueError:
+> Input y_true contains NaN` on a numeric target, `ValueError:
+> Classification metrics can't handle a mix of unknown and binary targets`
+> on a `Utf8` one, neither naming the target or the diagnostic. Its
+> precomputed twin *is* inside the contract, so those two paths still
+> answer a null differently. And `class_balance_chart` counts `y`'s own
+> values rather than comparing them against a model, so no class
+> resolution happens there to disagree with.
+>
+> - *Nulls refuse.* A target carrying any null row raises `ValueError`
+>   naming the diagnostic invoked, the null count out of the row count, and
+>   `y`'s observed values. A null is not a class observation, so counting it
+>   as a negative would fabricate data — `REFUSE MALFORMED` governs, and
+>   scikit-learn refuses a NaN-bearing `y` too. This replaces three
+>   different old behaviors: on a `Utf8`/`Categorical`/`Enum` target it
+>   replaces an unowned `TypeError: '<' not supported between instances of
+>   'str' and 'NoneType'` raised from whichever of four internal
+>   `np.unique`/`sorted` sites the call reached first; on a numeric target
+>   it replaces silence, where the nulls arrived as `NaN`, became a third
+>   distinct class, and shifted the metric (measured: AUC 0.9395 against a
+>   clean 0.9843 on a 200-row fixture with 10 nulls) or pushed a
+>   `classes_`-less model from resolution tier 2 to tier 3; and on the
+>   precomputed `confusion_matrix_chart` / `classification_report_chart` it
+>   replaces rendering `None` as a class of its own (their
+>   `sorted(..., key=str)` stringified it). "Null" means null in every dtype
+>   family a polars target can arrive in, including the temporal one: a
+>   `Date`/`Datetime`/`Duration` column's nulls arrive as `NaT` rather than
+>   as `NaN` or `None`, and until this note they were seen by nothing —
+>   `confusion_matrix_chart` rendered the `NaT` as a class of its own
+>   (measured 2026-09-13), the same silent accept as the string case above.
+>   One spelling stays outside: a *pandas* nullable target (`pd.NA`) never
+>   reaches this guard at all, because ferrum's polars ingestion refuses it
+>   first with its own untyped `TypeError: unexpected value while building
+>   Series of type String; found value of type Object: <NA>`. That is an
+>   ingestion-layer gap, not a silent accept.
+> - *Stray values warn.* Rows holding a value outside an otherwise-matching
+>   class set now emit one `UserWarning` per computed call naming the
+>   diagnostic, how many such rows there were, and which values they held.
+>   What happens to those rows is unchanged, and it is not the same on both
+>   families, so the two messages say different things. On a **curve**
+>   (`roc_curve`, `pr_curve`, `calibration_curve`, `cumulative_gain`,
+>   `lift_curve`, `discrimination_threshold`, and their charts) the row
+>   still counts as negative — scikit-learn's own `pos_label` semantics and
+>   the right arithmetic — and the warning says *counted as negative*
+>   (measured: the 200-row fixture with 10 rows set to a stray `7` returns
+>   AUC 0.9395, and says so). On the **confusion matrix** (`confusion_matrix`,
+>   `confusion_matrix_chart`, `class_prediction_error_chart`) the kernel
+>   maps the row to its out-of-vocabulary code and **drops** it — it is
+>   counted in no cell, not absorbed into one — so the warning says
+>   *dropped*. That drop is not new; the silence around it was total, and
+>   measured (2026-09-13): cells summing to 190 of 200 rows on the binary
+>   fixture and 290 of 300 on the multiclass one, with no diagnostic at all,
+>   while `roc_curve` on the identical source warned.
+> - *A binary pair whose positive class matches no row says nothing extra.*
+>   `binary_indicator` refuses it a moment later, so the call returns no
+>   number; a stray warning ahead of that refusal would assert an absorb
+>   that never happened, and one used to (measured with `classes_ = [0, 2]`
+>   against a `{0, 1}` target: "96 row(s) … were counted as negative",
+>   immediately followed by the refusal). The refusal is the whole answer.
+> - *A resolution nothing matches refuses, on both reaches.* `cumulative_gain`
+>   and `lift_curve` join the total-mismatch refusal every other binary
+>   builder already had: a binary target holding no positive row used to
+>   yield a gain curve reaching 1.0 and a lift chart carrying only its
+>   baseline. A multiclass resolution where **zero** resolved class values
+>   match any row also refuses, closing the silent all-NaN case the resolver's
+>   own docstring called a known gap (measured: three NaN curves where
+>   sklearn's one-vs-rest AUCs were 0.872 / 0.942 / 0.930).
+> - *Unchanged.* Multiclass one-vs-rest still tolerates *some* classes being
+>   absent — "no row is class k" is a real answer, and `lift_curve` still
+>   skips a zero-base-rate one-vs-rest class. An empty target is still not an
+>   error, an all-positive target still yields the kernels' honest NaN, and
+>   the request-vs-slice rule for `discrimination_threshold(cv=...)` below
+>   still holds. A clean target is byte-identical everywhere: no golden moved.
+> - *One asymmetry, by construction.* A stray value on a `classes_`-less
+>   **binary** model still refuses rather than absorbing. The stray inflates
+>   `y`'s cardinality past the score-column count, so resolution falls to the
+>   parsed `class_{i}` labels, which match no row at all — a total mismatch,
+>   not a stray among valid rows. There is no class set to absorb into.
+
 > **2026-09-10 (batch G close, cycle 3 — positive-class resolution and
 > target hygiene):** two consequences of making binarization mandatory,
 > both corrections.
@@ -1212,7 +1311,11 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > is not an error, and an all-positive target still yields the kernels'
 > honest NaN. A *partially* corrupted target — some null or out-of-domain
 > rows among valid ones — is still absorbed as negative and is **not**
-> covered here.
+> covered here. *(Superseded 2026-09-13 by the hygiene-matrix note above:
+> nulls refuse, strays warn-and-absorb, and gain/lift plus zero-match
+> multiclass joined the refusal. The all-null case still refuses, now by the
+> null rule and with the true diagnosis rather than a `classes_` mismatch
+> message.)*
 >
 > The refusal judges the **request**, never an internal slice of it.
 > `discrimination_threshold(cv=...)` resolves and validates the positive

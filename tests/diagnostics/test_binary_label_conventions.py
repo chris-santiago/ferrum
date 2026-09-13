@@ -20,7 +20,9 @@ the ``{0, 1}`` form, never by the code under test.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
+import warnings
 
 import numpy as np
 import polars as pl
@@ -237,6 +239,19 @@ class _DuckProba:
         return self._fitted.predict_proba(np.asarray(X))
 
 
+class _WrongClasses(_DuckProba):
+    """A model whose ``classes_`` only half-agrees with ``y``.
+
+    The shape that separates the stray rule from the total-mismatch rule:
+    with ``classes_ = [0, 2]`` against a ``{0, 1}`` target, the negative
+    class matches real rows while the positive class matches none.
+    """
+
+    def __init__(self, fitted, classes):
+        super().__init__(fitted)
+        self.classes_ = np.asarray(classes)
+
+
 class _DecisionFunctionOnly:
     """A margin-scoring estimator: ``decision_function`` plus ``classes_``."""
 
@@ -392,17 +407,24 @@ def test_a_target_matching_no_positive_row_refuses_by_name(call, binary_data):
     assert "y holds [0]" in message  # and what y actually has
 
 
-def test_an_all_null_target_refuses_the_same_way(binary_data):
-    """Nulls compare unequal to everything, so an all-null target is the
-    same total mismatch and gets the same refusal rather than a curve drawn
-    against an entirely-negative phantom target.
+def test_an_all_null_target_refuses_as_a_null_target(binary_data):
+    """An all-null target still refuses -- by the null rule, not the
+    mismatch rule (#203, 2026-09-13).
+
+    Batch G caught this case through the total-mismatch guard, because
+    nulls compare unequal to everything and the target therefore looked
+    entirely negative. The advice it gave ("check that y and the model's
+    classes_ describe the same labels") sent the caller to inspect a
+    ``classes_`` that was never wrong. The null guard now runs first and
+    names the actual problem, so the refusal is kept and the diagnosis is
+    the true one.
     """
     X, y01 = binary_data
     fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
     nulls = pl.Series("y", [None] * len(y01), dtype=pl.Int64)
     source = ferrum.ModelSource(fitted, X, nulls)
 
-    with pytest.raises(ValueError, match=r"no row of y equals the positive class"):
+    with pytest.raises(ValueError, match=r"roc_curve: y has 200 null row\(s\) out of 200"):
         source.roc_curve()
 
 
@@ -685,3 +707,548 @@ def test_tier_3_binary_refuses_rather_than_collapsing(binary_data):
     source = ferrum.ModelSource(_DuckProba(fitted), X, pl.Series("y", y3))
     with pytest.raises(ValueError, match=r"no row of y equals the positive class 'class_1'"):
         source.roc_curve()
+
+
+# ---------------------------------------------------------------------------
+# The target-hygiene matrix (#203)
+# ---------------------------------------------------------------------------
+#
+# One contract for a target that disagrees with the model, one cell per
+# shape, pinned on both source paths:
+#
+#   nulls                      -> refuse (any dtype, any diagnostic)
+#   stray values among valid   -> warn + absorb as negative
+#   nothing matches (binary)   -> refuse, by the positive class's name
+#   nothing matches (multi)    -> refuse, by the resolved class set
+#   some classes absent (multi)-> absorb in silence (one-vs-rest's own answer)
+#
+# Before this, the answer depended on the target's dtype and on which
+# resolution tier the model happened to land in; the sections above pin the
+# parts batch G closed, this one pins the rest.
+
+
+#: The six binary diagnostics that binarize ``y`` against a positive class,
+#: as ``(source method call, the name its refusals use)``. ``cumulative_gain``
+#: and ``lift_curve`` are the two the batch-G guard never reached.
+_BINARY_DIAGNOSTICS = [
+    pytest.param(lambda s: s.roc_curve(), "roc_curve", id="roc_curve"),
+    pytest.param(lambda s: s.pr_curve(), "pr_curve", id="pr_curve"),
+    pytest.param(lambda s: s.calibration_curve(), "calibration_curve", id="calibration_curve"),
+    pytest.param(lambda s: s.cumulative_gain(), "cumulative_gain", id="cumulative_gain"),
+    pytest.param(lambda s: s.lift_curve(), "lift_curve", id="lift_curve"),
+    pytest.param(
+        lambda s: s.discrimination_threshold(),
+        "discrimination_threshold",
+        id="discrimination_threshold",
+    ),
+]
+
+#: The same six on the precomputed path, as figure functions taking
+#: ``y_true=``/``y_pred=``, plus the two label-consuming ones.
+_PRECOMPUTED_SCORE_CHARTS = [
+    pytest.param(ferrum.roc_chart, "roc_chart", id="roc_chart"),
+    pytest.param(ferrum.pr_chart, "pr_chart", id="pr_chart"),
+    pytest.param(ferrum.calibration_chart, "calibration_chart", id="calibration_chart"),
+    pytest.param(ferrum.gain_chart, "gain_chart", id="gain_chart"),
+    pytest.param(ferrum.lift_chart, "lift_chart", id="lift_chart"),
+    pytest.param(
+        ferrum.discrimination_threshold_chart,
+        "discrimination_threshold_chart",
+        id="discrimination_threshold_chart",
+    ),
+]
+
+_PRECOMPUTED_LABEL_CHARTS = [
+    pytest.param(ferrum.confusion_matrix_chart, "confusion_matrix_chart", id="confusion_matrix"),
+    pytest.param(
+        ferrum.classification_report_chart,
+        "classification_report_chart",
+        id="classification_report",
+    ),
+]
+
+
+def _corrupted_binary_source(binary_data, replacement, *, dtype=pl.Int64, hide_classes=False):
+    """A ``ModelSource`` whose y's first ten rows carry ``replacement``.
+
+    The model is fitted on the clean ``{0, 1}`` target, so ``classes_`` is
+    right and only the target is corrupt -- the shape a user actually hands
+    ferrum when ten rows of a join came back empty or mis-coded.
+    ``hide_classes`` wraps it so resolution has to fall past tier 1.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    values = [replacement if i < 10 else v for i, v in enumerate(y01.to_list())]
+    y = pl.Series("y", values, dtype=dtype)
+    model = _DuckProba(fitted) if hide_classes else fitted
+    return ferrum.ModelSource(model, X, y)
+
+
+def _string_binary_source(binary_data, replacement):
+    """The utf8 twin of :func:`_corrupted_binary_source`.
+
+    Dtype is the axis that decided the old behavior: a string target with
+    nulls crashed with an unowned ``TypeError``, a numeric one degraded in
+    silence. Both must now answer identically.
+    """
+    X, y01 = binary_data
+    labels = ["pos" if int(v) == 1 else "neg" for v in y01.to_list()]
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), np.array(labels))
+    values = [replacement if i < 10 else v for i, v in enumerate(labels)]
+    return ferrum.ModelSource(fitted, X, pl.Series("y", values, dtype=pl.Utf8))
+
+
+# --- cell: a null-bearing target refuses -----------------------------------
+
+
+@pytest.mark.parametrize(("call", "name"), _BINARY_DIAGNOSTICS)
+@pytest.mark.parametrize("dtype", ["numeric", "utf8"])
+def test_a_null_bearing_target_refuses_on_every_binary_diagnostic(call, name, dtype, binary_data):
+    """Ten null rows out of two hundred, and every diagnostic says so.
+
+    This is the cell that ends the dtype fork. On ``Utf8`` the call raised
+    ``TypeError: '<' not supported between instances of 'str' and 'NoneType'``
+    from whichever of four ``np.unique``/``sorted`` sites it reached first,
+    naming neither the target nor the diagnostic. On ``Int64`` nothing
+    raised at all: the nulls arrived as ``NaN``, became a third distinct
+    class, and the metric silently shifted (measured AUC 0.9395 against a
+    clean 0.9843) -- or, on a ``classes_``-less model, the extra class
+    pushed resolution from tier 2 to tier 3 and turned the same input into
+    a refusal about the wrong thing.
+    """
+    source = (
+        _corrupted_binary_source(binary_data, None)
+        if dtype == "numeric"
+        else _string_binary_source(binary_data, None)
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        call(source)
+    message = str(excinfo.value)
+    assert message.startswith(f"{name}: y has 10 null row(s) out of 200")
+    assert "Drop or impute the null rows" in message
+    # The observed values still come back, nulls included, so the caller can
+    # see what the target holds without re-deriving it.
+    assert ("None" in message) if dtype == "utf8" else ("nan" in message)
+
+
+@pytest.mark.parametrize("hide_classes", [False, True], ids=["with_classes_", "no_classes_"])
+def test_a_null_bearing_target_refuses_on_confusion_matrix(hide_classes, binary_data):
+    """Crash site four: ``confusion_matrix``'s no-``classes_`` branch.
+
+    ``sorted(set(y_true) | set(y_pred))`` is a plain sort with no key, so a
+    ``None`` among string labels raised the identical unowned ``TypeError``
+    from a completely different owner. Both branches route through the same
+    guard now.
+    """
+    X, y01 = binary_data
+    labels = ["pos" if int(v) == 1 else "neg" for v in y01.to_list()]
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), np.array(labels))
+    values = [None if i < 10 else v for i, v in enumerate(labels)]
+    model = _DuckProba(fitted) if hide_classes else fitted
+    source = ferrum.ModelSource(model, X, pl.Series("y", values, dtype=pl.Utf8))
+
+    with pytest.raises(ValueError, match=r"confusion_matrix: y has 10 null row\(s\) out of 200"):
+        source.confusion_matrix()
+
+
+def test_a_null_bearing_multiclass_target_refuses():
+    """The multiclass tier guard is the third crash site, and it answers
+    the same way the binary ones do."""
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    labels = [f"c{int(v)}" for v in df["y"].to_list()]
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), np.array(labels))
+    values = [None if i < 10 else v for i, v in enumerate(labels)]
+    source = ferrum.ModelSource(_DuckProba(fitted), X, pl.Series("y", values, dtype=pl.Utf8))
+
+    with pytest.raises(ValueError, match=r"roc_curve: y has 10 null row\(s\) out of 300"):
+        source.roc_curve()
+
+
+@pytest.mark.parametrize(("chart_fn", "name"), _PRECOMPUTED_SCORE_CHARTS)
+@pytest.mark.parametrize("dtype", ["numeric", "utf8"])
+def test_a_null_bearing_target_refuses_on_the_precomputed_path(chart_fn, name, dtype):
+    """The precomputed twins had no null coverage at all, and three
+    different behaviors between them: ``roc_chart`` refused for the wrong
+    reason ("got 3 unique classes", counting ``NaN`` as one),
+    ``calibration_chart`` refused for another wrong reason ("no row of y
+    equals the positive class nan"), and ``gain_chart`` raised the unowned
+    ``TypeError``. One answer now.
+    """
+    if dtype == "numeric":
+        y_true = np.array([1.0, np.nan, 0.0, 1.0, 0.0, 1.0])
+    else:
+        y_true = np.array(["pos", None, "neg", "pos", "neg", "pos"], dtype=object)
+    y_pred = np.array([0.9, 0.5, 0.1, 0.8, 0.2, 0.7])
+
+    with pytest.raises(ValueError) as excinfo:
+        chart_fn(y_true=y_true, y_pred=y_pred)
+    assert str(excinfo.value).startswith(f"{name}: y has 1 null row(s) out of 6")
+
+
+@pytest.mark.parametrize(("chart_fn", "name"), _PRECOMPUTED_LABEL_CHARTS)
+def test_a_null_bearing_target_refuses_on_the_precomputed_label_charts(chart_fn, name):
+    """``sorted(..., key=str)`` made these two accidentally immune to the
+    crash -- they stringified ``None`` to ``"None"`` and rendered it as a
+    class of its own, which is worse than raising. They refuse now."""
+    y_true = np.array(["a", None, "b", "a"], dtype=object)
+    y_pred = np.array(["a", "a", "b", "b"], dtype=object)
+
+    with pytest.raises(ValueError) as excinfo:
+        chart_fn(y_true=y_true, y_pred=y_pred)
+    assert str(excinfo.value).startswith(f"{name}: y has 1 null row(s) out of 4")
+
+
+# --- cell: stray out-of-domain values warn and absorb ----------------------
+
+
+@pytest.mark.parametrize(("call", "name"), _BINARY_DIAGNOSTICS)
+def test_a_stray_value_absorbs_as_negative_and_says_so(call, name, binary_data):
+    """Absorb is right; the silence was the defect.
+
+    Counting an out-of-domain row as "not the positive class" is
+    scikit-learn's own ``pos_label`` semantics, so the answer stays. What
+    was missing is any sign that ten of the two hundred rows were not the
+    target the caller thought they were passing -- the metric just moved.
+    """
+    source = _corrupted_binary_source(binary_data, 7)
+
+    with pytest.warns(UserWarning) as record:
+        call(source)
+
+    hygiene = [str(w.message) for w in record if str(w.message).startswith(f"{name}:")]
+    assert len(hygiene) == 1, hygiene
+    message = hygiene[0]
+    assert "10 row(s) of y hold values outside the resolved class set [0, 1]" in message
+    assert "were counted as negative" in message
+    assert "out-of-domain values are [7]" in message
+
+
+def test_the_absorbed_metric_is_the_absorbed_metric(binary_data, references):
+    """The number the warning warns about, checked against sklearn.
+
+    The absorb has to be exactly "those rows are negatives" -- not a drop,
+    not a re-fit -- so sklearn scoring the same probabilities against the
+    same absorbed indicator is the oracle. Pinning the *gap* as well keeps
+    the cell honest: a warning about a metric that had not moved would be
+    noise.
+    """
+    source = _corrupted_binary_source(binary_data, 7)
+    with pytest.warns(UserWarning, match=r"roc_curve: 10 row\(s\)"):
+        auc = source.roc_curve()["auc"].unique().to_list()
+
+    y_absorbed = np.array([0 if i < 10 else int(v) for i, v in enumerate(binary_data[1].to_list())])
+    expected = float(roc_auc_score(y_absorbed, references["proba"]))
+    assert auc == pytest.approx([expected], abs=1e-12)
+    assert abs(expected - references["auc"]) > 0.01
+
+
+def test_a_stray_value_absorbs_on_the_multiclass_path_too(binary_data):
+    """Uniform across arities, not only across the six binary entries."""
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), df["y"].to_numpy())
+    values = [9 if i < 10 else int(v) for i, v in enumerate(df["y"].to_list())]
+    source = ferrum.ModelSource(fitted, X, pl.Series("y", values))
+
+    with pytest.warns(UserWarning, match=r"roc_curve: 10 row\(s\) of y hold values outside"):
+        roc = source.roc_curve()
+    assert set(roc["class"].to_list()) == {"0", "1", "2"}
+
+
+def test_the_precomputed_calibration_pair_warns_about_what_it_absorbs():
+    """The one precomputed diagnostic that can absorb a stray.
+
+    roc/pr/gain/lift read their class set off ``y_true`` itself, so every
+    row is in it by construction; ``calibration_chart`` reduces a 3+-valued
+    target to its extremes (``binary_class_values``) and counts everything
+    between as negative. It did that in silence.
+    """
+    y_true = np.array([0, 1, 7, 0, 1, 1, 0, 1])
+    y_pred = np.array([0.1, 0.9, 0.5, 0.2, 0.8, 0.7, 0.3, 0.6])
+
+    with pytest.warns(UserWarning) as record:
+        ferrum.calibration_chart(y_true=y_true, y_pred=y_pred)
+
+    hygiene = [str(w.message) for w in record if str(w.message).startswith("calibration_chart:")]
+    assert len(hygiene) == 1, hygiene
+    assert "resolved class set [0, 7]" in hygiene[0]
+    assert "out-of-domain values are [1]" in hygiene[0]
+
+
+@pytest.mark.parametrize(("call", "name"), _BINARY_DIAGNOSTICS)
+def test_a_clean_target_emits_no_hygiene_warning(call, name, binary_data):
+    """The guard's own false-positive check: a clean ``{0, 1}`` target --
+    what every fixture and golden in the repo uses -- must stay silent, or
+    the whole warning becomes noise users learn to filter."""
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(fitted, X, y01)
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        call(source)
+    assert [str(w.message) for w in record if str(w.message).startswith(f"{name}:")] == []
+
+
+def test_multiclass_absent_classes_absorb_without_a_warning():
+    """The one-vs-rest allowance is not a stray.
+
+    ``test_multiclass_one_vs_rest_still_tolerates_an_absent_class`` pins
+    that the *curves* survive; this pins that they survive quietly. Every
+    row of ``y`` is inside the resolved class set -- it is the class set
+    that has a member no row holds -- so there is nothing absorbed to warn
+    about, and warning here would fire on the routine case.
+    """
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    model = LogisticRegression(max_iter=1000).fit(X.to_numpy(), df["y"].to_numpy())
+    y = pl.Series("y", [0 if int(v) == 2 else int(v) for v in df["y"].to_list()])
+    source = ferrum.ModelSource(model, X, y)
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        source.roc_curve()
+    assert [str(w.message) for w in record if str(w.message).startswith("roc_curve:")] == []
+
+
+# --- cell: nothing matches -> refuse, on the two reaches that lacked it ----
+
+
+@pytest.mark.parametrize(
+    ("call", "name"),
+    [
+        pytest.param(lambda s: s.cumulative_gain(), "cumulative_gain", id="cumulative_gain"),
+        pytest.param(lambda s: s.lift_curve(), "lift_curve", id="lift_curve"),
+    ],
+)
+def test_gain_and_lift_join_the_total_mismatch_refusal(call, name, binary_data):
+    """``binary_indicator``'s docstring has always said "every binary curve
+    builder"; gain and lift were the two that weren't.
+
+    On a target holding no positive row, ``cumulative_gain`` drew a curve
+    reaching gain 1.0 (its denominator floors at 1) and ``lift_curve``
+    dropped the positive class through its zero-base-rate ``continue`` and
+    returned the baseline alone -- both plausible, neither meaningful,
+    while ``roc_curve`` on the identical source refused by name.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(fitted, X, pl.Series("y", [0] * len(y01)))
+
+    with pytest.raises(ValueError) as excinfo:
+        call(source)
+    message = str(excinfo.value)
+    assert message.startswith(f"{name}: no row of y equals the positive class 1")
+    assert "y holds [0]" in message
+
+
+def test_tier_3_multiclass_refuses_when_nothing_matches():
+    """The silence the resolver's own docstring called a known gap.
+
+    A ``classes_``-less multiclass model whose ``y`` cardinality disagrees
+    with its score-column count resolves to parsed ``class_{i}`` labels,
+    which match no row. Binary caught that through the positive class's
+    guard; multiclass had none and returned three all-NaN curves, where
+    sklearn's one-vs-rest AUCs over the same probabilities are 0.872,
+    0.942 and 0.930 -- the refusal is what stops that from rendering as a
+    blank chart with no explanation.
+    """
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), df["y"].to_numpy())
+    y = pl.Series("y", [9 if i < 10 else int(v) for i, v in enumerate(df["y"].to_list())])
+    source = ferrum.ModelSource(_DuckProba(fitted), X, y)
+
+    with pytest.raises(ValueError) as excinfo:
+        source.roc_curve()
+    message = str(excinfo.value)
+    assert message.startswith(
+        "roc_curve: no row of y equals any of the resolved class values "
+        "['class_0', 'class_1', 'class_2']"
+    )
+    assert "y holds [0, 1, 2, 9]" in message
+
+
+def test_a_stray_value_still_refuses_when_resolution_cannot_survive_it(binary_data):
+    """The one cell where a stray refuses instead of absorbing, pinned so
+    the asymmetry is deliberate rather than discovered.
+
+    Absorb needs a class set to absorb *into*. On a ``classes_``-less
+    binary model the stray inflates ``y``'s cardinality past the score
+    column count, resolution falls to tier 3's parsed ``class_{i}`` labels,
+    and those match no row at all -- a total mismatch, not a stray among
+    valid rows. It refuses through ``binary_indicator``, exactly as it did
+    before #203, and the hygiene guard defers to that message rather than
+    producing a second one.
+    """
+    source = _corrupted_binary_source(binary_data, 7, hide_classes=True)
+
+    with pytest.raises(ValueError) as excinfo:
+        source.roc_curve()
+    assert "no row of y equals the positive class 'class_1'" in str(excinfo.value)
+
+
+def test_a_partly_wrong_class_set_refuses_without_first_claiming_an_absorb(binary_data):
+    """A refusal cannot be preceded by a warning about what it absorbed.
+
+    ``classes_ = [0, 2]`` against a ``{0, 1}`` target resolves a positive
+    class no row holds while the negative class still matches half the
+    rows, so it is a *partial* mismatch to the stray rule and a total one
+    to ``binary_indicator``. It used to be both: the call emitted
+    ``roc_curve: 96 row(s) of y hold values outside the resolved class set
+    [0, 2] and were counted as negative`` and *then* raised. Nothing was
+    counted as negative -- the call returned no number at all -- so the
+    warning asserted something that never happened. The refusal is the
+    whole answer now.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(_WrongClasses(fitted, [0, 2]), X, y01)
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError) as excinfo:
+            source.roc_curve()
+    assert str(excinfo.value).startswith("roc_curve: no row of y equals the positive class 2")
+    assert [str(w.message) for w in record if str(w.message).startswith("roc_curve:")] == []
+
+
+# --- cell: null beats stray when the target holds both ---------------------
+
+
+def test_a_null_beats_a_stray_when_the_target_holds_both(binary_data):
+    """Both rules claim this target, and the refusal has to win.
+
+    A target carrying five nulls *and* ten stray rows satisfies the null
+    rule (refuse) and the stray rule (warn and absorb) at once. Refusing is
+    right -- the absorb would report a number measured partly against rows
+    the target never recorded -- but the ordering was unpinned, so swapping
+    the two guards would have turned this into a warning plus that number
+    with nothing failing.
+    """
+    X, y01 = binary_data
+    values = [None if i < 5 else (7 if i < 15 else int(v)) for i, v in enumerate(y01.to_list())]
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(fitted, X, pl.Series("y", values))
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError) as excinfo:
+            source.roc_curve()
+    assert str(excinfo.value).startswith("roc_curve: y has 5 null row(s) out of 200")
+    assert [str(w.message) for w in record if str(w.message).startswith("roc_curve:")] == []
+
+
+# --- cell: a temporal null is a null too -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "stamps"),
+    [
+        pytest.param("date", [dt.date(2020, 1, 1), dt.date(2020, 1, 2)], id="date"),
+        pytest.param(
+            "datetime",
+            [dt.datetime(2020, 1, 1), dt.datetime(2020, 1, 2)],
+            id="datetime",
+        ),
+    ],
+)
+def test_a_temporal_null_target_refuses_like_every_other_dtype(kind, stamps):
+    """The dtype family the null mask did not inspect at all.
+
+    A ``pl.Date``/``pl.Datetime`` column reaches numpy as ``datetime64``
+    carrying ``NaT``, which is neither a float ``NaN`` nor an object
+    ``None``, so the mask came back all-``False`` and the guard passed a
+    null-bearing target straight through. Measured before this cell:
+    ``confusion_matrix_chart`` rendered a ``None`` row *and* column as a
+    class of its own -- exactly the pre-#203 behavior the null rule
+    replaced on every other dtype. The rule is the target's, not the
+    dtype's.
+    """
+    y_true = np.asarray(pl.Series("y", [stamps[0], None, stamps[1], stamps[0]]))
+    y_pred = np.asarray(pl.Series("p", [stamps[0], stamps[0], stamps[1], stamps[0]]))
+    assert y_true.dtype.kind == "M", y_true.dtype
+
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred)
+    assert str(excinfo.value).startswith("confusion_matrix_chart: y has 1 null row(s) out of 4")
+
+
+# --- cell: the confusion family drops its strays, and says dropped ---------
+
+
+def test_a_stray_value_is_dropped_from_the_confusion_matrix_and_says_so(binary_data):
+    """The one diagnostic whose strays do not absorb.
+
+    ``confusion_frame`` encodes each value to its index in the model's
+    class set and maps everything else to the kernel's out-of-vocabulary
+    code, which drops the row: it is counted in no cell rather than
+    absorbed into a negative. Measured before this: the cells summed to
+    190.0 of 200 rows in complete silence, while ``roc_curve`` on the
+    identical source warned. The message has to say *dropped*, because a
+    message borrowed from the absorb cell would describe arithmetic the
+    kernel does not do.
+    """
+    source = _corrupted_binary_source(binary_data, 7)
+
+    with pytest.warns(UserWarning) as record:
+        cm = source.confusion_matrix()
+
+    hygiene = [str(w.message) for w in record if str(w.message).startswith("confusion_matrix:")]
+    assert len(hygiene) == 1, hygiene
+    message = hygiene[0]
+    assert "10 row(s) of y out of 200 hold values outside the class set [0, 1]" in message
+    assert "dropped from it entirely" in message
+    assert "counted in no cell, not absorbed into one" in message
+    assert "out-of-domain values are [7]" in message
+    # The loss the warning is about, in the frame itself.
+    assert cm["value"].sum() == pytest.approx(190.0)
+
+
+def test_the_confusion_drop_warning_covers_the_multiclass_matrix_too():
+    """Uniform across arities, like the absorb cell above it."""
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), df["y"].to_numpy())
+    values = [9 if i < 10 else int(v) for i, v in enumerate(df["y"].to_list())]
+    source = ferrum.ModelSource(fitted, X, pl.Series("y", values))
+
+    with pytest.warns(UserWarning) as record:
+        cm = source.confusion_matrix()
+
+    hygiene = [str(w.message) for w in record if str(w.message).startswith("confusion_matrix:")]
+    assert len(hygiene) == 1, hygiene
+    assert "10 row(s) of y out of 300 hold values outside the class set [0, 1, 2]" in hygiene[0]
+    assert cm["value"].sum() == pytest.approx(290.0)
+
+
+def test_class_prediction_error_inherits_the_confusion_drop_warning(binary_data):
+    """It renders the confusion frame, so it loses the same rows.
+
+    A *fresh* source deliberately: every diagnostic result is cached on
+    ``(method, kwargs)``, so a chart built from a source whose
+    ``confusion_matrix()`` was already computed returns the cached frame
+    and does not re-warn.
+    """
+    source = _corrupted_binary_source(binary_data, 7)
+
+    with pytest.warns(UserWarning, match=r"confusion_matrix: 10 row\(s\) of y out of 200"):
+        ferrum.class_prediction_error_chart(source)
+
+
+def test_a_clean_target_leaves_the_confusion_matrix_silent(binary_data):
+    """The drop warning's own false-positive check.
+
+    Every confusion fixture and golden in the repo passes a target whose
+    values are all in ``classes_``; none of them may start warning.
+    """
+    X, y01 = binary_data
+    fitted = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
+    source = ferrum.ModelSource(fitted, X, y01)
+
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        source.confusion_matrix()
+    assert [str(w.message) for w in record if str(w.message).startswith("confusion_matrix:")] == []
