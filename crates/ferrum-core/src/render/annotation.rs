@@ -14,6 +14,7 @@ use super::break_axis;
 use super::color::parse_color as parse_color_str;
 use super::draw::{arrowhead_path, arrowhead_triangle, to_scene_color};
 use super::scale_resolve::{data_pixel_x, data_pixel_y, ScaleKind};
+use super::RenderWarning;
 use crate::layout::geometry::Rect;
 
 // ── Coordinate types ────────────────────────────────────────────────────────
@@ -382,7 +383,11 @@ impl<'a> ScaleContext<'a> {
     }
 }
 
-// ── Break-axis suppression support (spec §4 H5, F-L08-07) ───────────────────
+// ── Break-axis coordinate classification (spec §4 H5, F-L08-07) ─────────────
+//
+// What an annotation's coordinates on one axis ARE. What a break then DOES with
+// them — clip, split, or drop — is the routing section at the bottom of this
+// file (#228).
 
 /// The wire `type` tag for `spec` — the annotation "kind" named in
 /// `RenderWarning::AnnotationSuppressedByBreak`.
@@ -390,7 +395,7 @@ impl<'a> ScaleContext<'a> {
 /// Mirrors the `#[serde(tag = "type")]` discriminant on `AnnotationSpec`
 /// above via an exhaustive match, so a new spec variant is a compile error
 /// here rather than silently falling through to an untagged warning.
-pub fn kind_name(spec: &AnnotationSpec) -> &'static str {
+fn kind_name(spec: &AnnotationSpec) -> &'static str {
     match spec {
         AnnotationSpec::Text { .. } => "text",
         AnnotationSpec::Arrow { .. } => "arrow",
@@ -412,9 +417,11 @@ pub fn kind_name(spec: &AnnotationSpec) -> &'static str {
 /// bound an interval whose interior is part of the annotation too. Testing
 /// only the endpoints made suppression non-monotonic — a rect overlapping a
 /// gap vanished while a LARGER rect containing that gap painted straight
-/// across the break.
+/// across the break. It is also what tells the two #228 routings apart: only
+/// an interval can be CLIPPED, so only [`AxisCoords::Extent`] can reach the
+/// clip at all.
 #[derive(Debug, Clone, PartialEq)]
-pub enum AxisCoords {
+enum AxisCoords {
     /// Point-shaped anchors (`Text`, `Callout`'s anchor and text anchor,
     /// `Image`), each suppressed only when it lands inside a gap. Also the
     /// degenerate form of an extent shape whose endpoints are not both
@@ -422,9 +429,12 @@ pub enum AxisCoords {
     /// only the coordinate(s) that are data.
     Points(Vec<f64>),
     /// Both bounds of an extent shape (`Rect`, `Span`, `Line`, `Arrow`,
-    /// `Bracket`) on this axis, in spec order. Suppressed when the interval
-    /// they bound INTERSECTS a gap — an endpoint inside one, or the interval
-    /// reaching across one.
+    /// `Bracket`) on this axis, in spec order. The break REACHES the interval
+    /// when it intersects a gap — an endpoint inside one, or the interval
+    /// reaching across one — and what happens then is the kind's own routing
+    /// ([`BreakRouting`], #228): clipped per visible segment for the four
+    /// splittable kinds, dropped whole for `Bracket` and for an interval with
+    /// nothing left.
     Extent(f64, f64),
 }
 
@@ -441,7 +451,7 @@ pub enum AxisCoords {
 /// Exhaustive over `AnnotationSpec`'s 8 shapes, enumerated from this file's
 /// own field list (spec §4 H5's coordinate table), so a new spec variant is a
 /// compile error here rather than silently skipping break suppression for it.
-pub fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> AxisCoords {
+fn data_coords_on_axis(spec: &AnnotationSpec, axis: &str) -> AxisCoords {
     // Branches on `axis == "y"` with x as the fallback, matching every other
     // break-axis consumer's convention (`break_axis.rs`'s `is_y()`,
     // `scene_build.rs`'s `if axis == "y" { &scales.y } else { &scales.x }`) —
@@ -556,19 +566,31 @@ pub struct AnnotationNodes {
 /// `below_marks`; every other spec (including Text with any other z value)
 /// routes to `above_marks`, preserving the historical single-bucket behavior
 /// for all existing charts.
-pub fn build_annotations(specs: &[AnnotationSpec], ctx: &ScaleContext) -> AnnotationNodes {
+///
+/// PRIVATE by design: [`build_annotations_through_breaks`] is this module's only
+/// entry from the scene builder. Reaching this directly with a `ctx` that
+/// carries breaks would place every extent annotation endpoint-by-endpoint —
+/// painting a straddling rect as one solid block across the gap — which is the
+/// defect the break routing exists to prevent (#228).
+fn build_annotations(specs: &[AnnotationSpec], ctx: &ScaleContext) -> AnnotationNodes {
     let mut result = AnnotationNodes {
         below_marks: Vec::new(),
         above_marks: Vec::with_capacity(specs.len()),
     };
     for spec in specs {
-        let target = match spec {
-            AnnotationSpec::Text { z, .. } if z == "below_marks" => &mut result.below_marks,
-            _ => &mut result.above_marks,
-        };
-        build_one(spec, ctx, target);
+        build_one(spec, ctx, z_bucket(spec, &mut result));
     }
     result
+}
+
+/// The z-order bucket `spec`'s nodes belong in — the partition rule
+/// [`AnnotationNodes`] documents, read off the spec rather than restated at
+/// each of its two call sites (the plain build and the break-routed one).
+fn z_bucket<'n>(spec: &AnnotationSpec, nodes: &'n mut AnnotationNodes) -> &'n mut Vec<SceneNode> {
+    match spec {
+        AnnotationSpec::Text { z, .. } if z == "below_marks" => &mut nodes.below_marks,
+        _ => &mut nodes.above_marks,
+    }
 }
 
 /// Dispatch a single annotation spec to its builder, appending nodes to `out`.
@@ -902,47 +924,65 @@ fn emit_span(
         corner_radius: 0.0,
     });
 
-    if let Some(label_text) = label {
-        if !label_text.is_empty() {
-            // Small inset used for top/bottom placements so the label clears
-            // the span edge. Consistent with other annotation label insets.
-            const LABEL_INSET: f64 = 6.0;
-
-            // In SVG, y increases downward: lower y = higher on screen.
-            // "top" → near the top edge of the span (lower SVG y value),
-            // "bottom" → near the bottom edge (higher SVG y value),
-            // "middle" / anything else → vertical center.
-            let label_y = match label_position {
-                "top" => y + LABEL_INSET,
-                "bottom" => y + h - LABEL_INSET,
-                _ => y + h * 0.5,
-            };
-            // "top" places the label near the top edge — baseline is Top so
-            // text hangs below the anchor point and sits inside the span.
-            let baseline = match label_position {
-                "top" => TextBaseline::Top,
-                "bottom" => TextBaseline::Alphabetic,
-                _ => TextBaseline::Middle,
-            };
-
-            out.push(SceneNode::Text {
-                x: x + w * 0.5,
-                y: label_y,
-                content: label_text.to_string(),
-                slot: None,
-                style: TextStyle {
-                    font_size: 11.0,
-                    font_weight: FontWeight::Normal,
-                    anchor: TextAnchor::Middle,
-                    baseline,
-                    angle: 0.0,
-                    color: Color::rgb(51, 51, 51),
-                    opacity: 1.0,
-                    font_family: "Inter, system-ui, sans-serif".to_string(),
-                },
-            });
-        }
+    if let Some(node) = span_label_node(x, y, w, h, label, label_position) {
+        out.push(node);
     }
+}
+
+/// The label node for a span band occupying `(x, y, w, h)`, or `None` when the
+/// span carries no label text.
+///
+/// Extracted from [`emit_span`] so the break clip can re-anchor the label onto
+/// the piece that survived largest ([`clipped_span_label`]): a span straddling a
+/// gap has its pre-clip midpoint INSIDE the gap, which is the one place its
+/// label must not be drawn (#228).
+fn span_label_node(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    label: Option<&str>,
+    label_position: &str,
+) -> Option<SceneNode> {
+    let label_text = label.filter(|t| !t.is_empty())?;
+
+    // Small inset used for top/bottom placements so the label clears
+    // the span edge. Consistent with other annotation label insets.
+    const LABEL_INSET: f64 = 6.0;
+
+    // In SVG, y increases downward: lower y = higher on screen.
+    // "top" → near the top edge of the span (lower SVG y value),
+    // "bottom" → near the bottom edge (higher SVG y value),
+    // "middle" / anything else → vertical center.
+    let label_y = match label_position {
+        "top" => y + LABEL_INSET,
+        "bottom" => y + h - LABEL_INSET,
+        _ => y + h * 0.5,
+    };
+    // "top" places the label near the top edge — baseline is Top so
+    // text hangs below the anchor point and sits inside the span.
+    let baseline = match label_position {
+        "top" => TextBaseline::Top,
+        "bottom" => TextBaseline::Alphabetic,
+        _ => TextBaseline::Middle,
+    };
+
+    Some(SceneNode::Text {
+        x: x + w * 0.5,
+        y: label_y,
+        content: label_text.to_string(),
+        slot: None,
+        style: TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Middle,
+            baseline,
+            angle: 0.0,
+            color: Color::rgb(51, 51, 51),
+            opacity: 1.0,
+            font_family: "Inter, system-ui, sans-serif".to_string(),
+        },
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1123,6 +1163,369 @@ fn emit_callout(
             font_family: "Inter, system-ui, sans-serif".to_string(),
         },
     });
+}
+
+// ── Break routing (#228 stratified clip) ────────────────────────────────────
+
+/// Build every annotation on a panel, re-placing each one on any broken axis.
+///
+/// The single entry the scene builder uses, and the whole of the #228
+/// stratified contract. An annotation that a gap actually reaches gets one of
+/// three fates, decided by what its geometry MEANS rather than by whether a gap
+/// touches it at all ([`BreakRouting`]):
+///
+/// - it is CUT — clipped or split into one piece per visible segment, exactly as
+///   the equivalent mark geometry is, and SILENTLY: a clipped annotation
+///   rendered, so there is nothing to warn about;
+/// - it is DROPPED whole, when nothing of it survives the gaps or its kind
+///   admits no honest split, and rolled into one warning per axis per mechanism;
+/// - it is untouched, and built through the ordinary coordinate fold.
+///
+/// The two rollups (`AnnotationSuppressedByBreak` for a real coordinate inside a
+/// gap, `AnnotationSpansBreakGap` for an interval that reaches across one) are
+/// unchanged from the pre-clip contract, including their per-axis,
+/// first-seen-order bundling (#240-3): they now report a strictly smaller
+/// population, because everything that CAN be cut is. Each bundles every dropped
+/// instance's kind into one `RenderWarning`, since the per-instance offending
+/// value was never independently actionable (one fix regardless of instance:
+/// move the gap, or move the annotation).
+///
+/// `ctx.breaks` is the SAME remap list the mark pass folds through — already
+/// filtered to axes whose resolved scale has a continuous `data_domain()`, and
+/// (post-#230-4) carrying at most one remap per axis, though it spans BOTH axes,
+/// so every entry is still consulted. Empty for every chart without an effective
+/// `BreakAxis`, which short-circuits to the plain build: un-broken and
+/// ordinal-axis-broken charts stay byte-identical and push no warnings.
+pub fn build_annotations_through_breaks(
+    specs: &[AnnotationSpec],
+    ctx: &ScaleContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) -> AnnotationNodes {
+    if ctx.breaks.is_empty() {
+        return build_annotations(specs, ctx);
+    }
+    // Per-axis rollup accumulators (#240-3): small `Vec`s, not `HashMap`s, so
+    // the emitted warnings stay in first-seen-axis order — deterministic for a
+    // per-render count never large enough for O(n^2) lookup to matter.
+    let mut in_gap: Vec<(String, Vec<String>)> = Vec::new();
+    let mut spanning: Vec<(String, Vec<String>)> = Vec::new();
+    let mut nodes = AnnotationNodes {
+        below_marks: Vec::new(),
+        above_marks: Vec::with_capacity(specs.len()),
+    };
+    for spec in specs {
+        match break_fate(spec, ctx.breaks) {
+            BreakFate::Untouched => build_one(spec, ctx, z_bucket(spec, &mut nodes)),
+            BreakFate::Cut { axes, routing } => {
+                build_cut(spec, ctx, &axes, routing, z_bucket(spec, &mut nodes))
+            }
+            BreakFate::Suppressed(BreakConflict::Point { axis, kind }) => {
+                accumulate_by_axis(&mut in_gap, axis, kind)
+            }
+            BreakFate::Suppressed(BreakConflict::Span { axis, kind }) => {
+                accumulate_by_axis(&mut spanning, axis, kind)
+            }
+        }
+    }
+    for (axis, kinds) in in_gap {
+        warnings.push(RenderWarning::AnnotationSuppressedByBreak { axis, kinds });
+    }
+    for (axis, kinds) in spanning {
+        warnings.push(RenderWarning::AnnotationSpansBreakGap { axis, kinds });
+    }
+    nodes
+}
+
+/// Build one CUT annotation: against the unbroken scale, then re-placed piece by
+/// piece through each break that cuts it.
+///
+/// The clip/split machinery performs its own pixel→data→broken-pixel round trip,
+/// so the geometry it receives must NOT have been folded already — hence the
+/// context rebuilt here, carrying only the breaks this spec is not routed
+/// through. Those are the axes on which this annotation is not an extent at all
+/// (a rect with one pixel-space bound, say): their coordinates still fold, so a
+/// cut on one axis never costs an annotation its placement on the other.
+///
+/// Multiple cutting axes are applied in the panel's own remap order, which is
+/// the order `remap_mark_batch_through_break` applies them to marks — the two
+/// compose identically or not at all.
+fn build_cut(
+    spec: &AnnotationSpec,
+    ctx: &ScaleContext<'_>,
+    axes: &[usize],
+    routing: CutRouting,
+    out: &mut Vec<SceneNode>,
+) {
+    let unrouted: Vec<break_axis::BreakRemap<'_>> = ctx
+        .breaks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !axes.contains(i))
+        .map(|(_, remap)| *remap)
+        .collect();
+    let unrouted_ctx = ScaleContext {
+        plot_area: ctx.plot_area,
+        x_scale: ctx.x_scale,
+        y_scale: ctx.y_scale,
+        breaks: &unrouted,
+    };
+
+    let mut nodes: Vec<SceneNode> = Vec::new();
+    // A span's label is held back and re-anchored below, on the piece that
+    // survives largest; every other kind's nodes all go through the machinery.
+    let band_only = span_band_only(spec);
+    build_one(band_only.as_ref().unwrap_or(spec), &unrouted_ctx, &mut nodes);
+    for &i in axes {
+        nodes = routing.place(&ctx.breaks[i], nodes);
+    }
+    if let Some(label) = clipped_span_label(spec, &nodes) {
+        nodes.push(label);
+    }
+    out.append(&mut nodes);
+}
+
+/// How a `BreakAxis` gap re-places one annotation kind's geometry (#228, D1).
+///
+/// The stratification IS the #228 decision: an annotation whose geometry can be
+/// split honestly is split — exactly as the equivalent mark geometry is — and
+/// only what cannot be is dropped whole. Which is which follows from what the
+/// annotation's coordinates mean, the same question [`BreakPlacement`] asks of a
+/// mark batch.
+///
+/// [`BreakPlacement`]: super::break_axis::BreakPlacement
+#[derive(Clone, Copy)]
+enum BreakRouting {
+    /// The break CUTS this kind: built against the unbroken scale and re-placed
+    /// one piece per visible segment, silently.
+    Cut(CutRouting),
+    /// The break DROPS this kind whole once it meets a gap, rolling it into the
+    /// per-axis suppression warning.
+    ///
+    /// Two populations, one answer. The point-anchored kinds (`text`, `callout`,
+    /// `image`) have no extent to cut: their coordinate is either inside a gap
+    /// or is not, and a callout's background rect is a TEXT BOX — drawn size
+    /// around an anchor, never data — so it is never clipped either.
+    ///
+    /// `bracket` is the one extent-shaped kind here, and PERMANENTLY so (spec §4
+    /// #228, D1 — not a residual awaiting a follow-up). Its two endpoint TIPS
+    /// are what say where the bracketed range begins and ends; a cut at a gap
+    /// edge would either strand those tips at positions the data never had or
+    /// invent new tips at the cut, so a bracket reaching across a gap asserts a
+    /// continuity the broken axis cannot carry. Dropping it whole, with the
+    /// warning naming the axis, is the honest answer.
+    SuppressWhole,
+}
+
+/// The three ways a cut annotation's nodes go through the break machinery —
+/// [`BreakRouting`] minus the drop case, so the router cannot reach a clip with a
+/// kind that has no clip.
+#[derive(Clone, Copy)]
+enum CutRouting {
+    /// `rect`'s rect and `span`'s band: the pixel extent along the broken axis
+    /// IS data, so it clips per visible segment exactly as a bar's height does
+    /// (annotation rects lower to the same `SceneNode::Rect` shape).
+    ClipExtent,
+    /// `line`'s shaft: connected stroked geometry whose every vertex is its own
+    /// data position, so it is cut at the gap edges it crosses, with the
+    /// cross-axis coordinate interpolated at each crossing.
+    SplitStroke,
+    /// `arrow`: a split shaft plus the head that rides the piece reaching its
+    /// tip. [`emit_arrow`] pushes `[shaft Line, head Path]` — the same node pair,
+    /// in the same order, `marks::segment::build` emits for `arrow=True` — so
+    /// the segment splitter's shaft/head pairing (head rebuilt on the tip piece,
+    /// dropped when the tip is in a gap) applies verbatim.
+    SplitShaftAndHead,
+}
+
+impl CutRouting {
+    /// Re-place `nodes` through one break.
+    fn place(self, remap: &break_axis::BreakRemap<'_>, nodes: Vec<SceneNode>) -> Vec<SceneNode> {
+        match self {
+            Self::ClipExtent => remap.clip_nodes(nodes).nodes,
+            Self::SplitStroke => remap.split_nodes(nodes).nodes,
+            Self::SplitShaftAndHead => remap.split_segment_nodes(nodes).nodes,
+        }
+    }
+}
+
+/// The routing `spec`'s kind takes at a break.
+///
+/// Exhaustive over `AnnotationSpec`'s 8 shapes, like [`kind_name`] and
+/// [`data_coords_on_axis`], so a new kind is a compile error here rather than
+/// silently inheriting one of these answers.
+fn break_routing(spec: &AnnotationSpec) -> BreakRouting {
+    match spec {
+        AnnotationSpec::Rect { .. } | AnnotationSpec::Span { .. } => {
+            BreakRouting::Cut(CutRouting::ClipExtent)
+        }
+        AnnotationSpec::Line { .. } => BreakRouting::Cut(CutRouting::SplitStroke),
+        AnnotationSpec::Arrow { .. } => BreakRouting::Cut(CutRouting::SplitShaftAndHead),
+        AnnotationSpec::Bracket { .. }
+        | AnnotationSpec::Text { .. }
+        | AnnotationSpec::Callout { .. }
+        | AnnotationSpec::Image { .. } => BreakRouting::SuppressWhole,
+    }
+}
+
+/// One annotation's verdict under all of the panel's breaks.
+enum BreakFate {
+    /// No gap reaches it — built through the ordinary coordinate fold, which is
+    /// what keeps an annotation on a chart whose break misses it byte-identical.
+    Untouched,
+    /// Cut by the breaks at `axes` (indices into the panel's remap list) and
+    /// re-placed by `routing`. Silent: a cut annotation RENDERED.
+    Cut { axes: Vec<usize>, routing: CutRouting },
+    /// Dropped whole, and rolled into `conflict`'s per-axis warning.
+    Suppressed(BreakConflict),
+}
+
+/// One break's answer for one spec, before the per-axis answers combine into a
+/// [`BreakFate`].
+enum AxisFate {
+    Untouched,
+    Cut,
+    Suppressed(BreakConflict),
+}
+
+/// Which mechanism dropped one annotation, before it is folded into that
+/// mechanism's per-axis rollup — see [`build_annotations_through_breaks`].
+enum BreakConflict {
+    /// A real data coordinate of the annotation lies inside a gap.
+    Point { axis: String, kind: String },
+    /// No coordinate does, but the annotation's interval reaches across a gap.
+    Span { axis: String, kind: String },
+}
+
+/// Combine every break's answer for `spec` into one verdict.
+fn break_fate(spec: &AnnotationSpec, breaks: &[break_axis::BreakRemap<'_>]) -> BreakFate {
+    let routing = break_routing(spec);
+    let mut axes: Vec<usize> = Vec::new();
+    for (i, remap) in breaks.iter().enumerate() {
+        match axis_break_fate(spec, remap, routing) {
+            AxisFate::Untouched => {}
+            AxisFate::Cut => axes.push(i),
+            // A drop on ANY axis wins over a cut on another: if nothing of the
+            // annotation survives one axis's gaps, clipping it on the other
+            // would render pieces of something the reader was told is gone.
+            AxisFate::Suppressed(conflict) => return BreakFate::Suppressed(conflict),
+        }
+    }
+    match routing {
+        BreakRouting::Cut(routing) if !axes.is_empty() => BreakFate::Cut { axes, routing },
+        _ => BreakFate::Untouched,
+    }
+}
+
+/// What one break does to one spec.
+///
+/// Two questions, one per coordinate shape ([`AxisCoords`]):
+///
+/// - a POINT coordinate conflicts when it lands inside a gap, and a point has
+///   nothing to cut — in-gap is the whole story;
+/// - an EXTENT's interval conflicts when it MEETS a gap: an endpoint inside one,
+///   or (the containment inversion) the interval reaching across one. A
+///   cut-routed kind is then CLIPPED whenever any of its interval survives, and
+///   dropped only when none of it does.
+///
+/// That last rule is what retired the endpoint-first suppression shortcut
+/// (#228): an in-gap endpoint used to suppress the whole annotation, so
+/// `annotate_rect(y1=100, y2=400)` under a `(150, 850)` gap vanished instead of
+/// rendering its visible 100–150 portion. The endpoint test survives for one
+/// narrower job — choosing WHICH rollup a dropped annotation lands in, since
+/// "a coordinate of yours is in the gap" and "your interval crosses the gap" are
+/// different, equally true facts.
+fn axis_break_fate(
+    spec: &AnnotationSpec,
+    remap: &break_axis::BreakRemap<'_>,
+    routing: BreakRouting,
+) -> AxisFate {
+    let axis = remap.axis();
+    let result = remap.result();
+    let in_gap = |value: &f64| break_axis::gap_containing(*value, result).is_some();
+    let dropped = |spanning: bool| {
+        let (axis, kind) = (axis.to_string(), kind_name(spec).to_string());
+        AxisFate::Suppressed(if spanning {
+            BreakConflict::Span { axis, kind }
+        } else {
+            BreakConflict::Point { axis, kind }
+        })
+    };
+    match data_coords_on_axis(spec, axis) {
+        AxisCoords::Points(values) => {
+            if values.iter().any(in_gap) {
+                dropped(false)
+            } else {
+                AxisFate::Untouched
+            }
+        }
+        AxisCoords::Extent(lo, hi) => {
+            let endpoint_in_gap = [lo, hi].iter().any(in_gap);
+            if !endpoint_in_gap && break_axis::gap_spanned_by(lo, hi, result).is_none() {
+                return AxisFate::Untouched;
+            }
+            match routing {
+                BreakRouting::Cut(_) if remap.data_extent_visible(lo, hi) => AxisFate::Cut,
+                _ => dropped(!endpoint_in_gap),
+            }
+        }
+    }
+}
+
+/// Append `kind` to `axis`'s bucket in a per-axis rollup accumulator, creating
+/// the bucket on first sight. Shared by both drop mechanisms.
+fn accumulate_by_axis(acc: &mut Vec<(String, Vec<String>)>, axis: String, kind: String) {
+    match acc.iter_mut().find(|(a, _)| *a == axis) {
+        Some((_, kinds)) => kinds.push(kind),
+        None => acc.push((axis, vec![kind])),
+    }
+}
+
+/// `spec` with a `Span`'s label removed, or `None` when there is nothing to
+/// remove (any other kind, or a span with no label).
+///
+/// The band is clipped on its own and the label re-anchored afterwards
+/// ([`clipped_span_label`]), so the label never rides the pre-clip midpoint —
+/// which, for the straddling span this exists for, is inside the gap.
+fn span_band_only(spec: &AnnotationSpec) -> Option<AnnotationSpec> {
+    let AnnotationSpec::Span { label: Some(_), .. } = spec else {
+        return None;
+    };
+    let mut band = spec.clone();
+    if let AnnotationSpec::Span { label, .. } = &mut band {
+        *label = None;
+    }
+    Some(band)
+}
+
+/// A clipped span's label, anchored on the largest surviving piece.
+///
+/// `pieces` is the band AFTER the clip: one `Rect` per visible segment. The
+/// label rides the LARGEST of them — the piece with room for it, and the one a
+/// reader takes as the band's body — measured along the span's own axis. Ties
+/// keep the first piece, so the choice is deterministic and reads in segment
+/// order. `None` when the span carries no label, when `spec` is not a span at
+/// all, or when no piece survived (in which case the caller has nothing to draw
+/// a label on).
+fn clipped_span_label(spec: &AnnotationSpec, pieces: &[SceneNode]) -> Option<SceneNode> {
+    let AnnotationSpec::Span { axis, label, label_position, .. } = spec else {
+        return None;
+    };
+    let label = label.as_deref()?;
+    let along_is_y = axis == "y";
+    let along = |piece: &(f64, f64, f64, f64)| if along_is_y { piece.3 } else { piece.2 };
+    let (x, y, w, h) = pieces
+        .iter()
+        .filter_map(rect_extent)
+        .reduce(|a, b| if along(&b) > along(&a) { b } else { a })?;
+    span_label_node(x, y, w, h, Some(label), label_position)
+}
+
+/// `(x, y, w, h)` of a `Rect` node — the shape a clipped span piece has.
+fn rect_extent(node: &SceneNode) -> Option<(f64, f64, f64, f64)> {
+    match node {
+        SceneNode::Rect { x, y, w, h, .. } => Some((*x, *y, *w, *h)),
+        _ => None,
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -2349,5 +2752,738 @@ mod tests {
         // 20 + (1-(-0.5))*300 = 470.
         assert!((above_max - (-130.0)).abs() < 1e-6, "got {above_max}");
         assert!((below_min - 470.0).abs() < 1e-6, "got {below_min}");
+    }
+
+    // ── Break routing (#228 stratified clip, D1) ─────────────────────────────
+    //
+    // These pins moved here from `scene_build.rs`, where they tested the
+    // `suppress_annotations_for_break` filter this routing replaces. Three of
+    // them were REWRITTEN rather than moved, because #228 retires their old
+    // answers: an extent that spans a gap is no longer dropped (it clips), N
+    // spanning rects no longer roll up as suppressed (nothing is suppressed),
+    // and an extent with an in-gap ENDPOINT is no longer dropped whole (it
+    // clips to whatever survives). The suppression they pinned is now the
+    // narrower fact it always should have been: nothing survives, or the kind
+    // admits no honest split.
+    //
+    // All geometry below is hand-checkable against one fixture: domain
+    // [0, 1000] on y pixels 320 (bottom) → 20 (top), 300 pixels total, 12 of
+    // them reserved per break indicator.
+
+    /// A spec from its wire JSON — shorter than an 8-field literal, and it
+    /// exercises the same `serde` defaults a real chart's annotations arrive
+    /// with.
+    fn spec(json: &str) -> AnnotationSpec {
+        serde_json::from_str(json).expect("test annotation spec must deserialize")
+    }
+
+    /// A y-`Rect` spec with the given data bounds; every other coordinate is
+    /// norm, so only the y interval is under test.
+    fn y_rect(y1: f64, y2: f64) -> AnnotationSpec {
+        spec(&format!(
+            r#"{{"type":"rect","x1":{{"norm":0.0}},"y1":{y1},"x2":{{"norm":1.0}},"y2":{y2}}}"#
+        ))
+    }
+
+    /// A y-`Bracket` spec with the given data bounds — the kind that is
+    /// PERMANENTLY suppress-whole.
+    fn y_bracket(y1: f64, y2: f64) -> AnnotationSpec {
+        spec(&format!(
+            r#"{{"type":"bracket","x1":{{"norm":0.0}},"y1":{y1},"x2":{{"norm":1.0}},"y2":{y2},"label":"b"}}"#
+        ))
+    }
+
+    /// A `Text` spec anchored at a y data value; its x is norm, so an x break
+    /// never reaches it.
+    fn y_text(y: f64, text: &str) -> AnnotationSpec {
+        spec(&format!(
+            r#"{{"type":"text","x":{{"norm":1.0}},"y":{y},"text":"{text}"}}"#
+        ))
+    }
+
+    /// The broken panel every routing test shares: domain [0, 1000] on both
+    /// axes, y mapped 320 (bottom) → 20 (top) over 300 pixels and x 50 → 550
+    /// over 500, each broken by `gaps` with a 12px indicator.
+    ///
+    /// One `BreakResult` per axis, because a result's segments carry PIXEL
+    /// bounds: sharing one across both axes would place x geometry on the y
+    /// axis's pixels.
+    struct BrokenPanel {
+        x_scale: ScaleKind,
+        y_scale: ScaleKind,
+        plot_area: Rect,
+        x_result: break_axis::BreakResult,
+        y_result: break_axis::BreakResult,
+    }
+
+    const X_PIXELS: (f64, f64) = (50.0, 550.0);
+    const Y_PIXELS: (f64, f64) = (320.0, 20.0);
+
+    fn broken_panel(gaps: &[[f64; 2]]) -> BrokenPanel {
+        use crate::scale::linear::LinearScale;
+        BrokenPanel {
+            x_scale: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1000.0],
+                vec![X_PIXELS.0, X_PIXELS.1],
+                false,
+                false,
+            )),
+            y_scale: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 1000.0],
+                vec![Y_PIXELS.0, Y_PIXELS.1],
+                false,
+                false,
+            )),
+            plot_area: Rect { x: 50.0, y: 20.0, w: 500.0, h: 300.0 },
+            x_result: break_axis::apply_break_to_scale((0.0, 1000.0), gaps, X_PIXELS, 12.0),
+            y_result: break_axis::apply_break_to_scale((0.0, 1000.0), gaps, Y_PIXELS, 12.0),
+        }
+    }
+
+    impl BrokenPanel {
+        /// The remap for one axis, built exactly as `scene_build` builds it:
+        /// the scale's own domain and pixel range.
+        fn remap(&self, axis: &'static str) -> break_axis::BreakRemap<'_> {
+            let (pixels, result) = if axis == "y" {
+                (Y_PIXELS, &self.y_result)
+            } else {
+                (X_PIXELS, &self.x_result)
+            };
+            break_axis::BreakRemap::new(axis, (0.0, 1000.0), pixels, result)
+        }
+
+        /// Build `specs` through `breaks`, returning the above-marks nodes and
+        /// the warnings pushed.
+        fn build(
+            &self,
+            specs: &[AnnotationSpec],
+            breaks: &[break_axis::BreakRemap<'_>],
+        ) -> (Vec<SceneNode>, Vec<RenderWarning>) {
+            let ctx = ScaleContext {
+                plot_area: self.plot_area,
+                x_scale: &self.x_scale,
+                y_scale: &self.y_scale,
+                breaks,
+            };
+            let mut warnings = Vec::new();
+            let nodes = build_annotations_through_breaks(specs, &ctx, &mut warnings);
+            assert!(
+                nodes.below_marks.is_empty(),
+                "these fixtures use above-marks specs only"
+            );
+            (nodes.above_marks, warnings)
+        }
+    }
+
+    /// `(y, h)` of every `Rect` node, in paint order — how an extent's clipped
+    /// pieces are read.
+    fn rect_bands(nodes: &[SceneNode]) -> Vec<(f64, f64)> {
+        nodes.iter().filter_map(rect_extent).map(|(_, y, _, h)| (y, h)).collect()
+    }
+
+    /// The intent-ledger headline: `annotate_rect(y1=0, y2=1000)` on a
+    /// `[0, 1000]` axis broken at `(150, 850)` renders TWO pieces, silently.
+    ///
+    /// Pre-#228 the same rect was dropped whole with an
+    /// `AnnotationSpansBreakGap` warning, while identical MARK geometry (a bar
+    /// of the same extent) clipped per segment — the same chart answering the
+    /// same question two ways.
+    #[test]
+    fn a_straddling_rect_clips_into_one_piece_per_visible_segment() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_rect(0.0, 1000.0)], &[y]);
+
+        // 288 data pixels split 150:150 → 144 each. Segment 0 (data 0–150)
+        // runs 320 → 176; the indicator takes 176 → 164; segment 1 (data
+        // 850–1000) runs 164 → 20.
+        assert_eq!(
+            rect_bands(&nodes),
+            vec![(176.0, 144.0), (20.0, 144.0)],
+            "one piece per visible segment, cut at the gap edges"
+        );
+        assert!(
+            warnings.is_empty(),
+            "a successful clip is SILENT, like a clipped mark; got {warnings:?}"
+        );
+    }
+
+    /// The other half of that contract: a rect with nothing outside the gap is
+    /// still dropped whole, and still rolls up as an in-gap suppression (both
+    /// of its endpoints are real coordinates inside the gap).
+    #[test]
+    fn a_rect_wholly_inside_a_gap_is_suppressed_and_rolled_up() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_rect(300.0, 700.0)], &[y]);
+
+        assert!(nodes.is_empty(), "nothing of it is visible, so nothing renders");
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["rect".to_string()]);
+            }
+            other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+        }
+    }
+
+    /// The retired endpoint-first shortcut (rewrite of
+    /// `suppress_annotations_for_break_keeps_the_endpoint_answer_for_extents`):
+    /// an extent with an in-gap ENDPOINT whose surviving portion is non-empty
+    /// CLIPS to that portion. Pre-#228 the in-gap endpoint suppressed the whole
+    /// rect, so `annotate_rect(y1=100, y2=400)` under a `(150, 850)` gap
+    /// vanished instead of rendering its visible 100–150 band.
+    #[test]
+    fn an_extent_with_an_in_gap_endpoint_clips_to_its_surviving_portion() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_rect(100.0, 400.0)], &[y]);
+
+        // Data 100 → 320 − (100/150)·144 = 224; data 150 → 176.
+        assert_eq!(
+            rect_bands(&nodes),
+            vec![(176.0, 48.0)],
+            "the visible 100–150 portion renders, cut at the gap edge"
+        );
+        assert!(warnings.is_empty(), "clipping is silent; got {warnings:?}");
+    }
+
+    /// The unchanged half of that same pin: an extent wholly on one side of the
+    /// gap is untouched — no clip, no warning, one node.
+    #[test]
+    fn an_extent_clear_of_every_gap_is_untouched() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_rect(0.0, 140.0)], &[y]);
+
+        // Data 140 → 320 − (140/150)·144 = 185.6; data 0 → 320.
+        assert_eq!(rect_bands(&nodes), vec![(185.6, 134.4)]);
+        assert!(warnings.is_empty());
+    }
+
+    /// The knife edge where a clip-routed extent STILL suppresses as spanning:
+    /// a rect whose bounds are exactly the gap's bounds reaches across the gap
+    /// (neither endpoint is inside it — gaps are open intervals) yet contributes
+    /// no length to any segment, so nothing survives and the drop rolls into
+    /// `AnnotationSpansBreakGap`.
+    #[test]
+    fn a_rect_exactly_covering_the_gap_rolls_up_as_spanning() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_rect(150.0, 850.0)], &[y]);
+
+        assert!(nodes.is_empty());
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSpansBreakGap { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["rect".to_string()]);
+            }
+            other => panic!("expected one AnnotationSpansBreakGap, got {other:?}"),
+        }
+    }
+
+    /// `bracket` is suppress-whole PERMANENTLY (spec §4 #228, D1 — not a
+    /// residual): its two endpoint tips are what say where the bracketed range
+    /// begins and ends, so a cut at a gap edge would either strand them at
+    /// positions the data never had or invent new tips at the cut. A bracket
+    /// straddling a gap is therefore dropped where a rect of the same extent
+    /// clips.
+    #[test]
+    fn a_bracket_straddling_a_gap_is_dropped_whole_not_split() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_bracket(100.0, 900.0)], &[y]);
+
+        assert!(nodes.is_empty(), "a bracket admits no honest split");
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSpansBreakGap { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["bracket".to_string()]);
+            }
+            other => panic!("expected one AnnotationSpansBreakGap, got {other:?}"),
+        }
+    }
+
+    /// #240-3's rollup, re-aimed at the population that still suppresses
+    /// (rewrite of
+    /// `suppress_annotations_for_break_rolls_up_n_spanning_annotations_into_one_warning`,
+    /// whose three straddling RECTS now clip instead): N brackets spanning the
+    /// same axis's gap roll up into exactly ONE warning carrying every kind.
+    #[test]
+    fn n_spanning_annotations_roll_up_into_one_warning() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let specs = vec![
+            y_bracket(100.0, 900.0),
+            y_bracket(120.0, 880.0),
+            y_bracket(140.0, 860.0),
+        ];
+        let (nodes, warnings) = panel.build(&specs, &[y]);
+
+        assert!(nodes.is_empty());
+        assert_eq!(warnings.len(), 1, "N drops, one warning; got {warnings:?}");
+        match &warnings[0] {
+            RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds.len(), 3, "the count of dropped instances survives");
+                assert!(kinds.iter().all(|k| k == "bracket"));
+            }
+            other => panic!("expected AnnotationSpansBreakGap, got {other:?}"),
+        }
+    }
+
+    /// A span's band clips like a rect, and its label anchors on the midpoint of
+    /// the LARGEST surviving piece — not on the pre-clip band's midpoint, which
+    /// belongs to no piece at all.
+    #[test]
+    fn a_span_clips_and_its_label_rides_the_largest_surviving_piece() {
+        // Gap (200, 600): 288 data pixels split 200:400 → 96 and 192. Segment 0
+        // (data 0–200) runs 320 → 224, the indicator 224 → 212, segment 1 (data
+        // 600–1000) runs 212 → 20. The larger piece is segment 1's.
+        let panel = broken_panel(&[[200.0, 600.0]]);
+        let y = panel.remap("y");
+        let span = spec(
+            r#"{"type":"span","axis":"y","start":0.0,"end":1000.0,"label":"band",
+                "label_position":"middle"}"#,
+        );
+        let (nodes, warnings) = panel.build(&[span], &[y]);
+
+        assert_eq!(rect_bands(&nodes), vec![(224.0, 96.0), (20.0, 192.0)]);
+        assert!(warnings.is_empty(), "clipping is silent; got {warnings:?}");
+
+        let labels: Vec<(f64, f64)> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Text { x, y, content, .. } if content == "band" => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![(300.0, 116.0)],
+            "one label, on the larger piece's midpoint (20 + 192/2), centered in \
+             the plot (50 + 500/2)"
+        );
+    }
+
+    /// The same rule's discriminating case: with two EQUAL pieces the label
+    /// takes the first, and either way it can never land in the gap band — where
+    /// the pre-clip midpoint of a full-domain span falls when the gap is centred.
+    #[test]
+    fn a_clipped_span_label_never_lands_inside_the_gap_band() {
+        // Gap (400, 600) splits the 288 data pixels 144:144: segment 0 runs
+        // 320 → 176, the indicator 176 → 164, segment 1 runs 164 → 20. The
+        // pre-clip band is the whole range 20…320, whose midpoint is 170 —
+        // inside the indicator band, which is exactly where the old pre-clip
+        // placement would have drawn the label.
+        let panel = broken_panel(&[[400.0, 600.0]]);
+        let y = panel.remap("y");
+        let span = spec(
+            r#"{"type":"span","axis":"y","start":0.0,"end":1000.0,"label":"band",
+                "label_position":"middle"}"#,
+        );
+        let (nodes, _) = panel.build(&[span], &[y]);
+
+        let label_y = nodes
+            .iter()
+            .find_map(|n| match n {
+                SceneNode::Text { y, .. } => Some(*y),
+                _ => None,
+            })
+            .expect("the span's label must render");
+        assert_eq!(label_y, 248.0, "first of two equal pieces: 176 + 144/2");
+        assert!(
+            !(164.0..=176.0).contains(&label_y),
+            "the label must not land in the invisible gap band; got {label_y}"
+        );
+    }
+
+    /// An annotation `line` splits through the vertex machinery (#230-1's
+    /// splitter, one mechanism for marks and annotations alike): one sub-line
+    /// per visible segment, cut at the gap edges, with the CROSS-axis
+    /// coordinate interpolated at each crossing rather than dropped back to the
+    /// last visible vertex.
+    #[test]
+    fn an_annotation_line_splits_at_the_gap_with_its_crossing_interpolated() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        // A diagonal from (norm 0, data 0) to (norm 1, data 1000): x runs
+        // 50 → 550 as y runs 320 → 20.
+        let line = spec(
+            r#"{"type":"line","x1":{"norm":0.0},"y1":0.0,"x2":{"norm":1.0},"y2":1000.0}"#,
+        );
+        let (nodes, warnings) = panel.build(&[line], &[y]);
+
+        let segments: Vec<(f64, f64, f64, f64)> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { x1, y1, x2, y2, .. } => Some((*x1, *y1, *x2, *y2)),
+                _ => None,
+            })
+            .collect();
+        // The crossings are at data 150 (15% along the line → x = 125) and data
+        // 850 (85% → x = 475), placed at the gap-edge pixels 176 and 164.
+        assert_eq!(
+            segments,
+            vec![(50.0, 320.0, 125.0, 176.0), (475.0, 164.0, 550.0, 20.0)],
+            "two pieces, each ending ON the gap edge at the x it actually crosses"
+        );
+        assert!(warnings.is_empty(), "splitting is silent; got {warnings:?}");
+    }
+
+    /// An `arrow`'s shaft splits like a line, and its head rides the piece that
+    /// reaches the TIP — rebuilt there, keeping its drawn size and pointing
+    /// along the piece a reader sees it attached to.
+    #[test]
+    fn an_arrow_head_rides_the_tip_piece_with_its_size_kept() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let arrow = spec(
+            r#"{"type":"arrow","x":{"norm":0.0},"y":0.0,"x2":{"norm":1.0},"y2":1000.0,
+                "head_size":10.0}"#,
+        );
+        let (nodes, warnings) = panel.build(&[arrow], &[y]);
+        assert!(warnings.is_empty(), "splitting is silent; got {warnings:?}");
+
+        let shafts: Vec<(f64, f64)> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { x2, y2, .. } => Some((*x2, *y2)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shafts,
+            vec![(125.0, 176.0), (550.0, 20.0)],
+            "the shaft splits in two; the second piece reaches the tip"
+        );
+
+        let heads: Vec<&SceneNode> = nodes
+            .iter()
+            .filter(|n| matches!(n, SceneNode::Path { closed: true, .. }))
+            .collect();
+        assert_eq!(heads.len(), 1, "exactly one head, on the tip piece");
+        let (tip, size) = head_tip_and_size(heads[0]);
+        assert_eq!(tip, (550.0, 20.0), "the head sits on the placed tip");
+        assert!(
+            (size - 10.0).abs() < 1e-9,
+            "the head keeps its drawn size; got {size}"
+        );
+    }
+
+    /// `(tip, head_size)` of an arrowhead path — `draw::arrowhead_triangle`
+    /// writes `[tip, left, right]`, with the tip `head_size` from the base
+    /// midpoint.
+    fn head_tip_and_size(node: &SceneNode) -> ((f64, f64), f64) {
+        let SceneNode::Path { commands, .. } = node else {
+            panic!("expected the head Path, got {node:?}");
+        };
+        let points: Vec<(f64, f64)> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(points.len(), 3, "an arrowhead is three vertices");
+        let (tip, left, right) = (points[0], points[1], points[2]);
+        let base_mid = ((left.0 + right.0) / 2.0, (left.1 + right.1) / 2.0);
+        (tip, (tip.0 - base_mid.0).hypot(tip.1 - base_mid.1))
+    }
+
+    /// An arrow with nothing outside the gap is dropped whole and warns — the
+    /// suppress path is still reachable for a cut-routed kind.
+    #[test]
+    fn an_arrow_wholly_inside_a_gap_is_suppressed_and_warns() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let arrow = spec(
+            r#"{"type":"arrow","x":{"norm":0.0},"y":300.0,"x2":{"norm":1.0},"y2":700.0}"#,
+        );
+        let (nodes, warnings) = panel.build(&[arrow], &[y]);
+
+        assert!(nodes.is_empty(), "no piece of the shaft survives, so no head either");
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["arrow".to_string()]);
+            }
+            other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+        }
+    }
+
+    /// An arrow whose TAIL is visible but whose TIP lies inside a gap: the tip
+    /// has no piece to terminate the head on, so only the HEAD drops. The
+    /// shaft's own visible piece still renders, truncated at the gap edge it
+    /// ends on — clip-fate geometry (a faithful rendering of what is visible),
+    /// not a silent drop of the annotation, the same fate a
+    /// `mark_segment(arrow=True)` shaft gives an in-gap tip (#230-1). This is
+    /// the case neither `an_arrow_head_rides_the_tip_piece_with_its_size_kept`
+    /// (visible tip) nor `an_arrow_wholly_inside_a_gap_is_suppressed_and_warns`
+    /// (nothing survives) covers — the only one where head and shaft disagree.
+    #[test]
+    fn an_arrow_with_an_in_gap_tip_drops_only_the_head() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let arrow = spec(
+            r#"{"type":"arrow","x":{"norm":0.0},"y":0.0,"x2":{"norm":1.0},"y2":500.0,
+                "head_size":10.0}"#,
+        );
+        let (nodes, warnings) = panel.build(&[arrow], &[y]);
+        assert!(warnings.is_empty(), "the drop is silent; got {warnings:?}");
+
+        let shafts: Vec<&SceneNode> =
+            nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
+        assert_eq!(
+            shafts.len(),
+            1,
+            "the visible tail survives as one shaft piece; got {shafts:?}"
+        );
+
+        let heads: Vec<&SceneNode> = nodes
+            .iter()
+            .filter(|n| matches!(n, SceneNode::Path { closed: true, .. }))
+            .collect();
+        assert!(heads.is_empty(), "the head drops with its hidden tip; got {heads:?}");
+    }
+
+    /// Point-anchored kinds keep the plain membership test: in the gap → gone,
+    /// outside it → built, whatever lies between them.
+    #[test]
+    fn point_kinds_keep_the_membership_test() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let specs = vec![
+            y_text(500.0, "inside the break"),
+            y_text(100.0, "outside the break"),
+            spec(r#"{"type":"callout","x":{"norm":0.5},"y":500.0,"text":"in"}"#),
+            spec(r#"{"type":"image","x":{"norm":0.5},"y":500.0,"src":"a.png"}"#),
+        ];
+        let (nodes, warnings) = panel.build(&specs, &[y]);
+
+        let texts: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["outside the break"]);
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["text", "callout", "image"]);
+            }
+            other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+        }
+    }
+
+    /// A callout's background rect is a TEXT BOX — drawn size around an anchor,
+    /// never data — so it is never clipped, even when it straddles the gap band
+    /// in pixels. The negative control for the clip's reach.
+    #[test]
+    fn a_callout_box_is_never_clipped_even_across_the_gap_band() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        // Anchor at data 125 places at pixel 200; the box centres 30px above
+        // that (ty = 170) and is 22px tall (14 + 2·4 padding), so it covers
+        // 159…181 — straight across the 164…176 indicator band.
+        let callout = spec(r#"{"type":"callout","x":{"norm":0.5},"y":125.0,"text":"note"}"#);
+        let (nodes, warnings) = panel.build(&[callout], &[y]);
+
+        assert_eq!(
+            rect_bands(&nodes),
+            vec![(159.0, 22.0)],
+            "ONE box, uncut, spanning the gap band"
+        );
+        assert!(warnings.is_empty());
+    }
+
+    /// The desugar fan-out, honestly: one `annotate_hline(label=...)` emits a
+    /// `line` plus its own `text` at the same y, so under a y break the pair
+    /// shares one fate and rolls into one warning naming both kinds.
+    #[test]
+    fn an_hline_and_its_label_share_one_fate_under_a_y_break() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let hline = |value: f64| {
+            vec![
+                spec(&format!(
+                    r#"{{"type":"line","x1":{{"norm":0.0}},"y1":{value},"x2":{{"norm":1.0}},
+                        "y2":{value}}}"#
+                )),
+                y_text(value, "label"),
+            ]
+        };
+
+        let (dropped, warnings) = panel.build(&hline(500.0), &[y]);
+        assert!(dropped.is_empty(), "an hline in the gap takes its label with it");
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["line", "text"], "both primitives, one warning");
+            }
+            other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+        }
+
+        let (kept, warnings) = panel.build(&hline(100.0), &[y]);
+        assert_eq!(kept.len(), 2, "a visible hline keeps both primitives");
+        assert!(warnings.is_empty());
+    }
+
+    /// The mixed-fate half of that fan-out: on an x break, a full-width `line`
+    /// CLIPS (its x extent is data and part of it survives) while a `text`
+    /// anchored inside the gap point-suppresses. One annotation's pieces render;
+    /// the other's warning names only the kind that was actually dropped.
+    #[test]
+    fn a_clipped_line_and_a_suppressed_label_report_only_the_drop() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let x = panel.remap("x");
+        let specs = vec![
+            spec(
+                r#"{"type":"line","x1":0.0,"y1":{"norm":0.0},"x2":1000.0,"y2":{"norm":0.0}}"#,
+            ),
+            spec(r#"{"type":"text","x":500.0,"y":{"norm":0.5},"text":"mid"}"#),
+        ];
+        let (nodes, warnings) = panel.build(&specs, &[x]);
+
+        let xs: Vec<(f64, f64)> = nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { x1, x2, .. } => Some((*x1, *x2)),
+                _ => None,
+            })
+            .collect();
+        // x pixels 50 → 550: 488 data pixels split 150:150 → 244 each, so
+        // data 150 lands at 294 and data 850 at 306 across the indicator.
+        assert_eq!(
+            xs,
+            vec![(50.0, 294.0), (306.0, 550.0)],
+            "the line clips into two visible pieces"
+        );
+        assert!(
+            !nodes.iter().any(|n| matches!(n, SceneNode::Text { .. })),
+            "the in-gap label is gone"
+        );
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
+                assert_eq!(axis, "x");
+                assert_eq!(kinds, &["text".to_string()], "only the DROP is reported");
+            }
+            other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+        }
+    }
+
+    /// A drop on one axis beats a clip on the other: an annotation with nothing
+    /// left on y is gone, not rendered in pieces along x.
+    #[test]
+    fn a_drop_on_one_axis_wins_over_a_cut_on_the_other() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let (x, y) = (panel.remap("x"), panel.remap("y"));
+        // x spans the whole domain (clippable); y sits entirely in the gap.
+        let rect = spec(
+            r#"{"type":"rect","x1":0.0,"y1":300.0,"x2":1000.0,"y2":700.0}"#,
+        );
+        let (nodes, warnings) = panel.build(&[rect], &[x, y]);
+
+        assert!(nodes.is_empty(), "nothing survives on y, so nothing renders");
+        assert_eq!(warnings.len(), 1, "one drop, one warning; got {warnings:?}");
+    }
+
+    /// With no breaks the router IS the plain build: same nodes, no warnings.
+    /// This is what keeps every un-broken chart byte-identical.
+    #[test]
+    fn no_breaks_routes_straight_to_the_plain_build() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let specs = vec![y_rect(0.0, 1000.0), y_text(500.0, "t")];
+        let ctx = ScaleContext {
+            plot_area: panel.plot_area,
+            x_scale: &panel.x_scale,
+            y_scale: &panel.y_scale,
+            breaks: &[],
+        };
+        let mut warnings = Vec::new();
+        let routed = build_annotations_through_breaks(&specs, &ctx, &mut warnings);
+        let plain = build_annotations(&specs, &ctx);
+
+        assert_eq!(routed.above_marks, plain.above_marks);
+        assert_eq!(routed.below_marks, plain.below_marks);
+        assert!(warnings.is_empty());
+    }
+
+    /// `z_bucket`'s second call site — the routed build, not just the plain
+    /// one — is exercised too: a `z="below_marks"` Text untouched by the break
+    /// still lands in `below_marks`, not `above_marks`. Every other fixture in
+    /// this module goes through `BrokenPanel::build`, which asserts
+    /// `nodes.below_marks.is_empty()` for every case, so without this pin that
+    /// assertion is never falsified by a real below_marks case reaching the
+    /// routed build.
+    #[test]
+    fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let text = AnnotationSpec::Text {
+            x: CoordValue::Norm { norm: 0.5 },
+            y: CoordValue::Data(100.0),
+            text: "caption".to_string(),
+            font_size: 12.0,
+            color: "#000000".to_string(),
+            anchor: "middle".to_string(),
+            baseline: "middle".to_string(),
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            z: "below_marks".to_string(),
+        };
+        let ctx = ScaleContext {
+            plot_area: panel.plot_area,
+            x_scale: &panel.x_scale,
+            y_scale: &panel.y_scale,
+            breaks: &[y],
+        };
+        let mut warnings = Vec::new();
+        let nodes = build_annotations_through_breaks(&[text], &ctx, &mut warnings);
+
+        assert!(warnings.is_empty());
+        assert!(
+            nodes.above_marks.is_empty(),
+            "a below_marks Text must not land above marks; got {:?}",
+            nodes.above_marks
+        );
+        assert_eq!(
+            nodes.below_marks.len(),
+            1,
+            "z_bucket must still route it through the router"
+        );
+        match &nodes.below_marks[0] {
+            SceneNode::Text { content, .. } => assert_eq!(content, "caption"),
+            other => panic!("expected the below_marks Text, got {other:?}"),
+        }
+    }
+
+    /// `RenderWarning::AnnotationSuppressedByBreak`'s third named population: a
+    /// `Cut`-routed extent kind (`rect`) whose two bounds on the broken axis
+    /// are NOT both data — one is pixel-space — degenerates to
+    /// `AxisCoords::Points` on that axis. With only one data bound there is no
+    /// interval to clip, so an in-gap value there drops the whole rect even
+    /// though `rect`'s own routing is `Cut` — enumerated in the warning's own
+    /// doc (`render/mod.rs`), not merely asserted here.
+    #[test]
+    fn a_mixed_coordinate_rect_drops_whole_when_its_data_bound_is_in_the_gap() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let rect = spec(
+            r#"{"type":"rect","x1":{"norm":0.0},"y1":500.0,"x2":{"norm":1.0},"y2":{"px":50.0}}"#,
+        );
+        let (nodes, warnings) = panel.build(&[rect], &[y]);
+
+        assert!(nodes.is_empty(), "an unreadable interval cannot be clipped; got {nodes:?}");
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, kinds }] => {
+                assert_eq!(axis, "y");
+                assert_eq!(kinds, &["rect".to_string()]);
+            }
+            other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+        }
     }
 }

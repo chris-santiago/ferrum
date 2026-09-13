@@ -800,13 +800,29 @@ pub enum RenderWarning {
     /// precedence already answers it.) `channel` is `"x"`/`"y"`/`"y2"`;
     /// `fields` names the subset the caller actually set, in schema order.
     ScaleDomainConfigOnOrdinalAxis { channel: String, fields: Vec<String> },
-    /// An annotation's data-space coordinate on a broken axis fell inside
-    /// that axis's `BreakAxis` gap (spec §4 H5, F-L08-07). The whole
-    /// annotation is dropped — not just the offending coordinate — because a
-    /// partially-suppressed annotation (a callout whose text moved but whose
-    /// leader line vanished, say) is worse than none. A surviving annotation
-    /// (no coordinate in any gap) is remapped through the break like marks
-    /// are, and pushes no warning.
+    /// An annotation was DROPPED because a `BreakAxis` gap contains one of its
+    /// data coordinates and left nothing of it to draw (spec §4 H5, F-L08-07;
+    /// narrowed by #228's stratified clip). Three populations reach here: a
+    /// point-anchored kind (`text`, `callout`, `image`) whose coordinate lands
+    /// inside a gap — it has no extent to cut, so in-gap is the whole story —
+    /// an extent-shaped kind with an in-gap endpoint whose surviving portion is
+    /// EMPTY, and a `Cut`-routed extent kind whose coordinates on THIS axis
+    /// degrade to a single point (one of its two bounds is pixel-/norm-space
+    /// rather than data, e.g. `ann.rect(y1=<data>, y2=fm.px(...))`): with only
+    /// one data-space bound there is no interval to clip, so an in-gap value
+    /// there drops the whole annotation exactly as a point-anchored kind's
+    /// would, even though `rect`'s own routing is `Cut`. An extent with any
+    /// surviving portion is clipped per visible segment instead, silently,
+    /// exactly as the equivalent mark geometry is; `bracket` is the one extent
+    /// kind still dropped whenever a gap reaches it (its endpoint tips admit
+    /// no honest split), and reports here when the in-gap coordinate is one of
+    /// its own endpoints.
+    ///
+    /// What is dropped is the whole annotation — not just the offending
+    /// coordinate — because a partially-suppressed annotation (a callout whose
+    /// text moved but whose leader line vanished, say) is worse than none. An
+    /// annotation no gap reaches is remapped through the break like marks are,
+    /// and pushes no warning.
     ///
     /// Rolled up per axis (#240-3): this used to fire once per suppressed
     /// annotation ELEMENT — the internal per-primitive `AnnotationSpec`, not
@@ -841,13 +857,16 @@ pub enum RenderWarning {
         kinds: Vec<String>,
     },
     /// An EXTENT-shaped annotation (rect, span, line, arrow, bracket) on a
-    /// broken axis had no coordinate inside a gap but *straddled* one — its
-    /// two data coordinates bound an interval that contains the gap (spec §4
-    /// H5). It is suppressed for the same reason an annotation with an in-gap
-    /// endpoint is: the interval's interior lies in the gap, so drawing it
-    /// would assert continuity exactly where the axis says it is broken.
-    /// Before this, growing such an annotation past the gap brought it back
-    /// and painted it as one solid shape across the break.
+    /// broken axis had no coordinate inside a gap but *straddled* one — its two
+    /// data coordinates bound an interval that contains the gap (spec §4 H5) —
+    /// and was dropped rather than clipped. Post-#228 that is the narrow case:
+    /// a straddling extent is normally CLIPPED into one piece per visible
+    /// segment, silently, so this fires only when the interval cannot be split
+    /// honestly (`bracket`, whose endpoint tips are what mark the bracketed
+    /// range's ends) or when it contributes no length to any visible segment
+    /// (its bounds are exactly a gap's bounds — both endpoints visible values,
+    /// nothing between them). Drawing either would assert continuity exactly
+    /// where the axis says it is broken.
     ///
     /// Rolled up per axis (#240-3): this used to fire once per suppressed
     /// annotation element, so a chart with N such elements emitted N

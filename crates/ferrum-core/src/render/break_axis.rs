@@ -320,9 +320,9 @@ pub fn broken_scale_map(value: f64, result: &BreakResult) -> Option<f64> {
 /// bounds are inclusive, so gaps are open intervals) or lies outside the
 /// domain entirely.
 ///
-/// Consumed by the BreakAxis annotation-suppression pass (spec §4 H5,
-/// F-L08-07) to name the offending gap in
-/// `RenderWarning::AnnotationSuppressedByBreak`.
+/// Consumed by the BreakAxis annotation break router (spec §4 H5, F-L08-07,
+/// #228) to tell an annotation a gap swallowed from one it merely reaches, and
+/// to name the mechanism in `RenderWarning::AnnotationSuppressedByBreak`.
 pub fn gap_containing(value: f64, result: &BreakResult) -> Option<(f64, f64)> {
     if broken_scale_map(value, result).is_some() {
         return None;
@@ -344,8 +344,10 @@ pub fn gap_containing(value: f64, result: &BreakResult) -> Option<(f64, f64)> {
 /// straddles a gap has no in-gap endpoint at all, which is why it survived
 /// the endpoint-only suppression test and painted straight across the break.
 ///
-/// Consumed by the BreakAxis annotation-suppression pass (spec §4 H5) for the
-/// extent-shaped annotation kinds.
+/// Consumed by the BreakAxis annotation break router (spec §4 H5, #228) for the
+/// extent-shaped annotation kinds, where it answers "does this break reach the
+/// interval at all"; whether anything of it SURVIVES is
+/// [`BreakRemap::data_extent_visible`]'s question.
 pub fn gap_spanned_by(a: f64, b: f64, result: &BreakResult) -> Option<(f64, f64)> {
     let (lo, hi) = (a.min(b), a.max(b));
     result.segments.windows(2).find_map(|w| {
@@ -733,6 +735,13 @@ impl BreakPlacement {
 /// [`BreakResult`]. This type carries the four numbers that round trip needs
 /// alongside the axis they apply to, so every caller (marks, gridlines, axis
 /// chrome) performs it identically.
+///
+/// `Copy` because it is four borrowed/scalar fields and callers hold it in
+/// slices they need to re-partition: the annotation router builds a
+/// subset of the panel's remaps (the axes whose gaps it is NOT routing through
+/// the clip) to hand back to `ScaleContext`, which is a filter over a slice,
+/// not a new resolution.
+#[derive(Clone, Copy)]
 pub struct BreakRemap<'a> {
     /// `"x"` or `"y"` — which coordinate of a node this break moves.
     axis: &'a str,
@@ -1056,6 +1065,27 @@ impl<'a> BreakRemap<'a> {
                 (p0.min(p1), p0.max(p1))
             })
             .collect()
+    }
+
+    /// Whether any part of the closed DATA interval bounded by `a` and `b`
+    /// (either order) lands on a visible segment — "would clipping this extent
+    /// leave anything to draw".
+    ///
+    /// The data-space door to the same intersection rule
+    /// [`BreakRemap::clip_extent`] reaches through pixels, for the one caller
+    /// whose extent IS data: an annotation's bounds are spec values, so asking
+    /// in data avoids a round trip through a pixel the spec never had (and
+    /// through [`BreakRemap::data_at`]'s domain clamp, which would make an
+    /// out-of-domain bound look like a domain-edge one). Used by the
+    /// annotation break router to tell "clip it" from "nothing survives, drop
+    /// it" (#228).
+    ///
+    /// Zero-length and merely-touching intervals follow
+    /// [`BreakRemap::data_spans`]'s rules: a point ON a visible segment is
+    /// visible, a point in a gap is not, and an interval arriving from inside a
+    /// gap exactly onto a segment's edge contributes no length and so is not.
+    pub fn data_extent_visible(&self, a: f64, b: f64) -> bool {
+        !self.data_spans(a.min(b), a.max(b)).is_empty()
     }
 
     /// The visible slices of the closed data interval from `d0` to `d1`, in
@@ -2765,6 +2795,29 @@ mod tests {
         assert_eq!(pieces.len(), 1, "only the below-gap portion is visible; got {pieces:?}");
         assert!((pieces[0].0 - 206.0).abs() < 1e-9, "clipped at the gap edge; got {pieces:?}");
         assert!((pieces[0].1 - 400.0).abs() < 1e-9);
+    }
+
+    /// `data_extent_visible` answers, in DATA space, the question `clip_extent`
+    /// answers in pixels — "is there anything left to draw" — for the
+    /// annotation router, whose extents are spec values rather than placed
+    /// pixels (#228). Its edge rules are `data_spans`': a point ON a segment is
+    /// visible, a point in a gap is not, and an interval that merely touches a
+    /// segment's edge from inside the gap contributes no length.
+    #[test]
+    fn data_extent_visible_matches_the_clip_it_gates() {
+        let br = guide_break();
+        let remap = guide_remap(&br);
+        assert!(remap.data_extent_visible(0.0, 1000.0), "straddling: two pieces survive");
+        assert!(remap.data_extent_visible(100.0, 400.0), "in-gap endpoint: 100..150 survives");
+        assert!(!remap.data_extent_visible(300.0, 700.0), "wholly inside the gap");
+        assert!(
+            !remap.data_extent_visible(150.0, 850.0),
+            "exactly the gap: both ends are visible values, but no length is"
+        );
+        assert!(remap.data_extent_visible(100.0, 100.0), "a visible point has a position");
+        assert!(!remap.data_extent_visible(500.0, 500.0), "an in-gap point does not");
+        // Order-independent: the router hands in spec order, not sorted order.
+        assert!(remap.data_extent_visible(1000.0, 0.0));
     }
 
     #[test]

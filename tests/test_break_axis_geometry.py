@@ -1075,13 +1075,18 @@ def test_boundary_value_annotation_is_not_suppressed():
 
 
 def test_span_inside_a_gap_is_suppressed():
-    """A `Span` whose range lies inside a gap suppresses (spec §4 H5's rider).
+    """A `Span` with nothing outside the gap suppresses (#228's drop case).
 
-    Both of the span's own endpoints (300, 700) sit inside the gap, so this
-    is classified as a POINT-in-gap suppression (`spec_break_conflict` tests
-    endpoints before the span-crossing case) and rolls into
-    `AnnotationSuppressedByBreak`, not `AnnotationSpansBreakGap` — the
-    message names the axis and count (#240-3), not the specific kind.
+    Rewritten for #228's stratified clip: a span is suppressed because NOTHING
+    OF IT SURVIVES the gaps, not because a gap touches it — a span that
+    straddles a gap now clips into one piece per visible segment
+    (`tests/test_break_axis_annotation_clip.py`). This one's range (300, 700)
+    lies wholly inside the gap, so there is nothing to clip.
+
+    Both of its endpoints are real coordinates inside the gap, which is what
+    picks the rollup bucket: `AnnotationSuppressedByBreak`, not
+    `AnnotationSpansBreakGap`. The message names the axis and count (#240-3),
+    not the specific kind.
     """
     df = pl.DataFrame({"category": ["A", "B"], "value": [72.0, 900.0]})
     chart = (

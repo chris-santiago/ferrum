@@ -482,33 +482,36 @@ pub fn build_scene(
         // grid/axes, zindex >= 1) routes into the separate `chrome_above`
         // slot below — a typed sibling, not a prefix of `annotations`.
         //
-        // Break-axis suppression (spec §4 H5, F-L08-07) runs first: any
-        // annotation with a data-space coordinate inside a gap on that axis
-        // is dropped whole, with a warning. Survivors are built against
-        // `ScaleContext`'s `breaks`, which folds their DATA coordinates
-        // through `break_remaps` — the SAME list `remap_mark_batch_through_
-        // break` folds marks through below — so an ordinal-axis break (no
-        // continuous `data_domain()`, filtered out of `break_remaps` above)
-        // neither moves nor suppresses annotations, matching its marks.
-        // `build_structural_nodes`'s same-axis merge (#230-4) collapses every
-        // `BreakAxis` spec sharing an axis into ONE `BreakResult` before this
-        // runs, so `break_remaps` carries at most one remap per axis — the
-        // fold below always executes 0 or 1 times per axis, never composing
-        // multiple same-axis remaps in sequence. Norm/px coordinates are
-        // plot-area-relative and untouched regardless.
+        // Break-axis routing (#228, spec §4 H5/F-L08-07) happens inside
+        // `build_annotations_through_breaks`, which owns the stratified
+        // contract: an extent annotation a gap CUTS (rect, span, line, arrow)
+        // is clipped or split into one piece per visible segment exactly as
+        // the equivalent mark geometry is, silently; one nothing survives of,
+        // and every kind that admits no honest split (bracket, and the
+        // point-anchored text/callout/image), is dropped whole and rolled into
+        // one warning per axis per mechanism. Whatever survives untouched is
+        // built against `ScaleContext`'s `breaks`, which folds its DATA
+        // coordinates through `break_remaps` — the SAME list
+        // `remap_mark_batch_through_break` folds marks through below — so an
+        // ordinal-axis break (no continuous `data_domain()`, filtered out of
+        // `break_remaps` above) neither moves nor drops annotations, matching
+        // its marks. `build_structural_nodes`'s same-axis merge (#230-4)
+        // collapses every `BreakAxis` spec sharing an axis into ONE
+        // `BreakResult` before this runs, so `break_remaps` carries at most one
+        // remap per axis. Norm/px coordinates are plot-area-relative and
+        // untouched regardless.
         let annotation_nodes = if panel_idx == 0 && !chart_config.annotations.is_empty() {
-            let surviving_annotations = suppress_annotations_for_break(
-                &chart_config.annotations,
-                &break_remaps,
-                warnings,
-            );
             let ann_ctx = super::annotation::ScaleContext {
                 plot_area: panel.plot_area,
                 x_scale: &scales.x,
                 y_scale: &scales.y,
                 breaks: &break_remaps,
             };
-            super::annotation::build_annotations(&surviving_annotations, &ann_ctx)
+            super::annotation::build_annotations_through_breaks(
+                &chart_config.annotations,
+                &ann_ctx,
+                warnings,
+            )
         } else {
             super::annotation::AnnotationNodes {
                 below_marks: Vec::new(),
@@ -2867,144 +2870,6 @@ fn build_structural_nodes(
     StructuralOutput {
         extra_annotations,
         break_results,
-    }
-}
-
-// ── Break-axis annotation suppression ────────────────────────────────────────
-
-/// Drop annotations whose data-space position on a broken axis falls inside
-/// that axis's gap (spec §4 H5, F-L08-07). The whole annotation is dropped,
-/// not just the offending coordinate, so a caller never sees a
-/// half-suppressed callout or span.
-///
-/// BOTH suppression mechanisms are collected per axis and rolled into ONE
-/// warning each after the filter completes (#240-3): a chart with N
-/// suppressed annotations under one axis's break used to emit N (or, for a
-/// desugar that emits multiple primitive specs per user call —
-/// `annotate_hline`'s line plus its own label Text, both landing on the same
-/// in-gap value — 2N) near-identical warnings for what is one underlying
-/// fact per axis ("this break's gap swallowed some annotations"). The
-/// per-instance offending value/extent was never independently actionable
-/// (there is exactly one fix regardless of which instance: move the gap, or
-/// move the annotation), so each rollup bundles every suppressed instance's
-/// kind into one `RenderWarning`, mirroring
-/// `RenderWarning::LegendValuesUnknown`'s "bundle every offender into one
-/// `Vec`, not one warning each" shape. The two mechanisms stay separate
-/// warning types (point-in-gap vs. extent-spans-gap are different, equally
-/// true facts about the same annotation), each independently rolled up to
-/// at most one warning per axis.
-///
-/// `break_remaps` is the SAME list `remap_mark_batch_through_break` folds
-/// marks through — already filtered to axes whose resolved scale has a
-/// continuous `data_domain()` (quality-review cycle-2 finding #1: an ordinal
-/// axis has nothing to reverse-map through, so its `BreakAxis` must neither
-/// move nor suppress annotations, matching its marks). Post-#230-4, at most
-/// one entry exists per axis — same-axis `BreakAxis` specs merge into one
-/// `BreakResult` upstream in `build_structural_nodes`, so `break_remaps`
-/// itself is where the "one break per axis" invariant lives, not this
-/// function. Every entry IS still consulted here, because the list spans
-/// BOTH axes (an x break and a y break each need their own membership
-/// check), not because a single axis can have more than one.
-///
-/// A no-op when `break_remaps` is empty: every chart without an effective
-/// `BreakAxis` gets `specs` back unchanged and pushes no warnings, which is
-/// what keeps un-broken (and ordinal-axis-broken) charts byte-identical.
-fn suppress_annotations_for_break(
-    specs: &[super::annotation::AnnotationSpec],
-    break_remaps: &[break_axis::BreakRemap<'_>],
-    warnings: &mut Vec<RenderWarning>,
-) -> Vec<super::annotation::AnnotationSpec> {
-    if break_remaps.is_empty() {
-        return specs.to_vec();
-    }
-    // Per-axis rollup accumulators (#240-3): small `Vec`s, not `HashMap`s, so
-    // the emitted warnings stay in first-seen-axis order — deterministic for
-    // a per-render count that is never large enough for O(n^2) lookup to
-    // matter.
-    let mut in_gap: Vec<(String, Vec<String>)> = Vec::new();
-    let mut spanning: Vec<(String, Vec<String>)> = Vec::new();
-    let surviving = specs
-        .iter()
-        .filter(|spec| {
-            for remap in break_remaps {
-                let axis = remap.axis();
-                match spec_break_conflict(spec, axis, remap.result()) {
-                    Some(BreakConflict::Point { axis, kind }) => {
-                        accumulate_by_axis(&mut in_gap, axis, kind);
-                        return false;
-                    }
-                    Some(BreakConflict::Span { axis, kind }) => {
-                        accumulate_by_axis(&mut spanning, axis, kind);
-                        return false;
-                    }
-                    None => {}
-                }
-            }
-            true
-        })
-        .cloned()
-        .collect();
-    for (axis, kinds) in in_gap {
-        warnings.push(RenderWarning::AnnotationSuppressedByBreak { axis, kinds });
-    }
-    for (axis, kinds) in spanning {
-        warnings.push(RenderWarning::AnnotationSpansBreakGap { axis, kinds });
-    }
-    surviving
-}
-
-/// Append `kind` to `axis`'s bucket in a per-axis rollup accumulator,
-/// creating the bucket on first sight. Shared by both suppression mechanisms
-/// in `suppress_annotations_for_break`.
-fn accumulate_by_axis(acc: &mut Vec<(String, Vec<String>)>, axis: String, kind: String) {
-    match acc.iter_mut().find(|(a, _)| *a == axis) {
-        Some((_, kinds)) => kinds.push(kind),
-        None => acc.push((axis, vec![kind])),
-    }
-}
-
-/// One spec's conflict against one break, before it is folded into its
-/// mechanism's per-axis rollup — see `suppress_annotations_for_break`.
-enum BreakConflict {
-    Point { axis: String, kind: String },
-    Span { axis: String, kind: String },
-}
-
-/// The conflict `spec` earns from `result` on `axis`, or `None` when the two
-/// do not conflict.
-///
-/// Two questions, one per coordinate shape (`annotation::AxisCoords`):
-///
-/// - A POINT coordinate conflicts when it lands inside a gap.
-/// - An EXTENT's interval conflicts when it MEETS a gap — an endpoint inside
-///   one (reported identically to a point, since a real coordinate is in the
-///   gap) or, failing that, the interval reaching across one. The second case
-///   is the containment inversion: `annotate_rect(y1=100, y2=900)` under a
-///   `(150, 850)` gap has no in-gap endpoint, so endpoint-only testing let it
-///   paint as one solid rect straight across the break while every smaller,
-///   merely-overlapping rect was suppressed.
-///
-/// Endpoints are tested before the span so an extent with an in-gap endpoint
-/// keeps folding into the `Point` rollup, rather than degrading to the
-/// coarser span case.
-fn spec_break_conflict(
-    spec: &super::annotation::AnnotationSpec,
-    axis: &str,
-    result: &break_axis::BreakResult,
-) -> Option<BreakConflict> {
-    use super::annotation::AxisCoords;
-
-    let kind = || super::annotation::kind_name(spec).to_string();
-    let in_gap = |value: f64| {
-        break_axis::gap_containing(value, result)
-            .map(|_gap| BreakConflict::Point { axis: axis.to_string(), kind: kind() })
-    };
-    match super::annotation::data_coords_on_axis(spec, axis) {
-        AxisCoords::Points(values) => values.into_iter().find_map(in_gap),
-        AxisCoords::Extent(lo, hi) => [lo, hi].into_iter().find_map(in_gap).or_else(|| {
-            break_axis::gap_spanned_by(lo, hi, result)
-                .map(|_gap| BreakConflict::Span { axis: axis.to_string(), kind: kind() })
-        }),
     }
 }
 
@@ -9097,6 +8962,14 @@ mod tests {
         }
     }
 
+    /// The `y`-axis `BreakRemap` the sidecar-realignment tests below share:
+    /// domain `(0, 1000)`, pixel range `(320, 20)` (SVG-down convention),
+    /// matching `_bar_svg`'s panel geometry elsewhere in the test suite closely
+    /// enough for hand-checkable gap arithmetic.
+    fn y_remap(result: &break_axis::BreakResult) -> break_axis::BreakRemap<'_> {
+        break_axis::BreakRemap::new("y", (0.0, 1000.0), (320.0, 20.0), result)
+    }
+
     /// The misaligned-sidecar warning, end to end through the batch remap and
     /// reachable in the DEBUG gate (cycle-2 N6): a bar batch whose
     /// `data_indices` has the wrong length is split 1→2 by the clip, cannot be
@@ -9857,381 +9730,17 @@ mod tests {
         );
     }
 
-    // ── suppress_annotations_for_break (spec §4 H5, F-L08-07) ───────────────
-
-    fn text_spec(y: crate::render::annotation::CoordValue, text: &str) -> crate::render::annotation::AnnotationSpec {
-        crate::render::annotation::AnnotationSpec::Text {
-            x: crate::render::annotation::CoordValue::Norm { norm: 1.0 },
-            y,
-            text: text.to_string(),
-            font_size: 12.0,
-            color: "#333333".to_string(),
-            anchor: "middle".to_string(),
-            baseline: "middle".to_string(),
-            angle: 0.0,
-            dx: 0.0,
-            dy: 0.0,
-            z: "above_marks".to_string(),
-        }
-    }
-
-    /// An x-axis mirror of `text_spec`: the y coordinate is norm (untouched by
-    /// an x-break), and x carries the data value under test.
-    fn x_text_spec(x: crate::render::annotation::CoordValue, text: &str) -> crate::render::annotation::AnnotationSpec {
-        crate::render::annotation::AnnotationSpec::Text {
-            x,
-            y: crate::render::annotation::CoordValue::Norm { norm: 1.0 },
-            text: text.to_string(),
-            font_size: 12.0,
-            color: "#333333".to_string(),
-            anchor: "middle".to_string(),
-            baseline: "middle".to_string(),
-            angle: 0.0,
-            dx: 0.0,
-            dy: 0.0,
-            z: "above_marks".to_string(),
-        }
-    }
-
-    /// The `y`-axis `BreakRemap` these tests share: domain `(0, 1000)`, pixel
-    /// range `(320, 20)` (SVG-down convention), matching `_bar_svg`'s panel
-    /// geometry elsewhere in the test suite closely enough for hand-checkable
-    /// gap arithmetic.
-    fn y_remap(result: &break_axis::BreakResult) -> break_axis::BreakRemap<'_> {
-        break_axis::BreakRemap::new("y", (0.0, 1000.0), (320.0, 20.0), result)
-    }
-
-    /// The `x`-axis mirror of `y_remap`: domain `(0, 1000)`, pixel range
-    /// `(20, 320)` (left-to-right, no inversion).
-    fn x_remap(result: &break_axis::BreakResult) -> break_axis::BreakRemap<'_> {
-        break_axis::BreakRemap::new("x", (0.0, 1000.0), (20.0, 320.0), result)
-    }
-
-    /// The finding's exact repro (F-L08-07): a labelled `annotate_hline`
-    /// whose y sits inside the break gap must be dropped, with a warning
-    /// naming its axis and kind (rolled up per #240-3, so "kind" now means
-    /// "one of the `kinds` bundled into the axis's warning" rather than a
-    /// per-instance field); a sibling outside the gap must survive untouched.
-    #[test]
-    fn suppress_annotations_for_break_drops_in_gap_and_warns() {
-        use crate::render::annotation::{AnnotationSpec, CoordValue};
-
-        let specs = vec![
-            text_spec(CoordValue::Data(500.0), "inside the break"),
-            text_spec(CoordValue::Data(100.0), "outside the break"),
-        ];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-
-        assert_eq!(surviving.len(), 1, "the in-gap annotation must be dropped");
-        match &surviving[0] {
-            AnnotationSpec::Text { text, .. } => assert_eq!(text, "outside the break"),
-            other => panic!("expected the surviving Text spec, got {other:?}"),
-        }
-        assert_eq!(warnings.len(), 1, "exactly one warning for the one suppressed spec");
-        match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
-                assert_eq!(axis, "y");
-                assert_eq!(kinds, &["text".to_string()]);
-            }
-            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
-        }
-    }
-
-    /// The x-axis mirror of the above (quality-review cycle-2 fix #3): the
-    /// `find`-by-axis wiring is exercised for `"x"`, not just `"y"`.
-    #[test]
-    fn suppress_annotations_for_break_drops_in_gap_and_warns_on_x_axis() {
-        use crate::render::annotation::{AnnotationSpec, CoordValue};
-
-        let specs = vec![
-            x_text_spec(CoordValue::Data(500.0), "inside the break"),
-            x_text_spec(CoordValue::Data(100.0), "outside the break"),
-        ];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (20.0, 320.0), 12.0);
-        let remaps = vec![x_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-
-        assert_eq!(surviving.len(), 1, "the in-gap annotation must be dropped");
-        match &surviving[0] {
-            AnnotationSpec::Text { text, .. } => assert_eq!(text, "outside the break"),
-            other => panic!("expected the surviving Text spec, got {other:?}"),
-        }
-        assert_eq!(warnings.len(), 1);
-        match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
-                assert_eq!(axis, "x");
-                assert_eq!(kinds, &["text".to_string()]);
-            }
-            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
-        }
-    }
-
-    /// #240-3 RED proof: the frozen repro (4 in-gap `annotate_hline`s, each
-    /// desugaring to a `line` primitive plus its own label `text` primitive —
-    /// 8 primitive specs total) used to emit 8 near-identical warnings; now
-    /// it rolls up into exactly ONE `AnnotationSuppressedByBreak` per axis,
-    /// carrying all 8 kinds.
-    #[test]
-    fn suppress_annotations_for_break_rolls_up_n_in_gap_annotations_into_one_warning() {
-        use crate::render::annotation::{AnnotationSpec, CoordValue};
-
-        let mut specs = Vec::new();
-        for i in 0..4 {
-            specs.push(AnnotationSpec::Line {
-                x1: CoordValue::Data(500.0),
-                y1: CoordValue::Data(500.0),
-                x2: CoordValue::Data(500.0),
-                y2: CoordValue::Data(500.0),
-                stroke: "#333333".to_string(),
-                stroke_width: 1.0,
-                dash: None,
-            });
-            specs.push(text_spec(CoordValue::Data(500.0), &format!("label {i}")));
-        }
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert!(surviving.is_empty(), "every spec sits at y=500, inside the gap");
-        assert_eq!(
-            warnings.len(),
-            1,
-            "8 in-gap primitive specs must roll up into exactly one warning, got {warnings:?}"
-        );
-        match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
-                assert_eq!(axis, "y");
-                assert_eq!(kinds.len(), 8, "the count of suppressed instances survives the rollup");
-            }
-            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
-        }
-    }
-
-    /// A value exactly on the gap boundary is NOT suppressed — gaps are open
-    /// intervals (spec §4 H5's boundary rule, mirroring `broken_scale_map`).
-    #[test]
-    fn suppress_annotations_for_break_keeps_boundary_values() {
-        use crate::render::annotation::CoordValue;
-
-        let specs = vec![text_spec(CoordValue::Data(150.0), "on the boundary")];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert_eq!(surviving.len(), 1, "a boundary value must survive");
-        assert!(warnings.is_empty());
-    }
-
-    /// A no-op when there is no `BreakAxis`: every chart without one gets its
-    /// annotations back unchanged and pushes no warnings (byte-stability).
-    /// This also covers the ordinal-axis case (quality-review cycle-2 finding
-    /// #1): the caller filters `break_remaps` to continuous-domain axes
-    /// before this function ever sees them, so an ordinal-axis `BreakAxis`
-    /// reaches here as an EMPTY slice, not a fabricated-domain entry.
-    #[test]
-    fn suppress_annotations_for_break_is_a_no_op_without_breaks() {
-        use crate::render::annotation::CoordValue;
-
-        let specs = vec![text_spec(CoordValue::Data(500.0), "t")];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-        let surviving = suppress_annotations_for_break(&specs, &[], &mut warnings);
-        assert_eq!(surviving.len(), 1);
-        assert!(warnings.is_empty());
-    }
-
-    /// A `Span` on the broken axis whose range lies inside the gap suppresses
-    /// (spec §4 H5's explicit Span rider). Adjudicated (quality-review
-    /// cycle-2): a Span PARTIALLY overlapping a gap suppresses whole too —
-    /// deliberately narrower than H4's mark-clip rule for the same shape,
-    /// per the decision doc's "marks clip, annotations suppress on any
-    /// in-gap coordinate" split. Not revisited here; see the cycle-2 report.
-    #[test]
-    fn suppress_annotations_for_break_drops_in_gap_span() {
-        use crate::render::annotation::{AnnotationSpec, CoordValue};
-
-        let specs = vec![AnnotationSpec::Span {
-            axis: "y".to_string(),
-            start: CoordValue::Data(300.0),
-            end: CoordValue::Data(700.0),
-            fill: "#cccccc".to_string(),
-            opacity: 0.2,
-            label_position: "center".to_string(),
-            label: None,
-        }];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert!(surviving.is_empty(), "an in-gap span must be dropped whole");
-        assert_eq!(warnings.len(), 1);
-        match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { kinds, .. } => {
-                assert_eq!(kinds, &["span".to_string()])
-            }
-            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
-        }
-    }
-
-    /// A y-`Rect` spec with the given data bounds; every other coordinate is
-    /// norm, so only the y interval is under test.
-    fn y_rect_spec(y1: f64, y2: f64) -> crate::render::annotation::AnnotationSpec {
-        use crate::render::annotation::{AnnotationSpec, CoordValue};
-        AnnotationSpec::Rect {
-            x1: CoordValue::Norm { norm: 0.0 },
-            y1: CoordValue::Data(y1),
-            x2: CoordValue::Norm { norm: 1.0 },
-            y2: CoordValue::Data(y2),
-            fill: "#cccccc".to_string(),
-            opacity: 0.3,
-            corner_radius: 0.0,
-            stroke: None,
-        }
-    }
-
-    /// The containment inversion (close-review S3): a rect whose interval
-    /// STRADDLES the gap has no in-gap endpoint, so endpoint-only testing let
-    /// it render as one solid rect straight across the break while every
-    /// smaller, merely-overlapping rect was suppressed. Growing an annotation
-    /// can no longer bring it back.
-    #[test]
-    fn suppress_annotations_for_break_drops_an_extent_that_spans_the_gap() {
-        let specs = vec![y_rect_spec(100.0, 900.0)];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert!(
-            surviving.is_empty(),
-            "a rect bounding the gap asserts continuity exactly where the axis is broken"
-        );
-        // #240-3: rolled up to ONE warning naming the axis and the suppressed
-        // kind(s), not the per-instance extent/gap (re-aimed from the
-        // pre-rollup per-annotation shape, per D §240-3).
-        assert_eq!(warnings.len(), 1);
-        match &warnings[0] {
-            RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
-                assert_eq!(axis, "y");
-                assert_eq!(kinds, &["rect".to_string()]);
-            }
-            other => panic!("expected AnnotationSpansBreakGap, got {other:?}"),
-        }
-    }
-
-    /// #240-3: N extent-shaped annotations that each span the same axis's
-    /// break gap used to emit N separate `AnnotationSpansBreakGap` warnings
-    /// (one per suppressed instance) — now they roll up into exactly ONE
-    /// warning naming the axis and carrying every suppressed kind.
-    #[test]
-    fn suppress_annotations_for_break_rolls_up_n_spanning_annotations_into_one_warning() {
-        let specs = vec![
-            y_rect_spec(100.0, 900.0),
-            y_rect_spec(120.0, 880.0),
-            y_rect_spec(140.0, 860.0),
-        ];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert!(surviving.is_empty(), "every rect straddles the gap");
-        assert_eq!(
-            warnings.len(),
-            1,
-            "N spanning annotations must roll up into exactly one warning, got {warnings:?}"
-        );
-        match &warnings[0] {
-            RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
-                assert_eq!(axis, "y");
-                assert_eq!(kinds.len(), 3, "the count of suppressed instances survives the rollup");
-                assert!(kinds.iter().all(|k| k == "rect"));
-            }
-            other => panic!("expected AnnotationSpansBreakGap, got {other:?}"),
-        }
-    }
-
-    /// The other side of that pin: an extent with an in-gap ENDPOINT folds
-    /// into the `AnnotationSuppressedByBreak` rollup (not the coarser
-    /// `AnnotationSpansBreakGap` one, since the endpoint check runs first —
-    /// see `spec_break_conflict`'s doc), and an extent wholly on one side of
-    /// the gap still survives untouched.
-    #[test]
-    fn suppress_annotations_for_break_keeps_the_endpoint_answer_for_extents() {
-        let specs = vec![y_rect_spec(100.0, 400.0), y_rect_spec(0.0, 140.0)];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert_eq!(surviving.len(), 1, "only the overlapping rect is dropped");
-        assert_eq!(warnings.len(), 1);
-        match &warnings[0] {
-            RenderWarning::AnnotationSuppressedByBreak { axis, kinds } => {
-                assert_eq!(axis, "y");
-                assert_eq!(
-                    kinds, &["rect".to_string()],
-                    "the in-gap-endpoint rect folds into the Point rollup, not the Span one"
-                );
-            }
-            other => panic!("expected AnnotationSuppressedByBreak, got {other:?}"),
-        }
-    }
-
-    /// A point-shaped annotation keeps the membership test: a `Text` whose
-    /// anchor is outside every gap survives, whatever lies between it and
-    /// another annotation.
-    #[test]
-    fn suppress_annotations_for_break_leaves_point_shapes_on_membership() {
-        use crate::render::annotation::CoordValue;
-
-        let specs = vec![text_spec(CoordValue::Data(100.0), "below the gap")];
-        let break_result =
-            break_axis::apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (320.0, 20.0), 12.0);
-        let remaps = vec![y_remap(&break_result)];
-        let mut warnings: Vec<RenderWarning> = Vec::new();
-
-        let surviving = suppress_annotations_for_break(&specs, &remaps, &mut warnings);
-        assert_eq!(surviving.len(), 1, "a point outside every gap is not an extent");
-        assert!(warnings.is_empty());
-    }
-
-    // `suppress_annotations_for_break_consults_every_same_axis_break`
-    // (quality-review cycle-2 finding #2) used to live here, hand-building a
-    // `remaps` vec holding TWO same-axis `BreakRemap`s (one per independently
-    // resolved `BreakResult`) to pin that suppression consults every one of
-    // them, not just the first.
+    // ── Annotation break routing (#228) ─────────────────────────────────────
     //
-    // #230-4's same-axis merge (`build_structural_nodes` above) makes that
-    // construction unreachable from production: N same-axis `BreakAxis`
-    // specs now merge into ONE `BreakResult` — one gap list — before
-    // `break_remaps` is ever built, so `suppress_annotations_for_break`'s
-    // `break_remaps` slice carries at most one entry per axis (mirroring the
-    // same invariant `annotation.rs`'s `ScaleContext::breaks` now carries,
-    // whose own two same-axis-remap tests were retired for the identical
-    // reason). Keeping this hand-built two-same-axis-remap shape green would
-    // pin the replaced, production-unreachable construction as if it were
-    // still a supported input, so it is retired rather than kept passing.
-    //
-    // The function's real per-axis, per-remap loop stays exercised by the
-    // tests above (single remap, single axis) and by
-    // `suppress_annotations_for_break`'s own doc, which now states the
-    // post-merge invariant directly. The same-axis merge itself is pinned in
-    // `build_structural_nodes`'s tests just above in this file.
+    // The annotation-vs-break tests used to live here, next to
+    // `suppress_annotations_for_break`. That function is gone: #228's
+    // stratified contract makes the break's answer for an annotation a
+    // BUILD-time question (clip it, split it, or drop it), not a filter over
+    // specs, so the whole decision moved into
+    // `annotation::build_annotations_through_breaks` beside the emitters and
+    // the coordinate classifier it needs. Its tests moved with it — including
+    // the three pins this batch rewrote, whose old answers (an extent that
+    // spans a gap is dropped; N spanning rects roll up as suppressed; an
+    // in-gap ENDPOINT suppresses the whole extent) the new contract retires.
+    // See `annotation.rs`'s "Break routing" test section.
 }
