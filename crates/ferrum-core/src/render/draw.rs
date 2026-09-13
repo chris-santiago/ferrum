@@ -730,6 +730,12 @@ pub struct MarkBuildResult {
     /// straight onto `MarkBatch::polar_spans` (batch E Task 2, cycle 5).
     /// `None` for every other mark.
     pub polar_spans: Option<Vec<(f64, f64)>>,
+    /// Per-node `(x, y)` exact data anchor, threaded straight onto
+    /// `MarkBatch::glyph_anchors` (#230-3) — see that field's doc for why it
+    /// exists. Populated only by the `BreakPlacement::MoveGlyph`/
+    /// `MoveGlyphAndConnector` builders (`point.rs`, `tick.rs`, `text.rs`,
+    /// `image.rs`, `label.rs`); `None` for every other mark.
+    pub glyph_anchors: Option<Vec<(f64, f64)>>,
     /// Why `nodes` is empty, when it is (#118) — spec §4's silent-empty
     /// policy. `None` covers every LEGITIMATE empty a mark builder can
     /// produce: a zero-row input batch, a documented per-row null/non-finite/
@@ -762,7 +768,7 @@ pub struct EmptyReason(pub String);
 
 impl MarkBuildResult {
     pub fn empty(kind: MarkBatchKind) -> Self {
-        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, empty_reason: None }
+        Self { kind, nodes: vec![], data_indices: Some(vec![]), tooltips: None, hrefs: None, descriptions: None, polar_spans: None, glyph_anchors: None, empty_reason: None }
     }
 
     /// Like [`empty`](Self::empty), but names why — for a builder that

@@ -196,24 +196,37 @@ fn build_geometry(
                 let tick_half = tick_full / 2.0;
                 let baseline_x = panel.x;
                 let mut acc = MarkNodes::with_capacity(ys.len());
+                // #230-3: `cy` is this row's own data-mapped y; `x` carries no
+                // data here (crossbar length is a fixed band fraction, drawn
+                // from `bx`), so the x anchor mirrors the drawn geometry's own
+                // (already-symmetric) midpoint — inert for an x-break, since
+                // an x-break never applies to a batch that placed no x data.
+                let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(ys.len());
                 for i in 0..ys.len() {
                     let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
                     let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
                     let cy = cy + y_offsets[i];
                     let bx = baseline_x + x_offsets[i];
+                    let (x1, x2) = (bx, bx + 2.0 * tick_half);
                     acc.push(SceneNode::Line {
-                        x1: bx,
+                        x1,
                         y1: cy,
-                        x2: bx + 2.0 * tick_half,
+                        x2,
                         y2: cy,
                         style: row_stroke(i),
                     }, i);
+                    // Same expression the pre-#230-3 bbox model derived from
+                    // this node's own endpoints ((lo+hi)/2.0 over x1/x2), so
+                    // this anchor is bit-identical to it, not merely equal in
+                    // exact arithmetic.
+                    anchors.push(((x1 + x2) / 2.0, cy));
                 }
                 let (nodes, data_indices) = acc.finalize();
                 let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
                 return MarkBuildResult {
                     empty_reason: None,
                     polar_spans: None,
+                    glyph_anchors: Some(anchors),
                     kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                     tooltips, hrefs, descriptions,
                 };
@@ -232,22 +245,33 @@ fn build_geometry(
             };
             let baseline_x = panel.x;
             let mut acc = MarkNodes::with_capacity(ys.len());
+            // #230-3: `py` is this row's own data-mapped y; the x anchor
+            // mirrors the dash's own (already-symmetric) drawn midpoint (no x
+            // data placed this rug, so an x-break has nothing real to anchor
+            // on — see tick.rs's mode-A comment above for the same reasoning).
+            let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(ys.len());
             for i in 0..ys.len() {
                 let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
                 let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
                 let py = py + y_offsets[i];
                 let bx = baseline_x + x_offsets[i];
+                let (x1, x2) = (bx, bx + tick_len);
                 acc.push(SceneNode::Line {
-                    x1: bx, y1: py,
-                    x2: bx + tick_len, y2: py,
+                    x1, y1: py,
+                    x2, y2: py,
                     style: row_stroke(i),
                 }, i);
+                // Same expression the pre-#230-3 bbox model derived from this
+                // node's own endpoints, for bit-identity (see the crossbar
+                // mode above).
+                anchors.push(((x1 + x2) / 2.0, py));
             }
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
                 empty_reason: None,
                 polar_spans: None,
+                glyph_anchors: Some(anchors),
                 kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                 tooltips, hrefs, descriptions,
             };
@@ -297,6 +321,11 @@ fn build_geometry(
             // or at low/default padding.
             let tick_half = pos_meta.clamp_width(tick_full_raw) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
+            // #230-3: `cx` (ordinal, never breaks) and `py` (continuous) are
+            // both exact — this crossbar is already symmetric around `cx`
+            // along x, so its anchor matches the drawn geometry's own
+            // midpoint bit for bit.
+            let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
                 let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -311,12 +340,14 @@ fn build_geometry(
                     y2: py,
                     style: row_stroke(i),
                 }, i);
+                anchors.push((cx, py));
             }
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
                 empty_reason: None,
                 polar_spans: None,
+                glyph_anchors: Some(anchors),
                 kind: MarkBatchKind::Tick,
                 nodes,
                 data_indices: Some(data_indices),
@@ -353,6 +384,9 @@ fn build_geometry(
             // same.
             let tick_half = pos_meta.clamp_width(tick_full_raw) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
+            // #230-3: `px` (continuous) and `cy` (ordinal, never breaks) are
+            // both exact — symmetric around `cy` along y already.
+            let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
                 let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
@@ -367,12 +401,14 @@ fn build_geometry(
                     y2: cy + tick_half,
                     style: row_stroke(i),
                 }, i);
+                anchors.push((px, cy));
             }
             let (nodes, data_indices) = acc.finalize();
             let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
                 empty_reason: None,
                 polar_spans: None,
+                glyph_anchors: Some(anchors),
                 kind: MarkBatchKind::Tick,
                 nodes,
                 data_indices: Some(data_indices),
@@ -416,24 +452,34 @@ fn build_geometry(
         let tick_half = tick_full / 2.0;
         let baseline_y = panel.y + panel.h;
         let mut acc = MarkNodes::with_capacity(xs.len());
+        // #230-3: `cx` (ordinal, never breaks) is exact; the y anchor mirrors
+        // the crossbar's own (already-symmetric) drawn midpoint — no y data
+        // placed this crossbar, so a y-break has nothing real to anchor on.
+        let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
             let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
             let cx = cx + x_offsets[i];
             let by = baseline_y + y_offsets[i];
+            let (y1, y2) = (by, by - 2.0 * tick_half);
             acc.push(SceneNode::Line {
                 x1: cx,
-                y1: by,
+                y1,
                 x2: cx,
-                y2: by - 2.0 * tick_half,
+                y2,
                 style: row_stroke(i),
             }, i);
+            // Same expression the pre-#230-3 bbox model derived from this
+            // node's own endpoints, for bit-identity (see the first crossbar
+            // mode above).
+            anchors.push((cx, (y1 + y2) / 2.0));
         }
         let (nodes, data_indices) = acc.finalize();
         let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
         return MarkBuildResult {
             empty_reason: None,
             polar_spans: None,
+            glyph_anchors: Some(anchors),
             kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
             tooltips, hrefs, descriptions,
         };
@@ -481,18 +527,26 @@ fn build_geometry(
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
     let baseline_y = panel.y + panel.h;
     let mut acc = MarkNodes::with_capacity(xs.len());
+    // #230-3: `px` is this row's own data-mapped x; the y anchor mirrors the
+    // dash's own (already-symmetric) drawn midpoint (`by` is the baseline
+    // chrome, not data — a y-break has nothing real to anchor a rug on).
+    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(xs.len());
     for (i, xopt) in xs.iter().enumerate() {
         let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
         let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
         let px = px + x_offsets[i];
         let by = baseline_y + y_offsets[i];
+        let (y1, y2) = (by, by - tick_len);
         acc.push(SceneNode::Line {
             x1: px,
-            y1: by,
+            y1,
             x2: px,
-            y2: by - tick_len,
+            y2,
             style: row_stroke(i),
         }, i);
+        // Same expression the pre-#230-3 bbox model derived from this node's
+        // own endpoints, for bit-identity (see the first crossbar mode above).
+        anchors.push((px, (y1 + y2) / 2.0));
     }
 
     let (nodes, data_indices) = acc.finalize();
@@ -501,6 +555,7 @@ fn build_geometry(
     MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: Some(anchors),
         kind: MarkBatchKind::Tick,
         nodes,
         data_indices: Some(data_indices),

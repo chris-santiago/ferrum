@@ -300,6 +300,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         hrefs,
         descriptions,
         polar_spans: Some(spans),
+        glyph_anchors: None,
     }
 }
 
@@ -443,6 +444,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         hrefs,
         descriptions,
         polar_spans: None,
+        glyph_anchors: None,
     }
 }
 
@@ -609,6 +611,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         hrefs,
         descriptions,
         polar_spans: None,
+        glyph_anchors: None,
     }
 }
 
@@ -793,6 +796,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         hrefs,
         descriptions,
         polar_spans: None,
+        glyph_anchors: None,
     }
 }
 
@@ -919,6 +923,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         hrefs,
         descriptions,
         polar_spans: None,
+        glyph_anchors: None,
     }
 }
 

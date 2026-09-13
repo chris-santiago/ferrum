@@ -275,6 +275,7 @@ fn finalize_rule_build(
     MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: None,
         kind: MarkBatchKind::Rule,
         nodes,
         data_indices: Some(data_indices),

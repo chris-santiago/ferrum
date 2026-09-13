@@ -1080,6 +1080,7 @@ mod keyed_pairing_tests {
         MarkBatch {
             clip: true,
             polar_spans: None,
+            glyph_anchors: None,
             kind: MarkBatchKind::Point,
             nodes: (0..n).map(|_| circle_node()).collect(),
             data_indices: None,

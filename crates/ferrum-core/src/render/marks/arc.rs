@@ -277,6 +277,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
         hrefs,
         descriptions,
         polar_spans: Some(spans),
+        glyph_anchors: None,
     })
 }
 
@@ -416,6 +417,7 @@ fn build_nominal_theta(
         hrefs,
         descriptions,
         polar_spans: Some(spans),
+        glyph_anchors: None,
     }
 }
 
@@ -538,6 +540,7 @@ fn build_annular(
         hrefs,
         descriptions,
         polar_spans: Some(spans),
+        glyph_anchors: None,
     }
 }
 

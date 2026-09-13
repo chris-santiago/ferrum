@@ -130,6 +130,13 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     // Capacity is 2× when leader lines are drawn (one text + one line per row).
     let capacity = if draw_leader { n * 2 } else { n };
     let mut acc = MarkNodes::with_capacity(capacity);
+    // #230-3: one exact `(px, py)` data anchor per emitted node — the
+    // scale-mapped position BEFORE the label's `(dx, dy)` placement offset is
+    // baked into the Text node's own `x`/`y` below. Repeated for the leader
+    // Line node too (`remap_label_node` never reads a Line's anchor — its own
+    // two ends are placed independently — but `glyph_anchors` still needs one
+    // entry per emitted node to stay aligned with `data_indices`).
+    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(capacity);
 
     // Placed bounding boxes accumulate as we emit each label; used only when
     // collision avoidance is active.
@@ -218,8 +225,11 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
                 },
             };
             acc.push_many([text_node, line_node], i);
+            anchors.push((px, py));
+            anchors.push((px, py));
         } else {
             acc.push(text_node, i);
+            anchors.push((px, py));
         }
     }
 
@@ -229,6 +239,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
     Ok(MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: Some(anchors),
         kind: MarkBatchKind::Label,
         nodes,
         data_indices: Some(data_indices),

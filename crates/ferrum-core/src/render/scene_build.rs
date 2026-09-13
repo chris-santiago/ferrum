@@ -527,6 +527,20 @@ pub fn build_scene(
             }
         }
 
+        // #230-3: `glyph_anchors` is a build-time-only sidecar the break
+        // remap above (`remap_glyph_batch`'s exact-anchor read) fully
+        // consumes — unlike `polar_spans`, it has no downstream consumer
+        // (no interactive/WASM reader), so it must not survive into the
+        // scene this panel emits. Cleared unconditionally, whether or not
+        // this panel had a break to fold through, so a `MoveGlyph`/
+        // `MoveGlyphAndConnector` batch's per-node `(x, y)` anchor never
+        // double-serializes a row's own position into SVG-irrelevant JSON —
+        // the growth `test_packed_json_size_under_1mb` guards against for a
+        // large packed point batch.
+        for batch in &mut mark_batches {
+            batch.glyph_anchors = None;
+        }
+
         // zindex (B5): an above-marks grid is moved out of the (before-marks)
         // `grid` slot into the `chrome_above` slot (emitted after marks). The
         // below-marks default keeps the grid in `grid` for byte-identical output.
@@ -1721,15 +1735,20 @@ fn build_panel_mark_batches(
 
         let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
         // #6 alignment guard (spec §7): each present per-node vector must
-        // have exactly one entry per node. All six channels — tooltips,
-        // hrefs, descriptions, data_indices, keys, and polar_spans — are
-        // independent and checked independently so any misaligned channel
-        // trips the guard under a debug build. data_indices and keys are the
-        // alignment vector and key channel; covering them here catches
-        // builders (like the pre-fix label.rs) that diverge data_indices
-        // while leaving metadata None (which the three-channel guard could
-        // not detect). polar_spans (batch E Task 2, cycle 6) is the same
-        // shape again, populated only by arc.rs/bar.rs::build_polar.
+        // have exactly one entry per node. All seven channels — tooltips,
+        // hrefs, descriptions, data_indices, keys, polar_spans, and
+        // glyph_anchors — are independent and checked independently so any
+        // misaligned channel trips the guard under a debug build.
+        // data_indices and keys are the alignment vector and key channel;
+        // covering them here catches builders (like the pre-fix label.rs)
+        // that diverge data_indices while leaving metadata None (which the
+        // three-channel guard could not detect). polar_spans (batch E Task
+        // 2, cycle 6) is the same shape again, populated only by
+        // arc.rs/bar.rs::build_polar; glyph_anchors (wave-2 Task 10,
+        // #230-3) is the same shape once more, populated only by the five
+        // `MoveGlyph`/`MoveGlyphAndConnector` builders and cleared right
+        // after the break remap consumes it (see the panel-build loop's
+        // `batch.glyph_anchors = None` pass) so it never reaches JSON.
         //
         // `NodeChannelLengths::of` derives every length from the very vectors
         // moved into the `MarkBatch` below, so this seam cannot transpose two
@@ -1765,6 +1784,16 @@ fn build_panel_mark_batches(
             // (possibly single-slot, self-describing) clone's `y_slots`.
             y_slot: layer_slot_idx,
             polar_spans: result.polar_spans,
+            // #230-3: the exact data anchor every `MoveGlyph`/
+            // `MoveGlyphAndConnector` batch's break remap reads instead of
+            // measuring one off the node's own drawn bbox. `None` for every
+            // other batch kind, matching `result.glyph_anchors`'s own
+            // producer-side default. Left in Cartesian pixel space even under
+            // `CoordPolar` (unlike `result.nodes`, which
+            // `apply_polar_node_transform` projects above) because polar +
+            // `BreakAxis` refuses at the render funnel before any remap runs
+            // (#230-8) — this sidecar is never read for a polar chart.
+            glyph_anchors: result.glyph_anchors,
             // Batch E Task 9: clip escape. `None` (the overwhelming majority
             // of layers) resolves to `true` — byte-stable, matching every
             // batch before this field existed. `mark_function(clip=False)`
@@ -2902,14 +2931,10 @@ fn remap_mark_batch_through_break(
             install_rebuilt_nodes(batch, rebuilt, warnings);
         }
         break_axis::BreakPlacement::MoveGlyph => {
-            for node in batch.nodes.iter_mut() {
-                remap.remap_glyph_node(node);
-            }
+            remap_glyph_batch(batch, remap, break_axis::BreakRemap::remap_glyph_node);
         }
         break_axis::BreakPlacement::MoveGlyphAndConnector => {
-            for node in batch.nodes.iter_mut() {
-                remap.remap_label_node(node);
-            }
+            remap_glyph_batch(batch, remap, break_axis::BreakRemap::remap_label_node);
         }
         // The two vertex models are 1→N like the clip: a stroke crossing a gap
         // becomes one sub-node per visible piece (#230-1), so they carry the
@@ -2924,6 +2949,60 @@ fn remap_mark_batch_through_break(
             let rebuilt = remap.split_segment_nodes(std::mem::take(&mut batch.nodes));
             install_rebuilt_nodes(batch, rebuilt, warnings);
         }
+    }
+}
+
+/// Re-place every node of a `MoveGlyph`/`MoveGlyphAndConnector` batch, pairing
+/// each with its exact data anchor from `MarkBatch::glyph_anchors` (#230-3)
+/// rather than a bbox measured off the node's own drawn geometry — the model
+/// that hid an asymmetric `TriangleUp` at a different position than a circle
+/// drawn at the same data value, and that read a `mark_text` node's `dx`/`dy`-
+/// shifted `(x, y)` as if it were the data position. 1:1, never 1→N, so no
+/// sidecar realignment is needed here (unlike [`install_rebuilt_nodes`]).
+///
+/// A batch whose sidecar length disagrees with its node count is a producer
+/// bug — every `MoveGlyph`/`MoveGlyphAndConnector` builder (`point.rs`,
+/// `tick.rs`, `text.rs`, `image.rs`, `label.rs`) populates one anchor per
+/// node it emits — so it is loud in debug (REFUSE MALFORMED, matching
+/// `remap_axis_tick_node`'s node-kind `debug_assert!`). Release falls back
+/// per-node to [`break_axis::BreakRemap::bbox_anchor_fallback`] (the
+/// pre-#230-3 model), which stays correct for every symmetric shape and
+/// degrades gracefully rather than panicking a render for a future
+/// unmigrated producer.
+///
+/// The check is count-based (`glyph_anchors.map_or(0, len) != nodes.len()`),
+/// not presence-based (`glyph_anchors.is_none()`): a *legitimately empty*
+/// `MoveGlyph`/`MoveGlyphAndConnector` batch — `MarkBuildResult::empty()`,
+/// zero nodes, `glyph_anchors: None` — is the ordinary, documented-tolerated
+/// shape a glyph builder returns for a row-nonempty layer whose own field
+/// read failed (e.g. `mark_label` on a Utf8 x column, `label.rs`'s
+/// `col_as_f64` error path). A presence-based check applied REFUSE MALFORMED
+/// to that non-malformed state and panicked every debug-built render of such
+/// a chart under any `BreakAxis` (quality-review cycle-3 S3; RED-proven by
+/// `mark_label_on_a_utf8_x_column_under_a_break_does_not_panic` and the two
+/// zero-node unit pins next to it, all of which panicked here pre-fix). `0
+/// == 0` passes the count check, so the empty case is unaffected, while a
+/// `None`/short sidecar on a NON-empty batch still trips it.
+fn remap_glyph_batch<'a>(
+    batch: &mut MarkBatch,
+    remap: &break_axis::BreakRemap<'a>,
+    place: impl Fn(&break_axis::BreakRemap<'a>, &mut ferrum_scene::SceneNode, (f64, f64)),
+) {
+    debug_assert_eq!(
+        batch.glyph_anchors.as_ref().map_or(0, Vec::len),
+        batch.nodes.len(),
+        "{:?} batch must carry one glyph_anchors entry per node (#230-3); got {:?} \
+         anchors for {} nodes",
+        batch.kind,
+        batch.glyph_anchors.as_ref().map(Vec::len),
+        batch.nodes.len(),
+    );
+    let anchors = batch.glyph_anchors.as_deref();
+    for (i, node) in batch.nodes.iter_mut().enumerate() {
+        let anchor = anchors
+            .and_then(|a| a.get(i).copied())
+            .unwrap_or_else(|| remap.bbox_anchor_fallback(node));
+        place(remap, node, anchor);
     }
 }
 
@@ -9017,6 +9096,7 @@ mod tests {
             packed_instances: None,
             y_slot: 0,
             polar_spans: None,
+            glyph_anchors: None,
             clip: true,
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
@@ -9073,6 +9153,7 @@ mod tests {
             packed_instances: None,
             y_slot: 0,
             polar_spans: None,
+            glyph_anchors: None,
             clip: true,
         };
         let mut warnings: Vec<RenderWarning> = Vec::new();
@@ -9084,6 +9165,515 @@ mod tests {
             "both clipped pieces point back at the row that produced them"
         );
         assert!(warnings.is_empty(), "no noise on a well-formed batch: {warnings:?}");
+    }
+
+    // ── #230-3: exact glyph anchors (wave-2 Task 10) ──────────────────────────
+    //
+    // Shared fixture: a real resolved y scale (domain (0,1000), explicit — so
+    // `resolve_padding_fraction` gives it zero padding — over a (0.0, 1000.0)
+    // pixel range) with one gap `[400, 600]` in DATA space and `break_size`
+    // 20. The break's own segment/pixel-direction arithmetic (a Y axis maps
+    // larger data to SMALLER pixels — see `BreakRemap::clip_extent_bands`'s
+    // doc) is never hand-derived below: every expectation is read back off
+    // `scale.pixel_range()` / `BreakRemap::coord()` themselves (the same
+    // public surface `scene_build`'s production break loop calls), so these
+    // tests hold regardless of which pixel direction the scale resolves to.
+
+    fn anchor_fixture_break(scale: &scale_resolve::ScaleKind) -> break_axis::BreakResult {
+        break_axis::apply_break_to_scale(
+            scale.data_domain().expect("test fixture: continuous y scale"),
+            &[[400.0, 600.0]],
+            scale.pixel_range(),
+            20.0,
+        )
+    }
+
+    fn anchor_fixture_remap<'a>(
+        scale: &scale_resolve::ScaleKind,
+        br: &'a break_axis::BreakResult,
+    ) -> break_axis::BreakRemap<'a> {
+        break_axis::BreakRemap::new(
+            "y",
+            scale.data_domain().expect("test fixture: continuous y scale"),
+            scale.pixel_range(),
+            br,
+        )
+    }
+
+    /// Build a one-row `Mark::Point` batch through the real production path
+    /// (`marks::point::build` + the production `MarkBatch` field mapping),
+    /// run it through the real `remap_mark_batch_through_break`, and hand
+    /// back its nodes alongside the moved anchor `BreakRemap::coord` itself
+    /// reports for this row's raw (unbroken) pixel — `None` when that pixel
+    /// reverse-maps into the gap — so the caller need not re-derive it.
+    fn remapped_point_nodes(shape: &str, y: f64) -> (Vec<SceneNode>, Option<f64>) {
+        use crate::render::draw::resolve_mark_style;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+        use std::sync::Arc;
+
+        let y_scale = ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: Some(vec![0.0, 1000.0]),
+                range: None, clamp: false, padding: None, scheme: None,
+                domain_param: None, reverse: false,
+            },
+            nice: false, zero: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(DataType::Quantitative), scale: Some(y_scale), ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(MarkKwargsSpec { shape: Some(shape.to_string()), size: Some(400.0), ..Default::default() }),
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowType::Float64, false),
+            Field::new("y", ArrowType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0])),
+            Arc::new(Float64Array::from(vec![y])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = crate::layout::PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = scale_resolve::resolve_scales(
+            &spec, &batch, (0.0, 1000.0), (0.0, 1000.0), &theme,
+        ).unwrap();
+        let raw_px = scales.y.to_pixel_f64(y).expect("y is finite and in-domain");
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = marks::point::build(&ctx);
+
+        let mut mb = MarkBatch {
+            kind: result.kind,
+            nodes: result.nodes,
+            data_indices: result.data_indices,
+            tooltips: result.tooltips,
+            hrefs: result.hrefs,
+            descriptions: result.descriptions,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: result.polar_spans,
+            glyph_anchors: result.glyph_anchors,
+            clip: true,
+        };
+        let br = anchor_fixture_break(&scales.y);
+        let remap = anchor_fixture_remap(&scales.y, &br);
+        let expected = remap.coord(raw_px);
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut mb, &remap, &mut warnings);
+        (mb.nodes, expected)
+    }
+
+    /// The minimum y-coordinate this node carries (Circle or the TriangleUp/
+    /// TriangleDown `Path` — the two node shapes these tests build).
+    fn node_min_y(node: &SceneNode) -> f64 {
+        match node {
+            SceneNode::Circle { cy, .. } => *cy,
+            SceneNode::Path { commands, .. } => commands
+                .iter()
+                .filter_map(|c| match c {
+                    ferrum_scene::PathCmd::MoveTo { y, .. } | ferrum_scene::PathCmd::LineTo { y, .. } => Some(*y),
+                    _ => None,
+                })
+                .fold(f64::INFINITY, f64::min),
+            other => panic!("unexpected node kind in this fixture: {other:?}"),
+        }
+    }
+
+    /// #230-3 measured repro (consolidated research map §3 item 3): a
+    /// `TriangleUp` glyph's asymmetric drawn geometry (vertices span
+    /// `cy - h .. cy + 0.5h`) made the pre-fix bbox-anchor model — the
+    /// midpoint of the node's own drawn extent — hide it at a y position
+    /// where a `Circle` at the EXACT SAME data value still renders. On this
+    /// y scale, larger data maps to a SMALLER pixel, and `TriangleUp`'s bbox
+    /// midpoint (`cy - h/4`) is a smaller pixel than its true anchor `cy` —
+    /// i.e. the bbox midpoint always reads as slightly MORE data than the
+    /// row's real value. `y = 399` sits just below the gap `[400, 600]`'s
+    /// LOWER edge (1.0 data unit outside it, so the row's true data
+    /// anchor is VISIBLE), but the old bbox-derived pixel reads back as data
+    /// just inside `[400, 600]` — pre-fix that hid the triangle while a
+    /// `Circle` at the same data value stayed visible (spec-reviewer
+    /// cycle-1 finding: `y = 600.5`, just above the gap's UPPER edge, moves
+    /// the wrong direction — bbox midpoint reads as even more data, i.e.
+    /// further from the gap — so it never reproduced the hide). RED-proven
+    /// by file-copy revert against the pre-#230-3 `remap_glyph_node`
+    /// (bbox-midpoint anchor, no `anchor` parameter).
+    #[test]
+    fn triangle_up_renders_wherever_a_circle_at_the_same_y_renders() {
+        let (circle_nodes, circle_expected) = remapped_point_nodes("circle", 399.0);
+        let (triangle_nodes, triangle_expected) = remapped_point_nodes("triangle-up", 399.0);
+        assert_eq!(circle_nodes.len(), 1, "one circle glyph for one row");
+        assert_eq!(triangle_nodes.len(), 1, "one triangle glyph for one row");
+
+        let circle_expected = circle_expected
+            .expect("sanity: data 399.0 is outside the [400,600] gap, so the circle must render");
+        assert_eq!(
+            triangle_expected,
+            Some(circle_expected),
+            "sanity: the circle and triangle share the SAME data anchor (both at y=399.0), \
+             so the scale/break fixture must report the same moved pixel for both"
+        );
+        let circle_y = node_min_y(&circle_nodes[0]);
+        assert!(
+            (circle_y - circle_expected).abs() < 1e-9,
+            "circle anchor must equal the scale's own moved pixel; got {circle_y}, want {circle_expected}"
+        );
+
+        let triangle_y = node_min_y(&triangle_nodes[0]);
+        assert!(
+            triangle_y > -1000.0,
+            "the triangle must render wherever the circle at the same data position does \
+             (#230-3); got a hidden node at y={triangle_y}"
+        );
+        // The triangle's own tip (`cy - h`) sits exactly `h` above its anchor,
+        // drawn size preserved, at the SAME moved anchor pixel as the circle
+        // — not a different, bbox-derived pixel (the pre-#230-3 bug).
+        let want_h = (400.0_f64 / std::f64::consts::PI).sqrt() * 1.4;
+        let want_tip = circle_expected - want_h;
+        assert!(
+            (triangle_y - want_tip).abs() < 1e-6,
+            "the triangle must move to the anchor's compressed position with its drawn \
+             height preserved; got tip y={triangle_y}, want {want_tip}"
+        );
+    }
+
+    /// The `mark_text` twin of the triangle repro: `dx`/`dy` are baked into
+    /// the node's own `x`/`y` at batch build (`text.rs`: `y: py + dy`),
+    /// where `dy` is a PIXEL offset, so the pre-#230-3 model measured/
+    /// hide-tested the OFFSET position instead of the row's true data
+    /// anchor. On this fixture's scale, pixel = 1000 - data, so an offset's
+    /// data equivalent is `y - dy`, not `y + dy`. `y = 605.0` is 5 data
+    /// units outside the gap's `[400,600]` upper edge (visible), but its
+    /// `dy = +10.0` offset position (`y - dy` = 595.0) is INSIDE the gap —
+    /// so the old code hid this label; `y = 450.0` is deep inside the gap
+    /// (hidden), but its `dy = +200.0` offset position (`y - dy` = 250.0)
+    /// is outside — so the old code wrongly rendered it. RED-proven by
+    /// file-copy revert against the pre-#230-3 `remap_glyph_node`.
+    fn remapped_text_node(y: f64, dx: f64, dy: f64) -> (SceneNode, Option<f64>, f64) {
+        use crate::render::draw::resolve_mark_style;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{ContinuousScaleCommon, DataType, Encoding, EncodingSpec, ScaleSpec};
+        use crate::spec::mark::Mark;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowType, Field, Schema};
+        use std::sync::Arc;
+
+        let y_scale = ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: Some(vec![0.0, 1000.0]),
+                range: None, clamp: false, padding: None, scheme: None,
+                domain_param: None, reverse: false,
+            },
+            nice: false, zero: false,
+        };
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(DataType::Quantitative), scale: Some(y_scale), ..Default::default() }),
+                ..Default::default()
+            },
+            mark_style: Some(MarkKwargsSpec { dx: Some(dx), dy: Some(dy), ..Default::default() }),
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowType::Float64, false),
+            Field::new("y", ArrowType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0])),
+            Arc::new(Float64Array::from(vec![y])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = crate::layout::PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = scale_resolve::resolve_scales(
+            &spec, &batch, (0.0, 1000.0), (0.0, 1000.0), &theme,
+        ).unwrap();
+        let raw_px = scales.y.to_pixel_f64(y).expect("y is finite and in-domain");
+        let raw_px_x = scales.x.to_pixel_f64(0.0).expect("x is finite and in-domain");
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Text).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = marks::text::build(&ctx).unwrap();
+
+        let mut mb = MarkBatch {
+            kind: result.kind,
+            nodes: result.nodes,
+            data_indices: result.data_indices,
+            tooltips: result.tooltips,
+            hrefs: result.hrefs,
+            descriptions: result.descriptions,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: result.polar_spans,
+            glyph_anchors: result.glyph_anchors,
+            clip: true,
+        };
+        let br = anchor_fixture_break(&scales.y);
+        let remap = anchor_fixture_remap(&scales.y, &br);
+        let expected = remap.coord(raw_px);
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut mb, &remap, &mut warnings);
+        assert_eq!(mb.nodes.len(), 1, "one text node for one row");
+        (mb.nodes.into_iter().next().unwrap(), expected, raw_px_x)
+    }
+
+
+    #[test]
+    fn text_dxdy_hides_and_moves_on_the_exact_data_position_not_the_offset() {
+        // `dy` is a PIXEL offset baked into the node's own `y` at batch
+        // build (`text.rs`: `y: py + dy`), on an axis where pixel = 1000 -
+        // data (larger data -> smaller pixel). So the offset position's
+        // data equivalent is `y - dy`, not `y + dy`.
+        //
+        // y=605.0 (visible, 5 data units outside the gap's [400,600] upper
+        // edge), dy=+10.0 -> offset pixel 395+10=405 -> offset data
+        // 1000-405=595 (INSIDE the gap). The exact-anchor model must still
+        // render it, moved+dy off the DATA position's own moved pixel; the
+        // pre-#230-3 bbox/offset-position model hid this label instead.
+        let (visible, expected, raw_px_x) = remapped_text_node(605.0, 5.0, 10.0);
+        let expected =
+            expected.expect("sanity: data 605.0 is outside the [400,600] gap, so this must render");
+        let SceneNode::Text { x, y, .. } = visible else { panic!("expected Text node") };
+        assert!(
+            y > -1000.0,
+            "hide-test must run on the DATA position (605.0), not the dx/dy-offset \
+             position (data 595.0, inside the gap); got y={y}"
+        );
+        assert!(
+            (y - (expected + 10.0)).abs() < 1e-9,
+            "dy must be preserved rigidly around the moved DATA anchor, not the \
+             (already-hidden) offset position; got y={y}, want {}",
+            expected + 10.0
+        );
+        assert!(
+            (x - (raw_px_x + 5.0)).abs() < 1e-9,
+            "dx is on the untouched x axis under a y-break, so it stays exact"
+        );
+
+        // y=450.0 (hidden, deep in the gap), dy=+200.0 -> offset pixel
+        // 550+200=750 -> offset data 1000-750=250 (outside the gap). The
+        // exact-anchor model must still hide it on its true DATA position,
+        // not the offset one.
+        let (hidden, expected_hidden, _) = remapped_text_node(450.0, 0.0, 200.0);
+        assert!(
+            expected_hidden.is_none(),
+            "sanity: data 450.0 is inside the [400,600] gap, so this must hide"
+        );
+        let SceneNode::Text { y, .. } = hidden else { panic!("expected Text node") };
+        assert!(
+            y < -1000.0,
+            "hide-test must run on the DATA position (450.0, inside the gap), not the \
+             dx/dy-offset position (data 250.0 — +200px on the inverted axis — outside it); \
+             got y={y}"
+        );
+    }
+
+    /// REFUSE MALFORMED (#230-3, spec §6's anchor rule, applied to glyph
+    /// batches): a `MoveGlyph`-kind batch reaching the break remap with a
+    /// NON-ZERO node count but no `glyph_anchors` sidecar (or a short one) is
+    /// a producer bug — every real `point.rs`/`tick.rs`/`text.rs`/
+    /// `image.rs`/`label.rs` builder populates it for every row it emits a
+    /// node for — so it fails loudly in debug rather than silently falling
+    /// back to a bbox-measured anchor (mirrors `remap_axis_tick_node`'s
+    /// node-kind `debug_assert!`). This is deliberately count-based
+    /// (`glyph_anchors.len() != nodes.len()`), not presence-based
+    /// (`glyph_anchors.is_none()`): a *legitimately empty* `MoveGlyph`/
+    /// `MoveGlyphAndConnector` batch (`MarkBuildResult::empty()`, zero nodes,
+    /// `glyph_anchors: None`) is the ordinary, tolerated shape one of these
+    /// builders returns when its own field read fails (a Utf8 x column under
+    /// `mark_label`, e.g.) — REFUSE MALFORMED must not fire on that
+    /// non-malformed state (quality-review cycle-3 S3; see the zero-node
+    /// pins below and `mark_label_on_a_utf8_x_column_under_a_break_does_not_panic`
+    /// for the reachable, previously-panicking repro).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "must carry one glyph_anchors entry per node")]
+    fn a_move_glyph_batch_with_a_short_glyph_anchors_vec_panics_in_debug() {
+        let br = anchor_fixture_break(&linear_scale([0.0, 1000.0], [0.0, 1000.0]));
+        let remap = anchor_fixture_remap(&linear_scale([0.0, 1000.0], [0.0, 1000.0]), &br);
+        let mut batch = MarkBatch {
+            kind: ferrum_scene::MarkBatchKind::Point,
+            nodes: vec![SceneNode::Circle { cx: 5.0, cy: 600.5, r: 3.0, style: FillStroke {
+                fill: None, stroke: None, stroke_width: 0.0, opacity: 1.0,
+                stroke_dash: None, stroke_opacity: 1.0, fill_opacity: 1.0, angle: 0.0,
+            } }],
+            data_indices: Some(vec![0]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            // A real producer bug: one node, but no anchor recorded for it
+            // (a short/missing sidecar) — this must still refuse loudly.
+            glyph_anchors: None,
+            clip: true,
+        };
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
+    }
+
+    /// The non-malformed twin of the panic test above: a `MoveGlyph` batch
+    /// with ZERO nodes and `glyph_anchors: None` — exactly the shape
+    /// `MarkBuildResult::empty()` (`draw.rs`) produces — must pass through
+    /// untouched, not panic. RED-proven: before the cycle-3 guard fix (count-
+    /// based rather than presence-based), this panicked on the SAME
+    /// `debug_assert!` as the malformed case above, because `None` fails
+    /// `is_some_and(...)` regardless of node count.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_zero_node_move_glyph_batch_with_no_glyph_anchors_does_not_panic() {
+        let br = anchor_fixture_break(&linear_scale([0.0, 1000.0], [0.0, 1000.0]));
+        let remap = anchor_fixture_remap(&linear_scale([0.0, 1000.0], [0.0, 1000.0]), &br);
+        let mut batch = MarkBatch {
+            kind: ferrum_scene::MarkBatchKind::Point,
+            nodes: vec![],
+            data_indices: Some(vec![]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            glyph_anchors: None,
+            clip: true,
+        };
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
+        assert!(batch.nodes.is_empty(), "an empty batch stays empty");
+        assert!(warnings.is_empty(), "an empty batch is not a malformed one — no warning");
+    }
+
+    /// The `MoveGlyphAndConnector` (label) twin of the pin above: a zero-node
+    /// `Label`-kind batch with `glyph_anchors: None` must also pass through
+    /// untouched. Same RED history as the `MoveGlyph` pin.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_zero_node_move_glyph_and_connector_batch_with_no_glyph_anchors_does_not_panic() {
+        let br = anchor_fixture_break(&linear_scale([0.0, 1000.0], [0.0, 1000.0]));
+        let remap = anchor_fixture_remap(&linear_scale([0.0, 1000.0], [0.0, 1000.0]), &br);
+        let mut batch = MarkBatch {
+            kind: ferrum_scene::MarkBatchKind::Label,
+            nodes: vec![],
+            data_indices: Some(vec![]),
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot: 0,
+            polar_spans: None,
+            glyph_anchors: None,
+            clip: true,
+        };
+        let mut warnings: Vec<RenderWarning> = Vec::new();
+        remap_mark_batch_through_break(&mut batch, &remap, &mut warnings);
+        assert!(batch.nodes.is_empty(), "an empty batch stays empty");
+        assert!(warnings.is_empty(), "an empty batch is not a malformed one — no warning");
+    }
+
+    /// End-to-end reachability pin (quality-review cycle-3 S3): `mark_label`
+    /// on a Utf8 x column takes `label.rs`'s `col_as_f64` failure path
+    /// (`label.rs:92-97`) and returns `MarkBuildResult::empty()` — zero
+    /// nodes, `glyph_anchors: None` — for a layer whose ROW count is still
+    /// nonzero, so `build_panel_mark_batches` pushes it as a real batch
+    /// (only zero-ROW layers are skipped, `scene_build.rs`'s layer loop).
+    /// The break remap loop then runs `BreakPlacement::for_kind(Label)` →
+    /// `MoveGlyphAndConnector` → `remap_glyph_batch` on it. Before the
+    /// cycle-3 guard fix this panicked the whole render for the
+    /// non-malformed, documented-tolerated case of a label whose x field
+    /// cannot be read as a number; it must now render (with no label nodes,
+    /// same as an unbroken chart would produce for this spec).
+    #[test]
+    fn mark_label_on_a_utf8_x_column_under_a_break_does_not_panic() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Label,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![1.0_f64, 2.0_f64])),
+            ],
+        )
+        .unwrap();
+
+        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[1.2, 1.8]])]);
+        let scene = try_build_scene_for_with_chart_config(&spec, &batch, &chart_config)
+            .expect("a mark_label chart with an unreadable x column must still render under a break, not panic");
+        let label_nodes: usize = scene
+            .panels
+            .iter()
+            .flat_map(|p| p.marks.iter())
+            .filter(|m| m.kind == ferrum_scene::MarkBatchKind::Label)
+            .map(|m| m.nodes.len())
+            .sum();
+        assert_eq!(label_nodes, 0, "the label batch legitimately produced no nodes (x is unreadable as a number)");
     }
 
     // ── Cross-axis chrome under a break (close-review cycle-2 N2) ───────────

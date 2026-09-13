@@ -253,6 +253,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: None,
         kind: MarkBatchKind::Polygon,
         nodes,
         data_indices: Some(data_indices),

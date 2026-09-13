@@ -1749,18 +1749,33 @@ impl<'a> BreakRemap<'a> {
 
     /// Re-place one fixed-size glyph — the [`BreakPlacement::MoveGlyph`] model.
     ///
-    /// The glyph translates by the distance its own anchor (the midpoint of
-    /// its extent along this axis) moves, so its drawn size and shape survive
-    /// the compression: a diamond stays a diamond, a square stays square, and
-    /// a `shape=` glyph behaves exactly like the default circle. An anchor
-    /// inside a gap hides the whole node at `BREAK_HIDDEN` rather than any
-    /// part of it, so a glyph straddling a gap edge cannot emit a spike, and
-    /// no glyph is ever dropped — glyph batches stay 1:1 with their rows, and
-    /// their `data_indices`/tooltip/key entries stay valid.
+    /// `anchor` is the EXACT data anchor the batch build recorded for this
+    /// node (`MarkBatch::glyph_anchors`, #230-3) — the scale-mapped position
+    /// this row placed, before any shape-specific drawn geometry (a point's
+    /// radius, a text label's `dx`/`dy`) was added on top of it. The glyph
+    /// translates by the distance that anchor moves under the break, so its
+    /// drawn size and shape survive the compression: a diamond stays a
+    /// diamond, a square stays square, a `shape=` glyph behaves exactly like
+    /// the default circle, and any drawn offset from the anchor (an
+    /// asymmetric `TriangleUp`/`TriangleDown`, a text `dx`/`dy`) translates
+    /// rigidly with it. An anchor inside a gap hides the whole node at
+    /// `BREAK_HIDDEN` rather than any part of it, so a glyph straddling a gap
+    /// edge cannot emit a spike, and no glyph is ever dropped — glyph
+    /// batches stay 1:1 with their rows, and their `data_indices`/tooltip/key
+    /// entries stay valid.
     ///
-    /// For a single-coordinate node (`Circle`, `Text`) the anchor *is* the
-    /// coordinate, so this reduces to the plain assignment those nodes always
-    /// had, bit for bit.
+    /// This replaces the pre-#230-3 model, which measured the anchor off the
+    /// node's own drawn bounding box (`(lo + hi) / 2.0` over
+    /// [`BreakRemap::along_extent`]): correct only for a shape whose geometry
+    /// is symmetric around its data position (true of `Circle`/`Square`/
+    /// `Diamond`/`Cross`/`VLine`/`HLine`, and of a single-coordinate node like
+    /// `Text` before `dx`/`dy` is baked in), but not of `TriangleUp`/
+    /// `TriangleDown` (whose bbox midpoint sits a quarter of the triangle's
+    /// height off the data anchor — measured: a `TriangleUp` hidden where a
+    /// circle at the same data position renders) or of a `mark_text` node
+    /// whose `x`/`y` already has `dx`/`dy` added (the offset position was
+    /// measured and reverse-mapped/hide-tested instead of the true data
+    /// position).
     ///
     /// A `Line` node reaching here is a glyph too — a tick's dash, including a
     /// rug's, whose 8px length is drawn size and not data — so it moves
@@ -1768,12 +1783,25 @@ impl<'a> BreakRemap<'a> {
     /// glyphs is `mark_label`'s, and that batch is routed to
     /// [`BreakRemap::remap_label_node`] by its kind, never by a node-shape
     /// test here.
-    pub fn remap_glyph_node(&self, node: &mut SceneNode) {
-        let Some((lo, hi)) = self.along_extent(node) else {
-            return;
-        };
-        let anchor = (lo + hi) / 2.0;
-        self.translate_on_anchor(node, anchor);
+    pub fn remap_glyph_node(&self, node: &mut SceneNode, anchor: (f64, f64)) {
+        let (along, _across) = self.split(anchor);
+        self.translate_on_anchor(node, along);
+    }
+
+    /// The pre-#230-3 anchor model: the midpoint of a node's own drawn extent
+    /// along this break's axis — kept as the release-mode fallback for a
+    /// `MoveGlyph`/`MoveGlyphAndConnector` node whose batch did not carry an
+    /// exact data anchor (a producer bug in debug — see the `debug_assert!`
+    /// at `remap_mark_batch_through_break`'s call site; every real mark
+    /// builder populates `MarkBatch::glyph_anchors`, so this path is
+    /// unreached in production). Returns a full `(x, y)` point (via
+    /// [`BreakRemap::join`]) so the caller can hand it to
+    /// [`BreakRemap::remap_glyph_node`]/[`BreakRemap::remap_label_node`]
+    /// exactly like a real anchor; the coordinate this break does not move is
+    /// never read back out of it.
+    pub(crate) fn bbox_anchor_fallback(&self, node: &mut SceneNode) -> (f64, f64) {
+        let along = self.along_extent(node).map(|(lo, hi)| (lo + hi) / 2.0).unwrap_or(0.0);
+        self.join(along, 0.0)
     }
 
     /// Re-place one node of a label batch — the
@@ -1793,10 +1821,16 @@ impl<'a> BreakRemap<'a> {
     /// axis to zero length (200 8px rug dashes → 200 zero-length ones on a
     /// `displot(rug=True)` under a break). What a node *means* is a property of
     /// the mark that emitted it, not of its shape.
-    pub fn remap_label_node(&self, node: &mut SceneNode) {
+    ///
+    /// `anchor` is the batch's recorded exact data anchor for this node
+    /// (#230-3), forwarded to [`BreakRemap::remap_glyph_node`] for the Text
+    /// species; the connector `Line` ignores it entirely — its own two ends
+    /// already ARE two data positions; `remap_node` reverse-maps them
+    /// directly.
+    pub fn remap_label_node(&self, node: &mut SceneNode, anchor: (f64, f64)) {
         match node {
             SceneNode::Line { .. } => self.remap_node(node),
-            _ => self.remap_glyph_node(node),
+            _ => self.remap_glyph_node(node, anchor),
         }
     }
 
@@ -3879,7 +3913,9 @@ mod tests {
             y2: 340.0,
             style: thin_stroke(),
         };
-        remap.remap_label_node(&mut leader);
+        // The connector `Line` branch ignores `anchor` entirely — it places
+        // both of its own ends directly — so this value is inert.
+        remap.remap_label_node(&mut leader, (10.0, 360.0));
         let SceneNode::Line { y1, y2, .. } = leader else { panic!() };
         assert_eq!(
             y1,
@@ -3908,7 +3944,9 @@ mod tests {
             y2: 392.0,
             style: thin_stroke(),
         };
-        remap.remap_glyph_node(&mut dash);
+        // The dash's exact data anchor: its two drawn ends are symmetric
+        // around their midpoint, so this equals the pre-#230-3 bbox anchor.
+        remap.remap_glyph_node(&mut dash, (10.0, 396.0));
         let SceneNode::Line { y1, y2, .. } = dash else { panic!() };
         assert!(
             ((y1 - y2).abs() - 8.0).abs() < 1e-9,
@@ -3927,7 +3965,7 @@ mod tests {
             y2: 392.0,
             style: thin_stroke(),
         };
-        remap.remap_label_node(&mut connector);
+        remap.remap_label_node(&mut connector, (10.0, 396.0));
         let SceneNode::Line { y1, y2, .. } = connector else { panic!() };
         assert!(
             ((y1 - y2).abs() - 8.0).abs() > 1.0,
@@ -3953,7 +3991,9 @@ mod tests {
             style: thin_stroke(),
         };
         let mut collapsed = dash.clone();
-        remap.remap_glyph_node(&mut dash);
+        // Exact data anchor: symmetric drawn ends, so it matches the
+        // pre-#230-3 bbox midpoint.
+        remap.remap_glyph_node(&mut dash, (10.0, 408.0));
         remap.remap_node(&mut collapsed);
         let SceneNode::Line { y1, y2, .. } = dash else { panic!() };
         assert!(
@@ -4000,7 +4040,9 @@ mod tests {
             style: fill_stroke(),
             corner_radius: 0.0,
         };
-        remap.remap_glyph_node(&mut square);
+        // The square's own exact data anchor: symmetric around its center,
+        // pixel 360 (data 100).
+        remap.remap_glyph_node(&mut square, (10.0, 360.0));
         let SceneNode::Rect { y, h, w, .. } = square else { panic!() };
         assert!((h - 6.0).abs() < 1e-9, "a moved glyph keeps its height; got {h}");
         assert!((w - 6.0).abs() < 1e-9);
@@ -4025,7 +4067,8 @@ mod tests {
             style: fill_stroke(),
             closed: true,
         };
-        remap.remap_glyph_node(&mut diamond);
+        // The diamond's own exact data anchor: symmetric, centered on data 500.
+        remap.remap_glyph_node(&mut diamond, (10.0, 200.0));
         let SceneNode::Path { commands, .. } = &diamond else { panic!() };
         let ys: Vec<f64> = commands
             .iter()
@@ -4057,9 +4100,76 @@ mod tests {
         for cy in [40.0_f64, 200.0, 360.0, 400.0] {
             let mut glyph = SceneNode::Circle { cx: 5.0, cy, r: 3.0, style: fill_stroke() };
             let mut plain = glyph.clone();
-            remap.remap_glyph_node(&mut glyph);
+            // A circle's own coordinate IS its exact data anchor.
+            remap.remap_glyph_node(&mut glyph, (5.0, cy));
             remap.remap_node(&mut plain);
             assert_eq!(glyph, plain, "glyph and plain remap must agree exactly for cy={cy}");
+        }
+    }
+
+    /// #230-3, all 8 `ShapeKind`s, exercised through the real shape-emission
+    /// path (`marks::point::emit_shape_nodes` — the same function
+    /// `marks::point::build` calls per row, not a hand-mirrored geometry).
+    ///
+    /// A shape whose drawn vertices are symmetric around its data position —
+    /// `Circle`/`Square`/`Diamond`/`Cross`/`VLine`/`HLine` — has an exact data
+    /// anchor equal to its own bbox midpoint, so remapping on either one must
+    /// be byte-identical: this is `#230-3`'s "unchanged" contract, and the
+    /// reason every symmetric-shape point-mark break golden (the slash/
+    /// zigzag/wave/bar/area goldens all use circles) stays byte-stable.
+    /// `TriangleUp`/`TriangleDown` are NOT symmetric (their bbox midpoint
+    /// sits `h/4` off the true anchor — the exact defect the measured repro
+    /// in `scene_build.rs`'s `triangle_up_renders_wherever_a_circle_at_the_\
+    /// same_y_renders` catches), so their two remaps must DIFFER.
+    #[test]
+    fn every_point_shape_kind_is_covered_by_the_exact_anchor_contract() {
+        use crate::render::marks::point::{emit_shape_nodes, ShapeStyle};
+        use crate::render::scale_resolve::ShapeKind;
+
+        let br = guide_break();
+        let remap = guide_remap(&br);
+        let style = || ShapeStyle {
+            fill: None, fill_cleared: false, stroke: None, stroke_cleared: false,
+            stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, fill_opacity: 1.0,
+            stroke_dash: None, angle: 0.0,
+        };
+        // Anchored at data 100 (pixel 360, per `guide_break`'s worked example).
+        let (cx, cy, r) = (10.0, 360.0, 5.0);
+
+        let remap_via_exact_anchor = |kind: ShapeKind| -> Vec<SceneNode> {
+            let mut nodes = emit_shape_nodes(kind, cx, cy, r, style());
+            for node in nodes.iter_mut() {
+                remap.remap_glyph_node(node, (cx, cy));
+            }
+            nodes
+        };
+        let remap_via_bbox_anchor = |kind: ShapeKind| -> Vec<SceneNode> {
+            let mut nodes = emit_shape_nodes(kind, cx, cy, r, style());
+            for node in nodes.iter_mut() {
+                let anchor = remap.bbox_anchor_fallback(node);
+                remap.remap_glyph_node(node, anchor);
+            }
+            nodes
+        };
+
+        for kind in [
+            ShapeKind::Circle, ShapeKind::Square, ShapeKind::Diamond,
+            ShapeKind::Cross, ShapeKind::VLine, ShapeKind::HLine,
+        ] {
+            assert_eq!(
+                remap_via_exact_anchor(kind),
+                remap_via_bbox_anchor(kind),
+                "{kind:?}: a symmetric shape's exact-anchor remap must be byte-identical \
+                 to its (bbox-midpoint) pre-#230-3 remap"
+            );
+        }
+        for kind in [ShapeKind::TriangleUp, ShapeKind::TriangleDown] {
+            assert_ne!(
+                remap_via_exact_anchor(kind),
+                remap_via_bbox_anchor(kind),
+                "{kind:?}: an asymmetric shape's exact-anchor remap must DIFFER from its \
+                 bbox-midpoint remap — this asymmetry is #230-3's bug"
+            );
         }
     }
 

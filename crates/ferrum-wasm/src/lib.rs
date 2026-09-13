@@ -1196,6 +1196,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,

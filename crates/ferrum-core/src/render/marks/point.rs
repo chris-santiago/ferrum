@@ -320,6 +320,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // nodes are mapped to the SAME source row i, so data_indices carries 2 copies
     // of i — one per emitted node — keeping the alignment invariant.
     let mut acc = MarkNodes::with_capacity(n);
+    // #230-3: one exact `(cx, cy)` data anchor per emitted node — see the
+    // `MarkBatch::glyph_anchors` doc for why a break's glyph remap needs this
+    // instead of measuring a bbox off the shape's own drawn geometry.
+    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(n);
 
     for i in 0..n {
         // Resolve x-pixel.
@@ -472,6 +476,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // push_many maps EVERY emitted node to source row i. For single-node shapes
         // this is a single push; for Cross it pushes 2 nodes both tagged with row i.
         // This keeps data_indices[k] == source-row-of-nodes[k] for all k.
+        //
+        // #230-3: `(cx, cy)` — the scale-mapped position BEFORE `emit_shape_nodes`
+        // drew this row's shape geometry around it — is this row's exact glyph
+        // anchor. Repeated once per emitted node (2× for `Cross`, matching
+        // `push_many`'s own row-repeat) so `glyph_anchors` stays aligned to nodes,
+        // not rows, exactly like `data_indices`.
+        anchors.extend(std::iter::repeat_n((cx, cy), shape_nodes.len()));
         acc.push_many(shape_nodes, i);
     }
 
@@ -481,6 +492,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: Some(anchors),
         kind: MarkBatchKind::Point,
         nodes,
         data_indices: Some(data_indices),

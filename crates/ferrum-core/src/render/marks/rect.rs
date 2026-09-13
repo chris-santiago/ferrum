@@ -174,6 +174,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBu
     Ok(MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: None,
         kind: MarkBatchKind::Rect,
         nodes,
         data_indices: Some(data_indices),
@@ -446,6 +447,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildRe
 
     Ok(MarkBuildResult {
         polar_spans: None,
+        glyph_anchors: None,
         kind: MarkBatchKind::Rect,
         nodes,
         data_indices: Some(data_indices),
@@ -658,6 +660,7 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
     Ok(MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: None,
         kind: MarkBatchKind::Rect,
         nodes,
         data_indices: Some(data_indices),

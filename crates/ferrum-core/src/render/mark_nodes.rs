@@ -34,7 +34,7 @@
 //! }
 //! let (nodes, data_indices) = acc.finalize();
 //! let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
-//! MarkBuildResult { kind, nodes, data_indices: Some(data_indices), tooltips, hrefs, descriptions, polar_spans: None, empty_reason: None }
+//! MarkBuildResult { kind, nodes, data_indices: Some(data_indices), tooltips, hrefs, descriptions, polar_spans: None, glyph_anchors: None, empty_reason: None }
 //! ```
 
 use ferrum_scene::SceneNode;
@@ -128,11 +128,12 @@ impl MarkNodes {
 /// The node count of a built batch alongside the length of each per-node
 /// channel it carries — the input to the alignment guard (spec §7).
 ///
-/// The six channels — tooltips, hrefs, descriptions, data_indices, keys, and
-/// polar_spans — are populated **independently**. A chart with href but no
-/// tooltip produces `tooltips == None` while `hrefs == Some(full_row_vec)`, so
-/// each channel carries its own `Option<usize>` and is checked on its own;
-/// checking only `tooltips` would leave that case silent.
+/// The seven channels — tooltips, hrefs, descriptions, data_indices, keys,
+/// polar_spans, and glyph_anchors — are populated **independently**. A chart
+/// with href but no tooltip produces `tooltips == None` while
+/// `hrefs == Some(full_row_vec)`, so each channel carries its own
+/// `Option<usize>` and is checked on its own; checking only `tooltips` would
+/// leave that case silent.
 ///
 /// Named fields, not positional arguments: the guard previously took six
 /// adjacent same-typed `Option<usize>` parameters, and every call site was a
@@ -162,6 +163,13 @@ pub(crate) struct NodeChannelLengths {
     /// tooltip, selection, and emitted `data_index` all report a different
     /// row's data, silently.
     pub(crate) polar_spans: Option<usize>,
+    /// One `(x, y)` exact data anchor per emitted node (wave-2 Task 10 /
+    /// #230-3), populated only by the five glyph-placement builders
+    /// (`point.rs`, `tick.rs`, `text.rs`, `image.rs`, `label.rs`). A
+    /// misaligned `glyph_anchors` pairs a break's glyph remap with a
+    /// different row's anchor than the node it moves, silently — the same
+    /// hazard class `polar_spans` guards against for hit-testing.
+    pub(crate) glyph_anchors: Option<usize>,
 }
 
 impl NodeChannelLengths {
@@ -180,11 +188,12 @@ impl NodeChannelLengths {
             data_indices: result.data_indices.as_ref().map(Vec::len),
             keys: keys.map(<[String]>::len),
             polar_spans: result.polar_spans.as_ref().map(Vec::len),
+            glyph_anchors: result.glyph_anchors.as_ref().map(Vec::len),
         }
     }
 
-    /// The six channels paired with the name the guard reports, in check order.
-    fn channels(&self) -> [(&'static str, Option<usize>); 6] {
+    /// The seven channels paired with the name the guard reports, in check order.
+    fn channels(&self) -> [(&'static str, Option<usize>); 7] {
         [
             ("tooltip", self.tooltips),
             ("href", self.hrefs),
@@ -192,6 +201,7 @@ impl NodeChannelLengths {
             ("data_indices", self.data_indices),
             ("keys", self.keys),
             ("polar_spans", self.polar_spans),
+            ("glyph_anchors", self.glyph_anchors),
         ]
     }
 }
@@ -200,7 +210,7 @@ impl NodeChannelLengths {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChannelMisalignment {
     /// One of `"tooltip"`, `"href"`, `"description"`, `"data_indices"`,
-    /// `"keys"`, `"polar_spans"`.
+    /// `"keys"`, `"polar_spans"`, `"glyph_anchors"`.
     pub(crate) channel: &'static str,
     pub(crate) nodes: usize,
     pub(crate) channel_len: usize,
@@ -399,7 +409,7 @@ mod tests {
     }
 
     /// The predicate accepts aligned node/channel lengths and the no-channel
-    /// case, and rejects a deliberate mismatch on each of the six independent
+    /// case, and rejects a deliberate mismatch on each of the seven independent
     /// channels — including the shapes where the channels BEFORE the broken one
     /// are absent (`tooltips == None` used to short-circuit the whole guard).
     #[test]
@@ -410,7 +420,7 @@ mod tests {
             ..lengths(3)
         })
         .is_ok());
-        // All six channels aligned.
+        // All seven channels aligned.
         assert!(check_nodes_metadata_aligned(NodeChannelLengths {
             nodes: 3,
             tooltips: Some(3),
@@ -419,6 +429,7 @@ mod tests {
             data_indices: Some(3),
             keys: Some(3),
             polar_spans: Some(3),
+            glyph_anchors: Some(3),
         })
         .is_ok());
         // No channels present at all → nothing to check.
@@ -426,15 +437,16 @@ mod tests {
         assert!(check_nodes_metadata_aligned(lengths(0)).is_ok());
 
         // One misaligned channel at a time, every other channel absent — the
-        // href/description/data_indices/keys/polar_spans rows are the ones the
-        // old single-channel guard could not see.
-        let solo: [(&str, fn(usize) -> NodeChannelLengths); 6] = [
+        // href/description/data_indices/keys/polar_spans/glyph_anchors rows are
+        // the ones the old single-channel guard could not see.
+        let solo: [(&str, fn(usize) -> NodeChannelLengths); 7] = [
             ("tooltip", |n| NodeChannelLengths { tooltips: Some(n), ..lengths(3) }),
             ("href", |n| NodeChannelLengths { hrefs: Some(n), ..lengths(3) }),
             ("description", |n| NodeChannelLengths { descriptions: Some(n), ..lengths(3) }),
             ("data_indices", |n| NodeChannelLengths { data_indices: Some(n), ..lengths(3) }),
             ("keys", |n| NodeChannelLengths { keys: Some(n), ..lengths(3) }),
             ("polar_spans", |n| NodeChannelLengths { polar_spans: Some(n), ..lengths(3) }),
+            ("glyph_anchors", |n| NodeChannelLengths { glyph_anchors: Some(n), ..lengths(3) }),
         ];
         for (channel, build) in solo {
             assert_eq!(
@@ -468,6 +480,7 @@ mod tests {
                 data_indices: Some(5),
                 keys: None,
                 polar_spans: None,
+                glyph_anchors: None,
             }),
             Err(misaligned("data_indices", 3, 5))
         );
@@ -506,6 +519,7 @@ mod tests {
                 data_indices: Some(3),
                 keys: Some(3),
                 polar_spans: Some(3),
+                glyph_anchors: None,
             },
             "an Arc batch carries data_indices + polar_spans; tooltip/href/description are absent"
         );
@@ -554,6 +568,20 @@ mod tests {
         });
     }
 
+    /// The `glyph_anchors` twin of the `polar_spans` guard above (#230-3,
+    /// wave-2 Task 10): a misaligned anchor sidecar pairs a break's glyph
+    /// remap with a different row's anchor than the node it moves, silently.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "must equal glyph_anchors length")]
+    fn debug_assert_guard_trips_on_glyph_anchors_misalignment() {
+        // 3 point glyphs but only 1 glyph_anchors entry.
+        debug_assert_nodes_metadata_aligned(NodeChannelLengths {
+            glyph_anchors: Some(1),
+            ..lengths(3)
+        });
+    }
+
     // ── Packed-path keys guard (spec §4.3 / GH #93) ─────────────────────────
 
     /// The debug assertion trips when a packed batch's keys vector desyncs
@@ -580,7 +608,7 @@ mod tests {
     /// aligned or when no channels are present (the no-metadata batch case).
     #[test]
     fn debug_assert_guard_silent_when_aligned_or_no_metadata() {
-        // All six aligned.
+        // All seven aligned.
         debug_assert_nodes_metadata_aligned(NodeChannelLengths {
             nodes: 4,
             tooltips: Some(4),
@@ -589,15 +617,17 @@ mod tests {
             data_indices: Some(4),
             keys: Some(4),
             polar_spans: Some(4),
+            glyph_anchors: Some(4),
         });
         // Each channel present alone, aligned.
-        let solo: [fn(usize) -> NodeChannelLengths; 6] = [
+        let solo: [fn(usize) -> NodeChannelLengths; 7] = [
             |n| NodeChannelLengths { tooltips: Some(n), ..lengths(n) },
             |n| NodeChannelLengths { hrefs: Some(n), ..lengths(n) },
             |n| NodeChannelLengths { descriptions: Some(n), ..lengths(n) },
             |n| NodeChannelLengths { data_indices: Some(n), ..lengths(n) },
             |n| NodeChannelLengths { keys: Some(n), ..lengths(n) },
             |n| NodeChannelLengths { polar_spans: Some(n), ..lengths(n) },
+            |n| NodeChannelLengths { glyph_anchors: Some(n), ..lengths(n) },
         ];
         for build in solo {
             debug_assert_nodes_metadata_aligned(build(4));

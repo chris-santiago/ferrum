@@ -876,6 +876,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![ferrum_scene::SceneNode::Circle {
                     cx: 100.0,
@@ -1622,6 +1623,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![ferrum_scene::SceneNode::Circle {
                     cx: 100.0,
@@ -1765,6 +1767,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     ferrum_scene::SceneNode::Circle {
@@ -1936,6 +1939,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     ferrum_scene::SceneNode::Circle {

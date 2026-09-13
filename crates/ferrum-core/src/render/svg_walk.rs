@@ -549,6 +549,7 @@ mod tests {
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     polar_spans: None,
+                    glyph_anchors: None,
                     clip: true,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
@@ -828,6 +829,7 @@ mod tests {
         }];
         scene.panels[0].marks.push(MarkBatch {
             polar_spans: None,
+            glyph_anchors: None,
             clip: false,
             kind: MarkBatchKind::Rect,
             nodes: vec![SceneNode::Rect {
@@ -860,6 +862,7 @@ mod tests {
         });
         scene.panels[0].marks.push(MarkBatch {
             polar_spans: None,
+            glyph_anchors: None,
             clip: true,
             kind: MarkBatchKind::Text,
             nodes: vec![SceneNode::Text {

@@ -186,6 +186,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     Ok(MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: None,
         kind: MarkBatchKind::Segment,
         nodes,
         data_indices: Some(data_indices),

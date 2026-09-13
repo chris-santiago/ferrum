@@ -661,6 +661,7 @@ mod tests {
         MarkBatch {
             clip: true,
             polar_spans: None,
+            glyph_anchors: None,
             kind: MarkBatchKind::Point,
             nodes,
             data_indices,
@@ -680,6 +681,7 @@ mod tests {
         MarkBatch {
             clip: true,
             polar_spans: None,
+            glyph_anchors: None,
             kind: MarkBatchKind::Bar,
             nodes,
             data_indices,
@@ -699,6 +701,7 @@ mod tests {
         MarkBatch {
             clip: true,
             polar_spans: None,
+            glyph_anchors: None,
             kind: MarkBatchKind::Rect,
             nodes,
             data_indices,
@@ -1192,6 +1195,7 @@ mod tests {
         let line_batch = MarkBatch {
             clip: true,
             polar_spans: None,
+            glyph_anchors: None,
             kind: MarkBatchKind::Line,
             nodes: vec![SceneNode::Line {
                 x1: 0.0,

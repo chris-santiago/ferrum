@@ -123,6 +123,7 @@ mod tests {
                 marks: vec![MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![
                         SceneNode::Circle {
@@ -505,6 +506,7 @@ mod tests {
             packed_instances: None,
             y_slot: 0,
             polar_spans: None,
+            glyph_anchors: None,
             clip,
         }
     }

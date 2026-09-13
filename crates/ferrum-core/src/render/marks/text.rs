@@ -171,6 +171,12 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     // Accumulate nodes and source-row indices in lockstep so metadata is
     // aligned to kept nodes only (#6 defect class fix).
     let mut acc = MarkNodes::with_capacity(n_x);
+    // #230-3: one exact `(px, py)` data anchor per emitted node — the
+    // scale-mapped position BEFORE `dx`/`dy` is baked into the node's own
+    // `x`/`y` below. A break's glyph remap needs this anchor, not the node's
+    // own (already-offset) coordinate, so `dx`/`dy` translates rigidly with
+    // the glyph instead of being read back as if it were the data position.
+    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(n_x);
 
     for i in 0..n_x {
         let px = if let Some(xs) = &xs_f {
@@ -286,6 +292,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                 row_opacity,
             ),
         }, i);
+        anchors.push((px, py));
     }
 
     let (nodes, data_indices) = acc.finalize();
@@ -294,6 +301,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     Ok(MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: Some(anchors),
         kind: MarkBatchKind::Text,
         nodes,
         data_indices: Some(data_indices),

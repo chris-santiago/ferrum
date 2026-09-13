@@ -176,6 +176,45 @@ pub struct MarkBatch {
     /// guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polar_spans: Option<Vec<(f64, f64)>>,
+    /// Per-node `(x, y)` exact data anchor — the scale-mapped pixel position
+    /// this node's row placed, before any shape-specific drawn geometry
+    /// (a point's radius, a text label's `dx`/`dy`, a tick dash's length) was
+    /// added on top of it. Populated only by the five `BreakPlacement::
+    /// MoveGlyph`/`MoveGlyphAndConnector` builders — `point.rs`, `tick.rs`,
+    /// `text.rs`, `image.rs`, `label.rs` — aligned by node index like
+    /// `tooltips`/`hrefs`/`polar_spans` (one entry per emitted node, so a
+    /// multi-node shape like `Cross` or a `mark_label` leader-line pair
+    /// repeats the same anchor for every node its row produced). `None` for
+    /// every other batch kind and for any glyph batch built before this
+    /// field existed — the byte-stable default.
+    ///
+    /// Exists because a break's glyph remap
+    /// (`break_axis::BreakRemap::remap_glyph_node`, #230-3) used to measure
+    /// this anchor off the node's OWN drawn bounding box, which is only
+    /// correct for a shape whose geometry is symmetric around its data
+    /// position — true of a circle, square, or diamond, but not of
+    /// `TriangleUp`/`TriangleDown` (their bbox midpoint sits off the data
+    /// anchor by a quarter of the triangle's height) or of `mark_text`'s
+    /// `dx`/`dy`-shifted `(x, y)` (the node's own coordinate already has the
+    /// offset baked in, so measuring it treats the offset position as the
+    /// anchor). Carrying the true anchor alongside the node closes both: the
+    /// glyph moves/hides on the position its row actually placed it at, and
+    /// any drawn offset from that position (an asymmetric shape, a text
+    /// `dx`/`dy`) translates rigidly with it.
+    ///
+    /// Build-time-only: `scene_build.rs` clears every batch's `glyph_anchors`
+    /// back to `None` right after the per-panel break-remap pass runs
+    /// (whether or not that panel actually had a break to fold through), so
+    /// this field is always `None`/absent by the time a `SceneGraph` is
+    /// serialized to SVG or to the interactive/WASM JSON payload — there is
+    /// no downstream consumer of it on the wire (unlike `polar_spans`
+    /// above, which the interactive hit-test reader needs at serve time).
+    /// It lives on this shared wire type rather than a build-local pairing
+    /// because `MarkBatch` is already the one struct every mark kind
+    /// constructs; a design review may still prefer hoisting it into a
+    /// build-only side channel instead (quality-review cycle-3 advisory).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph_anchors: Option<Vec<(f64, f64)>>,
     /// Whether this batch is clipped to the panel's plot area (batch E Task
     /// 9, `mark_function(clip=False)`). `true` (the byte-stable default,
     /// skipped from JSON so every existing batch is untouched) means the

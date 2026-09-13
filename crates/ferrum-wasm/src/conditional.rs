@@ -622,6 +622,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx,
@@ -753,6 +754,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 50.0,
@@ -932,6 +934,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1114,6 +1117,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1260,6 +1264,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1449,6 +1454,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -1812,6 +1818,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 50.0,
@@ -1930,6 +1937,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Circle {
                     cx: 50.0,
@@ -2303,6 +2311,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![SceneNode::Rect {
                     x: 90.0,
@@ -2417,6 +2426,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![
                     SceneNode::Circle {
@@ -2548,6 +2558,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,
@@ -2714,6 +2725,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Bar,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,
@@ -2868,6 +2880,7 @@ mod tests {
                 MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -2885,6 +2898,7 @@ mod tests {
                 MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 200.0,
@@ -3073,6 +3087,7 @@ mod tests {
                 MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 100.0,
@@ -3095,6 +3110,7 @@ mod tests {
                 MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![], // empty — packed
                     data_indices: None,
@@ -3261,6 +3277,7 @@ mod tests {
                 MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
                         cx: 400.0,
@@ -3283,6 +3300,7 @@ mod tests {
                 MarkBatch {
                     clip: true,
                     polar_spans: None,
+                    glyph_anchors: None,
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
                     data_indices: None,
@@ -3426,6 +3444,7 @@ mod tests {
             marks: vec![MarkBatch {
                 clip: true,
                 polar_spans: None,
+                glyph_anchors: None,
                 kind: MarkBatchKind::Point,
                 nodes: vec![], // empty — packed batch
                 data_indices: None,

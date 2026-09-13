@@ -114,6 +114,14 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     let default_h = ctx.mark_style.misc.height.unwrap_or(32.0);
 
     let mut acc = MarkNodes::with_capacity(n);
+    // #230-3: one exact `(px, py)` data anchor per tile — the scale-mapped
+    // center position BEFORE the tile's own width/height is subtracted to
+    // find its top-left corner below. `for_each_along` treats `Image` nodes
+    // as a no-op (see its doc), so this anchor has no observable effect on
+    // today's break rendering; it exists so an `Image` batch satisfies the
+    // same `MoveGlyph` contract every other glyph batch does, rather than
+    // being a silent exception a debug build has to special-case.
+    let mut anchors: Vec<(f64, f64)> = Vec::with_capacity(n);
 
     for i in 0..n {
         // Skip nulls in required fields.
@@ -164,6 +172,7 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
             h: tile_h,
             data: ImageData::Url { url: url_val.to_string() },
         }, i);
+        anchors.push((px, py));
     }
 
     let (nodes, data_indices) = acc.finalize();
@@ -173,6 +182,7 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        glyph_anchors: Some(anchors),
         kind: MarkBatchKind::Image,
         nodes,
         data_indices: Some(data_indices),
@@ -322,6 +332,23 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     MarkBuildResult {
         empty_reason: None,
         polar_spans: None,
+        // #230-3: unlike the URL-tile path above (whose anchor IS the true
+        // center `(px, py)`), this value is NOT a correct data-position
+        // anchor — it is the raster extent's drawn top-left corner
+        // (`svg_x, svg_y_top`), the same value `SceneNode::Image.x/y` gets.
+        // A raster covers a whole data rect, not a point, so there is no
+        // single "position" to anchor on the way a glyph has one; the
+        // honest exact value would be the extent's own center,
+        // `((svg_x + svg_x_far) / 2.0, (svg_y_top + svg_y_bot) / 2.0)`. This
+        // is populated only so an `Image` batch satisfies the `MoveGlyph`
+        // contract's shape (one anchor per node) rather than being a silent
+        // exception a debug build has to special-case; it is inert today
+        // because `for_each_along` no-ops `Image` nodes unconditionally
+        // (quality-review cycle-3 note — reviewed, not required to fix,
+        // since nothing reads it). If that no-op is ever lifted for `Image`,
+        // this field must be corrected to the extent's center FIRST, or a
+        // raster tile will move by half its own width/height under a break.
+        glyph_anchors: Some(vec![(svg_x, svg_y_top)]),
         kind: MarkBatchKind::Image,
         nodes: vec![SceneNode::Image {
             x: svg_x,

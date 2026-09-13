@@ -631,6 +631,7 @@ mod tests {
                 grid: vec![],
                 marks: vec![MarkBatch {
                     polar_spans: None,
+                    glyph_anchors: None,
                     clip: true,
                     kind,
                     nodes,
