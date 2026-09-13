@@ -606,3 +606,182 @@ def test_pdp_chart_compare_multiclass_keeps_independent_x_under_feature_times_cl
     assert any(95 < t < 115 for t in ticks), "f1 x-range missing"
     gap_ticks = [t for t in ticks if 30 < t < 90]
     assert not gap_ticks, f"x axes collapsed onto a shared range; gap ticks present: {gap_ticks}"
+
+
+# ---------------------------------------------------------------------------
+# #213 — discrimination_threshold_chart(compare=) renders small multiples
+#
+# The classification family otherwise overlays compared models by colour, but
+# this chart's colour channel is already spent on the metric legend. Before
+# this fix the builder's ``unpivot`` silently dropped the ``model`` column
+# (it is in neither ``index=`` nor the resolved metric columns), so both
+# models' sweeps stacked into one panel as four interleaved zig-zag polylines
+# annotated with a single pooled F1 optimum -- the rival's whenever the rival
+# won, contradicting DiscriminationThresholdVisualizer's own repr.
+# ---------------------------------------------------------------------------
+
+
+_N_THRESHOLDS = 20
+_N_METRICS = 4  # precision, recall, f1, queue_rate
+
+
+def _threshold_compare_models():
+    """The pinned binary logistic fixture plus a genuinely different rival.
+
+    ``GaussianNB`` is a closed-form MLE fit (no solver, no seed), so it is
+    byte-stable within a pinned sklearn version, and its probability
+    calibration differs enough from the logistic fixture's that the two
+    models' F1 optima land on different thresholds AND different F1 values
+    (measured: base 0.918 @ t=0.42, alt 0.886 @ t=0.53 at
+    ``n_thresholds=20``). Both halves of the pooled-argmax bug are therefore
+    observable: a pooled optimum could only report one of the two pairs.
+    """
+    from sklearn.naive_bayes import GaussianNB
+
+    X, y, base = _binary_setup()
+    alt = GaussianNB().fit(X.to_numpy(), y.to_numpy())
+    return X, y, base, alt
+
+
+def _optimum_texts(chart) -> list[str]:
+    """Every ``max F1 = ... @ t=...`` annotation in a chart's rendered SVG."""
+    import re
+
+    return re.findall(r"max F1 = [0-9.]+ @ t=[0-9.]+", chart.to_svg())
+
+
+def _solo_optimum(model, X, y) -> tuple[float, float]:
+    """The (threshold, f1) F1-optimum of one model's own solo sweep."""
+    sweep = ferrum.ModelSource(model, X, y).discrimination_threshold(n_thresholds=_N_THRESHOLDS)
+    idx = sweep["f1"].arg_max()
+    return float(sweep["threshold"][idx]), float(sweep["f1"][idx])
+
+
+def test_compare_discrimination_threshold_renders_small_multiples():
+    """One titled panel per model, not one pooled panel."""
+    from ferrum.composition import ConcatChart
+    from ferrum.title import Title
+
+    X, y, base, alt = _threshold_compare_models()
+    result = ferrum.discrimination_threshold_chart(
+        base, X, y, n_thresholds=_N_THRESHOLDS, compare={"alt": alt}
+    )
+
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    for panel, name in zip(result.charts, ["base", "alt"]):
+        assert isinstance(panel._title, Title)
+        assert panel._title.text == name
+    assert "<svg" in result.to_svg()
+
+
+def test_compare_discrimination_threshold_panel_holds_one_sweep_each():
+    """Each panel's frame carries exactly one model's sweep.
+
+    The pooled render's defining symptom was ``2 * n_thresholds`` rows per
+    metric in a single frame with no column distinguishing them, which the
+    line mark drew as a zig-zag traversing x in [0, 1] twice.
+    """
+    X, y, base, alt = _threshold_compare_models()
+    result = ferrum.discrimination_threshold_chart(
+        base, X, y, n_thresholds=_N_THRESHOLDS, compare={"alt": alt}
+    )
+
+    for panel in result.charts:
+        assert panel._data.height == _N_THRESHOLDS * _N_METRICS
+        # One row per (threshold, metric) -- no stacked duplicate thresholds.
+        assert panel._data.select(["threshold", "metric"]).n_unique() == panel._data.height
+
+
+def test_compare_discrimination_threshold_panels_carry_their_own_optimum():
+    """Each panel annotates its OWN model's F1 optimum, not a pooled one."""
+    X, y, base, alt = _threshold_compare_models()
+    result = ferrum.discrimination_threshold_chart(
+        base, X, y, n_thresholds=_N_THRESHOLDS, compare={"alt": alt}
+    )
+
+    base_t, base_f1 = _solo_optimum(base, X, y)
+    alt_t, alt_f1 = _solo_optimum(alt, X, y)
+    # Precondition: the two models genuinely disagree, so a pooled optimum
+    # could not satisfy both assertions below.
+    assert (base_t, base_f1) != (alt_t, alt_f1)
+
+    base_panel, alt_panel = result.charts
+    assert _optimum_texts(base_panel) == [f"max F1 = {base_f1:.3f} @ t={base_t:.2f}"]
+    assert _optimum_texts(alt_panel) == [f"max F1 = {alt_f1:.3f} @ t={alt_t:.2f}"]
+
+
+def test_compare_discrimination_threshold_threshold_line_is_per_panel():
+    """``threshold_line=True`` draws each panel's own optimum rule.
+
+    ``_threshold_best`` rides the same per-model sweep as ``_optimum_x``, so
+    the sentinel siblings cannot disagree about which model a panel describes.
+    """
+    X, y, base, alt = _threshold_compare_models()
+    result = ferrum.discrimination_threshold_chart(
+        base, X, y, n_thresholds=_N_THRESHOLDS, threshold_line=True, compare={"alt": alt}
+    )
+
+    base_t, _ = _solo_optimum(base, X, y)
+    alt_t, _ = _solo_optimum(alt, X, y)
+    base_panel, alt_panel = result.charts
+    assert base_panel._data["_threshold_best"].drop_nulls().to_list() == [base_t]
+    assert alt_panel._data["_threshold_best"].drop_nulls().to_list() == [alt_t]
+
+
+def test_compare_discrimination_threshold_error_names_the_failing_model():
+    """A per-model builder failure re-raises prefixed with that model's name.
+
+    The multiclass fixture is a legal estimator that this binary-only
+    diagnostic refuses; the base panel builds fine, so the prefix is the only
+    thing identifying which compared model brought the request down.
+    """
+    X, y, base = _binary_setup()
+    multiclass = load_fixture("multiclass_logistic")
+
+    with pytest.raises(ValueError, match=r"compare=\{'alt': \.\.\.\}: .*binary-classifier only"):
+        ferrum.discrimination_threshold_chart(
+            base, X, y, n_thresholds=_N_THRESHOLDS, compare={"alt": multiclass}
+        )
+
+
+def test_discrimination_threshold_visualizer_compare_render_agrees_with_repr():
+    """The visualizer's headline metrics and its rendered chart agree.
+
+    ``_metrics``/``__repr__``/``.score()`` have described the base model since
+    batch G T9 (``_base_model_rows``), but ``_build_chart`` forwarded the
+    unfiltered compared source to the pooled builder, so the rendered
+    annotation could name the rival while the repr named the base -- the
+    "byte-identical between chart and visualizer render" half of #213. The
+    base panel now annotates exactly the pair the repr prints.
+    """
+    from ferrum.composition import ConcatChart
+
+    X, y, base, alt = _threshold_compare_models()
+    viz = ferrum.DiscriminationThresholdVisualizer(
+        base, n_thresholds=_N_THRESHOLDS, compare={"alt": alt}, random_state=0
+    ).fit(X, y)
+
+    chart = viz.show()
+    assert isinstance(chart, ConcatChart)
+    assert [panel._title.text for panel in chart.charts] == ["base", "alt"]
+
+    best_t = viz._metrics["best_threshold"]
+    best_f1 = viz._metrics["best_f1"]
+    base_panel, alt_panel = chart.charts
+    assert _optimum_texts(base_panel) == [f"max F1 = {best_f1:.3f} @ t={best_t:.2f}"]
+    # And the rival's panel reports something else entirely -- proof the
+    # agreement above is per-panel, not a single pooled string repeated.
+    assert _optimum_texts(alt_panel) != _optimum_texts(base_panel)
+
+
+def test_compare_discrimination_threshold_single_model_path_unchanged():
+    """``compare=None`` still returns a plain single-panel Chart."""
+    from ferrum.composition import ConcatChart
+
+    X, y, base = _binary_setup()
+    chart = ferrum.discrimination_threshold_chart(base, X, y, n_thresholds=_N_THRESHOLDS)
+
+    assert isinstance(chart, ferrum.Chart)
+    assert not isinstance(chart, ConcatChart)
+    assert chart._data.height == _N_THRESHOLDS * _N_METRICS

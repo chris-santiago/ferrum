@@ -1,7 +1,8 @@
 """compare= aggregate rendering — composite golden tests (GH #35, GH #42).
 
 Four representative small-multiples goldens, one per bucket defined in the
-GH #35 spec, plus two dodge-by-model goldens added for GH #42:
+GH #35 spec, plus two dodge-by-model goldens added for GH #42 and one
+classification-curve small-multiple added for #213:
 
 1. NESTED case — ``pdp_chart`` with two features and ``compare=``.
    The outer ``ConcatChart`` holds one PDP facet-composite per model;
@@ -30,10 +31,18 @@ GH #35 spec, plus two dodge-by-model goldens added for GH #42:
    (``per_class=False``). A single ``Chart`` with one bar per
    (feature, model), dodged within each feature band.
 
+7. CLASSIFICATION-CURVE case (#213) — ``discrimination_threshold_chart``
+   with ``compare=``. A ``ConcatChart`` of one four-metric sweep panel per
+   model, each carrying its OWN F1-optimum annotation. The one
+   classification chart that composes rather than overlays, because its
+   colour channel is already spent on the metric legend.
+
 All fixtures and seeds are fixed for byte-stable reproduction.
 
 Regenerate with ``FERRUM_REGENERATE_GOLDENS=1 pytest
-tests/diagnostics/test_compare_aggregate_goldens.py``.
+tests/diagnostics/test_compare_aggregate_goldens.py`` — which rewrites each
+golden through ``tests._snapshots.regen_and_verify``, rasterizing an
+inspection PNG alongside it.
 """
 
 from __future__ import annotations
@@ -55,8 +64,15 @@ _REG_FEATURES = ["f0", "f1", "f2", "f3", "f4"]
 def _check_golden(svg: str, name: str) -> None:
     path = _GOLDEN_ROOT / f"{name}.svg"
     if _REGENERATE or not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(svg)
+        # ``regen_and_verify`` writes the SVG *and* rasterizes an inspection
+        # PNG under ``tests/snapshots/``, printing both paths, so a regen can
+        # never silently skip the visual check CLAUDE.md's "goldens are not
+        # blessed until visually inspected" rule requires. Mirrors
+        # ``tests/test_composite_shared_legend_goldens.py``'s
+        # ``_check_or_update``.
+        from tests._snapshots import regen_and_verify
+
+        regen_and_verify(path, svg)
         if not _REGENERATE:
             pytest.skip(f"created new golden at {path}; rerun to verify")
         return
@@ -252,3 +268,49 @@ def test_golden_compare_shap_bar_two_models():
     base, alt, X, y = _dodge_compare_models()
     chart = ferrum.shap_bar_chart(base, X, y, compare={"alt": alt})
     _check_golden(chart.to_svg(), "compare_shap_bar_two_models")
+
+
+# ---------------------------------------------------------------------------
+# Bucket 7 — classification curve (discrimination_threshold, #213)
+# ---------------------------------------------------------------------------
+
+
+def _threshold_compare_models():
+    """The pinned binary logistic fixture plus a differently-calibrated rival.
+
+    ``GaussianNB`` is a closed-form MLE fit (no solver, no seed), so it is
+    byte-stable within a pinned sklearn version, and its probability
+    calibration differs enough from the logistic fixture's that the two F1
+    optima land on different thresholds and different F1 values — which is
+    what makes the per-panel annotations visibly distinct in this golden
+    rather than two copies of one pooled string.
+    """
+    from sklearn.naive_bayes import GaussianNB
+
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    base = load_fixture("binary_logistic")
+    alt = GaussianNB().fit(X.to_numpy(), y.to_numpy())
+    return base, alt, X, y
+
+
+def test_golden_compare_discrimination_threshold_two_models():
+    """Classification-curve golden: ConcatChart of two threshold-sweep panels.
+
+    Each panel holds one model's four metric curves plus that model's own
+    F1-optimum label; shared x/y scales put the two sweeps on one
+    comparable frame. Replaces the pre-#213 single panel, in which the two
+    models' sweeps stacked with no distinguishing column and rendered as
+    interleaved zig-zag polylines under one pooled optimum annotation.
+    """
+    base, alt, X, y = _threshold_compare_models()
+    chart = ferrum.discrimination_threshold_chart(
+        base,
+        X,
+        y,
+        n_thresholds=20,
+        threshold_line=True,
+        compare={"alt": alt},
+    )
+    _check_golden(chart.to_svg(), "compare_discrimination_threshold_two_models")

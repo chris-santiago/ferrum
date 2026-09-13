@@ -778,7 +778,7 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
-        Additional estimators to overlay against ``model``. Routes
+        Additional estimators to compare against ``model``. Routes
         through ``_resolve_source`` (the same path
         ``discrimination_threshold_chart`` uses) at ``fit`` time, so
         ``model`` is treated as the base curve (label ``"base"``).
@@ -787,6 +787,13 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         threshold sweep -- ``compare=`` always has one distinguished
         base model (unlike ``CalibrationVisualizer``'s symmetric
         ``*models``), so the headline metric is restricted to its rows.
+        ``show()`` returns a ``ConcatChart`` of one panel per model
+        (small multiples, shared scales), each titled with its model
+        name; the ``"base"`` panel's ``optimum_label`` therefore annotates
+        the same threshold/F1 pair ``_metrics`` and ``__repr__`` report.
+        Changed 2026-09-13 (#213): before, this visualizer rendered every
+        model's sweep stacked into one panel with a single pooled
+        optimum, which is precisely the number its own repr contradicted.
     mark : dict, optional
         Per-layer mark overrides. See ``discrimination_threshold_chart``.
     encode : dict, optional

@@ -5,6 +5,16 @@ The classification family (``roc_chart``, ``pr_chart``, ``calibration_chart``,
 ...) genuinely *supports* ``compare=`` (overlaid curves); those tests live in
 ``tests/diagnostics/test_compare.py``.
 
+``discrimination_threshold_chart`` is the one classification chart that renders
+**small multiples** instead (one panel per model, ``ConcatChart``, shared x/y
+scales, titled with the model name): its colour channel is already spent on the
+four-metric legend, so overlay has no free channel left to separate models by,
+and every per-panel aggregate (the F1-optimum annotation and the
+``threshold_line`` rule) is that model's own by construction because each panel
+re-enters the single-model builder. Changed 2026-09-13 (#213) from a pooled
+single panel; its tests live in ``test_compare.py`` alongside the overlay
+family's.
+
 Two regression charts support ``compare=`` on their scatter path by overlay,
 because their marks already accept a ``color_field`` exactly like the
 classification family: ``prediction_error_chart`` (default path, no band) and

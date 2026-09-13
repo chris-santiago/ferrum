@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
-    from ferrum import Chart
+    from ferrum import Chart, ConcatChart
 
 from ferrum._desugar import _UNSET, BoolOrUnset
 from ferrum.diagnostics.source import ComparedModelSource
@@ -34,6 +34,7 @@ from ferrum._overrides import register_layer_names
 from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
     _color_field_for,
+    _compose_compare,
     _finalize_chart,
     _inject_metric_into_legend_labels,
     _resolve_source,
@@ -723,7 +724,7 @@ def _discrimination_threshold_chart_from_source(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-):
+) -> "Chart | ConcatChart":
     """Build a discrimination-threshold chart from a ModelSource.
 
     The underlying DataFrame is unpivoted to long form
@@ -748,8 +749,50 @@ def _discrimination_threshold_chart_from_source(
     ``threshold_line`` keeps its concrete ``False`` default deliberately:
     unlike ``optimum_label``, ``False`` is never the value the mark refuses
     on, so there is no default-vs-explicit ambiguity to preserve for it.
+
+    ``compare=`` renders small multiples (#213, 2026-09-13): a
+    ``ComparedModelSource`` composes one panel per model via
+    ``_compose_compare``, which re-enters this same builder with each
+    plain per-model ``ModelSource``.  Every single-model aggregate below
+    -- above all ``mark_discrimination_threshold``'s F1 ``arg_max`` over
+    the whole frame it receives -- is then per-model by construction,
+    with no per-model branch anywhere downstream.  The pooled render this
+    replaces was wrong twice over: ``unpivot`` below lists neither
+    ``model`` in ``index=`` nor among ``metric_columns``, so polars
+    dropped the column and the stacked per-model sweeps rendered as one
+    interleaved zig-zag per metric; and the optimum annotation, computed
+    over that pooled frame, showed whichever model happened to win --
+    contradicting ``DiscriminationThresholdVisualizer``'s own
+    ``_metrics``/``__repr__``/``.score()``, which ``_base_model_rows``
+    already restricts to the base model.  The branch lives in this
+    builder rather than in ``discrimination_threshold_chart`` (where the
+    sibling ``compare=`` dispatchers put theirs) because
+    ``DiscriminationThresholdVisualizer._build_chart`` calls this builder
+    directly with its own compared source: a public-function branch would
+    answer the same question at two call sites and leave the visualizer
+    rendering the pooled geometry its repr disagrees with.
     """
     import ferrum
+
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _discrimination_threshold_chart_from_source,
+            builder_kwargs=dict(
+                n_thresholds=n_thresholds,
+                metrics=metrics,
+                cv=cv,
+                threshold_line=threshold_line,
+                optimum_label=optimum_label,
+                subtitle=subtitle,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
 
     df = source.discrimination_threshold(n_thresholds=n_thresholds, cv=cv)
     metric_columns = _resolve_metric_columns([c for c in df.columns if c != "threshold"], metrics)
@@ -1707,7 +1750,7 @@ def discrimination_threshold_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Discrimination-threshold sweep chart for a binary classifier.
 
     Plots multiple classification metrics (precision, recall, F1,
@@ -1758,9 +1801,10 @@ def discrimination_threshold_chart(
         an explicit ``optimum_label=True`` without it raises; leaving
         ``optimum_label`` unset keeps the pre-#189 silent omission.
     compare : dict[str, estimator] or None, default None
-        Multi-model overlay.  Keys are display names; values are fitted
-        estimators.  Routes through ``_resolve_source`` ->
-        ``ComparedModelSource``.
+        Multi-model comparison, rendered as **small multiples**: one
+        panel per model with shared x/y scales, titled with the model
+        name.  Keys are display names; values are fitted estimators.
+        Routes through ``_resolve_source`` -> ``ComparedModelSource``.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
@@ -1781,8 +1825,23 @@ def discrimination_threshold_chart(
 
     Returns
     -------
-    Chart
-        Multi-metric line chart over the threshold range.
+    Chart or ConcatChart
+        Multi-metric line chart over the threshold range; a
+        [ConcatChart][ferrum.ConcatChart] of one such panel per model
+        when ``compare=`` is supplied.
+
+    Notes
+    -----
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart]
+    with one panel per model (small multiples, shared x/y scales) rather
+    than an overlay: this chart's colour channel is already spent on the
+    metric legend, so four metrics x N models cannot be told apart in one
+    panel.  Each panel is the single-model sweep for that model, so its
+    ``threshold_line`` and ``optimum_label`` mark that model's own F1
+    optimum.  Changed 2026-09-13 (#213); the previous render stacked every
+    model's sweep into one panel, drawing each metric as an interleaved
+    zig-zag and annotating a single pooled optimum.  The single-model path
+    (no ``compare=``) is unchanged.
 
     Examples
     --------
