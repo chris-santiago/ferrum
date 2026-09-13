@@ -4164,7 +4164,7 @@ class FerrumVisualizer:
 | `PRVisualizer(model, *, per_class=True, average="macro", annotate_ap=True, iso_lines=False, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | PR chart |
 | `ConfusionMatrixVisualizer(model, *, normalize="true", annotate=True, mark=None, encode=None, properties=None, layers=None, theme=None)` | Confusion matrix |
 | `ClassificationReportVisualizer(model, *, mark=None, encode=None, properties=None, layers=None, theme=None)` | Heatmap of precision/recall/F1 per class |
-| `CalibrationVisualizer(*models, n_bins=10, strategy="uniform", annotate_brier=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Calibration chart |
+| `CalibrationVisualizer(*models, n_bins=10, strategy="uniform", annotate_brier=True, subtitle=None, compare=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Calibration chart |
 | `ResidualsVisualizer(model, *, kind="studentized", cook_threshold=None, panels=None, annotate_metrics=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Residuals diagnostic |
 | `PredictionErrorVisualizer(model, *, reference_line=True, ci=None, reference_band=False, mark=None, encode=None, properties=None, layers=None, theme=None)` | Prediction error |
 | `FeatureImportancesVisualizer(model, *, method="builtin", top_k=20, orient="horizontal", error_bars=True, show_values=True, subtitle=None, mark=None, encode=None, properties=None, layers=None, theme=None)` | Importance chart |
@@ -4249,6 +4249,40 @@ class FerrumVisualizer:
 > `PRVisualizer` never had the render half of this problem: their charts
 > overlay by `color="model"`, so every curve is already labeled with the
 > model it belongs to.
+
+> **2026-09-13 (wave 3, #212 — `CalibrationVisualizer(compare=)`).**
+> Supersedes both statements above about `CalibrationVisualizer`: the
+> drift-map row naming its variadic `*models` as an adjudicated drift from
+> `calibration_chart`'s `compare=`, and the sentence saying its
+> "genuinely-symmetric multi-model shape" stands apart from `compare=`'s
+> distinguished base. The class now accepts **both**, as two different
+> questions rather than one drift:
+>
+> - `CalibrationVisualizer(model, compare={"rival": other})` has one
+>   distinguished base — the positional `model`, labelled `"base"` — with
+>   exactly the semantics `ROCVisualizer`/`PRVisualizer`/
+>   `DiscriminationThresholdVisualizer` already have: `has_score` is `True`,
+>   `.score()` scores the base model, and `_metrics` carries a single
+>   `calibration_error`, the base model's own (never pooled across rivals).
+>   Before this change the kwarg did not exist and the call raised
+>   `TypeError: CalibrationVisualizer.__init__() got an unexpected keyword
+>   argument 'compare'`.
+> - `CalibrationVisualizer(m_a, m_b)` / `CalibrationVisualizer({"a": m_a,
+>   "b": m_b})` is **unchanged**: symmetric, no base, `has_score=False`,
+>   `score()` returns the `0.0` fallback, and `_metrics` carries one
+>   `calibration_error[<model name>]` key per model. The 2026-06-23
+>   refinement above still describes this shape exactly.
+> - The two are mutually exclusive. Several positional models (or a
+>   dict-of-models) together with `compare=` is a self-contradicting
+>   request — the two spell different metric contracts — and raises
+>   `ValueError` at construction naming both idioms.
+>
+> `fit` resolves `compare=` through the same shared helper the three curve
+> visualizers use, so `compare={"base": ...}` and a non-dict `compare=`
+> refuse with the same messages on all four, and the rendered chart is
+> byte-identical to `calibration_chart(model, X, y, compare=...)` — the
+> parity is the constructor and the metric semantics, not a new render
+> path. No default, no existing call's output, and no golden changed.
 
 > **2026-05-11 (Phase 10 — Model Diagnostics):** Every visualizer constructor
 > documented above accepts `random_state: int | None = None` as an additional
