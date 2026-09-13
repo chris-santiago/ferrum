@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Union
 
 from ferrum._layer import _PRIMITIVE_MARKS, _Layer
 from ferrum.encoding.base import ChannelBase
@@ -50,6 +50,37 @@ from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ferrum.chart import Chart
+
+
+class _UnsetType:
+    """Sentinel marking a composite-mark bool kwarg as "caller never passed it".
+
+    ``mark_discrimination_threshold``'s ``threshold_line``/``optimum_label``
+    default to a concrete bool the same way every other flag on this module's
+    marks does, which makes an explicit ``optimum_label=True`` from the
+    caller indistinguishable from the parameter's own default once it
+    reaches :func:`_prep_discrimination_threshold_sentinels` (#189) -- and
+    that distinction is exactly what decides whether a ``metrics=`` subset
+    missing the f1-optimum row should refuse (explicit request, self-
+    contradicting) or silently downgrade (default request, batch-F T3's
+    crash-shape fix). This is a fresh sentinel local to ``ferrum._desugar``
+    rather than a reuse of ``ferrum.plots._helpers._UNSET`` or
+    ``ferrum._title_sentinel._UNSET``: ``plots`` sits above ``marks``/
+    ``_desugar`` in the import graph (``plots/_helpers.py`` already imports
+    from ``ferrum.marks``), so importing either of those higher-layer
+    sentinels here would invert that dependency.
+    """
+
+    def __repr__(self) -> str:
+        return "_UNSET"
+
+
+#: Sentinel default for ``mark_discrimination_threshold(threshold_line=, optimum_label=)``.
+_UNSET = _UnsetType()
+
+#: Type alias for a bool kwarg that distinguishes "omitted" (``_UNSET``) from
+#: an explicit ``True``/``False``.
+BoolOrUnset = Union[bool, _UnsetType]
 
 
 def _resolve_sort_for_composite(sort: Any, x_field: str | None, y_field: str | None) -> Any:
@@ -637,8 +668,67 @@ def _prep_hex_field_from_color(ctx: _ResolveContext) -> None:
         ctx.transform_kwargs = {**ctx.transform_kwargs, "field": color_field}
 
 
+def _resolve_or_refuse_disc_flag(
+    ctx: _ResolveContext,
+    *,
+    flag: str,
+    default: bool,
+    sentinel_column: str,
+    has_columns: bool,
+    columns: Any,
+) -> None:
+    """Resolve one ``discrimination_threshold`` bool flag to a concrete value.
+
+    Shared by ``optimum_label`` and ``threshold_line`` (#189): both are
+    gated by the same "did ``_disc_threshold_prep`` inject the matching
+    sentinel column" question, and both need the same explicit-vs-default
+    disposition once the answer is no -- an explicit request (the caller
+    passed a real bool to ``mark_discrimination_threshold``, distinguishable
+    from the default via the ``_UNSET`` sentinel) is a self-contradicting
+    ask (asking to label/rule an F1 optimum that ``metrics=`` filtered away)
+    and refuses typed; the parameter's own default silently downgrades to
+    ``False``, preserving batch-F T3's crash-shape fix for callers who never
+    touched the flag.
+    """
+    raw = ctx.transform_kwargs.get(flag, _UNSET)
+    explicit = raw is not _UNSET
+    resolved = bool(raw) if explicit else default
+    if resolved and (not has_columns or sentinel_column not in columns):
+        if explicit:
+            from ferrum.marks._desugar_helpers import _normalize_names
+
+            metrics = ctx.transform_kwargs.get("metrics")
+            # `metrics=` genuinely excluding "f1" and `metrics=` including
+            # "f1" but the underlying data having no "f1" row are two
+            # different failures with two different fixes -- checking which
+            # one actually happened (via the same loose case/spacing match
+            # `_disc_threshold_prep` uses, since `metrics=` may be relabeled
+            # for display before it gets here) keeps the message truthful in
+            # both shapes instead of always blaming `metrics=`.
+            metrics_include_f1 = bool(metrics) and "f1" in _normalize_names(metrics)
+            if metrics_include_f1:
+                raise ValueError(
+                    f"mark_discrimination_threshold({flag}=True) has no "
+                    f"F1-optimum row to draw from: metrics={metrics!r} "
+                    "includes 'f1', but the data's 'metric' column has no "
+                    f"'f1' row, so the sentinel column {sentinel_column!r} "
+                    f"was never injected. Add an 'f1' row to the data, or "
+                    f"omit {flag}= to fall back to the default (silently "
+                    "unlabeled) behavior."
+                )
+            raise ValueError(
+                f"mark_discrimination_threshold({flag}=True) has no F1-optimum "
+                f"row to draw from: metrics={metrics!r} excludes 'f1', so the "
+                f"sentinel column {sentinel_column!r} was never injected. "
+                f"Include 'f1' in metrics=, or omit {flag}= to fall back to "
+                "the default behavior (the layer is silently omitted)."
+            )
+        resolved = False
+    ctx.transform_kwargs = {**ctx.transform_kwargs, flag: resolved}
+
+
 def _prep_discrimination_threshold_sentinels(ctx: _ResolveContext) -> None:
-    """Suppress the optimum-label / threshold-line layers when their sentinel columns were never injected.
+    """Resolve the optimum-label / threshold-line flags against their sentinel columns.
 
     ``Chart.mark_discrimination_threshold``'s ``data_transform``
     (``_disc_threshold_prep`` in ``marks/_chart_mixins/_classification.py``)
@@ -657,18 +747,34 @@ def _prep_discrimination_threshold_sentinels(ctx: _ResolveContext) -> None:
     back into the desugar kwargs for EACH sentinel family independently, so
     neither layer is ever emitted for data that cannot back it, rather than
     letting the desugar and the transform disagree.
+
+    #189: a caller-supplied ``True`` (distinguished from the mark's own
+    default via the ``_UNSET`` sentinel -- see :func:`_resolve_or_refuse_disc_flag`)
+    now raises instead of vanishing; the un-passed default still downgrades
+    silently. Either way, by the time this function returns,
+    ``transform_kwargs[flag]`` is always a concrete ``bool`` -- the desugar
+    itself never sees the sentinel.
     """
     data = ctx.chart._data
     columns = getattr(data, "columns", None) if data is not None else None
     has_columns = columns is not None
 
-    if ctx.transform_kwargs.get("optimum_label", True):
-        if not has_columns or "_optimum_x" not in columns:
-            ctx.transform_kwargs = {**ctx.transform_kwargs, "optimum_label": False}
-
-    if ctx.transform_kwargs.get("threshold_line", False):
-        if not has_columns or "_threshold_best" not in columns:
-            ctx.transform_kwargs = {**ctx.transform_kwargs, "threshold_line": False}
+    _resolve_or_refuse_disc_flag(
+        ctx,
+        flag="optimum_label",
+        default=True,
+        sentinel_column="_optimum_x",
+        has_columns=has_columns,
+        columns=columns,
+    )
+    _resolve_or_refuse_disc_flag(
+        ctx,
+        flag="threshold_line",
+        default=False,
+        sentinel_column="_threshold_best",
+        has_columns=has_columns,
+        columns=columns,
+    )
 
 
 def _prep_smooth_force_name(ctx: _ResolveContext) -> None:

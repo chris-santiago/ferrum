@@ -2266,17 +2266,25 @@ def test_discrimination_threshold_default_metrics_renders_optimum_label():
 _THRESHOLD_RULE_STROKE = "rgba(170,170,170,0.600)"
 
 
-def test_discrimination_threshold_metrics_subset_without_f1_suppresses_threshold_line():
-    """Sibling of the optimum-label suppression test, for ``threshold_line=True``.
+def test_discrimination_threshold_explicit_threshold_line_without_f1_refuses():
+    """Sibling of the optimum-label refusal test, for ``threshold_line=True``.
 
     ``_threshold_best`` is injected by the SAME F1-optimum-row lookup as the
     ``_optimum_*`` sentinels, gated by the SAME ``f1_rows.height == 0`` early
     return (``_disc_threshold_prep``) -- a ``metrics=`` subset that drops f1
-    must therefore ALSO suppress the vertical rule layer that would
-    otherwise reference the nonexistent ``_threshold_best`` column. Pre-fix
-    this raised ``ValueError: layer 1: encoding 'x' references unknown
-    column '_threshold_best'`` (found by python-quality-reviewer against
-    the cycle-1 fix, which only guarded ``optimum_label``).
+    leaves no optimum for an explicit ``threshold_line=True`` to draw a rule
+    at.  #189: an EXPLICIT ``threshold_line=True`` here now raises
+    ``ValueError`` naming both ``threshold_line`` and ``metrics=`` instead of
+    silently vanishing (its predecessor,
+    ``test_discrimination_threshold_metrics_subset_without_f1_suppresses_threshold_line``,
+    pinned the earlier silent-downgrade behavior this issue fixes -- see
+    ``test_discrimination_threshold_default_metrics_renders_threshold_line``
+    below and the mark-level default-path pin in
+    ``tests/diagnostics/test_classification.py`` for the case that must
+    still stay silent: an UNSET ``threshold_line``). Pre-batch-F-T3 this
+    raised a different, uninformative ``ValueError: layer 1: encoding 'x'
+    references unknown column '_threshold_best'``; the #189 message instead
+    names the flag and ``metrics=`` and tells the caller what to do.
     """
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.4, 0.6])
@@ -2287,15 +2295,8 @@ def test_discrimination_threshold_metrics_subset_without_f1_suppresses_threshold
         metrics=("precision", "recall"),
         threshold_line=True,
     )
-    svg = chart.to_svg()
-    assert "<svg" in svg
-    assert _THRESHOLD_RULE_STROKE not in svg, (
-        "the threshold rule must not render without its sentinel"
-    )
-    polylines = re.findall(r'<polyline points="([^"]+)"', svg)
-    assert len(polylines) == 2, (
-        f"expected 2 metric polylines (precision, recall), got {len(polylines)}"
-    )
+    with pytest.raises(ValueError, match="threshold_line.*metrics"):
+        chart.to_svg()
 
 
 def test_discrimination_threshold_default_metrics_renders_threshold_line():

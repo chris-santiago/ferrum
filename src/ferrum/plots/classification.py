@@ -26,6 +26,7 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart
 
+from ferrum._desugar import _UNSET, BoolOrUnset
 from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.marks._desugar_helpers import _normalize_names, nominal_color_channel
@@ -715,7 +716,7 @@ def _discrimination_threshold_chart_from_source(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
     threshold_line: bool = False,
-    optimum_label: bool = True,
+    optimum_label: BoolOrUnset = _UNSET,
     subtitle: str | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -736,6 +737,17 @@ def _discrimination_threshold_chart_from_source(
     text layer (via ``desugar_discrimination_threshold``), so
     chart-API users get the same defaults via
     ``Chart(df).mark_discrimination_threshold(optimum_label=True)``.
+
+    ``optimum_label`` defaults to the ``mark_discrimination_threshold``
+    sentinel (``_UNSET``), not a materialized ``True``, and is forwarded
+    unchanged (#189): the mark's own explicit-vs-default check (does the
+    caller's ``metrics=`` still carry an f1 row to label?) can only see a
+    real caller override -- as opposed to this function's own default --
+    if this boundary does not collapse "the caller never touched
+    optimum_label" into a concrete ``True`` before forwarding it.
+    ``threshold_line`` keeps its concrete ``False`` default deliberately:
+    unlike ``optimum_label``, ``False`` is never the value the mark refuses
+    on, so there is no default-vs-explicit ambiguity to preserve for it.
     """
     import ferrum
 
@@ -1640,7 +1652,7 @@ def discrimination_threshold_chart(
     metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
     cv: Any = None,
     threshold_line: bool = False,
-    optimum_label: bool = True,
+    optimum_label: BoolOrUnset = _UNSET,
     compare: dict[str, Any] | None = None,
     subtitle: str | None = None,
     random_state: int | None = None,
@@ -1687,12 +1699,18 @@ def discrimination_threshold_chart(
         validation rather than a single train/test split.
     threshold_line : bool, default False
         When ``True``, injects a vertical reference rule at the
-        threshold that maximises F1.
+        threshold that maximises F1.  ``metrics=`` must include ``"f1"``
+        for there to be an optimum to draw the rule at; an explicit
+        ``threshold_line=True`` with no ``"f1"`` in ``metrics=`` raises
+        ``ValueError`` (#189).
     optimum_label : bool, default True
         When ``True``, overlays a text annotation at the F1-optimum
         point showing the threshold and F1 value
         (e.g. ``"max F1 = 0.872 @ t=0.43"``).  Composes with
-        ``threshold_line``; either can be enabled independently.
+        ``threshold_line``; either can be enabled independently.  Same
+        ``"f1"``-in-``metrics=`` requirement as ``threshold_line`` above:
+        an explicit ``optimum_label=True`` without it raises; leaving
+        ``optimum_label`` unset keeps the pre-#189 silent omission.
     compare : dict[str, estimator] or None, default None
         Multi-model overlay.  Keys are display names; values are fitted
         estimators.  Routes through ``_resolve_source`` ->

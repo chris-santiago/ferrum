@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ferrum._desugar import _UNSET, BoolOrUnset
 from ferrum.marks._desugar_helpers import (
     _filter_class_average,
     _inject_curve_annotation,
@@ -381,8 +382,8 @@ class ClassificationMarksMixin:
         *,
         metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
         n_thresholds: int = _N_THRESHOLDS_DEFAULT,
-        threshold_line: bool = False,
-        optimum_label: bool = True,
+        threshold_line: BoolOrUnset = _UNSET,
+        optimum_label: BoolOrUnset = _UNSET,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -409,7 +410,12 @@ class ClassificationMarksMixin:
             warning naming the no-op.
         threshold_line : bool, optional
             Whether to draw a vertical rule at the optimal threshold.  Default
-            is ``False``.
+            is ``False``.  ``metrics=`` must include ``"f1"`` for the rule to
+            have an optimum to draw at -- an explicit ``threshold_line=True``
+            with an ``f1``-less ``metrics=`` raises ``ValueError`` naming both
+            (#189); leaving this unset falls back to the pre-#189 silent
+            downgrade (no rule, no error) so existing callers who never
+            touched the flag are unaffected.
         optimum_label : bool, optional
             Whether to overlay a text annotation at the F1-optimum point
             showing ``"max F1 = {f1:.3f} @ t={threshold:.2f}"``.
@@ -417,6 +423,10 @@ class ClassificationMarksMixin:
             The mark's data_transform injects ``_optimum_x`` /
             ``_optimum_y`` / ``_optimum_text`` sentinel columns from
             the long-form data; the desugar emits a ``mark_text`` layer.
+            Same ``metrics=`` requirement and explicit-vs-default split as
+            ``threshold_line`` above (#189): an explicit ``optimum_label=True``
+            with no ``"f1"`` in ``metrics=`` raises; the unset default keeps
+            silently omitting the label.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -428,6 +438,13 @@ class ClassificationMarksMixin:
             New layered ``Chart`` configured for discrimination-threshold
             rendering.
 
+        Raises
+        ------
+        ValueError
+            If ``threshold_line=True`` or ``optimum_label=True`` is passed
+            explicitly while ``metrics=`` excludes ``"f1"`` (no F1-optimum
+            row exists to draw the rule/label from).
+
         Examples
         --------
         >>> import ferrum as fm
@@ -436,6 +453,19 @@ class ClassificationMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_discrimination_threshold
+
+        # #189: `_UNSET` distinguishes "caller never touched this flag" (keep
+        # the pre-#189 silent downgrade) from "caller explicitly asked for
+        # it" (refuse instead of vanishing) -- but the closure below decides
+        # whether to inject the *data* the layer would need, which has to
+        # happen now, against a concrete bool, using this mark's own
+        # defaults (`optimum_label` True, `threshold_line` False). The
+        # explicit-vs-default disposition itself is decided later, in
+        # `_prep_discrimination_threshold_sentinels` (`ferrum._desugar`),
+        # against the raw (possibly still-`_UNSET`) values passed through
+        # unchanged below -- keep both defaults in sync if they ever change.
+        threshold_line_effective = False if threshold_line is _UNSET else bool(threshold_line)
+        optimum_label_effective = True if optimum_label is _UNSET else bool(optimum_label)
 
         if n_thresholds != _N_THRESHOLDS_DEFAULT:
             # `n_thresholds` is registered in ferrum.marks._informational_kwargs
@@ -528,10 +558,10 @@ class ClassificationMarksMixin:
             best_t = float(f1_rows["threshold"][best_idx])
             best_f1 = float(f1_rows["value"][best_idx])
             new_cols = []
-            if threshold_line:
+            if threshold_line_effective:
                 col = [best_t] + [None] * (n - 1)
                 new_cols.append(pl.Series("_threshold_best", col, dtype=pl.Float64))
-            if optimum_label:
+            if optimum_label_effective:
                 opt_x = [best_t] + [None] * (n - 1)
                 opt_y = [best_f1] + [None] * (n - 1)
                 opt_text = [f"max F1 = {best_f1:.3f} @ t={best_t:.2f}"] + [None] * (n - 1)

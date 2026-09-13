@@ -194,6 +194,157 @@ def test_mark_discrimination_threshold_metrics_filter_matches_relabeled_names():
     )
 
 
+# --- #189: explicit-vs-default optimum_label/threshold_line -----------------
+# `mark_discrimination_threshold`'s own `optimum_label`/`threshold_line`
+# default to the `_UNSET` sentinel (`ferrum._desugar`) rather than a
+# materialized bool, so `_prep_discrimination_threshold_sentinels` can tell
+# "the caller explicitly asked for this" from "the caller never touched the
+# flag" once a `metrics=` subset excludes `"f1"` and leaves neither sentinel
+# column for the layer to read. An explicit ask refuses (self-contradicting:
+# there is no F1-optimum row to label/rule at); the unset default keeps the
+# pre-#189 silent downgrade.
+_NO_F1_LONG_DF = pl.DataFrame(
+    {
+        "threshold": [0.1, 0.2, 0.3],
+        "metric": ["precision"] * 3,
+        "value": [0.5, 0.6, 0.7],
+    }
+)
+
+
+@pytest.mark.parametrize("flag", ["optimum_label", "threshold_line"])
+def test_mark_discrimination_threshold_explicit_flag_without_f1_refuses(flag):
+    """Direct-API pin for #189's refusal shape: EXPLICIT ``optimum_label=True``
+    or ``threshold_line=True`` on ``mark_discrimination_threshold`` with a
+    ``metrics=`` subset that excludes ``"f1"`` raises a typed ``ValueError``
+    naming both the flag and ``metrics=`` instead of silently rendering
+    without the layer."""
+    with pytest.raises(ValueError, match=f"{flag}.*metrics"):
+        ferrum.Chart(_NO_F1_LONG_DF).mark_discrimination_threshold(
+            metrics=("precision",), **{flag: True}
+        ).to_svg()
+
+
+def test_mark_discrimination_threshold_default_optimum_label_without_f1_stays_silent():
+    """Direct-API pin for #189's default-path preservation: leaving
+    ``optimum_label`` UNSET (the mark's own default) with a ``metrics=``
+    subset that excludes ``"f1"`` must still silently omit the label --
+    exactly batch-F T3's crash-shape fix, unaffected by the new explicit
+    refusal above."""
+    svg = (
+        ferrum.Chart(_NO_F1_LONG_DF).mark_discrimination_threshold(metrics=("precision",)).to_svg()
+    )
+    assert "<svg" in svg
+    assert "max F1" not in svg
+
+
+def test_mark_discrimination_threshold_default_threshold_line_without_f1_stays_silent():
+    """Sibling of the above for ``threshold_line`` -- its own default is
+    ``False`` (never the value the refusal fires on), so leaving it UNSET
+    with an f1-less ``metrics=`` renders without error or a rule."""
+    svg = (
+        ferrum.Chart(_NO_F1_LONG_DF).mark_discrimination_threshold(metrics=("precision",)).to_svg()
+    )
+    assert "<svg" in svg
+    assert 'stroke-dasharray="4,4"' not in svg
+
+
+def test_mark_discrimination_threshold_explicit_optimum_label_metrics_includes_f1_but_data_lacks_row():
+    """Cycle-2 fix (quality-review REVISE): the refusal message must not
+    unconditionally blame ``metrics=`` for excluding ``"f1"``.
+
+    Here ``metrics=`` is left at the mark's own default, which genuinely
+    *includes* ``"f1"`` -- the failure is that the caller's hand-built
+    long-form data simply has no ``"f1"`` row in its ``metric`` column.
+    Pre-fix this raised claiming ``metrics=(...) excludes 'f1'`` (false)
+    with the remediation "Include 'f1' in metrics=" (already there,
+    actively wrong advice). This is the exact live repro from the quality
+    reviewer's REVISE verdict.
+    """
+    df = pl.DataFrame(
+        {
+            "threshold": [0.1, 0.2, 0.3],
+            "metric": ["precision", "recall", "queue_rate"],
+            "value": [0.5, 0.6, 0.2],
+        }
+    )
+    with pytest.raises(ValueError, match="optimum_label") as excinfo:
+        ferrum.Chart(df).mark_discrimination_threshold(optimum_label=True).to_svg()
+    message = str(excinfo.value)
+    assert "includes 'f1'" in message, message
+    assert "excludes 'f1'" not in message, message
+    assert "no 'f1' row" in message, message
+
+
+@pytest.mark.parametrize("flag", ["optimum_label", "threshold_line"])
+def test_discrimination_threshold_visualizer_explicit_flag_without_f1_refuses(flag):
+    """Visualizer-level pin for #189 (spec-review coverage gap): an
+    EXPLICIT ``optimum_label=True``/``threshold_line=True`` on
+    ``DiscriminationThresholdVisualizer`` with a ``metrics=`` subset that
+    excludes ``"f1"`` raises the same typed ``ValueError`` as the mark and
+    figure-function paths.
+
+    ``.fit()`` itself does not raise -- ``_materialize`` always computes
+    the full metric set (including f1) from ``ModelSource.discrimination_
+    threshold`` regardless of ``metrics=``, and ``_build_chart`` only
+    assembles a lazy ``Chart``. The refusal fires when the pending mark is
+    resolved, at ``.show().to_svg()``.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.DiscriminationThresholdVisualizer(
+        model,
+        n_thresholds=20,
+        metrics=("precision", "recall"),
+        **{flag: True},
+    ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
+    with pytest.raises(ValueError, match=f"{flag}.*metrics"):
+        viz.show().to_svg()
+
+
+def test_discrimination_threshold_visualizer_default_flags_without_f1_stay_silent():
+    """Visualizer-level pin for #189's default-path preservation (spec-
+    review coverage gap): leaving both ``optimum_label`` and
+    ``threshold_line`` UNSET (their own defaults) with an f1-less
+    ``metrics=`` still silently omits the label/rule -- the same
+    batch-F T3 crash-shape fix the mark and figure-function paths keep,
+    now pinned at the visualizer layer too.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    viz = ferrum.DiscriminationThresholdVisualizer(
+        model,
+        n_thresholds=20,
+        metrics=("precision", "recall"),
+    ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
+    svg = viz.show().to_svg()
+    assert "<svg" in svg
+    assert "max F1" not in svg
+    assert 'stroke-dasharray="4,4"' not in svg
+
+
+def test_discrimination_threshold_chart_explicit_optimum_label_without_f1_refuses(binary_source):
+    """Figure-level pin for #189's ``optimum_label`` refusal shape (spec-
+    review coverage gap): sibling of
+    ``test_discrimination_threshold_explicit_threshold_line_without_f1_refuses``
+    (``tests/test_bug_hunt_model_diagnostics.py``), which only pins
+    ``threshold_line`` at this layer. ``discrimination_threshold_chart``'s
+    own ``optimum_label`` default also uses the ``_UNSET`` sentinel (the
+    footprint deviation this task made to keep default-path silence
+    intact for every caller who never touches ``optimum_label``), so an
+    EXPLICIT ``optimum_label=True`` with an f1-less ``metrics=`` must
+    raise here too.
+    """
+    chart = ferrum.discrimination_threshold_chart(
+        binary_source,
+        optimum_label=True,
+        metrics=("precision", "recall"),
+        n_thresholds=20,
+    )
+    with pytest.raises(ValueError, match="optimum_label.*metrics"):
+        chart.to_svg()
+
+
 def test_discrimination_threshold_chart_optimum_label_present_vs_absent(binary_source):
     """optimum_label=True renders the max-F1 annotation text on the
     figure-function path; optimum_label=False renders none of it.

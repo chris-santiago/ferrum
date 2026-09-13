@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from ferrum._desugar import _UNSET, BoolOrUnset
 from ferrum.plots.classification import (
     _calibration_chart_from_source,
     _class_balance_chart_from_dataframe,
@@ -721,7 +722,11 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         threshold (matches the figure-level
         ``discrimination_threshold_chart(threshold_line=True)``).
     optimum_label : bool, default True
-        Overlay a text label naming the F1-maximising threshold.
+        Overlay a text label naming the F1-maximising threshold.  Same
+        ``"f1"``-in-``metrics=`` requirement as ``threshold_line`` (#189):
+        an explicit ``optimum_label=True``/``threshold_line=True`` with no
+        ``"f1"`` in ``metrics=`` raises ``ValueError``; leaving the
+        parameter unset keeps the pre-#189 silent omission.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
@@ -763,7 +768,7 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         metrics: tuple[str, ...] = ("precision", "recall", "f1", "queue_rate"),
         cv: Any = None,
         threshold_line: bool = False,
-        optimum_label: bool = True,
+        optimum_label: BoolOrUnset = _UNSET,
         subtitle: str | None = None,
         compare: dict[str, Any] | None = None,
         mark: dict | None = None,
@@ -778,6 +783,14 @@ class DiscriminationThresholdVisualizer(FerrumVisualizer):
         self.metrics = metrics
         self.cv = cv
         self.threshold_line = threshold_line
+        # `optimum_label` stays `_UNSET` when the caller never touched it
+        # (rather than materializing the mark's own `True` default) so
+        # `_discrimination_threshold_chart_from_source` -> `mark_
+        # discrimination_threshold` can still tell "the caller never asked"
+        # from "the caller explicitly asked" once this reaches the mark's
+        # #189 explicitness check -- exactly the same forwarding contract
+        # `_discrimination_threshold_chart_from_source` documents for its
+        # own `optimum_label` parameter.
         self.optimum_label = optimum_label
         self.subtitle = subtitle
         self.compare = compare
