@@ -954,6 +954,51 @@ def test_discrimination_threshold_visualizer_threshold_line():
     assert "<line " in svg
 
 
+def test_discrimination_threshold_visualizer_cv_forwards_and_is_deterministic():
+    """``cv=`` forwards straight through to
+    ``ModelSource.discrimination_threshold`` (#211).
+
+    Comparing two ``cv=5`` visualizer instances against each other only
+    pins determinism -- it does not discriminate a severed forwarding path:
+    a ``_materialize`` that silently hardcoded ``cv=None`` would still pass
+    that check, since two ``cv=None`` runs agree with each other too. This
+    instead ties the visualizer's ``_metrics`` to a directly-computed
+    ``ModelSource(...).discrimination_threshold(cv=5)`` frame's own
+    F1-optimum point, built from the exact same ``(model, X, y,
+    random_state)`` the visualizer's ``_build_source`` uses for a plain
+    (non-``compare=``) fit, and separately proves ``cv=5`` was genuinely
+    used -- not silently substituted with ``cv=None`` -- by first
+    confirming the two disagree on this fixture.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X, y = df.select(["f0", "f1", "f2", "f3"]), df["y"]
+
+    shadow = ferrum.ModelSource(model, X, y, random_state=None)
+
+    cv5 = shadow.discrimination_threshold(n_thresholds=20, cv=5)
+    idx_cv5 = cv5["f1"].arg_max()
+    expected_threshold = float(cv5["threshold"][idx_cv5])
+    expected_f1 = float(cv5["f1"][idx_cv5])
+
+    cv_none = shadow.discrimination_threshold(n_thresholds=20, cv=None)
+    idx_none = cv_none["f1"].arg_max()
+    none_threshold = float(cv_none["threshold"][idx_none])
+    none_f1 = float(cv_none["f1"][idx_none])
+
+    # The fixture has to discriminate, or a severed forwarding path that
+    # silently fell back to cv=None would be invisible below.
+    assert (expected_threshold, expected_f1) != (none_threshold, none_f1)
+
+    viz = ferrum.DiscriminationThresholdVisualizer(model, n_thresholds=20, cv=5).fit(X, y)
+    assert viz._metrics["best_threshold"] == expected_threshold
+    assert viz._metrics["best_f1"] == expected_f1
+    assert (viz._metrics["best_threshold"], viz._metrics["best_f1"]) != (
+        none_threshold,
+        none_f1,
+    )
+
+
 def test_visualizer_unfit_repr():
     model = load_fixture("binary_logistic")
     viz = ferrum.ROCVisualizer(model)

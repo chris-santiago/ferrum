@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -386,8 +387,12 @@ class ClassificationCurvesMixin(_MixinBase):
         cv : int or cross-validation splitter, optional
             When an int, runs the same sweep on each fold's held-out scores
             from a freshly-cloned + re-fit estimator and averages
-            per-threshold metrics across folds. Pass a splitter object with
-            a ``.split()`` method to override the fold generator. ``None``
+            per-threshold metrics across folds. Resolves the same way
+            sklearn's own ``check_cv(cv, y, classifier=True)`` does: an
+            **unshuffled** ``StratifiedKFold``, so the sweep is deterministic
+            regardless of ``random_state`` (#211). Pass a splitter object
+            with a ``.split(X, y)`` method to override the fold generator --
+            it receives ``y`` too, so a stratified splitter works. ``None``
             (default) sweeps the in-sample scores directly.
         """
         key = self._cache_key(
@@ -447,19 +452,42 @@ class ClassificationCurvesMixin(_MixinBase):
 
         That split matters because the two failures look identical to a
         frame builder and are not the same thing. "``y`` and the model's
-        classes never met" is a bad request and refuses. "this ``KFold``
+        classes never met" is a bad request and refuses. "this fold's test
         slice happens to hold no positives" is a property of the split of a
         perfectly good target -- routine on the imbalanced data this
-        diagnostic exists for (measured: a 10% positive rate with ``cv=5``
-        produced a zero-positive fold in 4 of 20 seeds), and doubly so
-        because the default generator here is plain ``KFold(shuffle=True)``
-        rather than a stratified one. Such a fold contributes the kernel's
-        honest ``precision = recall = f1 = 0`` with its real ``queue_rate``,
-        which is what the fold average has always incorporated and what this
-        call returned before the whole-target guard existed.
+        diagnostic exists for. Such a fold contributes the kernel's honest
+        ``precision = recall = f1 = 0`` with its real ``queue_rate``, which is
+        what the fold average has always incorporated and what this call
+        returned before the whole-target guard existed.
+
+        **Splitter (#211, 2026-09-13).** An integer ``cv`` resolves via
+        sklearn's own ``check_cv(cv, y, classifier=True)`` convention -- an
+        **unshuffled** ``StratifiedKFold`` -- rather than the hand-rolled
+        ``KFold(shuffle=True, random_state=self._random_state or 0)`` this
+        used before. Stratification makes a zero-positive test fold rare
+        instead of routine (measured before the fix: a 10% positive rate
+        with ``cv=5`` produced a zero-positive fold in 4 of 20 seeds under
+        the old shuffled ``KFold``) and being unshuffled makes the sweep
+        deterministic by construction, with no seed to thread -- restoring
+        the spec's long-standing "``discrimination_threshold`` ignores
+        ``random_state``" claim to truth. A user-supplied splitter is used
+        verbatim and now receives ``y`` in ``.split(X, y)`` so a stratified
+        splitter works (previously ``.split(X)`` starved it of the labels it
+        needs). This is a disclosed, number-moving change for every
+        integer-``cv=`` call; no golden exercises ``cv=``.
+
+        A **train** fold missing a class (all rows share one label) leaves
+        the cloned estimator nothing to fit two classes from; a
+        :func:`_warn_if_train_fold_missing_a_class` warning names the fold
+        and the missing class *before* the estimator's own fit or scoring
+        step runs, so the eventual sklearn error (or, for a tolerant
+        estimator, ``_score_fold``'s single-column ``predict_proba``
+        indexing) is diagnosable instead of opaque. Stratification does not
+        eliminate this case at very small class counts, and the warning does
+        not either -- it only names it.
         """
         from sklearn.base import clone
-        from sklearn.model_selection import KFold
+        from sklearn.model_selection import check_cv
 
         # Request-level: refuses a target that genuinely never matches the
         # positive class, before any fold exists to be blamed for it.
@@ -470,17 +498,10 @@ class ClassificationCurvesMixin(_MixinBase):
         # numpy required: CV split uses integer-array row indexing (X_np[tr], X_np[te])
         # which polars does not support.
         X_np = self._require_X("discrimination_threshold").to_numpy()
-        splitter = (
-            cv
-            if hasattr(cv, "split")
-            else KFold(
-                n_splits=int(cv),
-                shuffle=True,
-                random_state=self._random_state or 0,
-            )
-        )
+        splitter = cv if hasattr(cv, "split") else check_cv(cv, y_true, classifier=True)
         fold_dfs: list[pl.DataFrame] = []
-        for tr, te in splitter.split(X_np):
+        for fold_index, (tr, te) in enumerate(splitter.split(X_np, y_true)):
+            _warn_if_train_fold_missing_a_class(fold_index, y_true_bin[tr], positive_class)
             m = clone(self._model).fit(X_np[tr], y_true[tr])
             s = _score_fold(m, X_np[te])
             fold_dfs.append(
@@ -661,3 +682,45 @@ def _score_fold(model, X_te: np.ndarray) -> np.ndarray:
         "discrimination_threshold(cv=...) requires the wrapped "
         "model to implement 'predict_proba' or 'decision_function'."
     )
+
+
+def _warn_if_train_fold_missing_a_class(
+    fold_index: int, train_indicator: np.ndarray, positive_class: object
+) -> None:
+    """Warn when a ``discrimination_threshold(cv=...)`` train fold holds one class.
+
+    A train fold with no positive rows -- or no negative rows -- leaves the
+    cloned estimator with a single-class training set. Most sklearn
+    classifiers raise a raw "needs samples of at least 2 classes" error from
+    ``fit``; an estimator that tolerates a single-class fit instead returns a
+    single-column ``predict_proba``, which ``_score_fold``'s ``[:, 1]``
+    indexing then fails on. This warns one call earlier than either failure,
+    naming the fold and the missing class, so the eventual error is
+    diagnosable instead of opaque (#211). It does not prevent the failure --
+    an unshuffled ``StratifiedKFold`` makes this rare but not impossible at
+    very small class counts, and silently working around a single-class
+    training set would be a bigger behavior change than a warning.
+
+    A **test** fold missing a class is the documented, unrelated, and
+    unwarned sibling: it is a routine property of the split (see
+    :func:`ferrum.diagnostics._internal._curve_frames.threshold_sweep_from_indicator`)
+    and contributes the kernel's honest all-zero metrics, not a warning.
+    """
+    n_positive = int(train_indicator.sum())
+    if n_positive == 0:
+        warnings.warn(
+            f"discrimination_threshold(cv=...): fold {fold_index}'s training "
+            f"split has no rows of the positive class ({positive_class!r}); "
+            "the model may fail to fit or score this fold.",
+            UserWarning,
+            stacklevel=3,
+        )
+    elif n_positive == len(train_indicator):
+        warnings.warn(
+            f"discrimination_threshold(cv=...): fold {fold_index}'s training "
+            f"split has no rows of the negative class (every row equals the "
+            f"positive class {positive_class!r}); the model may fail to fit "
+            "or score this fold.",
+            UserWarning,
+            stacklevel=3,
+        )

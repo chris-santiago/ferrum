@@ -457,10 +457,13 @@ def _imbalanced_source(n=120, n_positive=12, seed=0):
     """A clean, well-labelled, imbalanced binary target.
 
     Imbalance is the normal case for ``discrimination_threshold`` -- it is
-    the tool people reach for *because* the classes are skewed -- and the
-    default fold generator is plain ``KFold(shuffle=True)``, not a
-    stratified one, so some held-out fold containing no positives is
-    routine rather than pathological.
+    the tool people reach for *because* the classes are skewed. The default
+    fold generator is an unshuffled ``StratifiedKFold`` (#211, 2026-09-13),
+    which keeps each fold's positive rate close to the whole target's --
+    stratification makes a zero-positive *test* fold rare rather than the
+    routine occurrence it was under the old shuffled plain ``KFold``, but
+    "rare" is not "impossible" at these small positive counts, which is
+    exactly what this test still exercises.
     """
     rng = np.random.default_rng(seed)
     features = rng.normal(size=(n, 3))
@@ -520,6 +523,124 @@ def test_cross_validated_sweep_is_unchanged_by_the_whole_target_guard():
     assert [row["f1"] for row in fold] == [0.0] * 5
     # 4 of 4 scores >= 0.0, 3 of 4 >= 0.25, 2 >= 0.5, 1 >= 0.75, 0 >= 1.0.
     assert [row["queue_rate"] for row in fold] == [1.0, 0.75, 0.5, 0.25, 0.0]
+
+
+def test_discrimination_threshold_cv_is_deterministic_with_no_random_state():
+    """Integer ``cv=`` is deterministic by construction (#211, 2026-09-13).
+
+    The default splitter is now an unshuffled ``StratifiedKFold``, which has
+    no seed to thread. Two independently-constructed sources over the same
+    data with no ``random_state`` supplied at all must sweep to byte-
+    identical frames -- restoring the spec's "ignores random_state" claim
+    (``ferrum-spec.md:245``) to truth. Before this fix the splitter was
+    ``KFold(shuffle=True, random_state=self._random_state or 0)``, which was
+    deterministic only by accident of the ``or 0`` default, not because the
+    method genuinely ignored the seed.
+    """
+    swept_a = _imbalanced_source().discrimination_threshold(cv=5)
+    swept_b = _imbalanced_source().discrimination_threshold(cv=5)
+    assert swept_a.equals(swept_b)
+
+
+def test_discrimination_threshold_cv_ignores_random_state():
+    """N3: two sources built from the identical data but DIFFERENT
+    ``random_state`` values must sweep to the identical frame under
+    ``cv=``, proving the spec's claim true rather than merely unbroken by
+    coincidence.
+    """
+    rng = np.random.default_rng(0)
+    features = rng.normal(size=(120, 3))
+    y = np.zeros(120, dtype=int)
+    y[rng.choice(120, 12, replace=False)] = 1
+    X = pl.DataFrame(features, schema=["f0", "f1", "f2"])
+    model = LogisticRegression(max_iter=1000).fit(features, y)
+
+    seeded_low = ferrum.ModelSource(model, X, pl.Series("y", y), random_state=1)
+    seeded_high = ferrum.ModelSource(model, X, pl.Series("y", y), random_state=99)
+    assert seeded_low.discrimination_threshold(cv=5).equals(
+        seeded_high.discrimination_threshold(cv=5)
+    )
+
+
+def test_discrimination_threshold_cv_accepts_a_user_supplied_stratified_splitter():
+    """N2: a user-supplied splitter's ``.split()`` used to be called with no
+    ``y`` (``splitter.split(X_np)``), so a stratified splitter -- which
+    requires ``y`` -- raised ``TypeError: split() missing 1 required
+    positional argument: 'y'``. ``.split(X, y)`` now supplies it.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    source = _imbalanced_source()
+    swept = source.discrimination_threshold(cv=StratifiedKFold(n_splits=5))
+    assert swept.height == 50
+    assert set(swept.columns) == {"threshold", "precision", "recall", "f1", "queue_rate"}
+
+
+class _FixedFoldSplitter:
+    """A single hard-coded ``(train, test)`` split.
+
+    Forces a train fold missing a class deterministically, rather than
+    relying on ``StratifiedKFold``'s probabilistic behavior at small class
+    counts to happen to produce one.
+    """
+
+    def __init__(self, train: np.ndarray, test: np.ndarray):
+        self._train = train
+        self._test = test
+
+    def split(self, X, y=None, groups=None):
+        yield self._train, self._test
+
+
+def test_discrimination_threshold_cv_warns_on_a_train_fold_missing_the_positive_class():
+    """A TRAIN fold missing a class is #211's unhandled sibling to the
+    routine all-negative TEST fold: it leaves the cloned estimator nothing
+    to fit two classes from, so sklearn's own ``fit`` raises. The warning
+    must name the fold and the missing class *before* that raise, not
+    replace it.
+    """
+    n = 20
+    y = np.zeros(n, dtype=int)
+    y[:4] = 1  # positives only at indices 0-3
+    rng = np.random.default_rng(0)
+    features = rng.normal(size=(n, 3))
+    X = pl.DataFrame(features, schema=["f0", "f1", "f2"])
+    model = LogisticRegression(max_iter=1000).fit(features, y)
+    source = ferrum.ModelSource(model, X, pl.Series("y", y), random_state=0)
+
+    train = np.arange(4, n)  # excludes every positive row
+    test = np.arange(0, 4)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="2 classes"):
+            source.discrimination_threshold(cv=_FixedFoldSplitter(train, test))
+
+    messages = [str(w.message) for w in caught if w.category is UserWarning]
+    assert any("fold 0" in m and "no rows of the positive class" in m for m in messages)
+
+
+def test_discrimination_threshold_cv_warns_on_a_train_fold_missing_the_negative_class():
+    """The symmetric case: a train fold holding only the positive class."""
+    n = 20
+    y = np.zeros(n, dtype=int)
+    y[16:] = 1  # negatives only at indices 0-15; positives at 16-19
+    rng = np.random.default_rng(0)
+    features = rng.normal(size=(n, 3))
+    X = pl.DataFrame(features, schema=["f0", "f1", "f2"])
+    model = LogisticRegression(max_iter=1000).fit(features, y)
+    source = ferrum.ModelSource(model, X, pl.Series("y", y), random_state=0)
+
+    train = np.arange(16, n)  # every row is the positive class
+    test = np.arange(0, 16)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="2 classes"):
+            source.discrimination_threshold(cv=_FixedFoldSplitter(train, test))
+
+    messages = [str(w.message) for w in caught if w.category is UserWarning]
+    assert any("fold 0" in m and "no rows of the negative class" in m for m in messages)
 
 
 def test_a_whole_target_mismatch_still_refuses_under_cv():
