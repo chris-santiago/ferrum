@@ -27,11 +27,24 @@ def polars_or_array_to_record_batch(X) -> pa.RecordBatch:
     resolves ``self._X`` through ``_require_X`` (raising a typed error on an
     X-less source) and avoids the type-dispatch overhead once it's a known
     polars DataFrame.
+
+    A ``pyarrow.Table`` routes through ``ferrum._coerce.to_polars`` (the
+    canonical Arrow-CDI ingestion seam that ``ModelSource`` already uses)
+    rather than being sampled with ``to_batches()[0]``: a real-world
+    ``pa.Table`` is routinely multi-chunk (``pa.concat_tables``, a
+    multi-file ``parquet.read_table``, a ``RecordBatchReader`` drain), and
+    taking only the first chunk silently computed every statistic on a
+    fraction of the rows (#217 residual) while the covariance path's
+    length guard raised a misleading "y length must match X row count"
+    against the caller's full-length ``y``.
     """
     if isinstance(X, pa.RecordBatch):
         return X
     if isinstance(X, pa.Table):
-        return X.to_batches()[0] if X.num_rows > 0 else pa.RecordBatch.from_pydict({})
+        from ferrum._coerce import to_polars
+
+        df = to_polars(X)
+        return pa.RecordBatch.from_pydict({c: df[c].to_arrow() for c in df.columns})
     if isinstance(X, pl.DataFrame):
         return pa.RecordBatch.from_pydict({c: X[c].to_arrow() for c in X.columns})
     if hasattr(X, "to_numpy") and hasattr(X, "columns"):

@@ -388,6 +388,87 @@ def test_rank2d_chart_accepts_list_of_lists():
     assert "<svg" in chart.to_svg()
 
 
+def test_rank1d_chart_multi_chunk_pyarrow_table_matches_single_chunk_and_model_source():
+    # N1 (#217 residual): polars_or_array_to_record_batch's pyarrow arm used
+    # to take X.to_batches()[0], silently truncating a multi-chunk Table to
+    # its first chunk. pa.concat_tables (the ordinary provenance of a real
+    # chunked Table -- also produced by a multi-file parquet.read_table or a
+    # RecordBatchReader drain) is the real-path way to build one; slicing a
+    # single Table and concatenating the pieces reproduces the exact defect
+    # shape without hand-building an Arrow layout the production path never
+    # emits. Every consumer of the fixed coercer -- the raw-data chart path,
+    # the ModelSource path, and a single-chunk Table of the same data -- must
+    # now agree, not just "not crash".
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    tbl_single = df.to_arrow()
+    tbl_chunked = pa.concat_tables([tbl_single.slice(0, 100), tbl_single.slice(100)])
+    assert tbl_chunked.column(0).num_chunks == 2
+
+    svg_chunked = ferrum.rank1d_chart(tbl_chunked, algorithm="variance").to_svg()
+    svg_single = ferrum.rank1d_chart(tbl_single, algorithm="variance").to_svg()
+    svg_model_source = ferrum.rank1d_chart(
+        ferrum.ModelSource(None, tbl_chunked), algorithm="variance"
+    ).to_svg()
+    assert svg_chunked == svg_single
+    assert svg_chunked == svg_model_source
+
+
+def test_rank1d_chart_covariance_multi_chunk_pyarrow_table_renders_not_refuses():
+    # N1: the covariance path used to refuse with a misleading
+    # "y length must match X row count" because the coercer silently
+    # halved X's row count while y kept its full length. With the coercer
+    # fixed, the row counts agree and covariance renders and matches the
+    # ModelSource path on the same chunked Table.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    y = load_dataset("regression")["y"]
+    tbl_single = df.to_arrow()
+    tbl_chunked = pa.concat_tables([tbl_single.slice(0, 100), tbl_single.slice(100)])
+
+    chart = ferrum.rank1d_chart(tbl_chunked, y=y, algorithm="covariance")
+    svg = chart.to_svg()
+    assert "<svg" in svg
+    assert svg.count("<rect") >= len(_REGRESSION_FEATURES)
+
+    via_model_source = ferrum.rank1d_chart(
+        ferrum.ModelSource(None, tbl_chunked, y), algorithm="covariance"
+    )
+    assert svg == via_model_source.to_svg()
+
+
+def test_rank2d_chart_multi_chunk_pyarrow_table_matches_single_chunk():
+    # N1 sibling: rank2d_compute shares the same coercer, so it inherited
+    # the identical truncation defect.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    tbl_single = df.to_arrow()
+    tbl_chunked = pa.concat_tables([tbl_single.slice(0, 100), tbl_single.slice(100)])
+
+    svg_chunked = ferrum.rank2d_chart(tbl_chunked, algorithm="pearson").to_svg()
+    svg_single = ferrum.rank2d_chart(tbl_single, algorithm="pearson").to_svg()
+    assert svg_chunked == svg_single
+
+
+def test_rank1d_compute_empty_pyarrow_table_matches_empty_polars_frame():
+    # N1 sibling: the old coercer's empty-Table branch
+    # (`pa.RecordBatch.from_pydict({})`) discarded the schema along with
+    # the rows, so an empty 2-column pyarrow Table produced a 0-feature
+    # result while an empty 2-column polars DataFrame produced 2 features
+    # (score 0.0). Routing through `to_polars` preserves the schema for
+    # both spellings of "no rows, two columns".
+    from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
+
+    empty_pa = pa.table(
+        {"a": pa.array([], type=pa.float64()), "b": pa.array([], type=pa.float64())}
+    )
+    empty_pl = pl.DataFrame(
+        {"a": pl.Series([], dtype=pl.Float64), "b": pl.Series([], dtype=pl.Float64)}
+    )
+
+    result_pa = rank1d_compute(empty_pa, algorithm="variance")
+    result_pl = rank1d_compute(empty_pl, algorithm="variance")
+    assert result_pa.shape == result_pl.shape == (2, 3)
+    assert sorted(result_pa["feature"].to_list()) == sorted(result_pl["feature"].to_list())
+
+
 def test_rank1d_chart_1d_array_reports_accurate_shape_message():
     # The 1-D-array shape check must still come from the coercer
     # (`polars_or_array_to_record_batch`'s own "X must be 2D" message),
@@ -547,6 +628,22 @@ def test_rank2d_visualizer_pearson():
     # On the regression fixture the features are independent → small
     # off-diagonal correlations.
     assert viz._metrics["max_abs_corr"] < 0.3
+
+
+def test_rank1d_visualizer_multi_chunk_pyarrow_table_matches_single_chunk():
+    # N1: Rank1DVisualizer.fit calls rank1d_compute directly, bypassing the
+    # is_raw_tabular_data gate entirely -- so a fix scoped to the gate alone
+    # would leave this path silently truncating. It must inherit the fix
+    # because it shares the same coercer.
+    df = load_dataset("regression").select(_REGRESSION_FEATURES)
+    tbl_single = df.to_arrow()
+    tbl_chunked = pa.concat_tables([tbl_single.slice(0, 100), tbl_single.slice(100)])
+
+    viz_chunked = ferrum.Rank1DVisualizer(algorithm="variance").fit(tbl_chunked)
+    viz_single = ferrum.Rank1DVisualizer(algorithm="variance").fit(tbl_single)
+    assert viz_chunked._metrics["top_feature_score"] == pytest.approx(
+        viz_single._metrics["top_feature_score"]
+    )
 
 
 def test_parallel_coordinates_visualizer():
