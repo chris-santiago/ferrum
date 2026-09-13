@@ -225,6 +225,172 @@ def test_embeddings_rejects_bad_method():
         source.embeddings(method="badmethod")
 
 
+# --- #222 / N4: embeddings(method="tsne") perplexity handling -------
+#
+# One validation owner (``_resolve_tsne_perplexity`` /
+# ``_check_embedding_method_kwargs`` in ``sources/_clustering.py``): the
+# default adapts to ``min(30, n_samples - 2)`` so small-n t-SNE renders out
+# of the box (pre-fix: every n <= 31 raised the raw manifolds-rs "kNN size"
+# error on the default path alone), an explicit out-of-range/non-positive/
+# non-finite perplexity refuses typed in perplexity/n_samples vocabulary
+# with no PanicException reachable, and an unknown method_kwargs key
+# refuses by name per method.
+
+
+def _tsne_x(n: int, seed: int = 0) -> pl.DataFrame:
+    """``n``-row, 3-feature raw X for exercising ``embeddings(method='tsne')``
+    below any real fitted model (this issue lives entirely in perplexity
+    resolution, not in cluster assignment)."""
+    rng = np.random.RandomState(seed)
+    return pl.DataFrame(
+        {
+            "f0": rng.randn(n),
+            "f1": rng.randn(n),
+            "f2": rng.randn(n),
+        }
+    )
+
+
+def test_embeddings_tsne_default_renders_at_n20():
+    """Number-mover pin: pre-fix, the unmodified manifolds-rs default of 30
+    reached the kernel unclamped and raised for every n <= 31 -- n=20 is
+    representative of that entire dead range. Post-fix the default resolves
+    to min(30, 18) = 18 and renders."""
+    source = ferrum.ModelSource(None, _tsne_x(20), random_state=0)
+    emb = source.embeddings(method="tsne")
+    assert emb.height == 20
+    assert {"dim_0", "dim_1", "label"} <= set(emb.columns)
+    xy = emb.select("dim_0", "dim_1").to_numpy()
+    assert np.isfinite(xy).all()
+
+
+def test_embeddings_tsne_perplexity_out_of_range_refuses():
+    """p > n_samples - 2 refuses typed, naming perplexity/n_samples/bound --
+    not the raw manifolds-rs 'kNN size' vocabulary."""
+    source = ferrum.ModelSource(None, _tsne_x(20), random_state=0)
+    with pytest.raises(ValueError, match=r"perplexity=200.*n_samples=20.*<= 18") as exc_info:
+        source.embeddings(method="tsne", perplexity=200)
+    assert "kNN size" not in str(exc_info.value)
+    assert "PanicException" not in str(exc_info.value)
+
+
+def test_embeddings_tsne_perplexity_non_positive_refuses():
+    """A non-positive perplexity (0 or negative) refuses typed instead of
+    reaching manifolds-rs, where 0.0 silently succeeded (k floors at 5) and
+    a negative value panicked the process boundary (to_usize().unwrap() on
+    a value with no valid usize)."""
+    source = ferrum.ModelSource(None, _tsne_x(20), random_state=0)
+    for bad in (0, -1.0):
+        with pytest.raises(ValueError, match=r"perplexity must be positive.*n_samples=20"):
+            source.embeddings(method="tsne", perplexity=bad)
+
+
+def test_embeddings_tsne_perplexity_non_finite_refuses_no_panic():
+    """NaN previously reached ``k_float.to_usize().unwrap()`` in
+    manifolds-rs and raised a ``PanicException`` -- not a ``ValueError`` --
+    that no ``except ValueError`` could catch. The type of the exception
+    pytest.raises asserts on is itself the regression pin: a PanicException
+    would fail this test even though it 'raises something'."""
+    source = ferrum.ModelSource(None, _tsne_x(20), random_state=0)
+    with pytest.raises(ValueError, match=r"perplexity must be a finite number.*n_samples=20"):
+        source.embeddings(method="tsne", perplexity=float("nan"))
+    with pytest.raises(ValueError, match=r"perplexity must be a finite number.*n_samples=20"):
+        source.embeddings(method="tsne", perplexity=float("inf"))
+
+
+def test_embeddings_tsne_default_perplexity_deterministic():
+    """The default-perplexity adaptation must not disturb the existing
+    seed-determinism contract: same random_state twice is byte-equal,
+    different random_state differs."""
+    x = _tsne_x(20)
+    a = ferrum.ModelSource(None, x, random_state=7).embeddings(method="tsne")
+    b = ferrum.ModelSource(None, x, random_state=7).embeddings(method="tsne")
+    c = ferrum.ModelSource(None, x, random_state=8).embeddings(method="tsne")
+    assert a.equals(b)
+    assert not a.equals(c)
+
+
+@pytest.mark.parametrize(
+    "method,bad_kwargs",
+    [
+        ("tsne", {"bogus": 1}),
+        ("tsne", {"n_neighbors": 5}),  # a real key, wrong method
+        ("umap", {"perplexity": 5}),  # a real key, wrong method
+        ("pca", {"n_neighbors": 5}),  # pca accepts none
+    ],
+)
+def test_embeddings_unknown_method_kwargs_refuses_by_name(method, bad_kwargs):
+    source = ferrum.ModelSource(None, _tsne_x(20), random_state=0)
+    (bad_key,) = bad_kwargs
+    with pytest.raises(ValueError, match=rf"method={method!r}.*unknown method_kwargs.*{bad_key!r}"):
+        source.embeddings(method=method, **bad_kwargs)
+
+
+# Boundary pin for the adaptive-default clamp and the explicit-perplexity
+# refusal bound, at the exact edges: n=5/6/7 sit just above the n>=4 floor
+# manifolds-rs itself enforces (where _tsne_perplexity_bound(n) = n - 2 is
+# smallest and closest to where a library-minimum guard could fire), and
+# n=31/32 straddle the min(30, n-2) crossover -- n=31 is the last n where
+# the clamp still binds (bound=29 < manifolds-rs's own default of 30) and
+# n=32 is the first n where it no longer binds (bound=30, so the resolved
+# default equals manifolds-rs's own unclamped default). A future off-by-one
+# in either _tsne_perplexity_bound or the min(30, ...)/floor composition
+# would move one of these five numbers without necessarily breaking any
+# non-boundary test. Each expected value below was verified live against
+# the real ModelSource.embeddings(method="tsne") path (not just the private
+# helper), matching this test's own render/refusal assertions.
+@pytest.mark.parametrize(
+    "n,expected_default_perplexity",
+    [
+        (5, 3.0),
+        (6, 4.0),
+        (7, 5.0),
+        (31, 29.0),
+        (32, 30.0),
+    ],
+)
+def test_embeddings_tsne_default_perplexity_boundary(n, expected_default_perplexity):
+    from ferrum.diagnostics.sources._clustering import (
+        _TSNE_DEFAULT_PERPLEXITY,
+        _TSNE_MIN_PERPLEXITY,
+        _resolve_tsne_perplexity,
+        _tsne_perplexity_bound,
+    )
+
+    bound = _tsne_perplexity_bound(n)
+    resolved = _resolve_tsne_perplexity(n, None)
+    assert resolved == expected_default_perplexity
+    assert resolved == max(_TSNE_MIN_PERPLEXITY, min(_TSNE_DEFAULT_PERPLEXITY, float(bound)))
+
+    # Behavioral confirmation through the real path, not just the formula:
+    # the default renders at exactly this n.
+    source = ferrum.ModelSource(None, _tsne_x(n), random_state=0)
+    emb = source.embeddings(method="tsne")
+    assert emb.height == n
+    xy = emb.select("dim_0", "dim_1").to_numpy()
+    assert np.isfinite(xy).all()
+
+
+@pytest.mark.parametrize("n", [5, 6, 7, 31, 32])
+def test_embeddings_tsne_explicit_perplexity_bound_boundary(n):
+    """The explicit-perplexity refusal bound (perplexity <= n_samples - 2)
+    at the exact edges: the bound itself renders through the real kernel,
+    one above it refuses -- pinned at n=5/6/7 and n=31/32 so an off-by-one
+    in the bound comparison (or in manifolds-rs's own kNN-size derivation)
+    can't land green."""
+    from ferrum.diagnostics.sources._clustering import _tsne_perplexity_bound
+
+    bound = _tsne_perplexity_bound(n)
+
+    source_ok = ferrum.ModelSource(None, _tsne_x(n, seed=1), random_state=0)
+    emb = source_ok.embeddings(method="tsne", perplexity=float(bound))
+    assert emb.height == n
+
+    source_bad = ferrum.ModelSource(None, _tsne_x(n, seed=1), random_state=0)
+    with pytest.raises(ValueError, match=rf"n_samples={n}.*<= {bound}"):
+        source_bad.embeddings(method="tsne", perplexity=float(bound + 1))
+
+
 def test_intercluster_distance_method():
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")

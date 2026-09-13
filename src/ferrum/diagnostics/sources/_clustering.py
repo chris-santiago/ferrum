@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -25,6 +26,111 @@ else:
 # batch) -- ``plots.clustering`` imports the constant from this module, not
 # the other way around.
 _ELBOW_METRICS: tuple[str, ...] = ("distortion", "silhouette", "calinski_harabasz")
+
+# ``method_kwargs`` accepted per ``embeddings()`` method, checked per method
+# rather than against the union of all three: checking the union would
+# accept ``perplexity`` on ``"umap"`` and silently drop it on the floor --
+# the same swallow this closes, with a more convincing spelling (#222, N4).
+_EMBEDDING_METHOD_KWARGS: dict[str, frozenset[str]] = {
+    "umap": frozenset({"n_neighbors", "min_dist", "n_epochs"}),
+    "tsne": frozenset({"perplexity", "learning_rate", "n_iter"}),
+    "pca": frozenset(),
+}
+
+# manifolds-rs's own unclamped t-SNE default (``perplexity.unwrap_or(30.0)``,
+# vendored ``manifolds-rs`` ``lib.rs:530``) and the floor a resolved
+# perplexity is never allowed to fall below.
+_TSNE_DEFAULT_PERPLEXITY = 30.0
+_TSNE_MIN_PERPLEXITY = 1.0
+
+
+def _tsne_perplexity_bound(n_samples: int) -> int:
+    """Return the largest legal t-SNE perplexity for ``n_samples`` observations.
+
+    manifolds-rs (Barnes-Hut t-SNE) requires ``perplexity < kNN size``,
+    where the kNN size is ``clamp(3 * perplexity, 5, n_samples - 1)``
+    (vendored ``manifolds-rs`` ``lib.rs:614-615``). In the small-``n``
+    regime this diagnostic actually reaches (the constraint binds once
+    ``3 * perplexity > n_samples - 1``), that composes to the
+    sample-count-only bound ``perplexity <= n_samples - 2`` -- one sample
+    stricter than sklearn's own ``perplexity < n_samples``, a documented
+    ferrum divergence (see ``ferrum-spec.md``'s dated note).
+
+    Shared by :func:`_resolve_tsne_perplexity` (``embeddings``, validating
+    or defaulting a user-visible ``perplexity``) and
+    :meth:`ClusteringMixin.intercluster_distance` (silently clamping a
+    ``k`` centers count, which has no user-visible perplexity of its own)
+    so the two call sites express one physical constraint, not two that
+    can drift (#222, N4).
+    """
+    return n_samples - 2
+
+
+def _resolve_tsne_perplexity(n_samples: int, requested: float | None) -> float:
+    """Resolve ``embeddings(method='tsne')``'s effective perplexity.
+
+    ``requested is None`` (the caller passed no ``perplexity=``) adapts
+    manifolds-rs's own default of 30 down to fit ``n_samples``:
+    ``min(30, n_samples - 2)``, floored at ``_TSNE_MIN_PERPLEXITY`` so the
+    resolved value is never non-positive. Before this, the unmodified
+    default of 30 reached the Rust kernel unclamped and refused for every
+    ``n_samples <= 31`` -- the majority failure mode, since it fires on
+    every t-SNE call that never supplied ``perplexity=`` at all, including
+    through ``manifold_chart`` and ``ManifoldVisualizer`` (#222, N4).
+
+    An explicit ``requested`` value is validated, never silently reduced:
+    non-numeric, non-finite, non-positive, or above
+    ``_tsne_perplexity_bound(n_samples)`` all refuse with a typed
+    ``ValueError`` naming ``perplexity``, ``n_samples``, and the bound --
+    replacing both the raw manifolds-rs ``kNN size`` vocabulary leak and
+    the ``PanicException`` a negative or NaN value previously produced
+    (``k_float.to_usize().unwrap()`` on a value with no valid ``usize``).
+    """
+    bound = _tsne_perplexity_bound(n_samples)
+    if requested is None:
+        return max(_TSNE_MIN_PERPLEXITY, min(_TSNE_DEFAULT_PERPLEXITY, float(bound)))
+    if isinstance(requested, bool) or not isinstance(requested, (int, float)):
+        raise ValueError(
+            f"ModelSource.embeddings(method='tsne'): perplexity must be a "
+            f"finite number, got {requested!r} (n_samples={n_samples})."
+        )
+    value = float(requested)
+    if not math.isfinite(value):
+        raise ValueError(
+            f"ModelSource.embeddings(method='tsne'): perplexity must be a "
+            f"finite number, got {requested!r} (n_samples={n_samples})."
+        )
+    if value <= 0:
+        raise ValueError(
+            f"ModelSource.embeddings(method='tsne'): perplexity must be "
+            f"positive, got {value!r} (n_samples={n_samples})."
+        )
+    if value > bound:
+        raise ValueError(
+            f"ModelSource.embeddings(method='tsne'): perplexity={value!r} "
+            f"exceeds the maximum for n_samples={n_samples} (must be "
+            f"<= {bound}, i.e. n_samples - 2); reduce perplexity or supply "
+            f"more samples."
+        )
+    return value
+
+
+def _check_embedding_method_kwargs(method: str, method_kwargs: dict[str, Any]) -> None:
+    """Refuse a ``method_kwargs`` key ``method`` does not accept, by name.
+
+    Every read on the raw path was ``method_kwargs.get(...)``, so a typo
+    (or a key that belongs to a different method, e.g. ``perplexity`` on
+    ``"umap"``) reached nothing and the embedding silently computed with
+    defaults (#222, N4).
+    """
+    allowed = _EMBEDDING_METHOD_KWARGS[method]
+    unknown = sorted(set(method_kwargs) - allowed)
+    if unknown:
+        raise ValueError(
+            f"ModelSource.embeddings(method={method!r}): unknown "
+            f"method_kwargs {unknown!r}; accepted keys for {method!r} are "
+            f"{sorted(allowed)!r}."
+        )
 
 
 class ClusteringMixin(_MixinBase):
@@ -149,12 +255,18 @@ class ClusteringMixin(_MixinBase):
             Number of embedding dimensions to emit (``dim_0`` …
             ``dim_{n_components-1}``).
         **method_kwargs
-            Algorithm-specific options forwarded to the Rust kernel.
+            Algorithm-specific options forwarded to the Rust kernel. Any
+            key not in the accepted set for ``method`` refuses by name.
             ``"umap"`` accepts ``n_neighbors``, ``min_dist``, ``n_epochs``;
             ``"tsne"`` accepts ``perplexity``, ``learning_rate``,
-            ``n_iter``; ``"pca"`` takes none.
+            ``n_iter`` -- ``perplexity`` defaults to
+            ``min(30, n_samples - 2)`` when omitted (so small-``n`` t-SNE
+            renders out of the box) and refuses an explicit value that is
+            non-finite, non-positive, or exceeds ``n_samples - 2``;
+            ``"pca"`` takes none.
         """
         validate_choice("ModelSource.embeddings", "method", method, ("umap", "tsne", "pca"))
+        _check_embedding_method_kwargs(method, method_kwargs)
         key = self._cache_key(
             "embeddings",
             embed_method=method,
@@ -177,11 +289,12 @@ class ClusteringMixin(_MixinBase):
             df = pl.from_arrow(result)
         elif method == "tsne":
             x_arrow = self._x_record_batch("embeddings")
+            perplexity = _resolve_tsne_perplexity(x_arrow.num_rows, method_kwargs.get("perplexity"))
             result = _core.tsne_embedding(
                 x_arrow,
                 n_components,
                 seed,
-                method_kwargs.get("perplexity"),
+                perplexity,
                 method_kwargs.get("learning_rate"),
                 method_kwargs.get("n_iter"),
             )
@@ -263,8 +376,12 @@ class ClusteringMixin(_MixinBase):
             )
             # kNN size for k centers is k-1 (each center's k-1 co-embedded
             # neighbors); t-SNE requires perplexity strictly less than that,
-            # so the clamp ceiling is k-2, not k-1 (F-L12-02).
-            perplexity = float(max(1, min(5, int(k) - 2)))
+            # so the clamp ceiling is k-2, not k-1 (F-L12-02). Expressed via
+            # the shared _tsne_perplexity_bound rather than a second
+            # k-2 -- same bound, one vocabulary with embeddings() (#222,
+            # N4); the resolved value (min(5, k-2), floored at 1) is
+            # unchanged.
+            perplexity = float(max(1, min(5, _tsne_perplexity_bound(int(k)))))
             tsne_batch = _core.tsne_embedding(
                 centers_arrow,
                 2,
