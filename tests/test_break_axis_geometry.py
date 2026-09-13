@@ -291,6 +291,141 @@ def test_violin_is_clipped_per_segment_rather_than_left_on_the_unbroken_scale():
 
 
 # --------------------------------------------------------------------------
+# corner radius on cut edges (#230-2)
+# --------------------------------------------------------------------------
+
+
+def test_split_bar_with_corner_radius_squares_only_the_cut_edge():
+    """The measured #230-2 repro: `mark_bar(corner_radius=8)` crossing a gap
+    keeps rounded corners on the edges the bar always had, and squares only
+    the edge the gap produced.
+
+    Pre-fix this rendered `rx="8"` on BOTH pieces (a plain `<rect rx="8">`
+    each), rounding the cut edge exactly like the uncut one. The pieces must
+    never fall back to `<rect rx ry>` and must round only their two uncut
+    corners.
+    """
+    df = pl.DataFrame({"c": ["A"], "v": [900.0]})
+    chart = fm.Chart(df).mark_bar(corner_radius=8).encode(
+        x="c:N", y=fm.Y("v:Q", scale=fm.LinearScale(domain=[0.0, 1000.0]))
+    ) + fm.BreakAxis(axis="y", gap=(150, 850))
+    svg = chart.to_svg()
+    assert 'rx="' not in svg, "a piece a gap actually cut must never fall back to a plain rect"
+
+    paths = _mark_paths(svg)
+    assert len(paths) == 2, f"one path per visible segment; got {paths}"
+    for d in paths:
+        arcs = re.findall(r"A([\d.]+) ([\d.]+) [\d.]+ \d \d [-\d.]+ [-\d.]+", d)
+        assert len(arcs) == 2, f"only the two uncut corners round; got {d}"
+        for rx, ry in arcs:
+            assert float(rx) == pytest.approx(8.0) and float(ry) == pytest.approx(8.0), (
+                f"an uncut corner keeps the full requested radius; got {d}"
+            )
+
+
+def test_split_narrow_bar_clamps_rx_and_ry_independently():
+    """Spec-review cycle-1 finding: the clamp is per-axis, matching SVG
+    `<rect rx ry>` semantics — `rx` clamps to half the piece's own WIDTH, `ry`
+    to half its HEIGHT, independently.
+
+    Reviewer's measured repro (40 narrow bars, `corner_radius=8`, half
+    crossing a `(150, 850)` gap): a single shared `min(w/2, h/2)` clamp
+    rounded a split piece's uncut corners CIRCULAR (5.573 x 5.573), while the
+    untouched neighbouring bars of the identical width render `rx="8"
+    ry="8"` — which the SVG UA auto-clamps to an ELLIPTICAL 5.573 x 8, since
+    only `rx` needs clamping at that width. A narrow-but-tall split piece
+    must therefore NOT have `rx == ry`.
+    """
+    n = 40
+    cats = [f"c{i}" for i in range(n)]
+    values = [72.0 if i % 2 == 0 else 900.0 for i in range(n)]
+    df = pl.DataFrame({"c": cats, "v": values})
+    chart = fm.Chart(df).mark_bar(corner_radius=8).encode(
+        x="c:N", y=fm.Y("v:Q", scale=fm.LinearScale(domain=[0.0, 1000.0]))
+    ) + fm.BreakAxis(axis="y", gap=(150, 850))
+    svg = chart.to_svg()
+
+    paths = _mark_paths(svg)
+    split_pieces = [d for d in paths if d.count("A") == 2]
+    assert split_pieces, f"expected at least one split rounded piece; got {len(paths)} paths"
+
+    d = split_pieces[0]
+    xs = [x for x, _ in _path_coords(d)]
+    ys = [y for _, y in _path_coords(d)]
+    w = max(xs) - min(xs)
+    h = max(ys) - min(ys)
+    assert w < 16.0, f"the bar must be narrower than 2x the radius for rx to clamp; got w={w}"
+    assert h > 16.0, f"the piece must be taller than 2x the radius so ry does not clamp; got h={h}"
+
+    arcs = re.findall(r"A([\d.]+) ([\d.]+) [\d.]+ \d \d [-\d.]+ [-\d.]+", d)
+    assert arcs, f"expected rounded corners on the uncut edges; got {d}"
+    for rx_s, ry_s in arcs:
+        rx, ry = float(rx_s), float(ry_s)
+        assert rx == pytest.approx(w / 2.0, abs=0.01), (
+            f"rx must clamp to half the piece's own width; got rx={rx} w={w}"
+        )
+        assert ry == pytest.approx(8.0, abs=0.01), (
+            f"ry must stay at the requested radius (well under half the piece's height); got {ry}"
+        )
+        assert rx != pytest.approx(ry, abs=0.5), (
+            f"rx and ry must clamp independently — a narrow-but-tall piece must not "
+            f"round circular; got rx={rx} ry={ry}"
+        )
+
+
+def test_split_bar_at_exact_gap_boundary_stays_a_plain_rounded_rect():
+    """Quality-review cycle-3 finding 6 (S1): cut detection compares exactly
+    against a gap's boundary (``>``/``<``, never a tolerance band), so a bar
+    whose extent stops EXACTLY where a gap starts touches no cut edge at all
+    and must stay a plain rounded ``<rect>``, not degrade to a squared
+    ``<path>``. This is the knife-edge proving cut detection has no false
+    positive at equality: ``v=150.0`` (this test) keeps the whole rect,
+    ``v=150.0000001`` (a hair over the gap start) flips to a squared piece.
+    """
+    df = pl.DataFrame({"c": ["A"], "v": [150.0]})
+    chart = fm.Chart(df).mark_bar(corner_radius=8).encode(
+        x="c:N", y=fm.Y("v:Q", scale=fm.LinearScale(domain=[0.0, 1000.0]))
+    ) + fm.BreakAxis(axis="y", gap=(150, 850))
+    svg = chart.to_svg()
+
+    assert not _mark_paths(svg), (
+        f"a bar with no cut edge must not degrade to a squared path; got a path in {svg}"
+    )
+    mark_rects = re.findall(rf'<rect[^>]*fill="{re.escape(_MARK_FILL)}"[^>]*/?>', svg)
+    assert len(mark_rects) == 1, f"expected exactly one plain rounded rect; got {mark_rects}"
+    assert 'rx="8"' in mark_rects[0] and 'ry="8"' in mark_rects[0], (
+        f"the uncut rect keeps its full requested corner radius; got {mark_rects[0]}"
+    )
+
+
+def test_split_bar_with_two_gaps_keeps_the_fully_cut_middle_piece_a_plain_rect():
+    """Quality-review cycle-3 finding 3 (S2): a bar split by TWO gaps has a
+    middle piece cut on BOTH its top and bottom edges — every corner touches
+    a cut edge, so no rounding survives. That piece renders as a plain
+    ``<rect>`` (no ``rx``/``ry``), not a four-line ``<path>`` outline that is
+    byte-identical in geometry but forfeits ``<rect>``-only behavior
+    (hit-testing, R-tree membership, packing eligibility, the centre
+    rotation anchor) for no visual gain.
+    """
+    df = pl.DataFrame({"c": ["A"], "v": [900.0]})
+    chart = fm.Chart(df).mark_bar(corner_radius=8).encode(
+        x="c:N", y=fm.Y("v:Q", scale=fm.LinearScale(domain=[0.0, 1000.0]))
+    ) + fm.BreakAxis(axis="y", gap=[(100, 300), (400, 800)])
+    svg = chart.to_svg()
+
+    paths = _mark_paths(svg)
+    assert len(paths) == 2, (
+        f"the two end pieces (each cut on only one edge) stay rounded paths; got {paths}"
+    )
+    for d in paths:
+        arcs = re.findall(r"A([\d.]+) ([\d.]+) [\d.]+ \d \d [-\d.]+ [-\d.]+", d)
+        assert len(arcs) == 2, f"each end piece keeps its two uncut corners rounded; got {d}"
+
+    rects = _rects(svg)
+    assert len(rects) == 1, f"exactly one plain rect: the fully-cut middle piece; got {rects}"
+
+
+# --------------------------------------------------------------------------
 # vertex splitting (#230-1)
 #
 # Vertex-placed stroked geometry (line, rule, segment shaft) crossing a gap

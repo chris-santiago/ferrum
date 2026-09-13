@@ -1034,6 +1034,17 @@ enum Side {
     AtMost,
 }
 
+/// One [`BreakRemap::clip_extent_bands`] result: a pixel-space `(lo, hi)`
+/// band plus which of its two edges (`lo`, the smaller pixel value, and
+/// `hi`, the larger) a gap cut rather than the extent's own endpoint.
+#[derive(Debug, Clone, Copy)]
+struct ClippedBand {
+    lo: f64,
+    hi: f64,
+    cut_lo: bool,
+    cut_hi: bool,
+}
+
 impl<'a> BreakRemap<'a> {
     /// Resolve `result` against the unbroken scale's `domain` and `pixels`.
     pub fn new(
@@ -1160,6 +1171,32 @@ impl<'a> BreakRemap<'a> {
     /// zero-length pair when visible, so a zero-valued bar still lands in the
     /// right place.
     pub fn clip_extent(&self, a: f64, b: f64) -> Vec<(f64, f64)> {
+        self.clip_extent_bands(a, b)
+            .into_iter()
+            .map(|band| (band.lo, band.hi))
+            .collect()
+    }
+
+    /// Same intersection as [`BreakRemap::clip_extent`], plus which pixel-space
+    /// edge of each returned band a gap produced rather than `a`/`b`
+    /// themselves — [`BreakRemap::clip_node_into`]'s `Rect` arm needs this to
+    /// know which corners of a split piece stay rounded (#230-2: the prior
+    /// code copied `corner_radius` onto every piece, rounding the CUT edge a
+    /// gap introduced along with the two edges that were always there).
+    ///
+    /// "Cut" is exact, not a float-tolerance guess: `data_spans`' own
+    /// `lo.max(s_lo)` / `hi.min(s_hi)` clamp returns one of its two operands
+    /// UNCHANGED (`f64::max`/`min` never interpolate), so a band's data-space
+    /// bound is cut exactly when the clamp picked the segment's edge over the
+    /// requested extent's own endpoint — checkable with a plain `>`/`<`
+    /// against the same `lo`/`hi` this method already computes. Mapping that
+    /// into pixel space needs one more step: `data_spans` walks segments in
+    /// ascending DATA order, but a segment's `pixel_for` can run either
+    /// direction (a Y axis maps larger data to SMALLER pixels), so which of a
+    /// band's two data-cut flags lands on the smaller-pixel edge depends on
+    /// that segment's own direction — read off `p0` vs `p1` per band rather
+    /// than assumed from array position.
+    fn clip_extent_bands(&self, a: f64, b: f64) -> Vec<ClippedBand> {
         // `BREAK_HIDDEN` is poison here too (#230-9 belt-and-braces): tested
         // on the INPUT pixels, before `data_at` runs, because `data_at`'s own
         // poison guard returns `f64::NAN` for a hidden endpoint, and Rust's
@@ -1178,12 +1215,19 @@ impl<'a> BreakRemap<'a> {
         let (d0, d1) = (self.data_at(a), self.data_at(b));
         // Ascending, so `data_spans` needs no travel-order reversal and the
         // pairs come out in segment order, as every caller reads them.
-        self.data_spans(d0.min(d1), d0.max(d1))
+        let (lo, hi) = (d0.min(d1), d0.max(d1));
+        self.data_spans(lo, hi)
             .into_iter()
-            .map(|(k, lo, hi)| {
+            .map(|(k, c_lo, c_hi)| {
                 let seg = &self.result.segments[k];
-                let (p0, p1) = (seg.pixel_for(lo), seg.pixel_for(hi));
-                (p0.min(p1), p0.max(p1))
+                let (p0, p1) = (seg.pixel_for(c_lo), seg.pixel_for(c_hi));
+                let cut_at_c_lo = c_lo > lo;
+                let cut_at_c_hi = c_hi < hi;
+                if p0 <= p1 {
+                    ClippedBand { lo: p0, hi: p1, cut_lo: cut_at_c_lo, cut_hi: cut_at_c_hi }
+                } else {
+                    ClippedBand { lo: p1, hi: p0, cut_lo: cut_at_c_hi, cut_hi: cut_at_c_lo }
+                }
             })
             .collect()
     }
@@ -1280,21 +1324,24 @@ impl<'a> BreakRemap<'a> {
     fn clip_node_into(&self, node: SceneNode, out: &mut Vec<SceneNode>) {
         match node {
             SceneNode::Rect { x, y, w, h, style, corner_radius } => {
-                let (start, len) = if self.is_y() { (y, h) } else { (x, w) };
-                for (lo, hi) in self.clip_extent(start, start + len) {
-                    let (nx, nw, ny, nh) = if self.is_y() {
-                        (x, w, lo, hi - lo)
+                let is_y = self.is_y();
+                let (start, len) = if is_y { (y, h) } else { (x, w) };
+                for band in self.clip_extent_bands(start, start + len) {
+                    let (nx, nw, ny, nh) = if is_y {
+                        (x, w, band.lo, band.hi - band.lo)
                     } else {
-                        (lo, hi - lo, y, h)
+                        (band.lo, band.hi - band.lo, y, h)
                     };
-                    out.push(SceneNode::Rect {
-                        x: nx,
-                        y: ny,
-                        w: nw,
-                        h: nh,
-                        style: style.clone(),
-                        corner_radius,
-                    });
+                    // A Y split cuts the top/bottom edges (the left/right
+                    // edges are `x`/`x+w`, untouched by a Y clip); an X split
+                    // cuts left/right. `band.cut_lo` names the smaller-pixel
+                    // edge (top for Y, left for X), `band.cut_hi` the larger.
+                    let cut = if is_y {
+                        CutEdges { top: band.cut_lo, right: false, bottom: band.cut_hi, left: false }
+                    } else {
+                        CutEdges { top: false, right: band.cut_hi, bottom: false, left: band.cut_lo }
+                    };
+                    out.push(rounded_rect_piece(nx, ny, nw, nh, style.clone(), corner_radius, cut));
                 }
             }
             // A CLOSED polygonal path IS the extent geometry — the area fill —
@@ -2041,7 +2088,25 @@ impl<'a> BreakRemap<'a> {
             // first visible segment — the 1→1 degradation of the clip. Callers
             // that can grow their node list (mark batches, gridlines) go
             // through `clip_nodes` and get every visible segment.
-            SceneNode::Rect { x, y, w, h, .. } => {
+            //
+            // This arm is unreachable for a `corner_radius`-bearing rect in
+            // production: every producer of an extent rect that can carry a
+            // radius (bar, rect) is `BreakPlacement::ClipExtent` and routes
+            // through `clip_nodes` -> `clip_node_into`'s dedicated `Rect` arm,
+            // which owns the cut-edge-aware radius handling `rounded_rect_piece`
+            // builds. A rect that DOES reach this fallback (a point mark's
+            // `Square` shape, always `corner_radius: 0.0`) never carries a
+            // radius, so the assertion below turns that claim into something
+            // the suite enforces rather than a prose trace that can drift.
+            SceneNode::Rect { x, y, w, h, corner_radius, .. } => {
+                debug_assert_eq!(
+                    *corner_radius,
+                    0.0,
+                    "remap_node's Rect arm is the 1->1 fallback and does not apply \
+                     rounded_rect_piece's cut-edge-aware radius handling; a \
+                     corner_radius-bearing rect must route through clip_nodes -> \
+                     clip_node_into instead"
+                );
                 let (start, len) = if is_y { (y, h) } else { (x, w) };
                 match self.clip_extent(*start, *start + *len).first() {
                     Some(&(lo, hi)) => {
@@ -2257,6 +2322,182 @@ fn path_commands(points: &[(f64, f64)], closed: bool) -> Vec<PathCmd> {
         commands.push(PathCmd::Close);
     }
     commands
+}
+
+/// Which of a clipped rect piece's four edges a break's gap produced — the
+/// crate's typed-`Copy`-struct idiom for "which edges" ([`GridRectEnds`],
+/// `marks/axis.rs`), in place of four positional `bool`s a call site could
+/// silently transpose.
+///
+/// Exactly two of the four are ever set for one split: a Y split can only
+/// cut `top`/`bottom` (the `left`/`right` edges are the rect's own `x` /
+/// `x + w`, untouched by a Y clip); an X split can only cut `left`/`right`.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct CutEdges {
+    top: bool,
+    right: bool,
+    bottom: bool,
+    left: bool,
+}
+
+impl CutEdges {
+    /// Whether ANY edge was cut — the common early-out for "this piece is
+    /// exactly the source rect, unclipped".
+    fn any(self) -> bool {
+        self.top || self.right || self.bottom || self.left
+    }
+
+    /// Whether each of the four corners — top-left, top-right, bottom-right,
+    /// bottom-left, in that order — touches a cut edge. A corner squares
+    /// whenever EITHER of its two adjacent edges is cut.
+    fn corners(self) -> [bool; 4] {
+        [
+            self.top || self.left,
+            self.top || self.right,
+            self.bottom || self.right,
+            self.bottom || self.left,
+        ]
+    }
+}
+
+/// Build one clipped rect piece's scene node — a `Path` with arcs on only
+/// the UNCUT corners when a cut edge would otherwise round a corner the gap
+/// itself produced, a plain `Rect` in every other case (#230-2).
+///
+/// A piece stays a `Rect` rather than converting to a `Path` in THREE cases,
+/// each because the conversion would either add no information or would
+/// actively cost the piece something only `Rect`-ness carries (SVG
+/// centre-anchored rotation, WASM hit-testing, R-tree membership, batch
+/// packing eligibility):
+///
+/// - **No cut edge, or no radius.** The common case — an unbroken chart, or
+///   a break whose gaps miss the piece entirely — and byte-identical to what
+///   this code emitted before #230-2.
+/// - **Every surviving corner is squared** (quality-review finding, cycle
+///   3): a piece cut on both edges of one axis (the middle slice of a
+///   two-gap break) has no corner left to round, so its outline is already a
+///   plain four-cornered box. It emits `Rect { corner_radius: 0.0 }` rather
+///   than a `Path` that would spell the identical geometry while forfeiting
+///   `Rect`-only behavior for no visual gain.
+/// - **`style.angle != 0.0`** (quality-review finding, cycle 3):
+///   `SceneNode::Rect` rotates about its own centre
+///   (`svg_walk.rs::emit_node`'s `Rect` arm), while `SceneNode::Path` rotates
+///   about its first `MoveTo` — a converted piece would silently jump to a
+///   different rotation anchor than its unbroken rounded sibling (hundreds
+///   of pixels, measured), and lose the rotation entirely in WASM, which
+///   never reads `style.angle` for a `Path`. A rotated piece keeps the plain
+///   `Rect`, uncut radius and all, rather than corrupt its anchor: the
+///   un-squared cut edge in that specific rotated+rounded+broken three-way
+///   combination is a documented residual (`ferrum-spec.md`'s #230-2 dated
+///   note), not a silent regression.
+fn rounded_rect_piece(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    style: FillStroke,
+    corner_radius: f64,
+    cut: CutEdges,
+) -> SceneNode {
+    if corner_radius <= 0.0 || !cut.any() || style.angle != 0.0 {
+        return SceneNode::Rect { x, y, w, h, style, corner_radius };
+    }
+    if cut.corners().iter().all(|&squared| squared) {
+        return SceneNode::Rect { x, y, w, h, style, corner_radius: 0.0 };
+    }
+    SceneNode::Path {
+        commands: square_cut_rounded_rect_path(x, y, w, h, corner_radius, cut),
+        style,
+        closed: true,
+    }
+}
+
+/// A rounded rect's outline, clockwise from the top edge, with the radius
+/// zeroed on every corner `cut` touches — a corner squares whenever EITHER
+/// of its two adjacent edges is cut. Never called with all four corners
+/// squared; [`rounded_rect_piece`] takes the plain-`Rect` branch for that.
+///
+/// `radius` is clamped per axis, matching SVG `<rect rx ry>` semantics
+/// exactly: `rx` clamps to `w / 2` and `ry` clamps to `h / 2`, INDEPENDENTLY
+/// of each other. An SVG `<rect>` gets that clamp for free from the
+/// rendering rules, but a hand-built arc path does not, so a piece shorter
+/// than the requested radius on only one axis (a thin sliver left after a
+/// gap eats most of a bar) needs it spelled out here to match what the
+/// plain-`Rect` branch would have rendered for the same dimensions — a
+/// single shared scalar clamped by `min(w/2, h/2)` would round the uncut
+/// corners of a narrow-but-tall piece more tightly than an unsplit rect of
+/// the same size does, since `rx` and `ry` never actually collapse to one
+/// number unless `w == h`.
+fn square_cut_rounded_rect_path(
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    radius: f64,
+    cut: CutEdges,
+) -> Vec<PathCmd> {
+    let radius = radius.max(0.0);
+    let rx = radius.min(w / 2.0);
+    let ry = radius.min(h / 2.0);
+    let [squared_tl, squared_tr, squared_br, squared_bl] = cut.corners();
+    let corner = |squared: bool| -> (f64, f64) { if squared { (0.0, 0.0) } else { (rx, ry) } };
+    let (rx_tl, ry_tl) = corner(squared_tl);
+    let (rx_tr, ry_tr) = corner(squared_tr);
+    let (rx_br, ry_br) = corner(squared_br);
+    let (rx_bl, ry_bl) = corner(squared_bl);
+
+    let mut cmds = Vec::with_capacity(9);
+    cmds.push(PathCmd::MoveTo { x: x + rx_tl, y });
+    cmds.push(PathCmd::LineTo { x: x + w - rx_tr, y });
+    if rx_tr > 0.0 || ry_tr > 0.0 {
+        cmds.push(PathCmd::ArcTo {
+            rx: rx_tr,
+            ry: ry_tr,
+            rotation: 0.0,
+            large_arc: false,
+            sweep: true,
+            x: x + w,
+            y: y + ry_tr,
+        });
+    }
+    cmds.push(PathCmd::LineTo { x: x + w, y: y + h - ry_br });
+    if rx_br > 0.0 || ry_br > 0.0 {
+        cmds.push(PathCmd::ArcTo {
+            rx: rx_br,
+            ry: ry_br,
+            rotation: 0.0,
+            large_arc: false,
+            sweep: true,
+            x: x + w - rx_br,
+            y: y + h,
+        });
+    }
+    cmds.push(PathCmd::LineTo { x: x + rx_bl, y: y + h });
+    if rx_bl > 0.0 || ry_bl > 0.0 {
+        cmds.push(PathCmd::ArcTo {
+            rx: rx_bl,
+            ry: ry_bl,
+            rotation: 0.0,
+            large_arc: false,
+            sweep: true,
+            x,
+            y: y + h - ry_bl,
+        });
+    }
+    cmds.push(PathCmd::LineTo { x, y: y + ry_tl });
+    if rx_tl > 0.0 || ry_tl > 0.0 {
+        cmds.push(PathCmd::ArcTo {
+            rx: rx_tl,
+            ry: ry_tl,
+            rotation: 0.0,
+            large_arc: false,
+            sweep: true,
+            x: x + rx_tl,
+            y,
+        });
+    }
+    cmds.push(PathCmd::Close);
+    cmds
 }
 
 /// The vertices of an OPEN path whose every command draws a straight line —
@@ -3046,6 +3287,306 @@ mod tests {
         assert!(clipped.nodes.is_empty(), "a hidden bar leaves no node: {:?}", clipped.nodes);
         assert!(clipped.is_reindexed());
         assert_eq!(clipped.realign(Some(vec![3usize])), Some(vec![]));
+    }
+
+    // ── Corner radius on cut edges (#230-2) ───────────────────────────────────
+
+    /// The guide's worked example with a corner radius: `mark_bar(value=900,
+    /// corner_radius=8)` under a `(150, 850)` gap — the measured repro (prior
+    /// disposition `sdd-batch-h/task-3-report.md:125`, F5/S1): the old code
+    /// copied `corner_radius` onto both pieces verbatim, so `rx="8"` appeared
+    /// on the cut edge each piece shares with the gap, not just the two edges
+    /// that were always there. Fixed: each piece is a `Path` with arcs ONLY
+    /// on its uncut corners; the cut edge is flat.
+    #[test]
+    fn corner_radius_split_rect_squares_only_the_cut_edge() {
+        let br = guide_break();
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 40.0,
+            w: 20.0,
+            h: 360.0,
+            style: fill_stroke(),
+            corner_radius: 8.0,
+        };
+        let clipped = guide_remap(&br).clip_nodes(vec![node]);
+        assert_eq!(clipped.nodes.len(), 2, "crossing bar splits: {:?}", clipped.nodes);
+
+        // Piece 0 (data 0..150, pixels 206..400): the baseline (y=400, data
+        // 0) is the ORIGINAL rect's real bottom edge — uncut, rounded. The
+        // top (y=206, data 150) sits against the gap — cut, squared.
+        let lower = path_commands_of(&clipped.nodes[0]);
+        assert_eq!(
+            arc_count(lower),
+            2,
+            "only the two uncut (bottom) corners get an arc; got {lower:?}"
+        );
+        assert!(
+            matches!(lower.first(), Some(PathCmd::MoveTo { x, y })
+                if (*x - 10.0).abs() < 1e-9 && (*y - 206.0).abs() < 1e-9),
+            "the squared top-left corner starts flush at the rect's corner point; got {lower:?}"
+        );
+        assert!(
+            matches!(lower[1], PathCmd::LineTo { x, y }
+                if (x - 30.0).abs() < 1e-9 && (y - 206.0).abs() < 1e-9),
+            "the top edge runs corner to corner with no arc; got {lower:?}"
+        );
+        for cmd in lower {
+            if let PathCmd::ArcTo { rx, ry, y, .. } = cmd {
+                assert!((*rx - 8.0).abs() < 1e-9 && (*ry - 8.0).abs() < 1e-9);
+                assert!(*y > 206.0 + 1e-6, "an arc must not sit on the cut (top) edge; got {cmd:?}");
+            }
+        }
+
+        // Piece 1 (data 850..900, pixels 129.33..194): the true top of the
+        // original rect (y≈129.33, data 900) is uncut — rounded. Its bottom
+        // (y=194, data 850) sits against the gap — cut, squared.
+        let upper = path_commands_of(&clipped.nodes[1]);
+        assert_eq!(
+            arc_count(upper),
+            2,
+            "only the two uncut (top) corners get an arc; got {upper:?}"
+        );
+        let bottom_y = 194.0;
+        for cmd in upper {
+            if let PathCmd::ArcTo { rx, ry, y, .. } = cmd {
+                assert!((*rx - 8.0).abs() < 1e-9 && (*ry - 8.0).abs() < 1e-9);
+                assert!(*y < bottom_y - 1e-6, "an arc must not sit on the cut (bottom) edge; got {cmd:?}");
+            }
+        }
+        assert!(
+            matches!(upper.last(), Some(PathCmd::Close)),
+            "a rounded-piece path must close; got {upper:?}"
+        );
+    }
+
+    /// Mirror of the above on the X axis: a rect split by an X break squares
+    /// its left/right cut edge instead of top/bottom, proving the corner
+    /// treatment is not accidentally Y-only.
+    #[test]
+    fn corner_radius_split_rect_on_x_axis_squares_the_cut_edge() {
+        // Domain [0, 1000] on x pixels 0 -> 400 (increasing with data, unlike
+        // the Y guide fixture), gap (150, 850), same 12px indicator.
+        let result = apply_break_to_scale((0.0, 1000.0), &[[150.0, 850.0]], (0.0, 400.0), 12.0);
+        let remap = BreakRemap::new("x", (0.0, 1000.0), (0.0, 400.0), &result);
+        // A rect from data 0 (pixel 0) to data 900 (pixel 360), like the Y
+        // case rotated 90 degrees.
+        let node = SceneNode::Rect {
+            x: 0.0,
+            y: 10.0,
+            w: 360.0,
+            h: 20.0,
+            style: fill_stroke(),
+            corner_radius: 8.0,
+        };
+        let clipped = remap.clip_nodes(vec![node]);
+        assert_eq!(clipped.nodes.len(), 2, "crossing bar splits: {:?}", clipped.nodes);
+
+        // Piece 0 (data 0..150): its LEFT edge (x=0) is the original rect's
+        // real left edge — uncut, rounded. Its RIGHT edge sits against the
+        // gap — cut, squared.
+        // `path_commands_of` itself asserts the node is a `Path`, not a
+        // `Rect` — the cut edge means this piece must not take the
+        // plain-`Rect` branch at all.
+        let left_piece = path_commands_of(&clipped.nodes[0]);
+        assert_eq!(arc_count(left_piece), 2, "only the two uncut (left) corners get an arc; got {left_piece:?}");
+
+        // Piece 1's LEFT edge sits against the gap — cut, squared; its RIGHT
+        // edge (x=360, data 900) is the original rect's real right edge —
+        // uncut, rounded.
+        let right_piece = path_commands_of(&clipped.nodes[1]);
+        assert_eq!(arc_count(right_piece), 2, "only the two uncut (right) corners get an arc; got {right_piece:?}");
+    }
+
+    /// #230-2's clamp clause: a piece SHORTER than the requested radius on
+    /// its uncut side gets the same clamp an SVG `<rect rx ry>` gets for
+    /// free (`rx`/`ry` each capped at half of their own dimension) — a
+    /// hand-built arc path does not get that clamp automatically, so it must
+    /// be applied explicitly.
+    #[test]
+    fn corner_radius_clamps_when_the_piece_is_shorter_than_the_radius() {
+        let br = guide_break();
+        // A rect from data 0 to data 900, but only 4px wide — narrower than
+        // the requested 8px radius.
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 40.0,
+            w: 4.0,
+            h: 360.0,
+            style: fill_stroke(),
+            corner_radius: 8.0,
+        };
+        let clipped = guide_remap(&br).clip_nodes(vec![node]);
+        assert_eq!(clipped.nodes.len(), 2);
+        for node in &clipped.nodes {
+            let cmds = path_commands_of(node);
+            for cmd in cmds {
+                if let PathCmd::ArcTo { rx, ry, .. } = cmd {
+                    // SVG `<rect rx ry>` clamps each axis independently:
+                    // rx to w/2 (2.0, since w=4.0), ry to h/2 (180.0, but
+                    // the 8px requested radius never reaches that ceiling,
+                    // so ry stays 8.0). A single shared min(w/2, h/2)
+                    // clamp would wrongly squeeze ry down to 2.0 too.
+                    assert!(
+                        (*rx - 2.0).abs() < 1e-9,
+                        "rx must clamp to half the 4px width (2.0); got {cmd:?}"
+                    );
+                    assert!(
+                        (*ry - 8.0).abs() < 1e-9,
+                        "ry must stay at the requested 8px radius (well under half the 360px height); got {cmd:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A piece with no cut edge (a rect that fits wholly in one segment)
+    /// keeps the plain `Rect` node — byte-identical to pre-#230-2 output,
+    /// which is also what keeps every unbroken chart's bar goldens
+    /// untouched by this fix.
+    #[test]
+    fn corner_radius_on_an_uncut_piece_stays_a_plain_rect() {
+        let br = guide_break();
+        // Data 0..100, wholly inside segment 0 (data 0..150) — no gap
+        // touches this bar at all. Positions are on the UNBROKEN scale (the
+        // domain-0..1000-over-pixel-400..0 mapping `clip_node_into` receives
+        // its node coordinates in, before any break remap runs): data 100 ->
+        // pixel 400 + (100/1000)*(0-400) = 360.
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 360.0,
+            w: 20.0,
+            h: 40.0, // up to pixel 400 (data 0)
+            style: fill_stroke(),
+            corner_radius: 8.0,
+        };
+        let clipped = guide_remap(&br).clip_nodes(vec![node]);
+        assert_eq!(clipped.nodes.len(), 1, "no gap touches this bar; got {:?}", clipped.nodes);
+        match &clipped.nodes[0] {
+            SceneNode::Rect { corner_radius, .. } => assert_eq!(*corner_radius, 8.0),
+            other => panic!("an uncut piece must stay a plain Rect, not a Path; got {other:?}"),
+        }
+    }
+
+    /// Quality-review cycle-3 finding 3 (S2): a piece cut on BOTH edges of
+    /// the split axis — the middle slice of a two-gap break — has no corner
+    /// left to round. Folding "no corner survives" into the Rect-vs-Path
+    /// gate keeps it a plain `Rect { corner_radius: 0.0 }` rather than a
+    /// `Path` that would draw the identical four-line box while forfeiting
+    /// hit-testing, R-tree membership, packing eligibility and the centre
+    /// rotation anchor for no visual gain.
+    #[test]
+    fn corner_radius_fully_cut_middle_piece_stays_a_plain_rect_with_zero_radius() {
+        // Same domain/pixel-range/break-size convention as `guide_break`,
+        // with a second gap so the middle retained segment (data 300..400)
+        // is bounded on both sides by a gap rather than by the domain edge.
+        let br = apply_break_to_scale(
+            (0.0, 1000.0),
+            &[[100.0, 300.0], [400.0, 800.0]],
+            (400.0, 0.0),
+            12.0,
+        );
+        let remap = BreakRemap::new("y", (0.0, 1000.0), (400.0, 0.0), &br);
+        // Data 0..900, same shape as the guide's own worked example.
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 40.0,
+            w: 20.0,
+            h: 360.0,
+            style: fill_stroke(),
+            corner_radius: 8.0,
+        };
+        let clipped = remap.clip_nodes(vec![node]);
+        assert_eq!(
+            clipped.nodes.len(),
+            3,
+            "three visible segments intersect the bar (0..100, 300..400, 800..900); got {:?}",
+            clipped.nodes
+        );
+
+        // Order-independent: exactly one piece (the fully-cut middle slice)
+        // must be a plain zero-radius `Rect`; the other two (cut on only one
+        // edge) must be `Path`s with their two uncut corners still rounded.
+        let (mut fully_cut, mut partly_cut) = (0, 0);
+        for piece in &clipped.nodes {
+            match piece {
+                SceneNode::Rect { corner_radius, .. } => {
+                    assert_eq!(
+                        *corner_radius, 0.0,
+                        "the only Rect piece must be the fully-cut one; got {piece:?}"
+                    );
+                    fully_cut += 1;
+                }
+                SceneNode::Path { commands, .. } => {
+                    assert_eq!(
+                        arc_count(commands),
+                        2,
+                        "a piece cut on only one edge keeps two rounded corners; got {commands:?}"
+                    );
+                    partly_cut += 1;
+                }
+                other => panic!("expected Rect or Path; got {other:?}"),
+            }
+        }
+        assert_eq!(
+            (fully_cut, partly_cut),
+            (1, 2),
+            "exactly one fully-cut piece (Rect) and two partly-cut pieces (Path); got {:?}",
+            clipped.nodes
+        );
+    }
+
+    /// Quality-review cycle-3 finding 1 (S3): `SceneNode::Rect` rotates
+    /// about its own centre (`svg_walk.rs::emit_node`'s `Rect` arm), while
+    /// `SceneNode::Path` rotates about its first `MoveTo`. Converting a
+    /// rotated, rounded, cut piece to a `Path` would silently relocate its
+    /// rotation anchor relative to its unbroken rounded sibling (measured:
+    /// hundreds of pixels), and WASM drops the rotation for a `Path`
+    /// entirely (`tessellate.rs` never reads `style.angle`). The gate keeps
+    /// a rotated piece a plain `Rect` — original, uncut radius and all —
+    /// rather than corrupt its anchor; the un-squared cut edge that results
+    /// is a documented residual (`ferrum-spec.md`'s #230-2 dated note), not
+    /// a silent regression.
+    #[test]
+    fn corner_radius_rotated_piece_keeps_the_plain_rect_and_its_anchor() {
+        let br = guide_break();
+        let mut style = fill_stroke();
+        style.angle = 30.0;
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 40.0,
+            w: 20.0,
+            h: 360.0,
+            style,
+            corner_radius: 8.0,
+        };
+        let clipped = guide_remap(&br).clip_nodes(vec![node]);
+        assert_eq!(
+            clipped.nodes.len(),
+            2,
+            "a rotated bar still splits into two pieces; got {:?}",
+            clipped.nodes
+        );
+        for piece in &clipped.nodes {
+            match piece {
+                SceneNode::Rect { corner_radius, style, .. } => {
+                    assert_eq!(
+                        *corner_radius, 8.0,
+                        "a rotated piece keeps its original, un-squared radius; got {piece:?}"
+                    );
+                    assert!((style.angle - 30.0).abs() < 1e-9, "rotation must survive the clip");
+                }
+                other => panic!(
+                    "a rotated cut piece must stay a Rect (centre-anchored rotation), not a Path; got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// The number of `ArcTo` commands in a path — how many of a clipped
+    /// rect piece's four corners kept their rounding.
+    fn arc_count(cmds: &[PathCmd]) -> usize {
+        cmds.iter().filter(|c| matches!(c, PathCmd::ArcTo { .. })).count()
     }
 
     #[test]

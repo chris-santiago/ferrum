@@ -2785,6 +2785,17 @@ mod tests {
         ))
     }
 
+    /// Like [`y_rect`], with an explicit `corner_radius` — for #230-2
+    /// coverage of `annotate_rect(corner_radius=...)` straddling a gap (T7
+    /// routed `rect`/`span` annotations through the same clip machinery as
+    /// marks, so they inherited the mark-side defect; this is the annotation
+    /// half of that fix's regression coverage).
+    fn y_rect_with_radius(y1: f64, y2: f64, corner_radius: f64) -> AnnotationSpec {
+        spec(&format!(
+            r#"{{"type":"rect","x1":{{"norm":0.0}},"y1":{y1},"x2":{{"norm":1.0}},"y2":{y2},"corner_radius":{corner_radius}}}"#
+        ))
+    }
+
     /// A y-`Bracket` spec with the given data bounds — the kind that is
     /// PERMANENTLY suppress-whole.
     fn y_bracket(y1: f64, y2: f64) -> AnnotationSpec {
@@ -2906,6 +2917,60 @@ mod tests {
             warnings.is_empty(),
             "a successful clip is SILENT, like a clipped mark; got {warnings:?}"
         );
+    }
+
+    /// #230-2, the annotation half: `annotate_rect(corner_radius=8)`
+    /// straddling a gap must square the cut edge on each piece, not carry
+    /// `corner_radius` onto it verbatim. `annotate_rect` clips through the
+    /// exact same [`break_axis::BreakRemap::clip_nodes`] a mark batch does
+    /// (see [`a_straddling_rect_clips_into_one_piece_per_visible_segment`]),
+    /// so a fix scoped only to the mark-facing call site would leave this
+    /// broken — this proves the annotation path gets it too.
+    #[test]
+    fn a_straddling_rounded_rect_squares_only_its_cut_edge() {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap("y");
+        let (nodes, warnings) = panel.build(&[y_rect_with_radius(0.0, 1000.0, 8.0)], &[y]);
+
+        assert_eq!(nodes.len(), 2, "same two pieces as the unrounded case; got {nodes:?}");
+        assert!(warnings.is_empty(), "a successful clip is SILENT; got {warnings:?}");
+
+        // Piece 0 (pixel 176..320, data 0..150): y=320 is the real baseline
+        // (data 0) — uncut, rounded. y=176 sits against the gap — cut,
+        // squared.
+        let lower = path_cmds(&nodes[0]);
+        assert_eq!(arc_count(&lower), 2, "only the two uncut (bottom) corners get an arc; got {lower:?}");
+        for cmd in &lower {
+            if let PathCmd::ArcTo { y, .. } = cmd {
+                assert!(*y > 176.0 + 1e-6, "an arc must not sit on the cut (top) edge; got {cmd:?}");
+            }
+        }
+
+        // Piece 1 (pixel 20..164, data 850..1000): y=20 is the real top
+        // (data 1000) — uncut, rounded. y=164 sits against the gap — cut,
+        // squared.
+        let upper = path_cmds(&nodes[1]);
+        assert_eq!(arc_count(&upper), 2, "only the two uncut (top) corners get an arc; got {upper:?}");
+        for cmd in &upper {
+            if let PathCmd::ArcTo { y, .. } = cmd {
+                assert!(*y < 164.0 - 1e-6, "an arc must not sit on the cut (bottom) edge; got {cmd:?}");
+            }
+        }
+    }
+
+    /// The commands of a `Path` node, panicking on anything else — the
+    /// squared-corner pieces #230-2 produces for a cut, rounded rect.
+    fn path_cmds(node: &SceneNode) -> Vec<PathCmd> {
+        let SceneNode::Path { commands, .. } = node else {
+            panic!("expected a Path (rounded, cut piece); got {node:?}")
+        };
+        commands.clone()
+    }
+
+    /// The number of `ArcTo` commands in a path — how many of a clipped
+    /// rect piece's four corners kept their rounding.
+    fn arc_count(cmds: &[PathCmd]) -> usize {
+        cmds.iter().filter(|c| matches!(c, PathCmd::ArcTo { .. })).count()
     }
 
     /// The other half of that contract: a rect with nothing outside the gap is

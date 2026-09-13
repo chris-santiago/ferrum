@@ -148,6 +148,33 @@ def test_rect_wholly_inside_a_gap_is_suppressed_and_rolled_up():
     ]
 
 
+def test_straddling_rect_with_corner_radius_squares_only_the_cut_edge():
+    """#230-2, the annotation half: `ann.rect(corner_radius=...)` straddling a
+    gap inherits the mark-side fix, since both route through the same
+    `clip_nodes` -> `clip_node_into` machinery.
+
+    The rect renders as two `<path>` pieces (never falling back to a plain
+    `<rect rx ry>`), each rounding only the corners its own uncut edges gave
+    it.
+    """
+    rect = fm.Annotate(
+        ann.rect(x1=fm.norm(0), y1=0.0, x2=fm.norm(1), y2=1000.0, fill="#ffcc00", corner_radius=8.0)
+    )
+    svg, messages = _render(fm.BreakAxis(axis="y", gap=(150, 850)), rect)
+    assert not messages, f"a successful clip is silent; got {messages}"
+    assert 'rx="' not in svg, "a cut rounded annotation rect must never fall back to a plain rect"
+
+    paths = re.findall(r'<path d="([^"]*)" fill="#ffcc00"', svg)
+    assert len(paths) == 2, f"one path per visible segment; got {paths}"
+    for d in paths:
+        arcs = re.findall(r"A([\d.]+) ([\d.]+) [\d.]+ \d \d [-\d.]+ [-\d.]+", d)
+        assert len(arcs) == 2, f"only the two uncut corners round; got {d}"
+        for rx, ry in arcs:
+            assert float(rx) == pytest.approx(8.0) and float(ry) == pytest.approx(8.0), (
+                f"an uncut corner keeps the full requested radius; got {d}"
+            )
+
+
 def test_rect_with_a_pixel_bound_drops_whole_when_its_data_bound_is_in_the_gap():
     """`AnnotationSuppressedByBreak`'s third population (quality-review cycle 2).
 
