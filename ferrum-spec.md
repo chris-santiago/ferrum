@@ -244,6 +244,28 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 > roc_curve, pr_curve, confusion_matrix, calibration_curve, cumulative_gain,
 > lift_curve, discrimination_threshold, pca_variance, rank1d/rank2d) ignore it.
 
+> **2026-09-13 (wave 3 T4, #211/N3 — correcting a false claim):** the
+> `discrimination_threshold` entry above, and the matching
+> `DiscriminationThresholdVisualizer` entry in §3.15's `random_state` note,
+> were **false** for `cv=<int>` between 2026-05-11 and this fix: the hand-rolled
+> splitter was `KFold(n_splits=cv, shuffle=True, random_state=self._random_state
+> or 0)`, which genuinely consumed `random_state` (it was reproducible only by
+> the accident of the `or 0` default when `random_state` was left unset).
+> `discrimination_threshold(cv=<int>)` now resolves via sklearn's own
+> `check_cv(cv, y, classifier=True)` convention — an **unshuffled**
+> `StratifiedKFold` — which has no seed to thread, making both claims true
+> again. This is a disclosed, number-moving change for every integer-`cv=`
+> call (stratification changes which rows land in which fold); no golden
+> exercises `cv=`. A user-supplied splitter's `.split()` now also receives
+> `y` (previously `.split(X)` with no `y`, which raised for a stratified
+> splitter). A **train** fold left with only one class (rare under
+> stratification, not impossible at very small class counts) now emits a
+> `UserWarning` naming the fold and the missing class before the clone-and-fit
+> step fails; a degenerate **test** fold is unaffected — it is a routine
+> property of the split, not a bad request, and still silently contributes
+> `precision = recall = f1 = 0` with a real `queue_rate` (unchanged since the
+> 2026-09-11 close review, cycle 4).
+
 > **2026-09-10 (batch G, F-L12-01):** `X` is now optional
 > (`ModelSource(model, X=None, y=None, ...)`; back-compatible — every existing
 > positional/keyword call site is unaffected). Diagnostics computed purely
@@ -345,7 +367,7 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 - `.embeddings(*, method="umap", n_components=2, **method_kwargs)` — `dim_0`, `dim_1`, (`dim_2`), `label`
 - `.learning_curve(*, cv=5, scoring=None, train_sizes=None)` — `train_size`, `split`, `score`, `mean_score`, `std_score`, `lower`, `upper`
 - `.validation_curve(param, values, *, cv=5, scoring=None)` — `param_value`, `split`, `score`, `mean_score`, `lower`, `upper`
-- `.discrimination_threshold(*, n_thresholds=50, cv=None)` — `threshold`, `precision`, `recall`, `f1`, `queue_rate`. Binary classifiers only. Sweeps the decision threshold and records precision, recall, F1, and queue rate at each point. `cv`: if provided, averages over cross-validation folds.
+- `.discrimination_threshold(*, n_thresholds=50, cv=None)` — `threshold`, `precision`, `recall`, `f1`, `queue_rate`. Binary classifiers only. Sweeps the decision threshold and records precision, recall, F1, and queue rate at each point. `cv`: if provided, averages over cross-validation folds; an int resolves to sklearn's `check_cv(cv, y, classifier=True)` — an unshuffled `StratifiedKFold` — and a splitter object is called `.split(X, y)` (see the 2026-09-13 dated note above).
 - `.pca_variance(*, n_components=None)` — `component`, `explained_variance_ratio`, `cumulative_variance_ratio`. Model must expose `explained_variance_ratio_` (e.g. sklearn PCA, TruncatedSVD). `n_components`: limit output to first n components.
 - `.rank1d(*, algorithm="shapiro")` — `feature`, `score`, `rank`. Univariate feature ranking. `algorithm`: `"shapiro"` (Shapiro-Wilk normality score) | `"variance"` | `"covariance"` (covariance with target y).
 - `.rank2d(*, algorithm="pearson")` — `feature_x`, `feature_y`, `correlation`. Pairwise feature correlation matrix. `algorithm`: `"pearson"` | `"spearman"` | `"kendall"` | `"covariance"`.
@@ -449,6 +471,8 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 > **Dated note (2026-09-11, wave-1 hardening, #216 — `rank1d`/`rank2d` refuse an X-less fitted estimator on every algorithm):** `rank1d_chart`/`rank2d_chart` previously only probed "is this raw tabular data or a fitted estimator" inside the `algorithm="covariance"` branch of `rank1d_chart`, and not at all in `rank2d_chart` — so `rank1d_chart(model, y=y, algorithm="shapiro"/"variance")` and EVERY `rank2d_chart(model)` call on an X-less fitted estimator leaked a raw `TypeError` from `np.asarray()` instead of the typed `ModelSource` refusal ("...requires the training data: `ModelSource(model, X)`.") the covariance branch already had. The raw/model probe is now hoisted to the top of both dispatch functions, routing every algorithm through the same typed refusal; `rank2d_chart(model, df)` (with X) is unaffected.
 >
 > **Breaking (2026-09-13, wave-3 diagnostics, N1 — a multi-chunk `pyarrow.Table` was silently truncated to its first chunk):** `polars_or_array_to_record_batch` (the raw-data coercer behind `rank1d_chart`/`rank2d_chart`/`Rank1DVisualizer`/`Rank2DVisualizer`) took `X.to_batches()[0]` for a `pyarrow.Table` input, discarding every chunk after the first. A real `pa.Table` is routinely multi-chunk — `pa.concat_tables`, a multi-file `parquet.read_table`, or a `RecordBatchReader` drain all produce one — so every raw-data rank statistic on such a Table was silently computed over a fraction of the rows while `ModelSource`'s own path (which already routes through `ferrum._coerce.to_polars`) computed the correct answer on the same input: measured on a 200-row regression fixture split into two 100-row chunks, `rank1d_chart(chunked, algorithm="variance")`'s top score for column `b` read **1.169347** (the first 100-row chunk alone) against the correct **1.018316** (all 200 rows) on the equivalent single-chunk Table and the `ModelSource` path. The covariance path did not compute a silently wrong number; it refused with a misleading `"y length must match X row count"`, because the coercer silently halved X's row count while the caller's `y` kept its full length. The pyarrow arm now routes through `ferrum._coerce.to_polars` (the same canonical Arrow-CDI seam `ModelSource` already uses), so every chunk is consumed and the raw-data path, the `ModelSource` path, and a single-chunk Table of the same data all agree. A secondary, smaller instance of the same defect is also closed: an empty 2-column `pyarrow.Table` used to return zero features (the old empty-Table branch, `pa.RecordBatch.from_pydict({})`, discarded the schema along with the rows), where an empty 2-column `polars.DataFrame` correctly returned 2 features scored 0.0 — both spellings of "no rows, two columns" now agree. `#217` itself (the covariance-refuses-on-`pa.Table` shape) was already closed by `545be19a`; this note documents the residual defect one layer below it, in the coercer `545be19a` did not touch.
+
+> **Cache contract (2026-09-13, wave-3 diagnostics, #224b/N5 — `BaseSource._cache_key` can never return the wrong frame):** every `ModelSource` derived-data method caches its result under a key built from the method name plus its kwargs. `_cache_key` normalizes an `ndarray`/`list`/`tuple` kwarg value (including one nested inside another) into a nested tuple of its own values — content-preserving, no rounding, no truncation — before checking hashability. Every `int` and `float` leaf also carries its own numeric kind through normalization, so equal content produces an equal, cacheable key only when the values' type matches too: an int-valued array-like and an equal-valued float-valued array-like (e.g. `train_sizes=[1]` vs. `train_sizes=[1.0]`) key *differently*, because that distinction is not just container bookkeeping — sklearn's own `learning_curve(train_sizes=)` reads an `int` array as an absolute sample count and a `float` array as a fraction of the training set, two different requests that would otherwise collide onto one cached frame via Python's cross-type numeric equality (`1 == 1.0`, `hash(1) == hash(1.0)`). A value that is still unhashable after normalization (a dict, a custom object with no usable `__hash__`, a cv splitter object) is never cached at all: that call gets a key built from a fresh, never-repeating `_Uncacheable` marker, so the lookup always misses, the method always recomputes, and the result is never stored either — `self._cache` (a `_SourceCache`) recognizes the marker at write time and skips the assignment, so a caller who repeatedly passes the same reused unhashable value (e.g. looping `discrimination_threshold(cv=my_splitter)`) does not grow `self._cache` by one throwaway entry per call; correctness costs a cache miss, never a memory leak. This is a disclosed behavior change from the prior `repr()` fallback, which cached under an identity- or print-derived key that could collide two logically different calls. Four such collisions were verified end-to-end and are now impossible: (a) `discrimination_threshold(cv=<splitter>)` with a splitter class that defines `__eq__` (disabling identity `__hash__`) without overriding `__repr__` — CPython's default `object.__repr__` prints the memory address, and two short-lived temporaries of the same class reliably land at the same freed address (measured 10/10 trials), so `cv=Splitter(3)` followed by `cv=Splitter(7)` built the SAME key and the second call silently returned the first's frame; (b) `learning_curve(train_sizes=<ndarray>)`, where numpy's `repr()` rounds (`precision=8`) and truncates (`threshold=1000` → `...`), so two different `train_sizes` arrays could print identically and share a cache slot; (c) `shap_values(background=...)`, which keyed on a hand-rolled `str(background)[:64]` — two backgrounds differing only past character 64 of their printed repr collided outright; (d) `learning_curve(train_sizes=<int array>)` vs. `learning_curve(train_sizes=<equal-valued float array>)` — the dtype-blind collision described above, on the same method as (b) via a different vector. `validation_curve`'s own local `tuple(float(v) for v in vals)` normalization (previously the one caller that worked around the `repr()` fallback correctly) is now redundant and has collapsed onto the central normalizer.
 
 ---
 
@@ -3943,7 +3967,10 @@ class FerrumVisualizer:
 > `Rank2DVisualizer` — except `algorithm="kendall"` which is also
 > deterministic, `ClassBalanceVisualizer`, `ClassificationReportVisualizer`,
 > `ClassPredictionErrorVisualizer`) ignore the value; the rest propagate
-> it. The `ElbowVisualizer(model_class, *, ks, ...)` signature is unique —
+> it. (`DiscriminationThresholdVisualizer`'s membership in this deterministic
+> list was briefly false while its `cv=` path used a shuffled splitter — see
+> the dated 2026-09-13 §3.13 note for that history; the unshuffled
+> `StratifiedKFold` restores it.) The `ElbowVisualizer(model_class, *, ks, ...)` signature is unique —
 > it takes a model **class** and fits one instance per k inside `fit()`.
 
 ---
