@@ -2934,7 +2934,11 @@ fn remap_mark_batch_through_break(
 /// `data_indices`/tooltips/hrefs/descriptions/keys/polar_spans cannot be
 /// realigned by one model and forgotten by another. A rebuild that did not
 /// change the list's shape touches no sidecar, so such a batch's bytes are
-/// unchanged.
+/// unchanged. `keys` is the one sidecar that is not a verbatim copy per
+/// piece: [`break_axis::SidecarRealign::realign_keys`] suffixes every piece
+/// past the first with `#{i}` (#230-5), because a duplicate key across a
+/// split batch's pieces silently degrades WASM's keyed transition pairing
+/// for the whole batch.
 fn install_rebuilt_nodes(
     batch: &mut MarkBatch,
     rebuilt: break_axis::ClippedNodes,
@@ -2950,7 +2954,7 @@ fn install_rebuilt_nodes(
         batch.tooltips = realign.realign(batch.tooltips.take());
         batch.hrefs = realign.realign(batch.hrefs.take());
         batch.descriptions = realign.realign(batch.descriptions.take());
-        batch.keys = realign.realign(batch.keys.take());
+        batch.keys = realign.realign_keys(batch.keys.take());
         batch.polar_spans = realign.realign(batch.polar_spans.take());
         if realign.misaligned() {
             warnings.push(RenderWarning::BreakClipSidecarMisaligned {

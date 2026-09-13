@@ -10,6 +10,8 @@
 //! for the Y axis `plot_top` (small pixel value) corresponds to a large data
 //! value and `plot_bottom` (large pixel value) corresponds to a small data value.
 
+use std::collections::HashSet;
+
 use ferrum_scene::{FillStroke, MarkBatchKind, PathCmd, SceneNode};
 
 use crate::layout::{Rect, ThemeInputs};
@@ -798,16 +800,31 @@ impl ClippedNodes {
     /// and that reporting has test coverage in the debug gate the project
     /// actually runs.
     pub fn realign<T: Clone>(&self, sidecar: Option<Vec<T>>) -> Option<Vec<T>> {
-        let sidecar = sidecar?;
+        let sidecar = match self.checked_sidecar(sidecar?) {
+            Ok(sidecar) => sidecar,
+            Err(sidecar) => return Some(sidecar),
+        };
+        Some(self.sources.iter().map(|&i| sidecar[i].clone()).collect())
+    }
+
+    /// The wrong-length guard [`ClippedNodes::realign`] and
+    /// [`ClippedNodes::realign_keys`] both need before they may index into a
+    /// sidecar — extracted so the "one rule" [`ClippedNodes::accepts_sidecar_len`]
+    /// documents cannot drift into two implementations that quietly disagree.
+    /// `Err` hands the sidecar straight back, untouched: a release build must
+    /// never index a wrong-length sidecar, only report it (via
+    /// [`SidecarRealign`]).
+    fn checked_sidecar<T>(&self, sidecar: Vec<T>) -> Result<Vec<T>, Vec<T>> {
         debug_assert_eq!(
             sidecar.len(),
             self.source_len,
             "per-node sidecar must have one entry per pre-clip node"
         );
-        if sidecar.len() != self.source_len {
-            return Some(sidecar);
+        if sidecar.len() == self.source_len {
+            Ok(sidecar)
+        } else {
+            Err(sidecar)
         }
-        Some(self.sources.iter().map(|&i| sidecar[i].clone()).collect())
     }
 
     /// Start realigning a batch's per-node sidecars, accumulating whether any
@@ -822,6 +839,87 @@ impl ClippedNodes {
     /// [`SidecarRealign`]'s misalignment flag.
     pub fn accepts_sidecar_len(&self, len: usize) -> bool {
         len == self.source_len
+    }
+
+    /// Realign a batch's `keys` sidecar, disambiguating a 1→N split.
+    ///
+    /// Every other sidecar this type realigns is a legitimate verbatim copy —
+    /// two pieces of one split bar share one `data_index`, one tooltip, one
+    /// href, because they ARE one row. `keys` is different: WASM's transition
+    /// pairing (`ferrum-wasm`'s `transition.rs`) treats key equality as row
+    /// identity, so two nodes sharing a key when they came from a 1→N split
+    /// (not from two distinct rows) makes the whole batch's keyed pairing
+    /// degrade to `IndexZip` (#230-5). The fix is suffixing, not a new
+    /// sidecar: within each run of pieces sharing a source index — `sources`
+    /// groups them contiguously, since [`rebuild_nodes`] finishes emitting
+    /// one source's pieces before starting the next — the first piece keeps
+    /// the original key verbatim and each subsequent piece gets `{key}#{i}`
+    /// (spec §6; see [`Self::suffix_keys`] for why `i` is not simply the
+    /// run position). An unkeyed batch (`sidecar` is `None`) is untouched,
+    /// same as [`ClippedNodes::realign`].
+    pub fn realign_keys(&self, sidecar: Option<Vec<String>>) -> Option<Vec<String>> {
+        let sidecar = match self.checked_sidecar(sidecar?) {
+            Ok(sidecar) => sidecar,
+            Err(sidecar) => return Some(sidecar),
+        };
+        Some(self.suffix_keys(&sidecar))
+    }
+
+    /// Suffix `sidecar` (one entry per PRE-clip source node, already length
+    /// checked by [`Self::realign_keys`]) into one key per emitted piece.
+    ///
+    /// A chart broken on two axes runs `install_rebuilt_nodes` — and this
+    /// method — ONCE PER AXIS (`scene_build.rs`'s `break_remaps` loop), so
+    /// the second pass's `sidecar` is the FIRST pass's already-suffixed
+    /// output, not the original user keys. Naively resuming the `#1, #2, ...`
+    /// counter from zero in each pass can mint a suffix the first pass
+    /// already used (`"ka#1"` reappearing once from pass one's second piece
+    /// and again from pass two suffixing pass one's `"ka#1"` piece), which is
+    /// exactly the duplicate this whole mechanism exists to prevent — so
+    /// checking only "is this the same run" is not enough; the check has to
+    /// be "is this candidate string already spoken for, by ANYONE in this
+    /// batch". `incoming` is every entry `sidecar` already holds (covers a
+    /// user key that happens to already contain `#`, and every not-yet-
+    /// visited run's own bare key); `emitted` is every key this call has
+    /// produced so far. Within one run, the smallest available `i` is tried
+    /// in increasing order starting from 1, so the common case (nothing
+    /// collides) still produces the plain `#1, #2, ...` spec §6 sequence;
+    /// the first piece of a run is never suffixed, per spec.
+    fn suffix_keys(&self, sidecar: &[String]) -> Vec<String> {
+        let incoming: HashSet<&str> = sidecar.iter().map(String::as_str).collect();
+        let mut emitted: HashSet<String> = HashSet::with_capacity(self.sources.len());
+        let mut out = Vec::with_capacity(self.sources.len());
+        let mut run_source: Option<usize> = None;
+        let mut next_i = 1usize;
+        for &src in &self.sources {
+            if let Some(prev) = run_source {
+                debug_assert!(
+                    src >= prev,
+                    "sources must be non-decreasing: `rebuild_nodes` finishes \
+                     emitting one source's pieces before starting the next, \
+                     so a run's source index never appears again after a \
+                     later one — the suffix counter above depends on this to \
+                     tell pieces of one split apart from unrelated runs; got \
+                     source {src} after {prev}"
+                );
+            }
+            let key = if run_source == Some(src) {
+                loop {
+                    let candidate = format!("{}#{next_i}", sidecar[src]);
+                    next_i += 1;
+                    if !incoming.contains(candidate.as_str()) && !emitted.contains(&candidate) {
+                        break candidate;
+                    }
+                }
+            } else {
+                run_source = Some(src);
+                next_i = 1;
+                sidecar[src].clone()
+            };
+            emitted.insert(key.clone());
+            out.push(key);
+        }
+        out
     }
 }
 
@@ -849,14 +947,37 @@ impl SidecarRealign<'_> {
     /// reported, testable outcome in a debug build instead of a panic in one
     /// profile and silence in the other.
     pub fn realign<T: Clone>(&mut self, sidecar: Option<Vec<T>>) -> Option<Vec<T>> {
-        if sidecar
-            .as_ref()
-            .is_some_and(|s| !self.clipped.accepts_sidecar_len(s.len()))
-        {
-            self.misaligned = true;
+        if self.note_if_misaligned(&sidecar) {
             return sidecar;
         }
         self.clipped.realign(sidecar)
+    }
+
+    /// Realign the batch's `keys` sidecar via [`ClippedNodes::realign_keys`],
+    /// recording a length mismatch exactly like [`SidecarRealign::realign`].
+    /// The only caller is `scene_build::install_rebuilt_nodes`'s `batch.keys`
+    /// line — see [`ClippedNodes::realign_keys`] for why `keys` cannot share
+    /// the plain clone-per-piece path every other sidecar uses.
+    pub fn realign_keys(&mut self, sidecar: Option<Vec<String>>) -> Option<Vec<String>> {
+        if self.note_if_misaligned(&sidecar) {
+            return sidecar;
+        }
+        self.clipped.realign_keys(sidecar)
+    }
+
+    /// The misalignment check [`SidecarRealign::realign`] and
+    /// [`SidecarRealign::realign_keys`] both perform before touching
+    /// [`ClippedNodes`] — one implementation of "does this sidecar's length
+    /// match the pre-clip node count", so the flag it sets cannot drift
+    /// between the verbatim-copy arm and the key-suffixing arm.
+    fn note_if_misaligned<T>(&mut self, sidecar: &Option<Vec<T>>) -> bool {
+        let misaligned = sidecar
+            .as_ref()
+            .is_some_and(|s| !self.clipped.accepts_sidecar_len(s.len()));
+        if misaligned {
+            self.misaligned = true;
+        }
+        misaligned
     }
 
     /// True when any sidecar realigned through this accumulator had the wrong
@@ -3956,6 +4077,14 @@ mod tests {
             Some(vec!["a", "a", "c"]),
             "each piece inherits its source row; the dropped row vanishes"
         );
+        // The `keys` sidecar is the one exception: it suffixes rather than
+        // copying verbatim, on this exact fixture (dropped-source shape,
+        // quality-review cycle-2 fix 4b).
+        assert_eq!(
+            split.realign_keys(Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])),
+            Some(vec!["a".to_string(), "a#1".to_string(), "c".to_string()]),
+            "the crossing row's second piece is suffixed; the dropped row's key vanishes with it"
+        );
     }
 
     /// An unbroken axis must leave vertex geometry exactly where it was — the
@@ -4361,5 +4490,100 @@ mod tests {
             "a wrong-length sidecar is passed through, never indexed into"
         );
         assert!(broken.misaligned(), "and the pass-through is recorded");
+    }
+
+    /// [`SidecarRealign::realign_keys`]'s own wrong-length guard (duplicated
+    /// from [`SidecarRealign::realign`] before quality-review cycle-2 fix 2,
+    /// now the shared [`SidecarRealign::note_if_misaligned`]) had zero
+    /// coverage in either language — this pins the `keys` sidecar going
+    /// through the exact same pass-through-and-record path as every other
+    /// sidecar.
+    #[test]
+    fn the_realigner_reports_a_misaligned_keys_sidecar() {
+        let br = guide_break();
+        let node = SceneNode::Rect {
+            x: 10.0,
+            y: 40.0,
+            w: 20.0,
+            h: 340.0,
+            style: fill_stroke(),
+            corner_radius: 0.0,
+        };
+        let clipped = guide_remap(&br).clip_nodes(vec![node]);
+        assert!(clipped.is_reindexed());
+
+        let mut aligned = clipped.realigner();
+        assert_eq!(
+            aligned.realign_keys(Some(vec!["k".to_string()])),
+            Some(vec!["k".to_string(), "k#1".to_string()]),
+            "a right-length keys sidecar realigns (and suffixes) cleanly"
+        );
+        assert!(!aligned.misaligned(), "a right-length sidecar realigns cleanly");
+
+        let mut broken = clipped.realigner();
+        assert_eq!(
+            broken.realign_keys(Some(vec!["k".to_string(), "j".to_string()])),
+            Some(vec!["k".to_string(), "j".to_string()]),
+            "a wrong-length keys sidecar is passed through, never indexed into"
+        );
+        assert!(broken.misaligned(), "and the pass-through is recorded");
+    }
+
+    /// A batch broken on BOTH axes runs `install_rebuilt_nodes` — and
+    /// [`ClippedNodes::realign_keys`] — once per axis (`scene_build.rs`'s
+    /// `break_remaps` loop), so the second pass's `keys` sidecar is the
+    /// FIRST pass's already-suffixed output. Quality-review cycle-2 finding
+    /// 1 (S3): resuming the `#1, #2, ...` counter naively in the second call
+    /// reproduces `"ka#1"` from two different pieces — measured pre-fix as
+    /// `["ka", "ka#1", "ka#1", "ka#1#1"]`. This pins the two-call
+    /// composition directly (no scene/scale machinery needed: two
+    /// back-to-back splits of the same node, the second call fed the
+    /// first's output, is exactly what two axis breaks compose into).
+    #[test]
+    fn realign_keys_composes_across_two_remap_passes_without_colliding() {
+        let br = guide_break();
+        // First pass (e.g. the x-axis break): one source node splits into two
+        // pieces.
+        let first_pass = guide_remap(&br).split_nodes(vec![polyline(vec![
+            (0.0, 400.0),
+            (20.0, 40.0),
+        ])]);
+        let first_keys = first_pass
+            .realign_keys(Some(vec!["ka".to_string()]))
+            .expect("keyed sidecar");
+        assert_eq!(first_keys, vec!["ka".to_string(), "ka#1".to_string()]);
+
+        // Second pass (e.g. the y-axis break): each of the two pieces from
+        // pass one splits again, so `sources` groups two runs of two.
+        let second_pass = guide_remap(&br).split_nodes(vec![
+            polyline(vec![(0.0, 400.0), (20.0, 40.0)]),
+            polyline(vec![(0.0, 400.0), (20.0, 40.0)]),
+        ]);
+        let second_keys = second_pass
+            .realign_keys(Some(first_keys))
+            .expect("keyed sidecar");
+        assert_eq!(
+            second_keys.len(),
+            4,
+            "two runs of two pieces each; got {second_keys:?}"
+        );
+        let unique: std::collections::HashSet<&String> = second_keys.iter().collect();
+        assert_eq!(
+            unique.len(),
+            4,
+            "every piece must be a distinct key, even composed across two \
+             remap passes; got {second_keys:?}"
+        );
+        assert_eq!(
+            second_keys,
+            vec![
+                "ka".to_string(),
+                "ka#2".to_string(),
+                "ka#1".to_string(),
+                "ka#1#1".to_string(),
+            ],
+            "pass two's suffix search skips \"ka#1\" because pass one's own \
+             output already used it; got {second_keys:?}"
+        );
     }
 }

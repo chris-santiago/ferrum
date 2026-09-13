@@ -699,9 +699,11 @@ def test_split_line_pieces_realign_their_batch_sidecars():
     """1→N splitting goes through the clip machinery's sidecar realignment, so
     each piece inherits its source row's ``data_indices``/``keys``.
 
-    Keys DUPLICATE across pieces for now — suffixing is #230-5's own work
-    (spec §4.5); what this pins is that the realignment happens at all, i.e.
-    that a split batch's sidecars stay one-entry-per-node.
+    Keys are SUFFIXED across pieces (#230-5, spec §4.5): the first piece of a
+    split keeps its source row's key verbatim, every subsequent piece gets
+    ``{key}#{i}`` (``i`` = 1, 2, ...) — a duplicate key across a split
+    batch's pieces silently degrades WASM's keyed transition pairing for the
+    whole batch, so the pieces must be distinguishable.
     """
     # Local, like `test_finding_p1.py`'s uses of it: `_render_scene` is the
     # private scene-JSON door, and the import documents that at the use site.
@@ -729,10 +731,174 @@ def test_split_line_pieces_realign_their_batch_sidecars():
     assert nodes == 3, f"two pieces for series a, one for series b; got {nodes}"
     assert len(indices) == nodes, f"one data_index per node; got {indices}"
     assert len(keys) == nodes, f"one key per node; got {keys}"
-    assert keys == ["a", "a", "b"], f"each piece inherits its source row's key; got {keys}"
+    assert keys == ["a", "a#1", "b"], (
+        f"first piece keeps its source row's key verbatim, later pieces are suffixed; got {keys}"
+    )
     assert indices[0] == indices[1] != indices[2], (
         f"the two pieces of series a share its row; got {indices}"
     )
+
+
+def test_split_keyed_bar_gets_a_suffixed_pairing_key():
+    """#230-5's own regression: a keyed BAR crossing a gap splits 1→N, and
+    the corrected measured repro is ``["ka", "ka#1", "kb"]`` (pre-fix it was
+    the duplicate ``["ka", "ka", "kb"]`` — see the research map's #230-5 row).
+    """
+    from ferrum._scene import _render_scene
+
+    df = pl.DataFrame({"c": ["ka", "kb"], "v": [900.0, 68.0]})
+    chart = fm.Chart(df).mark_bar().encode(x="c:N", y="v:Q", key="c") + fm.BreakAxis(
+        axis="y", gap=(150, 850)
+    )
+    scene = json.loads(_render_scene(chart)[0])
+    batches = [b for b in scene["panels"][0]["marks"] if b.get("kind") == "bar"]
+    assert batches, "expected a bar batch"
+    keys = []
+    for batch in batches:
+        keys += batch.get("keys") or []
+    assert keys == ["ka", "ka#1", "kb"], (
+        f"the crossing bar's first piece keeps its key, its second is suffixed; got {keys}"
+    )
+
+
+def test_split_line_with_two_gaps_suffixes_every_piece_past_the_first():
+    """A line crossing two same-axis gaps splits into three pieces; the
+    suffix counter runs over pieces, not over gaps — ``ka``, ``ka#1``,
+    ``ka#2``, matching #230-4's same-axis-merge worked example (spec §4.4).
+    """
+    from ferrum._scene import _render_scene
+
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [10.0, 300.0, 600.0, 900.0],
+            "g": ["ka", "ka", "ka", "ka"],
+        }
+    )
+    chart = fm.Chart(df).mark_line().encode(x="x:Q", y="y:Q", key="g") + fm.BreakAxis(
+        axis="y", gap=[(150, 400), (500, 850)]
+    )
+    scene = json.loads(_render_scene(chart)[0])
+    batches = [b for b in scene["panels"][0]["marks"] if b.get("kind") == "line"]
+    assert batches, "expected a line batch"
+    nodes, keys = 0, []
+    for batch in batches:
+        nodes += len(batch["nodes"])
+        keys += batch.get("keys") or []
+    assert nodes == 3, f"three visible segments across two gaps; got {nodes}"
+    assert keys == ["ka", "ka#1", "ka#2"], f"suffix counts per piece, not per gap; got {keys}"
+
+
+def test_split_keyed_bars_get_distinct_suffixes_across_two_sources():
+    """Two DIFFERENT keyed sources each split by the same gap must not step on
+    each other's suffixes: ``ka``/``ka#1`` for the first bar, ``kb``/``kb#1``
+    for the second — quality-review cycle-2 fix 4c (two split sources in one
+    batch, the most common real shape: several keyed bars each crossing the
+    gap)."""
+    from ferrum._scene import _render_scene
+
+    df = pl.DataFrame({"c": ["ka", "kb"], "v": [950.0, 900.0]})
+    chart = fm.Chart(df).mark_bar().encode(x="c:N", y="v:Q", key="c") + fm.BreakAxis(
+        axis="y", gap=(150, 850)
+    )
+    scene = json.loads(_render_scene(chart)[0])
+    batches = [b for b in scene["panels"][0]["marks"] if b.get("kind") == "bar"]
+    assert batches, "expected a bar batch"
+    keys = []
+    for batch in batches:
+        keys += batch.get("keys") or []
+    assert keys == ["ka", "ka#1", "kb", "kb#1"], (
+        f"each source's own suffix counter must not collide with the other's; got {keys}"
+    )
+    assert len(set(keys)) == len(keys), f"no duplicate key across the batch; got {keys}"
+
+
+def test_split_keyed_marks_on_two_axis_breaks_get_distinct_suffixes():
+    """A mark cut on BOTH axes goes through `install_rebuilt_nodes` — and its
+    `keys` suffixing — once per axis (`scene_build.rs`'s `break_remaps`
+    loop). Quality-review cycle-2 finding 1 (S3): naively resuming the
+    ``#1, #2, ...`` counter in the second pass re-suffixes the first pass's
+    ALREADY-suffixed output and mints a duplicate — measured pre-fix as
+    ``['ka', 'ka#1', 'ka#1', 'ka#1#1']`` for both a line and a rect. This pins
+    both the vertex-split path (line) and the extent-clip path (rect) landing
+    on four distinct keys instead.
+    """
+    from ferrum._scene import _render_scene
+
+    x_break = fm.BreakAxis(axis="x", gap=(4, 6))
+    y_break = fm.BreakAxis(axis="y", gap=(150, 850))
+
+    # Line: a "W" shaped 4-vertex path so each x-half of the line ALSO
+    # traverses the full y-gap independently — the shape that produces two
+    # further y-splits, one per x-piece, on the real vertex-split path.
+    line_df = pl.DataFrame(
+        {
+            "x": [0.0, 3.9, 6.1, 10.0],
+            "y": [0.0, 1000.0, 0.0, 1000.0],
+            "g": ["g", "g", "g", "g"],
+        }
+    )
+    line_chart = fm.Chart(line_df).mark_line().encode(x="x:Q", y="y:Q", key="g") + x_break + y_break
+    line_scene = json.loads(_render_scene(line_chart)[0])
+    line_batches = [b for b in line_scene["panels"][0]["marks"] if b.get("kind") == "line"]
+    assert line_batches, "expected a line batch"
+    line_keys = []
+    for batch in line_batches:
+        line_keys += batch.get("keys") or []
+    assert len(set(line_keys)) == len(line_keys), (
+        f"no duplicate key may survive a two-axis split; got {line_keys}"
+    )
+    assert line_keys == ["g", "g#2", "g#1", "g#1#1"], (
+        "cycle-2 fix 1: pass two's suffix search must skip \"g#1\" (pass one's "
+        f"own output already used it); got {line_keys}"
+    )
+
+    # Rect (x/x2/y/y2): the extent-clip path, cut independently on both axes.
+    rect_df = pl.DataFrame({"x1": [1.0], "x2": [9.0], "y1": [1.0], "y2": [1000.0], "g": ["ka"]})
+    rect_chart = (
+        fm.Chart(rect_df).mark_rect().encode(x="x1:Q", x2="x2:Q", y="y1:Q", y2="y2:Q", key="g")
+        + x_break
+        + y_break
+    )
+    rect_scene = json.loads(_render_scene(rect_chart)[0])
+    rect_batches = [b for b in rect_scene["panels"][0]["marks"] if b.get("kind") == "rect"]
+    assert rect_batches, "expected a rect batch"
+    rect_keys = []
+    for batch in rect_batches:
+        rect_keys += batch.get("keys") or []
+    assert rect_keys == ["ka", "ka#2", "ka#1", "ka#1#1"], (
+        f"pass one's own \"ka#1\" piece forces pass two's first run to skip to "
+        f'"ka#2"; got {rect_keys}'
+    )
+    assert len(set(rect_keys)) == len(rect_keys), (
+        f"no duplicate key across the batch; got {rect_keys}"
+    )
+
+
+def test_split_keyed_marks_keep_static_svg_byte_identical():
+    """Keys are an interactive-only sidecar (spec §4.5): a keyed chart and its
+    unkeyed twin must render the same static SVG bytes for both a split bar
+    and a split line, whether or not #230-5's suffixing fires.
+    """
+    bar_df = pl.DataFrame({"c": ["ka", "kb"], "v": [900.0, 68.0]})
+    bar_break = fm.BreakAxis(axis="y", gap=(150, 850))
+    unkeyed_bar = (fm.Chart(bar_df).mark_bar().encode(x="c:N", y="v:Q") + bar_break).to_svg()
+    keyed_bar = (fm.Chart(bar_df).mark_bar().encode(x="c:N", y="v:Q", key="c") + bar_break).to_svg()
+    assert keyed_bar == unkeyed_bar, "a bar's keys must not affect its static SVG"
+
+    line_df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [10.0, 300.0, 600.0, 900.0],
+            "g": ["ka", "ka", "ka", "ka"],
+        }
+    )
+    line_break = fm.BreakAxis(axis="y", gap=[(150, 400), (500, 850)])
+    unkeyed_line = (fm.Chart(line_df).mark_line().encode(x="x:Q", y="y:Q") + line_break).to_svg()
+    keyed_line = (
+        fm.Chart(line_df).mark_line().encode(x="x:Q", y="y:Q", key="g") + line_break
+    ).to_svg()
+    assert keyed_line == unkeyed_line, "a line's keys must not affect its static SVG"
 
 
 # --------------------------------------------------------------------------
