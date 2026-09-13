@@ -314,6 +314,7 @@ def desugar_pdp(
 
     Data contract (from ``ModelSource.partial_dependence``): ``feature``
     (Utf8), ``feature_value`` (Float64), ``pd_value`` (Float64),
+    ``class_label`` (Utf8 — the model output the row belongs to),
     ``sample_id`` (Int64 — ``-1`` for the average row).
 
     ``kind="average"`` (default): single PD curve per feature (the
@@ -322,7 +323,11 @@ def desugar_pdp(
     ``kind="individual"``: per-sample ICE polylines via ``mark_style.detail``
     routing on a Utf8-cast ``sample_id`` column (one polyline per
     sample, no categorical color collision because the color encoding
-    stays on ``feature``).
+    carries a different discriminator — the faceted ``pdp_chart`` builder
+    passes ``color_field="class_label"`` on a multi-class frame, where
+    ``sample_id`` repeats across classes and line.rs's one-polyline-per-
+    ``(color, detail)``-pair grouping is what keeps class curves apart,
+    and ``color_field=None`` on a single-output frame).
 
     ``kind="both"``: ICE polylines + a thicker average overlay. The chart
     builder injects an ``_pd_ice_value`` column that holds the per-sample
@@ -331,8 +336,10 @@ def desugar_pdp(
     only.
 
     When ``center=True``, the chart builder pre-subtracts the value at
-    the smallest ``feature_value`` per ``(feature, sample_id)`` group so
-    every polyline starts at 0. It is registered in
+    the smallest ``feature_value`` per ``(feature, class_label,
+    sample_id)`` group -- one curve's full identity, so a multi-class
+    frame's classes anchor separately -- and every polyline starts at 0.
+    It is registered in
     ``ferrum.marks._informational_kwargs.INFORMATIONAL_KWARGS`` under
     ``"pdp"``; ``Chart.mark_pdp`` warns once if it is passed directly with
     a truthy value.

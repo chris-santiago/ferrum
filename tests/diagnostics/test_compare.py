@@ -564,3 +564,45 @@ def test_pdp_chart_compare_keeps_independent_feature_x():
     # partial-dependence y (|y| < ~16 here) never do.
     gap_ticks = [t for t in ticks if 30 < t < 90]
     assert not gap_ticks, f"x axes collapsed onto a shared range; gap ticks present: {gap_ticks}"
+
+
+def test_pdp_chart_compare_multiclass_keeps_independent_x_under_feature_times_class():
+    """#209 re-verification: with per-class rows the compose gate's
+    ``resolve={"x": "independent"}`` still has to hold — the grouping is now
+    feature x class, and every model panel carries K curves per feature.
+    """
+    import re
+
+    import numpy as np
+    from sklearn.linear_model import LogisticRegression
+
+    rng = np.random.default_rng(0)
+    n = 150
+    labels = np.array([0, 1, 2] * (n // 3))
+    x_np = np.column_stack(
+        [
+            rng.uniform(-2, 2, n) + labels,  # f0 in ~[-2, 4]
+            rng.uniform(100, 110, n) - labels,  # f1 in ~[98, 110]
+        ]
+    )
+    X = pl.DataFrame({"f0": x_np[:, 0], "f1": x_np[:, 1]})
+    y = pl.Series("y", labels)
+    base = LogisticRegression(max_iter=500).fit(x_np, labels)
+    alt = LogisticRegression(max_iter=500, C=0.1).fit(x_np, labels)
+
+    chart = ferrum.pdp_chart(
+        base,
+        X,
+        y,
+        features=["f0", "f1"],
+        grid_resolution=8,
+        compare={"alt": alt},
+    )
+    svg = chart.to_svg()
+    # 2 models x 2 features x 3 classes.
+    assert svg.count("<polyline ") == 2 * 2 * 3
+    ticks = [float(t) for t in re.findall(r">(-?\d+\.?\d*)</text>", svg)]
+    assert any(-2.5 < t < 4.5 for t in ticks), "f0 x-range missing"
+    assert any(95 < t < 115 for t in ticks), "f1 x-range missing"
+    gap_ticks = [t for t in ticks if 30 < t < 90]
+    assert not gap_ticks, f"x axes collapsed onto a shared range; gap ticks present: {gap_ticks}"

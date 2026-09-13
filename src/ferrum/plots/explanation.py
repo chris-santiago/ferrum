@@ -678,17 +678,27 @@ def _shap_waterfall_chart_from_source(
 # ---------------------------------------------------------------------------
 
 
+_PDP_CURVE_KEYS = ("feature", "class_label", "sample_id")
+"""Columns that identify one PDP/ICE polyline.
+
+``class_label`` joined the key with #209 (multiclass PDP): a K-class model
+emits K curves per (feature, sample), so grouping on (feature, sample_id)
+alone would chain one class's curve into the next. It is a constant column
+on regression and binary frames, so single-output grouping is unchanged.
+"""
+
+
 def _pdp_center_curves(df: pl.DataFrame) -> pl.DataFrame:
     """Subtract each curve's value at its smallest feature_value so every
-    polyline starts at zero. Anchors per ``(feature, sample_id)`` because
-    each (feature, sample) has its own grid; the smallest grid value is
-    the anchor.
+    polyline starts at zero. Anchors per ``(feature, class_label,
+    sample_id)`` because each such curve has its own grid; the smallest
+    grid value is the anchor.
     """
-    anchor = df.group_by(["feature", "sample_id"], maintain_order=True).agg(
+    anchor = df.group_by(_PDP_CURVE_KEYS, maintain_order=True).agg(
         pl.col("pd_value").first().alias("_pd_anchor")
     )
     return (
-        df.join(anchor, on=["feature", "sample_id"], how="left")
+        df.join(anchor, on=_PDP_CURVE_KEYS, how="left")
         .with_columns(
             (pl.col("pd_value") - pl.col("_pd_anchor")).alias("pd_value"),
         )
@@ -702,9 +712,11 @@ def _pdp_split_kind_both(df: pl.DataFrame) -> pl.DataFrame:
     - ``_pd_ice_value``: per-sample value on ICE rows (sample_id >= 0),
       null on the average row so the ICE line layer skips it.
     - ``_pd_avg_value``: the average curve broadcast to every row (joined
-      from the sample_id=-1 rows by ``(feature, feature_value)``). The
-      average layer reads this on ALL rows but mark_line groups by color
-      (feature) so duplicated rows merge into one polyline.
+      from the sample_id=-1 rows by ``(feature, class_label,
+      feature_value)``). The average layer reads this on ALL rows but
+      mark_line groups by color so duplicated rows merge into one
+      polyline. ``class_label`` is part of the join key for #209: without
+      it a K-class frame's join is K-to-K and multiplies the rows.
 
     Drops the original ``sample_id == -1`` rows so the duplicate-avg
     polyline collapses to one rendering; ``_pd_avg_value`` on the ICE
@@ -712,7 +724,7 @@ def _pdp_split_kind_both(df: pl.DataFrame) -> pl.DataFrame:
     """
     avg_only = (
         df.filter(pl.col("sample_id") == -1)
-        .select(["feature", "feature_value", "pd_value"])
+        .select(["feature", "class_label", "feature_value", "pd_value"])
         .rename({"pd_value": "_pd_avg_value"})
     )
     df = df.with_columns(
@@ -721,7 +733,7 @@ def _pdp_split_kind_both(df: pl.DataFrame) -> pl.DataFrame:
         .otherwise(None)
         .alias("_pd_ice_value"),
     )
-    df = df.join(avg_only, on=["feature", "feature_value"], how="left")
+    df = df.join(avg_only, on=["feature", "class_label", "feature_value"], how="left")
     return df.filter(pl.col("sample_id") >= 0)
 
 
@@ -756,8 +768,14 @@ def _pdp_chart_from_source(
     full grid). Each layer reads its own y column.
 
     When ``center=True``: subtracts the value at the smallest
-    ``feature_value`` per ``(feature, sample_id)`` group so every
-    polyline starts at 0.
+    ``feature_value`` per ``(feature, class_label, sample_id)`` group so
+    every polyline starts at 0.
+
+    On a multi-class classifier (#209) the frame carries one curve per
+    class per feature, so ``class_label`` drives the color channel: each
+    feature panel shows K curves, one per class, with a shared class
+    legend. Regression and binary frames carry a single ``class_label``
+    value and keep the color-free single-curve-per-panel rendering.
     """
     import ferrum
 
@@ -766,11 +784,17 @@ def _pdp_chart_from_source(
         grid_resolution=grid_resolution,
         kind=kind,
     )
-    # Sort by (feature, sample_id, feature_value) so each polyline's
-    # rows are contiguous and monotonic in feature_value within its
-    # group — line.rs renders rows in batch order within each detail /
-    # color group.
-    df = df.sort(["feature", "sample_id", "feature_value"])
+    # Sort by (feature, class_label, sample_id, feature_value) so each
+    # polyline's rows are contiguous and monotonic in feature_value
+    # within its group — line.rs renders rows in batch order within each
+    # detail / color group.
+    df = df.sort([*_PDP_CURVE_KEYS, "feature_value"])
+    # One class -> the color channel would add a redundant legend for a
+    # single hue, so it stays off (and regression/binary output is
+    # unchanged). Several classes -> color is what separates the curves
+    # AND the stroke groups line.rs pairs `detail` against, so ICE
+    # polylines cannot chain across classes.
+    color_field = "class_label" if df["class_label"].n_unique() > 1 else None
 
     if center:
         df = _pdp_center_curves(df)
@@ -792,7 +816,9 @@ def _pdp_chart_from_source(
         .mark_pdp(
             kind=kind,
             ice_alpha=ice_alpha,
-            color_field=None,  # one feature per facet — color is redundant
+            # One feature per facet, so color never encodes the feature;
+            # it encodes the model output when there is more than one.
+            color_field=color_field,
         )
         .encode(
             x=X("feature_value", title="Feature value"),

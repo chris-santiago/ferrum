@@ -242,7 +242,7 @@ class FeatureImportanceMixin(_MixinBase):
 
         sv_raw = explainer.shap_values(X_np)
         sv_by_class = _split_shap_by_class(sv_raw, self._model)
-        class_labels = _shap_class_labels(self._model, len(sv_by_class))
+        class_labels = _output_class_labels(self._model, len(sv_by_class))
 
         f_mean = X_np.mean(axis=0)
         f_std_raw = X_np.std(axis=0)
@@ -294,6 +294,22 @@ class FeatureImportanceMixin(_MixinBase):
             layers on the same DataFrame. Chart builders pair the ICE rows
             with the ``detail`` encoding channel on ``sample_id`` to render
             one polyline per sample.
+
+        Returns
+        -------
+        pl.DataFrame
+            Columns ``feature``, ``feature_value``, ``pd_value``,
+            ``class_label``, ``sample_id``. ``class_label`` names the model
+            output each row belongs to, following ``shap_values``'
+            convention (2026-09-13, #209):
+
+            - Regression: the constant ``"target"`` on every row.
+            - Binary classifiers: the positive-class name on every row
+              (sklearn's partial dependence reports the positive class).
+            - Multi-class classifiers: one row group per class, each
+              carrying its class name. Both ``kind`` fan-outs apply, so a
+              K-class model returns K times the row count a binary model
+              would.
         """
         validate_choice(
             "ModelSource.partial_dependence", "kind", kind, ("average", "individual", "both")
@@ -364,11 +380,13 @@ class FeatureImportanceMixin(_MixinBase):
         ``sklearn.inspection.partial_dependence``, which integer-indexes
         ``features=[f_idx]`` positionally either way.
 
-        sklearn returns ``individual`` of shape ``(n_outputs, n_samples,
-        n_grid)`` when ``kind in ("individual", "both")``; this method
-        uses a single output (binary class index 1 / regression scalar)
-        by indexing ``[0]``. For ``"average"`` the shape is
-        ``(n_outputs, n_grid)``.
+        sklearn returns ``average`` of shape ``(n_outputs, n_grid)`` and
+        ``individual`` of shape ``(n_outputs, n_samples, n_grid)``.
+        ``n_outputs`` is 1 for regression and for binary classifiers (the
+        positive class) and K for a K-class classifier. Every output gets
+        its own row group tagged with ``class_label`` (#209, 2026-09-13):
+        a prior version indexed ``[0]`` and silently discarded every class
+        but the first.
         """
         from sklearn.inspection import partial_dependence as _sk_pd
 
@@ -380,26 +398,38 @@ class FeatureImportanceMixin(_MixinBase):
             kind=kind,
         )
         grid = r["grid_values"][0]
+        # `average` and `individual` agree on n_outputs, so either one
+        # answers "how many outputs did the model report".
+        reference = r["average"] if kind in ("average", "both") else r["individual"]
+        labels = _output_class_labels(self._model, len(np.asarray(reference)))
         rows: list[dict] = []
         if kind in ("average", "both"):
-            avg = np.asarray(r["average"])[0]
-            rows.extend(
-                {"feature": fname, "feature_value": float(v), "pd_value": float(p), "sample_id": -1}
-                for v, p in zip(grid, avg)
-            )
-        if kind in ("individual", "both"):
-            individual = np.asarray(r["individual"])[0]
-            n_samples, _ = individual.shape
-            for s in range(n_samples):
+            avg = np.asarray(r["average"])
+            for c, label in enumerate(labels):
                 rows.extend(
                     {
                         "feature": fname,
                         "feature_value": float(v),
                         "pd_value": float(p),
-                        "sample_id": int(s),
+                        "class_label": label,
+                        "sample_id": -1,
                     }
-                    for v, p in zip(grid, individual[s])
+                    for v, p in zip(grid, avg[c])
                 )
+        if kind in ("individual", "both"):
+            individual = np.asarray(r["individual"])
+            for c, label in enumerate(labels):
+                for s in range(individual.shape[1]):
+                    rows.extend(
+                        {
+                            "feature": fname,
+                            "feature_value": float(v),
+                            "pd_value": float(p),
+                            "class_label": label,
+                            "sample_id": int(s),
+                        }
+                        for v, p in zip(grid, individual[c, s])
+                    )
         return rows
 
 
@@ -540,18 +570,31 @@ def _split_shap_by_class(sv_raw: Any, model: Any) -> list[np.ndarray]:
     return [arr]
 
 
-def _shap_class_labels(model: Any, n_arrays: int) -> list[str]:
-    """Return one class-label string per SHAP-values array.
+def _output_class_labels(model: Any, n_outputs: int) -> list[str]:
+    """Return one ``class_label`` string per model output.
+
+    The single owner of the ``class_label`` vocabulary, shared by
+    ``shap_values`` (one output per SHAP-values array) and
+    ``partial_dependence`` (one output per sklearn PD row group, #209).
+    Both frames therefore label the same model the same way.
 
     Regression / non-classifier models without a ``classes_`` attribute
-    return ``["target"]``. Binary classifiers collapse to a single
-    positive-class label. Multi-class classifiers return one label per
-    class in model-class order.
+    label their single output ``"target"``. Binary classifiers collapse to
+    a single positive-class label. Multi-class classifiers return one
+    label per class in model-class order.
+
+    A multi-output regressor (no ``classes_``, several outputs) numbers
+    its outputs ``target_0 ... target_{n-1}``: ``class_label`` is the
+    grouping key downstream consumers curve- and facet-split on, so
+    repeating a bare ``"target"`` across distinct outputs would silently
+    merge unrelated curves.
     """
     if not hasattr(model, "classes_"):
-        return ["target"] * n_arrays
+        if n_outputs == 1:
+            return ["target"]
+        return [f"target_{i}" for i in range(n_outputs)]
     classes = list(model.classes_)
-    if n_arrays == 1:
+    if n_outputs == 1:
         # Binary classifier collapsed to positive class.
         return [str(classes[-1])]
-    return [str(c) for c in classes[:n_arrays]]
+    return [str(c) for c in classes[:n_outputs]]

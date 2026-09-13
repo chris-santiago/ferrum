@@ -112,6 +112,12 @@ SCHEMA_PDP = pl.Schema(
         "feature": pl.Utf8,
         "feature_value": pl.Float64,
         "pd_value": pl.Float64,
+        # class_label names the model output each row belongs to, using the
+        # same vocabulary as SCHEMA_SHAP_VALUES below ("target" on
+        # regression, the positive-class name on binary classifiers, one
+        # row group per class on multi-class classifiers). Added
+        # 2026-09-13 (#209 — multiclass partial dependence).
+        "class_label": pl.Utf8,
         "sample_id": pl.Int64,
     }
 )

@@ -493,7 +493,7 @@ def test_shap_waterfall_chart_per_class_true_single_class_byte_identical():
 def _binary_source():
     """An actual binary classifier (not the regression ridge fixture) --
     binary_logistic routes SHAP through the positive-class slice as a
-    single-element class_label list (see _shap_class_labels), so this
+    single-element class_label list (see _output_class_labels), so this
     exercises the single-class byte-identity path on a genuinely
     classification-shaped source rather than a regression stand-in."""
     model = load_fixture("binary_logistic")
@@ -512,6 +512,97 @@ def test_shap_waterfall_chart_per_class_true_binary_byte_identical():
     svg_true = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True).to_svg()
     svg_false = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=False).to_svg()
     assert svg_true == svg_false
+
+
+def _multi_output_regressor_source():
+    """A native multi-output regressor: no ``classes_``, two model outputs.
+
+    This is the one live shape that reaches ``_output_class_labels``'
+    multi-output branch from the SHAP side (#209 cycle 2). ``y``'s first
+    column is driven by ``a``, its second by ``b``, so the two outputs
+    disagree about which feature matters -- which is what makes the
+    per-output selection observable rather than cosmetic.
+    """
+    from sklearn.ensemble import RandomForestRegressor
+
+    rng = np.random.default_rng(0)
+    n = 120
+    X = pl.DataFrame({name: rng.normal(size=n) for name in ("a", "b", "c")})
+    x_np = X.to_numpy()
+    y = np.column_stack(
+        [
+            3.0 * x_np[:, 0] + 0.2 * x_np[:, 2],
+            4.0 * x_np[:, 1] + 0.2 * x_np[:, 2],
+        ]
+    )
+    model = RandomForestRegressor(n_estimators=5, max_depth=3, random_state=0).fit(x_np, y)
+    return ferrum.ModelSource(model, X, random_state=0)
+
+
+def test_shap_values_multi_output_regressor_labels_each_output():
+    """A multi-output regressor labels its outputs ``target_0``/``target_1``.
+
+    Disclosed behavior change (2026-09-13, #209 cycle 2): this shape used
+    to emit a repeated ``"target"`` on every row, which made two unrelated
+    outputs one indistinguishable ``class_label`` group. The shared owner
+    ``_output_class_labels`` now numbers them.
+    """
+    source = _multi_output_regressor_source()
+    sv = source.shap_values()
+    assert sv["class_label"].unique(maintain_order=True).to_list() == [
+        "target_0",
+        "target_1",
+    ]
+    n_features = sv["feature"].n_unique()
+    n_samples = sv["sample_id"].n_unique()
+    assert sv.height == n_samples * n_features * 2
+    # Each output carries a full sample x feature block of its own.
+    per_output = sv.group_by("class_label").len().sort("class_label")
+    assert per_output["len"].to_list() == [n_samples * n_features] * 2
+
+
+def test_shap_bar_chart_per_class_false_multi_output_selects_one_output():
+    """``per_class=False`` now aggregates one output, not both pooled.
+
+    The numbers this pins are the reason the label change matters: with a
+    single repeated ``class_label``, ``_shap_select_class`` had nothing to
+    filter on, so ``abs_mean_shap`` averaged the two outputs' SHAP values
+    together and ranked the features by a quantity belonging to neither
+    model output. The oracle here is the frame's own first-output rows.
+    """
+    from ferrum.plots.explanation import _shap_select_class
+
+    source = _multi_output_regressor_source()
+    sv = source.shap_values()
+
+    selected = _shap_select_class(sv, per_class=False)
+    assert selected["class_label"].unique().to_list() == ["target_0"]
+    assert selected.height == sv.height // 2
+
+    chart = ferrum.shap_bar_chart(source)
+    rendered = dict(
+        zip(
+            chart._data["feature"].to_list(),
+            chart._data["abs_mean_shap"].to_list(),
+            strict=True,
+        )
+    )
+
+    def _abs_means(frame):
+        agg = frame.group_by("feature").agg(pl.col("shap_value").abs().mean().alias("m"))
+        return dict(zip(agg["feature"].to_list(), agg["m"].to_list(), strict=True))
+
+    first_output = _abs_means(sv.filter(pl.col("class_label") == "target_0"))
+    pooled = _abs_means(sv)
+    for feature, value in rendered.items():
+        assert value == pytest.approx(first_output[feature], rel=1e-12)
+
+    # Discriminating: the two aggregations genuinely disagree, and they
+    # disagree about the ranking, not only about the magnitudes. `a` drives
+    # output 0; `b` drives output 1 and dominates the pooled mean.
+    assert first_output["a"] > first_output["b"]
+    assert pooled["b"] > pooled["a"]
+    assert chart._data["feature"][0] == "a"
 
 
 def _multiclass_compare_sources():
@@ -743,16 +834,21 @@ def test_partial_dependence_schema():
     model, X, y = _rf_xy()
     src = ferrum.ModelSource(model, X, y, random_state=0)
     pd_df = src.partial_dependence(["f0", "f1"], grid_resolution=20)
-    assert set(pd_df.columns) == {
+    # class_label joined the schema with #209 (multiclass PDP): it names
+    # the model output, "target" on a regressor.
+    assert pd_df.columns == [
         "feature",
         "feature_value",
         "pd_value",
+        "class_label",
         "sample_id",
-    }
+    ]
+    assert pd_df["class_label"].unique().to_list() == ["target"]
     assert set(pd_df["feature"].unique().to_list()) == {"f0", "f1"}
     # sample_id is -1 for kind="average" (marginal curve, not per-sample).
     assert (pd_df["sample_id"] == -1).all()
-    # 2 features × 20 grid points.
+    # 2 features × 20 grid points — a single-output model fans out to one
+    # row group, so the row count is unchanged by #209.
     assert pd_df.height == 40
 
 
@@ -788,6 +884,183 @@ def test_partial_dependence_individual_returns_per_sample_rows():
     assert -1 in both_ids
     assert max(both_ids) == X.height - 1
     assert both.height == (X.height + 1) * 10
+
+
+# ---------------------------------------------------------------------------
+# #209 — multiclass partial dependence emits per-class rows (D2).
+#
+# Before the fix `_pd_rows_for_feature` kept sklearn's output `[0]`, so a
+# 3-class model returned class 0's curve alone with nothing in the frame
+# saying so. The frame now carries `class_label` (shap_values' vocabulary)
+# and one row group per model output; sklearn's per-output result is the
+# value oracle.
+# ---------------------------------------------------------------------------
+
+
+def _multiclass_xy():
+    """Multiclass logistic fixture — deterministic across runs/platforms."""
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    return model, df.select(["f0", "f1", "f2", "f3"]), df["y"]
+
+
+def _sk_pd_oracle(model, X, f_idx, *, grid_resolution, kind):
+    """sklearn's own partial dependence for one feature — the value oracle.
+
+    Called exactly the way `ModelSource.partial_dependence` calls it (these
+    fixtures carry no ``feature_names_in_``, so `_sklearn_X` hands sklearn
+    the same ``X.to_numpy()`` this does).
+    """
+    from sklearn.inspection import partial_dependence as sk_pd
+
+    return sk_pd(
+        model,
+        X.to_numpy(),
+        features=[f_idx],
+        grid_resolution=grid_resolution,
+        kind=kind,
+    )
+
+
+def _curve(pd_df, feature, class_label):
+    return (
+        pd_df.filter((pl.col("feature") == feature) & (pl.col("class_label") == class_label))
+        .sort("feature_value")["pd_value"]
+        .to_numpy()
+    )
+
+
+def test_partial_dependence_multiclass_emits_one_row_group_per_class():
+    """RED pre-fix: 20 rows carrying class 0's curve twice-unlabelled.
+    Now 60 rows, three labelled classes, each matching sklearn's output
+    for that class.
+    """
+    model, X, y = _multiclass_xy()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    pd_df = src.partial_dependence(["f0", "f1"], grid_resolution=10)
+
+    classes = [str(c) for c in model.classes_]
+    assert sorted(pd_df["class_label"].unique().to_list()) == sorted(classes)
+    # 2 features × 10 grid points × 3 classes.
+    assert pd_df.height == 2 * 10 * 3
+
+    oracle = np.asarray(_sk_pd_oracle(model, X, 0, grid_resolution=10, kind="average")["average"])
+    for c, label in enumerate(classes):
+        np.testing.assert_allclose(_curve(pd_df, "f0", label), oracle[c], rtol=1e-12, atol=0)
+    # Discriminating: the three curves are genuinely different, so a frame
+    # that repeated class 0 three times could not pass the check above.
+    assert not np.allclose(oracle[0], oracle[1])
+    assert not np.allclose(oracle[0], oracle[2])
+
+
+def test_partial_dependence_multiclass_individual_and_both_fan_out_per_class():
+    """Both kinds fan out: ICE rows carry (class, sample) pairs, and
+    ``kind="both"`` carries one average row group per class on top.
+    """
+    model, X, y = _multiclass_xy()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    n_classes, n_samples, grid = len(model.classes_), X.height, 6
+
+    ice = src.partial_dependence(["f0"], kind="individual", grid_resolution=grid)
+    assert ice.height == n_classes * n_samples * grid
+    assert -1 not in set(ice["sample_id"].to_list())
+    # Every (class, sample) pair is a complete curve — not a class-blind
+    # sample_id group carrying three classes' points chained together.
+    per_curve = ice.group_by(["class_label", "sample_id"]).len()
+    assert per_curve.height == n_classes * n_samples
+    assert per_curve["len"].unique().to_list() == [grid]
+
+    ice_oracle = np.asarray(
+        _sk_pd_oracle(model, X, 0, grid_resolution=grid, kind="individual")["individual"]
+    )
+    last = str(model.classes_[-1])
+    got = (
+        ice.filter((pl.col("class_label") == last) & (pl.col("sample_id") == 0))
+        .sort("feature_value")["pd_value"]
+        .to_numpy()
+    )
+    np.testing.assert_allclose(got, ice_oracle[n_classes - 1, 0], rtol=1e-12, atol=0)
+
+    both = src.partial_dependence(["f0"], kind="both", grid_resolution=grid)
+    assert both.height == n_classes * (n_samples + 1) * grid
+    avg_rows = both.filter(pl.col("sample_id") == -1)
+    assert sorted(avg_rows["class_label"].unique().to_list()) == sorted(
+        str(c) for c in model.classes_
+    )
+
+
+def test_partial_dependence_binary_labels_the_positive_class_and_keeps_one_curve():
+    """Binary classifiers keep exactly today's rows (sklearn reports the
+    positive class only); the label names that class, mirroring
+    ``shap_values``.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    src = ferrum.ModelSource(model, X, df["y"], random_state=0)
+    pd_df = src.partial_dependence(["f0"], grid_resolution=12)
+
+    assert pd_df["class_label"].unique().to_list() == [str(model.classes_[1])]
+    assert pd_df.height == 12
+    oracle = np.asarray(_sk_pd_oracle(model, X, 0, grid_resolution=12, kind="average")["average"])
+    np.testing.assert_allclose(
+        _curve(pd_df, "f0", str(model.classes_[1])), oracle[0], rtol=1e-12, atol=0
+    )
+
+
+def test_partial_dependence_single_output_frame_unchanged_apart_from_class_label():
+    """The regression frame's values and row order are byte-identical to the
+    pre-#209 frame: dropping the new column reproduces it exactly.
+    """
+    model, X, y = _rf_xy()
+    src = ferrum.ModelSource(model, X, y, random_state=0)
+    pd_df = src.partial_dependence(["f0", "f1"], kind="both", grid_resolution=8)
+
+    legacy = pd_df.drop("class_label")
+    assert legacy.columns == ["feature", "feature_value", "pd_value", "sample_id"]
+    # The pre-#209 rows were sklearn's output [0] in grid order, average
+    # rows first then per-sample rows, per feature.
+    expected: list[dict] = []
+    for f_idx, fname in ((0, "f0"), (1, "f1")):
+        r = _sk_pd_oracle(model, X, f_idx, grid_resolution=8, kind="both")
+        grid = r["grid_values"][0]
+        avg = np.asarray(r["average"])[0]
+        expected.extend(
+            {"feature": fname, "feature_value": float(v), "pd_value": float(p), "sample_id": -1}
+            for v, p in zip(grid, avg)
+        )
+        individual = np.asarray(r["individual"])[0]
+        for s in range(individual.shape[0]):
+            expected.extend(
+                {
+                    "feature": fname,
+                    "feature_value": float(v),
+                    "pd_value": float(p),
+                    "sample_id": int(s),
+                }
+                for v, p in zip(grid, individual[s])
+            )
+    assert legacy.equals(pl.DataFrame(expected))
+
+
+def test_partial_dependence_multi_output_regressor_labels_each_output():
+    """A multi-output regressor has no ``classes_`` but several outputs;
+    repeating a bare "target" would merge unrelated curves downstream, so
+    the outputs are numbered.
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.multioutput import MultiOutputRegressor
+
+    rng = np.random.default_rng(0)
+    X_np = rng.normal(size=(40, 3))
+    targets = np.column_stack([X_np[:, 0] * 2, X_np[:, 1] * -3])
+    model = MultiOutputRegressor(Ridge()).fit(X_np, targets)
+    X = pl.DataFrame(X_np, schema=["a", "b", "c"])
+    src = ferrum.ModelSource(model, X, pl.Series("y", targets[:, 0]), random_state=0)
+
+    pd_df = src.partial_dependence(["a"], grid_resolution=5)
+    assert sorted(pd_df["class_label"].unique().to_list()) == ["target_0", "target_1"]
+    assert pd_df.height == 2 * 5
 
 
 # --- pdp_chart figure function -----------------------------------------
@@ -874,6 +1147,95 @@ def test_pdp_chart_center_starts_at_zero():
     # Pull the underlying data and assert all per-sample first values are 0.
     df = chart._data
     first = df.group_by(["feature", "sample_id"]).agg(pl.col("pd_value").first().alias("first"))
+    assert np.allclose(first["first"].to_numpy(), 0.0)
+
+
+def test_pdp_chart_single_output_has_no_class_legend():
+    """Regression/binary frames carry one class_label value, so the color
+    channel stays off: no legend swatch text beyond the panel labels. This
+    is what keeps the existing PDP goldens byte-identical.
+    """
+    model, X, y = _rf_xy()
+    svg = ferrum.pdp_chart(model, X, y, features=["f0", "f1"], grid_resolution=10).to_svg()
+    assert "target" not in svg
+    assert "class_label" not in svg
+
+
+def test_pdp_chart_multiclass_renders_one_curve_per_class_with_legend():
+    """RED pre-fix: two polylines (one per feature panel, class 0 only).
+    Now one polyline per (feature, class) with a class legend.
+    """
+    import re
+
+    model, X, y = _multiclass_xy()
+    svg = ferrum.pdp_chart(model, X, y, features=["f0", "f1"], grid_resolution=10).to_svg()
+    assert svg.count("<polyline ") == 2 * len(model.classes_)
+    texts = re.findall(r">([^<>]+)</text>", svg)
+    for label in (str(c) for c in model.classes_):
+        assert label in texts, f"class {label} missing from the legend"
+    # Three distinct stroke colors on the curves — the classes are told
+    # apart visually, not just structurally.
+    strokes = set(re.findall(r'<polyline [^>]*stroke="(#[0-9a-fA-F]{6})"', svg))
+    assert len(strokes) == len(model.classes_)
+
+
+def test_pdp_chart_multiclass_ice_curves_do_not_chain_across_classes():
+    """ICE sample_ids repeat across classes, so a class-blind detail
+    grouping would emit n_samples polylines per feature (each chaining three
+    classes' points). Color-by-class makes the group (class, sample).
+    """
+    model, X, y = _multiclass_xy()
+    n_classes = len(model.classes_)
+    chart = ferrum.pdp_chart(
+        model,
+        X,
+        y,
+        features=["f0"],
+        grid_resolution=4,
+        kind="individual",
+    )
+    assert chart.to_svg().count("<polyline ") == n_classes * X.height
+
+
+def test_pdp_chart_multiclass_both_overlays_one_average_per_class():
+    """kind="both" joins the average curve onto the ICE rows. With
+    class_label out of the join key that join is K-to-K and multiplies the
+    frame; with it in, each class gets exactly its own average overlay.
+    """
+    model, X, y = _multiclass_xy()
+    n_classes = len(model.classes_)
+    from ferrum.plots.explanation import _pdp_chart_from_source
+
+    source = ferrum.ModelSource(model, X, y, random_state=0)
+    chart = _pdp_chart_from_source(source, features=["f0"], grid_resolution=4, kind="both")
+    df = chart._data
+    assert df.height == n_classes * X.height * 4
+    # Each class's average overlay is that class's own curve.
+    per_class_avg = df.group_by("class_label").agg(pl.col("_pd_avg_value").mean().alias("m"))
+    assert per_class_avg["m"].n_unique() == n_classes
+    assert chart.to_svg().count("<polyline ") == n_classes * (X.height + 1)
+
+
+def test_pdp_chart_multiclass_center_anchors_every_class_curve():
+    """center=True re-bases per (feature, class_label, sample_id). Without
+    class_label in the anchor key, only one class's curves start at zero.
+    """
+    model, X, y = _multiclass_xy()
+    from ferrum.plots.explanation import _pdp_chart_from_source
+
+    source = ferrum.ModelSource(model, X, y, random_state=0)
+    chart = _pdp_chart_from_source(
+        source,
+        features=["f0"],
+        grid_resolution=4,
+        kind="individual",
+        center=True,
+    )
+    df = chart._data.sort(["feature", "class_label", "sample_id", "feature_value"])
+    first = df.group_by(["feature", "class_label", "sample_id"], maintain_order=True).agg(
+        pl.col("pd_value").first().alias("first")
+    )
+    assert first.height == len(model.classes_) * X.height
     assert np.allclose(first["first"].to_numpy(), 0.0)
 
 

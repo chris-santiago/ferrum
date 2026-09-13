@@ -445,8 +445,9 @@ class ExplanationMarksMixin:
         Visualises how the model's output varies as a function of one feature
         while marginalising over all others.  Data must carry the long-form
         schema from ``ModelSource.partial_dependence()``: ``feature``,
-        ``feature_value``, ``pd_value``.  The chart builder pre-sorts ascending
-        by ``feature_value``.
+        ``feature_value``, ``pd_value``, ``class_label`` (the model output the
+        row belongs to), ``sample_id`` (``-1`` on an average row).  The chart
+        builder pre-sorts ascending by ``feature_value``.
 
         Parameters
         ----------

@@ -349,6 +349,16 @@ def test_golden_pdp_chart_both_centered():
     _check_golden(chart.to_svg(), "pdp_chart_both_centered")
 
 
+def test_golden_pdp_chart_multiclass_per_class():
+    """#209 — a multiclass PDP shows one curve per class per feature panel,
+    colored and legended by ``class_label``. Pre-fix this rendered class 0's
+    curve alone with no indication the other two existed.
+    """
+    source = _multiclass_logistic_source()
+    chart = ferrum.pdp_chart(source, features=["f0", "f1"], grid_resolution=15)
+    _check_golden(chart.to_svg(), "pdp_chart_multiclass_per_class")
+
+
 def test_golden_pdp_chart_three_features():
     model, X, y = _regression_xy()
     chart = ferrum.pdp_chart(
