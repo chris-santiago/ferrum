@@ -3033,29 +3033,8 @@ fn remap_mark_batch_through_break(
     }
     match break_axis::BreakPlacement::for_kind(batch.kind) {
         break_axis::BreakPlacement::ClipExtent => {
-            let clipped = remap.clip_nodes(std::mem::take(&mut batch.nodes));
-            if clipped.is_reindexed() {
-                // One realigner for the whole batch: it applies the same
-                // wrong-length pass-through `ClippedNodes::realign` always
-                // did, and reports it once instead of leaving a release build
-                // to ship misattributed tooltips in silence.
-                let mut realign = clipped.realigner();
-                batch.data_indices = realign.realign(batch.data_indices.take());
-                batch.tooltips = realign.realign(batch.tooltips.take());
-                batch.hrefs = realign.realign(batch.hrefs.take());
-                batch.descriptions = realign.realign(batch.descriptions.take());
-                batch.keys = realign.realign(batch.keys.take());
-                batch.polar_spans = realign.realign(batch.polar_spans.take());
-                if realign.misaligned() {
-                    warnings.push(RenderWarning::BreakClipSidecarMisaligned {
-                        // The serde spelling, not a `Debug` string: the two
-                        // agree only because every variant is one word today,
-                        // and a user-visible message must not depend on that.
-                        mark: batch.kind.wire_name().to_string(),
-                    });
-                }
-            }
-            batch.nodes = clipped.nodes;
+            let rebuilt = remap.clip_nodes(std::mem::take(&mut batch.nodes));
+            install_rebuilt_nodes(batch, rebuilt, warnings);
         }
         break_axis::BreakPlacement::MoveGlyph => {
             for node in batch.nodes.iter_mut() {
@@ -3067,17 +3046,57 @@ fn remap_mark_batch_through_break(
                 remap.remap_label_node(node);
             }
         }
+        // The two vertex models are 1→N like the clip: a stroke crossing a gap
+        // becomes one sub-node per visible piece (#230-1), so they carry the
+        // same sidecar bookkeeping.
         break_axis::BreakPlacement::MoveVertices => {
-            for node in batch.nodes.iter_mut() {
-                remap.remap_node(node);
-            }
+            let rebuilt = remap.split_nodes(std::mem::take(&mut batch.nodes));
+            install_rebuilt_nodes(batch, rebuilt, warnings);
         }
         // Batch-wide, not per node: an arrowhead is rebuilt from its own
         // shaft's placed endpoints, so the walk has to see both.
         break_axis::BreakPlacement::MoveVerticesAndGlyph => {
-            remap.remap_segment_nodes(&mut batch.nodes);
+            let rebuilt = remap.split_segment_nodes(std::mem::take(&mut batch.nodes));
+            install_rebuilt_nodes(batch, rebuilt, warnings);
         }
     }
+}
+
+/// Install a 1→N node rebuild on `batch`, realigning its per-node sidecars.
+///
+/// The one bookkeeping half shared by every rewrite a break performs on a mark
+/// batch — the extent clip and both vertex splits — so a batch's
+/// `data_indices`/tooltips/hrefs/descriptions/keys/polar_spans cannot be
+/// realigned by one model and forgotten by another. A rebuild that did not
+/// change the list's shape touches no sidecar, so such a batch's bytes are
+/// unchanged.
+fn install_rebuilt_nodes(
+    batch: &mut MarkBatch,
+    rebuilt: break_axis::ClippedNodes,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    if rebuilt.is_reindexed() {
+        // One realigner for the whole batch: it applies the same wrong-length
+        // pass-through `ClippedNodes::realign` always did, and reports it once
+        // instead of leaving a release build to ship misattributed tooltips in
+        // silence.
+        let mut realign = rebuilt.realigner();
+        batch.data_indices = realign.realign(batch.data_indices.take());
+        batch.tooltips = realign.realign(batch.tooltips.take());
+        batch.hrefs = realign.realign(batch.hrefs.take());
+        batch.descriptions = realign.realign(batch.descriptions.take());
+        batch.keys = realign.realign(batch.keys.take());
+        batch.polar_spans = realign.realign(batch.polar_spans.take());
+        if realign.misaligned() {
+            warnings.push(RenderWarning::BreakClipSidecarMisaligned {
+                // The serde spelling, not a `Debug` string: the two agree only
+                // because every variant is one word today, and a user-visible
+                // message must not depend on that.
+                mark: batch.kind.wire_name().to_string(),
+            });
+        }
+    }
+    batch.nodes = rebuilt.nodes;
 }
 
 // The per-panel independent-axis `TickProjection` rebuild (formerly the

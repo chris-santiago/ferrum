@@ -153,11 +153,12 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             match arrowhead_triangle(line_x1, line_y1, line_x2, line_y2, arrow_size) {
                 // ORDER IS LOAD-BEARING: the shaft `Line` must precede its
                 // arrowhead `Path` in this array. `break_axis.rs`'s
-                // `remap_segment_nodes` rebuilds an in-gap arrowhead from
-                // "the most recently placed `Line`" when it walks a broken
-                // `Segment` batch's nodes in order — it has no other way to
-                // learn which shaft a head belongs to, since a batch holds
-                // many rows' worth of `[Line, Path]` pairs back to back.
+                // `BreakRemap::split_segment_nodes` rebuilds an in-gap
+                // arrowhead from "the most recently placed `Line`" when it
+                // walks a broken `Segment` batch's nodes in order — it has no
+                // other way to learn which shaft a head belongs to, since a
+                // batch holds many rows' worth of `[Line, Path]` pairs back
+                // to back.
                 // Reversing this pair (or interleaving a `Line` between an
                 // unrelated row's shaft and head) makes that walk silently
                 // pair an arrowhead with the WRONG row's shaft direction
@@ -827,13 +828,14 @@ mod tests {
     /// The shaft/head node order the arrowhead comment above `push_many`
     /// calls out as load-bearing: for every arrowed row, `build` must emit
     /// `[Line, Path]` ADJACENT, in that order, not just "one Line and one
-    /// Path somewhere in the batch." `break_axis.rs`'s `remap_segment_nodes`
-    /// pairs a head with "the most recently placed `Line`" while walking the
-    /// batch in order; if a future change reordered or interleaved these
-    /// pairs, that walk would silently attach an arrowhead to the WRONG
-    /// row's shaft under a break, and neither this test's sibling assertions
-    /// (which only count node kinds) nor the render would visibly complain
-    /// on a chart with no break. Three rows, arrow enabled, none degenerate.
+    /// Path somewhere in the batch." `break_axis.rs`'s
+    /// `BreakRemap::split_segment_nodes` pairs a head with "the most recently
+    /// placed `Line`" while walking the batch in order; if a future change
+    /// reordered or interleaved these pairs, that walk would silently attach
+    /// an arrowhead to the WRONG row's shaft under a break, and neither this
+    /// test's sibling assertions (which only count node kinds) nor the
+    /// render would visibly complain on a chart with no break. Three rows,
+    /// arrow enabled, none degenerate.
     #[test]
     fn segment_arrow_true_emits_line_then_path_adjacent_per_row() {
         use crate::spec::mark_style::MarkKwargsSpec;
