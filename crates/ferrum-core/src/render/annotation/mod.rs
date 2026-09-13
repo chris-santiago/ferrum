@@ -1319,6 +1319,13 @@ enum BreakRouting {
 /// The three ways a cut annotation's nodes go through the break machinery —
 /// [`BreakRouting`] minus the drop case, so the router cannot reach a clip with a
 /// kind that has no clip.
+///
+/// Named after `break_axis::BreakPlacement` (private to this module, so not a
+/// resolvable doc link from here), which asks the same question for mark
+/// batches: `ClipExtent`, `MoveVertices`, `MoveVerticesAndGlyph` are the same
+/// three answers under the same names, minus the two glyph-only placements
+/// annotations never need. The two enums are not linked by the type system —
+/// keep them in correspondence by hand if either grows a new variant.
 #[derive(Clone, Copy)]
 enum CutRouting {
     /// `rect`'s rect and `span`'s band: the pixel extent along the broken axis
@@ -1327,14 +1334,16 @@ enum CutRouting {
     ClipExtent,
     /// `line`'s shaft: connected stroked geometry whose every vertex is its own
     /// data position, so it is cut at the gap edges it crosses, with the
-    /// cross-axis coordinate interpolated at each crossing.
-    SplitStroke,
+    /// cross-axis coordinate interpolated at each crossing. The
+    /// `break_axis::BreakPlacement::MoveVertices` counterpart.
+    MoveVertices,
     /// `arrow`: a split shaft plus the head that rides the piece reaching its
     /// tip. [`emit_arrow`] pushes `[shaft Line, head Path]` — the same node pair,
     /// in the same order, `marks::segment::build` emits for `arrow=True` — so
     /// the segment splitter's shaft/head pairing (head rebuilt on the tip piece,
-    /// dropped when the tip is in a gap) applies verbatim.
-    SplitShaftAndHead,
+    /// dropped when the tip is in a gap) applies verbatim. The
+    /// `break_axis::BreakPlacement::MoveVerticesAndGlyph` counterpart.
+    MoveVerticesAndGlyph,
 }
 
 impl CutRouting {
@@ -1342,8 +1351,8 @@ impl CutRouting {
     fn place(self, remap: &break_axis::BreakRemap<'_>, nodes: Vec<SceneNode>) -> Vec<SceneNode> {
         match self {
             Self::ClipExtent => remap.clip_nodes(nodes).nodes,
-            Self::SplitStroke => remap.split_nodes(nodes).nodes,
-            Self::SplitShaftAndHead => remap.split_segment_nodes(nodes).nodes,
+            Self::MoveVertices => remap.split_nodes(nodes).nodes,
+            Self::MoveVerticesAndGlyph => remap.split_segment_nodes(nodes).nodes,
         }
     }
 }
@@ -1358,8 +1367,8 @@ fn break_routing(spec: &AnnotationSpec) -> BreakRouting {
         AnnotationSpec::Rect { .. } | AnnotationSpec::Span { .. } => {
             BreakRouting::Cut(CutRouting::ClipExtent)
         }
-        AnnotationSpec::Line { .. } => BreakRouting::Cut(CutRouting::SplitStroke),
-        AnnotationSpec::Arrow { .. } => BreakRouting::Cut(CutRouting::SplitShaftAndHead),
+        AnnotationSpec::Line { .. } => BreakRouting::Cut(CutRouting::MoveVertices),
+        AnnotationSpec::Arrow { .. } => BreakRouting::Cut(CutRouting::MoveVerticesAndGlyph),
         AnnotationSpec::Bracket { .. }
         | AnnotationSpec::Text { .. }
         | AnnotationSpec::Callout { .. }
