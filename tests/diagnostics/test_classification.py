@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 
 import numpy as np
 import polars as pl
@@ -1205,13 +1207,10 @@ def test_classification_report_chart_precomputed_matches_model_path():
     """Precomputed and model-path reports agree to machine precision on
     identical predictions (G3 acceptance criterion 4).
 
-    Deliberately order-insensitive: both frames are sorted by
-    ``(class, metric)`` before comparing, because the two paths render
-    their class axis in different (but each individually documented and
-    separately pinned -- see
-    ``test_classification_report_chart_class_axis_order_documented_divergence``)
-    orders for >= 10 numeric classes. This test's job is value parity,
-    not axis order.
+    Sorts both frames by ``(class, metric)`` before comparing so this test's
+    job stays value parity, not axis order -- the two paths' class-axis
+    render order is pinned separately, and identically since #224a, by
+    ``test_classification_report_chart_class_axis_order_now_identical``.
     """
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
@@ -1235,19 +1234,29 @@ def test_classification_report_chart_precomputed_matches_model_path():
         assert model_row["value"] == pytest.approx(precomputed_row["value"], abs=1e-9)
 
 
-def test_classification_report_chart_class_axis_order_documented_divergence():
-    """The model path orders classes as sklearn's ``classification_report``
-    returns them (numeric-sorted, via ``unique_labels``); the precomputed
-    path orders them ``sorted(..., key=str)`` (the ``confusion_matrix``
-    precedent -- see ``_PrecomputedSource.classification_report``'s
-    docstring). For >= 10 numeric classes these disagree: string order
-    interleaves ``"10"``/``"11"`` before ``"2"``. The parity test above
-    sorts both frames before comparing, so it cannot see a regression in
-    either path's own render order -- this test pins each path's ORDER
-    independently instead of the row multiset.
+def test_classification_report_chart_class_axis_order_now_identical():
+    """#224a: the model path and the precomputed path now order the class
+    axis identically -- both by sklearn's ``unique_labels`` convention (the
+    union of the raw values, ascending) -- closing the documented divergence
+    this test used to pin. Before the fix, the precomputed path sorted its
+    already-stringified ``confusion_matrix`` labels with ``key=str``, which
+    orders by digit count before value and so puts ``"10"``/``"11"`` before
+    ``"2"``; the model path's sklearn-backed ``classification_report`` never
+    stringified before sorting, so the two disagreed. Verified at both the
+    frame level and the rendered SVG's y-axis tick order (the user-visible
+    surface #224a's verify-then-file text is actually about), on a 12-class
+    fixture. Twelve classes is *not* the smallest shape the two rules
+    disagree on -- decimal-string order and numeric order part company as
+    soon as two labels have unequal digit counts, which needs only two
+    classes (``{2, 10}``, pinned by
+    ``test_precomputed_classification_report_order_moves_below_ten_classes``).
+    The 12-class fixture is used here because it puts a full
+    ``10``/``11``-before-``2`` interleave on the rendered axis.
     """
     import numpy as np
     from sklearn.linear_model import LogisticRegression
+
+    from tests._svg_extents import axis_tick_labels
 
     n_classes = 12
     rng = np.random.default_rng(0)
@@ -1267,12 +1276,20 @@ def test_classification_report_chart_class_axis_order_documented_divergence():
     model_order = list(dict.fromkeys(model_chart._data["class"].to_list()))
     precomputed_order = list(dict.fromkeys(precomputed_chart._data["class"].to_list()))
 
-    assert model_order == [str(c) for c in sorted(set(y.tolist()))]
-    assert precomputed_order == sorted({str(c) for c in y.tolist()}, key=str)
-    assert model_order != precomputed_order, (
-        "expected the documented >= 10-class order divergence between the "
-        "model path (numeric) and precomputed path (string-sorted)"
+    expected_order = [str(c) for c in sorted(set(y.tolist()))]
+    assert model_order == expected_order
+    assert precomputed_order == expected_order, (
+        "expected the precomputed path to retire its key=str order and "
+        "match the model path's numeric-ascending unique_labels order"
     )
+
+    # The rendered surface, not only the frame: both charts' y-axis tick
+    # text must appear in the identical screen order.
+    model_ticks = axis_tick_labels(model_chart.to_svg(), axis="y")
+    precomputed_ticks = axis_tick_labels(precomputed_chart.to_svg(), axis="y")
+    assert model_ticks == expected_order
+    assert precomputed_ticks == expected_order
+    assert model_ticks == precomputed_ticks
 
 
 def test_precomputed_source_classification_report_hand_computed():
@@ -1364,20 +1381,23 @@ def test_class_balance_chart_bars_colored_by_class():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "y_transform, class_names",
-    [
-        pytest.param(lambda y: y, None, id="numeric_y_no_names"),
-        pytest.param(lambda y: y.cast(pl.Utf8), None, id="utf8_y_no_names"),
-        pytest.param(
-            lambda y: y.cast(pl.Utf8).cast(pl.Categorical), None, id="categorical_y_no_names"
-        ),
-        pytest.param(lambda y: y.cast(pl.Utf8), ["A", "B", "C"], id="utf8_y_with_class_names"),
-        pytest.param(
-            lambda y: y.cast(pl.Utf8).cast(pl.Enum(["2", "0", "1"])), None, id="enum_y_no_names"
-        ),
-    ],
-)
+# Shared by every confusion-derived dtype matrix below (confusion itself and
+# its #206 sibling, class_prediction_error, which renders the same frame
+# wholesale) -- five cells covering numeric / Utf8 / Categorical / Enum y and
+# a Utf8 y with a `class_names=` alias, the shape a #206 fix must clone
+# per the batch-G close's own dtype matrix this mirrors.
+_CONFUSION_DTYPE_MATRIX = [
+    pytest.param(lambda y: y, None, id="numeric_y_no_names"),
+    pytest.param(lambda y: y.cast(pl.Utf8), None, id="utf8_y_no_names"),
+    pytest.param(lambda y: y.cast(pl.Utf8).cast(pl.Categorical), None, id="categorical_y_no_names"),
+    pytest.param(lambda y: y.cast(pl.Utf8), ["A", "B", "C"], id="utf8_y_with_class_names"),
+    pytest.param(
+        lambda y: y.cast(pl.Utf8).cast(pl.Enum(["2", "0", "1"])), None, id="enum_y_no_names"
+    ),
+]
+
+
+@pytest.mark.parametrize("y_transform, class_names", _CONFUSION_DTYPE_MATRIX)
 def test_confusion_matrix_encode_values_land_in_ys_domain_matrix(y_transform, class_names):
     """``confusion_matrix`` is the third call site of the batch's
     display-label-vs-comparison-value rule, and the only one without a
@@ -1425,6 +1445,602 @@ def test_confusion_matrix_encode_values_land_in_ys_domain_matrix(y_transform, cl
     assert rendered, "no numeric cells rendered at all"
     assert set(rendered) != {"0.00"}, "the rendered matrix is a grid of zeros"
     assert rendered == cells(ferrum.ModelSource(model, X, df["y"]))
+
+
+@pytest.mark.parametrize("y_transform, class_names", _CONFUSION_DTYPE_MATRIX)
+def test_class_prediction_error_chart_dtype_matrix_already_correct(y_transform, class_names):
+    """#206 regression pin, not a fix: ``class_prediction_error_chart``
+    renders ``ModelSource.confusion_matrix(normalize=None)`` wholesale
+    (``_class_prediction_error_chart_from_source``), so it inherited the
+    batch-G confusion fix by transitivity and never touched ``model.predict``
+    directly -- there is no second dtype-domain translation for it to need.
+    Verified by cloning ``test_confusion_matrix_encode_values_land_in_ys_domain_matrix``'s
+    dtype matrix at this figure's own surface: the stacked-bar segment
+    values must equal the numeric-y baseline for every dtype cell, and its
+    goldens are the negative control -- clean-target goldens do not exercise
+    this branch and must not move.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = y_transform(df["y"])
+    kwargs = {} if class_names is None else {"class_names": class_names}
+    source = ferrum.ModelSource(model, X, y, **kwargs)
+    baseline_source = ferrum.ModelSource(model, X, df["y"])
+
+    segments = ferrum.class_prediction_error_chart(source)._data
+    baseline = ferrum.class_prediction_error_chart(baseline_source)._data
+    assert segments["value"].to_list() == baseline["value"].to_list()
+    assert sum(segments["value"].to_list()) == float(len(y)), (
+        "counts vanished: a class value did not land in y's domain"
+    )
+
+    svg = ferrum.class_prediction_error_chart(source).to_svg()
+    assert "<svg" in svg
+
+
+@pytest.mark.parametrize("y_transform, class_names", _CONFUSION_DTYPE_MATRIX)
+def test_classification_report_chart_dtype_matrix_matches_numeric_baseline(
+    y_transform, class_names
+):
+    """#206: the classification_report model path translates ``model.predict``
+    into ``y``'s domain the same way the confusion-matrix fix does, so a
+    utf8/Categorical/Enum ``y`` fit against an int-coded ``classes_`` (the
+    ordinary shape when a user label-encodes for training and keeps the
+    readable target for plotting) renders the SAME per-class values as the
+    clean numeric-``y`` baseline, instead of leaking sklearn's own
+    ``ValueError: Mix of label input types (string and number)`` before any
+    metric is computed.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = y_transform(df["y"])
+    kwargs = {} if class_names is None else {"class_names": class_names}
+    source = ferrum.ModelSource(model, X, y, **kwargs)
+    baseline_source = ferrum.ModelSource(model, X, df["y"])
+
+    report = ferrum.classification_report_chart(source)._data.sort(["class", "metric"])
+    baseline = ferrum.classification_report_chart(baseline_source)._data.sort(["class", "metric"])
+    assert report["value"].to_list() == pytest.approx(baseline["value"].to_list(), abs=1e-9)
+
+    assert "<svg" in ferrum.classification_report_chart(source).to_svg()
+
+
+def test_classification_report_visualizer_f1_macro_matches_numeric_baseline_utf8_y():
+    """#206, ``ClassificationReportVisualizer`` sibling: ``_materialize``'s
+    ``f1_macro`` must not disagree with the numeric-``y`` baseline just
+    because ``y`` is label-encoded differently than ``model.classes_`` --
+    the same translation ``_classification_report_chart``'s model path now
+    runs, reused rather than re-derived.
+
+    One cell (Utf8 ``y``), not the full ``_CONFUSION_DTYPE_MATRIX`` --
+    named accordingly rather than under a "dtype_matrix" name that implied
+    the full parametrization above.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y_str = df["y"].cast(pl.Utf8)
+
+    baseline_viz = ferrum.ClassificationReportVisualizer(model).fit(X, df["y"])
+    viz = ferrum.ClassificationReportVisualizer(model).fit(X, y_str)
+    assert viz._metrics["f1_macro"] == pytest.approx(baseline_viz._metrics["f1_macro"], abs=1e-9)
+
+
+def test_classification_report_chart_model_path_null_y_refuses():
+    """#206 cross-task note: the model path now routes a null-bearing ``y``
+    through the shared target-hygiene guard (T1, #203) instead of leaking
+    scikit-learn's own null error -- the model path was the one classification
+    surface T1 disclosed as outside the contract; this closes it.
+
+    ``diagnostic`` differs by consumer: the chart function names itself
+    (it IS ``classification_report_chart``), while the visualizer names
+    itself (``ClassificationReportVisualizer``) rather than the figure
+    function it delegates to, since a caller who builds the visualizer
+    directly never calls ``classification_report_chart``.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y_null = df["y"].cast(pl.Utf8).scatter([0, 1], None)
+
+    with pytest.raises(ValueError, match=r"classification_report_chart: y has 2 null row"):
+        ferrum.classification_report_chart(model, X, y_null)
+
+    with pytest.raises(ValueError, match=r"ClassificationReportVisualizer: y has 2 null row"):
+        ferrum.ClassificationReportVisualizer(model).fit(X, y_null)
+
+
+def test_classification_report_visualizer_fit_without_y_refuses():
+    """#206 cycle-2 fix: ``ClassificationReportVisualizer(model).fit(X)`` --
+    ``y`` defaulting to ``None`` per ``FerrumVisualizer.fit``'s own signature
+    -- must refuse with a typed domain message, mirroring the chart
+    consumer's own ``source.y is None`` guard. Pre-fix, ``np.asarray(None)``
+    reached ``require_no_null_target``'s ``_null_mask``, whose ``.tolist()``
+    is ``None``, and iterating it leaked ``TypeError: 'NoneType' object is
+    not iterable`` from ferrum's own internals.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+
+    with pytest.raises(
+        ValueError, match=r"ClassificationReportVisualizer\.fit\(\) requires the target"
+    ):
+        ferrum.ClassificationReportVisualizer(model).fit(X)
+
+
+def test_classification_report_chart_model_path_total_mismatch_refuses():
+    """#206 cycle 5: a model's ``classes_`` translated into ``y``'s domain
+    but matching none of ``y``'s observed values used to render an 18-row,
+    every-metric-0.0 report in silence, while ``confusion_matrix_chart`` on
+    the identical source warned and dropped the rows. This is the
+    total-mismatch shape #203's standing policy already refuses elsewhere
+    (``check_resolved_target``'s zero-match case, ``binary_indicator``'s
+    positive-class case), so it now refuses here too instead of trading
+    #206's own pre-fix loud sklearn ``Mix of label input types`` error for
+    a silent, wrong-looking-plausible chart.
+
+    ``model.classes_`` is ``[0, 1, 2]`` (confirmed via the fixture);
+    ``y`` is relabelled to ``"c0"``/``"c1"``/``"c2"`` -- disjoint from the
+    translated class vocabulary (``"0"``/``"1"``/``"2"``) by construction,
+    not merely differently spelled. This is the disjoint-*vocabulary*
+    shape, the one #203's matrix adjudicated; the sibling test below pins
+    that disjoint *predictions* alone are not this shape.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y_disjoint = pl.Series("y", [f"c{v}" for v in df["y"].to_list()])
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"classification_report_chart: the model's classes_ \[0, 1, 2\], "
+            r"translated into y's domain, match none of y's observed values"
+        ),
+    ):
+        ferrum.classification_report_chart(model, X, y_disjoint)
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"ClassificationReportVisualizer: the model's classes_ \[0, 1, 2\], "
+            r"translated into y's domain, match none of y's observed values"
+        ),
+    ):
+        ferrum.ClassificationReportVisualizer(model).fit(X, y_disjoint)
+
+
+def test_classification_report_chart_model_path_partial_overlap_still_renders():
+    """The total-mismatch refusal above must not fire on a partial stray:
+    part of the translated class vocabulary lands in ``y``'s domain, part
+    doesn't -- the ordinary out-of-vocabulary case scikit-learn's own report
+    already tolerates. Relabels only two of three classes to a disjoint
+    spelling, leaving the third (``2``) untouched so the translated
+    ``classes_`` and ``y`` overlap on at least one class.
+
+    Asserts the rendered class axis, not a row count: a row count passes on
+    a report of the wrong shape (cycle-5 review, finding 18).
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    relabel = {0: "c0", 1: "c1", 2: "2"}
+    y_partial = pl.Series("y", [relabel[v] for v in df["y"].to_list()])
+
+    df_report = ferrum.classification_report_chart(model, X, y_partial)._data
+    assert sorted(set(df_report["class"].to_list())) == ["0", "1", "2", "c0", "c1"]
+    assert df_report.height == 15
+
+
+def test_classification_report_chart_model_path_predictions_disjoint_from_y_renders():
+    """The guard's subject is the class *vocabulary*, not the realized
+    predictions -- and this is the shape that separates the two predicates
+    (cycle-6 fix, #206 cycle-5 review finding 17).
+
+    Predictions are a *sample* of the vocabulary, so ``predictions & y`` can
+    be empty while ``translated classes_ & y`` is not: here ``classes_`` is
+    ``[0, 1]``, ``y`` is integer (identity translation, no dtype mismatch
+    anywhere), and the slice is the 7 rows where ``y`` holds only ``0`` and
+    the model predicts only ``1`` -- "how does the model do on the rows it
+    gets entirely wrong?", a legitimate report request. The vocabulary
+    ``[0, 1]`` overlaps ``y``'s ``[0]``, so nothing is mistranslated and the
+    report must render.
+
+    Pre-fix the prediction-based predicate refused it, with a message whose
+    claim ("the model's classes_ ... match none of y's observed values") is
+    measurably false on this input. Released baseline (measured 2026-09-13,
+    ``classification_report(y_sub, model.predict(X_sub), output_dict=True,
+    zero_division=0)``): classes ``'0'``/``'1'``, every precision/recall/F1
+    ``0.0``, support ``7.0``/``0.0`` -- so the values below are sklearn's
+    own, not a shape this pin invented.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    predictions = np.asarray(model.predict(X.to_numpy()))
+
+    rows = np.flatnonzero((y.to_numpy() == 0) & (predictions == 1)).tolist()
+    X_sub, y_sub = X[rows], y[rows]
+    # The predicate-discriminating premise, asserted rather than assumed:
+    # y and the predictions share no value, y and classes_ do.
+    assert set(y_sub.to_list()) == {0}
+    assert set(predictions[rows].tolist()) == {1}
+    assert not set(y_sub.to_list()).isdisjoint(set(model.classes_.tolist()))
+
+    df_report = ferrum.classification_report_chart(model, X_sub, y_sub)._data
+    assert sorted(set(df_report["class"].to_list())) == ["0", "1"]
+    assert df_report.height == 6
+    assert df_report["value"].to_list() == [0.0] * 6
+
+    viz = ferrum.ClassificationReportVisualizer(model).fit(X_sub, y_sub)
+    assert viz._metrics["f1_macro"] == 0.0
+
+
+# --- #224a: the report's class-axis partition (_curve_frames.report_labels) ---
+#
+# One cell of the partition per test below, plus a totality property test.
+# Every cell is a named contract, so a new input shape lands in exactly one
+# of them rather than in whichever hole the previous repro left open: cell 1
+# a null in either array, cell 2 a mix of ordering families, cell 3 an
+# orderable homogeneous union (the answer), cell 4 an unorderable one.
+
+
+def test_precomputed_classification_report_mixed_label_types_refuses():
+    """Cell 2 of ``report_labels``' partition: values from two ordering
+    families refuse as a *mix of label types*, the shape scikit-learn's own
+    ``unique_labels`` refuses too.
+
+    Released baseline (measured 2026-09-13 against ``HEAD``): this input
+    **rendered** -- ``sorted(..., key=str)`` stringified first, so classes
+    ``'0'``/``'1'`` came out with every metric 0.5, silently scoring string
+    predictions against integer targets. #224a's first cycle replaced that
+    with an unowned ``TypeError: '<' not supported between instances of
+    'str' and 'int'`` (never released). The whole message is asserted, not
+    only its first clause: the remedy sentence is the part that was wrong
+    for a null-bearing ``y_pred`` in cycle 2, so it is pinned here and the
+    null shapes are pinned separately below.
+    """
+    y_true = [0, 1, 0, 1]
+    y_pred = np.array(["0", "1", "1", "0"], dtype=object)
+
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+
+    assert str(excinfo.value) == (
+        "classification_report_chart: y_true and y_pred hold a mix of label "
+        "types that cannot be ordered together, the same shape scikit-learn's "
+        "own unique_labels refuses. y_true holds [0, 1] and y_pred holds "
+        "['0', '1']. Use one consistent value type for y_true and y_pred "
+        "before calling classification_report_chart."
+    )
+
+
+@pytest.mark.parametrize(
+    ("y_true", "y_pred", "observed"),
+    [
+        pytest.param(
+            np.array(["a", "b", "a", "b"], dtype=object),
+            np.array(["a", None, "a", "b"], dtype=object),
+            "['a', 'b', None]",
+            id="object-None",
+        ),
+        pytest.param(
+            np.array([0.0, 1.0, 0.0, 1.0]),
+            np.array([0.0, np.nan, 0.0, 1.0]),
+            "[0.0, 1.0, nan]",
+            id="float-NaN",
+        ),
+        pytest.param(
+            np.array(["2020-01-01", "2020-01-02"], dtype="datetime64[ns]"),
+            np.array(["2020-01-01", "NaT"], dtype="datetime64[ns]"),
+            None,
+            id="temporal-NaT",
+        ),
+    ],
+)
+def test_precomputed_classification_report_null_y_pred_refuses(y_true, y_pred, observed):
+    """Cell 1 of the partition, ``y_pred`` half: a null *prediction* refuses
+    in the null guard's own vocabulary, naming ``y_pred`` -- in every dtype
+    family a null can arrive in, because the cell tests through
+    ``_null_mask`` rather than through whichever spelling a repro used.
+
+    Released baseline (measured 2026-09-13 against ``HEAD``): all three
+    rendered a phantom class of their own -- ``y_pred=["a",None,"a","b"]``
+    produced a ``'None'`` row at 0/0/0 with class ``'b'``'s recall at 0.5,
+    and ``y_pred=[0.0,nan,0.0,1.0]`` a ``'nan'`` row the same way. Cycle 2
+    of #224a diagnosed only the object-``None`` one, and diagnosed it
+    *wrong* -- as a type mix, prescribing "use one consistent value type"
+    for a caller whose defect was a null -- while the float-``NaN`` twin
+    still rendered silently, so the answer still depended on the target's
+    dtype.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+
+    message = str(excinfo.value)
+    assert message.startswith(
+        "classification_report_chart: y_pred has 1 null row(s) out of "
+        f"{len(y_pred)}, and a null is not a predicted class"
+    )
+    assert message.endswith(
+        "Drop or impute the null rows before calling classification_report_chart."
+    )
+    # The remedy names the null, not a type mix (cycle 2's misdiagnosis).
+    assert "consistent value type" not in message
+    if observed is not None:
+        assert f"y_pred holds {observed}" in message
+
+
+@pytest.mark.parametrize(
+    ("value_a", "value_b", "family"),
+    [
+        pytest.param(1 + 1j, 2 + 0j, "complex", id="complex"),
+        pytest.param({"k": 1}, {"k": 2}, "dict", id="dict"),
+    ],
+)
+def test_precomputed_classification_report_unorderable_values_refuse(value_a, value_b, family):
+    """Cell 4 of the partition, the *unorderable* half: values of *one*
+    family that do not order at all refuse by name -- not as a "mix of
+    label types", which would send the caller after a defect their input
+    does not have.
+
+    Released baseline (measured 2026-09-13 against ``HEAD``): the complex
+    pair rendered classes ``'(1+1j)'``/``'(2+0j)'`` through
+    ``sorted(..., key=str)``, and the dict pair leaked ``TypeError:
+    unhashable type: 'dict'`` from the ``set()`` the union was built with.
+    ``dict`` is unorderable (no ``<``) as well as unhashable, so it takes
+    this branch rather than the sibling *unkeyable* one below (which needs
+    a value that DOES order).
+    """
+    y_true = np.array([value_a, value_b], dtype=object)
+    y_pred = np.array([value_a, value_a], dtype=object)
+
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+
+    message = str(excinfo.value)
+    assert message.startswith(
+        f"classification_report_chart: y_true and y_pred hold {family} values "
+        f"that cannot be used as class labels. They do not order against "
+        f"each other"
+    )
+    assert "mix of label types" not in message
+
+
+@pytest.mark.parametrize(
+    ("value_a", "value_b", "family"),
+    [
+        pytest.param([1], [2], "list", id="list"),
+        pytest.param({1}, {2}, "set", id="set"),
+        pytest.param(bytearray(b"a"), bytearray(b"b"), "bytes", id="bytearray"),
+    ],
+)
+def test_precomputed_classification_report_unkeyable_values_refuse(value_a, value_b, family):
+    """Cell 4 of the partition, the *unkeyable* half: values that DO order
+    (``list``, ``set`` and ``bytearray`` all support ``<``) but cannot be
+    hashed refuse by name too -- the confusion matrix this report is built
+    from keys each class by its label value, so an orderable-but-unhashable
+    label is exactly as unusable as an unorderable one.
+
+    Released baseline / cycle-3 measurement: ``report_labels`` itself never
+    raised on these (its sort over a concatenated list, not a ``set``,
+    succeeds), so each one answered here and then leaked
+    ``TypeError: unhashable type: 'list'``/``'set'``/``'bytearray'`` one
+    statement later, out of ``_PrecomputedSource.confusion_matrix``'s own
+    ``set()``-based label derivation.
+    """
+    y_true = _object_array([value_a, value_b])
+    y_pred = _object_array([value_a, value_a])
+
+    with pytest.raises(ValueError) as excinfo:
+        ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)
+
+    message = str(excinfo.value)
+    assert message.startswith(
+        f"classification_report_chart: y_true and y_pred hold {family} values "
+        f"that cannot be used as class labels. They order, but cannot be "
+        f"hashed"
+    )
+    assert "mix of label types" not in message
+
+
+def test_precomputed_classification_report_frozenset_labels_dedupe_by_equality():
+    """Cell 3's answer, on the one shape that is hashable but only
+    partially ordered (``frozenset``, ordered by subset): the former
+    adjacency-only dedupe assumed equal values sort next to each other,
+    which a partial order does not guarantee.
+
+    Released baseline / cycle-3 measurement: ``report_labels`` on this
+    exact pair (``true=[{1}, {2}]``, ``pred=[{2}, {1}]``, all frozensets)
+    returned ``[frozenset({1}), frozenset({2}), frozenset({1})]`` -- three
+    labels for two classes. Deduplicating by hash equality
+    (``dict.fromkeys``) instead of adjacency closes it: exactly two
+    distinct classes render, regardless of dtype.
+    """
+    a, b = frozenset({1}), frozenset({2})
+    y_true = _object_array([a, b, a, b])
+    y_pred = _object_array([b, a, a, b])
+
+    frame = ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)._data
+    classes = list(dict.fromkeys(frame["class"].to_list()))
+    assert len(classes) == 2
+    assert set(classes) == {str(a), str(b)}
+
+
+def test_precomputed_classification_report_order_moves_below_ten_classes():
+    """Cell 3, and the true blast radius of #224a's order change: the two
+    rules disagree whenever the class labels' decimal strings sort
+    differently from their values, which needs only unequal digit counts --
+    **two** classes are enough, not ten.
+
+    Measured 2026-09-13: ``{2, 10}`` rendered ``['10', '2']`` on the
+    released code and renders ``['2', '10']`` now. The disclosure that
+    "fewer than 10 classes are unaffected" was false, and this pins the
+    corrected claim. ``confusion_matrix_chart`` on the identical input
+    still renders ``['10', '2']`` -- the ``key=str`` rule retires for the
+    report only -- which is both the documented asymmetry and the proof
+    that the difference is real rather than an artifact of the fixture.
+    """
+    y_true = np.array([2, 10, 2, 10])
+    y_pred = np.array([2, 10, 10, 2])
+
+    report = ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred)._data
+    assert list(dict.fromkeys(report["class"].to_list())) == ["2", "10"]
+
+    confusion = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_pred)._data
+    assert list(dict.fromkeys(confusion["actual"].to_list())) == ["10", "2"]
+
+
+def test_report_labels_numeric_unions_are_not_a_type_mix():
+    """Cell 2's boundary: ``int``/``float``/``bool`` are one ordering
+    family, so a union of them is *not* a type mix. A partition keyed on
+    the exact Python type would refuse all three of these, which the
+    released code accepted -- the mixed cell has to mean "cannot be
+    ordered together", not "not spelled the same way".
+    """
+    from ferrum.diagnostics._internal._curve_frames import report_labels
+
+    def labels(true_values, pred_values):
+        return report_labels(
+            np.array(true_values, dtype=object),
+            np.array(pred_values, dtype=object),
+            diagnostic="probe",
+        )
+
+    assert labels([0, 1], [0.0, 1.0]) == [0, 1]
+    assert labels([True, False], [1, 0]) == [False, True]
+    assert labels([Decimal("1"), Decimal("2")], [1, 2]) == [Decimal("1"), Decimal("2")]
+
+
+class _Orderable:
+    """A custom label value that defines ``<`` (and so has a class axis)."""
+
+    def __init__(self, rank: int) -> None:
+        self.rank = rank
+
+    def __lt__(self, other: object) -> bool:
+        return self.rank < other.rank  # type: ignore[attr-defined]
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Orderable) and self.rank == other.rank
+
+    def __hash__(self) -> int:
+        return hash(self.rank)
+
+
+class _Unorderable:
+    """A custom label value with no ordering at all."""
+
+
+_REPORT_LABEL_SHAPES = {
+    "empty": ([], []),
+    "one class": ([1], [1]),
+    "ints": ([0, 1, 2], [1, 1, 2]),
+    "floats": ([0.5, 1.5], [1.5, 0.5]),
+    "bools": ([True, False], [False, True]),
+    "decimals": ([Decimal("1"), Decimal("10")], [Decimal("10"), Decimal("1")]),
+    "strings": (["a", "b"], ["b", "a"]),
+    "bytes": ([b"a", b"b"], [b"b", b"a"]),
+    "dates": ([date(2020, 1, 1), date(2020, 1, 2)], [date(2020, 1, 2), date(2020, 1, 1)]),
+    "datetimes": ([datetime(2020, 1, 1), datetime(2020, 1, 2)], [datetime(2020, 1, 1)] * 2),
+    "times": ([time(1), time(2)], [time(2), time(1)]),
+    "timedeltas": ([timedelta(1), timedelta(2)], [timedelta(2), timedelta(1)]),
+    "tuples": ([(1, 2), (1, 3)], [(1, 3), (1, 2)]),
+    "frozensets": ([frozenset({1}), frozenset({2})], [frozenset({2}), frozenset({1})]),
+    "sets (unhashable, orderable)": ([{1}, {2}], [{2}, {1}]),
+    "lists (unhashable, orderable)": ([[1], [2]], [[2], [1]]),
+    "custom orderable": ([_Orderable(1), _Orderable(2)], [_Orderable(2), _Orderable(1)]),
+    "custom unorderable": ([_Unorderable(), _Unorderable()], [_Unorderable()]),
+    "dicts": ([{"k": 1}, {"k": 2}], [{"k": 1}]),
+    "complex": ([1 + 1j, 2 + 0j], [2 + 0j, 1 + 1j]),
+    "ndarray values": ([np.array([1, 2]), np.array([3, 4])], [np.array([1, 2])]),
+    "int vs str": ([0, 1], ["0", "1"]),
+    "str vs date": (["a"], [date(2020, 1, 1)]),
+    "bytes vs str": ([b"a"], ["a"]),
+    "date vs datetime": ([date(2020, 1, 1)], [datetime(2020, 1, 1)]),
+    "None in y_true": ([None, "a"], ["a", "a"]),
+    "None in y_pred": (["a", "b"], ["a", None]),
+    "NaN in y_pred": ([0.0, 1.0], [0.0, float("nan")]),
+    "null and mixed at once": ([0, 1], ["0", None]),
+    "y_true empty, y_pred not": ([], ["a"]),
+    "y_pred empty, y_true not": (["a"], []),
+}
+
+
+def _object_array(values: list) -> np.ndarray:
+    """An object array holding ``values`` element for element.
+
+    Assigned one slot at a time rather than with ``np.array(values,
+    dtype=object)``, which would broadcast a list-of-lists into a 2-D array
+    instead of holding the lists as label values.
+    """
+    arr = np.empty(len(values), dtype=object)
+    for i, value in enumerate(values):
+        arr[i] = value
+    return arr
+
+
+_NAMED_REFUSALS = (
+    # cell 1, either array
+    r"^probe: (y|y_pred) has \d+ null row\(s\) out of \d+, and a null is not ",
+    # cell 2
+    r"^probe: y_true and y_pred hold a mix of label types that cannot be ordered ",
+    # cell 4 -- one stem, two reasons (does not order / orders but unhashable)
+    r"^probe: y_true and y_pred hold \S+ values that cannot be used as class labels\. ",
+)
+
+
+@pytest.mark.parametrize("shape", list(_REPORT_LABEL_SHAPES), ids=list(_REPORT_LABEL_SHAPES))
+def test_report_labels_answers_or_refuses_by_name(shape):
+    """Totality, as a property rather than as a list of repros: for *any*
+    input, ``report_labels`` either returns a sorted label list or raises
+    one of its three named refusals. Nothing may leak an unowned
+    ``TypeError``/``ValueError`` out of a sort, a hash or a comparison --
+    the failure class that recurred across three fix cycles, each time
+    through a shape the previous repro had not thought of.
+
+    The table spans every ordering family the partition knows, values that
+    are orderable but unhashable, values that are hashable but unorderable,
+    each null spelling in each array, a null and a type mix at once, and
+    the empty cases. It is a property over the *values* a 1-D pair can
+    hold; array shape is a caller precondition enforced upstream
+    (``_require_1d_array``, and the source constructor for a scalar), not
+    part of this contract.
+
+    The answer branch (a returned list, not a refusal) is checked against
+    the contract cell 3 actually promises: pairwise distinct by equality,
+    and non-decreasing for every family that totally orders. ``frozenset``
+    is the one family here that only *partially* orders (by subset), so
+    ``sorted()`` does not itself produce an ascending sequence for it --
+    only distinctness is asserted there. This is the branch a duplicated,
+    arbitrarily-ordered answer would previously have passed silently
+    (measured: the ``frozensets`` row returned a duplicate label before
+    the dedup fix, and ``isinstance``/``len`` alone could not see it).
+    """
+    from ferrum.diagnostics._internal._curve_frames import _value_family, report_labels
+
+    true_values, pred_values = _REPORT_LABEL_SHAPES[shape]
+    try:
+        labels = report_labels(
+            _object_array(true_values), _object_array(pred_values), diagnostic="probe"
+        )
+    except Exception as exc:  # noqa: BLE001 - totality is the property under test
+        assert isinstance(exc, ValueError) and any(
+            re.match(pattern, str(exc)) for pattern in _NAMED_REFUSALS
+        ), f"{shape}: leaked an unnamed {type(exc).__name__}: {exc}"
+        return
+    assert isinstance(labels, list)
+    assert len(labels) <= len(true_values) + len(pred_values)
+    for i, a in enumerate(labels):
+        for b in labels[i + 1 :]:
+            assert a != b, f"{shape}: duplicate label {a!r} survived dedup: {labels!r}"
+    if labels and _value_family(labels[0]) != "frozenset":
+        for i in range(len(labels) - 1):
+            assert not (labels[i + 1] < labels[i]), f"{shape}: labels are not ascending: {labels!r}"
 
 
 def test_classification_report_cells_render_two_decimal_places():

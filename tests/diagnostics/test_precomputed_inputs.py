@@ -617,6 +617,23 @@ def test_classification_report_chart_precomputed_2d_refuses(binary_precomputed):
         ferrum.classification_report_chart(y_true=y_true, y_pred=y_pred_2d)
 
 
+def test_classification_report_chart_precomputed_y_true_2d_refuses():
+    """The mirror image of the ``y_pred`` 2-D refusal above: a non-1-D
+    ``y_true`` gets the same typed shape refusal ``y_pred`` already had
+    (#208), naming ``y_true`` specifically. Previously unchecked -- a 2-D
+    ``y_true`` reached ``_curve_frames.report_labels`` and was misdiagnosed
+    as "a mix of label types" (each row read as its own ``list``-family
+    value, one ordering family, against ``y_pred``'s ``number`` family),
+    which sent the caller after a defect they did not have.
+    """
+    y_true_2d = np.array([[1, 2], [3, 4]])
+    y_pred = np.array([1, 2])
+    with pytest.raises(ValueError, match="classification_report_chart requires 1-D") as excinfo:
+        ferrum.classification_report_chart(y_true=y_true_2d, y_pred=y_pred)
+    assert "y_true" in str(excinfo.value)
+    assert "mix of label types" not in str(excinfo.value)
+
+
 def test_residuals_chart_precomputed_2d_refuses(regression_precomputed):
     y_true, y_pred = regression_precomputed
     y_pred_2d = np.column_stack([y_pred, y_pred])

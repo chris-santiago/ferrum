@@ -817,6 +817,34 @@ def _classification_report_chart(
     y-then-X guard order, ``sources/_classification.py:333-337``). The
     X guard routes through ``BaseSource._require_X`` rather than
     hand-writing its message, so both guards' wording has one owner.
+
+    Target hygiene and prediction translation (#206, 2026-09-13): the
+    model path now runs the shared null-target guard
+    (``_curve_frames.require_no_null_target``) before predicting, joining
+    the precomputed path inside the target-hygiene contract instead of
+    leaking scikit-learn's own null error, and translates
+    ``model.predict``'s output into ``y``'s domain through
+    ``report_predictions_in_y_domain`` -- the SAME positional
+    ``classes_``<->``encode_values`` correspondence the confusion-matrix
+    fix built -- before handing both to sklearn. Without the translation, a
+    utf8/Categorical/Enum ``y`` fit against an int-coded ``classes_`` made
+    ``y_true``/``y_pred`` disagree on type, and sklearn's own
+    ``unique_labels`` raised ``ValueError: Mix of label input types
+    (string and number)`` instead of computing the report.
+
+    Total-mismatch refusal (#206 cycle 5, 2026-09-13):
+    ``report_predictions_in_y_domain`` also refuses when the model's
+    ``classes_``, translated into ``y``'s domain, match none of ``y``'s
+    observed values -- ``classes_ = [0, 1, 2]`` against
+    ``y = ["c0", "c1", "c2"]`` translates every prediction to
+    ``"0"``/``"1"``/``"2"``, values ``y`` never holds, and the pre-refusal
+    behavior was an 18-row, every-metric-0.0 report with no warning (the
+    same shape that raised the loud ``Mix of label input types`` error
+    before the translation above existed). The vocabulary is what is
+    tested, not the realized predictions: a model evaluated on a slice it
+    gets entirely wrong predicts nothing ``y`` holds while still describing
+    ``y``'s labels, and that report renders. See
+    ``_curve_frames.check_translated_classes_match_y``.
     """
     import ferrum
     from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
@@ -829,19 +857,37 @@ def _classification_report_chart(
         require_sklearn("classification_report")
         from sklearn.metrics import classification_report
 
+        import numpy as np
+
+        from ferrum.diagnostics._internal import _curve_frames
+        from ferrum.diagnostics.sources._classification import report_predictions_in_y_domain
+
         if source.y is None:
             raise ValueError("ModelSource.classification_report() requires y to be provided.")
+        _curve_frames.require_no_null_target(
+            np.asarray(source.y), diagnostic="classification_report_chart"
+        )
         X = source._require_X("classification_report")
         y_true = source.y
-        y_pred = source.model.predict(X)
+        # `.tolist()`: sklearn's `type_of_target` misreads an
+        # object-dtype ndarray of plain numeric values as "unknown"
+        # rather than "multiclass"/"binary" (observed with the
+        # translated array's `dtype=object`, needed to hold values from
+        # any of y's dtypes uniformly); a plain list of native Python
+        # values is read correctly, the same reason `confusion_frame`
+        # calls `.tolist()` on the translated array internally.
+        y_pred = report_predictions_in_y_domain(
+            source.model,
+            source.y,
+            source.model.predict(X),
+            diagnostic="classification_report_chart",
+        ).tolist()
         report = classification_report(
             y_true,
             y_pred,
             output_dict=True,
             zero_division=0,
         )
-
-        from ferrum.diagnostics._internal import _curve_frames
 
         per_class_metrics = {
             str(cls_label): metrics_dict

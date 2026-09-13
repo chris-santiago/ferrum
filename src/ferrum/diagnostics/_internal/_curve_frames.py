@@ -42,7 +42,9 @@ Python-facing DataFrame schemas (the chart-builder contract, unchanged):
 
 from __future__ import annotations
 
+import datetime
 import math
+import numbers
 import warnings
 from typing import cast
 
@@ -173,6 +175,50 @@ def _null_mask(y_true: np.ndarray) -> np.ndarray:
     return np.zeros(len(arr), dtype=bool)
 
 
+def _refuse_null_rows(values: np.ndarray, *, name: str, consequence: str, diagnostic: str) -> None:
+    """Raise if ``values`` carries null rows, in the shared null vocabulary.
+
+    One message skeleton for every array a diagnostic refuses nulls in:
+    which array, how many rows of how many, *why* a null cannot be counted
+    there, the observed values, and the correction. ``consequence`` is the
+    only part that varies, and it has to: what a null does to a target
+    (:func:`require_no_null_target`) and what it does to a prediction column
+    (:func:`require_no_null_predictions`) are different fabrications, and a
+    message that blurred them would send the caller after the wrong array.
+    """
+    mask = _null_mask(values)
+    n_null = int(mask.sum())
+    if not n_null:
+        return
+    raise ValueError(
+        f"{diagnostic}: {name} has {n_null} null row(s) out of {len(mask)}, and "
+        f"{consequence} {name} holds {_observed_values(values)!r}. Drop or "
+        f"impute the null rows before calling {diagnostic}."
+    )
+
+
+def _unkeyable_label_error(
+    *, family: str, reason: str, y_true: np.ndarray, y_pred: np.ndarray, diagnostic: str
+) -> ValueError:
+    """Build :func:`report_labels`' cell-4 refusal; ``reason`` is the only varying clause.
+
+    Cell 4's two ways into "unusable as a class label" -- does not order,
+    orders but cannot be hashed -- differ only in the sentence naming which
+    of the two failed and why; the stem, the observed-values pair, and the
+    corrective closing sentence are identical between them. This is the
+    same shape :func:`_refuse_null_rows`'s ``consequence=`` parameter
+    exists for, applied to cell 4 rather than the null cell.
+    """
+    return ValueError(
+        f"{diagnostic}: y_true and y_pred hold {family} values that cannot "
+        f"be used as class labels. {reason} y_true holds "
+        f"{_observed_values(y_true)!r} and y_pred holds "
+        f"{_observed_values(y_pred)!r}. Use label values that compare with "
+        f"< and can be hashed (numbers, strings, dates) before calling "
+        f"{diagnostic}."
+    )
+
+
 def require_no_null_target(y_true: np.ndarray, *, diagnostic: str) -> None:
     """Refuse a target that carries null rows.
 
@@ -200,16 +246,49 @@ def require_no_null_target(y_true: np.ndarray, *, diagnostic: str) -> None:
     function on the precomputed path (``roc_chart``) -- following
     :func:`binary_indicator`'s ``diagnostic=`` idiom.
     """
-    mask = _null_mask(y_true)
-    n_null = int(mask.sum())
-    if not n_null:
-        return
-    raise ValueError(
-        f"{diagnostic}: y has {n_null} null row(s) out of {len(mask)}, and a "
-        f"null is not a class observation -- counting those rows as negatives "
-        f"would measure every metric against data the target never recorded. "
-        f"y holds {_observed_values(y_true)!r}. Drop or impute the null rows "
-        f"before calling {diagnostic}."
+    _refuse_null_rows(
+        y_true,
+        name="y",
+        consequence=(
+            "a null is not a class observation -- counting those rows as "
+            "negatives would measure every metric against data the target "
+            "never recorded."
+        ),
+        diagnostic=diagnostic,
+    )
+
+
+def require_no_null_predictions(y_pred: np.ndarray, *, diagnostic: str) -> None:
+    """Refuse a hard-label prediction column that carries null rows.
+
+    :func:`require_no_null_target`'s sibling for the other array a
+    label-domain diagnostic reads. A null prediction is not a predicted
+    class, and every rule that builds a class axis from the union of
+    ``y_true`` and ``y_pred`` turns it into a class of its own: measured
+    2026-09-13 on ``classification_report_chart``, an object-dtype
+    ``y_pred = ["a", None, "a", "b"]`` rendered a ``'None'`` row at
+    0/0/0 and dropped class ``'b'``'s recall to 0.5, and the float twin
+    ``y_pred = [0.0, nan, 0.0, 1.0]`` rendered a ``'nan'`` row the same
+    way. Both are fabrication rather than degradation -- the chart names a
+    class nothing ever predicted -- so this refuses, as
+    :func:`require_no_null_target` does, rather than warning.
+
+    It is deliberately *not* called by the confusion family, whose own
+    twins still render such a row: this guard is new with
+    :func:`report_labels` (#224a, 2026-09-13) and widening it to
+    ``confusion_matrix`` would move a second figure's behavior under a
+    fix that is about the report's class axis. That asymmetry is disclosed
+    in ``ferrum-spec.md`` and the changelog rather than left implicit.
+    """
+    _refuse_null_rows(
+        y_pred,
+        name="y_pred",
+        consequence=(
+            "a null is not a predicted class -- it would become a class of "
+            "its own on the class axis, and every row holding it would be "
+            "scored against that phantom class."
+        ),
+        diagnostic=diagnostic,
     )
 
 
@@ -395,6 +474,72 @@ def binary_indicator(y_true: np.ndarray, positive_value: object, *, diagnostic: 
             f"classes_ describe the same labels."
         )
     return indicator
+
+
+def check_translated_classes_match_y(
+    y_true: np.ndarray,
+    class_values: list,
+    classes_: object,
+    *,
+    diagnostic: str,
+) -> None:
+    """Refuse a report whose translated ``classes_`` share no value with ``y``.
+
+    :func:`sources._classification.report_predictions_in_y_domain` translates
+    ``model.predict``'s output into ``y``'s domain through the positional
+    ``classes_`` <-> ``encode_values`` correspondence -- sound when
+    ``classes_`` and ``y`` describe the *same* labels in two dtypes (an
+    int-coded ``classes_`` against a readable ``Utf8``/``Categorical``/
+    ``Enum`` ``y`` is the ordinary shape). It is not sound when ``classes_``
+    and ``y`` describe *different* labels: a model fit with ``classes_ =
+    [0, 1, 2]`` against ``y = ["c0", "c1", "c2"]`` translates every
+    prediction to ``"0"``/``"1"``/``"2"`` -- values the correspondence
+    invented, not values ``y`` ever held -- and every cell of the resulting
+    report reads 0.0 with nothing to say why (measured 2026-09-13: an
+    18-row, 6-class report, every metric 0.0, no warning, while
+    ``confusion_matrix_chart`` on the identical source warns and drops the
+    rows instead). Before #206's translation, this exact shape raised
+    scikit-learn's own ``ValueError: Mix of label input types (string and
+    number)`` -- loud, but at least stopping the caller. This is the
+    total-mismatch shape #203's standing policy already refuses elsewhere
+    (:func:`check_resolved_target`'s zero-match case, :func:`binary_indicator`'s
+    positive-class case), so it refuses here too rather than trading a loud
+    error for a silent, all-zero one.
+
+    The subject is the class *vocabulary* -- ``class_values`` is
+    ``classes_`` coerced into ``y``'s dtype -- not the predictions the
+    correspondence produced. Predictions are a *sample* of that vocabulary,
+    so testing them answers a different question than the message asks:
+    a correctly-labelled, same-dtype model evaluated on the slice it gets
+    entirely wrong (``y`` holds only ``0``, the model predicts only ``1``)
+    shares no predicted value with ``y`` while its ``classes_`` and ``y``
+    describe the same labels -- a legitimate report request ("how does the
+    model do on the rows it misses?"), which a prediction-based test refused
+    while telling the caller something measurably false (cycle-5 review,
+    finding 17, 2026-09-13). Membership is tested through
+    :func:`_unmatched_mask`, the same primitive
+    :func:`check_resolved_target`'s zero-match cell uses, so this guard and
+    the precedent whose closing sentence it borrows also share a mechanism.
+
+    A *partial* overlap -- part of the translated vocabulary lands in
+    ``y``'s domain, part doesn't -- is not this shape: it is the ordinary
+    out-of-vocabulary case scikit-learn's own ``classification_report``
+    already tolerates (an unmatched predicted class reports 0.0 for that
+    row's contribution, same as it always has), so this only fires when the
+    overlap is empty and ``y`` is non-empty.
+    """
+    y_true = np.asarray(y_true)
+    if not len(y_true) or not len(class_values):
+        return
+    if not _unmatched_mask(y_true, list(class_values)).all():
+        return
+    raise ValueError(
+        f"{diagnostic}: the model's classes_ {np.asarray(classes_).tolist()!r}, "
+        f"translated into y's domain, match none of y's observed values, so "
+        f"every cell of the report would be computed against a class axis "
+        f"that shares nothing with y. y holds {_observed_values(y_true)!r}. "
+        f"Check that y and the model's classes_ describe the same labels."
+    )
 
 
 def binary_class_values(y_true: np.ndarray) -> tuple[list, list[str]]:
@@ -808,6 +953,188 @@ def confusion_frame(
 # ---------------------------------------------------------------------------
 # Classification report
 # ---------------------------------------------------------------------------
+
+
+def _value_family(value: object) -> str:
+    """Name the ordering family ``value`` belongs to.
+
+    Two values can be ordered against each other only when they are the
+    same kind of thing, so "same kind" is what :func:`report_labels`
+    partitions on. The families are the ones Python's ``<`` compares
+    *within* and refuses *across*: every real number is one family (an
+    ``int``, a ``float``, a ``bool`` and a ``Decimal`` all compare, which
+    is why an int/float or bool/int union must not be called mixed), each
+    of ``str`` and ``bytes`` is its own, and ``datetime`` /
+    ``date`` / ``time`` / ``timedelta`` are four rather than one
+    (``datetime`` refuses to compare against a bare ``date``). ``complex``
+    is excluded from the number family deliberately: it is a number that
+    does not order.
+
+    Anything else is named by its own type, so two different exotic types
+    read as mixed while one of them alone reads as a single family whose
+    orderability :func:`report_labels` then finds out by trying.
+    """
+    if isinstance(value, numbers.Number) and not isinstance(value, complex):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (bytes, bytearray)):
+        return "bytes"
+    if isinstance(value, datetime.datetime):
+        return "datetime"
+    if isinstance(value, datetime.date):
+        return "date"
+    if isinstance(value, datetime.time):
+        return "time"
+    if isinstance(value, datetime.timedelta):
+        return "timedelta"
+    return type(value).__name__
+
+
+def report_labels(y_true: np.ndarray, y_pred: np.ndarray, *, diagnostic: str) -> list[object]:
+    """Build the report's class axis: both arrays' distinct values, ascending.
+
+    The one owner of ``classification_report``'s class-axis derivation
+    (#224a). It returns the *raw* values in scikit-learn ``unique_labels``
+    order -- the union of both arrays' distinct values in their natural
+    ascending order -- and the caller stringifies them, so the ``str()``
+    that addresses the confusion frame's already-stringified
+    ``actual``/``predicted`` columns stays visible at the call site.
+
+    **Total by partition, not by patch.** Totality here is over the
+    *values* the two arrays hold; their *shape* is the caller's
+    precondition, enforced upstream and unchanged by this function (a
+    non-1-D ``y_true`` or ``y_pred`` is refused by ``_require_1d_array``,
+    and a scalar ``y_true`` never builds a ``_PrecomputedSource`` at all).
+    Over values, every input lands in exactly one of four cells, and each
+    cell is a named contract:
+
+    1. *A null in either array* refuses, naming which one, through
+       :func:`require_no_null_target` / :func:`require_no_null_predictions`
+       and therefore through :func:`_null_mask`, so every dtype family's
+       null spelling counts (object ``None``, float ``NaN``, temporal
+       ``NaT``) rather than whichever one a repro happened to use.
+    2. *Values from more than one ordering family* refuses as a mix of
+       label types, the same shape scikit-learn's own ``unique_labels``
+       refuses (see :func:`_value_family` for what counts as one family:
+       an int/float or bool/int union is **not** mixed).
+    3. *One family, orderable and hashable* is the answer: sorted, then
+       deduplicated by hash equality (``dict.fromkeys``, not adjacency --
+       a partially-ordered family such as ``frozenset`` does not sort its
+       equal values next to each other, so adjacency alone under-dedupes).
+       Python's sort being stable keeps ``y_true``'s representative of an
+       equal pair (``0`` over ``0.0``, ``False`` over ``0``), the same one
+       ``set(y_true) | set(y_pred)`` kept.
+    4. *One family, unkeyable* refuses by name rather than mixed, since
+       telling that caller to "use one consistent value type" would name a
+       defect their input does not have. Two ways into this cell, both
+       named: values that do not order (``complex``, ``dict``, a custom
+       type with no ``<``), and values that order but cannot be hashed
+       (``list``, ``set``, ``bytearray``) -- the confusion matrix this
+       report is built from keys each class by its label value, so an
+       orderable-but-unhashable label is exactly as unusable as an
+       unorderable one, just discovered one statement later.
+
+    The partition is the point. This function's predecessors each fixed
+    the shape in front of them and left the next one open: the released
+    ``sorted(..., key=str)`` rule stringified first, so it was total but
+    ordered ``"10"`` before ``"2"``; #224a's first cycle sorted raw values
+    with a bare ``sorted()`` and leaked ``TypeError: '<' not supported
+    between instances of 'str' and 'int'``; its second wrapped that sort in
+    ``except TypeError`` and so told a caller whose real defect was a null
+    ``y_pred`` to go fix a type mix (measured 2026-09-13:
+    ``y_true=["a","b","a","b"]``, ``y_pred=["a",None,"a","b"]``), while the
+    float-``NaN`` twin never raised at all and rendered a ``'nan'`` class;
+    its third partitioned nulls/mix/order but claimed a ``set``-free sort
+    made hashability unnecessary, while the very next statement
+    (``self.confusion_matrix(...)``) still hashed every label into a dict
+    -- measured: ``list``/``set``/``bytearray`` labels answered here and
+    then leaked ``TypeError: unhashable type`` one statement later, and a
+    ``frozenset`` pair answered with a duplicate (adjacency-only dedupe
+    under a partial order). Cell 4 now names both ways a value can be
+    unusable as a class label, and cell 3's dedupe no longer assumes
+    adjacency implies equality.
+
+    Its two sibling union-derived label sites deliberately do **not**
+    share it, and both were re-measured 2026-09-13:
+    ``_PrecomputedSource.confusion_matrix`` keeps its own
+    ``sorted(..., key=str)`` order (retiring that rule was scoped to the
+    report), and ``ModelSource.confusion_matrix``'s no-``classes_`` branch
+    keeps its raw ``sorted(set(...))``. T1's disposition for that branch --
+    that its labels are the union of ``y_true``/``y_pred``, so no row can
+    fall outside them and it needs no stray-value guard -- still holds.
+    Its sort's totality is a separate, still-open surface: a
+    ``classes_``-less model predicting numbers against a string ``y``
+    raises the same unowned ``TypeError``, and a dict-valued prediction
+    raises ``TypeError: unhashable type``. Closing it would move a second
+    figure's behavior, so it is disclosed rather than swept in here.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    # Cell 1: a null in either array.
+    require_no_null_target(y_true, diagnostic=diagnostic)
+    require_no_null_predictions(y_pred, diagnostic=diagnostic)
+
+    true_values = y_true.tolist()
+    pred_values = y_pred.tolist()
+
+    # Cell 2: values from more than one ordering family.
+    families = {_value_family(v) for v in true_values} | {_value_family(v) for v in pred_values}
+    if len(families) > 1:
+        raise ValueError(
+            f"{diagnostic}: y_true and y_pred hold a mix of label types that "
+            f"cannot be ordered together, the same shape scikit-learn's own "
+            f"unique_labels refuses. y_true holds {_observed_values(y_true)!r} "
+            f"and y_pred holds {_observed_values(y_pred)!r}. Use one "
+            f"consistent value type for y_true and y_pred before calling "
+            f"{diagnostic}."
+        )
+
+    # Cell 4a: values that do not order. Only the comparison operators of
+    # the caller's own values can raise here, and both spellings of "these
+    # do not order" are caught: TypeError from a type with no `<` (dict,
+    # complex), ValueError from one whose `<` returns something that is
+    # not a bool (an ndarray used as a label value).
+    try:
+        ordered = sorted(true_values + pred_values)
+    except (TypeError, ValueError) as exc:
+        # Exactly one family here: two or more already refused above, and
+        # zero means both arrays were empty, which cannot raise.
+        family = next(iter(families))
+        raise _unkeyable_label_error(
+            family=family,
+            reason=(
+                "They do not order against each other, so there is no class axis to put them on."
+            ),
+            y_true=y_true,
+            y_pred=y_pred,
+            diagnostic=diagnostic,
+        ) from exc
+
+    # Cell 4b: values that order but cannot be hashed. The only consumer
+    # of this class axis (the confusion matrix this report is built from)
+    # keys each cell by its label value, so an orderable-but-unhashable
+    # label is unusable in exactly the same way an unorderable one is --
+    # just discovered one statement later if not caught here.
+    try:
+        labels = list(dict.fromkeys(ordered))
+    except TypeError as exc:
+        family = next(iter(families))
+        raise _unkeyable_label_error(
+            family=family,
+            reason=(
+                "They order, but cannot be hashed, and the confusion "
+                "matrix this report is built from keys each class by its "
+                "label value."
+            ),
+            y_true=y_true,
+            y_pred=y_pred,
+            diagnostic=diagnostic,
+        ) from exc
+
+    # Cell 3: one family, orderable and hashable -- the answer.
+    return labels
 
 
 def classification_report_frame(per_class_metrics: dict[str, dict[str, float]]) -> pl.DataFrame:

@@ -181,6 +181,68 @@ def _predictions_in_y_domain(
     return np.array([translation.get(value, value) for value in y_pred.tolist()], dtype=object)
 
 
+def report_predictions_in_y_domain(
+    model: Any, y_true: pl.Series, y_pred: np.ndarray, *, diagnostic: str
+) -> np.ndarray:
+    """Translate a report model path's ``model.predict`` output into ``y``'s domain.
+
+    ``classification_report``'s two model-path consumers --
+    ``plots.classification._classification_report_chart`` and
+    ``ClassificationReportVisualizer._materialize`` -- used to hand
+    ``model.predict`` output straight to sklearn, the exact shape
+    ``confusion_matrix`` had before the batch G close's fix. When the model
+    exposes ``classes_`` in a dtype that differs from ``y``'s -- an
+    int-coded ``classes_`` against a ``Utf8``/``Categorical``/``Enum`` ``y``
+    is the ordinary shape -- the untranslated predictions and ``y`` disagree
+    on type, and sklearn's own ``unique_labels`` raises ``ValueError: Mix of
+    label input types (string and number)`` before any metric is computed
+    (#206). This reuses :func:`_coerce_real_classes` and
+    :func:`_predictions_in_y_domain` -- the SAME positional
+    ``classes_``<->``encode_values`` correspondence the confusion fix built
+    -- rather than deriving a second translation that could disagree with
+    it.
+
+    Returns ``y_pred`` unchanged, as a plain array, when the model exposes
+    no ``classes_`` -- there is no correspondence to translate through, the
+    same fallback ``confusion_matrix``'s no-``classes_`` branch takes. A
+    model exposing no ``classes_`` also runs no overlap check below, for
+    the same reason: disclosed, not closed, in ``ferrum-spec.md``'s #206
+    note.
+
+    When ``classes_`` *is* present, the coerced class vocabulary is checked
+    against ``y`` before anything is translated (#206 cycle 5, 2026-09-13;
+    predicate corrected cycle 6):
+    :func:`_curve_frames.check_translated_classes_match_y` refuses when
+    ``classes_``, translated into ``y``'s domain, matches none of ``y``'s
+    observed values -- ``classes_ = [0, 1, 2]`` against
+    ``y = ["c0", "c1", "c2"]`` is the shape, translating every prediction to
+    ``"0"``/``"1"``/``"2"`` against a ``y`` that only ever holds
+    ``"c0"``/``"c1"``/``"c2"``. Before this correspondence existed, that
+    shape raised sklearn's own loud ``Mix of label input types`` error;
+    without this check, the translation would trade that loud refusal for an
+    18-row, every-metric-0.0 report with no warning at all. #203's standing
+    policy is that a total mismatch refuses typed rather than rendering
+    silently, so this is that policy applied here, matching
+    :func:`_curve_frames.check_resolved_target`'s zero-match case and
+    :func:`_curve_frames.binary_indicator`'s total-mismatch case. The
+    vocabulary is the subject, not the realized predictions: predictions
+    sample the vocabulary, so a model evaluated on a slice it gets entirely
+    wrong shares no predicted value with ``y`` while still describing the
+    same labels, and that report is a legitimate request. A *partial*
+    overlap is left alone too -- it is the ordinary out-of-vocabulary case
+    sklearn's own report already tolerates.
+    """
+    y_pred = np.asarray(y_pred)
+    real_classes = getattr(model, "classes_", None)
+    if real_classes is None:
+        return y_pred
+    encode_values = _coerce_real_classes(real_classes, y_true.dtype)
+    _curve_frames.check_translated_classes_match_y(
+        np.asarray(y_true), encode_values, real_classes, diagnostic=diagnostic
+    )
+    return _predictions_in_y_domain(real_classes, encode_values, y_pred)
+
+
 class ClassificationCurvesMixin(_MixinBase):
     """Phase 10b — classification curves (ROC, PR, calibration, gain, lift, discrimination threshold, confusion matrix)."""
 

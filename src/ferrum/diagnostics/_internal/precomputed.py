@@ -60,11 +60,16 @@ def _require_not_multiclass_for_1d(classes: list, *, chart_name: str) -> None:
         )
 
 
-def _require_1d_y_pred(y_pred: np.ndarray, *, chart_name: str, kind: str) -> None:
-    """Refuse a 2-D ``y_pred`` where ``chart_name`` requires 1-D ``kind`` (#208)."""
-    if y_pred.ndim != 1:
+def _require_1d_array(array: np.ndarray, *, chart_name: str, kind: str) -> None:
+    """Refuse a non-1-D array where ``chart_name`` requires 1-D ``kind`` (#208).
+
+    Generic over which array it is called on -- ``kind`` names both what the
+    array holds and, where more than one array could be malformed at the
+    same call site, which one (e.g. ``"hard class labels (y_true)"``).
+    """
+    if array.ndim != 1:
         raise ValueError(
-            f"{chart_name} requires 1-D {kind}; got an array with shape {y_pred.shape}."
+            f"{chart_name} requires 1-D {kind}; got an array with shape {array.shape}."
         )
 
 
@@ -106,7 +111,11 @@ class _PrecomputedSource:
     Every classification method here runs the shared target-hygiene guard
     (``_curve_frames.require_no_null_target``, #203) before reading class
     values off ``y_true``, naming the *figure function* the caller invoked
-    the way ``_require_1d_y_pred`` already does. Without it a null among
+    the way ``_require_1d_array`` already does. ``classification_report``
+    runs it inside ``_curve_frames.report_labels`` rather than calling it
+    directly, because it needs the same guard on ``y_pred`` too (#224a);
+    the message and the diagnostic name are the sibling methods'. Without
+    the guard a null among
     string labels raised an unowned ``TypeError`` from ``np.unique`` /
     ``sorted`` here just as it did on the model path, and the two numeric
     paths disagreed: ``roc_chart`` refused for the wrong reason ("3 unique
@@ -224,7 +233,7 @@ class _PrecomputedSource:
         number every Brier display surface reads.
         """
         y_pred = self._y_pred_np
-        _require_1d_y_pred(
+        _require_1d_array(
             y_pred, chart_name="calibration_chart", kind="positive-class probabilities"
         )
         _curve_frames.require_no_null_target(self._y_true_np, diagnostic="calibration_chart")
@@ -271,7 +280,7 @@ class _PrecomputedSource:
         """
         y_true = self._y_true_np
         y_pred = self._y_pred_np
-        _require_1d_y_pred(y_pred, chart_name="confusion_matrix_chart", kind="hard class labels")
+        _require_1d_array(y_pred, chart_name="confusion_matrix_chart", kind="hard class labels")
         _curve_frames.require_no_null_target(y_true, diagnostic="confusion_matrix_chart")
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()), key=str)
         return _curve_frames.confusion_frame(y_true, y_pred, labels, normalize=normalize)
@@ -292,29 +301,67 @@ class _PrecomputedSource:
         path's sklearn-backed report, so ``classification_report_chart``
         renders either source kind uniformly.
 
-        Class *order* is a documented divergence, not a bug: labels are
-        ``sorted(..., key=str)`` here (the ``confusion_matrix`` precedent
-        this method reuses, same as ``ModelSource.confusion_matrix``'s
-        own ``sorted(...)`` fallback), whereas the model path inherits
-        sklearn's numeric ``unique_labels`` order. For fewer than 10
-        numeric classes the two agree; at 10+ they diverge (string order
-        interleaves ``"10"``, ``"11"`` before ``"2"``). Both paths agree
-        on the row *values* (see the model-vs-precomputed parity test),
-        just not the class-axis render order.
+        Class order (#224a, 2026-09-13): the class axis is ordered by
+        sklearn's ``unique_labels`` convention -- the union of ``y_true``
+        and ``y_pred``'s own distinct values, in their natural ascending
+        order -- computed from the *raw* arrays rather than from
+        ``confusion_matrix``'s already-stringified ``actual``/``predicted``
+        columns. That distinction matters for a numeric target: stringifying
+        first and then sorting (the retired ``sorted(..., key=str)`` rule,
+        still ``confusion_matrix``'s own order and unchanged there) sorts
+        lexicographically, so it orders by digit count before value --
+        ``"10"`` lands between ``"1"`` and ``"2"`` -- while sorting the raw
+        numeric values first sorts ascending. That is exactly what the
+        model path's sklearn-backed ``classification_report`` does, since
+        it never stringifies before resolving ``unique_labels``. This
+        retires the documented divergence between the two paths; both order
+        the class axis identically now. Both paths already agreed on the
+        row *values* (see the model-vs-precomputed parity test). The two
+        orders differ for any numeric class set whose members have unequal
+        digit counts, two classes included -- measured 2026-09-13 on
+        ``{2, 10}``: ``['10', '2']`` before, ``['2', '10']`` now.
+
+        The label derivation is :func:`_curve_frames.report_labels`, which
+        owns the whole partition of what ``y_true``/``y_pred`` can hold: a
+        null in either array, a mix of ordering families, an orderable and
+        hashable homogeneous union (the answer), and an unkeyable one
+        (unorderable or orderable-but-unhashable) each get a named
+        outcome, so no input shape reaches this method's arithmetic
+        without one.
         """
-        _require_1d_y_pred(
-            self._y_pred_np, chart_name="classification_report_chart", kind="hard class labels"
+        # Both arrays' shape is this method's own precondition -- unlike
+        # report_labels' value partition below, a non-1-D array is not a
+        # value report_labels is asked to make sense of, so it is refused
+        # here, by name, before report_labels ever sees it.
+        _require_1d_array(
+            self._y_true_np,
+            chart_name="classification_report_chart",
+            kind="hard class labels (y_true)",
         )
-        # Ahead of the delegation below so the refusal names this figure
-        # rather than the confusion matrix it is built from.
-        _curve_frames.require_no_null_target(
-            self._y_true_np, diagnostic="classification_report_chart"
+        _require_1d_array(
+            self._y_pred_np,
+            chart_name="classification_report_chart",
+            kind="hard class labels (y_pred)",
         )
+        # Ahead of the confusion delegation below, so a refusal names this
+        # figure rather than the matrix it is built from -- and so an
+        # unkeyable label value (report_labels' cell 4b: orderable but
+        # unhashable, e.g. a list or a set) is refused by name rather than
+        # crashing inside the matrix's dict-keyed label lookup. report_labels
+        # runs the null guard the sibling methods call directly, on both
+        # arrays rather than on y_true alone.
+        raw_labels = _curve_frames.report_labels(
+            self._y_true_np, self._y_pred_np, diagnostic="classification_report_chart"
+        )
+        # str() is the stringifier on both sides of this correspondence:
+        # the confusion frame's actual/predicted columns are built the same
+        # way, so these labels address its cells.
+        labels = [str(v) for v in raw_labels]
+
         cm = self.confusion_matrix(normalize=None)
         actual_col = cm["actual"].to_list()
         predicted_col = cm["predicted"].to_list()
         value_col = cm["value"].to_list()
-        labels = sorted(set(actual_col) | set(predicted_col), key=str)
 
         predicted_totals: dict[str, float] = {}
         actual_totals: dict[str, float] = {}
@@ -362,7 +409,7 @@ class _PrecomputedSource:
         ``source.predictions()`` still dispatches polymorphically for
         callers that don't need to override the name.
         """
-        _require_1d_y_pred(self._y_pred_np, chart_name=chart_name, kind="fitted values")
+        _require_1d_array(self._y_pred_np, chart_name=chart_name, kind="fitted values")
         y_true = self._y_true_np.astype(np.float64)
         y_pred = self._y_pred_np.astype(np.float64)
         residual = y_true - y_pred
@@ -404,7 +451,7 @@ class _PrecomputedSource:
 
         y_true = self._y_true_np
         y_pred = self._y_pred_np  # 1-D positive-class scores
-        _require_1d_y_pred(
+        _require_1d_array(
             y_pred, chart_name="discrimination_threshold_chart", kind="positive-class scores"
         )
         _curve_frames.require_no_null_target(y_true, diagnostic="discrimination_threshold_chart")

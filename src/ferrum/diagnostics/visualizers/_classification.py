@@ -665,6 +665,9 @@ class ClassificationReportVisualizer(FerrumVisualizer):
         require_sklearn("ClassificationReportVisualizer")
         from sklearn.metrics import f1_score
 
+        from .._internal import _curve_frames
+        from ..sources._classification import report_predictions_in_y_domain
+
         if self._source.X is None:
             # Reachable via ``ClassificationReportVisualizer(model).fit(None, y)``
             # -- ``fit`` forwards its ``X`` argument straight into
@@ -679,8 +682,53 @@ class ClassificationReportVisualizer(FerrumVisualizer):
             raise ValueError(
                 "ClassificationReportVisualizer.fit() requires the training data: fit(X, y)."
             )
+        if self._source.y is None:
+            # Reachable via ``ClassificationReportVisualizer(model).fit(X)``
+            # -- ``FerrumVisualizer.fit``'s own signature defaults ``y`` to
+            # ``None`` (`_base.py:103`). Without this guard,
+            # ``np.asarray(None)`` below reaches ``require_no_null_target``
+            # -> ``_null_mask``, whose ``.tolist()`` result is ``None``, and
+            # iterating it leaks ``TypeError: 'NoneType' object is not
+            # iterable`` from ferrum's own internals -- a worse leak than
+            # even the pre-#206 shape, which at least named sklearn's
+            # ``y_true`` parameter. Mirrors the chart consumer's own
+            # ``source.y is None`` guard (`plots/classification.py`'s
+            # `_classification_report_chart`), naming this visualizer
+            # instead since it never reaches that guard directly.
+            raise ValueError("ClassificationReportVisualizer.fit() requires the target: fit(X, y).")
+        # Target hygiene and prediction translation (#206, 2026-09-13): the
+        # same null-target guard and classes_<->encode_values translation
+        # ``_classification_report_chart``'s model path runs, so this
+        # visualizer's f1_macro and its rendered chart cannot disagree on
+        # either a null-bearing y or a dtype-mismatched classes_. ``diagnostic``
+        # names this visualizer, not the figure function -- matching
+        # ``require_sklearn("ClassificationReportVisualizer")`` above and
+        # ``require_no_null_target``'s own contract that ``diagnostic`` names
+        # the entry the caller actually invoked, since a caller building this
+        # visualizer directly never calls ``classification_report_chart``.
+        _curve_frames.require_no_null_target(
+            np.asarray(self._source.y), diagnostic="ClassificationReportVisualizer"
+        )
         y_true = self._source.y
-        y_pred = self._source.model.predict(self._source.X)
+        # `.tolist()`: see `_classification_report_chart`'s matching
+        # comment -- sklearn's `type_of_target` misreads the translated
+        # array's `dtype=object` as "unknown" rather than
+        # "multiclass"/"binary" for plain numeric values.
+        #
+        # `report_predictions_in_y_domain` also refuses here (#206 cycle 5,
+        # 2026-09-13) when the model's classes_, translated into y's domain,
+        # match none of y's observed values -- the same total-mismatch shape
+        # `_curve_frames.check_resolved_target`/`binary_indicator` already
+        # refuse on the curve paths, applied to this visualizer's own
+        # translation. The class vocabulary is the subject, not the realized
+        # predictions, so a slice the model gets entirely wrong still
+        # reports.
+        y_pred = report_predictions_in_y_domain(
+            self._source.model,
+            self._source.y,
+            self._source.model.predict(self._source.X),
+            diagnostic="ClassificationReportVisualizer",
+        ).tolist()
         self._metrics["f1_macro"] = float(
             f1_score(y_true, y_pred, average="macro", zero_division=0)
         )
