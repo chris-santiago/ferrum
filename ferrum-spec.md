@@ -3310,6 +3310,39 @@ with ferrum.theme_context(my_theme):
 > model-selection charts keep the 2026-06-27 small-multiples layout.
 > Single-model output is unchanged.
 
+> **2026-09-13 (wave 3 T5, #213 — `discrimination_threshold_chart(compare=)`
+> joins the small multiples):** `discrimination_threshold_chart` and
+> `DiscriminationThresholdVisualizer(compare=)` now render **small
+> multiples** — one `ConcatChart` panel per model, shared x/y scales,
+> titled with the model name — instead of the single pooled panel they
+> produced before. This is the one classification-curve chart that composes
+> rather than overlaying by `color="model"` (the 2026-05 classification
+> default), because its colour channel is already spent on the four-metric
+> legend; with N models overlaid there is no free channel left to tell the
+> models apart. **Breaking, and the geometry moves, not just the
+> annotation.** The builder's `unpivot` to long form listed neither `model`
+> in `index=` nor among the resolved metric columns, so polars dropped the
+> column outright: both models' sweeps stacked into one frame with nothing
+> distinguishing them, and the line mark drew each metric as a polyline that
+> traversed the threshold axis once per model — an interleaved zig-zag, not
+> an overlay. Measured on the pinned `binary_logistic` fixture vs. a
+> `GaussianNB` rival at `n_thresholds=20`: the old single panel held 160
+> rows over only 80 distinct `(threshold, metric)` pairs (every pair
+> duplicated); each panel now holds 80 rows, one per pair. The
+> F1-optimum annotation and the `threshold_line` rule were computed by a
+> single `arg_max` over that pooled frame, so they reported whichever model
+> won globally; each panel now computes them from its own model's sweep,
+> because `_compose_compare` builds every panel by re-entering the
+> single-model builder. Measured: base 0.918 @ t=0.42, rival 0.886 @ t=0.53
+> — two distinct labels where there was one. This also settles the render
+> half of the `compare=` metric-semantics note (F-L10-07) below:
+> `DiscriminationThresholdVisualizer(GaussianNB, compare={"rival": logistic})`
+> reprs `best_threshold=0.5263, best_f1=0.8865` (its base model, restricted
+> by `_base_model_rows` since batch G) while rendering `max F1 = 0.918 @
+> t=0.42` (the rival's). The `"base"` panel now annotates exactly the pair
+> the repr prints. The single-model path (no `compare=`) is unchanged, and
+> both single-model discrimination-threshold goldens are byte-identical.
+
 > **2026-07-02 (explicit scales survive composite-mark desugar, #45):**
 > an explicit `scale=` on a chart-level positional channel (`x`/`y`) now
 > propagates onto the layers a composite mark desugars into — previously
@@ -4205,7 +4238,17 @@ class FerrumVisualizer:
 > (`has_score=False`, `score()=0.0`, no distinguished base) is unaffected —
 > `compare=` on the other three has one distinguished base model (the
 > primary `model=` argument) where `CalibrationVisualizer`'s `*models` does
-> not.
+> not. **Rider (2026-09-13, wave 3 T5, #213):** that fix reached the
+> *metrics* only. `DiscriminationThresholdVisualizer._build_chart` kept
+> forwarding the unfiltered compared source to the pooled chart builder, so
+> the rendered F1-optimum annotation could still name the rival while
+> `_metrics`/`__repr__` named the base. `compare=` on that visualizer now
+> renders small multiples (see the 2026-09-13 note in the `compare=`
+> composition section), so the `"base"` panel's annotation and the repr
+> describe the same model by construction. `ROCVisualizer` and
+> `PRVisualizer` never had the render half of this problem: their charts
+> overlay by `color="model"`, so every curve is already labeled with the
+> model it belongs to.
 
 > **2026-05-11 (Phase 10 — Model Diagnostics):** Every visualizer constructor
 > documented above accepts `random_state: int | None = None` as an additional
