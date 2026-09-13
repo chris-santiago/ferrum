@@ -31,7 +31,7 @@ use crate::render::svg::uniquify_clip_ids_with_prefix;
 /// document-scoped, so `url(#ferrum-clip-0)` then resolves to whichever
 /// definition comes first and the other clips its content by the wrong
 /// rect. Caller passes a distinct `inset_idx` per `StructuralSpec::Inset`
-/// processed for this chart (see `scene_build::build_structural_nodes`).
+/// processed for this chart (see `scene_build::build_chart_insets`).
 ///
 /// Rendering order (back to front):
 /// 1. Drop shadow (if `spec.shadow`)

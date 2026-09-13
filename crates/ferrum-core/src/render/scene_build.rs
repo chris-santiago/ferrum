@@ -139,6 +139,15 @@ pub fn build_scene(
         leaf_scales,
     };
 
+    // Break-axis structural features are built PER PANEL (#230-7, spec §4.7):
+    // every facet panel lays the chart's data-space gaps over its own plot rect
+    // and its own scale pixel range. The two chart-scoped halves are hoisted out
+    // of the loop — the same-axis merge is a pure function of the spec, and the
+    // warnings the per-panel build produces are collected in a scene-level
+    // ledger that reports each distinct fact once instead of once per panel.
+    let mut break_ledger = BreakWarningLedger::default();
+    let merged_breaks = merge_break_specs(&chart_config.structural, &mut break_ledger);
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel {
@@ -293,28 +302,39 @@ pub fn build_scene(
         let panel_y_axis: Option<&AxisLayout> =
             panel_axes.independent_y.as_ref().or(panel_y_axis_global);
 
-        // Structural features: axis breaks, insets. Only applied to the first
-        // panel (non-faceted charts). Resolved BEFORE the axes and gridlines
-        // are built so they can be placed on the broken scale as they are
-        // built, while the axis title is still distinguishable from the
-        // tick-positioned chrome around it.
-        let StructuralOutput {
-            extra_annotations: structural_annotations,
-            break_results,
-        } = if panel_idx == 0 && !chart_config.structural.is_empty() {
-            build_structural_nodes(
-                &chart_config.structural,
+        // Structural features: this panel's axis breaks, plus — on the
+        // reference panel only — the chart's inset bodies. Resolved BEFORE the
+        // axes and gridlines are built so they can be placed on the broken
+        // scale as they are built, while the axis title is still
+        // distinguishable from the tick-positioned chrome around it.
+        let mut structural_annotations: Vec<SceneNode> = Vec::new();
+        let break_results = if merged_breaks.is_empty() {
+            Vec::new()
+        } else {
+            let PanelBreaks { indicators, results } = build_panel_breaks(
+                &merged_breaks,
                 &scales,
                 &panel.plot_area,
                 theme,
-                warnings,
-            )
-        } else {
-            StructuralOutput {
-                extra_annotations: Vec::new(),
-                break_results: Vec::new(),
-            }
+                panel_idx,
+                &mut break_ledger,
+            );
+            structural_annotations.extend(indicators);
+            results
         };
+        // Insets are chart-scoped, not panel-scoped (see `PanelBreaks`). They
+        // are appended AFTER this panel's break indicators, where before
+        // #230-7's split the two interleaved in declaration order: an inset is
+        // opaque embedded content and an indicator is axis chrome, so
+        // chrome-under-content is the right paint order for the pair, and no
+        // chart in the corpus declares both.
+        if panel_idx == 0 {
+            structural_annotations.extend(build_chart_insets(
+                &chart_config.structural,
+                &scales,
+                &panel.plot_area,
+            ));
+        }
         // Resolve each break against the unbroken scale it replaces. A scale
         // with no continuous domain (ordinal) has nothing to reverse-map
         // through, so it contributes no remap and its marks stay put.
@@ -495,7 +515,7 @@ pub fn build_scene(
         // `remap_mark_batch_through_break` folds marks through below — so an
         // ordinal-axis break (no continuous `data_domain()`, filtered out of
         // `break_remaps` above) neither moves nor drops annotations, matching
-        // its marks. `build_structural_nodes`'s same-axis merge (#230-4)
+        // its marks. `merge_break_specs`'s same-axis merge (#230-4)
         // collapses every `BreakAxis` spec sharing an axis into ONE
         // `BreakResult` before this runs, so `break_remaps` carries at most one
         // remap per axis. Norm/px coordinates are plot-area-relative and
@@ -598,6 +618,12 @@ pub fn build_scene(
             layout_scale: LayoutScale::identity(),
         });
     }
+
+    // One report per distinct break-axis fact, now that every panel has had its
+    // say (#230-7). Flushed here rather than from inside the loop so a fact N
+    // panels observed is reported once, and so the free-scale case where it
+    // held on only some of them can say so.
+    break_ledger.flush(warnings);
 
     // Wave-1 close remediation (S3-1): once at least one panel actually
     // resolved its own scales, the panel-real pass has already re-reported
@@ -2639,13 +2665,23 @@ fn build_polar_axes(
 
 // ── Structural feature processing ────────────────────────────────────────────
 
-/// Process structural feature specs (axis breaks, insets).
-struct StructuralOutput {
-    /// Additional annotation nodes (break indicators, insets).
-    extra_annotations: Vec<SceneNode>,
-    /// `(axis, BreakResult)` pairs for each BreakAxis spec, used by the
-    /// caller to remap primary mark pixel coordinates through the broken scale.
-    break_results: Vec<(String, break_axis::BreakResult)>,
+/// One panel's break-axis output (#230-7).
+///
+/// Structural processing is split by scope, because the two structural specs
+/// have different ones. A `BreakAxis` is a statement about an AXIS, and every
+/// facet panel draws that axis against its own plot rect and its own scale
+/// pixel range, so breaks are built once per panel ([`build_panel_breaks`]).
+/// An `Inset` is a whole embedded chart placed in the plot area, built once
+/// for the chart on panel 0 ([`build_chart_insets`]) — rendering one copy per
+/// facet panel would emit the same inset clip-path ids N times into a single
+/// SVG document, which is an id collision, not a feature.
+struct PanelBreaks {
+    /// Break indicator nodes, placed against THIS panel's plot rect.
+    indicators: Vec<SceneNode>,
+    /// `(axis, BreakResult)` pairs, one per broken axis, used by the caller to
+    /// remap this panel's mark, chrome, and annotation coordinates through the
+    /// broken scale.
+    results: Vec<(String, break_axis::BreakResult)>,
 }
 
 /// The name of `scale`'s kind when it is continuous but NOT linear in data,
@@ -2665,241 +2701,435 @@ fn nonlinear_scale_kind(scale: &scale_resolve::ScaleKind) -> Option<&'static str
     }
 }
 
-fn build_structural_nodes(
-    structural: &[StructuralSpec],
-    scales: &scale_resolve::ResolvedScales,
-    plot_area: &crate::layout::Rect,
-    theme: &crate::layout::ThemeInputs,
-    warnings: &mut Vec<RenderWarning>,
-) -> StructuralOutput {
-    let mut extra_annotations: Vec<SceneNode> = Vec::new();
-    let mut break_results: Vec<(String, break_axis::BreakResult)> = Vec::new();
-    // Distinct per Inset item so each embedded body gets its own clip-id
-    // namespace (see `inset::build_inset_nodes`); only Inset variants advance it.
-    let mut inset_idx: usize = 0;
+// ── Break-axis warning cadence (#230-7) ──────────────────────────────────────
 
-    // Same-axis `BreakAxis` specs merge into ONE gap list before any break is
-    // applied (#230-4). Before this, two `BreakAxis(axis="y", gap=...)` specs
-    // each built their OWN `BreakResult` against the ORIGINAL (unbroken)
-    // domain, and the mark/annotation fold below applied both in sequence —
-    // numerically wrong (the second break re-interprets the first break's
-    // already-broken pixel as an unbroken-domain data value) and, compounded
-    // by `BreakRemap::data_at`'s domain clamp, could resurrect a mark the
-    // first break had hidden (see `BREAK_HIDDEN` never clamped back into
-    // view, `break_axis.rs`). Building one union'd `BreakResult` per axis
-    // makes N same-axis specs render identically to one spec declaring their
-    // combined gaps — `normalize_gaps` (already merges overlapping, nested,
-    // and unsorted gaps) does the rest, and it is exercised on the union the
-    // same way it always was on one spec's gap list. A conflicting
-    // `break_size`/`break_style` between merged specs keeps the FIRST
-    // declaration's value (matching "declare one BreakAxis with the union of
-    // gaps" — the first spec's cosmetic knobs are what that single spec would
-    // have carried) and warns once per axis per conflicting field, so a
-    // later spec's silently-dropped knob is named rather than merely
-    // overridden.
-    struct MergedBreakGroup {
-        gaps: Vec<[f64; 2]>,
-        break_size: f64,
-        break_style: String,
-        style_conflict: bool,
-        size_conflict: bool,
+/// Which break-axis fact one panel's structural pass reported.
+///
+/// The discriminant a scene-level report is keyed by, alongside the axis: two
+/// panels reporting the same fact about the same axis are ONE fact about the
+/// chart, not two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BreakFact {
+    /// The axis has no numeric domain for a gap to remove a range from.
+    Ordinal,
+    /// No declared gap overlaps this panel's axis domain.
+    NoOverlap,
+    /// The break applies, but the scale's inverse is not linear, so the gap
+    /// removes a different data range than the one asked for.
+    NonlinearScale,
+}
+
+/// One `(axis, fact)` pair, and how many panels reported it.
+struct PanelFact {
+    axis: String,
+    fact: BreakFact,
+    /// The first reporting panel's payload, verbatim. For [`BreakFact::NoOverlap`]
+    /// that payload names the panel's own domain, which a later panel's report
+    /// may or may not share — hence `first_panel`, and hence `diverged` below,
+    /// which is what actually checks.
+    warning: RenderWarning,
+    first_panel: usize,
+    panels_reporting: usize,
+    /// Set once a later panel reports the SAME fact with a DIFFERENT payload
+    /// (e.g. `NoOverlap` on independent y-scales, where every panel misses
+    /// its gap but each panel's domain differs). `panels_reporting == panels`
+    /// alone is not proof the stored payload speaks for every panel — only
+    /// that every panel agreed the fact held. A count-only qualification gate
+    /// let an all-report, all-diverged case flush panel 0's payload verbatim
+    /// and unattributed, presenting one panel's domain as the chart's.
+    diverged: bool,
+}
+
+/// Scene-level collector for every warning the break-axis structural pass
+/// produces, so each distinct fact is reported ONCE per render no matter how
+/// many facet panels observed it.
+///
+/// Breaks are built per panel (#230-7), but the facts they report are not
+/// per-panel facts. Merge conflicts are pure functions of the spec, and
+/// ineffectiveness / scale nonlinearity are functions of `(spec, resolved
+/// domain)`, so most facets report each one exactly once: for the common
+/// shape, every panel resolves the same domain and reports the same payload.
+/// Pushing them straight into `warnings` from inside the panel loop would
+/// multiply one user-facing fact by the panel count, exactly the
+/// rollup-hostile cadence wave 1 spent a batch removing elsewhere.
+///
+/// The ledger does not assume every panel's payload agrees just because the
+/// spec's facet resolve is shared — it checks (`note_panel_fact`'s comparison
+/// against the stored payload), because a per-panel resolved domain can still
+/// differ panel to panel for reasons the resolve mode alone doesn't settle. A
+/// fact reported with a differing payload, or reported by fewer panels than
+/// exist, is qualified rather than flushed verbatim: [`qualified_for_partial_panels`]
+/// makes that one report say it does not speak for every panel.
+#[derive(Default)]
+struct BreakWarningLedger {
+    /// Facts about the spec alone, reported verbatim in the order noted.
+    chart_level: Vec<RenderWarning>,
+    /// Facts observed while building a panel, one entry per `(axis, fact)`.
+    panel_facts: Vec<PanelFact>,
+    /// How many panels ran the per-panel break build.
+    panels: usize,
+}
+
+impl BreakWarningLedger {
+    fn note_chart_level(&mut self, warning: RenderWarning) {
+        self.chart_level.push(warning);
     }
-    let mut merged_breaks: Vec<(String, MergedBreakGroup)> = Vec::new();
-    for item in structural {
-        if let StructuralSpec::BreakAxis(spec_brk) = item {
-            match merged_breaks.iter_mut().find(|(axis, _)| *axis == spec_brk.axis) {
-                Some((_, group)) => {
-                    group.gaps.extend_from_slice(&spec_brk.gaps);
-                    if !group.style_conflict && spec_brk.break_style != group.break_style {
-                        group.style_conflict = true;
-                    }
-                    if !group.size_conflict && spec_brk.break_size != group.break_size {
-                        group.size_conflict = true;
-                    }
+
+    /// Count one panel into the denominator. Called by [`build_panel_breaks`]
+    /// itself rather than by its caller, so "a panel built breaks" and "a panel
+    /// was counted" cannot drift apart.
+    fn enter_panel(&mut self) {
+        self.panels += 1;
+    }
+
+    /// Record that `panel_idx` observed `fact` about `axis`. `warning` builds
+    /// the payload; for the first panel to report the pair it becomes the
+    /// entry's stored payload. For every later panel reporting the same
+    /// pair, it is still built and compared against the stored payload
+    /// (`RenderWarning` is `PartialEq`) so a payload that DIFFERS across
+    /// reporting panels — the independent-scale `NoOverlap` case, where each
+    /// panel's domain is its own — marks the entry `diverged` rather than
+    /// letting a later, equally-reporting panel's disagreement go unnoticed.
+    fn note_panel_fact(
+        &mut self,
+        axis: &str,
+        fact: BreakFact,
+        panel_idx: usize,
+        warning: impl FnOnce() -> RenderWarning,
+    ) {
+        match self
+            .panel_facts
+            .iter_mut()
+            .find(|e| e.fact == fact && e.axis == axis)
+        {
+            Some(entry) => {
+                entry.panels_reporting += 1;
+                if warning() != entry.warning {
+                    entry.diverged = true;
                 }
-                None => merged_breaks.push((
-                    spec_brk.axis.clone(),
-                    MergedBreakGroup {
-                        gaps: spec_brk.gaps.clone(),
-                        break_size: spec_brk.break_size,
-                        break_style: spec_brk.break_style.clone(),
-                        style_conflict: false,
-                        size_conflict: false,
-                    },
-                )),
+            }
+            None => self.panel_facts.push(PanelFact {
+                axis: axis.to_string(),
+                fact,
+                warning: warning(),
+                first_panel: panel_idx,
+                panels_reporting: 1,
+                diverged: false,
+            }),
+        }
+    }
+
+    /// Append one report per distinct fact to this render's warnings.
+    ///
+    /// A fact reported by every panel with an IDENTICAL payload (the shared-
+    /// scale case, overwhelmingly the common one) flushes verbatim. Anything
+    /// short of that — reported by fewer than every panel, OR reported by
+    /// every panel but with payloads that disagree — is qualified rather
+    /// than presented as one chart-wide fact, since the stored payload speaks
+    /// for `first_panel` only in either case.
+    fn flush(self, warnings: &mut Vec<RenderWarning>) {
+        let panels = self.panels;
+        warnings.extend(self.chart_level);
+        for entry in self.panel_facts {
+            if entry.panels_reporting == panels && !entry.diverged {
+                warnings.push(entry.warning);
+            } else {
+                warnings.push(qualified_for_partial_panels(entry, panels));
             }
         }
     }
-    for (axis, group) in &merged_breaks {
+}
+
+/// The scene-level report for a fact whose stored payload does not speak for
+/// every panel, in two shapes the ledger has actually observed:
+///
+/// - **Partial** (`panels_reporting < panels`): fewer panels reported the
+///   fact than exist — it held on some panels and not others, so the break
+///   applied on the rest.
+/// - **Diverged** (`panels_reporting == panels`, `diverged`): every panel
+///   reported the fact, but `note_panel_fact`'s payload comparison found at
+///   least one panel's report differed from the stored one. There is no
+///   "rest" the break applied on here; the honest qualification is that the
+///   stored payload is one panel's own, not every panel's.
+///
+/// Both shapes name `first_panel`, the panel the stored payload actually
+/// describes. `BreakAxisIneffective` is a claim about what the reader is
+/// looking at ("this break removed nothing"), and under either shape that
+/// claim is panel-specific, not chart-wide, so the report says so.
+/// `BreakAxisOnNonlinearScale` is instead a claim about the SPEC (a log
+/// axis's inverse is not the break's linear reverse map) which is equally
+/// true on every panel the break applies to, so naming a subset would add
+/// nothing a reader could act on: it is reported once, verbatim, regardless
+/// of which shape triggered qualification.
+fn qualified_for_partial_panels(entry: PanelFact, panels: usize) -> RenderWarning {
+    let PanelFact { warning, first_panel, panels_reporting, diverged, .. } = entry;
+    match warning {
+        RenderWarning::BreakAxisIneffective { axis, reason } => {
+            let qualifier = if panels_reporting == panels && diverged {
+                format!(
+                    "(measured on facet panel {first_panel}); other panels \
+                     reported this fact with a different value, so this is \
+                     panel {first_panel}'s, not every panel's"
+                )
+            } else {
+                format!(
+                    "(facet panel {first_panel}); this holds on \
+                     {panels_reporting} of {panels} panels, and the break \
+                     applies on the rest"
+                )
+            };
+            RenderWarning::BreakAxisIneffective {
+                axis,
+                reason: format!("{reason} {qualifier}"),
+            }
+        }
+        other => other,
+    }
+}
+
+// ── Same-axis merge ──────────────────────────────────────────────────────────
+
+/// Every `BreakAxis` declared on one axis, merged into the single gap list the
+/// render applies (#230-4), in first-declaration order.
+///
+/// Before this merge, two `BreakAxis(axis="y", gap=...)` specs each built their
+/// OWN `BreakResult` against the ORIGINAL (unbroken) domain and the
+/// mark/annotation fold applied both in sequence — numerically wrong (the
+/// second break re-interprets the first break's already-broken pixel as an
+/// unbroken-domain data value) and, compounded by `BreakRemap::data_at`'s
+/// domain clamp, able to resurrect a mark the first break had hidden (see
+/// `BREAK_HIDDEN` never clamped back into view, `break_axis.rs`). One union'd
+/// gap list per axis makes N same-axis specs render identically to one spec
+/// declaring their combined gaps: `normalize_gaps` already merges overlapping,
+/// nested, and unsorted gaps, and it is exercised on the union exactly as it
+/// always was on one spec's list.
+struct MergedBreak {
+    axis: String,
+    gaps: Vec<[f64; 2]>,
+    /// First declaration wins; `size_conflict` records that a later same-axis
+    /// spec asked for a different value, so the dropped knob is named rather
+    /// than merely overridden.
+    break_size: f64,
+    size_conflict: bool,
+    /// First declaration wins; see `size_conflict`.
+    break_style: String,
+    style_conflict: bool,
+}
+
+/// Merge every same-axis `BreakAxis` in `structural` (see [`MergedBreak`]) and
+/// note each conflicting cosmetic field once.
+///
+/// A pure function of the chart spec: nothing here reads a scale, a plot rect,
+/// or a panel. It therefore runs ONCE per scene, ahead of the panel loop,
+/// rather than once per facet panel — which is also why its conflict warnings
+/// go into the ledger's chart-level bucket.
+fn merge_break_specs(
+    structural: &[StructuralSpec],
+    ledger: &mut BreakWarningLedger,
+) -> Vec<MergedBreak> {
+    let mut merged: Vec<MergedBreak> = Vec::new();
+    for item in structural {
+        let StructuralSpec::BreakAxis(spec_brk) = item else {
+            continue;
+        };
+        match merged.iter_mut().find(|m| m.axis == spec_brk.axis) {
+            Some(group) => {
+                group.gaps.extend_from_slice(&spec_brk.gaps);
+                group.style_conflict |= spec_brk.break_style != group.break_style;
+                group.size_conflict |= spec_brk.break_size != group.break_size;
+            }
+            None => merged.push(MergedBreak {
+                axis: spec_brk.axis.clone(),
+                gaps: spec_brk.gaps.clone(),
+                break_size: spec_brk.break_size,
+                size_conflict: false,
+                break_style: spec_brk.break_style.clone(),
+                style_conflict: false,
+            }),
+        }
+    }
+    for group in &merged {
         if group.style_conflict {
-            warnings.push(RenderWarning::BreakAxisMergeConflict {
-                axis: axis.clone(),
+            ledger.note_chart_level(RenderWarning::BreakAxisMergeConflict {
+                axis: group.axis.clone(),
                 field: "break_style".to_string(),
             });
         }
         if group.size_conflict {
-            warnings.push(RenderWarning::BreakAxisMergeConflict {
-                axis: axis.clone(),
+            ledger.note_chart_level(RenderWarning::BreakAxisMergeConflict {
+                axis: group.axis.clone(),
                 field: "break_size".to_string(),
             });
         }
     }
-    // Which axes have already been processed below — a same-axis
-    // `BreakAxis`'s SECOND (and later) occurrence is a no-op here: its gaps
-    // are already folded into `merged_breaks` and were applied at the first
-    // occurrence's position, which is where this axis's indicator(s) and
-    // `break_results` entry belong (preserving declaration-order placement
-    // relative to any interleaved `Inset` items).
-    let mut processed_axes: Vec<String> = Vec::new();
+    merged
+}
 
-    for item in structural {
-        match item {
-            StructuralSpec::BreakAxis(spec_brk) => {
-                if processed_axes.contains(&spec_brk.axis) {
-                    continue;
+// ── Per-panel break build ────────────────────────────────────────────────────
+
+/// Build one panel's break indicators and break results (spec §4.7).
+///
+/// Called for EVERY panel (#230-7). A facet's panels share the chart's
+/// data-space gaps but each lays them over its OWN plot rect and its own scale
+/// pixel range, so this is the whole per-panel input: the same `merged` gaps,
+/// a different `scales`/`plot_area`. Before #230-7 only panel 0 ran this, so
+/// panels 1..N rendered unbroken — two different scales under one shared axis,
+/// silently, with every in-gap mark on those panels drawn at a position the
+/// axis labels contradicted.
+fn build_panel_breaks(
+    merged: &[MergedBreak],
+    scales: &scale_resolve::ResolvedScales,
+    plot_area: &crate::layout::Rect,
+    theme: &crate::layout::ThemeInputs,
+    panel_idx: usize,
+    ledger: &mut BreakWarningLedger,
+) -> PanelBreaks {
+    ledger.enter_panel();
+    let mut indicators: Vec<SceneNode> = Vec::new();
+    let mut results: Vec<(String, break_axis::BreakResult)> = Vec::new();
+
+    for group in merged {
+        // ONE predicate decides whether this break does anything, and it is
+        // the same one `build_scene` applies downstream when it turns these
+        // results into `BreakRemap`s: the axis must have a continuous domain,
+        // and at least one gap must survive being clipped to it. Asking it
+        // here — rather than fabricating a `(0.0, 1.0)` domain for an ordinal
+        // axis and asking whether a gap lands inside THAT — is what makes the
+        // answer match the render: an ordinal `BreakAxis(gap=(0.2, 0.4))` used
+        // to draw a slash indicator over a scale nothing moved on, and warn
+        // nothing, because the fabricated domain made its gap look effective.
+        let scale = if group.axis == "y" { &scales.y } else { &scales.x };
+        let Some(data_domain) = scale.data_domain() else {
+            // No numeric domain at all: no remap downstream, so no indicator
+            // here and no result entry (one would be filtered out by that same
+            // `data_domain()` test).
+            ledger.note_panel_fact(&group.axis, BreakFact::Ordinal, panel_idx, || {
+                RenderWarning::BreakAxisIneffective {
+                    axis: group.axis.clone(),
+                    reason: "the axis is ordinal, so its gaps have no numeric \
+                             data range to remove"
+                        .to_string(),
                 }
-                processed_axes.push(spec_brk.axis.clone());
-                // Safe: every `BreakAxis` item populated `merged_breaks`
-                // above by this same axis key.
-                let group = &merged_breaks
-                    .iter()
-                    .find(|(axis, _)| *axis == spec_brk.axis)
-                    .expect("this axis was just inserted into merged_breaks above")
-                    .1;
+            });
+            continue;
+        };
 
-                // Build break indicators and add them to annotations.
-                let is_y = spec_brk.axis == "y";
+        // The segments tile the SCALE's own pixel range — the padded one it
+        // places data in — not the raw plot rect (#226). The two differ by the
+        // positional-scale padding inset (`layout::geometry::inset_pixel_range`,
+        // up to 8px per end), and `BreakRemap::new` downstream reverse-maps from
+        // `scale.pixel_range()`: laying the segments over the rect instead made
+        // the round trip lossy in exactly that band, so every effective break
+        // silently deleted the axis padding (ticks/marks/gridlines up to 8px off
+        // their unbroken positions, and an 8px step the moment a gap crossed the
+        // domain boundary). One span, read from one place — and, since #230-7,
+        // read from THIS panel's scale rather than panel 0's.
+        let break_result = break_axis::apply_break_to_scale(
+            data_domain,
+            &group.gaps,
+            scale.pixel_range(),
+            group.break_size,
+        );
 
-                // ONE predicate decides whether this break does anything, and
-                // it is the same one `build_scene` applies downstream when it
-                // turns these results into `BreakRemap`s: the axis must have a
-                // continuous domain, and at least one gap must survive being
-                // clipped to it. Asking it here — rather than fabricating a
-                // `(0.0, 1.0)` domain for an ordinal axis and asking whether a
-                // gap lands inside THAT — is what makes the answer match the
-                // render: an ordinal `BreakAxis(gap=(0.2, 0.4))` used to draw a
-                // slash indicator over a scale nothing moved on, and warn
-                // nothing, because the fabricated domain made its gap look
-                // effective.
-                let scale = if is_y { &scales.y } else { &scales.x };
-                let Some(data_domain) = scale.data_domain() else {
-                    // No numeric domain at all: no remap downstream, so no
-                    // indicator here and no `break_results` entry (one would
-                    // be filtered out by that same `data_domain()` test).
-                    warnings.push(RenderWarning::BreakAxisIneffective {
-                        axis: spec_brk.axis.clone(),
-                        reason: "the axis is ordinal, so its gaps have no numeric \
-                                 data range to remove"
-                            .to_string(),
-                    });
-                    continue;
-                };
-
-                // The segments tile the SCALE's own pixel range — the padded
-                // one it places data in — not the raw plot rect (#226). The
-                // two differ by the positional-scale padding inset
-                // (`layout::geometry::inset_pixel_range`, up to 8px per end),
-                // and `BreakRemap::new` below reverse-maps from
-                // `scale.pixel_range()`: laying the segments over the rect
-                // instead made the round trip lossy in exactly that band, so
-                // every effective break silently deleted the axis padding
-                // (ticks/marks/gridlines up to 8px off their unbroken
-                // positions, and an 8px step the moment a gap crossed the
-                // domain boundary). One span, read from one place.
-                let break_result = break_axis::apply_break_to_scale(
-                    data_domain,
-                    &group.gaps,
-                    scale.pixel_range(),
-                    group.break_size,
-                );
-
-                if break_result.effective_gaps == 0 {
-                    // Nothing was removed, so nothing may claim it was: no
-                    // indicator, no nonlinear-placement warning (placement
-                    // cannot be unreliable when nothing was placed), and no
-                    // `break_results` entry — matching the ordinal branch
-                    // above exactly. A prior cut kept pushing the
-                    // single-segment identity result here so these charts
-                    // stayed byte-identical to the pre-batch broken render,
-                    // but that identity map is laid over the *plot rect*
-                    // while `BreakRemap::new` reverse-maps from the scale's
-                    // own (padded) pixel range, so it was never truly the
-                    // identity: it silently collapsed the scale's padding,
-                    // moving every mark and gridline by up to the padding
-                    // width. Dropping the entry makes this render exactly
-                    // the unbroken chart, which is what the warning below
-                    // promises. Disclosed behavior change — see
-                    // ferrum-spec.md's batch-H dated note.
-                    let (lo, hi) = data_domain;
-                    warnings.push(RenderWarning::BreakAxisIneffective {
-                        axis: spec_brk.axis.clone(),
-                        reason: format!("no gap overlaps the axis domain ({lo}, {hi})"),
-                    });
-                    continue;
+        if break_result.effective_gaps == 0 {
+            // Nothing was removed, so nothing may claim it was: no indicator,
+            // no nonlinear-placement warning (placement cannot be unreliable
+            // when nothing was placed), and no result entry — matching the
+            // ordinal branch above exactly. A prior cut kept pushing the
+            // single-segment identity result here so these charts stayed
+            // byte-identical to the pre-batch broken render, but that identity
+            // map is laid over the *plot rect* while `BreakRemap::new`
+            // reverse-maps from the scale's own (padded) pixel range, so it was
+            // never truly the identity: it silently collapsed the scale's
+            // padding, moving every mark and gridline by up to the padding
+            // width. Dropping the entry makes this render exactly the unbroken
+            // chart, which is what the warning below promises. Disclosed
+            // behavior change — see ferrum-spec.md's batch-H dated note.
+            let (lo, hi) = data_domain;
+            ledger.note_panel_fact(&group.axis, BreakFact::NoOverlap, panel_idx, || {
+                RenderWarning::BreakAxisIneffective {
+                    axis: group.axis.clone(),
+                    reason: format!("no gap overlaps the axis domain ({lo}, {hi})"),
                 }
-
-                // The break's placement math reverse-maps pixels to data
-                // linearly, which is not a log/pow/symlog scale's inverse —
-                // the gap then removes a different data range than the one
-                // asked for. Unfixed here (the scale-level inverse is a
-                // filed follow-up), but no longer silent.
-                if let Some(scale_kind) = nonlinear_scale_kind(scale) {
-                    warnings.push(RenderWarning::BreakAxisOnNonlinearScale {
-                        axis: spec_brk.axis.clone(),
-                        scale_kind: scale_kind.to_string(),
-                    });
-                }
-                extra_annotations.extend(break_axis::build_break_indicators(
-                    &break_result,
-                    plot_area,
-                    &spec_brk.axis,
-                    group.break_size,
-                    &group.break_style,
-                    theme,
-                ));
-
-                // Stash the break result so the caller can remap primary marks.
-                break_results.push((spec_brk.axis.clone(), break_result));
-            }
-
-            StructuralSpec::Inset(spec_inset) => {
-                // `connect_to` is specified in data-space by the Python API.
-                // Resolve [x, y] through the primary scales to pixel coordinates
-                // before passing to build_inset_nodes (which treats them as pixels).
-                //
-                // Through `scale_resolve`'s data→pixel resolver pair (a
-                // re-export of `scale_resolve::positional`'s implementation,
-                // which lives next to `axis_pixel_range` — see that module's
-                // doc), which owns the out-of-domain/ordinal fallback this
-                // block used to carry its own copy of, including the y flip
-                // `axis_pixel_range` is the reason for. That flip was fixed
-                // in the annotation copy and left wrong here, so an
-                // out-of-domain connector anchor resolved to the mirrored
-                // side of the plot; with one implementation a third copy
-                // cannot drift again.
-                let resolved_inset;
-                let inset_to_build = if let Some([dx, dy]) = spec_inset.connect_to {
-                    let px_x = scale_resolve::data_pixel_x(&scales.x, plot_area, dx);
-                    let px_y = scale_resolve::data_pixel_y(&scales.y, plot_area, dy);
-                    resolved_inset = super::chart_config::InsetSpec {
-                        connect_to: Some([px_x, px_y]),
-                        ..spec_inset.clone()
-                    };
-                    &resolved_inset
-                } else {
-                    spec_inset
-                };
-                let inset_nodes = inset::build_inset_nodes(inset_to_build, plot_area, inset_idx);
-                inset_idx += 1;
-                extra_annotations.extend(inset_nodes);
-            }
+            });
+            continue;
         }
+
+        // The break's placement math reverse-maps pixels to data linearly,
+        // which is not a log/pow/symlog scale's inverse — the gap then removes
+        // a different data range than the one asked for. Unfixed here (the
+        // scale-level inverse is a filed follow-up), but no longer silent.
+        if let Some(scale_kind) = nonlinear_scale_kind(scale) {
+            ledger.note_panel_fact(&group.axis, BreakFact::NonlinearScale, panel_idx, || {
+                RenderWarning::BreakAxisOnNonlinearScale {
+                    axis: group.axis.clone(),
+                    scale_kind: scale_kind.to_string(),
+                }
+            });
+        }
+
+        indicators.extend(break_axis::build_break_indicators(
+            &break_result,
+            plot_area,
+            &group.axis,
+            group.break_size,
+            &group.break_style,
+            theme,
+        ));
+
+        // Stash the break result so the caller can remap this panel's marks.
+        results.push((group.axis.clone(), break_result));
     }
 
-    StructuralOutput {
-        extra_annotations,
-        break_results,
+    PanelBreaks { indicators, results }
+}
+
+/// Build the chart's `Inset` bodies against the reference panel's plot rect.
+///
+/// Chart-scoped, not panel-scoped (see [`PanelBreaks`]'s doc): `inset_idx`
+/// namespaces each embedded body's clip ids within ONE SVG document, so
+/// running this per facet panel would emit the same ids N times.
+fn build_chart_insets(
+    structural: &[StructuralSpec],
+    scales: &scale_resolve::ResolvedScales,
+    plot_area: &crate::layout::Rect,
+) -> Vec<SceneNode> {
+    let mut nodes: Vec<SceneNode> = Vec::new();
+    // Distinct per Inset item so each embedded body gets its own clip-id
+    // namespace (see `inset::build_inset_nodes`).
+    let mut inset_idx: usize = 0;
+    for item in structural {
+        let StructuralSpec::Inset(spec_inset) = item else {
+            continue;
+        };
+        // `connect_to` is specified in data-space by the Python API. Resolve
+        // [x, y] through the primary scales to pixel coordinates before passing
+        // to build_inset_nodes (which treats them as pixels).
+        //
+        // Through `scale_resolve`'s data→pixel resolver pair (a re-export of
+        // `scale_resolve::positional`'s implementation, which lives next to
+        // `axis_pixel_range` — see that module's doc), which owns the
+        // out-of-domain/ordinal fallback this block used to carry its own copy
+        // of, including the y flip `axis_pixel_range` is the reason for. That
+        // flip was fixed in the annotation copy and left wrong here, so an
+        // out-of-domain connector anchor resolved to the mirrored side of the
+        // plot; with one implementation a third copy cannot drift again.
+        let resolved_inset;
+        let inset_to_build = if let Some([dx, dy]) = spec_inset.connect_to {
+            let px_x = scale_resolve::data_pixel_x(&scales.x, plot_area, dx);
+            let px_y = scale_resolve::data_pixel_y(&scales.y, plot_area, dy);
+            resolved_inset = super::chart_config::InsetSpec {
+                connect_to: Some([px_x, px_y]),
+                ..spec_inset.clone()
+            };
+            &resolved_inset
+        } else {
+            spec_inset
+        };
+        nodes.extend(inset::build_inset_nodes(inset_to_build, plot_area, inset_idx));
+        inset_idx += 1;
     }
+    nodes
 }
 
 // ── Break-axis mark remapping ────────────────────────────────────────────────
@@ -4184,55 +4414,7 @@ mod tests {
         batch: &RecordBatch,
         chart_config: &super::super::chart_config::ChartConfig,
     ) -> Result<ferrum_scene::SceneGraph, RenderError> {
-        let theme = ThemeInputs::default();
-        let viewport = crate::layout::Viewport {
-            width: 600.0,
-            height: 400.0,
-        };
-        let config = super::super::config::RenderConfig::default();
-
-        let mut prep = super::super::prepare::prepare_render_inputs(
-            spec,
-            batch,
-            &theme,
-            viewport,
-            &crate::render::chart_config::ChartConfig::default(),
-            None,
-        )?;
-        // Mirror the real orchestration (`config_apply`'s
-        // `build_effective_theme_config_over_theme`, pass 15): `apply_show_defaults`
-        // is the bottom of the grid/domain
-        // precedence chain, run once here right before layout so `AxisLayout
-        // .show_grid`/`show_domain` carry the final per-axis answer.
-        prep.axes.apply_show_defaults(&theme);
-        let mut warnings = prep.warnings.clone();
-        let metrics = super::super::font::FontdueMetrics::new();
-        let layout = crate::layout::compute_layout(
-            spec,
-            &theme,
-            viewport,
-            &prep.axes,
-            &prep.facet_groups,
-            &prep.legend_entries,
-            prep.legend_title.clone(),
-            prep.colorbar.as_ref(),
-            &metrics,
-            &crate::layout::legend::LegendOverrides::default(),
-            &prep.aux_legends,
-            crate::layout::CompositeLayoutSeam::default(),
-        )
-        .unwrap();
-
-        build_scene(
-            spec,
-            &prep,
-            &layout,
-            &theme,
-            &config,
-            &mut warnings,
-            chart_config,
-            None,
-        )
+        try_build_scene_capturing(spec, batch, chart_config).0
     }
 
     /// [`try_build_scene_for`], but also returns the accumulated
@@ -4242,13 +4424,31 @@ mod tests {
         spec: &ChartSpec,
         batch: &RecordBatch,
     ) -> (Result<ferrum_scene::SceneGraph, RenderError>, Vec<RenderWarning>) {
+        try_build_scene_capturing(
+            spec,
+            batch,
+            &super::super::chart_config::ChartConfig::default(),
+        )
+    }
+
+    /// The one `prepare → layout → build_scene` pipeline body this family of
+    /// helpers shares: both an explicit `ChartConfig` and the accumulated
+    /// warnings. `try_build_scene_for`, `..._with_chart_config`, and
+    /// `..._capturing_warnings` are all default-argument wrappers over this,
+    /// so the pipeline (and the `ChartConfig::default()` that
+    /// `prepare_render_inputs` deliberately keeps, unrelated to the
+    /// `chart_config` handed to `build_scene`) is stated once.
+    fn try_build_scene_capturing(
+        spec: &ChartSpec,
+        batch: &RecordBatch,
+        chart_config: &super::super::chart_config::ChartConfig,
+    ) -> (Result<ferrum_scene::SceneGraph, RenderError>, Vec<RenderWarning>) {
         let theme = ThemeInputs::default();
         let viewport = crate::layout::Viewport {
             width: 600.0,
             height: 400.0,
         };
         let config = super::super::config::RenderConfig::default();
-        let chart_config = super::super::chart_config::ChartConfig::default();
 
         let mut prep = match super::super::prepare::prepare_render_inputs(
             spec,
@@ -4261,6 +4461,11 @@ mod tests {
             Ok(p) => p,
             Err(e) => return (Err(e), Vec::new()),
         };
+        // Mirror the real orchestration (`config_apply`'s
+        // `build_effective_theme_config_over_theme`, pass 15): `apply_show_defaults`
+        // is the bottom of the grid/domain
+        // precedence chain, run once here right before layout so `AxisLayout
+        // .show_grid`/`show_domain` carry the final per-axis answer.
         prep.axes.apply_show_defaults(&theme);
         let mut warnings = prep.warnings.clone();
         let metrics = super::super::font::FontdueMetrics::new();
@@ -4287,7 +4492,7 @@ mod tests {
             &theme,
             &config,
             &mut warnings,
-            &chart_config,
+            chart_config,
             None,
         );
         (result, warnings)
@@ -8342,7 +8547,38 @@ mod tests {
         );
     }
 
-    // ── build_structural_nodes (close-review S2/S4) ─────────────────────────
+    // ── structural feature build (close-review S2/S4) ───────────────────────
+
+    /// What the single `build_structural_nodes` returned before #230-7 split
+    /// it into a per-panel break build and a chart-level inset build.
+    struct StructuralOutput {
+        extra_annotations: Vec<SceneNode>,
+        break_results: Vec<(String, break_axis::BreakResult)>,
+    }
+
+    /// The single-panel structural answer: the chart-level same-axis merge,
+    /// ONE panel's break build, the chart's insets, and the warning ledger
+    /// flushed — exactly the sequence `build_scene` runs for a chart with one
+    /// panel. Every pin below predates the split and asks about that answer,
+    /// so they ask it through one seam here rather than restating the
+    /// four-call sequence apiece. The faceted (multi-panel) cadence is pinned
+    /// separately, through `build_scene` itself.
+    fn build_structural_nodes(
+        structural: &[StructuralSpec],
+        scales: &scale_resolve::ResolvedScales,
+        plot_area: &crate::layout::Rect,
+        theme: &ThemeInputs,
+        warnings: &mut Vec<RenderWarning>,
+    ) -> StructuralOutput {
+        let mut ledger = BreakWarningLedger::default();
+        let merged = merge_break_specs(structural, &mut ledger);
+        let PanelBreaks { indicators, results } =
+            build_panel_breaks(&merged, scales, plot_area, theme, 0, &mut ledger);
+        ledger.flush(warnings);
+        let mut extra_annotations = indicators;
+        extra_annotations.extend(build_chart_insets(structural, scales, plot_area));
+        StructuralOutput { extra_annotations, break_results: results }
+    }
 
     /// The plot rect these structural tests share: y runs 20 (top) to 320
     /// (bottom), x runs 20 to 320.
@@ -8351,7 +8587,7 @@ mod tests {
     }
 
     /// A `ResolvedScales` carrying just the two positional scales — the only
-    /// fields `build_structural_nodes` reads.
+    /// fields the structural build reads.
     fn positional_scales(
         x: scale_resolve::ScaleKind,
         y: scale_resolve::ScaleKind,
@@ -9043,6 +9279,635 @@ mod tests {
                  (320); got {y}"
             );
         }
+    }
+
+    // ── #230-7: breaks on every facet panel ─────────────────────────────────
+
+    /// A bar chart faceted on `high_values.len()` groups (`p`, `q`, `r`, …):
+    /// each group carries the SAME `10.0` low value plus its own
+    /// `high_values[i]` high value, so any per-panel scale divergence shows
+    /// up as a difference in that group's own bar geometry alone.
+    ///
+    /// `high_values` is the one knob most of these tests turn: every entry
+    /// equal (e.g. `&[900.0, 900.0]`) resolves one shared domain; a lower
+    /// entry under `share_scale(y="independent")` gives that panel a
+    /// genuinely different domain, which is the only shape where a break can
+    /// be effective on one panel and miss another's domain entirely.
+    ///
+    /// `ncols` selects the wrap layout: `high_values.len()` lays every panel
+    /// out in one row (the column-facet shape most of these tests use); `1`
+    /// stacks every panel vertically instead — a row facet's own shape,
+    /// where panels occupy distinct absolute y extents rather than a shared
+    /// one, which a column facet cannot exercise (T11 cycle-4 quality
+    /// review, finding 5).
+    fn faceted_bar_spec(high_values: &[f64], ncols: u32) -> (ChartSpec, RecordBatch) {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "c".into(),
+                    type_: Some(crate::spec::encoding::DataType::Nominal),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec { field: "v".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: Some(crate::layout::facet::FacetSpec {
+                field: "g".to_string(),
+                row: None,
+                title: None,
+                row_title: None,
+                mode: crate::layout::facet::FacetMode::Wrap { ncols },
+                spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
+            }),
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        const GROUP_LETTERS: &[char] = &['p', 'q', 'r', 's', 't', 'u'];
+        assert!(
+            high_values.len() <= GROUP_LETTERS.len(),
+            "fixture only names {} groups; add more letters to widen it",
+            GROUP_LETTERS.len()
+        );
+        let mut c_values = Vec::with_capacity(high_values.len() * 2);
+        let mut v_values = Vec::with_capacity(high_values.len() * 2);
+        let mut g_values = Vec::with_capacity(high_values.len() * 2);
+        for (i, &high) in high_values.iter().enumerate() {
+            let group = GROUP_LETTERS[i].to_string();
+            c_values.push("A");
+            v_values.push(10.0_f64);
+            g_values.push(group.clone());
+            c_values.push("B");
+            v_values.push(high);
+            g_values.push(group);
+        }
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("c", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(c_values)),
+                Arc::new(Float64Array::from(v_values)),
+                Arc::new(StringArray::from(g_values)),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// Every mark rect in `panel`, as `(y, height)` — the two components a y
+    /// break moves. `x`/`width` are deliberately dropped: they differ between
+    /// panels by construction (each panel sits at its own x offset), and the
+    /// question here is whether the two panels placed the same DATA at the
+    /// same vertical position.
+    fn panel_bar_extents(panel: &Panel) -> Vec<(String, String)> {
+        panel
+            .marks
+            .iter()
+            .flat_map(|b| b.nodes.iter())
+            .filter_map(|n| match n {
+                SceneNode::Rect { y, h, .. } => Some((format!("{y:.4}"), format!("{h:.4}"))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn faceted_scene(
+        v_q: f64,
+        resolve_y_independent: bool,
+        structural: Vec<StructuralSpec>,
+    ) -> (ferrum_scene::SceneGraph, Vec<RenderWarning>) {
+        let (mut spec, batch) = faceted_bar_spec(&[900.0, v_q], 2);
+        if resolve_y_independent {
+            if let Some(facet) = spec.facet.as_mut() {
+                facet.resolve.y = crate::layout::facet::ResolveMode::Independent;
+            }
+        }
+        let chart_config = chart_config_with_structural(structural);
+        let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
+        (scene.expect("the faceted fixture must render"), warnings)
+    }
+
+    /// The measured #230-7 divergence, flipped: a `panel_idx == 0` gate meant
+    /// panels 1..N built no break at all, so two panels sharing ONE y axis
+    /// rendered on two different scales — panel 0's bars clipped per visible
+    /// segment, panel 1's drawn full height on the unbroken scale, with no
+    /// warning to say so. Identical data in both panels must now place
+    /// identically.
+    #[test]
+    fn a_faceted_break_places_every_panel_on_the_broken_scale() {
+        let (broken, warnings) =
+            faceted_scene(900.0, false, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        assert_eq!(broken.panels.len(), 2, "the fixture must produce two panels");
+
+        let p0 = panel_bar_extents(&broken.panels[0]);
+        let p1 = panel_bar_extents(&broken.panels[1]);
+        assert_eq!(
+            p0, p1,
+            "both panels carry the same two values under one shared y axis, so \
+             the break must place them identically; panel 1 rendering different \
+             extents is the panel-0-only gate"
+        );
+
+        // Discriminating against "neither panel broke": the 900 bar spans the
+        // gap, so under the break it is TWO clipped pieces per panel, where the
+        // unbroken chart draws one.
+        let (unbroken, _) = faceted_scene(900.0, false, Vec::new());
+        for (idx, panel) in unbroken.panels.iter().enumerate() {
+            assert_eq!(
+                panel_bar_extents(panel).len(),
+                2,
+                "the unbroken chart draws one rect per row in panel {idx}"
+            );
+        }
+        assert_eq!(p0.len(), 3, "the gap-spanning bar clips into two pieces: {p0:?}");
+        assert!(
+            warnings.is_empty(),
+            "an effective break on a linear shared-scale facet is silent: {warnings:?}"
+        );
+    }
+
+    /// Indicators are per-panel too, each drawn against its OWN plot rect —
+    /// otherwise panels 1..N carry a broken scale with nothing marking where
+    /// the axis was cut (or, worse, panel 0's indicator floating over them).
+    #[test]
+    fn a_faceted_break_draws_its_indicator_inside_every_panels_own_rect() {
+        let (scene, _) = faceted_scene(900.0, false, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        for (idx, panel) in scene.panels.iter().enumerate() {
+            let xs: Vec<f64> = panel
+                .annotations
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Line { x1, .. } => Some(*x1),
+                    _ => None,
+                })
+                .collect();
+            assert!(!xs.is_empty(), "panel {idx} must draw its own break indicator");
+            let rect = &panel.plot_area;
+            for x in xs {
+                assert!(
+                    x >= rect.x && x <= rect.x + rect.w,
+                    "panel {idx}'s indicator must sit inside its own plot rect \
+                     ({}..{}); got {x}",
+                    rect.x,
+                    rect.x + rect.w
+                );
+            }
+        }
+    }
+
+    /// The pin gap the T11 cycle-4 quality review named (finding 5): every
+    /// facet pin above uses a COLUMN-wrap facet, where every panel shares
+    /// one absolute y pixel range, so only x discriminates the per-panel
+    /// `plot_area`/`scale.pixel_range()` pairing this task consumes.
+    /// `ncols: 1` stacks the two panels vertically instead — a row facet's
+    /// own shape — so panel 1's absolute y extent genuinely differs from
+    /// panel 0's. Reverting the y half of the per-panel pairing (computing
+    /// every panel's break against the REFERENCE panel's `plot_area`/scale)
+    /// would place panel 1's indicator at panel 0's vertical position,
+    /// outside panel 1's own rect, while every column-facet pin above stayed
+    /// green.
+    #[test]
+    fn a_row_faceted_break_places_every_panel_at_its_own_vertical_offset() {
+        let (spec, batch) = faceted_bar_spec(&[900.0, 900.0], 1);
+        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
+        let scene = scene.expect("the row-stacked fixture must render");
+        assert_eq!(scene.panels.len(), 2, "ncols=1 stacks both panels vertically");
+
+        let (r0, r1) = (scene.panels[0].plot_area, scene.panels[1].plot_area);
+        assert!(
+            r1.y >= r0.y + r0.h,
+            "a row facet stacks panel 1's rect below panel 0's, at a genuinely \
+             different absolute y — the shape a column facet cannot exercise: \
+             r0={r0:?} r1={r1:?}"
+        );
+
+        // Each panel's break indicator must land inside ITS OWN rect in y.
+        // Reusing the reference panel's plot_area/scale for the y half would
+        // place panel 1's indicator at panel 0's absolute y position, well
+        // outside panel 1's non-overlapping rect.
+        for (idx, panel) in scene.panels.iter().enumerate() {
+            let ys: Vec<f64> = panel
+                .annotations
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Line { y1, .. } => Some(*y1),
+                    _ => None,
+                })
+                .collect();
+            assert!(!ys.is_empty(), "panel {idx} must draw its own break indicator");
+            for y in ys {
+                assert!(
+                    y >= panel.plot_area.y && y <= panel.plot_area.y + panel.plot_area.h,
+                    "panel {idx}'s indicator must sit inside its own rect in y \
+                     ({}..{}); got {y}",
+                    panel.plot_area.y,
+                    panel.plot_area.y + panel.plot_area.h
+                );
+            }
+        }
+
+        // Identical data breaks IDENTICALLY once each panel's own vertical
+        // offset is subtracted out — the geometry itself, not merely
+        // containment.
+        let relative_extents = |panel: &Panel| -> Vec<(String, String)> {
+            panel
+                .marks
+                .iter()
+                .flat_map(|b| b.nodes.iter())
+                .filter_map(|n| match n {
+                    SceneNode::Rect { y, h, .. } => {
+                        Some((format!("{:.4}", y - panel.plot_area.y), format!("{h:.4}")))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let (rel0, rel1) = (relative_extents(&scene.panels[0]), relative_extents(&scene.panels[1]));
+        assert_eq!(
+            rel0, rel1,
+            "identical data must break identically relative to each panel's \
+             own y offset"
+        );
+        assert_eq!(rel0.len(), 3, "the gap-spanning bar still clips under a row facet: {rel0:?}");
+        assert!(
+            warnings.is_empty(),
+            "an effective break on a linear shared-scale row facet is silent: {warnings:?}"
+        );
+    }
+
+    fn ineffective_reports(warnings: &[RenderWarning]) -> Vec<&str> {
+        warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::BreakAxisIneffective { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Warning cadence, shared-scale half: "this break removed nothing" is a
+    /// function of `(spec, domain)`, and a shared-scale facet resolves ONE
+    /// domain, so N panels observing it is one fact about the chart. Reported
+    /// once, not once per panel.
+    #[test]
+    fn a_shared_scale_facet_reports_an_ineffective_break_once_not_once_per_panel() {
+        let (_, warnings) =
+            faceted_scene(900.0, false, vec![break_spec("y", vec![[2000.0, 3000.0]])]);
+        let reports = ineffective_reports(&warnings);
+        assert_eq!(
+            reports.len(),
+            1,
+            "two panels observing one panel-invariant fact report it ONCE: {warnings:?}"
+        );
+        assert!(
+            !reports[0].contains("panel"),
+            "a fact that held on every panel is reported unqualified, exactly as \
+             on a single-panel chart: {}",
+            reports[0]
+        );
+    }
+
+    /// Warning cadence, free-scale half: with `resolve.y = independent` the
+    /// panels resolve different domains, so `gap=(150, 850)` is effective on
+    /// the `0..900` panel and misses the `0..20` panel entirely. Silence on the
+    /// panel it missed would be dishonest and one warning per panel would be
+    /// noise, so the single report names the panel it was measured on and how
+    /// many panels share it.
+    #[test]
+    fn a_free_scale_facet_says_when_a_break_is_ineffective_on_only_some_panels() {
+        let (_, warnings) =
+            faceted_scene(20.0, true, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let reports = ineffective_reports(&warnings);
+        assert_eq!(reports.len(), 1, "still ONE report, not one per panel: {warnings:?}");
+        let reason = reports[0];
+        assert!(
+            reason.contains("(10, 20)"),
+            "the report names the domain it was measured against: {reason}"
+        );
+        assert!(
+            reason.contains("facet panel 1"),
+            "the report names WHICH panel it was measured on: {reason}"
+        );
+        assert!(
+            reason.contains("1 of 2 panels"),
+            "the report says the fact held on only some panels: {reason}"
+        );
+    }
+
+    /// The all-report divergence hole (T11 cycle-4 quality review, finding
+    /// 1): the pre-fix qualifier fired only when `panels_reporting < panels`,
+    /// so a facet where a gap misses EVERY panel — but with DIFFERENT domains
+    /// under independent y-scales — reported `panels_reporting == panels`
+    /// and flushed the first panel's domain verbatim, unattributed, as if it
+    /// were the chart's one domain. Reproduced exactly as measured live
+    /// (Python's zero-baseline widens the reported domains to `(0, 900)` /
+    /// `(0, 30)`; this raw-`ChartSpec` level has no zero-baseline injection,
+    /// so the domains are the panels' own data ranges): groups `p`
+    /// (`10, 900`) and `q` (`10, 30`), independent y, a gap that overlaps
+    /// neither.
+    #[test]
+    fn a_free_scale_facet_names_the_panel_when_a_gap_misses_every_panel_with_diverging_domains() {
+        let (_, warnings) =
+            faceted_scene(30.0, true, vec![break_spec("y", vec![[2000.0, 3000.0]])]);
+        let reports = ineffective_reports(&warnings);
+        assert_eq!(reports.len(), 1, "still ONE report, not one per panel: {warnings:?}");
+        let reason = reports[0];
+        assert!(
+            reason.contains("(10, 900)"),
+            "the report still names the first-reporting panel's own domain: {reason}"
+        );
+        assert!(
+            reason.contains("facet panel 0"),
+            "unlike the pre-fix flush, the payload is attributed to the panel it \
+             was measured on rather than presented as the chart's: {reason}"
+        );
+        assert!(
+            !reason.contains("applies on the rest"),
+            "every panel missed its own gap here, so there is no 'rest' the \
+             break applied on — the count-partial qualifier's wording must \
+             not be reused verbatim for this shape: {reason}"
+        );
+    }
+
+    /// The recurring honesty-class finding (T11 cycle-5 quality review): the
+    /// divergence qualifier above fires purely on payload inequality
+    /// (`panels_reporting == panels && diverged`), which the cycle-4 wording
+    /// mischaracterized as reachable "only under independent scales." It is
+    /// not. `faceted_bar_spec`'s bare `y` encoding (no `scale` set) resolves a
+    /// genuinely shared domain across panels — confirmed by
+    /// `a_shared_scale_facet_reports_an_ineffective_break_once_not_once_per_panel`
+    /// staying unqualified — but Python's `mark_bar()` always sets an explicit
+    /// `zero: true` y-scale (confirmed via `Chart.to_spec().to_json()`), and
+    /// resolving THAT against a facet panel's own column, rather than the
+    /// shared batch, is what produces two panels' domains genuinely
+    /// disagreeing under the DEFAULT resolve (`resolve.y = Shared`, no
+    /// `share_scale` call anywhere in this fixture) — reproduced live through
+    /// `to_svg()` with no `share_scale` call in
+    /// `test_free_scale_facet_names_the_panel_when_a_gap_misses_every_panel_with_diverging_domains`'s
+    /// Python twin's sibling pin. That per-panel domain resolution under a
+    /// nominally shared facet is a separate, pre-existing scale-resolution
+    /// question (out of scope here); what this task owns is that the
+    /// qualifier text states only what the ledger checked (a payload
+    /// disagreement) and does NOT claim the chart is independently scaled,
+    /// since this fixture proves it need not be.
+    #[test]
+    fn a_default_resolve_facet_names_the_panel_without_claiming_independent_scales() {
+        use crate::spec::encoding::{ContinuousScaleCommon, EncodingSpec, ScaleSpec};
+
+        let (mut spec, batch) = faceted_bar_spec(&[900.0, 20.0], 2);
+        let zero_baseline_y = ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+                reverse: false,
+            },
+            nice: false,
+            zero: true,
+        };
+        spec.encoding.y = Some(EncodingSpec {
+            field: "v".into(),
+            scale: Some(zero_baseline_y),
+            ..Default::default()
+        });
+        let chart_config =
+            chart_config_with_structural(vec![break_spec("y", vec![[2000.0, 3000.0]])]);
+        let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
+        scene.expect("the zero-baseline facet fixture must render");
+
+        let reports = ineffective_reports(&warnings);
+        assert_eq!(reports.len(), 1, "still ONE report, not one per panel: {warnings:?}");
+        let reason = reports[0];
+        assert!(
+            reason.contains("facet panel 0"),
+            "the report attributes the payload to the panel it was measured \
+             on: {reason}"
+        );
+        assert!(
+            !reason.contains("independent"),
+            "no `share_scale` call is anywhere in this fixture, so the report \
+             must not claim the chart is independently scaled: {reason}"
+        );
+        assert!(
+            !reason.contains("applies on the rest"),
+            "every panel missed its own gap here, so there is no 'rest' the \
+             break applied on: {reason}"
+        );
+    }
+
+    /// The other side of that honesty: the panel whose domain the gap DID
+    /// overlap still renders broken. A partial report is a qualification, not
+    /// a suppression.
+    #[test]
+    fn a_free_scale_facets_effective_panel_still_breaks() {
+        let (scene, _) = faceted_scene(20.0, true, vec![break_spec("y", vec![[150.0, 850.0]])]);
+        assert_eq!(
+            panel_bar_extents(&scene.panels[0]).len(),
+            3,
+            "panel 0's domain reaches 900, so its gap-spanning bar clips into two \
+             pieces beside the short one"
+        );
+        assert_eq!(
+            panel_bar_extents(&scene.panels[1]).len(),
+            2,
+            "panel 1's domain stops at 20, so the gap misses it and both its bars \
+             stay whole"
+        );
+    }
+
+    /// A merge conflict is a pure function of the SPEC, so it is reported once
+    /// per chart however many panels re-observe it.
+    #[test]
+    fn a_faceted_merge_conflict_is_reported_once_not_once_per_panel() {
+        let (_, warnings) = faceted_scene(
+            900.0,
+            false,
+            vec![
+                break_spec_styled("y", vec![[150.0, 400.0]], 12.0, "slash"),
+                break_spec_styled("y", vec![[500.0, 850.0]], 12.0, "zigzag"),
+            ],
+        );
+        let conflicts: Vec<_> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::BreakAxisMergeConflict { axis, field } => {
+                    Some((axis.as_str(), field.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(conflicts, vec![("y", "break_style")], "got {warnings:?}");
+    }
+
+    /// The nonlinear-placement fact is likewise reported once for the chart,
+    /// not once per panel.
+    #[test]
+    fn a_faceted_break_on_a_nonlinear_scale_warns_once_not_once_per_panel() {
+        let (mut spec, batch) = faceted_bar_spec(&[900.0, 900.0], 2);
+        if let Some(y) = spec.encoding.y.as_mut() {
+            y.scale = Some(crate::spec::encoding::ScaleSpec::Log {
+                base: 10.0,
+                common: crate::spec::encoding::ContinuousScaleCommon {
+                    domain: None,
+                    range: None,
+                    clamp: false,
+                    padding: None,
+                    scheme: None,
+                    domain_param: None,
+                    reverse: false,
+                },
+                nice: false,
+            });
+        }
+        let chart_config = chart_config_with_structural(vec![break_spec("y", vec![[20.0, 200.0]])]);
+        let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
+        scene.expect("a log-scaled faceted bar chart must still render");
+        let nonlinear: Vec<_> = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::BreakAxisOnNonlinearScale { .. }))
+            .collect();
+        assert_eq!(
+            nonlinear.len(),
+            1,
+            "two panels resolving the same log scale report it ONCE: {warnings:?}"
+        );
+    }
+
+    /// The nonlinear-scale asymmetry (#230-7 cycle-2 spec disclosure): unlike
+    /// `BreakAxisIneffective`, `BreakAxisOnNonlinearScale` is NOT qualified
+    /// when only some panels reported it — it is a claim about the SPEC
+    /// (a log axis's inverse is not the break's linear reverse map), equally
+    /// true on every panel the break reaches, so naming a subset would add
+    /// nothing a reader could act on. Reproduced live: a free-scale facet
+    /// with a log y and a gap effective on only ONE panel emits a FLAT
+    /// nonlinear warning (no panel named) beside a QUALIFIED ineffective
+    /// warning for the panel the gap missed.
+    #[test]
+    fn a_free_scale_facets_nonlinear_warning_stays_flat_beside_a_qualified_ineffective_one() {
+        let (mut spec, batch) = faceted_bar_spec(&[900.0, 20.0], 2);
+        if let Some(facet) = spec.facet.as_mut() {
+            facet.resolve.y = crate::layout::facet::ResolveMode::Independent;
+        }
+        if let Some(y) = spec.encoding.y.as_mut() {
+            y.scale = Some(crate::spec::encoding::ScaleSpec::Log {
+                base: 10.0,
+                common: crate::spec::encoding::ContinuousScaleCommon {
+                    domain: None,
+                    range: None,
+                    clamp: false,
+                    padding: None,
+                    scheme: None,
+                    domain_param: None,
+                    reverse: false,
+                },
+                nice: false,
+            });
+        }
+        let chart_config =
+            chart_config_with_structural(vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
+        scene.expect("a log-scaled, independent-y faceted bar chart must still render");
+
+        let nonlinear: Vec<String> = warnings
+            .iter()
+            .filter(|w| matches!(w, RenderWarning::BreakAxisOnNonlinearScale { .. }))
+            .map(|w| w.to_string())
+            .collect();
+        assert_eq!(
+            nonlinear.len(),
+            1,
+            "only panel 0's domain (10, 900) overlaps the gap, so only it reaches \
+             the nonlinear-scale check: {warnings:?}"
+        );
+        assert!(
+            !nonlinear[0].contains("panel"),
+            "BreakAxisOnNonlinearScale reports flat even though only 1 of 2 \
+             panels observed it: {}",
+            nonlinear[0]
+        );
+
+        let ineffective = ineffective_reports(&warnings);
+        assert_eq!(
+            ineffective.len(),
+            1,
+            "panel 1's domain (10, 20) misses the gap entirely: {warnings:?}"
+        );
+        assert!(
+            ineffective[0].contains("facet panel 1") && ineffective[0].contains("1 of 2 panels"),
+            "the ineffective report, unlike the nonlinear one beside it, IS \
+             qualified: {}",
+            ineffective[0]
+        );
+    }
+
+    /// The `>2`-panel free-scale message shape the T11 spec review flagged as
+    /// unverified: `PanelFact` keeps only the FIRST reporting panel's payload,
+    /// so a three-panel independent-scale facet where the gap misses two of
+    /// the three panels names one domain and a `"2 of 3 panels"` fraction —
+    /// not a per-panel list and not the panel that DID break. Groups
+    /// `p`/`q`/`r` (domains `(10, 900)`, `(10, 20)`, `(10, 30)`): panel 0's
+    /// domain alone overlaps the `(150, 850)` gap.
+    #[test]
+    fn a_three_panel_free_scale_facet_names_the_first_missed_panel_and_the_full_fraction() {
+        let (mut spec, batch) = faceted_bar_spec(&[900.0, 20.0, 30.0], 3);
+        if let Some(facet) = spec.facet.as_mut() {
+            facet.resolve.y = crate::layout::facet::ResolveMode::Independent;
+        }
+        let chart_config =
+            chart_config_with_structural(vec![break_spec("y", vec![[150.0, 850.0]])]);
+        let (scene, warnings) = try_build_scene_capturing(&spec, &batch, &chart_config);
+        let scene = scene.expect("the three-panel fixture must render");
+        assert_eq!(scene.panels.len(), 3, "the fixture must produce three panels");
+
+        let reports = ineffective_reports(&warnings);
+        assert_eq!(
+            reports.len(),
+            1,
+            "two panels sharing the same missed fact still report it ONCE: {warnings:?}"
+        );
+        let reason = reports[0];
+        assert!(
+            reason.contains("(10, 20)"),
+            "the report names the FIRST missed panel's domain (panel 1's, not \
+             panel 2's (10, 30)): {reason}"
+        );
+        assert!(
+            reason.contains("facet panel 1"),
+            "the report names the first panel it was measured on: {reason}"
+        );
+        assert!(
+            reason.contains("2 of 3 panels"),
+            "the fraction counts every panel that shares the fact, not just the \
+             first: {reason}"
+        );
     }
 
     /// The `y`-axis `BreakRemap` the sidecar-realignment tests below share:
@@ -9768,7 +10633,7 @@ mod tests {
         let mid = (y_domain.0 + y_domain.1) / 2.0;
         let span = y_domain.1 - y_domain.0;
         // Both halves of the round trip read the SAME span — the scale's own
-        // padded pixel range — exactly as `build_structural_nodes` and
+        // padded pixel range — exactly as `build_panel_breaks` and
         // `build_scene` pair them in production (#226).
         let result = break_axis::apply_break_to_scale(
             y_domain,

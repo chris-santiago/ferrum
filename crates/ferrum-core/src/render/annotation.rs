@@ -358,7 +358,7 @@ impl<'a> ScaleContext<'a> {
     /// This is exactly `remap_mark_batch_through_break`'s per-coordinate
     /// fold — reused here rather than re-derived, so an annotation and a
     /// mark reach the same pixel through the same arithmetic. In practice
-    /// the fold runs 0 or 1 times per axis: `build_structural_nodes`'s
+    /// the fold runs 0 or 1 times per axis: `merge_break_specs`'s
     /// same-axis merge (#230-4) collapses every `BreakAxis` spec sharing an
     /// axis into ONE `BreakResult` before `break_remaps` is built, so this
     /// axis-filtered iterator never holds more than one remap per axis, and
@@ -2634,7 +2634,7 @@ mod tests {
     // pin that `fold_breaks` composes every same-axis break in declaration
     // order rather than taking only the first.
     //
-    // #230-4's same-axis merge (`scene_build::build_structural_nodes`) makes
+    // #230-4's same-axis merge (`scene_build::merge_break_specs`) makes
     // that construction unreachable from production: N same-axis `BreakAxis`
     // specs now merge into ONE `BreakResult` — one gap list, run through
     // `normalize_gaps` once — before `break_remaps` is ever built, so

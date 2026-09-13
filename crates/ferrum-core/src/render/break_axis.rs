@@ -92,7 +92,7 @@ pub struct BreakResult {
     /// Zero means the `BreakAxis` is a no-op: every gap fell outside the
     /// domain, or the axis had no numeric domain to clip against at all.
     /// That case is otherwise invisible (no indicator, no moved mark), so
-    /// `scene_build::build_structural_nodes` reads this to emit
+    /// `scene_build::build_panel_breaks` reads this to emit
     /// [`RenderWarning::BreakAxisIneffective`](crate::render::RenderWarning::BreakAxisIneffective)
     /// rather than letting a structural feature disappear in silence.
     /// A gap that merely touches a domain edge still counts here — it
@@ -1093,7 +1093,7 @@ impl<'a> BreakRemap<'a> {
     /// unfixed here — the honest fix is a scale-level inverse
     /// (`ScaleKind::invert_f64`) or building marks against the piecewise
     /// scale directly, a filed follow-up — but it is no longer silent:
-    /// `scene_build::build_structural_nodes` emits
+    /// `scene_build::build_panel_breaks` emits
     /// [`RenderWarning::BreakAxisOnNonlinearScale`](crate::render::RenderWarning::BreakAxisOnNonlinearScale)
     /// when a `BreakAxis` targets one of those scale kinds.
     ///
@@ -1105,7 +1105,7 @@ impl<'a> BreakRemap<'a> {
     /// sentinel is not "geometry that overshoots the domain" — clamping it
     /// like any other out-of-range pixel silently un-hides whatever it
     /// belonged to. That was the exact resurrection mechanism the same-axis
-    /// merge above (`build_structural_nodes`) makes unreachable for the
+    /// merge above (`merge_break_specs`) makes unreachable for the
     /// production sequential-remap loop, but poisoning it here too covers any
     /// other caller of `data_at`: `f64::NAN` propagates through
     /// [`broken_scale_map`] as "no segment contains this" (`ScaleSegment::

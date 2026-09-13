@@ -4360,7 +4360,7 @@ mod tests {
     /// merged. `render/inset.rs::build_inset_nodes` namespaces each leaf's
     /// inset under its own `inset_idx` (`inset0-ferrum-clip-0`), but that
     /// counter restarts at 0 independently per leaf (`scene_build.rs`'s
-    /// `build_structural_nodes` is called once per leaf's own `build_scene`).
+    /// `build_chart_insets` is called once per leaf's own `build_scene`).
     /// Before the fix, `uniquify_scene_raw_clips`'s per-leaf `cellN` pass only
     /// matched the BARE `id="ferrum-clip-` literal, so it silently skipped
     /// the already-`inset0-`-prefixed ids — leaf 0's and leaf 1's insets both

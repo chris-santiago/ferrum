@@ -529,7 +529,7 @@
   },
   "ChartConfig.structural": {
     "honored": true,
-    "reason": "StructuralSpec (break_axis/inset) consumed by scene_build::build_structural_nodes (render/scene_build.rs), called from build_scene for the FIRST panel only (non-faceted charts). Emits break indicators / inset nodes as extra annotations and returns the per-axis BreakResult pairs that remap primary mark pixel coordinates through the broken scale."
+    "reason": "StructuralSpec (break_axis/inset) consumed by scene_build::merge_break_specs + scene_build::build_panel_breaks + scene_build::build_chart_insets (render/scene_build.rs), called from build_scene for EVERY panel (#230-7): merge_break_specs runs once per scene (the same-axis merge is a pure function of the spec), build_panel_breaks runs once per panel (each panel breaks its own plot rect and scale pixel range), and build_chart_insets stays chart-scoped, run only on the reference (first) panel because an inset's clip-path ids are namespaced per inset within one SVG document. Emits break indicators / inset nodes as extra annotations and returns the per-axis BreakResult pairs that remap primary mark pixel coordinates through the broken scale."
   },
   "ChartConfig.title": {
     "honored": true,
@@ -737,19 +737,19 @@
   },
   "StructuralSpec.BreakAxis.axis": {
     "honored": true,
-    "reason": "render/scene_build.rs::build_structural_nodes's BreakAxis arm, selects which resolved scale (x or y) apply_break_to_scale remaps"
+    "reason": "render/scene_build.rs::build_panel_breaks's BreakAxis arm, selects which resolved scale (x or y) apply_break_to_scale remaps"
   },
   "StructuralSpec.BreakAxis.break_size": {
     "honored": true,
-    "reason": "render/break_axis.rs::apply_break_to_scale's break_size argument, via build_structural_nodes"
+    "reason": "render/break_axis.rs::apply_break_to_scale's break_size argument, via build_panel_breaks"
   },
   "StructuralSpec.BreakAxis.break_style": {
     "honored": true,
-    "reason": "render/break_axis.rs::build_break_indicators's style argument, via build_structural_nodes"
+    "reason": "render/break_axis.rs::build_break_indicators's style argument, via build_panel_breaks"
   },
   "StructuralSpec.BreakAxis.gaps": {
     "honored": true,
-    "reason": "render/break_axis.rs::apply_break_to_scale's gaps argument, via build_structural_nodes"
+    "reason": "render/break_axis.rs::apply_break_to_scale's gaps argument, via build_panel_breaks"
   },
   "StructuralSpec.BreakAxis.type": {
     "honored": true,
