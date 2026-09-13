@@ -926,6 +926,105 @@ def test_calibration_visualizer_multi_model_error_is_per_model():
     assert "calibration_error" not in overlay._metrics
 
 
+def _calibration_base_and_rival():
+    """A base model and a rival whose calibration genuinely differs.
+
+    Shared by the ``compare=`` pins below: every one of them is only worth
+    making if the base's number and the rival's number are distinguishable,
+    so a pooled or rival-sourced answer cannot pass by coincidence.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    base = load_fixture("binary_logistic")
+    rival = LogisticRegression(C=0.01, max_iter=1000).fit(X.to_numpy(), y.to_numpy())
+    return X, y, base, rival
+
+
+def test_calibration_visualizer_compare_metrics_describe_the_base_model():
+    """``compare=`` (#212) has ONE distinguished base: the positional model.
+
+    Unlike the symmetric ``*models`` overlay, ``_metrics`` carries a single
+    ``calibration_error`` -- the base model's own, identical to what the
+    base alone reports -- so ``__repr__`` and ``.score()`` describe the same
+    model the headline number does, exactly as for
+    ``ROCVisualizer``/``PRVisualizer``/``DiscriminationThresholdVisualizer``.
+    """
+    X, y, base, rival = _calibration_base_and_rival()
+
+    solo_base = ferrum.CalibrationVisualizer(base, n_bins=5).fit(X, y)
+    solo_rival = ferrum.CalibrationVisualizer(rival, n_bins=5).fit(X, y)
+    expected = solo_base._metrics["calibration_error"]
+    # The fixture discriminates: pooling the two models' rows, or reading
+    # the rival's, could not produce the base's number.
+    assert expected != pytest.approx(solo_rival._metrics["calibration_error"])
+
+    viz = ferrum.CalibrationVisualizer(base, n_bins=5, compare={"rival": rival}).fit(X, y)
+
+    assert viz._source.model_names == ["base", "rival"]
+    assert list(viz._metrics) == ["calibration_error"]
+    assert viz._metrics["calibration_error"] == pytest.approx(expected)
+    assert "calibration_error=" in repr(viz)
+    assert "<svg" in viz.show().to_svg()
+
+
+def test_calibration_visualizer_compare_scores_the_base_model():
+    """A ``compare=`` overlay is scoreable; a symmetric ``*models`` one is not.
+
+    The split is the whole point of the additive-parity decision: with a
+    distinguished base, ``.score()`` has a well-defined answer (the base
+    model's own), so ``has_score`` must be True -- while the symmetric form
+    keeps its documented ``0.0`` no-single-score fallback.
+    """
+    X, y, base, rival = _calibration_base_and_rival()
+
+    compared = ferrum.CalibrationVisualizer(base, n_bins=5, compare={"rival": rival}).fit(X, y)
+    assert compared.has_score is True
+    assert compared.score(X, y) == pytest.approx(float(base.score(X, y)))
+
+    symmetric = ferrum.CalibrationVisualizer(base, rival, n_bins=5).fit(X, y)
+    assert symmetric.has_score is False
+    assert symmetric.score(X, y) == 0.0
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        pytest.param(lambda base, rival: (base, rival), id="two_positional"),
+        pytest.param(lambda base, rival: ({"a": base, "b": rival},), id="dict_positional"),
+    ],
+)
+def test_calibration_visualizer_refuses_models_and_compare_together(models):
+    """The two multi-model idioms are mutually exclusive, and say so.
+
+    ``*models`` is symmetric (no base, per-model keys, no score) while
+    ``compare=`` distinguishes a base -- there is no answer that serves both
+    contracts, so the contradictory request is refused at construction
+    rather than silently resolved one way.
+    """
+    _X, _y, base, rival = _calibration_base_and_rival()
+
+    with pytest.raises(ValueError, match=r"not both; got .* together with compare="):
+        ferrum.CalibrationVisualizer(*models(base, rival), compare={"rival": rival})
+
+
+def test_calibration_visualizer_compare_refusals_match_the_curve_visualizers():
+    """``compare=``'s malformed-input refusals come from the shared helper.
+
+    Routing ``fit`` through ``_build_compare_source`` is what buys the
+    reserved-``"base"`` guard and the non-dict refusal for free; these two
+    pins fail if the class grows its own private resolution instead.
+    """
+    X, y, base, rival = _calibration_base_and_rival()
+
+    with pytest.raises(ValueError, match=r"reserved for the primary"):
+        ferrum.CalibrationVisualizer(base, compare={"base": rival}).fit(X, y)
+    with pytest.raises(TypeError, match=r"compare= must be dict\[str, model\] or None"):
+        ferrum.CalibrationVisualizer(base, compare=[rival]).fit(X, y)
+
+
 def test_discrimination_threshold_visualizer():
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")

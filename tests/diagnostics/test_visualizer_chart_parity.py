@@ -8,7 +8,7 @@ uniform override quartet ``mark=``/``encode=``/``properties=``/``layers=``
 batch G decision doc (`.claude/output/decisions/2026-09-10-batch-g-diagnostics-correctness-decision.md`,
 G5) calls for, patterned on
 ``test_core_stub_parity.py::test_programmatic_signature_parity``: a live
-signature diff with an explicit, rationale-carrying skip-map for the three
+signature diff with an explicit, rationale-carrying skip-map for the
 adjudicated shape drifts, rather than a hand-maintained "did I remember"
 checklist.
 
@@ -20,10 +20,12 @@ here takes its data (``source``/``df``/``scores``/...) as a positional-or-
 keyword parameter before the ``*``, so restricting the diff to keyword-only
 names excludes the data parameter with no per-entry exclude list to
 maintain. ``CalibrationVisualizer`` is the one exception -- its target is
-the *public* ``calibration_chart`` function, specifically because the
-decision doc's skip-map entry for it (``*models`` <-> ``compare=``) only
-exists on the public signature (the private builder never had ``compare=``
-to begin with, since compare-resolution happens before the builder runs).
+the *public* ``calibration_chart`` function, because ``compare=`` exists
+only on the public signature (the private builder never had it:
+compare-resolution happens before the builder runs). That target was
+chosen when the pair was a documented drift; since #212 (2026-09-13) it
+earns its keep the other way round, as the mechanical proof that the
+visualizer's new ``compare=`` matches the public function's.
 """
 
 from __future__ import annotations
@@ -133,8 +135,8 @@ class ParityCase(NamedTuple):
     # Structural params on `target` that are never expected on the
     # visualizer, beyond what the keyword-only filter already excludes.
     # Only needed for CalibrationVisualizer, whose target is the *public*
-    # `calibration_chart` (chosen so the *models<->compare= skip-map entry
-    # checks something real) -- that function's precomputed-path y_true=/
+    # `calibration_chart` (the only signature carrying `compare=`)
+    # -- that function's precomputed-path y_true=/
     # y_pred= keyword-only params have no equivalent on CalibrationVisualizer,
     # which only ever wraps fitted models via its variadic *models.
     exclude: frozenset[str] = frozenset()
@@ -158,10 +160,11 @@ _PARITY_REGISTRY: list[ParityCase] = [
     ParityCase(ConfusionMatrixVisualizer, _confusion_chart_from_source),
     ParityCase(ClassPredictionErrorVisualizer, _class_prediction_error_chart_from_source),
     ParityCase(DiscriminationThresholdVisualizer, _discrimination_threshold_chart_from_source),
-    # Calibration targets the PUBLIC function (not the private builder) so
-    # the *models<->compare= skip-map entry below is checking something
-    # real: the private builder never had compare= (compare-resolution
-    # happens before the builder runs), only the public wrapper does.
+    # Calibration targets the PUBLIC function (not the private builder)
+    # because only the public wrapper carries compare= (compare-resolution
+    # happens before the builder runs). Since #212 the diff therefore
+    # checks the visualizer's own compare= against it, rather than skipping
+    # the pair as a drift.
     ParityCase(
         CalibrationVisualizer,
         calibration_chart,
@@ -213,6 +216,12 @@ _MUST_HAVE_COMPARE: tuple[type[FerrumVisualizer], ...] = (
     ROCVisualizer,
     PRVisualizer,
     DiscriminationThresholdVisualizer,
+    # Joined 2026-09-13 (#212): the last classification visualizer that
+    # refused compare= now accepts it with the same distinguished-base
+    # semantics, routed through the same `_build_compare_source` -- which
+    # is what makes the reserved-"base" and non-dict refusal tests below
+    # cover it too.
+    CalibrationVisualizer,
 )
 
 # Visualizers deliberately absent from `_PARITY_REGISTRY`, with the
@@ -290,11 +299,15 @@ class SkipEntry(NamedTuple):
     rationale: str
 
 
-# The three adjudicated shape drifts from the decision doc (G5) -- existing
+# The adjudicated shape drifts from the decision doc (G5) -- existing
 # spellings kept for back-compat, unification logged as a follow-up. Each
 # entry's `reference` is the function that actually carries `param`, so
 # `test_skip_map_entries_are_not_stale` can independently verify the drift
-# is still real.
+# is still real. The third original entry (CalibrationVisualizer's *models
+# vs. calibration_chart's compare=) is gone: #212 (2026-09-13) gave the
+# visualizer a real compare= with distinguished-base semantics, so the
+# drift it described no longer exists and the class now sits in
+# `_MUST_HAVE_COMPARE` below instead.
 _SKIP_ENTRIES: list[SkipEntry] = [
     SkipEntry(
         ROCVisualizer,
@@ -312,14 +325,6 @@ _SKIP_ENTRIES: list[SkipEntry] = [
         "CooksDistanceVisualizer keeps its pre-existing threshold= "
         "spelling for back-compat; adjudicated shape drift, not unified "
         "with cook_threshold= (batch G decision doc, G5).",
-    ),
-    SkipEntry(
-        CalibrationVisualizer,
-        "compare",
-        calibration_chart,
-        "CalibrationVisualizer already supports multi-model overlay via "
-        "its variadic *models constructor; not unified with compare= "
-        "(batch G decision doc, G5).",
     ),
 ]
 
@@ -589,12 +594,12 @@ def test_skip_map_entries_are_not_stale() -> None:
     assert not stale, "Stale skip-map entries:\n" + "\n".join(f"  {f}" for f in stale)
 
 
-def test_roc_pr_discrimination_threshold_accept_compare() -> None:
+def test_compare_capable_visualizers_accept_compare() -> None:
     """checkpoint decision 3 (full parity incl. the override quartet) plus
-    the G5 drift map name `compare=` explicitly for exactly these three
-    curve-family visualizers -- not the builder-level mechanical diff
-    (compare-resolution happens before the builder runs), so it's asserted
-    directly here.
+    the G5 drift map name `compare=` explicitly for the curve-family
+    visualizers -- not the builder-level mechanical diff (compare-resolution
+    happens before the builder runs), so it's asserted directly here.
+    `CalibrationVisualizer` joined them in #212 (2026-09-13).
     """
     for visualizer in _MUST_HAVE_COMPARE:
         assert "compare" in _own_param_names(visualizer), (

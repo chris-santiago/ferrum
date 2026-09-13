@@ -38,10 +38,13 @@ def _build_compare_source(
     """Resolve ``model`` (+ optional ``compare=``) into a ``ModelSource`` or
     ``ComparedModelSource``.
 
-    Shared ``_build_source`` override for the three visualizers that gained
-    ``compare=`` in the G5 parity sweep (``ROCVisualizer``, ``PRVisualizer``,
-    ``DiscriminationThresholdVisualizer``) -- one local home rather than
-    three copies of the reserved-``"base"``-key check. This mirrors
+    Shared ``_build_source`` body for every visualizer in this module that
+    accepts ``compare=``: the three that gained it in the G5 parity sweep
+    (``ROCVisualizer``, ``PRVisualizer``,
+    ``DiscriminationThresholdVisualizer``) plus ``CalibrationVisualizer``
+    (#212, 2026-09-13) -- one local home rather than four copies of the
+    reserved-``"base"``-key check, so every one of them refuses the same
+    malformed ``compare=`` with the same words. This mirrors
     ``ferrum.plots._helpers._resolve_source``'s own compare-merge branch
     (the figure-function entry point for the same ``compare=`` contract);
     diagnostics modules may not import ``plots._helpers`` (a plots-private
@@ -345,8 +348,10 @@ class CalibrationVisualizer(FerrumVisualizer):
     Wraps ``ModelSource.calibration_curve()``. Records the mean squared
     deviation between ``mean_predicted`` and ``fraction_positive`` as
     ``calibration_error`` — one entry per model, keyed
-    ``calibration_error[<model name>]``, when several models are
-    overlaid, since no single pooled number describes them all.
+    ``calibration_error[<model name>]``, for a symmetric ``*models``
+    overlay, since no single pooled number describes them all. Under
+    ``compare=`` (which distinguishes a base model) there is a single
+    ``calibration_error``, the base model's own.
 
     Parameters
     ----------
@@ -354,7 +359,11 @@ class CalibrationVisualizer(FerrumVisualizer):
         One or more fitted classifiers. Pass a single model for a
         single-curve diagram; pass two or more (or a single dict
         positional argument like ``{"a": m_a, "b": m_b}``) to overlay
-        multiple curves via ``ComparedModelSource``.
+        multiple curves via ``ComparedModelSource``. The multi-model
+        form is *symmetric*: no model is the base, so ``has_score`` is
+        ``False`` and ``_metrics`` carries one keyed entry per model.
+        Use ``compare=`` instead when one model is the subject and the
+        rest are rivals.
     n_bins : int, default 10
         Number of bins for the calibration histogram.
     strategy : {"uniform", "quantile"}, default "uniform"
@@ -363,6 +372,19 @@ class CalibrationVisualizer(FerrumVisualizer):
         Overlay a per-series Brier-score text label.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
+    compare : dict of str -> estimator or None, default None
+        Additional estimators to overlay against the single positional
+        model, with the same distinguished-base semantics as
+        ``ROCVisualizer``/``PRVisualizer``/
+        ``DiscriminationThresholdVisualizer``: the positional model is
+        the base (label ``"base"``), and ``_metrics["calibration_error"]``,
+        ``__repr__`` and ``.score()`` all describe it, never a rival.
+        Routes through the same ``_build_compare_source`` those three
+        use at ``fit`` time, so the reserved-``"base"``-key and non-dict
+        refusals are identical, and renders exactly what
+        ``calibration_chart(model, X, y, compare=...)`` renders.
+        Mutually exclusive with the symmetric ``*models`` overlay --
+        supplying both raises ``ValueError`` (added 2026-09-13, #212).
     mark : dict, optional
         Per-layer mark overrides. See ``calibration_chart``.
     encode : dict, optional
@@ -379,6 +401,7 @@ class CalibrationVisualizer(FerrumVisualizer):
     >>> import ferrum as fm
     >>> viz = fm.CalibrationVisualizer(clf, n_bins=5).fit(X, y)
     >>> viz_overlay = fm.CalibrationVisualizer(clf_a, clf_b).fit(X, y)
+    >>> viz_vs_rival = fm.CalibrationVisualizer(clf, compare={"rival": clf_b}).fit(X, y)
     """
 
     def __init__(
@@ -388,6 +411,7 @@ class CalibrationVisualizer(FerrumVisualizer):
         strategy: str = "uniform",
         annotate_brier: bool = True,
         subtitle: str | None = None,
+        compare: dict[str, Any] | None = None,
         mark: dict | None = None,
         encode: dict | None = None,
         properties: dict | None = None,
@@ -397,12 +421,30 @@ class CalibrationVisualizer(FerrumVisualizer):
     ):
         if len(models) == 0:
             raise TypeError("CalibrationVisualizer requires at least one model")
-        # Stash the raw inputs; fit() resolves them into a single
-        # ModelSource or ComparedModelSource (the parent class's fit()
-        # always builds a single-model ModelSource, so we override fit
-        # for the multi-model path).
+        # Stash the raw inputs; _build_source() resolves them (plus any
+        # compare= rivals) into a single ModelSource or a
+        # ComparedModelSource at fit time.
         super().__init__(models[0], random_state=random_state, theme=theme)
         self._models = models
+        self.compare = compare
+        if compare is not None and self._is_symmetric_overlay:
+            observed = (
+                "a dict of models as the single positional argument"
+                if isinstance(models[0], dict)
+                else f"{len(models)} positional models"
+            )
+            raise ValueError(
+                "CalibrationVisualizer takes either a symmetric multi-model "
+                "overlay (*models) or one base model plus compare= rivals, "
+                f"not both; got {observed} together with compare=. The two "
+                "spell different contracts, so no single answer serves both: "
+                "compare= keeps the positional model as the base, and "
+                "calibration_error/.score() describe it "
+                "(CalibrationVisualizer(base, compare={'rival': m})), while "
+                "*models is symmetric, reporting one calibration_error[<name>] "
+                "per model and no single score "
+                "(CalibrationVisualizer(m_a, m_b)). Pass the rivals one way."
+            )
         self.n_bins = n_bins
         self.strategy = strategy
         self.annotate_brier = annotate_brier
@@ -413,12 +455,17 @@ class CalibrationVisualizer(FerrumVisualizer):
         self.layers = layers
 
     @property
-    def _is_multi_model(self) -> bool:
-        """Whether this overlays multiple models (no single well-defined score).
+    def _is_symmetric_overlay(self) -> bool:
+        """Whether this overlays several models with **no** distinguished base.
 
-        True for two or more positional models, or for a single dict-of-models
-        positional argument. False for a single fitted model, where the
-        inherited single-model :meth:`score` / :meth:`has_score` apply.
+        True for two or more positional models, or for a single
+        dict-of-models positional argument -- the ``*models`` shape, where
+        no model is the subject and therefore none owns ``score()``. False
+        for a single fitted model (the inherited single-model
+        :meth:`score` / :meth:`has_score` apply) and false under
+        ``compare=``, which *does* distinguish a base: the constructor
+        refuses ``compare=`` together with a ``*models`` overlay, so the
+        two shapes can never both be live on one instance.
         """
         return len(self._models) > 1 or isinstance(self._models[0], dict)
 
@@ -426,85 +473,89 @@ class CalibrationVisualizer(FerrumVisualizer):
     def has_score(self) -> bool:
         """True iff [score][ferrum.CalibrationVisualizer.score] returns a real metric rather than the fallback.
 
-        A multi-model overlay has no single ``.score`` to report, so
+        A symmetric ``*models`` overlay has no single ``.score`` to report, so
         ``has_score`` is ``False`` and [score][ferrum.CalibrationVisualizer.score]
         returns ``0.0`` — the two stay mutually consistent. A single-model
-        calibration keeps the base ``model.score`` behavior unchanged.
+        calibration keeps the base ``model.score`` behavior unchanged, and so
+        does a ``compare=`` overlay: its base model is the subject, exactly as
+        for ``ROCVisualizer``/``PRVisualizer``/
+        ``DiscriminationThresholdVisualizer``.
         """
-        if self._is_multi_model:
+        if self._is_symmetric_overlay:
             return False
         return super().has_score
 
     def score(self, X: Any, y: Any) -> float:
-        """Single model's ``.score``; ``0.0`` for a multi-model overlay.
+        """Return the base model's ``.score``; ``0.0`` for a symmetric overlay.
 
-        Overlaying several models has no single well-defined score, so rather
-        than silently returning only the first model's metric this returns the
-        documented ``0.0`` no-single-score fallback (consistent with
-        [has_score][ferrum.CalibrationVisualizer.has_score] being ``False``).
+        Overlaying several models symmetrically has no single well-defined
+        score, so rather than silently returning only the first model's metric
+        this returns the documented ``0.0`` no-single-score fallback
+        (consistent with [has_score][ferrum.CalibrationVisualizer.has_score]
+        being ``False``). Under ``compare=`` the positional model is the base
+        and scores normally.
         """
-        if self._is_multi_model:
+        if self._is_symmetric_overlay:
             return 0.0
         return super().score(X, y)
 
-    def fit(self, X: Any, y: Any = None) -> "CalibrationVisualizer":
+    def _build_source(self, X: Any, y: Any) -> Any:
+        """Resolve ``*models`` / ``compare=`` into the source ``fit`` uses.
+
+        The three shapes this class accepts, in one place: ``compare=``
+        (base plus rivals, via the shared ``_build_compare_source`` the
+        curve visualizers use), a symmetric ``*models`` overlay (a
+        ``ComparedModelSource`` with auto-assigned ``model_<i>`` names, or
+        the caller's own names for the dict form), and a single model
+        (a plain ``ModelSource``, the inherited default).
+        """
         import ferrum
         from ferrum.diagnostics.source import ComparedModelSource
 
+        if self.compare is not None:
+            return _build_compare_source(
+                self.model, X, y, self.compare, random_state=self.random_state
+            )
+        if not self._is_symmetric_overlay:
+            return ferrum.ModelSource(self.model, X, y, random_state=self.random_state)
         if len(self._models) == 1:
-            m = self._models[0]
-            if isinstance(m, dict):
-                # Dict-of-models form.
-                self._source = ferrum.ModelSource.compare(
-                    m,
-                    X,
-                    y,
-                    random_state=self.random_state,
-                )
-            else:
-                self._source = ferrum.ModelSource(
-                    m,
-                    X,
-                    y,
-                    random_state=self.random_state,
-                )
-        else:
-            # Positional N-model overlay.
-            if all(isinstance(m, ferrum.ModelSource) for m in self._models):
-                self._source = ComparedModelSource(
-                    {f"model_{i}": m for i, m in enumerate(self._models)},
-                )
-            else:
-                self._source = ferrum.ModelSource.compare(
-                    {f"model_{i}": m for i, m in enumerate(self._models)},
-                    X,
-                    y,
-                    random_state=self.random_state,
-                )
-        self._materialize()
-        self._chart = self._build_chart()
-        self._fitted = True
-        return self
+            # Dict-of-models form: the caller named the models.
+            return ferrum.ModelSource.compare(
+                self._models[0],
+                X,
+                y,
+                random_state=self.random_state,
+            )
+        # Positional N-model overlay.
+        named = {f"model_{i}": m for i, m in enumerate(self._models)}
+        if all(isinstance(m, ferrum.ModelSource) for m in self._models):
+            return ComparedModelSource(named)
+        return ferrum.ModelSource.compare(named, X, y, random_state=self.random_state)
 
     def _materialize(self) -> None:
         cal = self._source.calibration_curve(
             n_bins=self.n_bins,
             strategy=self.strategy,
         )
-        # A multi-model overlay carries one row per (model, bin), so a
-        # single pooled mean over every row would describe no model in
-        # particular -- the metric-identity defect this batch fixed for the
-        # compare= trio via _base_model_rows, in the one sibling whose
-        # multi-model form is symmetric (*models) rather than
+        # A symmetric overlay carries one row per (model, bin) with no
+        # distinguished model, so a single pooled mean over every row would
+        # describe no model in particular -- the metric-identity defect this
+        # family fixed for the compare= trio via _base_model_rows, in the one
+        # sibling whose *models form is symmetric rather than
         # base-plus-rivals. `_metrics` is dict[str, float] and __repr__
         # formats every value with `:.4f`, so the honest shape here is one
         # float *key* per model rather than one dict-valued key.
-        if "model" in cal.columns:
+        if self.compare is None and "model" in cal.columns:
             for name in cal["model"].unique(maintain_order=True).to_list():
                 rows = cal.filter(pl.col("model") == name)
                 self._metrics[f"calibration_error[{name}]"] = _calibration_error(rows)
         else:
-            self._metrics["calibration_error"] = _calibration_error(cal)
+            # One headline number: the single model's, or -- under compare= --
+            # the base model's own, never a rival's and never pooled across
+            # rivals. `_base_model_rows` is the same filter
+            # ROCVisualizer/PRVisualizer/DiscriminationThresholdVisualizer
+            # apply, and a no-op on the single-model frame (no `model` column).
+            self._metrics["calibration_error"] = _calibration_error(_base_model_rows(cal))
 
     def _build_chart(self) -> Any:
         return _calibration_chart_from_source(

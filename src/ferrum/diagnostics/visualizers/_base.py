@@ -12,8 +12,8 @@ Two override patterns:
 2. **No-model / non-standard visualizers** — override ``fit`` directly
    and skip ``ModelSource`` construction.  ``ClassBalanceVisualizer``,
    ``Rank1DVisualizer`` / ``Rank2DVisualizer`` /
-   ``ParallelCoordinatesVisualizer``, ``CalibrationVisualizer``, and
-   ``ElbowVisualizer`` all take this path.
+   ``ParallelCoordinatesVisualizer``, and ``ElbowVisualizer`` all take
+   this path.
 
 The two hooks default to no-ops on the base class so option-2
 subclasses don't need to provide trivial stubs.  Calling ``show()``
@@ -25,8 +25,10 @@ A third, narrower hook — ``_build_source`` — lets an option-1 subclass
 customize *how* the ``ModelSource`` is constructed (e.g. routing a
 ``compare=`` kwarg through ``_resolve_source`` to build a
 ``ComparedModelSource``) without duplicating the rest of ``fit``.
-``ROCVisualizer``, ``PRVisualizer``, and
-``DiscriminationThresholdVisualizer`` use this.
+``ROCVisualizer``, ``PRVisualizer``,
+``DiscriminationThresholdVisualizer``, and ``CalibrationVisualizer``
+(whose ``*models`` overlay resolves here too, since 2026-09-13) use
+this.
 """
 
 from __future__ import annotations

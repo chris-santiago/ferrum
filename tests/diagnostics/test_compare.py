@@ -139,6 +139,28 @@ def test_compare_calibration_dict_positional():
     assert "<svg" in chart.to_svg()
 
 
+def test_compare_calibration_visualizer_render_equals_the_chart():
+    """``CalibrationVisualizer(compare=)`` renders what ``calibration_chart
+    (compare=)`` renders -- byte for byte (#212, 2026-09-13).
+
+    The visualizer's ``compare=`` is constructor-and-semantics parity, not a
+    second render path: both surfaces resolve the same
+    ``{"base": ..., **compare}`` source and hand it to the same builder, so
+    any divergence here means one of them grew its own resolution.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    X, y, base = _binary_setup()
+    rival = LogisticRegression(C=0.01, max_iter=1000).fit(X.to_numpy(), y.to_numpy())
+
+    viz = ferrum.CalibrationVisualizer(base, compare={"rival": rival}).fit(X, y)
+    assert viz._source.model_names == ["base", "rival"]
+    assert (
+        viz.show().to_svg()
+        == ferrum.calibration_chart(base, X, y, compare={"rival": rival}).to_svg()
+    )
+
+
 def test_compared_source_passthrough_via_figure():
     """Figure functions accept an already-built ComparedModelSource."""
     X, y, m = _binary_setup()
