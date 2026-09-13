@@ -1315,20 +1315,37 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > methods of the precomputed (`y_true=`/`y_pred=`) path: `roc_chart`,
 > `pr_chart`, `calibration_chart`, `gain_chart`, `lift_chart`,
 > `discrimination_threshold_chart`, `confusion_matrix_chart`, and
-> `classification_report_chart`.
+> `classification_report_chart`; plus, since 2026-09-13 (wave 3, #206), the
+> **model-backed** `classification_report_chart` and
+> `ClassificationReportVisualizer`, previously the one classification
+> surface outside this contract -- narrowly: only the null cell, below.
+> Its model path now runs the same null-target guard before predicting, so
+> a null-bearing `y` refuses in this contract's own typed voice instead of
+> leaking scikit-learn's `ValueError: Input y_true contains NaN` (numeric)
+> / `Classification metrics can't handle a mix of unknown and binary
+> targets` (`Utf8`), and both classification surfaces now answer a null
+> identically. The model path does **not** run the stray-value check
+> (`check_resolved_target`'s absorb-and-warn cell) -- sklearn's own
+> `classification_report` resolves its class union directly from whatever
+> `y_true`/`y_pred` it is handed, with no comparison-value resolution step
+> for that guard to attach to. It **does**, since 2026-09-13 (#206 cycle 5,
+> below), run a narrower total-mismatch check of its own
+> (`check_translated_classes_match_y`): when the model's `classes_`,
+> translated into `y`'s domain, match none of `y`'s observed values, the
+> call refuses instead of rendering an all-zero report in silence. One
+> consequence, disclosed rather than fixed: a model exposing no `classes_`
+> still hands sklearn `model.predict`'s raw, untranslated output (there is
+> no positional correspondence to translate through, and therefore nothing
+> for the total-mismatch check above to translate either -- see the
+> 2026-09-13 #206 note below), so a non-numeric `y` against such a model's
+> numeric predictions can still surface sklearn's own untyped
+> `ValueError: Mix of label input types (string and number)` -- a narrower
+> instance of the exact failure #206 closes for the `classes_`-present
+> case, tracked as a follow-up rather than closed here.
 >
-> Two classification surfaces are **outside** it, stated here so the
-> contract is not read wider than it is. The **model-backed**
-> `classification_report_chart` (and `ClassificationReportVisualizer`)
-> computes through `sklearn.metrics.classification_report` rather than
-> through this subsystem's resolution, and still surfaces scikit-learn's
-> own error for a null-bearing `y` — measured 2026-09-13: `ValueError:
-> Input y_true contains NaN` on a numeric target, `ValueError:
-> Classification metrics can't handle a mix of unknown and binary targets`
-> on a `Utf8` one, neither naming the target or the diagnostic. Its
-> precomputed twin *is* inside the contract, so those two paths still
-> answer a null differently. And `class_balance_chart` counts `y`'s own
-> values rather than comparing them against a model, so no class
+> One classification surface is **outside** the contract entirely, stated
+> here so it is not read wider than it is: `class_balance_chart` counts
+> `y`'s own values rather than comparing them against a model, so no class
 > resolution happens there to disagree with.
 >
 > - *Nulls refuse.* A target carrying any null row raises `ValueError`
@@ -1400,6 +1417,221 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 >   `y`'s cardinality past the score-column count, so resolution falls to the
 >   parsed `class_{i}` labels, which match no row at all — a total mismatch,
 >   not a stray among valid rows. There is no class set to absorb into.
+
+> **2026-09-13 (wave 3, #206 + #224a — classification_report dtype
+> translation and class-order unification):** two `classification_report`
+> fixes, both scoped to the model path's dtype handling and the class-axis
+> render order; the confusion matrix and every other classification
+> diagnostic are untouched.
+>
+> *#206 — `model.predict` dtype translation.* The model path (both
+> `classification_report_chart`'s builder and
+> `ClassificationReportVisualizer._materialize`'s `f1_macro`) now translates
+> `model.predict`'s output into `y`'s domain through the SAME positional
+> `classes_` ↔ `encode_values` correspondence the batch-G confusion fix
+> built, before calling sklearn — reused, not re-derived. Before this, a
+> `Utf8`/`Categorical`/`Enum` `y` fit against an int-coded `classes_` (the
+> ordinary shape when a user label-encodes for training and keeps the
+> readable target for plotting) made `y_true` and `model.predict`'s raw
+> output disagree on type, and sklearn's own `unique_labels` raised
+> `ValueError: Mix of label input types (string and number)` before any
+> metric was computed — a different failure shape than confusion's silent
+> all-zeros, since `classification_report`'s own `unique_labels` guard
+> catches the type split where confusion's kernel just encoded everything
+> to the out-of-vocabulary code. A numeric `y` is byte-identical (the
+> translation is the identity); `class_prediction_error_chart` needed no
+> change and was verified already-correct by transitivity — it consumes
+> `ModelSource.confusion_matrix()` wholesale and never touches
+> `model.predict` directly, so it inherited the batch-G fix already.
+>
+> **Disclosed, not closed by this fix.** The translation above applies only
+> when the model exposes `classes_`; the no-`classes_` branch
+> (`report_predictions_in_y_domain`'s documented passthrough, mirroring
+> `confusion_matrix`'s own no-`classes_` fallback) hands `model.predict`'s
+> raw output straight to sklearn unchanged, since there is no positional
+> `classes_`↔`encode_values` correspondence to translate through. A
+> non-numeric `y` against such a model's numeric predictions can therefore
+> still surface sklearn's own untyped `ValueError: Mix of label input types
+> (string and number)` (measured 2026-09-13 with a duck-typed
+> `classes_`-less wrapper over a `Utf8` `y`) — the identical failure #206
+> closes for the `classes_`-present case, surviving in this narrower one.
+> Filed as a follow-up, not fixed here.
+>
+> *classification_report's model path now sits inside the target-hygiene
+> contract (#203) too* — see the correction to the 2026-09-13 hygiene-matrix
+> note above: a null-bearing `y` on the model path now refuses through the
+> same `require_no_null_target` guard, naming the diagnostic and the null
+> count, instead of leaking scikit-learn's own null error. The visualizer's
+> own guard (`ClassificationReportVisualizer._materialize`) names
+> `ClassificationReportVisualizer`, not the figure function it never calls
+> directly, matching `require_sklearn("ClassificationReportVisualizer")`'s
+> own naming two lines above it; and `ClassificationReportVisualizer(model)
+> .fit(X)` (`y` omitted — `FerrumVisualizer.fit`'s own documented default)
+> now refuses the same typed way instead of leaking `TypeError: 'NoneType'
+> object is not iterable` out of `require_no_null_target`'s own
+> `_null_mask` internals.
+>
+> *#224a — one class-axis order.* Both `classification_report_chart` paths
+> (model and precomputed) now order the class axis by sklearn's
+> `unique_labels` convention: the union of `y_true`/`y_pred`'s own distinct
+> values, in their natural ascending order. The precomputed path's
+> `sorted(..., key=str)` rule — inherited from `confusion_matrix`'s own
+> fallback, and unchanged there — retires for `classification_report`
+> specifically: it sorted the confusion matrix's already-stringified
+> `actual`/`predicted` columns, which is decimal-string order — digit count
+> before value, so `"10"` lands between `"1"` and `"2"` — where sorting the
+> raw values first (matching sklearn's own `unique_labels`, which never
+> stringifies before resolving) sorts ascending. **Breaking, disclosed:**
+> this moves the rendered class-axis order for any precomputed
+> `classification_report_chart` call whose numeric class labels do not sort
+> the same way as their decimal strings. That condition is *unequal digit
+> counts*, not a class count: **two** classes are enough. Measured
+> 2026-09-13: `{2, 10}` rendered `10, 2` and now renders `2, 10`;
+> `{1, 2, 10}` rendered `1, 10, 2` and now renders `1, 2, 10`; a 12-class
+> target rendered `0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9` and now renders
+> `0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11`, matching the model path.
+> (An earlier draft of this note scoped the change to "10 or more numeric
+> classes" — that boundary was false, and a binary target labelled
+> `{2, 10}` moves.) Class labels that all have the same digit count
+> (`{0, 1, 2}`, `{10, 11, 12}`) are unaffected, as is any non-numeric
+> (string/Categorical/Enum) target — a purely lexicographic domain sorts
+> the same way either rule reads it. No golden exercises this path (no
+> `classification_report` golden exists at all). The documented divergence
+> test (`test_classification_report_chart_class_axis_order_documented_divergence`)
+> is flipped to
+> `test_classification_report_chart_class_axis_order_now_identical`,
+> pinning identity at both the frame and the rendered SVG's y-axis tick
+> order, with the sub-10-class move pinned alongside it
+> (`test_precomputed_classification_report_order_moves_below_ten_classes`).
+>
+> *The class-axis label derivation is total by partition.* Sorting raw
+> values is not total the way the retired `sorted(..., key=str)` rule was
+> (that rule stringified first, which is why it accepted everything and
+> ordered it wrongly), so `_curve_frames.report_labels` owns the whole
+> input space in four named cells rather than patching shapes as they are
+> reported: a **null in either array** refuses in the null guard's
+> vocabulary, naming which array, through `_null_mask` so every dtype
+> family's null spelling counts; a **mix of ordering families** refuses as
+> a mix of label types, matching scikit-learn's own `unique_labels` stance
+> (an `int`/`float` or `bool`/`int` union is one family, not a mix); a
+> **homogeneous orderable** union is the answer; and a **homogeneous
+> unorderable** one (`complex`, `dict`, a type with no `<`) refuses as
+> unorderable rather than as a mix, so the message does not send the
+> caller after a defect their input does not have.
+>
+> **Breaking, disclosed — three shapes that rendered now refuse.** Measured
+> 2026-09-13 against the pre-fix code at this wave's branch point
+> (`8bfb4bbb`), whose label expression — `sorted(set(actual) |
+> set(predicted), key=str)` — is character-identical to v0.23.0's. These
+> are before/after against what a user has, not against this task's own
+> unreleased intermediate states (its first cycle's unowned `TypeError`
+> never shipped):
+>
+> - `y_true=[0,1,0,1]` with `y_pred=["0","1","1","0"]` **rendered** classes
+>   `'0'`/`'1'` with every metric 0.5, silently scoring string predictions
+>   against integer targets; it now refuses as a mix of label types.
+> - A null-bearing `y_pred` **rendered** a phantom class of its own:
+>   `["a",None,"a","b"]` produced a `'None'` row at 0/0/0 with class `'b'`'s
+>   recall at 0.5, and `[0.0,nan,0.0,1.0]` produced a `'nan'` row the same
+>   way. Both now refuse, naming `y_pred` and the null count. (`y_true`'s
+>   nulls already refused, via #203's `require_no_null_target`.)
+> - `complex` class labels **rendered** (`'(1+1j)'`, `'(2+0j)'`, through the
+>   stringified sort) and now refuse as unorderable; `dict` labels leaked
+>   `TypeError: unhashable type: 'dict'` and now refuse by name too.
+>
+> `confusion_matrix_chart` does **not** move with any of these: measured on
+> the identical inputs, it still renders the mixed union (16 cells), still
+> renders a null `y_pred` as a `'None'`/`'nan'` class, and still orders its
+> own axis `10, 2`. The asymmetry is deliberate — #224a is about the
+> report's class axis, and widening these refusals to the confusion family
+> would move a second figure's behavior under a fix that is not about it —
+> but it means the two figures answer the same malformed input differently
+> until that family is revisited. In the same vein, `ModelSource`'s
+> no-`classes_` confusion branch still derives its labels with a bare
+> `sorted(set(...))`: T1's disposition for that branch (its labels are the
+> `y_true`/`y_pred` union, so no row can fall outside them and it needs no
+> stray-value guard) still holds, but its sort's totality does not — a
+> `classes_`-less model predicting numbers against a string `y` raises
+> `TypeError: '<' not supported between instances of 'str' and 'int'`
+> (measured 2026-09-13), the same unowned shape `report_labels` closes for
+> the report. Disclosed, tracked as a follow-up, not closed here.
+>
+> **2026-09-13 (fix cycle 4 — cell 4 extends from unorderable to
+> unkeyable, and `y_true`'s shape joins `y_pred`'s).** The prose above
+> ("a homogeneous unorderable [family] refuses as unorderable") was true
+> of `report_labels` in isolation but not of what shipped: the very next
+> statement in `classification_report` (`self.confusion_matrix(...)`)
+> keys each class by its label value in a `dict`, so an
+> orderable-but-unhashable label (`list`, `set`, `bytearray`) answered
+> inside `report_labels` and then leaked `TypeError: unhashable type`
+> one statement later — measured on all three. A `frozenset` pair (hashable,
+> but only partially ordered by subset) surfaced a second defect: the
+> former adjacency-only dedupe does not group equal values next to each
+> other under a partial order, so it returned a duplicate label (measured:
+> three labels for two classes). Cell 4 is now named *unkeyable* rather
+> than *unorderable*: it refuses both a value that does not order and one
+> that orders but cannot be hashed, each with its own message naming the
+> reason; the answer cell dedupes by hash equality (`dict.fromkeys`) after
+> confirming hashability, not by adjacency. **Breaking, disclosed:**
+> `list`/`set`/`bytearray` class labels now refuse by name — previously an
+> unowned `TypeError: unhashable type` leaked from the confusion matrix,
+> not from `report_labels`, so this closes a leak rather than narrowing an
+> accepted input. `frozenset` labels still render; the fix is to their
+> deduplication, not their acceptance. Also fixed: `y_true`'s shape was
+> never checked (`report_labels`' docstring claimed it was "the caller's
+> precondition, enforced upstream", which was true for `y_pred` via
+> `_require_1d_array` — renamed from `_require_1d_y_pred`, since it is now
+> called on both arrays — but not for `y_true`); a 2-D `y_true` was
+> misdiagnosed as "a mix of label types" (each row read as a `list`
+> value, one ordering family, against `y_pred`'s `number` family) instead
+> of the correct 1-D shape refusal `_require_1d_array` already gives
+> `y_pred`. `classification_report_chart` now checks both arrays' shape
+> before either reaches `report_labels`. `y_pred`'s own pre-existing 1-D
+> message also moved as part of this: it read `requires 1-D hard class
+> labels; got an array with shape ...` (unsuffixed, when it was the only
+> such check at this call site) and now reads `requires 1-D hard class
+> labels (y_pred); ...`, disambiguating it from the new `y_true` check
+> that now runs beside it. `confusion_matrix_chart`'s own 1-D `y_pred`
+> check is unaffected and keeps its unsuffixed wording.
+
+> **2026-09-13 (fix cycle 5 — a total mismatch between the model's
+> translated `classes_` and `y` refuses).** One residual carried forward from
+> cycle 1 (rated S1 there, revised upward to S2 on cycle-4 review): a
+> model whose `classes_` describe *different* labels than `y` --
+> `classes_ = [0, 1, 2]` fit against `y = ["c0", "c1", "c2"]` is the shape
+> -- translated every prediction to `"0"`/`"1"`/`"2"` through the
+> #206 correspondence, values `y` never held, and
+> `classification_report_chart` rendered an 18-row, six-class report with
+> **every metric 0.0** and no warning, while `confusion_matrix_chart` on
+> the identical source warned `"confusion_matrix: 300 row(s) of y out of
+> 300 hold values outside the class set ['0', '1', '2'] ... and were
+> dropped from it entirely"`. Before #206's translation existed, this exact
+> shape raised sklearn's own loud `ValueError: Mix of label input types
+> (string and number)` -- so #206, closing the dtype-translation gap for
+> the ordinary (same-labels, different-dtype) case, traded that loud
+> refusal for a silent, wrong-looking-plausible chart on this adjacent
+> (different-labels) case. This is the total-mismatch shape #203's
+> standing policy already refuses elsewhere -- a resolution matching no row
+> of `y` refuses rather than answering something plausible and meaningless
+> (`check_resolved_target`'s zero-match cell, `binary_indicator`'s
+> positive-class cell) -- so it now refuses here too, via the new
+> `_curve_frames.check_translated_classes_match_y`, called from
+> `report_predictions_in_y_domain` on the coerced class vocabulary before
+> anything is translated, on both model-path consumers
+> (`classification_report_chart`'s builder and
+> `ClassificationReportVisualizer._materialize`). **Breaking, disclosed:**
+> a total mismatch between the model's translated `classes_` and `y` now
+> refuses instead of rendering; a *partial* overlap is unaffected and still
+> renders, since it is the ordinary out-of-vocabulary case sklearn's own
+> report already tolerates. What is tested is the class *vocabulary*, not
+> the predictions the model happened to make: a correctly-labelled model
+> evaluated on a slice it gets entirely wrong (`y` holds only one class,
+> the model predicts only another) shares no predicted value with `y` while
+> its `classes_` and `y` still describe the same labels, so that report
+> renders, unchanged from the released behavior. This closes the gap for the `classes_`-present
+> branch only -- the `classes_`-less branch's own disclosed leak (above)
+> is untouched, since there is no translation for this check to run after
+> there.
 
 > **2026-09-10 (batch G close, cycle 3 — positive-class resolution and
 > target hygiene):** two consequences of making binarization mandatory,
@@ -3525,17 +3757,37 @@ ferrum.classification_report_chart(model=None, X=None, y=None, *,
 # bare title, `"Classification Report"` — the family's title-only shape (no
 # `subtitle=` parameter), matching `confusion_matrix_chart`. On the
 # precomputed path, `y_true=`/`y_pred=` (hard labels) resolve metrics from
-# confusion counts with **no sklearn import**; class labels are
-# `sorted(set(y_true) | set(y_pred), key=str)`. On the model path, `X`/`y`
+# confusion counts with **no sklearn import**; class labels are the
+# distinct values of `y_true`/`y_pred` in sklearn `unique_labels` order
+# (their own ascending order, raw values — not stringified first), the
+# same order the model path's sklearn-backed report produces. On the model path, `X`/`y`
 # are both required — an X-less or y-less `ModelSource` (or a bare
 # `classification_report_chart(model)` call) raises a typed `ValueError`
 # naming the diagnostic and the fix, replacing what used to be a leaked
 # sklearn shape error (`"Expected 2D array, got scalar array instead"`) or
-# a foreign `InvalidParameterError` naming `y_true`. Class-axis order can
-# diverge between the two paths at 10+ numeric classes — the model path
-# orders via sklearn's numeric `unique_labels`, the precomputed path via
-# `sorted(..., key=str)` (`confusion_matrix`'s own convention) — the two
-# agree below that count.
+# a foreign `InvalidParameterError` naming `y_true`. Both paths order the
+# class axis identically (#224a, 2026-09-13): the precomputed path's former
+# `sorted(..., key=str)` rule — still `confusion_matrix`'s own convention,
+# and unchanged there — retired for this figure, so the documented
+# divergence between the two paths no longer exists. `y_true` and `y_pred`
+# must each be 1-D (a 2-D `y_true` now refuses by name, mirroring the
+# `y_pred` shape check #208 already had). The label derivation
+# (`_curve_frames.report_labels`) is total by partition over the *values*
+# the two (1-D) arrays hold: a null in either array, a mix of ordering
+# families, and a homogeneous family that cannot serve as a class label —
+# either because it does not order (`complex`, `dict`) or because it
+# orders but cannot be hashed (`list`, `set`, `bytearray`) — each refuse
+# with a typed `ValueError` naming which array and what it holds. A
+# homogeneous, orderable, hashable family is the answer, deduplicated by
+# hash equality (not adjacency, so a partially-ordered-but-hashable family
+# such as `frozenset` cannot return a duplicate label). Nothing else can
+# reach the class axis. On the model path (#206 cycle 5, 2026-09-13): when
+# `model.classes_` is present, it is coerced into `y`'s dtype and checked
+# against `y`, and the call refuses if the two share no value at all (a
+# model whose `classes_` describe different labels than `y`, not merely a
+# different dtype) — see the dated #206 cycle-5 note above. A partial
+# overlap still renders, and so does a model that simply predicts none of
+# the classes `y` holds on the slice being reported.
 
 ferrum.calibration_chart(model_or_source=None, X=None, y=None, *,
                           y_true=None, y_pred=None,  # precomputed path (1-D positive-class proba)
