@@ -189,6 +189,20 @@ class TestStructuralGoldens:
         )
         _check_or_update("structural_break_axis_area.svg", chart.to_svg())
 
+    def test_break_axis_segment_arrow_clipped_into_segments(self):
+        """#231: an arrowed segment crossing a break gap splits into honest pieces.
+
+        Mirrors ``test_break_axis_bar_clipped_into_segments`` above: a
+        ``mark_segment(arrow=True)`` shaft crossing a ``(150, 850)`` gap renders
+        as two shaft pieces (no stroke spanning the gap), with the arrowhead
+        riding the piece that keeps the tip (wave-2 T6, #230-1).
+        """
+        df = pl.DataFrame({"x1": [1.0], "y1": [20.0], "x2": [3.0], "y2": [900.0]})
+        chart = fm.Chart(df).mark_segment(arrow=True, arrow_size=10).encode(
+            x="x1:Q", y="y1:Q", x2="x2:Q", y2="y2:Q"
+        ) + BreakAxis(axis="y", gap=(150, 850))
+        _check_or_update("structural_break_axis_segment_arrow.svg", chart.to_svg())
+
     def test_inset(self, sample_df):
         inset_chart = fm.Chart(sample_df).mark_point().encode(x="x", y="revenue")
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + Inset(

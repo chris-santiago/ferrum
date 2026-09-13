@@ -482,6 +482,18 @@ def _mark_paths(svg: str) -> list[str]:
     return re.findall(rf'<path d="([^"]*)"[^>]*{re.escape(_MARK_FILL)}', svg)
 
 
+def _head_size(vertices: list[tuple[float, float]]) -> float:
+    """Tip-to-base-midpoint distance for an arrowhead's 3 vertices."""
+    (tx, ty), (lx, ly), (rx, ry) = vertices
+    return ((tx - (lx + rx) / 2) ** 2 + (ty - (ly + ry) / 2) ** 2) ** 0.5
+
+
+def _head_angle(vertices: list[tuple[float, float]]) -> float:
+    """The angle (radians) from an arrowhead's base midpoint to its tip."""
+    (tx, ty), (lx, ly), (rx, ry) = vertices
+    return math.atan2(ty - (ly + ry) / 2, tx - (lx + rx) / 2)
+
+
 def _line_chart(gap=None, **encode):
     """A four-point line whose third vertex sits inside ``(150, 850)``.
 
@@ -638,19 +650,12 @@ def test_segment_with_an_arrow_keeps_its_head_on_the_tip_piece():
         f"the head sits on the tip piece's end; got tip={tip} piece={tip_piece}"
     )
 
-    def head_size(vertices):
-        (tx, ty), (lx, ly), (rx, ry) = vertices
-        return ((tx - (lx + rx) / 2) ** 2 + (ty - (ly + ry) / 2) ** 2) ** 0.5
-
     plain_head = [_path_coords(d) for d in _mark_paths(plain_svg) if len(_path_coords(d)) == 3]
-    assert head_size(heads[0]) == pytest.approx(head_size(plain_head[0]), abs=0.01), (
+    assert _head_size(heads[0]) == pytest.approx(_head_size(plain_head[0]), abs=0.01), (
         "the break moves the head, it does not resize it"
     )
     # And it points along the piece it terminates, whose slope the break changed.
-    head_angle = math.atan2(
-        tip[1] - (heads[0][1][1] + heads[0][2][1]) / 2,
-        tip[0] - (heads[0][1][0] + heads[0][2][0]) / 2,
-    )
+    head_angle = _head_angle(heads[0])
     piece_angle = math.atan2(tip_piece[3] - tip_piece[1], tip_piece[2] - tip_piece[0])
     assert head_angle == pytest.approx(piece_angle, abs=0.02), (
         f"head={head_angle} vs tip piece={piece_angle}"
@@ -1313,6 +1318,87 @@ def test_break_indicator_styles_still_render_with_clipped_bars(style):
         + fm.BreakAxis(axis="y", gap=(150, 850), break_style=style)
     ).to_svg()
     assert len(_rects(svg)) == 3, "one short bar + the crossing bar's two pieces"
+
+
+def test_arrowed_segment_under_a_break_splits_its_shaft_and_keeps_its_head():
+    """#231's end-to-end rider: a user's arrowed-segment chart under a break,
+    shaped the OPPOSITE way from the unit pin above.
+
+    ``test_segment_with_an_arrow_keeps_its_head_on_the_tip_piece`` pins the
+    ascending case, whose tip lands on the piece drawn in the domain's upper
+    visible range; this rider descends (``y1 > y2``), so its tip lands on the
+    piece drawn in the LOWER visible range instead. That closes the
+    tip-piece-identity regression class from the other side rather than
+    restating the same fixture: no stroke spans the gap, exactly one head
+    survives riding the tip, its drawn size carries over from the unbroken
+    chart, and its pointing direction is REBUILT on the new piece's own slope
+    rather than the unbroken chart's now-stale one (spec §4 #228/#230-1).
+    """
+    df = pl.DataFrame({"x1": [1.0], "y1": [900.0], "x2": [3.0], "y2": [20.0]})
+    chart = (
+        fm.Chart(df)
+        .mark_segment(arrow=True, arrow_size=10)
+        .encode(x="x1:Q", y="y1:Q", x2="x2:Q", y2="y2:Q")
+    )
+    plain_svg = chart.to_svg()
+    broken_svg = (chart + fm.BreakAxis(axis="y", gap=(150, 850))).to_svg()
+
+    shafts = _lines(broken_svg)
+    assert len(shafts) == 2, (
+        f"the shaft must split into one piece per visible segment; got {shafts}"
+    )
+    for x1, y1, x2, y2 in shafts:
+        assert min(y1, y2) > -1000, f"no shaft piece may reach the sentinel; got {shafts}"
+
+    # A genuine split leaves a gap between the two pieces' y-extents (the
+    # break's indicator sits there) — two pieces that merely touch or overlap
+    # would still spike a stroke across the break, which is exactly what the
+    # split exists to prevent.
+    extents = sorted((min(y1, y2), max(y1, y2)) for _, y1, _, y2 in shafts)
+    assert extents[0][1] < extents[1][0], (
+        f"no piece may span the gap: the two pieces' y-extents must be "
+        f"disjoint, with the indicator band between them; got {extents}"
+    )
+
+    heads = [_path_coords(d) for d in _mark_paths(broken_svg) if len(_path_coords(d)) == 3]
+    assert len(heads) == 1, f"exactly one arrowhead must survive; got {heads}"
+    head = heads[0]
+    assert all(y > -1000 for _, y in head), (
+        f"the head must carry no sentinel coordinate; got {head}"
+    )
+
+    plain_heads = [_path_coords(d) for d in _mark_paths(plain_svg) if len(_path_coords(d)) == 3]
+    assert len(plain_heads) == 1, f"expected one arrowhead on the unbroken chart; got {plain_heads}"
+
+    # Identity, not just connectivity: a y-break leaves x untouched, so the
+    # broken head's tip x must land exactly where the unbroken chart put it.
+    # This pins WHICH piece the head rides, independent of piece ordering —
+    # a head rebuilt on the wrong piece would carry that piece's x instead,
+    # which differs here since x1 != x2. Sitting on *some* piece's endpoint
+    # is necessary but not sufficient (both pieces have endpoints); matching
+    # the unbroken chart's tip x is what a wrong-piece regression cannot fake.
+    tip = head[0]
+    plain_tip_x = plain_heads[0][0][0]
+    assert tip[0] == pytest.approx(plain_tip_x, abs=0.01), (
+        f"the head's tip must keep the unbroken chart's x; got tip={tip} expected x={plain_tip_x}"
+    )
+    tip_piece = next((p for p in shafts if math.dist((p[2], p[3]), tip) < 0.01), None)
+    assert tip_piece is not None, (
+        f"the head must sit on a shaft piece's end, not float disconnected; "
+        f"head={head} shafts={shafts}"
+    )
+
+    assert _head_size(head) == pytest.approx(_head_size(plain_heads[0]), abs=0.01), (
+        "the break must not resize the arrowhead"
+    )
+
+    # Direction is REBUILT on the piece the head actually terminates, not
+    # carried over from the unbroken chart's now-stale slope.
+    piece_angle = math.atan2(tip_piece[3] - tip_piece[1], tip_piece[2] - tip_piece[0])
+    assert _head_angle(head) == pytest.approx(piece_angle, abs=0.02), (
+        f"the head must point along the piece it terminates; "
+        f"head_angle={_head_angle(head)} piece_angle={piece_angle}"
+    )
 
 
 # --------------------------------------------------------------------------
