@@ -31,7 +31,7 @@ import polars as pl
 
 import ferrum as fm
 import ferrum.annotation as ann
-from _svg_rects import svg_elements
+from _svg_rects import fill_rects
 
 _MARK_FILL = "#2563eb"
 
@@ -39,14 +39,12 @@ _MARK_FILL = "#2563eb"
 def _bars(svg: str) -> list[tuple[float, float, float, float]]:
     """``(x, y, w, h)`` for every mark rect painted in the default bar fill.
 
-    Binds to ``tests/_svg_rects.py``'s shared element parser (that module's
-    docstring names it the home for new sibling sites) rather than adding
-    another copy of the rect regex.
+    Binds to ``tests/_svg_rects.py``'s ``fill_rects`` (the home for this
+    fill-filtered rect extraction, since it was identically duplicated across
+    this module, ``test_break_axis_geometry.py`` and
+    ``test_break_axis_coordflip.py``).
     """
-    return [
-        (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
-        for a in svg_elements(svg, "rect", lambda a: a.get("fill") == _MARK_FILL)
-    ]
+    return fill_rects(svg, _MARK_FILL)
 
 
 def _panel_split(svg: str) -> tuple[list, list]:

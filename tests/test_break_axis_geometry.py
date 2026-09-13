@@ -57,7 +57,7 @@ import pytest
 import ferrum as fm
 import ferrum.annotation as ann
 from _svg_extents import axis_tick_dash_label_pairs, label_along, tick_along
-from _svg_rects import svg_elements
+from _svg_rects import fill_rects
 
 
 # --------------------------------------------------------------------------
@@ -70,23 +70,17 @@ _MARK_FILL = "#2563eb"
 def _rects(svg: str, fill: str = _MARK_FILL) -> list[tuple[float, float, float, float]]:
     """``(x, y, w, h)`` for every mark rect painted in ``fill``.
 
-    Binds to ``tests/_svg_rects.py``'s shared element parser (that module's
-    docstring names it the home for new sibling sites), as
-    ``test_break_axis_facet.py`` and ``test_break_axis_coordflip.py`` already
-    do. The hand-rolled positional regex this replaced required the SVG
-    attributes in exactly the order ``x y width height fill`` and would have
-    gone quietly blind on any attribute-ordering change in the Rust writer;
-    the shared parser reads an attribute dict and cannot.
+    Binds to ``tests/_svg_rects.py``'s ``fill_rects`` (the home for this
+    fill-filtered rect extraction, since it was identically duplicated across
+    this module, ``test_break_axis_facet.py`` and
+    ``test_break_axis_coordflip.py``).
 
     ``_svg_rects.data_bar_rects`` is deliberately NOT used: it merges every
     non-background data fill into one list, and this module's grid-band
     assertions (``_BAND_FILL``) depend on telling band rects apart from mark
     rects by color.
     """
-    return [
-        (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
-        for a in svg_elements(svg, "rect", lambda a: a.get("fill") == fill)
-    ]
+    return fill_rects(svg, fill)
 
 
 def _paths(svg: str) -> list[str]:

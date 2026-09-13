@@ -1320,12 +1320,16 @@ enum BreakRouting {
 /// [`BreakRouting`] minus the drop case, so the router cannot reach a clip with a
 /// kind that has no clip.
 ///
-/// Named after `break_axis::BreakPlacement` (private to this module, so not a
-/// resolvable doc link from here), which asks the same question for mark
+/// Named after [`BreakPlacement`], which asks the same question for mark
 /// batches: `ClipExtent`, `MoveVertices`, `MoveVerticesAndGlyph` are the same
-/// three answers under the same names, minus the two glyph-only placements
-/// annotations never need. The two enums are not linked by the type system —
-/// keep them in correspondence by hand if either grows a new variant.
+/// three answers under the same names. The two glyph placements have
+/// annotation counterparts — `Text`/`Callout`/`Image` are point-anchored
+/// glyphs too — but those route to [`BreakRouting::SuppressWhole`] instead of
+/// moving, for the reason documented on that variant. The two enums are not
+/// linked by the type system — keep them in correspondence by hand if either
+/// grows a new variant.
+///
+/// [`BreakPlacement`]: super::break_axis::BreakPlacement
 #[derive(Clone, Copy)]
 enum CutRouting {
     /// `rect`'s rect and `span`'s band: the pixel extent along the broken axis
@@ -1335,14 +1339,16 @@ enum CutRouting {
     /// `line`'s shaft: connected stroked geometry whose every vertex is its own
     /// data position, so it is cut at the gap edges it crosses, with the
     /// cross-axis coordinate interpolated at each crossing. The
-    /// `break_axis::BreakPlacement::MoveVertices` counterpart.
+    /// [`BreakPlacement::MoveVertices`](super::break_axis::BreakPlacement::MoveVertices)
+    /// counterpart.
     MoveVertices,
     /// `arrow`: a split shaft plus the head that rides the piece reaching its
     /// tip. [`emit_arrow`] pushes `[shaft Line, head Path]` — the same node pair,
     /// in the same order, `marks::segment::build` emits for `arrow=True` — so
     /// the segment splitter's shaft/head pairing (head rebuilt on the tip piece,
     /// dropped when the tip is in a gap) applies verbatim. The
-    /// `break_axis::BreakPlacement::MoveVerticesAndGlyph` counterpart.
+    /// [`BreakPlacement::MoveVerticesAndGlyph`](super::break_axis::BreakPlacement::MoveVerticesAndGlyph)
+    /// counterpart.
     MoveVerticesAndGlyph,
 }
 

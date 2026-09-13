@@ -181,7 +181,10 @@ class TestBreakAxisGapValidation:
             BreakAxis(axis="y", gap=(bad_start, 90))
 
     def test_single_gap_reversed_raises(self):
-        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start \(90\) must be less"):
+        """The reversed-pair check runs on the coerced (always-``float``)
+        bounds, so a plain-int input reports its ``float``-formatted value
+        (``90.0``), not the ``int`` the caller wrote."""
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start \(90\.0\) must be less"):
             BreakAxis(axis="y", gap=(90, 10))
 
     def test_single_gap_equal_bounds_raises(self):
@@ -287,12 +290,14 @@ class TestBreakAxisGapValidation:
         and the encoding layer's domain coercion has always accepted one via
         its duck-typed ``float(value)``. ``BreakAxis`` refused every numpy
         integer and narrow float while accepting ``np.datetime64`` — an
-        asymmetry with no contract behind it (design review F10). Only
-        ``np.float64`` worked before, and only because it subclasses
-        ``float``."""
+        asymmetry with no contract behind it (design review F10). ``np.float64``
+        reaches the plain ``isinstance(value, (int, float))`` branch by
+        subclassing ``float``; that branch now coerces with ``float(value)``
+        too, so every numpy spelling stores a plain Python ``float`` rather
+        than ``np.float64`` being the one that keeps its numpy type."""
         b = BreakAxis(axis="y", gap=(start, end))
         assert b.gap == (10.0, 90.0)
-        assert all(isinstance(bound, float) for bound in b.gap)
+        assert all(type(bound) is float for bound in b.gap)
 
     def test_numpy_bool_bound_is_still_refused(self):
         """``bool`` is excluded from the numeric kinds (a boolean is not a

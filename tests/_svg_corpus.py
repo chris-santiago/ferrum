@@ -151,11 +151,15 @@ BREAK_HIDDEN = -99999.0
 #: that routes structural chrome through this hide path, or any other
 #: off-canvas stray, is still reported, never excused by this neighborhood.
 #:
-#: Applies to `_CHROME_TAGS` nodes ONLY (`line`/`text`, the two kinds
-#: `build_axis` anchors and rigidly translates). Every other node kind — a
-#: mark, an annotation, a raw node — is matched EXACTLY: none of them can
-#: legitimately carry a baseline offset away from the sentinel, so a
-#: tolerance there would only blunt the safety net that exists to catch
+#: Applies to `_CHROME_TAGS` ONLY — the `line` and `text` SVG tags, scoped by
+#: TAG, not by node kind. Axis chrome (tick dash, tick label) shares those two
+#: tags with plain marks that draw as `<line>`/`<text>` too — `mark_rule`,
+#: `mark_tick`, box/violin whiskers, `mark_label` leader lines — so those
+#: marks get the same 100px neighborhood, not an exact match, even though
+#: they have no anchor offset of their own to carry. Every OTHER tag
+#: (`circle`/`rect`/`path`/`polygon`/...) is matched EXACTLY: none of those
+#: shapes can legitimately carry a baseline offset away from the sentinel, so
+#: a tolerance there would only blunt the safety net that exists to catch
 #: "some future defect parked geometry off-canvas" (design review F7).
 _BREAK_HIDDEN_TOLERANCE = 100.0
 
@@ -509,11 +513,16 @@ class Node:
         away (an unrelated bug landing at, say, `-4242`) stays outside the
         neighborhood and is still reported.
 
-        Every OTHER node kind is matched exactly. A mark, an annotation, or a
-        raw node reaches the hide path by being parked ON the sentinel; it
-        has no anchor offset to carry, so nothing legitimate sits near but
-        not at `BREAK_HIDDEN`, and a 100px neighborhood there would only
-        excuse the next real off-canvas defect (design review F7).
+        The neighborhood is scoped by SVG TAG (`line`/`text`), not by node
+        kind: axis chrome shares those two tags with plain marks that draw as
+        `<line>`/`<text>` (`mark_rule`, `mark_tick`, box/violin whiskers,
+        `mark_label` leader lines), so those marks get the same
+        neighborhood too. Every OTHER tag (`circle`/`rect`/`path`/`polygon`/
+        ...) is matched exactly: a node drawn with one of those tags reaches
+        the hide path by being parked ON the sentinel, has no anchor offset
+        to carry, so nothing legitimate sits near but not at `BREAK_HIDDEN`,
+        and a 100px neighborhood there would only excuse the next real
+        off-canvas defect (design review F7).
         """
         coords: list[float] = []
         for key in ("x", "y", "x1", "y1", "x2", "y2", "cx", "cy"):

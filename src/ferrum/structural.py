@@ -228,14 +228,16 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
     coercion already accepts through its duck-typed ``float(value)``: a
     pandas/numpy-derived *datetime* bound worked while a pandas/numpy-derived
     *integer* bound did not, which is an asymmetry with no contract behind it
-    (design review F10). ``np.float64`` reached the numeric branch already —
-    it subclasses ``float`` — so only the integer and narrower-float numpy
-    scalars change.
+    (design review F10). The plain ``isinstance(value, (int, float))`` branch
+    also coerces with ``float(value)`` rather than returning ``value``
+    unchanged, so ``np.float64`` (which reaches that branch by subclassing
+    ``float``) stores a plain Python ``float`` like every other numpy scalar
+    instead of being the one spelling that keeps its numpy type.
     """
     if isinstance(value, bool):
         return "other", value
     if isinstance(value, (int, float)):
-        return "numeric", value
+        return "numeric", float(value)
     if isinstance(value, (_dt.date, _dt.datetime, str)):
         return "temporal", _coerce_temporal_gap_bound(label, value)
 

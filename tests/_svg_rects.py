@@ -45,3 +45,20 @@ def data_bar_rects(svg: str) -> list[dict[str, str]]:
             and not a["fill"].startswith("url(")
         ),
     )
+
+
+def fill_rects(svg: str, fill: str = "#2563eb") -> list[tuple[float, float, float, float]]:
+    """Return `(x, y, w, h)` for every `<rect>` painted in `fill`.
+
+    This was triplicated (identically) across `test_break_axis_geometry.py`,
+    `test_break_axis_facet.py`, and `test_break_axis_coordflip.py` as `_rects`
+    / `_bars`, each wrapping `svg_elements` with the same fill-equality
+    predicate. Unlike `data_bar_rects`, which merges every non-background data
+    fill into one list, this keeps rects of a single, caller-chosen fill
+    separable from siblings painted a different color (e.g. mark rects vs.
+    grid-band rects in the same chart).
+    """
+    return [
+        (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
+        for a in svg_elements(svg, "rect", lambda a: a.get("fill") == fill)
+    ]

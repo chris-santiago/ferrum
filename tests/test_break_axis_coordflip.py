@@ -17,20 +17,17 @@ import polars as pl
 
 import ferrum as fm
 from _svg_extents import axis_tick_dash_label_pairs, tick_along
-from _svg_rects import svg_elements
+from _svg_rects import fill_rects
 
 
 def _rects(svg: str, fill: str = "#2563eb") -> list[tuple[float, float, float, float]]:
     """Extract (x, y, w, h) for every mark rect painted in fill.
 
-    Binds to `tests/_svg_rects.py`'s shared parser (that module's docstring
-    names it the home for new sibling sites) rather than adding another copy
-    of the rect regex.
+    Binds to `tests/_svg_rects.py`'s `fill_rects` (the home for this
+    fill-filtered rect extraction, since it was identically duplicated across
+    this module, `test_break_axis_geometry.py` and `test_break_axis_facet.py`).
     """
-    return [
-        (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
-        for a in svg_elements(svg, "rect", lambda a: a.get("fill") == fill)
-    ]
+    return fill_rects(svg, fill)
 
 
 def test_break_y_axis_on_flipped_chart_breaks_physical_y():

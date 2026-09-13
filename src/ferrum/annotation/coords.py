@@ -478,15 +478,7 @@ def _classify_raw_coord(v: CoordValue) -> CoordValue:
 def _coerce_coord(v: CoordValue) -> CoordValue:
     """Normalize an annotation positional coordinate for storage in a primitive.
 
-    Rules (see :func:`_classify_raw_coord`):
-    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` pass through.
-    - ``datetime.date`` / ``datetime.datetime`` → epoch-milliseconds float.
-    - ISO-8601 string → epoch-milliseconds float.
-    - Non-ISO-8601 string → ``OrdinalCategoryCoord``.
-    - Numeric → float.
-
-    The returned value is always a type that :func:`_coord` knows how to
-    serialize.
+    See :func:`_classify_raw_coord` for the classification rules.
     """
     return _classify_raw_coord(v)
 
