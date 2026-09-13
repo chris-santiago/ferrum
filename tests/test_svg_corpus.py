@@ -198,9 +198,10 @@ def test_break_sentinel_matches_the_rust_constant_it_mirrors():
     The Python value is only an allow-list-free explanation of an off-canvas
     coordinate as long as it is the value the renderer actually parks marks at.
 
-    The constant lives in ``render/break_axis.rs`` (batch H T3, which moved the
-    scene-remapping code next to the piecewise scale it remaps through); it was
-    previously declared in ``render/scene_build.rs``.
+    The constant lives in ``render/break_axis/mod.rs`` (batch H T3 moved the
+    scene-remapping code next to the piecewise scale it remaps through, from
+    ``render/scene_build.rs``; the wave-2 close promoted that single file to a
+    directory module when its ported tests outgrew it).
     """
     rust = (
         Path(__file__).resolve().parent.parent
@@ -208,7 +209,8 @@ def test_break_sentinel_matches_the_rust_constant_it_mirrors():
         / "ferrum-core"
         / "src"
         / "render"
-        / "break_axis.rs"
+        / "break_axis"
+        / "mod.rs"
     ).read_text()
     assert corpus.BREAK_HIDDEN == -99999.0
     assert "pub const BREAK_HIDDEN: f64 = -99999.0;" in rust
@@ -257,6 +259,44 @@ def test_off_viewport_respects_the_break_sentinel_neighborhood(tmp_path):
     chrome_span_hits = corpus.query_off_viewport(chrome_span)
     assert len(chrome_span_hits) == 1 and not chrome_span_hits[0].sentinel
     assert len(corpus.unexplained(chrome_span_hits)) == 1
+
+
+def test_break_sentinel_neighborhood_applies_to_chrome_nodes_only(tmp_path):
+    """The neighborhood is scoped to `_CHROME_TAGS` (design review F7).
+
+    D2's rigid translation is an AXIS-CHROME behavior: a tick label carries
+    its own baseline offset off-canvas with it, so `text`/`line` need the
+    tolerance. A mark, an annotation, or a raw node has no anchor offset — it
+    is parked ON the sentinel or it is a defect — so widening the predicate
+    for every node kind blunted the safety net for everything that is not
+    chrome. Both sides pinned: the same offset that is explained on a `text`
+    is reported on a `circle` and a `rect`.
+    """
+    offset_y = corpus.BREAK_HIDDEN + 50  # well inside the chrome tolerance
+
+    chrome = _doc(f'<text x="10" y="{offset_y}">hidden label</text>', tmp_path=tmp_path)
+    chrome_hits = corpus.query_off_viewport(chrome)
+    assert len(chrome_hits) == 1 and chrome_hits[0].sentinel
+    assert corpus.unexplained(chrome_hits) == []
+
+    for markup, name in (
+        (f'<circle cx="10" cy="{offset_y}" r="3" fill="#000"/>', "circle"),
+        (f'<rect x="10" y="{offset_y}" width="4" height="4" fill="#000"/>', "rect"),
+    ):
+        doc = _doc(markup, tmp_path=tmp_path)
+        hits = corpus.query_off_viewport(doc)
+        assert len(hits) == 1, name
+        assert not hits[0].sentinel, name
+        assert len(corpus.unexplained(hits)) == 1, name
+
+    # A non-chrome node parked EXACTLY on the sentinel is still explained —
+    # that is the hide path working as designed.
+    exact = _doc(
+        f'<circle cx="10" cy="{corpus.BREAK_HIDDEN}" r="3" fill="#000"/>', tmp_path=tmp_path
+    )
+    exact_hits = corpus.query_off_viewport(exact)
+    assert len(exact_hits) == 1 and exact_hits[0].sentinel
+    assert corpus.unexplained(exact_hits) == []
 
 
 def test_off_viewport_honors_a_non_zero_root_viewbox_origin(tmp_path):

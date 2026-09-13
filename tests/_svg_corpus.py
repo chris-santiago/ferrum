@@ -150,6 +150,13 @@ BREAK_HIDDEN = -99999.0
 #: corpus) or the pinned `-4242` counter-example (95757 away), so a defect
 #: that routes structural chrome through this hide path, or any other
 #: off-canvas stray, is still reported, never excused by this neighborhood.
+#:
+#: Applies to `_CHROME_TAGS` nodes ONLY (`line`/`text`, the two kinds
+#: `build_axis` anchors and rigidly translates). Every other node kind — a
+#: mark, an annotation, a raw node — is matched EXACTLY: none of them can
+#: legitimately carry a baseline offset away from the sentinel, so a
+#: tolerance there would only blunt the safety net that exists to catch
+#: "some future defect parked geometry off-canvas" (design review F7).
 _BREAK_HIDDEN_TOLERANCE = 100.0
 
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
@@ -491,15 +498,22 @@ class Node:
 
     @property
     def at_break_sentinel(self) -> bool:
-        """True when any of the element's own coordinates sits at, or in the
-        drawn-offset neighborhood of, `BREAK_HIDDEN` (see `_BREAK_HIDDEN_TOLERANCE`).
+        """True when any of the element's own coordinates sits at `BREAK_HIDDEN`
+        — or, for an axis-chrome node, in its drawn-offset neighborhood (see
+        `_BREAK_HIDDEN_TOLERANCE`).
 
-        Not an exact match: D2 (wave 2, #231) translates a hidden axis-chrome
-        node RIGIDLY on its own tick's anchor, so a label's off-screen
-        position is `BREAK_HIDDEN` plus whatever baseline offset it already
-        drew at, not the bare constant. A coordinate 95000+ away (an
-        unrelated bug landing at, say, `-4242`) stays outside the
+        Chrome is not an exact match because D2 (wave 2, #231) translates a
+        hidden axis-chrome node RIGIDLY on its own tick's anchor, so a
+        label's off-screen position is `BREAK_HIDDEN` plus whatever baseline
+        offset it already drew at, not the bare constant. A coordinate 95000+
+        away (an unrelated bug landing at, say, `-4242`) stays outside the
         neighborhood and is still reported.
+
+        Every OTHER node kind is matched exactly. A mark, an annotation, or a
+        raw node reaches the hide path by being parked ON the sentinel; it
+        has no anchor offset to carry, so nothing legitimate sits near but
+        not at `BREAK_HIDDEN`, and a 100px neighborhood there would only
+        excuse the next real off-canvas defect (design review F7).
         """
         coords: list[float] = []
         for key in ("x", "y", "x1", "y1", "x2", "y2", "cx", "cy"):
@@ -508,7 +522,9 @@ class Node:
         for key in ("points", "d"):
             if key in self.attrib:
                 coords.extend(_numbers(self.attrib[key]))
-        return any(abs(v - BREAK_HIDDEN) <= _BREAK_HIDDEN_TOLERANCE for v in coords)
+        if self.tag in _CHROME_TAGS:
+            return any(abs(v - BREAK_HIDDEN) <= _BREAK_HIDDEN_TOLERANCE for v in coords)
+        return any(math.isclose(v, BREAK_HIDDEN) for v in coords)
 
     @property
     def clip_ref(self) -> str | None:

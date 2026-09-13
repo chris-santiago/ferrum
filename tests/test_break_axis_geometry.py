@@ -13,6 +13,33 @@ dragged into the remap.
 Pixel expectations are derived from the segment allocation by hand — retained
 span fractions of ``plot_height - n_breaks * break_size`` — rather than read
 back out of the implementation.
+
+Why this file holds many contracts while three others hold one each
+------------------------------------------------------------------
+
+``BreakAxis`` coverage is partitioned by what a reader would go looking for,
+which is the convention ``tests/test_boxen_palette.py``'s docstring states:
+feature-named modules, not findings-ID-named ones. Three contracts got their
+own file because each is a *different subsystem meeting* the break, and a
+reader arrives at them by that other subsystem's name:
+``test_break_axis_facet.py`` (break × faceting: per-panel build, warning
+cadence), ``test_break_axis_annotation_clip.py`` (break × the annotation
+layer: clip/split/suppress fate per annotation kind), and
+``test_break_axis_coordflip.py`` (break × ``CoordFlip``: physical-axis token
+semantics).
+
+Everything else lives here because it is one subsystem — the break's own
+geometry — examined from several angles, and the angles share their fixtures
+and their hand-derived pixel arithmetic. Extent clipping, split-corner
+squaring (#230-2), vertex splitting (#230-1), split-key suffixing (#230-5),
+area borders, axis chrome, the scale-pixel-range/tick-label pins (#226, D2),
+same-axis merge (#230-4) and the Polar/Geo refusals (#230-8) all answer
+"where does the break put this geometry", against the same ``plot_height -
+n_breaks * break_size`` allocation. Splitting them into nine files would
+duplicate that arithmetic nine times, which is the drift the shared-parser
+extraction (``tests/_svg_extents.py``, ``tests/_svg_rects.py``) exists to
+prevent. The banner comments below are the seams; take one out to its own
+module when it stops sharing the fixtures, not before.
 """
 
 from __future__ import annotations
@@ -30,6 +57,7 @@ import pytest
 import ferrum as fm
 import ferrum.annotation as ann
 from _svg_extents import axis_tick_dash_label_pairs, label_along, tick_along
+from _svg_rects import svg_elements
 
 
 # --------------------------------------------------------------------------
@@ -40,12 +68,25 @@ _MARK_FILL = "#2563eb"
 
 
 def _rects(svg: str, fill: str = _MARK_FILL) -> list[tuple[float, float, float, float]]:
-    """``(x, y, w, h)`` for every mark rect painted in ``fill``."""
-    pattern = (
-        r'<rect x="([-\d.]+)" y="([-\d.]+)" width="([\d.]+)" height="([\d.]+)" '
-        rf'fill="{re.escape(fill)}"'
-    )
-    return [tuple(float(g) for g in m.groups()) for m in re.finditer(pattern, svg)]
+    """``(x, y, w, h)`` for every mark rect painted in ``fill``.
+
+    Binds to ``tests/_svg_rects.py``'s shared element parser (that module's
+    docstring names it the home for new sibling sites), as
+    ``test_break_axis_facet.py`` and ``test_break_axis_coordflip.py`` already
+    do. The hand-rolled positional regex this replaced required the SVG
+    attributes in exactly the order ``x y width height fill`` and would have
+    gone quietly blind on any attribute-ordering change in the Rust writer;
+    the shared parser reads an attribute dict and cannot.
+
+    ``_svg_rects.data_bar_rects`` is deliberately NOT used: it merges every
+    non-background data fill into one list, and this module's grid-band
+    assertions (``_BAND_FILL``) depend on telling band rects apart from mark
+    rects by color.
+    """
+    return [
+        (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
+        for a in svg_elements(svg, "rect", lambda a: a.get("fill") == fill)
+    ]
 
 
 def _paths(svg: str) -> list[str]:

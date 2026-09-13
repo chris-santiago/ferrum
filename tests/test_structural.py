@@ -245,6 +245,62 @@ class TestBreakAxisGapValidation:
         b = BreakAxis(axis="y", gap=[[10, 20]])
         assert b.gap == [(10, 20)]
 
+    def test_tuple_of_pairs_keeps_its_container_and_stays_hashable(self):
+        """The coerce-and-write-back path must not change ``gap``'s container
+        type. It did (design review F3): a tuple of pairs came back as a
+        LIST of pairs, which made a frozen ``BreakAxis`` unhashable —
+        ``hash(BreakAxis(axis="y", gap=((1, 5), (6, 9))))`` worked before the
+        temporal-bounds wave and raised ``TypeError: unhashable type: 'list'``
+        after it — so hashability depended on which of two equivalent
+        spellings the caller chose."""
+        b = BreakAxis(axis="y", gap=((1, 5), (6, 9)))
+        assert isinstance(b.gap, tuple)
+        assert b.gap == ((1, 5), (6, 9))
+        assert isinstance(hash(b), int)
+
+    def test_list_of_pairs_stays_a_list(self):
+        """The other half of F3: a list-spelled gap is not silently promoted
+        to a tuple either. It was never hashable, and is not made so."""
+        b = BreakAxis(axis="y", gap=[(1, 5), (6, 9)])
+        assert isinstance(b.gap, list)
+        assert b.gap == [(1, 5), (6, 9)]
+        with pytest.raises(TypeError):
+            hash(b)
+
+    def test_bare_pair_stays_a_bare_tuple(self):
+        b = BreakAxis(axis="y", gap=(10, 90))
+        assert b.gap == (10, 90)
+        assert isinstance(hash(b), int)
+
+    @pytest.mark.parametrize(
+        "start, end",
+        [
+            (np.int64(10), np.int64(90)),
+            (np.int32(10), np.int32(90)),
+            (np.float32(10.0), np.float32(90.0)),
+            (np.float64(10.0), np.float64(90.0)),
+        ],
+        ids=["int64", "int32", "float32", "float64"],
+    )
+    def test_numpy_numeric_bounds_are_accepted(self, start, end):
+        """A numpy scalar is what a dataframe hands back (``df["v"].max()``),
+        and the encoding layer's domain coercion has always accepted one via
+        its duck-typed ``float(value)``. ``BreakAxis`` refused every numpy
+        integer and narrow float while accepting ``np.datetime64`` — an
+        asymmetry with no contract behind it (design review F10). Only
+        ``np.float64`` worked before, and only because it subclasses
+        ``float``."""
+        b = BreakAxis(axis="y", gap=(start, end))
+        assert b.gap == (10.0, 90.0)
+        assert all(isinstance(bound, float) for bound in b.gap)
+
+    def test_numpy_bool_bound_is_still_refused(self):
+        """``bool`` is excluded from the numeric kinds (a boolean is not a
+        break region), and widening to numpy numerics must not smuggle
+        ``np.bool_`` in: it is neither ``np.integer`` nor ``np.floating``."""
+        with pytest.raises(ValueError, match=r"BreakAxis\.gap\[0\]: start must be a numeric"):
+            BreakAxis(axis="y", gap=(np.bool_(True), 90))
+
 
 # ---------------------------------------------------------------------------
 # BreakAxis.gap temporal bounds (#230-6): str/date/datetime/np.datetime64/

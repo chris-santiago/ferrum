@@ -112,15 +112,26 @@ fm.BreakAxis(
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `axis` | `str` | required | Which axis to break: `"x"` or `"y"` |
-| `gap` | `tuple | list` | required | A `(start, end)` pair or a list of pairs |
+| `gap` | `tuple \| list` | required | One `(start, end)` pair, or a sequence of pairs. Each bound is **numeric** (`int`, `float`, or a numpy scalar such as `np.int64`) or **temporal** (ISO-8601 date/datetime `str`, `datetime.date`, `datetime.datetime`, `numpy.datetime64`, `pandas.Timestamp`) — see [Time series with a data gap](#time-series-with-a-data-gap) |
 | `break_size` | `float` | `12` | Visual size of the break indicator in pixels |
 | `break_style` | `str` | `"slash"` | Break indicator: `"slash"`, `"zigzag"`, `"wave"`, or `"gap"` |
 
+The stored `gap` keeps the container type it was given (a tuple of pairs stays a tuple, so a tuple-spelled `BreakAxis` stays hashable), with each pair canonicalized to a 2-tuple. Temporal bounds are replaced by their epoch-millisecond floats at construction, so `BreakAxis(axis="x", gap=("2020-03-01", "2021-01-01")).gap` reads back as `(1583020800000.0, 1609459200000.0)`.
+
 ### Validation
+
+Everything below raises `ValueError` at construction time, naming the offending value — never at render time, and never by silently rendering a blank or nonsense chart.
 
 - `axis` must be `"x"` or `"y"`.
 - `break_style` must be one of the four named styles.
-- Invalid values raise `ValueError` at construction time.
+- `gap` must be a tuple or list holding at least one `(start, end)` pair, and every pair must have exactly two bounds.
+- Both bounds of one pair must be the same kind: a pair mixing a numeric bound with a temporal one is refused.
+- Each coerced pair must be **finite** (no `NaN`, no `±inf`) and **ordered** (`start < end`; equal bounds are a zero-width gap and are refused too).
+- A string bound that is not an ISO-8601 date or datetime is refused as an unparseable date, not as "not numeric".
+- A not-a-time bound (`pandas.NaT`, `numpy.datetime64("NaT")`) is refused by name.
+- A `numpy.datetime64` too large to represent as a microsecond-precision epoch offset is refused rather than silently wrapping to a meaningless instant.
+
+Two things are deliberately *not* construction errors, because they depend on data the constructor cannot see: a gap that falls outside the axis's resolved domain, and a temporal gap on a non-temporal axis. Both render as if the break had not been declared and emit a `BreakAxisIneffective` warning.
 
 ---
 
@@ -150,7 +161,7 @@ fm.BreakAxis(
 )
 ```
 
-Breaks are applied in order. Overlapping or adjacent ranges are handled gracefully.
+The gaps in one spec are **merged into a union**, not applied one after another: they are sorted, overlapping or adjacent ranges are combined into a single removed range, and the result is clipped to the axis domain before any segment is laid out. `gap=[(50, 200), (150, 300)]` therefore removes `(50, 300)` once and draws one indicator, not two overlapping ones, and the order you write the pairs in does not matter.
 
 Declaring two (or more) separate `fm.BreakAxis(...)` specs on the *same* axis merges their gaps into one break result instead of composing them sequentially — the render is identical to a single spec declaring the union of both gap lists. A conflicting `break_style`/`break_size` between the merged specs keeps the first declaration's value and warns once, naming the axis and the field that disagreed.
 

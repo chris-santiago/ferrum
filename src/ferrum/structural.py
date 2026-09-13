@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as _dt
-import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,27 +83,34 @@ class BreakAxis:
     axis : str
         Which axis to break: ``"x"`` or ``"y"``.
     gap : tuple or list
-        A single ``(start, end)`` break region or a list of ``(start, end)``
-        tuples for multiple breaks. Each bound is either numeric
-        (``int``/``float``, data-space) or temporal (``str`` ISO-8601 date/
+        A single ``(start, end)`` break region or a sequence of
+        ``(start, end)`` pairs for multiple breaks. Each bound is either
+        numeric (``int``/``float`` or a numpy scalar — ``np.int64``,
+        ``np.float32``, ... — data-space) or temporal (``str`` ISO-8601 date/
         datetime, ``datetime.date``, ``datetime.datetime``,
         ``numpy.datetime64``, or ``pandas.Timestamp``) — temporal bounds are
-        coerced to epoch-milliseconds UTC at construction time via the same
-        conversion the encoding layer applies to temporal scale domains and
-        annotation coordinates (#230-6). A naive (timezone-unaware) string or
-        ``datetime`` bound is *treated as* UTC; a timezone-aware ``datetime``
-        or ``pandas.Timestamp`` bound is *converted* to UTC before its epoch
-        offset is computed — the same naive/aware split
-        ``ferrum.annotation.coords.temporal_coord_to_epoch_ms`` documents,
-        since that is the function this coercion reuses. Both bounds of one
-        gap must be the same kind (numeric or temporal); a pair mixing the two raises
-        ``ValueError``. Once coerced, each ``(start, end)`` pair must be
-        finite (no NaN/±inf) and correctly ordered (``start < end``); a
-        malformed, non-finite, reversed, or unparseable-string gap raises
-        ``ValueError`` at construction time (#92, #230-6) instead of sailing
-        through to a blank or nonsense render. A temporal gap on a
-        non-temporal axis is out-of-domain and warns ``BreakAxisIneffective``
-        at render time rather than refusing at construction.
+        coerced to epoch-milliseconds UTC at construction time by
+        ``ferrum.annotation.coords.temporal_coord_to_epoch_ms``, literally
+        the same function the encoding layer applies to temporal scale
+        domains and annotation coordinates, so all three accept the same
+        types (#230-6). A naive (timezone-unaware) string or ``datetime``
+        bound is *treated as* UTC; a timezone-aware ``datetime`` or
+        ``pandas.Timestamp`` bound is *converted* to UTC before its epoch
+        offset is computed — that function's documented naive/aware split.
+        Both bounds of one gap must be the same kind (numeric or temporal); a
+        pair mixing the two raises ``ValueError``. Once coerced, each
+        ``(start, end)`` pair must be finite (no NaN/±inf) and correctly
+        ordered (``start < end``); a malformed, non-finite, reversed,
+        not-a-time (``pd.NaT``/``np.datetime64('NaT')``), out-of-range
+        ``datetime64``, or unparseable-string gap raises ``ValueError`` at
+        construction time (#92, #230-6) instead of sailing through to a blank
+        or nonsense render. A temporal gap on a non-temporal axis is
+        out-of-domain and warns ``BreakAxisIneffective`` at render time
+        rather than refusing at construction.
+
+        The stored ``gap`` keeps the container type it was given (a tuple of
+        pairs stays a tuple, so a tuple-spelled ``BreakAxis`` stays hashable)
+        while each pair is canonicalized to a 2-tuple of coerced floats.
     break_size : float, default 12
         Visual size of the break indicator in pixels.
     break_style : str, default "slash"
@@ -148,195 +154,47 @@ def _normalize_break_gaps(gap: Any) -> list[Any]:
     return list(gap)
 
 
-# Exact microseconds-per-tick ratio (numerator, denominator) for every unit
-# a ``numpy.datetime64`` dtype can carry: Y M W D h m s ms us ns ps fs as.
-# ``W`` through ``as`` are genuine fixed-length durations, so their ratios
-# are mathematically exact -- e.g. one ``ns`` tick is exactly 1/1000 of a
-# microsecond, regardless of which instant it falls on. ``Y`` and ``M`` are
-# NOT fixed-length (a Gregorian year is 365 or 366 days; a calendar month is
-# 28-31 days -- probed directly against ``np.datetime64``'s own calendar
-# arithmetic), so no rational ratio is exact for them. Their entries here
-# are instead a *proven* upper bound (no calendar year exceeds 366 days, no
-# calendar month exceeds 31 days), used only to gate the overflow refusal in
-# :func:`_epoch_us_for_datetime64` below -- never to compute an actual epoch
-# value, which for ``Y``/``M`` can only come from numpy's own calendar-aware
-# cast (see that function's docstring for why that is still safe to call).
-_DATETIME64_US_PER_TICK: dict[str, tuple[int, int]] = {
-    "Y": (366 * 86400 * 10**6, 1),
-    "M": (31 * 86400 * 10**6, 1),
-    "W": (7 * 86400 * 10**6, 1),
-    "D": (86400 * 10**6, 1),
-    "h": (3600 * 10**6, 1),
-    "m": (60 * 10**6, 1),
-    "s": (10**6, 1),
-    "ms": (1000, 1),
-    "us": (1, 1),
-    "ns": (1, 1000),
-    "ps": (1, 10**6),
-    "fs": (1, 10**9),
-    "as": (1, 10**12),
-}
-
-# Units whose ratio above is mathematically exact (every unit but the two
-# calendar ones), so their epoch-microsecond value can be computed directly
-# from the ratio with integer floor division -- no numpy round-trip.
-_DATETIME64_EXACT_UNITS = frozenset(_DATETIME64_US_PER_TICK) - {"Y", "M"}
-
-# The largest microsecond magnitude a signed 64-bit epoch offset can hold.
-# The negative side has one extra unit of headroom (``-2**63`` is itself the
-# ``NaT`` sentinel, already excluded by the ``np.isnat`` check upstream), so
-# this symmetric, slightly-conservative bound never accepts past the true
-# boundary.
-_DATETIME64_MAX_ABS_US = 2**63 - 1
-
-
-def _epoch_us_for_datetime64(label: str, value: Any) -> int:
-    """Return a non-``NaT`` ``np.datetime64`` bound's epoch offset in exact
-    microseconds, refusing it first if that offset cannot fit.
-
-    Every unit ``np.datetime64`` supports -- ``Y M W D h m s ms us ns ps fs
-    as`` -- passes through the identical arbitrary-precision proof before
-    any fixed-width cast can run, regardless of the dtype's ``count``:
-    ``raw`` is the value's raw, unscaled tick count (a reinterpret via
-    ``int64``, never scaled, so it cannot itself wrap), ``unit``/``count``
-    are read from the dtype's metadata (``np.datetime_data``, a pure
-    metadata read), and the two are combined with the unit's
-    microseconds-per-tick ratio using Python's arbitrary-precision integers,
-    which cannot overflow at any magnitude. A zero-count dtype
-    (``datetime64[0us]`` etc., which denotes no duration) is refused before
-    any arithmetic, so ``count >= 1`` holds throughout the proof. There is
-    no branch that skips this proof for any unit or any ``count`` -- a fine
-    unit (``us``/``ns``/
-    ``ps``/``fs``/``as``) whose ``count`` multiplies the tick back up past
-    microsecond resolution (e.g. ``datetime64[1000us]``) goes through
-    exactly the same arithmetic as a coarse one (#230-6 cycle-5; a
-    cycle-4 comment asserted fine units "cannot grow past int64 range and
-    need no check", which is false whenever ``count`` > 1).
-
-    For every unit except ``Y``/``M``, the ratio is exact, so the proof's
-    own arithmetic *is* the epoch-microsecond value -- no numpy cast runs
-    at all for those units, so there is nothing for a second, independently
-    fixed-width cast to disagree with. ``Y``/``M`` are not fixed-length
-    durations (see :data:`_DATETIME64_US_PER_TICK`'s docstring), so no
-    ratio can give their true calendar value; once this proof accepts a
-    ``Y``/``M`` bound using its conservative upper-bound ratio, the bound's
-    true magnitude is guaranteed no larger than the already-accepted
-    estimate, so numpy's own calendar-aware cast to ``datetime64[us]`` --
-    the only correct source for a real calendar date -- is now provably
-    safe to call and cannot itself wrap (#230-6 cycle-3's failure mode,
-    where a second numpy cast could wrap right along with the value being
-    checked, is structurally excluded: the safety proof never depends on a
-    numpy cast).
-    """
-    import numpy as np
-
-    raw = int(value.astype("int64"))  # native-unit tick count, unscaled
-    unit, count = np.datetime_data(value.dtype)
-    if count < 1:
-        # `datetime64[0us]` (and every other zero-count unit) is a legal,
-        # constructible numpy dtype whose ticks denote NO duration: the
-        # multiplicative proof below would degenerate to `0 > bound` and
-        # silently accept a fabricated 1970 epoch instant, and numpy's own
-        # casts raise SystemError on it. Refuse before any arithmetic —
-        # negative counts are rejected by numpy at dtype-parse time, so
-        # `count >= 1` holds everywhere past this line (#230-6 cycle-6).
-        raise ValueError(
-            f"{label}: {value!r} has a zero-count datetime64 unit "
-            f"('{count}{unit}'), which denotes no duration and cannot be "
-            "interpreted as an instant"
-        )
-    ratio = _DATETIME64_US_PER_TICK.get(unit)
-    if ratio is None:
-        # Every unit np.datetime64 can carry is tabled above; a non-NaT
-        # value with any other unit metadata is not constructible, so this
-        # is unreachable in practice. Refuse rather than silently accept
-        # under REFUSE MALFORMED, in case a future numpy adds a new unit.
-        raise ValueError(f"{label}: {value!r} has an unrecognized datetime64 unit {unit!r}")
-    numerator, denominator = ratio
-    if abs(raw) * count * numerator > _DATETIME64_MAX_ABS_US * denominator:
-        raise ValueError(
-            f"{label}: {value!r} is out of range to represent as a "
-            "microsecond-precision epoch offset"
-        )
-    if unit in _DATETIME64_EXACT_UNITS:
-        return (raw * count * numerator) // denominator
-    return int(value.astype("datetime64[us]").astype("int64"))
-
-
 def _coerce_temporal_gap_bound(label: str, value: Any) -> float:
     """Coerce one temporal ``BreakAxis.gap`` bound to epoch-milliseconds (UTC).
 
-    Reuses :func:`ferrum.annotation.coords.temporal_coord_to_epoch_ms` — the
-    same UTC-by-contract conversion the encoding layer's TimeScale-domain
-    coercion (``ferrum.encoding._scale._convert_temporal_domain_elements``)
-    and annotation coordinates already use (SPEC-04) — for
-    ``str``/``datetime.date``/``datetime.datetime`` bounds; ``pd.Timestamp``
-    is a ``datetime.datetime`` subclass and is covered by that same branch.
-    That reused function does not itself refuse ``pd.NaT`` (also a
-    ``datetime.datetime`` subclass): subtracting it from the epoch produces a
-    NaN second count rather than raising, so the NaN result is caught here
-    and refused with the same message as a ``np.datetime64`` ``NaT`` bound,
-    rather than sailing through to a generic "not finite" diagnosis two
-    layers downstream. ``np.datetime64`` has no analog in the reused
-    function (it is not a ``datetime.datetime`` subclass), so it is
-    converted directly via numpy's own microsecond cast — microsecond, not
-    millisecond, because ``datetime.datetime``/``pd.Timestamp`` (the
-    ``temporal_coord_to_epoch_ms`` branch below) top out at microsecond
-    resolution too, via ``total_seconds() * 1000.0``. Casting at the same
-    resolution as that sibling branch means a ``datetime64`` bound and a
-    ``pd.Timestamp``/``datetime`` bound for the *same instant* coerce to the
-    identical fractional-millisecond float, rather than one truncating a
-    sub-millisecond digit the other preserves. A ``datetime64`` bound finer
-    than microseconds (``[ns]`` and below) loses that extra precision on the
-    cast, same as it would converting through ``pd.Timestamp`` or Python's
-    own ``datetime``; only a genuine overflow of the microsecond-resolution
-    epoch offset (e.g. a value with unit ``"Y"`` many billions of years out,
-    or a fine unit whose dtype ``count`` multiplies it back up past
-    microsecond resolution) is refused as out of range. That overflow is
-    detected *before* any fixed-width cast runs, via
-    :func:`_epoch_us_for_datetime64`'s arbitrary-precision Python-integer
-    proof over the value's raw, unscaled tick count and its unit/count
-    metadata — uniformly for every ``np.datetime64`` unit, never by
-    comparing against a second numpy cast. A numpy reference cast is
-    fixed-width and can itself silently wrap for an extreme enough input, so
-    two independently-wrapped casts can land in coincidental agreement and
-    fool a wrap-detector built from them; Python ints cannot wrap, so that
-    failure mode is unrepresentable here. The proof is exact for every unit
-    except the two calendar units (``Y``, ``M``, which are not fixed-length
-    durations): for those it is a proven conservative upper bound that can
-    refuse a band of large-but-representable values a few hundred years
-    before the true boundary, but never accept one past it (see
-    :func:`_epoch_us_for_datetime64`'s docstring).
+    Delegates the whole conversion to
+    :func:`ferrum.annotation.coords.temporal_coord_to_epoch_ms`, the one
+    Python-side temporal seam — the same function the encoding layer's
+    TimeScale-domain coercion (``ferrum.encoding._scale._convert_temporal_domain_elements``)
+    and annotation coordinates go through (SPEC-04). Every accepted spelling
+    (``str`` ISO-8601, ``datetime.date``, ``datetime.datetime``,
+    ``pandas.Timestamp`` via the ``datetime`` subclass, ``numpy.datetime64``)
+    and every refusal (not-a-time, out-of-range ``datetime64``, unparseable
+    string) is decided there, so a gap bound and a scale domain element of
+    the same type cannot drift apart. This function only supplies the
+    ``BreakAxis.gap[i]`` label, which the seam has no business knowing.
+
+    The seam's refusals are surfaced in two shapes: an unparseable string
+    (its own ``_TemporalParseError``) is re-worded in this module's
+    vocabulary, because "a bad date in a break gap" is a break-gap mistake
+    and must read as one; every other refusal is the seam's own sentence
+    with the bound's label prefixed.
 
     Raises
     ------
     ValueError
-        If a ``np.datetime64`` or ``pd.Timestamp`` bound is ``NaT``, a
-        ``np.datetime64`` bound overflows the ``int64`` range a
-        microsecond-resolution epoch offset can represent, or a string bound
-        cannot be parsed as an ISO-8601 date or datetime — naming the
-        offending value in every case (#230-6).
+        If the bound is ``pd.NaT``/``np.datetime64('NaT')``, a
+        ``np.datetime64`` out of range to represent as a
+        microsecond-precision epoch offset, or a string that cannot be
+        parsed as an ISO-8601 date or datetime — naming the offending value
+        in every case (#230-6).
     """
-    import numpy as np
-
-    if isinstance(value, np.datetime64):
-        if np.isnat(value):
-            raise ValueError(f"{label}: got NaT (not-a-time), which is not a valid bound")
-        us_int = _epoch_us_for_datetime64(label, value)
-        return us_int / 1000.0
-
-    from ferrum.annotation.coords import temporal_coord_to_epoch_ms
+    from ferrum.annotation.coords import _TemporalParseError, temporal_coord_to_epoch_ms
 
     try:
-        epoch_ms = temporal_coord_to_epoch_ms(value)
-    except ValueError as exc:
+        return temporal_coord_to_epoch_ms(value)
+    except _TemporalParseError as exc:
         raise ValueError(
             f"{label}: cannot parse {value!r} as an ISO-8601 date or datetime "
             "(use 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS')"
         ) from exc
-    if math.isnan(epoch_ms):
-        raise ValueError(f"{label}: got NaT (not-a-time), which is not a valid bound")
-    return epoch_ms
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
 
 
 def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
@@ -344,7 +202,11 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
 
     Returns ``(kind, coerced_value)``:
 
-    - ``"numeric"``: ``int``/``float`` (``bool`` excluded), unchanged.
+    - ``"numeric"``: ``int``/``float`` and their numpy counterparts
+      (``np.integer``/``np.floating``, e.g. the ``np.int64`` a
+      ``DataFrame[col].max()`` hands back), coerced to ``float``. ``bool`` and
+      ``np.bool_`` are excluded — a boolean gap bound is a mistake, not a 0/1
+      break region.
     - ``"temporal"``: ``str``/``datetime.date``/``datetime.datetime``/
       ``numpy.datetime64`` (``pandas.Timestamp`` included via the
       ``datetime.datetime`` subclass check), coerced to epoch-ms UTC via
@@ -361,6 +223,14 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
     strings are meaningful ``BreakAxis.gap`` input now (temporal), unlike the
     ordinal-category vocabulary annotation coordinates use for non-ISO
     strings, so a bad one must be diagnosed as a bad date, not a bad number.
+
+    The numpy-numeric branch mirrors what the encoding layer's domain
+    coercion already accepts through its duck-typed ``float(value)``: a
+    pandas/numpy-derived *datetime* bound worked while a pandas/numpy-derived
+    *integer* bound did not, which is an asymmetry with no contract behind it
+    (design review F10). ``np.float64`` reached the numeric branch already —
+    it subclasses ``float`` — so only the integer and narrower-float numpy
+    scalars change.
     """
     if isinstance(value, bool):
         return "other", value
@@ -368,10 +238,19 @@ def _classify_and_coerce_gap_bound(label: str, value: Any) -> tuple[str, Any]:
         return "numeric", value
     if isinstance(value, (_dt.date, _dt.datetime, str)):
         return "temporal", _coerce_temporal_gap_bound(label, value)
+
+    # numpy is imported here rather than at module scope, matching this
+    # package's other numpy touch points. `_is_datetime64` is the seam's own
+    # predicate, so "which numpy values are temporal" is answered in the one
+    # place that converts them.
     import numpy as np
 
-    if isinstance(value, np.datetime64):
+    from ferrum.annotation.coords import _is_datetime64
+
+    if _is_datetime64(value):
         return "temporal", _coerce_temporal_gap_bound(label, value)
+    if isinstance(value, (np.integer, np.floating)):
+        return "numeric", float(value)
     return "other", value
 
 
@@ -390,10 +269,19 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
     (no break regions at all) is refused as malformed too, as is a ``gap``
     that is not iterable (e.g. a bare number).
 
-    Returns the coerced gap in the same single-pair-vs-list-of-pairs shape as
-    the input (bare ``(start, end)`` stays bare; a list of pairs stays a
-    list), for ``BreakAxis.__post_init__`` to store back onto the frozen
-    dataclass so temporal bounds never reach wire serialization unconverted.
+    Returns the coerced gap in the same shape AND the same container type as
+    the input, for ``BreakAxis.__post_init__`` to store back onto the frozen
+    dataclass so temporal bounds never reach wire serialization unconverted:
+    a bare ``(start, end)`` stays bare, a tuple of pairs stays a tuple, a list
+    of pairs stays a list. The container type is load-bearing, not cosmetic —
+    ``BreakAxis`` is a frozen dataclass, so rebuilding a tuple-spelled ``gap``
+    as a list silently made the instance UNHASHABLE (design review F3;
+    ``hash(BreakAxis(axis="y", gap=((1, 5), (6, 9))))`` raised ``TypeError``
+    where it had always worked), and made hashability depend on which of two
+    equivalent spellings the caller happened to choose. Each *pair* is
+    canonicalized to a 2-tuple regardless of how it was spelled — that is the
+    shape every reader downstream expects, and a list pair was never hashable
+    in any spelling.
     """
     if not isinstance(gap, (tuple, list)):
         raise ValueError(
@@ -428,9 +316,12 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
     # single-pair-vs-list classification: `_normalize_break_gaps` is that
     # heuristic's single owner (see its docstring), so `pairs[0] is gap`
     # holds exactly when the single-pair branch wrapped `gap` in a new list
-    # — a bare (start, end) tuple stays bare, anything else stays a list.
+    # — a bare (start, end) tuple stays bare, anything else is a sequence of
+    # pairs and keeps the caller's own container type (F3).
     if pairs[0] is gap:
         return coerced_pairs[0]
+    if isinstance(gap, tuple):
+        return tuple(coerced_pairs)
     return coerced_pairs
 
 

@@ -64,13 +64,21 @@ _TEMPORAL_ACCEPTED_FORMS = (
 def _convert_temporal_domain_elements(domain: list | tuple) -> list:
     """Convert a temporal scale's raw ``domain`` elements to epoch-ms (UTC), or refuse.
 
-    Every ``datetime.date``/``datetime.datetime``/ISO-8601 string element is
-    converted via :func:`ferrum.annotation.coords.temporal_coord_to_epoch_ms`
-    — the canonical Python-side converter, cross-language-parity-pinned
-    against Rust's own ``TimeScale(domain=...)`` extraction by
+    Every ``datetime.date``/``datetime.datetime``/``numpy.datetime64``/
+    ISO-8601 string element is converted via
+    :func:`ferrum.annotation.coords.temporal_coord_to_epoch_ms` — the
+    canonical Python-side converter, cross-language-parity-pinned against
+    Rust's own ``TimeScale(domain=...)`` extraction by
     ``tests/test_timescale_domain.py``. Elements already numeric (``float``/
     ``int``, i.e. already epoch-ms) are coerced via ``float()`` to ensure
     consistent serialization across both wire routes (chart-level and layer).
+
+    ``numpy.datetime64`` reaches that converter as of the F1 seam hoist
+    (design review, wave-2 break-axis): it was previously refused here as a
+    non-temporal type while ``BreakAxis.gap`` accepted it through a private
+    copy of the conversion, so the break and the scale domain of the same
+    axis spoke different vocabularies. ``pandas.NaT`` likewise converted to
+    ``nan`` and reached the wire; the seam now refuses it by name.
 
     This seam owns the whole rule, conversion AND refusal, because it is the
     only point BOTH wire routes pass through. Rust's own
@@ -95,14 +103,18 @@ def _convert_temporal_domain_elements(domain: list | tuple) -> list:
     bad ISO string in a *scale* domain is a scale-domain mistake and must read
     as one.
     """
-    from ferrum.annotation.coords import temporal_coord_to_epoch_ms
+    from ferrum.annotation.coords import (
+        _is_datetime64,
+        _TemporalParseError,
+        temporal_coord_to_epoch_ms,
+    )
 
     converted = []
     for value in domain:
-        if isinstance(value, (_dt.date, _dt.datetime, str)):
+        if isinstance(value, (_dt.date, _dt.datetime, str)) or _is_datetime64(value):
             try:
                 converted.append(temporal_coord_to_epoch_ms(value))
-            except ValueError as exc:
+            except _TemporalParseError as exc:
                 raise ValueError(
                     f"Cannot parse TimeScale domain value {value!r} as an ISO-8601 date or "
                     "datetime. Use 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:MM:SS[.ffffff][±HH:MM]'."
