@@ -221,9 +221,14 @@ class FeatureImportanceMixin(_MixinBase):
             Reserved for future use (no-op today). Participates only in the
             result cache key; not yet forwarded to the SHAP explainer.
         """
+        # Keyed on content, not `str(background)[:64]` (#224b): the
+        # truncation collided distinct backgrounds that differed only
+        # past character 64. `_cache_key` normalizes an ndarray/list/tuple
+        # `background` into a nested tuple of its own values; `None`
+        # passes through unchanged (already hashable).
         key = self._cache_key(
             "shap_values",
-            background=str(background)[:64],
+            background=background,
             max_evals=max_evals,
         )
         if key in self._cache:

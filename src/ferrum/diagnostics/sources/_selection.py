@@ -135,10 +135,14 @@ class ModelSelectionMixin(_MixinBase):
             raise ValueError("ModelSource.validation_curve() requires y to be provided.")
         X = self._require_X("validation_curve")
         vals = np.asarray(list(values), dtype=np.float64)
+        # `_cache_key` normalizes array-likes centrally (#224b) -- the
+        # local `tuple(float(v) for v in vals)` this used to build purely
+        # for cache-key hashability is now redundant; hand it the ndarray
+        # directly and let the one normalizer own it.
         key = self._cache_key(
             "validation_curve",
             param=param,
-            values=tuple(float(v) for v in vals),
+            values=vals,
             cv=cv,
             scoring=scoring,
         )

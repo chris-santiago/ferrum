@@ -23,6 +23,47 @@ import polars as pl
 import pyarrow as pa
 
 
+class _Uncacheable:
+    """Marks one ``_cache_key`` kwarg value as unhashable-after-normalization.
+
+    ``BaseSource._cache_key`` embeds a fresh instance per call for a kwarg
+    that stays unhashable after ``_normalize`` (a dict, a cv splitter with
+    no usable ``__hash__``), so the returned key can never equal any other
+    key, past or future — the lookup always misses and the compute always
+    runs fresh. ``_SourceCache.__setitem__`` recognizes this marker so the
+    *storage* half of the contract holds too: per spec §6, an
+    unnormalizable value is not cached, full stop, not cached-under-a-
+    unique-key. Without this, the ~25 call sites' unconditional
+    ``self._cache[key] = df`` would still leak one throwaway, never-reused
+    entry into ``self._cache`` per call — unbounded growth for a caller
+    that repeatedly passes the same reused unhashable object (e.g. looping
+    ``discrimination_threshold(cv=my_splitter)``).
+    """
+
+    __slots__ = ()
+
+
+class _SourceCache(dict):
+    """``self._cache``: a plain dict that refuses to store an uncacheable key.
+
+    Every ``ModelSource`` derived-data method follows the same shape —
+    ``if key in self._cache: return self._cache[key]`` on entry,
+    ``self._cache[key] = df`` after computing — repeated identically at
+    every call site across the mixin family. Rather than touch all ~25
+    sites (most outside this fix's footprint) to add a conditional store,
+    the store decision lives here once: a key built with an
+    ``_Uncacheable`` marker (see above) never gets persisted, so those
+    call sites' unconditional assignment becomes a correct no-op for
+    exactly the values the contract says must not be cached.
+    """
+
+    def __setitem__(self, key: tuple, value: Any) -> None:
+        _, pairs = key
+        if any(isinstance(v, _Uncacheable) for _, v in pairs):
+            return
+        super().__setitem__(key, value)
+
+
 _PROTOCOL_ATTRS: tuple[str, ...] = (
     "predict",
     "predict_proba",
@@ -152,7 +193,7 @@ class BaseSource:
         self._capabilities = frozenset(
             attr for attr in _PROTOCOL_ATTRS if hasattr(self._model, attr)
         )
-        self._cache: dict[tuple, pl.DataFrame] = {}
+        self._cache: dict[tuple, pl.DataFrame] = _SourceCache()
 
     @property
     def X(self) -> "pl.DataFrame | None":
@@ -299,23 +340,74 @@ class BaseSource:
     def _cache_key(self, method: str, **kwargs) -> tuple:
         """Build a hashable cache key from method name + kwargs.
 
-        Hashable kwarg values (the common case — ints, strs, None,
-        tuples) pass through unchanged so a string ``"f1"`` keys
-        identically across calls.  Unhashable values (lists, ndarrays,
-        cv splitter objects, …) fall back to ``repr()`` so we don't
-        raise ``TypeError`` at dict-lookup time; this trades cache
-        stability across calls (repr of mutable objects can change)
-        for crash-freedom on legitimate inputs that the public
-        signatures advertise as ``Any``.  Callers that need stable
-        cache identity across calls (e.g. for an ndarray of
-        ``train_sizes``) should normalize to a tuple before calling.
+        Array-likes are normalized centrally, content-preserving, before
+        any hashability check: an ``ndarray`` (of any dimension) converts
+        via ``.tolist()``, and any ``list``/``tuple`` (including one found
+        nested inside an array-like) converts to a nested tuple of the
+        same scalars — no rounding, no truncation. This is why a string
+        ``"f1"`` still keys identically across calls (the common case,
+        already hashable, untouched), and why an ndarray of ``train_sizes``
+        now keys on its *values* rather than on whatever ``repr()``
+        happened to print. Equal content produces an equal key only when
+        the values' numeric kind also matches: every ``int`` and ``float``
+        leaf (before or after ``ndarray``/``list``/``tuple`` normalization)
+        is tagged with its own type, so ``train_sizes=[1]`` (sklearn:
+        absolute sample count) and ``train_sizes=[1.0]`` (sklearn: fraction
+        of the training set) key differently even though ``1 == 1.0`` —
+        without the tag, Python's cross-type numeric equality/hash
+        (``hash(1) == hash(1.0)``) would collide two semantically
+        different ``learning_curve`` requests onto the same cached frame,
+        the same failure class as the three repros below via a fourth,
+        dtype-driven vector.
+
+        A value that is **still** unhashable after normalization (a dict,
+        a cv splitter object, any custom class without ``__hash__``) is
+        never cached at all: this call gets a cache key built from a
+        fresh ``_Uncacheable`` marker that cannot equal any other key,
+        past or future, so the lookup always misses, the compute always
+        runs fresh, and — via ``self._cache``'s ``_SourceCache.__setitem__``
+        override — the result is never stored either (spec §6: an
+        unnormalizable value is not cached, not cached-under-a-unique-key;
+        a stored-but-unreachable entry would just leak memory for the life
+        of the ``ModelSource``). The prior design fell back to ``repr(v)``
+        for these, which is identity-derived for any object that doesn't
+        override ``__repr__``: two unrelated temporaries of the same class
+        can land at the same freed memory address and produce the *same*
+        key, silently returning one call's cached frame for a completely
+        different request (measured: ``discrimination_threshold(cv=Splitter(3))``
+        followed by ``discrimination_threshold(cv=Splitter(7))``). A
+        truncating fallback (``shap_values``' former
+        ``str(background)[:64]``, or numpy's rounding/``...``-truncating
+        ``repr()``) has the same failure mode without even needing address
+        reuse: two different arrays can print identically. Recomputing on
+        every call for these inputs is strictly safer than either.
         """
 
-        def _hashable(v):
-            try:
-                hash(v)
-            except TypeError:
-                return repr(v)
+        def _normalize(v):
+            if isinstance(v, np.ndarray):
+                v = v.tolist()
+            if isinstance(v, (list, tuple)):
+                return tuple(_normalize(x) for x in v)
+            # Tag int/float leaves with their own type: `1 == 1.0` and
+            # `hash(1) == hash(1.0)`, so an untagged tuple of ints and an
+            # untagged tuple of equal-valued floats would otherwise compare
+            # (and hash) equal — silently colliding two array-likes whose
+            # dtype carries real meaning to the caller (e.g. sklearn's
+            # `learning_curve(train_sizes=)`: int means absolute count,
+            # float means fraction). `bool` is left untagged (a `bool`
+            # kwarg carries no such absolute/fractional split).
+            if isinstance(v, int) and not isinstance(v, bool):
+                return ("int", v)
+            if isinstance(v, float):
+                return ("float", v)
             return v
+
+        def _hashable(v):
+            normalized = _normalize(v)
+            try:
+                hash(normalized)
+            except TypeError:
+                return _Uncacheable()
+            return normalized
 
         return (method, tuple(sorted((k, _hashable(v)) for k, v in kwargs.items())))

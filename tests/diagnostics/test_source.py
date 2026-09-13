@@ -150,24 +150,101 @@ def test_probabilities_caching():
 def test_cache_key_accepts_unhashable_kwargs():
     # Before P3.2, _cache_key(method, train_sizes=[1, 2, 3]) crashed at
     # dict-lookup time because the kwarg value was unhashable and ended
-    # up inside a tuple used as a dict key. The fix falls back to repr()
-    # for unhashable values so the cache lookup just doesn't hit (the
-    # call recomputes) instead of raising TypeError.
+    # up inside a tuple used as a dict key. #224(b), 2026-09-13: a list or
+    # ndarray now normalizes into a nested tuple of its own values FIRST
+    # (content-preserving, no rounding/truncation), so equal content
+    # produces an equal, cacheable key instead of falling back to
+    # identity-derived repr(). A value that is still unhashable after
+    # normalization gets a fresh, never-repeating key, so it can never
+    # collide with a past or future call — the lookup just always misses
+    # (the call recomputes) instead of raising TypeError or caching under
+    # the wrong slot.
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
     source = ferrum.ModelSource(model, X, df["y"])
-    # Pass a list (unhashable) — must not raise.
+    # A list (unhashable) normalizes to a tuple — must not raise, and
+    # equal content must produce an equal key.
     k1 = source._cache_key("dummy", train_sizes=[0.1, 0.5, 1.0])
     k2 = source._cache_key("dummy", train_sizes=[0.1, 0.5, 1.0])
     assert k1 == k2  # same input → same key
-    # Pass an ndarray (unhashable).
-    arr = np.array([1, 2, 3])
+    # An ndarray (unhashable) normalizes the same way as an equal-content list.
+    arr = np.array([0.1, 0.5, 1.0])
     k3 = source._cache_key("dummy", train_sizes=arr)
-    assert hash(k3) == hash(k3)  # the key itself is hashable
-    # Mixed hashable + unhashable kwargs.
+    assert k3 == k1  # same content, different container type → same key
+    # Mixed hashable + unhashable-but-normalizable kwargs.
     k4 = source._cache_key("dummy", cv=5, train_sizes=[0.1, 0.5])
     assert hash(k4) == hash(k4)
+    # A value that stays unhashable even after normalization (a plain dict
+    # isn't an ndarray/list/tuple, so it is not normalized) never repeats:
+    # every call gets its own key.
+    k5 = source._cache_key("dummy", opts={"a": 1})
+    k6 = source._cache_key("dummy", opts={"a": 1})
+    assert k5 != k6
+    # An unhashable kwarg value is not cached, period: a repeated call with
+    # the SAME opts object also never repeats a key (correctness over
+    # caching means every such call is a fresh, uncached miss).
+    same_opts = {"a": 1}
+    k7 = source._cache_key("dummy", opts=same_opts)
+    k8 = source._cache_key("dummy", opts=same_opts)
+    assert k7 != k8
+    # Equal-valued int and float array-likes must NOT collapse to the same
+    # key: sklearn's own learning_curve(train_sizes=) reads an int array as
+    # an absolute sample count and a float array as a fraction — a real
+    # semantic difference the key must preserve even though `1 == 1.0`.
+    k9 = source._cache_key("dummy", train_sizes=[1])
+    k10 = source._cache_key("dummy", train_sizes=[1.0])
+    assert k9 != k10
+    k11 = source._cache_key("dummy", train_sizes=np.array([1, 2, 3]))
+    k12 = source._cache_key("dummy", train_sizes=np.array([1.0, 2.0, 3.0]))
+    assert k11 != k12
+
+
+def test_cache_key_uncacheable_value_never_grows_the_cache():
+    """RED-proof for #224(b)/N5's storage half: an unhashable-after-
+    normalization value must not just miss the cache lookup, it must not
+    be STORED under its one-off key either.
+
+    Pre-fix, ``_cache_key`` gave every such call a fresh, never-repeating
+    ``object()`` sentinel embedded in the key, but every one of the ~25
+    call sites unconditionally does ``self._cache[key] = df`` after
+    computing — so a caller who repeatedly passes the same reused
+    unhashable value (a real cross-validation exploration pattern: looping
+    ``discrimination_threshold(cv=my_splitter)``) would grow
+    ``self._cache`` by one throwaway, never-reused entry per call,
+    unbounded, for the life of the ``ModelSource``. ``self._cache`` is now
+    a ``_SourceCache`` that refuses to store any key built from an
+    ``_Uncacheable`` marker, so the loop below leaves the cache exactly as
+    empty as it started.
+    """
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"])
+
+    class _EqOnlySplitter:
+        def __init__(self, n_splits):
+            self.n_splits = n_splits
+
+        def __eq__(self, other):
+            return isinstance(other, _EqOnlySplitter) and other.n_splits == self.n_splits
+
+        def split(self, X, y=None):
+            from sklearn.model_selection import KFold
+
+            return KFold(n_splits=self.n_splits, shuffle=True, random_state=0).split(X)
+
+    reused_splitter = _EqOnlySplitter(3)
+    source.discrimination_threshold(cv=reused_splitter)
+    # One legitimate entry: `discrimination_threshold` internally calls the
+    # separately-cached `probabilities()`, a real, hashable-keyed hit
+    # shared across every iteration below. The uncacheable `cv=` key
+    # itself must never add a second entry, no matter how many times the
+    # SAME reused splitter is passed.
+    size_after_one_call = len(source._cache)
+    for _ in range(5):
+        source.discrimination_threshold(cv=reused_splitter)
+    assert len(source._cache) == size_after_one_call
 
 
 # --- 10b: classification curves --------------------------------------
@@ -357,6 +434,46 @@ def test_discrimination_threshold_cv_averaging():
     assert thresholds == sorted(thresholds)
 
 
+def test_discrimination_threshold_cv_splitter_identity_never_confused():
+    """RED-proof for #224(b) repro (a): two DIFFERENT custom splitters must
+    never share a cached frame.
+
+    A splitter class that defines ``__eq__`` (disabling the default
+    identity ``__hash__``) without overriding ``__repr__`` is unhashable.
+    Pre-fix, ``_cache_key`` fell back to ``repr(v)`` for it — CPython's
+    default ``object.__repr__`` embeds the memory address, not the
+    object's state. Two short-lived temporaries of the same class
+    reliably land at the same freed address (measured: 10/10 trials), so
+    ``cv=Splitter(3)`` and ``cv=Splitter(7)`` built the SAME cache key and
+    the second call silently returned the first's frame. The fix gives
+    any still-unhashable-after-normalization value a fresh,
+    never-repeating key, so this is now always a genuine cache miss
+    regardless of address reuse.
+    """
+
+    class _EqOnlySplitter:
+        def __init__(self, n_splits):
+            self.n_splits = n_splits
+
+        def __eq__(self, other):
+            return isinstance(other, _EqOnlySplitter) and other.n_splits == self.n_splits
+
+        def split(self, X, y=None):
+            from sklearn.model_selection import KFold
+
+            return KFold(n_splits=self.n_splits, shuffle=True, random_state=0).split(X)
+
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    source = ferrum.ModelSource(model, X, df["y"], random_state=0)
+
+    d3 = source.discrimination_threshold(cv=_EqOnlySplitter(3))
+    d7 = source.discrimination_threshold(cv=_EqOnlySplitter(7))
+    assert d3 is not d7
+    assert not d3.equals(d7)
+
+
 # --- Phase 10e: model-selection methods ---------------------------------
 
 
@@ -384,6 +501,66 @@ def test_learning_curve_schema_and_splits():
         pl.col("mean_score").n_unique().alias("n_unique"),
     )
     assert (agg["n_unique"] == 1).all()
+
+
+def test_learning_curve_train_sizes_content_not_repr_keyed():
+    """RED-proof for #224(b) repro (b): two ``train_sizes`` arrays that
+    numpy's ``repr()`` prints IDENTICALLY (its default ``precision=8``
+    rounds away a sub-epsilon difference) must not share a cache slot.
+    Pre-fix, an ndarray fell back to ``repr()`` for its cache key, so
+    ``learning_curve(train_sizes=[0.2,0.4,0.6,0.8,1.0])`` and the same
+    array with the last element nudged by ``1e-12`` built the SAME key
+    and the second call silently returned the first's frame.
+    """
+    from sklearn.linear_model import Ridge
+
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
+
+    ts1 = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
+    ts2 = np.array([0.2, 0.4, 0.6, 0.8, 1.0 - 1e-12])
+    assert repr(ts1) == repr(ts2)  # the collision precondition
+
+    lc1 = source.learning_curve(cv=3, train_sizes=ts1)
+    lc2 = source.learning_curve(cv=3, train_sizes=ts2)
+    assert lc1 is not lc2
+
+
+def test_learning_curve_train_sizes_int_vs_float_not_dtype_collapsed():
+    """RED-proof for #224(b)/N5 repro (d): an int ``train_sizes`` array and
+    an equal-valued float one must not share a cache slot.
+
+    sklearn's ``learning_curve`` reads an int-dtype ``train_sizes`` as
+    absolute sample counts and a float-dtype one as fractions of the
+    training set — ``train_sizes=[1]`` (one absolute sample) and
+    ``train_sizes=[1.0]`` (100% of the training set) are different
+    requests. Pre-fix, ``_normalize``'s ``ndarray.tolist()`` step
+    preserved the int/float Python types, but the nested tuples
+    ``(1,)`` and ``(1.0,)`` still compare and hash equal
+    (``1 == 1.0``), so the two calls built the SAME cache key and the
+    second silently returned the first's frame despite requesting a
+    completely different train size (measured: absolute train_size=1
+    vs. the float request's actual train_size=133 on this 200-row
+    dataset).
+    """
+    from sklearn.linear_model import Ridge
+
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    source = ferrum.ModelSource(Ridge(), X, df["y"], random_state=0)
+
+    ts_int = np.array([1])
+    ts_float = np.array([1.0])
+    assert ts_int.tolist() == [1] and ts_float.tolist() == [1.0]
+    assert ts_int.tolist() == ts_float.tolist()  # 1 == 1.0: the collision precondition
+
+    lc_int = source.learning_curve(cv=3, train_sizes=ts_int)
+    lc_float = source.learning_curve(cv=3, train_sizes=ts_float)
+    assert lc_int is not lc_float
+    assert not lc_int.equals(lc_float)
+    assert lc_int["train_size"].unique().to_list() == [1]
+    assert lc_float["train_size"].unique().to_list() != [1]
 
 
 def test_validation_curve_schema_and_values():

@@ -7,6 +7,7 @@ goldens live in ``test_goldens_phase_10.py``.
 
 from __future__ import annotations
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -296,6 +297,44 @@ def test_visualizer_show_before_fit_raises():
     viz = ferrum.LearningCurveVisualizer(model=None)
     with pytest.raises(RuntimeError, match="must be fit"):
         viz.show()
+
+
+# --- #224(b): validation_curve's local cache-key normalization collapses
+# --- onto the central BaseSource._cache_key normalizer ------------------
+
+
+def test_validation_curve_cache_key_no_longer_needs_local_normalization():
+    """``validation_curve`` used to build its cache key from a hand-rolled
+    ``tuple(float(v) for v in vals)`` purely so an ndarray ``values``
+    wouldn't crash the cache lookup. ``_cache_key`` now normalizes
+    array-likes centrally (spec §5), so that local step is redundant and
+    was removed; this pins that the collapse didn't reopen the
+    numpy-repr rounding collision ``learning_curve`` had (repro (b)) —
+    equal-content values (list vs. ndarray) still key identically, and
+    values differing only past numpy's ``repr()`` rounding precision key
+    distinctly.
+    """
+    model, X, y = _ridge_xy()
+    source = ferrum.ModelSource(model, X, y, random_state=0)
+
+    key_list = source._cache_key(
+        "validation_curve", param="alpha", values=[0.1, 1.0, 10.0], cv=3, scoring=None
+    )
+    key_array = source._cache_key(
+        "validation_curve",
+        param="alpha",
+        values=np.array([0.1, 1.0, 10.0]),
+        cv=3,
+        scoring=None,
+    )
+    assert key_list == key_array  # equal content, different container -> same key
+
+    close_values = np.array([0.1, 1.0, 10.0 - 1e-12])
+    assert repr(close_values) == repr(np.array([0.1, 1.0, 10.0]))  # collision precondition
+    key_close = source._cache_key(
+        "validation_curve", param="alpha", values=close_values, cv=3, scoring=None
+    )
+    assert key_close != key_array
 
 
 # --- mark_kwargs forwarding + validation ---------------------------------

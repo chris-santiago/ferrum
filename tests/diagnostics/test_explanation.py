@@ -260,6 +260,49 @@ def test_shap_values_caches():
     assert a is b
 
 
+def test_shap_values_background_content_not_str_truncated():
+    """RED-proof for #224(b) repro (c): ``shap_values(background=...)``
+    must key on the background's CONTENT, not ``str(background)[:64]``.
+
+    Two backgrounds differing only past character 64 of their printed
+    repr (numpy prints the leading rows identically; the differing value
+    sits in the last row) built the SAME 64-char-truncated key pre-fix,
+    so the second call silently returned the first's SHAP values —
+    computed against the wrong background.
+    """
+
+    class _PredictOnlyModel:
+        """Duck model exposing only ``predict`` — routes ``shap_values``
+        onto the model-agnostic ``KernelExplainer`` path, the only
+        explainer that reads ``background=`` (the deterministic
+        ``LinearExplainer``/``TreeExplainer`` paths ignore it entirely).
+        """
+
+        def __init__(self, coef):
+            self._coef = coef
+
+        def predict(self, X):
+            return np.asarray(X) @ self._coef
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(20, 3))
+    y = rng.normal(size=20)
+    model = _PredictOnlyModel(np.array([1.0, 2.0, 3.0]))
+    source = ferrum.ModelSource(
+        model, pl.DataFrame(X, schema=["f0", "f1", "f2"]), y, random_state=0
+    )
+
+    bg1 = np.ones((8, 3))
+    bg2 = bg1.copy()
+    bg2[-1, -1] = 2.0
+    assert str(bg1)[:64] == str(bg2)[:64]  # the truncation-collision precondition
+
+    sv1 = source.shap_values(background=bg1)
+    sv2 = source.shap_values(background=bg2)
+    assert sv1 is not sv2
+    assert not sv1.equals(sv2)
+
+
 # --- shap_chart figure dispatcher --------------------------------------
 
 
