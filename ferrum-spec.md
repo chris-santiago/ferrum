@@ -280,13 +280,67 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 - `.importances(*, method="builtin", n_repeats=30, scoring=None, random_state=None)` — `feature`, `importance`, `std`, `rank`
 - `.shap_values(*, background=None, max_evals=500)` — `sample_id`, `feature`, `shap_value`, `feature_value`, `feature_value_normalized`, `class_label`
 
-> **2026-05-12 (P3.11, D15):** `shap_values()` always includes a `class_label`
+> **2026-05-12 (P3.11, D15) — the second sentence is SUPERSEDED for multi-output regressors by the 2026-09-13 note below:** `shap_values()` always includes a `class_label`
 > column. Regression sources emit `class_label="target"` on every row.
 > Binary classifiers emit the positive-class name (single value, schema
 > unchanged in shape). Multi-class classifiers emit one row per
 > `(sample, feature, class)` — total height `n_samples * n_features * n_classes`.
 > See `mark_shap_*(per_class=...)` for the chart-side overlay hook.
-- `.partial_dependence(features, *, grid_resolution=100, kind="average")` — `feature`, `feature_value`, `pd_value`, `sample_id` (if `kind="individual"`)
+
+> **2026-09-13 (wave 3, #209 / D2 — supersedes the sentence above that reads
+> "Regression sources emit `class_label="target"` on every row", which is no
+> longer true for a *multi-output* regressor):** the `class_label` vocabulary
+> now has one owner (`_output_class_labels`), shared with
+> `.partial_dependence()` so the two frames cannot label the same model
+> differently, and that owner gained the case neither caller previously
+> answered. A single-output regressor is unchanged and still emits `"target"`
+> on every row; a model with no `classes_` but several outputs — a native
+> multi-output regressor, e.g. `RandomForestRegressor` fit on a 2-column `y` —
+> now emits `target_0 ... target_{n-1}` instead of repeating a bare `"target"`.
+> **Breaking (number mover) on the shap figure functions:** `class_label` is
+> what `shap_beeswarm_chart`/`shap_bar_chart`/`shap_waterfall_chart` (and the
+> deprecated `shap_chart` dispatcher) select and facet on, so those outputs
+> move for this model shape. With a repeated `"target"` there was nothing to select, and
+> `per_class=False` averaged two unrelated outputs' SHAP values together;
+> it now selects the first output's rows. Measured on 120 rows, three
+> standard-normal features `a`/`b`/`c` and
+> `y = [3a + 0.2c, 4b + 0.2c]` through
+> `RandomForestRegressor(n_estimators=5, max_depth=3, random_state=0)`:
+> `shap_values()`'s `class_label` uniques go `["target"]` → `["target_0",
+> "target_1"]` at an unchanged height of 720; the `per_class=False` selection
+> goes 720 rows → 360; and `shap_bar_chart(source)`'s `abs_mean_shap` goes
+> `a` 1.181774 → 2.011961 and `b` 1.626124 → 0.268149 (`c` 0.0 on both), so
+> the rendered bar order flips from `b, a, c` to `a, b, c`. `per_class=True`
+> on the same source now facets into one panel per output where it previously
+> rendered a single unfaceted panel (`_should_facet_by_class` needs more than
+> one class). Classifiers of every arity, and single-output regressors, are
+> unaffected.
+- `.partial_dependence(features, *, grid_resolution=100, kind="average")` — `feature`, `feature_value`, `pd_value`, `class_label`, `sample_id`
+
+> **2026-09-13 (wave 3, #209 / D2 — multiclass partial dependence emits per-class
+> rows):** `.partial_dependence()` always includes a `class_label` column naming
+> the model output each row belongs to, using exactly `shap_values()`'
+> vocabulary above (one shared owner, `_output_class_labels`). Regression sources
+> emit `class_label="target"`; binary classifiers emit the positive-class name
+> (sklearn's partial dependence reports the positive class only, so the rows are
+> unchanged). **Breaking (schema + number mover):** a K-class classifier now
+> emits one row group per class instead of silently returning class 0's curve
+> alone — for a 3-class model with 2 features at `grid_resolution=10`,
+> `kind="average"` measured 20 rows before and 60 after, and `kind="individual"`
+> on 300 samples at `grid_resolution=6` measured 1800 rows before and 5400 after.
+> Both `kind` fan-outs apply. The per-class values are sklearn's own per-output
+> results (`partial_dependence(...)["average"][c]` / `["individual"][c]`),
+> previously discarded for every `c > 0`. Single-output frames keep their rows
+> and row order byte-identical; only the new column is added. A multi-output
+> regressor (no `classes_`, several outputs) numbers its outputs `target_0 ...
+> target_{n-1}` rather than repeating a bare `"target"`, since `class_label` is
+> the downstream curve-grouping key. Chart side: `pdp_chart` keeps one facet
+> panel per feature and binds `class_label` to the color channel when the frame
+> carries more than one class, so each panel shows K legended curves; a
+> single-class frame keeps the color-free rendering it had (existing PDP goldens
+> are byte-identical). Grouping keys that identify one curve — the `center=`
+> anchor, the `kind="both"` average join, the ICE `detail` pairing — all carry
+> `class_label`, so curves cannot chain or cross-join between classes.
 - `.silhouette(k)` — `sample_id`, `cluster`, `silhouette_value`
 - `.embeddings(*, method="umap", n_components=2, **method_kwargs)` — `dim_0`, `dim_1`, (`dim_2`), `label`
 - `.learning_curve(*, cv=5, scoring=None, train_sizes=None)` — `train_size`, `split`, `score`, `mean_score`, `std_score`, `lower`, `upper`
@@ -341,6 +395,44 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 > size (n)` — every documented-supported `k` except 7+. Every `k >= 4` now
 > renders; `k < 4` keeps its existing typed refusal, unchanged.
 
+> **2026-09-13 (wave 3, #222 + N4 — `.embeddings(method="tsne")` perplexity
+> parity):** the same physical constraint `.intercluster_distance`'s clamp
+> encodes for `k` cluster centers — manifolds-rs (Barnes-Hut t-SNE) requires
+> `perplexity < kNN size`, which composes in the small-`n` regime to
+> `perplexity <= n_samples - 2` — now also governs `.embeddings(method=
+> "tsne")`'s user-visible `perplexity`. **Breaking (number mover):**
+> the default (no `perplexity=` supplied) now resolves to
+> `min(30, n_samples - 2)` instead of forwarding `None` straight to
+> manifolds-rs's own unclamped default of 30; measured before/after: every
+> call with `n_samples <= 31` previously raised
+> `tsne_embedding failed: perplexity (30) must be strictly less than the
+> kNN size (n_samples - 1)` and now renders (e.g. `n_samples=20` resolves
+> to `perplexity=18` and renders; `n_samples=200` is unaffected, since
+> `min(30, 198) == 30`, its pre-existing value). This is the majority
+> failure mode — it fired on `manifold_chart` and `ManifoldVisualizer` too,
+> since neither exposes a `perplexity` parameter of its own and both always
+> hit the default path. An explicit `perplexity=` is validated, never
+> silently reduced: non-numeric, non-finite (NaN/±inf), non-positive, or
+> greater than `n_samples - 2` all raise a typed `ValueError` naming
+> `perplexity`, `n_samples`, and the bound — replacing both the raw
+> manifolds-rs `"kNN size"` message (an internal derived quantity no
+> ferrum parameter names) and a `PanicException` a negative or NaN value
+> previously produced at the PyO3 boundary (`k_float.to_usize().unwrap()`
+> has no valid `usize` for those inputs), which no `except ValueError`
+> could catch. Unrelated to the perplexity fix but closed in the same
+> pass: an unknown `method_kwargs` key now refuses by name, checked
+> per-`method` (not the union of all three methods' keys, which would
+> accept `perplexity` on `"umap"` and silently drop it) — previously every
+> read was `method_kwargs.get(...)`, so a typo (or a key belonging to a
+> different method) reached nothing and the embedding was silently
+> computed with defaults. No golden added or moved: t-SNE/UMAP output has
+> no golden by deliberate design (manifolds-rs's RNG is not the
+> byte-deterministic `ChaCha8Rng` this repo's other transforms use, so no
+> t-SNE/UMAP output is cross-platform-stable enough to pin — see
+> `design-docs/architecture/ARCHITECTURE.md`'s "Randomness" section);
+> within one process/platform/toolchain, `random_state=` determinism is
+> unaffected by this change.
+
 > **2026-09-10 (batch G, F-L12-03 — `rank1d(algorithm="covariance")` raw
 > routing):** `rank1d_chart(df, y=y, algorithm="covariance")` on a raw
 > DataFrame/2-D array now renders — previously it unconditionally routed
@@ -355,6 +447,8 @@ ModelSource(model, X=None, y=None, *, feature_names=None, class_names=None,
 > **Dated note (2026-09-11, wave-1 hardening, #204 — `rank1d(algorithm="covariance")` refuses a length mismatch, drops null-`y` rows instead of zero-imputing them):** `y` whose length doesn't match `X`'s row count now raises a typed `ValueError` naming the mismatch (mirroring the existing `hat_matrix_stats` guard's wording) instead of panicking with an out-of-bounds index inside the Rust covariance kernel — the check runs uniformly before the `algorithm` dispatch, even though only `"covariance"` reads `y`. A null `y` slot — previously read straight off the Arrow value buffer's default `0.0` and folded into the covariance as a real zero-valued observation, corrupting every feature's score — now drops out of the computation entirely (a validity-aware read, not a zero-impute); both Python callers (`rank1d_compute_with_y`, `RankingMixin.rank1d`) now warn naming the algorithm and the dropped row count. An all-null `y` degrades to n=0, which the kernel's existing degenerate-input guards already handle without panicking.
 >
 > **Dated note (2026-09-11, wave-1 hardening, #216 — `rank1d`/`rank2d` refuse an X-less fitted estimator on every algorithm):** `rank1d_chart`/`rank2d_chart` previously only probed "is this raw tabular data or a fitted estimator" inside the `algorithm="covariance"` branch of `rank1d_chart`, and not at all in `rank2d_chart` — so `rank1d_chart(model, y=y, algorithm="shapiro"/"variance")` and EVERY `rank2d_chart(model)` call on an X-less fitted estimator leaked a raw `TypeError` from `np.asarray()` instead of the typed `ModelSource` refusal ("...requires the training data: `ModelSource(model, X)`.") the covariance branch already had. The raw/model probe is now hoisted to the top of both dispatch functions, routing every algorithm through the same typed refusal; `rank2d_chart(model, df)` (with X) is unaffected.
+>
+> **Breaking (2026-09-13, wave-3 diagnostics, N1 — a multi-chunk `pyarrow.Table` was silently truncated to its first chunk):** `polars_or_array_to_record_batch` (the raw-data coercer behind `rank1d_chart`/`rank2d_chart`/`Rank1DVisualizer`/`Rank2DVisualizer`) took `X.to_batches()[0]` for a `pyarrow.Table` input, discarding every chunk after the first. A real `pa.Table` is routinely multi-chunk — `pa.concat_tables`, a multi-file `parquet.read_table`, or a `RecordBatchReader` drain all produce one — so every raw-data rank statistic on such a Table was silently computed over a fraction of the rows while `ModelSource`'s own path (which already routes through `ferrum._coerce.to_polars`) computed the correct answer on the same input: measured on a 200-row regression fixture split into two 100-row chunks, `rank1d_chart(chunked, algorithm="variance")`'s top score for column `b` read **1.169347** (the first 100-row chunk alone) against the correct **1.018316** (all 200 rows) on the equivalent single-chunk Table and the `ModelSource` path. The covariance path did not compute a silently wrong number; it refused with a misleading `"y length must match X row count"`, because the coercer silently halved X's row count while the caller's `y` kept its full length. The pyarrow arm now routes through `ferrum._coerce.to_polars` (the same canonical Arrow-CDI seam `ModelSource` already uses), so every chunk is consumed and the raw-data path, the `ModelSource` path, and a single-chunk Table of the same data all agree. A secondary, smaller instance of the same defect is also closed: an empty 2-column `pyarrow.Table` used to return zero features (the old empty-Table branch, `pa.RecordBatch.from_pydict({})`, discarded the schema along with the rows), where an empty 2-column `polars.DataFrame` correctly returned 2 features scored 0.0 — both spellings of "no rows, two columns" now agree. `#217` itself (the covariance-refuses-on-`pa.Table` shape) was already closed by `545be19a`; this note documents the residual defect one layer below it, in the coercer `545be19a` did not touch.
 
 ---
 
@@ -1389,6 +1483,29 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > Both were previously silent no-ops (`del <param>` with neither wiring
 > nor a warning); they now match the "works or rejects/warns loudly"
 > contract every other P9 site above already meets.
+
+> **2026-09-13 (wave 3 T10, #189 — `mark_discrimination_threshold`
+> explicit-vs-default `optimum_label`/`threshold_line`):** both flags
+> default to a private `_UNSET` sentinel (`ferrum._desugar`) instead of a
+> materialized bool, so `_prep_discrimination_threshold_sentinels` can tell
+> "the caller explicitly asked for this" apart from "the parameter's own
+> default." A `metrics=` subset that excludes `"f1"` leaves neither the
+> `_threshold_best` nor the `_optimum_x`/`_optimum_y`/`_optimum_text`
+> sentinel column for the layer to read (see the 2026-05-12 note on this
+> mark above): an EXPLICIT `optimum_label=True` or `threshold_line=True` in
+> that state now raises `ValueError` naming the flag and `metrics=`, since
+> there is no F1-optimum row to label/rule at and the request is self-
+> contradicting; the un-passed default keeps the pre-existing silent
+> downgrade to `False` (batch F T3's crash-shape fix). `discrimination_
+> threshold_chart` and `DiscriminationThresholdVisualizer` forward
+> `optimum_label` through unchanged (still `_UNSET` by default) rather than
+> materializing their own `True` default before calling the mark, so the
+> silent-default behavior survives through the figure-function and
+> visualizer entry points too, not just the direct chart-API call this
+> issue was filed against. `threshold_line` keeps a concrete `False`
+> default at every layer — unlike `optimum_label`, `False` is never the
+> value the refusal fires on, so there is no default-vs-explicit ambiguity
+> to preserve for it there.
 
 > **2026-08-27 (close-out, findings-remediation batch):** two further gaps
 > closed on `mark_shap_beeswarm`/`shap_chart`, found by the closing design
