@@ -83,29 +83,35 @@ def _relabelled_source(X, y01, mapping):
 
 @pytest.mark.parametrize("name", sorted(_RELABELLINGS))
 def test_roc_auc_is_invariant_to_the_binary_label_convention(name, binary_data, references):
-    """The ROC frame's kernel ``auc`` and the chart title must equal
-    sklearn's AUC for the same probabilities, whatever the labels are."""
+    """The ROC frame's kernel ``auc`` and the rendered AUC annotation must
+    equal sklearn's AUC for the same probabilities, whatever the labels are.
+
+    The chart *title* carried this pin until #219/D4 (2026-09-13) retired
+    the title's metric suffix; the endpoint overlay is now the one metric
+    surface, so the rendered assertion moved there."""
     X, y01 = binary_data
     source, _ = _relabelled_source(X, y01, _RELABELLINGS[name])
 
     aucs = source.roc_curve()["auc"].unique().to_list()
     assert aucs == pytest.approx([references["auc"]], abs=1e-12)
 
-    title = ferrum.roc_chart(source)._title.text
-    assert title == f"ROC Curve — AUC {references['auc']:.3f}"
+    chart = ferrum.roc_chart(source)
+    assert chart._title.text == "ROC Curve"
+    assert f"AUC = {references['auc']:.3f}" in svg_texts(chart.to_svg())
 
 
 @pytest.mark.parametrize("name", sorted(_RELABELLINGS))
 def test_pr_ap_is_invariant_to_the_binary_label_convention(name, binary_data, references):
-    """Same invariant for average precision on the PR frame and title."""
+    """Same invariant for average precision on the PR frame and overlay."""
     X, y01 = binary_data
     source, _ = _relabelled_source(X, y01, _RELABELLINGS[name])
 
     aps = source.pr_curve()["ap"].unique().to_list()
     assert aps == pytest.approx([references["ap"]], abs=1e-12)
 
-    title = ferrum.pr_chart(source)._title.text
-    assert title == f"Precision–Recall Curve — AP {references['ap']:.3f}"
+    chart = ferrum.pr_chart(source)
+    assert chart._title.text == "Precision–Recall Curve"
+    assert f"AP = {references['ap']:.3f}" in svg_texts(chart.to_svg())
 
 
 @pytest.mark.parametrize("name", sorted(_RELABELLINGS))
@@ -123,12 +129,10 @@ def test_calibration_brier_is_invariant_to_the_binary_label_convention(
     assert frame["fraction_positive"].min() >= 0.0
     assert frame["fraction_positive"].max() <= 1.0
 
-    texts = svg_texts(ferrum.calibration_chart(source).to_svg())
+    chart = ferrum.calibration_chart(source)
     expected = f"Brier = {references['brier']:.3f}"
-    assert expected in texts
-    assert ferrum.calibration_chart(source)._title.text == (
-        f"Calibration Curve — Brier {references['brier']:.3f}"
-    )
+    assert expected in svg_texts(chart.to_svg())
+    assert chart._title.text == "Calibration Curve"
 
 
 @pytest.mark.parametrize("name", sorted(_RELABELLINGS))
@@ -144,13 +148,13 @@ def test_precomputed_curves_are_invariant_to_the_binary_label_convention(
     proba = references["proba"]
 
     roc = ferrum.roc_chart(y_true=y, y_pred=proba)
-    assert roc._title.text == f"ROC Curve — AUC {references['auc']:.3f}"
+    assert f"AUC = {references['auc']:.3f}" in svg_texts(roc.to_svg())
 
     pr = ferrum.pr_chart(y_true=y, y_pred=proba)
-    assert pr._title.text == f"Precision–Recall Curve — AP {references['ap']:.3f}"
+    assert f"AP = {references['ap']:.3f}" in svg_texts(pr.to_svg())
 
     cal = ferrum.calibration_chart(y_true=y, y_pred=proba)
-    assert cal._title.text == f"Calibration Curve — Brier {references['brier']:.3f}"
+    assert f"Brier = {references['brier']:.3f}" in svg_texts(cal.to_svg())
 
 
 def test_zero_one_labels_are_unchanged(binary_data, references):
@@ -186,6 +190,10 @@ def test_composed_brier_label_shows_the_per_sample_brier(strategy, binary_data, 
     score is invariant to -- and, worse, the composed layer overwrote the
     correct ``annotate_brier`` label, so the chart carried two copies of
     the wrong value and none of the right one.
+
+    Since #219(2) the composed label *replaces* the figure's rather than
+    overstriking it, so the chart carries exactly one Brier string either
+    way -- which is what the equality below now asserts.
     """
     X, y01 = binary_data
     model = LogisticRegression(max_iter=1000).fit(X.to_numpy(), y01.to_numpy())
@@ -196,21 +204,23 @@ def test_composed_brier_label_shows_the_per_sample_brier(strategy, binary_data, 
 
     expected = f"Brier = {references['brier']:.3f}"
     texts = svg_texts(annotated.to_svg())
-    assert expected in texts
-    # No *other* Brier number may appear anywhere on the composed chart.
-    rendered = {t for t in texts if t.startswith("Brier = ") or t.startswith("Calibration Curve")}
-    assert rendered == {expected, f"Calibration Curve — Brier {references['brier']:.3f}"}
+    # Exactly one Brier string, and it is the per-sample one. No other Brier
+    # number may appear anywhere on the composed chart, and the title -- which
+    # used to carry a second copy -- is the plain name.
+    assert [t for t in texts if t.startswith("Brier")] == [expected]
+    assert "Calibration Curve" in texts
 
 
-def test_brier_label_still_integrates_arbitrary_user_data():
-    """A frame with no ``brier`` column -- arbitrary user data, the reason
-    the composable path exists -- keeps the ``metric_fn`` fallback."""
+def test_brier_label_refuses_arbitrary_user_data_without_the_column():
+    """A frame with no ``brier`` column cannot answer what the Brier score
+    is: the binned points it draws define a different statistic. Since
+    #219(3) the label refuses instead of showing that statistic under the
+    Brier name -- the integrating fallback this test used to pin is gone."""
     df = pl.DataFrame({"p": [0.1, 0.4, 0.9], "obs": [0.0, 0.5, 1.0]})
     chart = ferrum.Chart(df).mark_line().encode(x="p", y="obs")
-    expected = float(np.mean((np.array([0.1, 0.4, 0.9]) - np.array([0.0, 0.5, 1.0])) ** 2))
 
-    texts = svg_texts((chart + ferrum.BrierLabel()).to_svg())
-    assert f"Brier = {expected:.3f}" in texts
+    with pytest.raises(ValueError, match=r"BrierLabel: the data has no 'brier' column"):
+        chart + ferrum.BrierLabel()
 
 
 # ---------------------------------------------------------------------------
@@ -334,9 +344,10 @@ def test_metrics_are_invariant_to_the_model_shape(shape, binary_data, references
     )
     assert source.calibration_curve()["fraction_positive"].max() > 0.0
 
-    assert ferrum.roc_chart(source)._title.text == f"ROC Curve — AUC {references['auc']:.3f}"
-    assert ferrum.calibration_chart(source)._title.text == (
-        f"Calibration Curve — Brier {references['brier']:.3f}"
+    # Rendered surface (the overlay, sole metric surface since #219/D4).
+    assert f"AUC = {references['auc']:.3f}" in svg_texts(ferrum.roc_chart(source).to_svg())
+    assert f"Brier = {references['brier']:.3f}" in svg_texts(
+        ferrum.calibration_chart(source).to_svg()
     )
     # The threshold sweep resolves the same positive class, so it must
     # be a real sweep rather than an all-negative flatline.

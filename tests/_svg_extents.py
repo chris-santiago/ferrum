@@ -55,6 +55,19 @@ def ordered_text_entries(svg: str) -> list[tuple[float, float, str]]:
     return entries
 
 
+def text_runs(svg: str) -> list[str]:
+    """Return every rendered ``<text>`` run, in document order, positions dropped.
+
+    The position-free sibling of ``ordered_text_entries``: it keeps runs that
+    carry no ``x``/``y`` attributes (a ``<text>`` positioned by its parent
+    group, e.g. a chart title), which is why an assertion about *what a chart
+    says* uses this and an assertion about *where it says it* uses the entry
+    parsers above. Shared by the metric-display tests (#219) so "one metric
+    string per curve" is counted the same way everywhere.
+    """
+    return re.findall(r"<text[^>]*>([^<]*)</text>", svg)
+
+
 def numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
     """Return (x, y, value) for every ``<text>`` element whose content parses as float."""
     entries = []

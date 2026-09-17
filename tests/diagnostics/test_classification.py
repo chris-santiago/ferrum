@@ -456,18 +456,17 @@ def test_pr_chart_per_class_false_routes_to_macro(multi_source):
     svg = chart.to_svg()
     assert "<svg" in svg
     # Verify the underlying DataFrame holds one summary class (the macro
-    # summary) rather than several per-class curves.
-    # After legend-label renaming, the single class value carries the AP score.
+    # summary) rather than several per-class curves. The legend value is the
+    # bare class name: #219/D4 retired the "(AP = x)" rename, leaving the
+    # endpoint overlay as the single metric surface.
     classes = set(chart._data["class"].unique().to_list())
-    assert len(classes) == 1
-    assert next(iter(classes)).startswith("macro (AP =")
+    assert classes == {"macro"}
 
 
 def test_pr_chart_per_class_false_micro(multi_source):
     chart = ferrum.pr_chart(multi_source, per_class=False, average="micro")
     classes = set(chart._data["class"].unique().to_list())
-    assert len(classes) == 1
-    assert next(iter(classes)).startswith("micro (AP =")
+    assert classes == {"micro"}
 
 
 def test_calibration_chart_figure_function(binary_source):

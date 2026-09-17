@@ -36,7 +36,6 @@ from ferrum.plots._helpers import (
     _color_field_for,
     _compose_compare,
     _finalize_chart,
-    _inject_metric_into_legend_labels,
     _resolve_source,
 )
 
@@ -161,28 +160,17 @@ def _roc_chart_from_source(
     (so the figure builder does not need a chart-level color encoding
     that would leak into mark_roc's diagonal reference layer).
 
-    F-L11-01 (2026-09-10): title, legend text and overlay all resolve their
-    AUC through ``kind="auc"`` -- the frame's Rust-computed column
-    -- so the three surfaces show one number from one source. For
-    ``per_class=False`` that column holds the weighted mean of the
-    per-class AUCs (sklearn parity), which is what the averaged-curve title
-    reports.
+    #219 / D4 (2026-09-13): ``annotate_auc`` drives exactly one surface,
+    the per-curve overlay below. The title's ``— AUC 0.987`` suffix and the
+    legend's ``1 (AUC = 0.987)`` rename are gone, so a multi-curve ROC
+    prints each AUC once and ``annotate_auc=False`` shows no AUC anywhere
+    (the title used to leak one regardless of the flag).
     """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit, _curve_metric
-    from ferrum.marks._desugar_helpers import _roc_render_frame
+    from ferrum._metric_labels import _apply_metric_label_explicit
 
     df = source.roc_curve(average=None if per_class else average)
     color_field = _color_field_for(df, "class")
-
-    if annotate_auc and color_field is not None:
-        df = _inject_metric_into_legend_labels(
-            df,
-            color_field=color_field,
-            x_col="fpr",
-            y_col="tpr",
-            kind="auc",
-        )
 
     # Single annotation surface: the figure builder owns the AUC overlay
     # (via _apply_metric_label_explicit below, formatted by _metric_labels'
@@ -200,34 +188,7 @@ def _roc_chart_from_source(
         y=Y("tpr", title="True Positive Rate"),
     )
 
-    # Count curves and compute the title's AUC from the same post-filter
-    # frame mark_roc renders, derived independently via the shared
-    # `_roc_render_frame` helper (not by reading `chart._data`, which would
-    # couple this figure builder to `_set_composite_mark`'s internal
-    # rebind-ordering guarantee). For multiclass per_class=False, `df` still
-    # carries every per-class row plus the average row (ModelSource.roc_curve
-    # appends a summary row rather than replacing the per-class ones), while
-    # the rendered chart shows exactly the one filtered curve -- using the
-    # unfiltered `df` here would count every leftover class and title the
-    # single rendered curve as unlabeled "ROC Curve" instead of
-    # "ROC Curve — AUC {v:.3f}". The `average`/`reference_line` values below
-    # mirror exactly what the `mark_roc(...)` call above passes.
-    curve_df = _roc_render_frame(
-        df, None if per_class else average, reference_line=True, mark_name="mark_roc"
-    )
-    n_curves = len(set(curve_df[color_field].to_list())) if color_field is not None else 1
-    if n_curves == 1:
-        auc_value = _curve_metric(
-            curve_df,
-            kind="auc",
-            x_col="fpr",
-            y_col="tpr",
-        )
-        chart = chart.properties(
-            title=ferrum.Title(f"ROC Curve — AUC {auc_value:.3f}", subtitle=subtitle),
-        )
-    else:
-        chart = chart.properties(title=ferrum.Title("ROC Curve", subtitle=subtitle))
+    chart = chart.properties(title=ferrum.Title("ROC Curve", subtitle=subtitle))
 
     if annotate_auc:
         chart = _apply_metric_label_explicit(
@@ -260,35 +221,21 @@ def _pr_chart_from_source(
 ):
     """Build a precision-recall chart from a ModelSource.
 
-    Schwabish SB3 (2026-05-11): active title with AP for single curve,
-    positive-class-prevalence baseline hline for binary classifiers,
-    and per-curve :class:`ferrum.APLabel` overlay via the explicit-field
-    helper.
+    Schwabish SB3 (2026-05-11): positive-class-prevalence baseline hline
+    for binary classifiers, and per-curve :class:`ferrum.APLabel` overlay
+    via the explicit-field helper.
 
-    F-L11-01 (2026-09-10): title, legend text and overlay all resolve their
-    AP through ``kind="ap"`` -- the frame's Rust-computed column --
-    so the three surfaces show one number from one source. For
-    ``per_class=False`` that column holds the weighted mean of the
-    per-class APs.
+    #219 / D4 (2026-09-13): ``annotate_ap`` drives exactly one surface, the
+    per-curve overlay below; the title's ``— AP 0.912`` suffix and the
+    legend's ``1 (AP = 0.912)`` rename are gone. See
+    :func:`_roc_chart_from_source`.
     """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit, _curve_metric
+    from ferrum._metric_labels import _apply_metric_label_explicit
 
     df = source.pr_curve(average=None if per_class else average)
     if iso_lines:
         df = _inject_pr_iso_lines(df)
-
-    # Rename color-field values to include per-class AP before legend is built.
-    _pr_color_field = _color_field_for(df, "class")
-    if annotate_ap and _pr_color_field is not None:
-        df = _inject_metric_into_legend_labels(
-            df,
-            color_field=_pr_color_field,
-            x_col="recall",
-            y_col="precision",
-            kind="ap",
-            curve_filter=lambda d: d.filter(pl.col("precision").is_not_null()),
-        )
 
     # Inject the positive-class-prevalence baseline as a same-data column
     # (one non-null entry, rest null) so the mark_rule overlay shares
@@ -334,30 +281,9 @@ def _pr_chart_from_source(
         )
     )
 
-    # Active title on single-curve PR charts.  Drop iso-curve sentinel rows
-    # (precision==null) before computing AP.
-    curve_df = df.filter(pl.col("precision").is_not_null())
-    if color_field is not None and color_field in curve_df.columns:
-        n_curves = len(set(curve_df[color_field].to_list()))
-    else:
-        n_curves = 1
-    if n_curves == 1:
-        ap_value = _curve_metric(
-            curve_df,
-            kind="ap",
-            x_col="recall",
-            y_col="precision",
-        )
-        chart = chart.properties(
-            title=ferrum.Title(
-                f"Precision–Recall Curve — AP {ap_value:.3f}",
-                subtitle=subtitle,
-            ),
-        )
-    else:
-        chart = chart.properties(
-            title=ferrum.Title("Precision–Recall Curve", subtitle=subtitle),
-        )
+    chart = chart.properties(
+        title=ferrum.Title("Precision–Recall Curve", subtitle=subtitle),
+    )
 
     if baseline_prevalence is not None:
         from ferrum._layer import _Layer
@@ -401,30 +327,27 @@ def _calibration_chart_from_source(
 ):
     """Build a calibration (reliability) chart from a ModelSource.
 
-    Schwabish SB3 (2026-05-11): active title carrying the per-sample
-    Brier score when the chart shows a single model; per-series
-    :class:`ferrum.BrierLabel` overlay when ``annotate_brier=True``.
+    Schwabish SB3 (2026-05-11): per-series :class:`ferrum.BrierLabel`
+    overlay when ``annotate_brier=True``.
 
-    F-L11-04 (2026-09-10, reworked at the batch G close): both the title and
-    the overlay read the *same* per-sample Brier -- the frame's broadcast
-    ``brier`` column, computed in ``calibration_frame`` from the
-    predictions the bins were built from, never from the binned
-    ``(mean_predicted, fraction_positive)`` data ``n_bins=``/``strategy=``
-    control. Single-model: one value drives both the title and the
-    ungrouped overlay. Compared (``isinstance(source, ComparedModelSource)``
-    -- the dead ``hasattr(source, "models")`` check is gone, no source class
-    ever had a ``models`` attribute): the title stays plain (no single
-    number describes several models, unchanged from before), while the
-    per-model rows each carry their own ``brier``, so the overlay labels
-    the ``color="model"`` groups with each model's own score (user
-    checkpoint decision 2, supersedes the spec's prior
-    bin-level-for-compared sanction -- see ``ferrum-spec.md``'s dated
-    note). The composable ``chart + BrierLabel()`` path reads the same
-    column by the same rule, so composing can no longer print a different
-    number over the one the figure already placed.
+    F-L11-04 (2026-09-10, reworked at the batch G close): the overlay reads
+    the per-sample Brier -- the frame's broadcast ``brier`` column, computed
+    in ``calibration_frame`` from the predictions the bins were built from,
+    never from the binned ``(mean_predicted, fraction_positive)`` data
+    ``n_bins=``/``strategy=`` control. A compared source
+    (``isinstance(source, ComparedModelSource)``) carries one ``brier`` per
+    model row, so the overlay labels the ``color="model"`` groups with each
+    model's own score.
+
+    #219 / D4 (2026-09-13): the title's ``— Brier 0.087`` suffix retired
+    along with the ROC/PR ones -- ``annotate_brier`` now drives the overlay
+    and nothing else, and ``annotate_brier=False`` shows no Brier anywhere.
+    That also removes the single-vs-compared title split (a compared chart
+    had no single number to title with), so every calibration chart is
+    titled "Calibration Curve".
     """
     import ferrum
-    from ferrum._metric_labels import _apply_metric_label_explicit, _broadcast_metric
+    from ferrum._metric_labels import _apply_metric_label_explicit
 
     df = source.calibration_curve(n_bins=n_bins, strategy=strategy)
     color = "model" if "model" in df.columns else None
@@ -437,23 +360,9 @@ def _calibration_chart_from_source(
         y=Y("fraction_positive", title="Fraction of positives"),
     )
 
-    # A compared chart has no single Brier to title with; the per-model
-    # numbers reach the reader through the per-series overlay instead.
-    brier_value = (
-        None if isinstance(source, ComparedModelSource) else _broadcast_metric(df, "brier")
+    chart = chart.properties(
+        title=ferrum.Title("Calibration Curve", subtitle=subtitle),
     )
-
-    if brier_value is not None:
-        chart = chart.properties(
-            title=ferrum.Title(
-                f"Calibration Curve — Brier {brier_value:.3f}",
-                subtitle=subtitle,
-            ),
-        )
-    else:
-        chart = chart.properties(
-            title=ferrum.Title("Calibration Curve", subtitle=subtitle),
-        )
 
     if annotate_brier:
         # Brier overlay shares the canonical metric-kind table in

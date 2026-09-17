@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
-from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group, _display_name
+from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group, _render_metric
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -239,11 +239,13 @@ def _filter_class_average(df: pl.DataFrame, average: str | None, *, mark_name: s
     Shared by ``Chart.mark_roc`` / ``Chart.mark_pr``: both accept an
     ``average`` kwarg (``"macro"``/``"micro"``/``"weighted"``) selecting a
     single summary curve out of a ``class`` discriminator column emitted by
-    ``ModelSource.roc_curve``/``pr_curve``.  A figure builder that annotates
-    curves (``annotate_auc``/``annotate_ap``) rewrites ``class`` values to
-    ``"{class} ({METRIC} = {value:.3f})"`` *before* calling the mark, so an
-    exact match alone would miss the annotated row — match either the raw
-    value or that renamed-prefix form.
+    ``ModelSource.roc_curve``/``pr_curve``.  Matches the raw ``class`` value
+    exactly (close review, cycle 2, #219: no surface rewrites ``class``
+    values any more -- the legend rename this used to also match,
+    ``"{class} ({METRIC} = {value:.3f})"``, retired with #219's D4, and
+    matching that shape as well as the exact value was a latent
+    mismatch hazard for real user data whose own ``class`` column happens
+    to start with ``"{average} ("``).
 
     When ``average`` matches no row, the correct response depends on *why*:
 
@@ -262,9 +264,7 @@ def _filter_class_average(df: pl.DataFrame, average: str | None, *, mark_name: s
     """
     if average is None or "class" not in df.columns:
         return df
-    class_col = _utf8_col("class")
-    mask = (class_col == average) | class_col.str.starts_with(f"{average} (")
-    filtered = df.filter(mask)
+    filtered = df.filter(_utf8_col("class") == average)
     if filtered.height > 0:
         return filtered
     if df["class"].cast(pl.Utf8).n_unique() > 1:
@@ -287,11 +287,10 @@ def _roc_render_frame(
     """Return the exact frame ``mark_roc`` renders: class-filtered, then
     ``fpr``-sorted when ``reference_line`` is set.
 
-    Shared by ``Chart.mark_roc``'s ``data_transform`` closure and
-    ``roc_chart``'s post-filter AUC title (``plots/classification.py``), so
-    the figure builder derives the rendered frame from this one function
-    instead of reading ``Chart._data`` and depending on
-    ``_set_composite_mark``'s internal ordering guarantee.
+    Its one caller is ``Chart.mark_roc``'s ``data_transform`` closure (close
+    review, cycle 2: ``roc_chart``'s former post-filter AUC title, the
+    second consumer this named, retired with #219's D4 -- the figure
+    builder no longer re-derives a filtered frame at all).
     """
     df = _filter_class_average(df, average, mark_name=mark_name)
     if reference_line:
@@ -317,6 +316,7 @@ def _inject_curve_annotation(
     prefix: str,
     x_col: str,
     y_col: str,
+    where: str,
 ) -> pl.DataFrame:
     """Inject one-non-null-row-per-group annotation columns.
 
@@ -324,12 +324,13 @@ def _inject_curve_annotation(
 
     - ``{prefix}_label_x: Float64`` -- x coordinate of the label anchor.
     - ``{prefix}_label_y: Float64`` -- staggered y per group.
-    - ``{prefix}_label: Utf8`` -- formatted string
-      ``"{group_value}: {display name} = {value:.3f}"``, or
-      ``"{display name} = {value:.3f}"`` when the data carries no group
-      column. The display name comes from the kind table rather than from a
-      caller-supplied literal, so a mark annotation cannot spell a metric
-      differently from the chart title (close review, 2026-09-11).
+    - ``{prefix}_label: Utf8`` -- ``"{group_value}: {metric text}"``, or
+      just ``"{metric text}"`` when the data carries no group column. The
+      metric text (``"AUC = 0.987"``) comes whole from
+      :func:`ferrum._metric_labels._render_metric` rather than from a
+      caller-supplied literal and a local ``:.3f``, so a mark annotation
+      cannot spell or round a metric differently from the figure overlay
+      (#219, 2026-09-13). ``prefix`` names the *columns*, not the text.
 
     All rows except one per group are null; ``mark_text`` skips nulls so
     exactly N labels render for N groups. This is what backs
@@ -343,13 +344,13 @@ def _inject_curve_annotation(
     column for that kind (as ``ModelSource.roc_curve()``/``pr_curve()``
     emit it) when it carries the value, else the kind's own value function
     integrated over ``(x_col, y_col)`` so a hand-built curve frame
-    annotates too.
+    annotates too. ``where`` is the mark name that owns this annotation
+    (``"mark_roc"``/``"mark_pr"``), used to name the surface if the kind
+    cannot be resolved from the frame.
     """
     n_rows = df.height
     if n_rows == 0:
         return df
-
-    name = _display_name(kind)
 
     label_x: list[float | None] = [None] * n_rows
     label_y: list[float | None] = [None] * n_rows
@@ -357,7 +358,7 @@ def _inject_curve_annotation(
 
     if group_field is not None and group_field in df.columns:
         metrics = _curve_metrics_by_group(
-            df, group_field=group_field, kind=kind, x_col=x_col, y_col=y_col
+            df, group_field=group_field, kind=kind, x_col=x_col, y_col=y_col, where=where
         )
         first_row: dict[str, int] = {}
         for row_i, value in enumerate(df[group_field].to_list()):
@@ -367,12 +368,12 @@ def _inject_curve_annotation(
             idx = first_row[group]
             label_x[idx] = _CURVE_LABEL_X
             label_y[idx] = _CURVE_LABEL_Y0 + slot * _CURVE_LABEL_Y_STEP
-            label_text[idx] = f"{group}: {name} = {metric:.3f}"
+            label_text[idx] = f"{group}: {_render_metric(kind, metric)}"
     else:
-        metric = _curve_metric(df, kind=kind, x_col=x_col, y_col=y_col)
+        metric = _curve_metric(df, kind=kind, x_col=x_col, y_col=y_col, where=where)
         label_x[0] = _CURVE_LABEL_X
         label_y[0] = _CURVE_LABEL_Y0
-        label_text[0] = f"{name} = {metric:.3f}"
+        label_text[0] = _render_metric(kind, metric)
 
     return df.with_columns(
         pl.Series(f"{prefix}_label_x", label_x, dtype=pl.Float64),

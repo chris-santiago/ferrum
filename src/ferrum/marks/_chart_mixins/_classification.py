@@ -97,6 +97,7 @@ class ClassificationMarksMixin:
                     prefix="_auc",
                     x_col="fpr",
                     y_col="tpr",
+                    where="mark_roc",
                 )
             return df
 
@@ -176,6 +177,7 @@ class ClassificationMarksMixin:
                     prefix="_ap",
                     x_col="recall",
                     y_col="precision",
+                    where="mark_pr",
                 )
             return df
 

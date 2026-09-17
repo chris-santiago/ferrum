@@ -26,8 +26,15 @@ _REGENERATE = bool(os.environ.get("FERRUM_REGENERATE_GOLDENS"))
 def _check_golden(svg: str, name: str) -> None:
     path = _GOLDEN_ROOT / f"{name}.svg"
     if _REGENERATE or not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(svg)
+        # ``regen_and_verify`` writes the SVG *and* rasterizes an inspection
+        # PNG under ``tests/snapshots/``, printing both paths, so a regen can
+        # never silently skip the visual check CLAUDE.md's "goldens are not
+        # blessed until visually inspected" rule requires. Mirrors
+        # ``tests/diagnostics/test_compare_aggregate_goldens.py`` and
+        # ``tests/test_composite_shared_legend_goldens.py``.
+        from tests._snapshots import regen_and_verify
+
+        regen_and_verify(path, svg)
         if not _REGENERATE:
             pytest.skip(f"created new golden at {path}; rerun to verify")
         return

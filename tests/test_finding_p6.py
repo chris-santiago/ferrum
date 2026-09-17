@@ -725,10 +725,17 @@ def test_apply_metric_label_explicit_corner_directly():
     ``calibration_chart``'s other behavior."""
     from ferrum._metric_labels import _apply_metric_label_explicit
 
+    # Each group carries its own broadcast `brier`: since #219(3) the Brier
+    # kind has no curve-integration fallback, so the frame must answer the
+    # question the label asks. The placement contract under test is unchanged.
     df = pl.concat(
         [
-            _roc_data("m0", scale=1.0).rename({"fpr": "predicted", "tpr": "observed"}),
-            _roc_data("m1", scale=0.6).rename({"fpr": "predicted", "tpr": "observed"}),
+            _roc_data("m0", scale=1.0)
+            .rename({"fpr": "predicted", "tpr": "observed"})
+            .with_columns(brier=pl.lit(0.11)),
+            _roc_data("m1", scale=0.6)
+            .rename({"fpr": "predicted", "tpr": "observed"})
+            .with_columns(brier=pl.lit(0.22)),
         ]
     )
     base = Chart(df).encode(x="predicted", y="observed", color="class").mark_line()

@@ -8,14 +8,15 @@ Four claims are pinned here, all at the user-observable surface:
    ``_trapezoid_auc`` and ``_ap_step`` integrating, ``gain_frame`` and
    ``lift_frame`` ranking by score, and ``_pr_average`` sorting by recall
    before interpolating.
-2. A diagnostic chart shows **one** AUC/AP, from the frame's kernel-computed
-   ``auc``/``ap`` column: chart title, legend text and label overlay agree
-   with the column and with each other.
+2. A diagnostic chart shows its AUC/AP **once**, from the frame's
+   kernel-computed ``auc``/``ap`` column, on one surface: the endpoint
+   overlay. Since #219/D4 (2026-09-13) the chart title and the legend no
+   longer repeat it, and ``annotate_*=False`` shows no metric at all -- so
+   these assertions count rendered strings rather than merely finding one.
 3. ``mark_roc(annotate_auc=True)`` / ``mark_pr(annotate_ap=True)`` render
    their label instead of raising ``layer N: unknown column '_auc_label_x'``.
-4. (G2, F-L11-04) A calibration chart shows **one** Brier score: the title
-   and the ``BrierLabel`` overlay agree, and that number is the true
-   per-sample Brier -- invariant to ``n_bins=``/``strategy=`` -- on the
+4. (G2, F-L11-04) A calibration chart shows **one** Brier score, the true
+   per-sample one -- invariant to ``n_bins=``/``strategy=`` -- on the
    single-model, compared, and precomputed paths alike.
 
 Every numeric expectation is hand-computed here (Python's ``sorted`` is a
@@ -25,8 +26,6 @@ asserted -- never from the function under test.
 """
 
 from __future__ import annotations
-
-import re
 
 import numpy as np
 import polars as pl
@@ -40,6 +39,7 @@ from ferrum.diagnostics._internal._curve_frames import (
     lift_frame,
     pr_frame,
 )
+from tests._svg_extents import text_runs
 from tests.fixtures import load_dataset, load_fixture
 
 # Two tie-heavy curves as ``(x, y)`` points, in threshold order. Eight of the
@@ -82,9 +82,10 @@ def hand_ap_step(recall: list[float], precision: list[float]) -> float:
     return total
 
 
-def svg_texts(svg: str) -> list[str]:
-    """Every rendered text run in an SVG, in document order."""
-    return [t for t in re.findall(r"<text[^>]*>([^<]*)</text>", svg)]
+#: Every rendered text run in an SVG, in document order. The parser lives in
+#: ``tests/_svg_extents`` so the sibling metric-display tests (#219) count
+#: "one metric string per curve" with the same regex this module uses.
+svg_texts = text_runs
 
 
 @pytest.fixture(scope="module")
@@ -175,50 +176,88 @@ def test_auc_label_overlay_on_tied_user_data_is_correct_and_repeatable():
 
 
 # ---------------------------------------------------------------------------
-# 2. One metric, one source: title == legend == overlay == frame column
+# 2. One metric, one surface: the overlay carries it, and nothing else does
+#
+#    #219 / D4 (2026-09-13): `annotate_*` drives exactly one surface. These
+#    tests used to assert title == legend == overlay == frame column; they now
+#    assert the overlay equals the frame column and that it is the ONLY place
+#    the number appears. Counting is what discriminates: an assertion that a
+#    string is present passes just as well when it is present three times.
 # ---------------------------------------------------------------------------
 
 
-def test_roc_chart_title_legend_and_overlay_all_equal_the_auc_column(binary_source):
+def _metric_texts(svg: str, marker: str) -> list[str]:
+    """Every rendered text run mentioning ``marker`` (e.g. ``"AUC"``)."""
+    return [t for t in svg_texts(svg) if marker in t]
+
+
+def test_roc_chart_shows_the_auc_column_exactly_once(binary_source):
     column_auc = binary_source.roc_curve(average=None)["auc"].unique().to_list()
     assert len(column_auc) == 1
-    expected = f"{column_auc[0]:.3f}"
+    expected = f"AUC = {column_auc[0]:.3f}"
 
     chart = ferrum.roc_chart(binary_source, annotate_auc=True)
-    texts = svg_texts(chart.to_svg())
-
-    assert chart._title.text == f"ROC Curve — AUC {expected}"
-    assert f"AUC = {expected}" in texts  # label overlay
-    assert any(t.endswith(f"(AUC = {expected})") for t in texts)  # legend entry
+    assert chart._title.text == "ROC Curve"
+    assert _metric_texts(chart.to_svg(), "AUC") == [expected]
 
 
-def test_pr_chart_title_legend_and_overlay_all_equal_the_ap_column(binary_source):
+def test_pr_chart_shows_the_ap_column_exactly_once(binary_source):
     column_ap = binary_source.pr_curve(average=None)["ap"].unique().to_list()
     assert len(column_ap) == 1
-    expected = f"{column_ap[0]:.3f}"
+    expected = f"AP = {column_ap[0]:.3f}"
 
     chart = ferrum.pr_chart(binary_source, annotate_ap=True)
-    texts = svg_texts(chart.to_svg())
-
-    assert chart._title.text == f"Precision–Recall Curve — AP {expected}"
-    assert f"AP = {expected}" in texts
-    assert any(t.endswith(f"(AP = {expected})") for t in texts)
+    assert chart._title.text == "Precision–Recall Curve"
+    assert _metric_texts(chart.to_svg(), "AP") == [expected]
 
 
-def test_roc_chart_per_class_legend_entries_equal_their_own_auc_column(multi_source):
-    """Multiclass: each legend entry carries its own class's column AUC."""
+def test_calibration_chart_shows_the_brier_column_exactly_once(binary_source):
+    column_brier = binary_source.calibration_curve()["brier"].unique().to_list()
+    assert len(column_brier) == 1
+    expected = f"Brier = {column_brier[0]:.3f}"
+
+    chart = ferrum.calibration_chart(binary_source)
+    assert chart._title.text == "Calibration Curve"
+    assert _metric_texts(chart.to_svg(), "Brier") == [expected]
+
+
+def test_roc_chart_per_class_shows_one_auc_per_curve_and_a_bare_legend(multi_source):
+    """Multiclass: one overlay label per class, each its own column AUC, and
+    the legend entries are the bare class names -- the ``(AUC = x)`` rename
+    that made a three-class chart print six AUCs is gone."""
     frame = multi_source.roc_curve(average=None)
     per_class = {
         cls: frame.filter(pl.col("class") == cls)["auc"].unique().to_list()[0]
         for cls in frame["class"].unique(maintain_order=True).to_list()
     }
     texts = svg_texts(ferrum.roc_chart(multi_source, annotate_auc=True).to_svg())
-    for cls, auc in per_class.items():
-        assert f"{cls} (AUC = {auc:.3f})" in texts
+
+    assert sorted(t for t in texts if "AUC" in t) == sorted(
+        f"AUC = {auc:.3f}" for auc in per_class.values()
+    )
+    for cls in per_class:
+        assert cls in texts  # bare legend entry
+    assert not [t for t in texts if t.startswith("(") or "(AUC" in t]
 
 
-def test_roc_chart_averaged_title_is_the_macro_mean_of_per_class_aucs(separating_source):
-    """``per_class=False`` titles the weighted mean the frame carries -- for
+@pytest.mark.parametrize(
+    ("figure", "flag", "marker"),
+    [
+        (ferrum.roc_chart, "annotate_auc", "AUC"),
+        (ferrum.pr_chart, "annotate_ap", "AP"),
+        (ferrum.calibration_chart, "annotate_brier", "Brier"),
+    ],
+)
+def test_annotate_false_renders_no_metric_text_anywhere(figure, flag, marker, binary_source):
+    """The #219 leak: the flag suppressed the overlay while the title kept
+    printing the metric regardless, so ``annotate_*=False`` never actually
+    meant "no metric"."""
+    svg = figure(binary_source, **{flag: False}).to_svg()
+    assert _metric_texts(svg, marker) == []
+
+
+def test_roc_chart_averaged_label_is_the_macro_mean_of_per_class_aucs(separating_source):
+    """``per_class=False`` annotates the weighted mean the frame carries -- for
     macro that is the plain mean of the per-class AUCs (sklearn parity), not
     a trapezoid over the interpolated average curve.
 
@@ -244,12 +283,14 @@ def test_roc_chart_averaged_title_is_the_macro_mean_of_per_class_aucs(separating
     )
     assert f"{expected:.3f}" != f"{interpolated:.3f}"  # the readings really differ
 
-    chart = ferrum.roc_chart(separating_source, per_class=False, average="macro")
-    assert chart._title.text == f"ROC Curve — AUC {expected:.3f}"
+    texts = svg_texts(
+        ferrum.roc_chart(separating_source, per_class=False, average="macro").to_svg()
+    )
+    assert [t for t in texts if "AUC" in t] == [f"AUC = {expected:.3f}"]
 
 
-def test_roc_chart_averaged_overlay_and_legend_read_the_auc_column(separating_source):
-    """The overlay and the legend text obey the same rule as the title.
+def test_roc_chart_averaged_overlay_reads_the_auc_column(separating_source):
+    """The overlay obeys the frame-column rule on an averaged curve too.
 
     On a binary or per-class curve the frame's ``auc`` and a trapezoid over
     the drawn curve agree by construction, so only an *averaged* multiclass
@@ -276,13 +317,13 @@ def test_roc_chart_averaged_overlay_and_legend_read_the_auc_column(separating_so
         ).to_svg()
     )
     auc_texts = [t for t in texts if "AUC" in t]
-    assert auc_texts  # the overlay and legend really rendered
+    assert len(auc_texts) == 1  # exactly one surface, and it really rendered
     for text in auc_texts:
         assert f"{expected:.3f}" in text
         assert f"{interpolated:.3f}" not in text
 
 
-def test_pr_chart_averaged_title_is_the_macro_mean_of_per_class_aps(multi_source):
+def test_pr_chart_averaged_label_is_the_macro_mean_of_per_class_aps(multi_source):
     """Same semantics for PR, on a fixture where the two candidate readings
     visibly disagree: the mean of the per-class APs rounds to 0.872, while
     a step integral over the interpolated macro curve rounds to 0.868."""
@@ -300,8 +341,8 @@ def test_pr_chart_averaged_title_is_the_macro_mean_of_per_class_aps(multi_source
     )
     assert f"{expected:.3f}" != f"{interpolated:.3f}"  # the readings really differ
 
-    chart = ferrum.pr_chart(multi_source, per_class=False, average="macro")
-    assert chart._title.text == f"Precision–Recall Curve — AP {expected:.3f}"
+    texts = svg_texts(ferrum.pr_chart(multi_source, per_class=False, average="macro").to_svg())
+    assert [t for t in texts if "AP" in t] == [f"AP = {expected:.3f}"]
 
 
 # ---------------------------------------------------------------------------
@@ -482,13 +523,12 @@ def hand_brier(proba_positive: np.ndarray, y_true: np.ndarray) -> float:
     return float(np.sum((p - y) ** 2) / len(p))
 
 
-def test_calibration_title_and_overlay_agree_and_are_invariant_to_binning(binary_source):
+def test_calibration_overlay_is_invariant_to_binning(binary_source):
     """The finding's exact repro: `strategy=`/`n_bins=` must not move the
-    displayed Brier, and the title and the corner overlay must show the
-    same number. Pre-fix, the title already carried the true per-sample
-    value, but the overlay was a bin-level number computed from
-    (mean_predicted, fraction_positive) -- and that bin-level number swung
-    with `n_bins=`/`strategy=` while the title held still."""
+    displayed Brier. Pre-fix the overlay was a bin-level number computed
+    from (mean_predicted, fraction_positive), and it swung with
+    `n_bins=`/`strategy=` while the title (retired at #219/D4) held still.
+    The overlay is now the only surface, so it is what must hold still."""
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     X_mat = df.select(["f0", "f1", "f2", "f3"])
@@ -499,8 +539,8 @@ def test_calibration_title_and_overlay_agree_and_are_invariant_to_binning(binary
     chart_b = ferrum.calibration_chart(binary_source, n_bins=20, strategy="quantile")
 
     for chart in (chart_a, chart_b):
-        assert chart._title.text == f"Calibration Curve — Brier {expected:.3f}"
-        assert f"Brier = {expected:.3f}" in svg_texts(chart.to_svg())
+        assert chart._title.text == "Calibration Curve"
+        assert [t for t in svg_texts(chart.to_svg()) if "Brier" in t] == [f"Brier = {expected:.3f}"]
 
 
 def test_calibration_compared_overlay_shows_each_models_own_per_sample_brier():
@@ -526,11 +566,11 @@ def test_calibration_compared_overlay_shows_each_models_own_per_sample_brier():
     assert f"Brier = {expected_strict:.3f}" in texts
 
 
-def test_calibration_precomputed_title_carries_brier():
-    """The precomputed path (`y_true=`/`y_pred=`) previously rendered a bare
-    "Calibration Curve" title -- neither `.model` nor `.X` exist on
-    `_PrecomputedSource` for the old attribute-chasing code to find. The
-    title must now carry the true per-sample Brier, matching the overlay."""
+def test_calibration_precomputed_annotates_the_true_brier():
+    """The precomputed path (`y_true=`/`y_pred=`) previously showed no Brier
+    at all -- neither `.model` nor `.X` exist on `_PrecomputedSource` for
+    the old attribute-chasing code to find. It must render the true
+    per-sample Brier, the same value the model path shows."""
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
     X_mat = df.select(["f0", "f1", "f2", "f3"])
@@ -540,8 +580,8 @@ def test_calibration_precomputed_title_carries_brier():
 
     chart = ferrum.calibration_chart(y_true=y.to_numpy(), y_pred=proba)
 
-    assert chart._title.text == f"Calibration Curve — Brier {expected:.3f}"
-    assert f"Brier = {expected:.3f}" in svg_texts(chart.to_svg())
+    assert chart._title.text == "Calibration Curve"
+    assert [t for t in svg_texts(chart.to_svg()) if "Brier" in t] == [f"Brier = {expected:.3f}"]
 
 
 # ---------------------------------------------------------------------------
@@ -667,7 +707,12 @@ def test_curve_metrics_by_group_keeps_first_appearance_order():
     from ferrum._metric_labels import _curve_metrics_by_group
 
     metrics = _curve_metrics_by_group(
-        _GROUP_ORDER_FRAME, group_field="class", kind="auc", x_col="fpr", y_col="tpr"
+        _GROUP_ORDER_FRAME,
+        group_field="class",
+        kind="auc",
+        x_col="fpr",
+        y_col="tpr",
+        where="test",
     )
     assert list(metrics) == ["c", "a", "b"]
     assert list(metrics.values()) == pytest.approx([0.70, 0.55, 0.40])
@@ -710,21 +755,21 @@ def test_mark_roc_stackers_each_group_label_on_its_own_row():
     ]
 
 
-def test_single_model_compared_calibration_omits_the_brier_title():
-    """The compared-source title guard is load-bearing, and was untested.
+def test_compared_and_plain_calibration_charts_share_one_plain_title():
+    """The compared-source title guard is subsumed by #219/D4, not lost.
 
-    ``_calibration_chart_from_source`` titles a calibration chart with the
-    frame's broadcast Brier *unless* the source is a ``ComparedModelSource``,
-    where no single number describes several models. In the only compared
-    case the suite built, two genuinely different models put two distinct
-    values in the ``brier`` column, so ``_broadcast_metric``'s multi-value
-    rule returned ``None`` anyway and the guard did nothing -- deleting it
-    changed no test.
+    ``_calibration_chart_from_source`` used to title a calibration chart
+    with the frame's broadcast Brier *unless* the source was a
+    ``ComparedModelSource``, where no single number describes several
+    models. With the title's metric suffix retired, the two branches
+    collapse into one plain title -- and the reason the guard existed (a
+    compared chart must not claim one model's number describes the figure)
+    still holds, because the only Brier text on either chart is the
+    per-series overlay.
 
-    A compared source wrapping **one** model (or two identical ones) is the
-    case that separates them: the column holds a single value, so without
-    the guard the chart would print a Brier title on a compared chart, which
-    is exactly what the guard exists to prevent.
+    A compared source wrapping **one** model is the discriminating case: the
+    column holds a single broadcast value, so a title that still read the
+    column would print it here.
     """
     model = load_fixture("binary_logistic")
     df = load_dataset("binary_classification")
@@ -734,14 +779,10 @@ def test_single_model_compared_calibration_omits_the_brier_title():
     compared = ferrum.ModelSource.compare({"only": model}, X, y)
     # The premise: the column really does carry one broadcast value here.
     assert len(compared.calibration_curve()["brier"].unique().to_list()) == 1
-
-    assert ferrum.calibration_chart(compared)._title.text == "Calibration Curve"
-    # The per-model overlay still carries the number, so nothing is lost --
-    # it is the *title* that has no single model to describe.
-    assert any(
-        t.startswith("Brier = ") for t in svg_texts(ferrum.calibration_chart(compared).to_svg())
-    )
-
-    # Control: the same model as a plain single source does title its Brier.
     plain = ferrum.ModelSource(model, X, y)
-    assert ferrum.calibration_chart(plain)._title.text.startswith("Calibration Curve — Brier ")
+
+    for source in (compared, plain):
+        chart = ferrum.calibration_chart(source)
+        assert chart._title.text == "Calibration Curve"
+        # The per-model overlay carries the number, exactly once.
+        assert len([t for t in svg_texts(chart.to_svg()) if t.startswith("Brier = ")]) == 1

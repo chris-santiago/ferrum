@@ -127,6 +127,37 @@ def test_mark_roc_average_typo_on_multiclass_data_warns_once():
     assert set(chart._data["class"].unique().to_list()) == {"0", "1", "macro"}
 
 
+def test_mark_roc_average_does_not_prefix_match_a_similarly_named_class():
+    """Close review, cycle 2 (#219 follow-up): ``_filter_class_average`` used
+    to also match a ``f"{average} ("``-prefixed ``class`` value, compensating
+    for a legend-rename surface #219's D4 retired (``_inject_metric_into_legend_labels``
+    used to rewrite ``class`` to ``"macro (AUC = 0.912)"``). That match had
+    no remaining producer once the rename was deleted, and was a latent
+    mismatch hazard for real user data whose own ``class`` column happens to
+    start with ``"{average} ("`` -- e.g. a caller-authored label like
+    ``"macro (custom)"`` that is NOT the macro-average row. Exact match
+    only: this must warn (multiclass, no exact ``"macro"`` match), not
+    silently treat the look-alike row as the requested average.
+    """
+    reset_warnings()
+    df = pl.DataFrame(
+        {
+            "fpr": [0.0, 1.0, 0.0, 1.0],
+            "tpr": [0.0, 1.0, 0.0, 1.0],
+            "class": ["0", "0", "macro (custom)", "macro (custom)"],
+        }
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = ferrum.Chart(df).mark_roc(average="macro", reference_line=False)
+    user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(user_warnings) == 1
+    assert "average" in str(user_warnings[0].message)
+    # Falls back to unfiltered -- the look-alike row is not silently
+    # accepted as the requested average.
+    assert set(chart._data["class"].unique().to_list()) == {"0", "macro (custom)"}
+
+
 def test_mark_roc_average_integer_class_column_does_not_raise():
     """Mutation-testing gap close: ``_utf8_col`` (``marks/_desugar_helpers.py``)
     casts the discriminator column to ``Utf8`` before comparing it against
@@ -696,12 +727,16 @@ def test_mark_pca_scree_with_threshold_n_components_raises_type_error():
 # ---------------------------------------------------------------------------
 
 
-def test_roc_chart_multiclass_per_class_false_titles_with_auc():
-    """``roc_chart(per_class=False)`` on multiclass data now renders exactly
-    one (average) curve via the P9 ``average`` fix. The title must reflect
-    that single-curve state -- computed from the post-filter frame -- not
-    the pre-filter frame, which still holds every per-class row plus the
-    average row and would make the single rendered curve look untitled."""
+def test_roc_chart_multiclass_per_class_false_annotates_one_averaged_auc():
+    """``roc_chart(per_class=False)`` on multiclass data renders exactly one
+    (average) curve via the P9 ``average`` fix, and the AUC annotation must
+    reflect that single-curve state -- one label, computed from the
+    post-filter frame -- not the pre-filter frame, which still holds every
+    per-class row plus the average row and would annotate four curves.
+
+    The title carried this pin until #219/D4 (2026-09-13) retired the
+    title's metric suffix; the overlay is now the single metric surface, so
+    that is where the post-filter frame is observable."""
     model = load_fixture("multiclass_logistic")
     df = load_dataset("multiclass_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
@@ -710,8 +745,8 @@ def test_roc_chart_multiclass_per_class_false_titles_with_auc():
     chart = ferrum.roc_chart(source, per_class=False)
     assert len(set(chart._data["class"].unique().to_list())) == 1
     svg = chart.to_svg()
-    assert "ROC Curve — AUC 0." in svg
-    assert ">ROC Curve<" not in svg
+    assert svg.count("AUC = ") == 1
+    assert ">ROC Curve<" in svg
 
 
 # ---------------------------------------------------------------------------

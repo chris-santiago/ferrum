@@ -16,13 +16,13 @@ There are two surfaces that overlay a metric value on a diagnostic curve:
   call ``_apply_metric_label_explicit`` with field overrides.
 
 Both paths share one definition of *what a metric kind is* — its value
-function, its overlay-text prefix, and the broadcast frame column it reads
-— via :data:`_METRIC_LABEL_SPECS`. A placement, prefix, or column fix
+function, its display name and format, and the broadcast frame column it
+reads — via :data:`_METRIC_LABEL_SPECS`. A placement, prefix, or column fix
 therefore lands in one place and is observed by both surfaces.  (The value
-functions ``_trapezoid_auc`` / ``_ap_step`` / ``_brier_score`` were already
-single-homed here; the metric→spec association was the piece duplicated
-between ``_apply_metric_label_explicit`` and the per-class dataclass
-``__radd__`` methods.)
+functions ``_trapezoid_auc`` / ``_ap_step`` were already single-homed here;
+the metric→spec association was the piece duplicated between
+``_apply_metric_label_explicit`` and the per-class dataclass ``__radd__``
+methods.)
 
 Where the metric value comes from (F-L11-01, 2026-09-10)
 --------------------------------------------------------
@@ -31,8 +31,8 @@ when the frame carries the broadcast metric column for that kind (``auc``
 on a ROC frame, ``ap`` on a PR frame, ``brier`` on a calibration frame),
 that value is shown; only data without such a column -- the
 ``+ AUCLabel()`` composable path over arbitrary user data -- is integrated
-here in Python. The chart title, the legend text, the label overlay and
-the ``mark_roc(annotate_auc=True)`` annotation therefore cannot disagree
+here in Python. The label overlay and the
+``mark_roc(annotate_auc=True)`` annotation therefore cannot disagree
 about what a curve's AUC is.
 
 The column is a property of the *kind*, not of the calling surface (close
@@ -40,9 +40,27 @@ review, 2026-09-10). When it was a per-call argument, the composable path
 passed none and silently integrated instead -- harmless for AUC/AP, whose
 integral over the drawn curve *is* the metric, and wrong for Brier, whose
 integral over a binned reliability diagram is a different statistic that
-moves with ``n_bins=``/``strategy=``. So ``chart + BrierLabel()`` printed
-a number that disagreed with the same chart's title, over the top of the
-correct label the figure had already placed.
+moves with ``n_bins=``/``strategy=``.
+
+Which surface shows the metric (#219, D4, 2026-09-13)
+-----------------------------------------------------
+Exactly one: the per-curve overlay label this module emits. The chart
+title's ``— AUC 0.987`` suffix and the legend's ``1 (AUC = 0.987)``
+rename both retired, so a multi-curve ROC no longer prints each curve's
+AUC two or three times, and ``annotate_*=False`` means no metric text
+anywhere. Titles keep their plain names (``"ROC Curve"``).
+
+With the duplicates gone, the surviving surfaces all derive their text
+from :func:`_render_metric` -- the single producer of a user-visible
+metric string. The display name, the ``.3f`` format and the ``"AUC = "``
+prefix are all properties of the kind in :data:`_METRIC_LABEL_SPECS`, so
+a surface can no longer spell or round a metric its own way.
+
+A kind whose ``value_fn`` is a :class:`_NoCurveDefinition` (Brier) has no
+fallback at all: a frame without the column cannot answer the question,
+and the surface refuses naming the column instead of quietly showing the
+bin-level statistic the old fallback produced, which is a different
+number under the same label.
 """
 
 from __future__ import annotations
@@ -53,7 +71,6 @@ from typing import Any, Callable, ClassVar, Literal, NamedTuple, Optional
 import polars as pl
 
 from ferrum._validate import validate_choice
-from ferrum.diagnostics._internal._curve_frames import brier_score as _brier_score
 
 
 def _resolve_field(enc_value: Any) -> Optional[str]:
@@ -132,35 +149,76 @@ def _broadcast_metric(df: pl.DataFrame, kind: str) -> Optional[float]:
     return float(values[0])
 
 
-def _curve_metric(df: pl.DataFrame, *, kind: str, x_col: str, y_col: str) -> float:
+def _metric_absence_reason(df: pl.DataFrame, kind: str) -> str:
+    """Which of :func:`_broadcast_metric`'s three ``None``-causes applies.
+
+    Mirrors that function's own column lookup exactly (same field, same
+    ``drop_nulls().unique()``), so the two cannot disagree about why a
+    frame's broadcast value is unusable -- this only runs after
+    :func:`_broadcast_metric` has already returned ``None`` for ``kind``.
+    """
+    metric_field = _METRIC_LABEL_SPECS[kind].column
+    if metric_field not in df.columns:
+        return "missing_column"
+    if len(df[metric_field].drop_nulls().unique()) == 0:
+        return "no_value"
+    return "multiple_values"
+
+
+def _curve_metric(df: pl.DataFrame, *, kind: str, x_col: str, y_col: str, where: str) -> float:
     """The metric of ``kind`` for the single curve held in ``df``.
 
     One resolution rule, shared by every surface that displays a metric
-    (chart title, legend text, label overlay, mark annotation): read the
-    frame's broadcast metric column when it carries this curve's value,
-    and integrate the kind's value function over ``(x_col, y_col)`` only
-    when it does not. The column is the kernel's own number, so a
-    diagnostic chart shows one metric from one source; the integration path
-    is what makes the composable ``+ AUCLabel()`` marks work on arbitrary
-    user data, which has no such column.
+    (label overlay, mark annotation): read the frame's broadcast metric
+    column when it carries this curve's value, and integrate the kind's
+    value function over ``(x_col, y_col)`` only when it does not. The
+    column is the kernel's own number, so a diagnostic chart shows one
+    metric from one source; the integration path is what makes the
+    composable ``+ AUCLabel()`` marks work on arbitrary user data, which
+    has no such column.
 
     Callers name the metric **kind**, never a column-and-function pair
     (close review, 2026-09-10). Both halves come from
     :data:`_METRIC_LABEL_SPECS` together, so a surface cannot pair the AUC
     integrator with the wrong column, and cannot omit the column and
     silently get the integrated curve instead of the kernel's value -- the
-    exact F-L11-04 failure mode. That was previously guaranteed only at the
-    label surface; the title and legend surfaces hand-paired literals.
+    exact F-L11-04 failure mode.
+
+    A kind whose value function is a :class:`_NoCurveDefinition` has no
+    integration path: without a usable broadcast value the frame simply
+    cannot answer the question, so this refuses naming the surface and
+    *which* of :func:`_broadcast_metric`'s three facts applies -- the column
+    is missing, present but all-null, or present with more than one distinct
+    value (close review, cycle 2: the message must not claim a column is
+    absent when it is sitting right there in "Columns present") (#219(3),
+    2026-09-13). ``where`` is that surface's user-facing name
+    (``"BrierLabel"``, ``"mark_roc"``) -- required, so a new caller has to
+    decide what a reader would recognise rather than inherit a generic one.
     """
     validate_choice("_curve_metric", "kind", kind, _METRIC_LABEL_SPECS)
     value = _broadcast_metric(df, kind)
     if value is not None:
         return value
 
+    spec = _METRIC_LABEL_SPECS[kind]
+    if isinstance(spec.value_fn, _NoCurveDefinition):
+        reason = _metric_absence_reason(df, kind)
+        if reason == "missing_column":
+            cause = f"the data has no {spec.column!r} column"
+        elif reason == "no_value":
+            cause = f"the {spec.column!r} column holds no non-null value for these rows"
+        else:
+            cause = f"the {spec.column!r} column holds more than one distinct value for these rows"
+        raise ValueError(
+            f"{where}: {cause}, so no "
+            f"{spec.display_name} value can be shown. {spec.value_fn.reason} "
+            f"Columns present: {sorted(df.columns)}."
+        )
+
     import numpy as np
 
     return float(
-        _METRIC_LABEL_SPECS[kind].value_fn(
+        spec.value_fn(
             np.asarray(df[x_col].to_list(), dtype=float),
             np.asarray(df[y_col].to_list(), dtype=float),
         )
@@ -174,6 +232,7 @@ def _curve_metrics_by_group(
     kind: str,
     x_col: str,
     y_col: str,
+    where: str,
 ) -> dict[str, float]:
     """:func:`_curve_metric` per ``group_field`` value, keyed by ``str(value)``.
 
@@ -189,9 +248,26 @@ def _curve_metrics_by_group(
             kind=kind,
             x_col=x_col,
             y_col=y_col,
+            where=where,
         )
         for value in groups
     }
+
+
+@dataclass(frozen=True)
+class _NoCurveDefinition:
+    """Stand-in for the value function of a kind the drawn curve cannot answer.
+
+    Brier is the case: it is a per-sample statistic, and integrating the
+    binned reliability points a calibration chart draws yields a different,
+    ``n_bins=``/``strategy=``-dependent number. Holding the explanation
+    *in place of* the callable (rather than beside it as a second nullable
+    field) means the "no fallback" fact and the sentence explaining it
+    cannot drift apart, and a kind added later must state its own reason to
+    opt out.
+    """
+
+    reason: str
 
 
 class _MetricKind(NamedTuple):
@@ -203,18 +279,25 @@ class _MetricKind(NamedTuple):
     the kernel's number or integrates the drawn curve must not depend on
     which of the two surfaces is asking.
 
+    ``value_fn`` integrates the drawn curve when the frame carries no such
+    column, or is a :class:`_NoCurveDefinition` when the drawn curve does
+    not define the metric at all -- see :func:`_curve_metric`.
+
     ``display_name`` is how the metric is spelled to a reader -- ``"AUC"``,
-    ``"AP"``, ``"Brier"`` -- and every display surface derives its text from
-    it. The overlay's ``prefix`` is a property rather than a stored field
-    for that reason (close review, 2026-09-11): the legend renames, the mark
-    annotations and the label overlays each used to carry their own literal
-    spelling alongside the kind, so one metric had three names in three
-    places and a mismatch would render wrong text. There is now one name.
+    ``"AP"``, ``"Brier"`` -- and ``format`` is how its value is rounded.
+    Every display surface derives its text from the two together via
+    :func:`_render_metric`; the overlay's ``prefix`` is a property rather
+    than a stored field for the same reason (close review, 2026-09-11):
+    the legend renames, the mark annotations and the label overlays each
+    used to carry their own literal spelling and their own ``.3f`` beside
+    the kind, so one metric had three names and three roundings in three
+    places and a mismatch rendered wrong text. There is now one of each.
     """
 
-    value_fn: Callable[[Any, Any], float]
+    value_fn: Callable[[Any, Any], float] | _NoCurveDefinition
     display_name: str
     column: str
+    format: str
 
     @property
     def prefix(self) -> str:
@@ -223,28 +306,28 @@ class _MetricKind(NamedTuple):
 
 
 # Canonical metric-kind table — the single source for the
-# ``kind -> (value function, display name, broadcast column)`` association
-# shared by every surface that shows a metric: the direct-mark ``__radd__``
-# path, the figure-function explicit-field path, the chart titles, the
-# legend renames and the mark annotations. Keys match the ``label_kind``
-# strings accepted by ``_apply_metric_label_explicit``; the derived prefixes
-# match the per-class dataclass defaults so consolidating here is
-# byte-identical on every surface.
+# ``kind -> (value function, display name, broadcast column, format)``
+# association shared by every surface that shows a metric: the direct-mark
+# ``__radd__`` path, the figure-function explicit-field path and the mark
+# annotations. Keys match the ``label_kind`` strings accepted by
+# ``_apply_metric_label_explicit``; the derived prefixes and the format
+# match the per-class dataclass defaults, which read them from here.
 _METRIC_LABEL_SPECS: dict[str, _MetricKind] = {
-    "auc": _MetricKind(_trapezoid_auc, "AUC", "auc"),
-    "ap": _MetricKind(_ap_step, "AP", "ap"),
-    "brier": _MetricKind(_brier_score, "Brier", "brier"),
+    "auc": _MetricKind(_trapezoid_auc, "AUC", "auc", ".3f"),
+    "ap": _MetricKind(_ap_step, "AP", "ap", ".3f"),
+    "brier": _MetricKind(
+        _NoCurveDefinition(
+            "Brier is computed from per-sample predicted probabilities, not from the "
+            "binned reliability points a calibration chart draws -- integrating those "
+            "gives a bin-level statistic that moves with n_bins=/strategy=. Supply a frame from "
+            "ModelSource.calibration_curve(), which carries the column (or call "
+            "ferrum.calibration_chart(), which already places this label)."
+        ),
+        "Brier",
+        "brier",
+        ".3f",
+    ),
 }
-
-
-def _display_name(kind: str) -> str:
-    """How ``kind`` is spelled to a reader (``"AUC"``, ``"AP"``, ``"Brier"``).
-
-    The accessor the legend-rename and mark-annotation helpers use, so a
-    display surface names a metric by asking the table rather than by
-    carrying its own literal next to the kind it already passed.
-    """
-    return _METRIC_LABEL_SPECS[kind].display_name
 
 
 def _default_prefix(kind: str) -> str:
@@ -252,7 +335,77 @@ def _default_prefix(kind: str) -> str:
     return _METRIC_LABEL_SPECS[kind].prefix
 
 
+def _default_format(kind: str) -> str:
+    """Canonical float format spec for a metric kind (drives dataclass defaults)."""
+    return _METRIC_LABEL_SPECS[kind].format
+
+
+def _render_metric(
+    kind: str,
+    value: float,
+    *,
+    prefix: Optional[str] = None,
+    fmt: Optional[str] = None,
+) -> str:
+    """The one producer of a user-visible metric string (#219, spec §6).
+
+    Returns ``"{prefix}{value:{format}}"`` -- e.g. ``"AUC = 0.987"`` --
+    with both halves taken from ``kind``'s row of
+    :data:`_METRIC_LABEL_SPECS`. Every surface that shows a metric calls
+    this; none formats a float itself. Before, six sites carried their own
+    ``:.3f`` literal, so changing the rounding (or a metric's spelling)
+    meant finding all six and a missed one rendered a differently-rounded
+    number beside the others.
+
+    ``prefix`` and ``fmt`` override the kind's defaults for the one shipped
+    reason they exist: ``AUCLabel(format=".2f", prefix="auc: ")`` and its
+    siblings are public, documented parameters. Passing neither (what every
+    internal caller does) is what the byte-parity test pins.
+    """
+    validate_choice("_render_metric", "kind", kind, _METRIC_LABEL_SPECS)
+    spec = _METRIC_LABEL_SPECS[kind]
+    return (
+        f"{spec.prefix if prefix is None else prefix}{value:{spec.format if fmt is None else fmt}}"
+    )
+
+
 _VALID_METRIC_LABEL_POSITIONS = ("end", "corner")
+
+#: Columns ``_apply_metric_label`` writes onto the base chart's data to carry
+#: its overlay, and the encoding the emitted ``mark_text`` layer reads. Named
+#: so the emitting code and the idempotence check below cannot disagree about
+#: which layer belongs to this module.
+_LABEL_TEXT_COL = "_label_text"
+_LABEL_X_COL = "_label_x"
+_LABEL_Y_COL = "_label_y"
+
+
+def _is_metric_label_layer(layer: Any) -> bool:
+    """Whether ``layer`` is an overlay this module emitted.
+
+    Recognised by structure -- a ``text`` mark reading
+    :data:`_LABEL_TEXT_COL` -- rather than by a layer name, because the
+    layer reaches ``Chart._layers`` through ``Chart.__add__``'s generic
+    ``_expand_layers`` path, which names nothing. The column is private to
+    this module, so nothing else can produce that shape.
+    """
+    return layer.mark == "text" and _resolve_field(layer.encoding.get("text")) == _LABEL_TEXT_COL
+
+
+def _without_metric_label_layer(base: "Chart") -> "Chart":
+    """``base`` with any previously-applied metric-label overlay removed.
+
+    Returns ``base`` itself when there is nothing to drop, so the common
+    first-application path clones nothing.
+    """
+    if base._layers is None:
+        return base
+    kept = [layer for layer in base._layers if not _is_metric_label_layer(layer)]
+    if len(kept) == len(base._layers):
+        return base
+    stripped = base._clone()
+    stripped._layers = kept
+    return stripped
 
 
 def _validate_metric_label_fields(label: "AUCLabel | APLabel | BrierLabel") -> None:
@@ -327,10 +480,21 @@ def _apply_metric_label(
     ``plots/_helpers.py``) rather than importing that residuals-specific,
     hardcoded-column helper, which would invert the top-level/``plots``
     dependency direction and does not compute this module's metrics anyway.
+
+    #219(2) (2026-09-13): applying a label to a chart that already carries
+    one **replaces** it. ``fm.roc_chart(...) + fm.AUCLabel()`` used to stack
+    a second text layer holding the same text at the same coordinates -- an
+    exact overstrike, visible only as slightly bolder glyphs -- because the
+    figure function already places one by default. The existing layer is
+    recognised by the encoding this function owns (see
+    :func:`_is_metric_label_layer`), and dropping it is also what lets a
+    re-applied label change ``position=``/``format=``: the replacement
+    re-derives every ``_label_*`` value from scratch.
     """
     from ferrum._coerce import to_arrow_table
     from ferrum.chart import Chart
 
+    base = _without_metric_label_layer(base)
     x_col = x_col_override or _resolve_field(base._encoding.get("x"))
     y_col = y_col_override or _resolve_field(base._encoding.get("y"))
     color_col = color_col_override or _resolve_field(base._encoding.get("color"))
@@ -366,8 +530,13 @@ def _apply_metric_label(
             group = df.filter(pl.col(color_col) == cls)
             if group.is_empty():
                 continue
-            metric = _curve_metric(group, kind=kind, x_col=x_col, y_col=y_col)
-            text = f"{label.prefix}{metric:{label.format}}"
+            # `_idx` is this function's own row index, not part of the
+            # caller's data -- drop it so a refusal lists the columns the
+            # caller actually passed.
+            metric = _curve_metric(
+                group.drop("_idx"), kind=kind, x_col=x_col, y_col=y_col, where=type(label).__name__
+            )
+            text = _render_metric(kind, metric, prefix=label.prefix, fmt=label.format)
             # nulls_last=True so a null x (which polars' default descending
             # sort places FIRST) never becomes the selected "endpoint" row;
             # the endpoint is the group's highest *non-null* x, matching what
@@ -387,8 +556,10 @@ def _apply_metric_label(
             else:
                 label_x_col[global_idx] = float(endpoint_x) if endpoint_x is not None else x_top
     else:
-        metric = _curve_metric(df, kind=kind, x_col=x_col, y_col=y_col)
-        text = f"{label.prefix}{metric:{label.format}}"
+        metric = _curve_metric(
+            df.drop("_idx"), kind=kind, x_col=x_col, y_col=y_col, where=type(label).__name__
+        )
+        text = _render_metric(kind, metric, prefix=label.prefix, fmt=label.format)
         global_idx = df[x_col].arg_max()
         # arg_max() returns None (not an int index) for an empty or
         # entirely-null x column -- pre-existing edge case, not introduced
@@ -403,16 +574,16 @@ def _apply_metric_label(
 
     base_pl = base._data if isinstance(base._data, pl.DataFrame) else pl.from_arrow(tbl)
     augmented = base_pl.with_columns(
-        pl.Series("_label_text", labels_col, dtype=pl.Utf8),
-        pl.Series("_label_x", label_x_col, dtype=pl.Float64),
-        pl.Series("_label_y", label_y_col, dtype=pl.Float64),
+        pl.Series(_LABEL_TEXT_COL, labels_col, dtype=pl.Utf8),
+        pl.Series(_LABEL_X_COL, label_x_col, dtype=pl.Float64),
+        pl.Series(_LABEL_Y_COL, label_y_col, dtype=pl.Float64),
     )
     base_aug = base._clone()
     base_aug._data = augmented
     annot_layer = (
         Chart(augmented)
         .mark_text(align="right", baseline="hanging", dx=-4, dy=4)
-        .encode(x="_label_x", y="_label_y", text="_label_text")
+        .encode(x=_LABEL_X_COL, y=_LABEL_Y_COL, text=_LABEL_TEXT_COL)
     )
     return base_aug + annot_layer
 
@@ -447,7 +618,7 @@ class AUCLabel:
 
     _kind: ClassVar[str] = "auc"
     position: Literal["end", "corner"] = "end"
-    format: str = ".3f"
+    format: str = _default_format("auc")
     prefix: str = _default_prefix("auc")
 
     def __post_init__(self) -> None:
@@ -489,7 +660,7 @@ class APLabel:
 
     _kind: ClassVar[str] = "ap"
     position: Literal["end", "corner"] = "end"
-    format: str = ".3f"
+    format: str = _default_format("ap")
     prefix: str = _default_prefix("ap")
 
     def __post_init__(self) -> None:
@@ -530,7 +701,7 @@ class BrierLabel:
 
     _kind: ClassVar[str] = "brier"
     position: Literal["end", "corner"] = "corner"
-    format: str = ".3f"
+    format: str = _default_format("brier")
     prefix: str = _default_prefix("brier")
 
     def __post_init__(self) -> None:
@@ -643,7 +814,7 @@ def _apply_metric_label_explicit(
     y_col: str,
     color_col: Optional[str] = None,
     position: str = "end",
-    fmt: str = ".3f",
+    fmt: Optional[str] = None,
     prefix: Optional[str] = None,
 ) -> "Chart":
     """Apply a metric label to ``base`` with explicit field overrides.
@@ -653,18 +824,22 @@ def _apply_metric_label_explicit(
     ``_pending_stat_mark`` composite hides the encoding.
 
     Shares the metric-kind table (:data:`_METRIC_LABEL_SPECS`) with the
-    direct-mark ``__radd__`` path, so a value-function, prefix, or
+    direct-mark ``__radd__`` path, so a value-function, prefix, format or
     broadcast-column change is observed identically by both surfaces. The
     kind's broadcast column is read from the table rather than passed by
     the caller (close review, 2026-09-10): a builder cannot ask for the
     wrong column, or forget to ask for one and silently get an integrated
-    curve instead of the kernel's number.
+    curve instead of the kernel's number. ``fmt``/``prefix`` default to the
+    table's for the same reason (#219, 2026-09-13) -- a builder that wrote
+    its own ``".3f"`` was a sixth place the rounding had to be changed.
     """
     validate_choice("_apply_metric_label_explicit", "label_kind", label_kind, _METRIC_LABEL_SPECS)
+    spec = _METRIC_LABEL_SPECS[label_kind]
     pos_lit: Any = position
-    prefix_str = prefix if prefix is not None else _METRIC_LABEL_SPECS[label_kind].prefix
     label_obj: Any = _METRIC_LABEL_CLASSES[label_kind](
-        position=pos_lit, format=fmt, prefix=prefix_str
+        position=pos_lit,
+        format=spec.format if fmt is None else fmt,
+        prefix=spec.prefix if prefix is None else prefix,
     )
     return _apply_metric_label(
         base,

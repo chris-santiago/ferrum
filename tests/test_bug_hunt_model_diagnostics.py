@@ -561,8 +561,8 @@ def test_roc_chart_annotate_auc_true_has_text_labels():
     svg = chart.to_svg()
     assert "<svg" in svg
     assert "<text" in svg
-    # AUC annotation may appear as "AUC = X.XXX" or "(AUC = X.XXX)" in legend labels
-    assert "AUC" in svg
+    # Since #219/D4 the AUC appears exactly once, in the endpoint overlay.
+    assert svg.count("AUC = ") == 1
 
 
 def test_pr_chart_annotate_ap_false_no_text_labels():
@@ -1858,6 +1858,7 @@ def test_inject_curve_annotation_zero_row_df():
         prefix="_auc",
         x_col="fpr",
         y_col="tpr",
+        where="mark_roc",
     )
     # Should return the DataFrame unchanged (no crash on zero-row input)
     assert result.height == 0
@@ -1887,6 +1888,7 @@ def test_inject_curve_annotation_null_group():
         prefix="_m",
         x_col="x",
         y_col="y",
+        where="mark_roc",
     )
     assert result.height == 3
     # The null group should be skipped; only "a" and "b" get labels
@@ -2073,12 +2075,10 @@ def test_precomputed_roc_all_same_class_chart_renders():
     assert "<svg" in svg
     assert "NaN" not in svg  # NaN in auc column should not leak to SVG coordinates
     # Symmetric to the all-zeros case above: an all-ones target labels its
-    # curve "1", not a class absent from the data. The figure builder
-    # renames the legend value to embed the metric ("1 (AUC = nan)"), so
-    # the class name is asserted as the prefix rather than coupling this
-    # check to the metric text.
-    labels = chart._data["class"].unique().to_list()
-    assert len(labels) == 1 and labels[0].startswith("1"), labels
+    # curve "1", not a class absent from the data. Since #219/D4 the legend
+    # value is the bare class name -- the metric lives only in the endpoint
+    # overlay -- so this is an equality, not a prefix check.
+    assert chart._data["class"].unique().to_list() == ["1"]
 
 
 # ---------------------------------------------------------------------------
