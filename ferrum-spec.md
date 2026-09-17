@@ -1256,6 +1256,59 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 > against the kernel column independently on the phase-10 golden fixtures
 > (seven goldens regenerated and PNG-inspected).
 
+> **2026-09-13 (wave 3, #219 / D4 — one metric surface; supersedes the two
+> notes above wherever they say the title or the legend carries a metric):**
+> `annotate_auc` / `annotate_ap` / `annotate_brier` now drive **exactly one**
+> surface, the per-curve endpoint overlay. Two surfaces retire:
+>
+> - The chart title's metric suffix. `roc_chart` is titled `"ROC Curve"`,
+>   `pr_chart` `"Precision–Recall Curve"` and `calibration_chart`
+>   `"Calibration Curve"` in every shape — single-curve, per-class, averaged,
+>   compared and precomputed alike. The single-vs-multi-curve title split and
+>   `calibration_chart`'s compared-source title guard are gone with it: there
+>   is no longer a title branch for them to guard.
+> - The legend rename. A ROC/PR legend entry is the bare class or model name
+>   (`"1"`, `"macro"`, `"a"`), not `"1 (AUC = 0.984)"`.
+>
+> This is the repo's own Schwabish T2 rule (a direct label replaces the
+> legend's copy of the number) applied to the three curve families, and it is
+> what makes `annotate_*=False` mean what it says: the title used to print the
+> metric regardless of the flag, so opting out never removed the number from
+> the figure. It now does — measured metric text runs across all eleven
+> phase-10 goldens this moved: `roc_chart_binary` and
+> `roc_chart_binary_annotate_auc` 3 → 1; `roc_chart_multiclass` and
+> `roc_chart_multiclass_annotate_auc` 6 → 3; `roc_chart_compare_two_models`
+> 4 → 2; `pr_chart_binary`, `pr_chart_binary_annotate_ap` and
+> `pr_chart_binary_iso_lines` 3 → 1; `pr_chart_multiclass_annotate_ap_iso`
+> 6 → 3; `pr_chart_multiclass_macro_average` 3 → 1;
+> `calibration_chart_binary` 2 → 1. No metric *value* changes; only how many
+> times each is printed.
+>
+> Two further contract changes ship with it:
+>
+> - **Re-applying a metric label replaces it.** `roc_chart(...) + AUCLabel()`
+>   used to stack a second text layer carrying the same string at the same
+>   coordinates (an exact overstrike, since the figure already places one).
+>   The new label now supersedes the old one, so a re-application is how a
+>   caller changes `position=` / `format=` / `prefix=` on a figure's label
+>   rather than a way to double it.
+> - **`BrierLabel` on a frame with no `brier` column refuses.** A reliability
+>   diagram's binned `(mean_predicted, fraction_positive)` points do not define
+>   a Brier score — integrating them gives a bin-level statistic that moves
+>   with `n_bins=` / `strategy=`. That silent fallback is deleted; the label
+>   raises a `ValueError` naming the missing column. `AUCLabel` / `APLabel`
+>   are unaffected: the area under the drawn curve *is* their metric, so the
+>   composable path over arbitrary user data keeps integrating.
+>
+> One owner now produces every user-visible metric string
+> (`ferrum._metric_labels._render_metric`), taking the display name and the
+> `.3f` format from the kind's row of `_METRIC_LABEL_SPECS`; the six sites
+> that each carried their own literal are gone or consume it. The mark-level
+> annotation (`mark_roc(annotate_auc=True)` / `mark_pr(annotate_ap=True)`)
+> keeps its `"{group}: AUC = 0.987"` placement and text byte-for-byte — it was
+> already a single surface for the direct-mark path — but composes that text
+> from the same owner.
+
 > **2026-09-10 (batch G close — binary label conventions):** every binary
 > classification diagnostic now binarizes the target against the positive
 > class before the Rust kernels see it, so a target's *labels* no longer
@@ -4014,21 +4067,23 @@ ferrum.cv_scores_chart(model, X, y, *, cv=5, scoring=None,
 > **Schwabish SB3 — 2026-05-11 — figure-function defaults.** Eight
 > Group-B functions adopt the Schwabish defaults from §3.19's principles doc:
 >
-> - `roc_chart`: `annotate_auc=True` by default; single-curve charts get the
->   active title `"ROC — AUC X.XXX"`; multi-curve charts get a descriptive
->   `"ROC"` title plus one `AUCLabel` per curve, staggered along the y axis
->   so labels do not collide at the line endpoint.
-> - `pr_chart`: `annotate_ap=True` by default; active title parallels
->   `roc_chart`. Binary classifiers additionally render a dashed horizontal
->   baseline at the positive-class prevalence so the chance-level floor is
->   always visible.
-> - `calibration_chart`: new `annotate_brier=True` kwarg (default on).
->   Single-model charts get an active title carrying the per-sample Brier
->   score computed from `model.predict_proba` plus a corner `BrierLabel`
->   showing the identical number (see the 2026-09-10 dated note immediately
->   below — this bullet's original text, "multi-model charts get one
->   `BrierLabel` per model from the bin-level reliability data," is
->   superseded).
+> - `roc_chart`: `annotate_auc=True` by default; one `AUCLabel` per curve,
+>   staggered along the y axis so labels do not collide at the line endpoint.
+>   (This bullet's original text gave single-curve charts the active title
+>   `"ROC — AUC X.XXX"` and multi-curve charts a descriptive `"ROC"` title;
+>   the metric-carrying title is superseded by the 2026-09-13 #219/D4 note in
+>   §3.15 — every ROC chart is titled `"ROC Curve"` and the overlay is the
+>   sole metric surface.)
+> - `pr_chart`: `annotate_ap=True` by default; overlay parallels `roc_chart`
+>   (its active title is superseded by the same 2026-09-13 note). Binary
+>   classifiers additionally render a dashed horizontal baseline at the
+>   positive-class prevalence so the chance-level floor is always visible.
+> - `calibration_chart`: new `annotate_brier=True` kwarg (default on). A
+>   corner `BrierLabel` carries the per-sample Brier score (see the
+>   2026-09-10 dated note immediately below — this bullet's original text,
+>   "multi-model charts get one `BrierLabel` per model from the bin-level
+>   reliability data," is superseded; its active title is superseded by the
+>   2026-09-13 #219/D4 note).
 
 > **2026-09-10 (batch G, F-L11-04 — supersedes the bin-level compared-path
 > text above; itself partly superseded by the batch G close note that
