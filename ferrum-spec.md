@@ -4353,7 +4353,7 @@ class FerrumVisualizer:
 > `ClassPredictionErrorVisualizer`) ignore the value; the rest propagate
 > it. (`DiscriminationThresholdVisualizer`'s membership in this deterministic
 > list was briefly false while its `cv=` path used a shuffled splitter — see
-> the dated 2026-09-13 §3.13 note for that history; the unshuffled
+> the dated 2026-09-13 §3.1 note for that history; the unshuffled
 > `StratifiedKFold` restores it.) The `ElbowVisualizer(model_class, *, ks, ...)` signature is unique —
 > it takes a model **class** and fits one instance per k inside `fit()`.
 

@@ -118,6 +118,19 @@ The boundary `ModelSource` enforces is the load-bearing one: it computes the der
 
 `ModelSource` also lazy-imports sklearn and shap as needed: `import ferrum` does not pull those packages into your process. (UMAP embeddings run in pure Rust, so no Python `umap` package is ever imported.) They load only when you actually compute a diagnostic that requires them — and only on the **fitted-model** path. The raw-array path (below) computes its metrics on Ferrum's native Rust kernels and imports none of them.
 
+Every derived-data method caches its result on the `ModelSource` instance, keyed on the method name and its keyword arguments, so calling `source.roc_curve()` twice does not recompute. The cache key is built from the arguments' own values — including array-likes such as `cv=` splitters and `train_sizes=` arrays — so two calls with different (or differently-typed) arguments always get their own answer; a value the key builder can't turn into something hashable (an unhashable custom object) is never cached at all, so that call recomputes fresh every time rather than risking a wrong hit.
+
+### A corrupted target refuses or warns, never fabricates
+
+Every classification diagnostic — the `ModelSource` methods above and the precomputed `y_true=`/`y_pred=` path below — applies one target-hygiene rule to a target that disagrees with the model:
+
+- **A null row refuses.** `y` (or `y_true`/`y_pred`) carrying any null value — `None`, `NaN`, `NaT`, depending on dtype — raises `ValueError` naming the diagnostic, the null count, and `y`'s observed values. A null is not a class observation, so nothing absorbs it silently; drop or impute those rows first.
+- **A stray out-of-domain value warns and is handled per family.** A row holding a value outside the resolved class set doesn't stop the call, but it doesn't disappear silently either: a `UserWarning` names the diagnostic, the row count, and the values. On a curve (`roc_curve`, `pr_curve`, `calibration_curve`, `cumulative_gain`, `lift_curve`, `discrimination_threshold`) the row is counted as negative (scikit-learn's own `pos_label` convention); on the confusion family (`confusion_matrix`, `class_prediction_error_chart`) the row is dropped from the matrix entirely, since the kernel maps it to no cell.
+- **A target that matches nothing refuses.** A binary positive class matching zero rows, or (for `cumulative_gain`/`lift_curve` and multiclass one-vs-rest) a resolved class set matching zero rows, raises rather than returning a curve of NaNs or a degenerate gain/lift line.
+- Multiclass one-vs-rest still tolerates *some* classes being absent from the data with no warning — that's a real answer ("no row is class k"), not corruption.
+
+A clean target is unaffected by any of this.
+
 ## Comparing multiple models
 
 Most classification helpers accept a `compare=` keyword for side-by-side multi-model comparison on the same test set. Pass a dict mapping display names to fitted estimators:
@@ -156,6 +169,17 @@ report
 ```
 
 [`ComparedModelSource`][ferrum.ComparedModelSource] computes derived data once per model and stamps a `model` column on the concatenated output, so charts can route `color="model"` automatically.
+
+### Two comparison shapes: overlay and small multiples
+
+Most `compare=` charts overlay every model on one panel and separate them with `color="model"`, as above. Two charts don't, because their color channel is already spent:
+
+- [`discrimination_threshold_chart`][ferrum.discrimination_threshold_chart] (and [`DiscriminationThresholdVisualizer`][ferrum.DiscriminationThresholdVisualizer]) already colors by metric (precision/recall/F1/queue_rate), so `compare=` renders **small multiples** instead: one titled panel per model, sharing x/y scales, each with its own F1-optimum annotation and threshold rule computed from that model's own sweep. The return type is `ConcatChart` (a compound view), not a single `Chart`.
+- [`CalibrationVisualizer`][ferrum.CalibrationVisualizer] accepts two different multi-model idioms, for two different questions. A symmetric overlay — `CalibrationVisualizer(model_a, model_b)` or `CalibrationVisualizer({"a": model_a, "b": model_b})` — treats every model equally: no base, `has_score` is `False`, and `calibration_error` carries one entry per model. `CalibrationVisualizer(model, compare={"rival": other})` instead distinguishes a base model — the same semantics `ROCVisualizer`/`PRVisualizer`/`DiscriminationThresholdVisualizer` use — so `.score()` and `calibration_error` describe the base model alone. The two idioms are mutually exclusive; passing both raises `ValueError`.
+
+### Cross-validated threshold sweeps
+
+`discrimination_threshold_chart(cv=...)` (and the visualizer's `cv=`) averages the threshold sweep over cross-validation folds instead of a single in-sample pass. An integer `cv=` resolves the same way scikit-learn's own `check_cv(cv, y, classifier=True)` does — an unshuffled `StratifiedKFold` — so the result is deterministic regardless of `random_state`, and stratification keeps a fold from landing with zero positives by construction. Pass a splitter object directly (e.g. a scikit-learn `StratifiedKFold`) to control the fold generator yourself; it receives both `X` and `y`, so stratified splitters work. If a **training** fold still ends up with only one class present (possible at very small class counts even under stratification), Ferrum warns naming the fold and the missing class before the fit would fail.
 
 ## Precomputed scores (no model required)
 
@@ -286,6 +310,12 @@ chart
 
 The same `mark=`, `encode=`, `properties=`, `layers=` pattern works on every diagnostic helper — `confusion_matrix_chart`, `calibration_chart`, `importance_chart`, and all the rest.
 
+### Metric labels: one surface, not three
+
+`roc_chart`, `pr_chart`, and `calibration_chart` take `annotate_auc=` / `annotate_ap=` / `annotate_brier=` (default `True`). Each flag drives exactly one surface: a text label overlaid at the curve's endpoint, e.g. `"1: AUC = 0.987"`. The chart title never carries the metric (`roc_chart` is always titled `"ROC Curve"`) and the legend entry is always the bare class or model name, so `annotate_auc=False` really does mean no AUC printed anywhere on the figure.
+
+Composable labels — [`AUCLabel`][ferrum.AUCLabel], [`APLabel`][ferrum.APLabel], [`BrierLabel`][ferrum.BrierLabel] — add or replace that same overlay: `roc_chart(model, X, y, annotate_auc=False) + fm.AUCLabel()` adds the label back with room to override `position=`/`format=`/`prefix=`, and re-applying one (`chart + fm.AUCLabel() + fm.AUCLabel(format=".1%")`) replaces the existing label rather than stacking a second copy on top of it. `BrierLabel` needs a `brier` column on the underlying frame — every calibration chart Ferrum builds has one, but a hand-built frame without it raises `ValueError` naming the missing column rather than silently falling back to a different statistic.
+
 ## Diagnostics compose with everything else
 
 The most important property of these helpers is structural: their output is a regular Ferrum chart. That means a ROC curve participates in the rest of the grammar identically to a scatter plot:
@@ -302,7 +332,7 @@ A four-panel model report is `(roc | cm) & (residuals | importances)` — same c
 A few sharp edges worth knowing:
 
 - **SHAP and shap-style helpers**: require `shap` installed. They lazy-import on first call; install the optional `ferrum-viz[shap]` extra to pull it in. UMAP runs in pure Rust via `manifolds-rs` — no Python dependency.
-- **Per-class breakdowns**: classifier diagnostics default to a per-class view when the model has more than two classes. Pass `per_class=False` to collapse to a macro / micro / weighted average.
+- **Per-class breakdowns**: classifier diagnostics default to a per-class view when the model has more than two classes. Pass `per_class=False` to collapse to a macro / micro / weighted average. [`pdp_chart`][ferrum.pdp_chart] follows the same convention for a multiclass model: the underlying `partial_dependence()` frame carries one row group per class (`class_label` column), and the chart facets by feature as usual while coloring by class, so each panel shows one curve per class instead of just the first.
 - **Compare multiple models**: most classification helpers accept a `compare=` keyword (or a [`ComparedModelSource`][ferrum.ComparedModelSource] data source) for side-by-side comparison. See the API reference for the per-helper signatures.
 - **Non-sklearn models**: any estimator exposing `predict()` and `predict_proba()` works (XGBoost, LightGBM, CatBoost, etc.). For frameworks without sklearn-compatible APIs (PyTorch, TensorFlow), use the `y_true=` / `y_pred=` precomputed path described above.
 
