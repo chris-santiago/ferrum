@@ -85,6 +85,12 @@ pub struct TimeScale {
     utc: bool,
     domain_user_set: bool,
     reverse: bool,
+    /// The constructor's `nice=` kwarg, carried verbatim onto the wire by
+    /// `to_scale_spec` (`#153`) — see `LinearScale`'s identically-shaped
+    /// field for the full rationale (data-derived domain nicing cannot
+    /// happen at construction, so this flag is what tells the render path
+    /// to nice the domain it infers from the column).
+    nice: bool,
 }
 
 impl TimeScale {
@@ -107,6 +113,7 @@ impl TimeScale {
             utc: false,
             domain_user_set: true,
             reverse: false,
+            nice,
         };
         if nice { s.time_nice() } else { s }
     }
@@ -241,8 +248,11 @@ impl TimeScale {
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
     ///
     /// `utc == true` maps to `ScaleSpec::Utc`, else `ScaleSpec::Time` — the
-    /// `"utc"`/`"time"` wire tag the legacy `_scale_to_dict` emitted. `nice` is
-    /// baked into the domain at construction, so it is always `false` here.
+    /// `"utc"`/`"time"` wire tag the legacy `_scale_to_dict` emitted. `nice`
+    /// carries the constructor's `nice=` kwarg verbatim (`#153`) — see
+    /// `LinearScale::to_scale_spec`'s doc for why this does not
+    /// double-apply the rounding for an explicit domain (both arms share
+    /// the same `self.nice` flag; UTC-ness and nicing are independent).
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
         let common = continuous_common(ContinuousCommonParts {
             domain: self.data.domain,
@@ -254,9 +264,9 @@ impl TimeScale {
             reverse: self.reverse,
         });
         if self.utc {
-            ScaleSpec::Utc { common, nice: false }
+            ScaleSpec::Utc { common, nice: self.nice }
         } else {
-            ScaleSpec::Time { common, nice: false }
+            ScaleSpec::Time { common, nice: self.nice }
         }
     }
 
@@ -290,6 +300,7 @@ impl TimeScale {
                         utc: self.utc,
                         domain_user_set: self.domain_user_set,
                         reverse: self.reverse,
+                        nice: self.nice,
                     };
                 };
                 let Some(dt_hi) = Utc.timestamp_millis_opt(hi as i64).single() else {
@@ -331,6 +342,7 @@ impl TimeScale {
             utc: self.utc,
             domain_user_set: self.domain_user_set,
             reverse: self.reverse,
+            nice: self.nice,
         }
     }
 }
@@ -564,6 +576,7 @@ impl TimeScale {
             utc,
             domain_user_set: resolved.domain_user_set,
             reverse,
+            nice,
         };
         if nice && resolved.domain_user_set {
             Ok(s.time_nice())

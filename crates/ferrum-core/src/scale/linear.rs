@@ -148,6 +148,16 @@ pub struct LinearScale {
     range_user_set: bool,
     domain_user_set: bool,
     reverse: bool,
+    /// The constructor's `nice=` kwarg, carried verbatim onto the wire by
+    /// `to_scale_spec` (`#153`). Independent of whether the domain was
+    /// niced eagerly below: for an explicit domain, `nice=True` bakes the
+    /// rounding into `data.domain` at construction AND this flag is set,
+    /// so a render-side rebuild from the (already-niced) wire domain
+    /// re-applies `nice()` idempotently. For a data-derived domain (no
+    /// `domain=`), nicing cannot happen yet — there is no domain to round —
+    /// so this flag is the only thing that survives to tell the render
+    /// path (which infers the real domain from the column) to nice it.
+    nice: bool,
 }
 
 impl LinearScale {
@@ -164,7 +174,7 @@ impl LinearScale {
         if nice {
             d = d.nice();
         }
-        LinearScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false }
+        LinearScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false, nice }
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
@@ -264,9 +274,17 @@ impl LinearScale {
 
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
     ///
-    /// `nice`/`zero` are always `false`: `nice` is baked into the domain at
-    /// construction (no field survives) and `zero` is not a `LinearScale`
-    /// concept — matching what the legacy `_scale_to_dict` omitted.
+    /// `nice` carries the constructor's `nice=` kwarg verbatim (`#153`) —
+    /// matching what the equivalent raw `scale={"nice": True}` dict already
+    /// emits. This does not double-apply the rounding: for an explicit
+    /// domain, `data.domain` was already niced eagerly at construction, and
+    /// a render-side rebuild that re-applies `nice()` to an already-niced
+    /// domain is idempotent (`LinearScaleData::nice`'s own idempotence,
+    /// pinned by `linear_nice_idempotent`); for a data-derived domain there
+    /// was nothing to nice yet, so this flag is what tells the render path
+    /// to nice the domain it infers from the column. `zero` is always
+    /// `false` — not a `LinearScale` concept, matching what the legacy
+    /// `_scale_to_dict` omitted.
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
         ScaleSpec::Linear {
             common: continuous_common(ContinuousCommonParts {
@@ -278,7 +296,7 @@ impl LinearScale {
                 padding: self.padding,
                 reverse: self.reverse,
             }),
-            nice: false,
+            nice: self.nice,
             zero: false,
         }
     }
@@ -313,6 +331,7 @@ impl LinearScale {
             range_user_set: resolved.range_user_set,
             domain_user_set: resolved.domain_user_set,
             reverse,
+            nice,
         })
     }
 
@@ -340,6 +359,7 @@ impl LinearScale {
             range_user_set: self.range_user_set,
             domain_user_set: self.domain_user_set,
             reverse: self.reverse,
+            nice: self.nice,
         }
     }
 
@@ -580,6 +600,58 @@ mod tests {
         }
         let json = serde_json::to_string(&s.to_scale_spec()).unwrap();
         assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    // ── `nice` wire provenance (#153) ───────────────────────────────────────
+
+    /// `LinearScale(nice=True)` with NO domain used to discard `nice` at
+    /// construction (the struct had no field for it, and `to_scale_spec`
+    /// hardcoded `nice: false`), so the raw-dict equivalent
+    /// (`{"type": "linear", "nice": True}`) and the typed class disagreed on
+    /// the wire for the identical intent. `nice` now carries the constructor
+    /// kwarg straight through: this object's OWN `domain()`/`ticks_internal()`
+    /// stay untouched (there is no domain yet to round), but the wire spec
+    /// now agrees with the raw dict, so a render-side rebuild (which infers
+    /// the domain from the encoded column) nices it.
+    #[test]
+    fn linear_nice_wire_flag_survives_data_derived_domain() {
+        let s = LinearScale::new(None, None, false, true, None, false).unwrap();
+        assert_eq!(s.domain(), None, "no domain to nice at construction — must stay unset");
+        match s.to_scale_spec() {
+            ScaleSpec::Linear { nice, .. } => assert!(nice, "nice=True on a data-derived domain must survive to the wire spec"),
+            other => panic!("expected ScaleSpec::Linear, got {other:?}"),
+        }
+    }
+
+    /// The explicit-domain half of `#153`'s fix is a non-change: `nice=True`
+    /// with an explicit `domain=` still nices EAGERLY at construction (this
+    /// object's own `.domain()` stays `[0.0, 10.0]`, byte-stable), and now
+    /// ALSO carries `nice: true` onto the wire. That is not a double-nice —
+    /// `LinearScaleData::nice` is idempotent (`linear_nice_idempotent`
+    /// above), so a render-side rebuild re-applying `nice()` to the
+    /// already-niced wire domain reproduces the same domain.
+    #[test]
+    fn linear_nice_wire_flag_survives_explicit_domain_already_niced() {
+        let s = LinearScale::new(Some(vec![0.13, 9.7]), None, false, true, None, false).unwrap();
+        assert_eq!(s.domain(), Some(vec![0.0, 10.0]), "explicit-domain nicing must stay eager/byte-stable");
+        match s.to_scale_spec() {
+            ScaleSpec::Linear { common, nice, .. } => {
+                assert!(nice, "nice=True with an explicit domain must also survive to the wire spec");
+                assert_eq!(common.domain, Some(vec![0.0, 10.0]), "wire domain must be the already-niced value");
+            }
+            other => panic!("expected ScaleSpec::Linear, got {other:?}"),
+        }
+    }
+
+    /// Default (`nice` unset) still emits `nice: false` — the pre-`#153`
+    /// baseline behavior for every LinearScale that never asked for nicing.
+    #[test]
+    fn linear_nice_default_false_emits_false() {
+        let s = LinearScale::new(None, None, false, false, None, false).unwrap();
+        match s.to_scale_spec() {
+            ScaleSpec::Linear { nice, .. } => assert!(!nice),
+            other => panic!("expected ScaleSpec::Linear, got {other:?}"),
+        }
     }
 
     /// `repr_string()` pinned in both directions (quality-review F2): the

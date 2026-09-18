@@ -312,6 +312,12 @@ pub struct LogScale {
     range_user_set: bool,
     domain_user_set: bool,
     reverse: bool,
+    /// The constructor's `nice=` kwarg, carried verbatim onto the wire by
+    /// `to_scale_spec` (`#153`) — see `LinearScale`'s identically-shaped
+    /// field for the full rationale (data-derived domain nicing cannot
+    /// happen at construction, so this flag is what tells the render path
+    /// to nice the domain it infers from the column).
+    nice: bool,
 }
 
 impl LogScale {
@@ -319,7 +325,7 @@ impl LogScale {
     pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, base: f64, clamp: bool, nice: bool) -> Self {
         let mut d = LogScaleData::new([domain[0], domain[1]], [range[0], range[1]], base, clamp);
         if nice { d = d.nice(); }
-        LogScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false }
+        LogScale { data: d, padding: None, range_user_set: true, domain_user_set: true, reverse: false, nice }
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
@@ -420,8 +426,9 @@ impl LogScale {
     }
 
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
-    /// `nice` is baked into the domain at construction, so it is always `false`
-    /// here — matching what the legacy `_scale_to_dict` omitted.
+    /// `nice` carries the constructor's `nice=` kwarg verbatim (`#153`) —
+    /// see `LinearScale::to_scale_spec`'s doc for why this does not
+    /// double-apply the rounding for an explicit domain.
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
         ScaleSpec::Log {
             base: self.data.base,
@@ -434,7 +441,7 @@ impl LogScale {
                 padding: self.padding,
                 reverse: self.reverse,
             }),
-            nice: false,
+            nice: self.nice,
         }
     }
 }
@@ -481,6 +488,7 @@ impl LogScale {
             range_user_set: resolved.range_user_set,
             domain_user_set: resolved.domain_user_set,
             reverse,
+            nice,
         })
     }
 
@@ -501,6 +509,7 @@ impl LogScale {
             range_user_set: self.range_user_set,
             domain_user_set: self.domain_user_set,
             reverse: self.reverse,
+            nice: self.nice,
         }
     }
 
@@ -725,6 +734,53 @@ mod tests {
         assert!(!s.reverse());
         let json = serde_json::to_string(&s.to_scale_spec()).unwrap();
         assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
+    }
+
+    // ── `nice` wire provenance (#153) ───────────────────────────────────────
+
+    /// `LogScale(nice=True)` with NO domain used to discard `nice` at
+    /// construction (`to_scale_spec` hardcoded `nice: false`) — see
+    /// `LinearScale`'s identically-shaped tests for the full rationale.
+    /// `nice` now carries the constructor kwarg straight through, so a
+    /// render-side rebuild (which infers the domain from the encoded
+    /// column) nices it, matching the raw-dict equivalent.
+    #[test]
+    fn log_nice_wire_flag_survives_data_derived_domain() {
+        let s = LogScale::new(None, None, 10.0, false, true, None, false).unwrap();
+        assert_eq!(s.domain(), None, "no domain to nice at construction — must stay unset");
+        match s.to_scale_spec() {
+            ScaleSpec::Log { nice, .. } => assert!(nice, "nice=True on a data-derived domain must survive to the wire spec"),
+            other => panic!("expected ScaleSpec::Log, got {other:?}"),
+        }
+    }
+
+    /// The explicit-domain half of `#153`'s fix is a non-change: `nice=True`
+    /// with an explicit `domain=` still nices EAGERLY at construction (this
+    /// object's own `.domain()` stays rounded to decades, byte-stable), and
+    /// now ALSO carries `nice: true` onto the wire — not a double-nice,
+    /// since `LogScaleData::nice` is idempotent on an already-niced domain
+    /// (`log_nice_positive_idempotent` above).
+    #[test]
+    fn log_nice_wire_flag_survives_explicit_domain_already_niced() {
+        let s = LogScale::new(Some(vec![3.0, 700.0]), None, 10.0, false, true, None, false).unwrap();
+        assert_eq!(s.domain(), Some(vec![1.0, 1000.0]), "explicit-domain nicing must stay eager/byte-stable");
+        match s.to_scale_spec() {
+            ScaleSpec::Log { common, nice, .. } => {
+                assert!(nice, "nice=True with an explicit domain must also survive to the wire spec");
+                assert_eq!(common.domain, Some(vec![1.0, 1000.0]), "wire domain must be the already-niced value");
+            }
+            other => panic!("expected ScaleSpec::Log, got {other:?}"),
+        }
+    }
+
+    /// Default (`nice` unset) still emits `nice: false`.
+    #[test]
+    fn log_nice_default_false_emits_false() {
+        let s = LogScale::new(None, None, 10.0, false, false, None, false).unwrap();
+        match s.to_scale_spec() {
+            ScaleSpec::Log { nice, .. } => assert!(!nice),
+            other => panic!("expected ScaleSpec::Log, got {other:?}"),
+        }
     }
 
     /// `repr_string()` pinned in both directions (quality-review F2): the

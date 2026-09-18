@@ -245,6 +245,78 @@ fn time_reverse_default_emits_no_reverse_key() {
     assert!(!json.contains("reverse"), "default reverse must not appear on the wire: {json}");
 }
 
+// ── `nice` wire provenance (#153) ───────────────────────────────────────
+
+/// `TimeScale(nice=True)` with NO domain used to discard `nice` at
+/// construction (`to_scale_spec` hardcoded `nice: false`) — see
+/// `LinearScale`'s identically-shaped tests for the full rationale. `nice`
+/// now carries the constructor kwarg straight through: the sentinel domain
+/// still stays untouched here (nothing to calendar-round yet, matching
+/// `time_domain_none_with_nice_leaves_sentinel_untouched` above), but the
+/// wire spec now agrees with the raw-dict equivalent, so a render-side
+/// rebuild (which infers the real domain from the encoded column)
+/// calendar-nices it — the behavior `scale/time/mod.rs`'s own doc comment
+/// (the `nice` parameter, above) already promised the encoding path
+/// delivers.
+#[test]
+fn time_nice_wire_flag_survives_data_derived_domain() {
+    let t = TimeScale::new(None, None, false, true, None, false, false).unwrap();
+    assert_eq!(t.domain_pair(), [0.0, 1.0], "no domain to nice at construction — sentinel stays untouched");
+    match t.to_scale_spec() {
+        ScaleSpec::Time { nice, .. } => assert!(nice, "nice=True on a data-derived domain must survive to the wire spec"),
+        other => panic!("expected ScaleSpec::Time, got {other:?}"),
+    }
+}
+
+/// The explicit-domain half of `#153`'s fix is a non-change: `nice=True`
+/// with an explicit `domain=` still calendar-nices EAGERLY at construction
+/// (this object's own `.domain()` widens outward to a calendar boundary,
+/// byte-stable), and now ALSO carries `nice: true` onto the wire — not a
+/// double-nice, since re-widening an already-niced domain to the same
+/// calendar boundary is idempotent (mirrors `LinearScaleData::nice`'s
+/// idempotence, pinned on the linear/log/symlog siblings).
+#[test]
+fn time_nice_wire_flag_survives_explicit_domain_already_niced() {
+    // 2024-01-02T03:17:00Z .. 2024-01-04T09:42:00Z: neither endpoint sits
+    // on a calendar boundary, so calendar-nice must actually widen both.
+    let (lo, hi) = (1_704_165_420_000.0, 1_704_361_320_000.0);
+    let t = TimeScale::new(td(vec![lo, hi]), None, false, true, None, false, false).unwrap();
+    let niced = t.domain_pair();
+    assert!(niced[0] <= lo, "niced lower bound must widen outward (<=), got {}", niced[0]);
+    assert!(niced[1] >= hi, "niced upper bound must widen outward (>=), got {}", niced[1]);
+    assert_ne!(niced, [lo, hi], "explicit-domain nicing must actually round something for this span");
+    match t.to_scale_spec() {
+        ScaleSpec::Time { common, nice, .. } => {
+            assert!(nice, "nice=True with an explicit domain must also survive to the wire spec");
+            assert_eq!(common.domain, Some(niced.to_vec()), "wire domain must be the already-niced value");
+        }
+        other => panic!("expected ScaleSpec::Time, got {other:?}"),
+    }
+}
+
+/// Default (`nice` unset) still emits `nice: false`.
+#[test]
+fn time_nice_default_false_emits_false() {
+    let t = TimeScale::new(td(vec![0.0, 1000.0]), None, false, false, None, false, false).unwrap();
+    match t.to_scale_spec() {
+        ScaleSpec::Time { nice, .. } => assert!(!nice),
+        other => panic!("expected ScaleSpec::Time, got {other:?}"),
+    }
+}
+
+/// `utc=True` composes with `nice=True` too — the `ScaleSpec::Utc` arm
+/// carries the same `self.nice` flag as the `Time` arm (`#153` fixes both
+/// arms of `to_scale_spec`; UTC-ness and nicing are independent, mirroring
+/// `time_utc_and_reverse_compose_independently` above).
+#[test]
+fn time_utc_nice_wire_flag_survives_data_derived_domain() {
+    let t = TimeScale::new(None, None, false, true, None, true, false).unwrap();
+    match t.to_scale_spec() {
+        ScaleSpec::Utc { nice, .. } => assert!(nice, "nice=True must survive on the Utc wire arm too"),
+        other => panic!("expected ScaleSpec::Utc, got {other:?}"),
+    }
+}
+
 /// `repr_string()` pinned in both directions (quality-review F2): the
 /// default-shaped repr is byte-identical to before this change, and
 /// `reverse=True` appends the exact `, reverse=True)` suffix. `TimeScale`

@@ -117,27 +117,285 @@ def test_nice_false_not_forced_into_spec():
 
 
 def test_nice_serialized_typed_linear_scale():
-    """LinearScale constructed with nice=True emits nice in the spec dict.
+    """LinearScale(nice=True) emits nice: True in the spec dict (#153, FIXED).
 
-    LinearScale applies nice-rounding eagerly to the domain at construction
-    time but does not expose nice as a readable bool attribute (Rust limitation).
-    The dict representation therefore cannot carry nice=True for typed scale
-    objects unless the Rust binding adds a #[getter].  This test documents the
-    current limitation; it will pass once the Rust getter is added.
+    Previously `LinearScale`'s Rust struct carried no `nice` field at all:
+    `to_scale_spec` hardcoded `nice: false` regardless of the constructor
+    kwarg, so the typed class silently disagreed with the raw-dict
+    equivalent (`{"type": "linear", "nice": True}`, which `_scale_to_dict`
+    already serialized correctly — see `test_nice_serialized_linear_scale_via_dict`
+    above). The class now carries the constructor's `nice=` kwarg onto the
+    wire unconditionally (`crates/ferrum-core/src/scale/linear.rs`'s new
+    `nice` field), so this asserts the fix rather than documenting the gap.
     """
     from ferrum.encoding._scale import _scale_to_dict
     from ferrum._core import LinearScale
 
     s = LinearScale(domain=[0, 100], range=[0, 600], nice=True)
     d = _scale_to_dict(s)
-    # nice is applied eagerly to domain at construction time; the flag itself
-    # is not exposed as a Python attribute on the current Rust binding.
-    # When a Rust #[getter] for nice is added, this assertion will start passing.
-    # For now we assert the dict is at least valid and has the expected type tag.
     assert d.get("type") == "linear"
-    # If nice is somehow accessible (future Rust change), verify it serializes:
-    if isinstance(getattr(s, "nice", None), bool):
-        assert d.get("nice") is True
+    assert d.get("nice") is True, "nice=True on a typed LinearScale must reach the wire spec dict"
+
+
+def test_nice_serialized_typed_linear_scale_no_domain():
+    """The data-derived-domain half of #153: LinearScale(nice=True) with NO
+    domain= must ALSO emit nice: True. This is the half that previously
+    could not even be eagerly baked into the domain (there is no domain yet
+    at construction time), so before the fix it was silently dropped with
+    no fallback at all.
+    """
+    from ferrum.encoding._scale import _scale_to_dict
+    from ferrum._core import LinearScale
+
+    s = LinearScale(nice=True)
+    d = _scale_to_dict(s)
+    assert d.get("type") == "linear"
+    assert d.get("nice") is True, "nice=True with no domain must still reach the wire spec dict"
+
+
+def test_nice_serialized_typed_time_scale():
+    """#153 also covers TimeScale (Time and Utc wire arms both)."""
+    from ferrum.encoding._scale import _scale_to_dict
+    from ferrum._core import TimeScale
+
+    d_time = _scale_to_dict(TimeScale(nice=True))
+    assert d_time.get("type") == "time"
+    assert d_time.get("nice") is True, (
+        "nice=True on a typed TimeScale must reach the wire spec dict"
+    )
+
+    d_utc = _scale_to_dict(TimeScale(nice=True, utc=True))
+    assert d_utc.get("type") == "utc"
+    assert d_utc.get("nice") is True, (
+        "nice=True on a typed TimeScale(utc=True) must reach the wire spec dict"
+    )
+
+
+def test_nice_serialized_typed_log_scale():
+    """#153 also covers LogScale."""
+    from ferrum.encoding._scale import _scale_to_dict
+    from ferrum._core import LogScale
+
+    d = _scale_to_dict(LogScale(nice=True))
+    assert d.get("type") == "log"
+    assert d.get("nice") is True, "nice=True on a typed LogScale must reach the wire spec dict"
+
+
+def test_nice_serialized_typed_symlog_scale():
+    """#153 also covers SymlogScale."""
+    from ferrum.encoding._scale import _scale_to_dict
+    from ferrum._core import SymlogScale
+
+    d = _scale_to_dict(SymlogScale(nice=True))
+    assert d.get("type") == "symlog"
+    assert d.get("nice") is True, "nice=True on a typed SymlogScale must reach the wire spec dict"
+
+
+def test_nice_renders_niced_ticks_for_typed_linear_scale_with_no_domain():
+    """#153's disclosed behavior change, pinned at render time: a typed
+    LinearScale(nice=True) with no domain now renders the SAME niced ticks
+    its raw-dict equivalent (`scale={"type": "linear", "nice": True}`)
+    already rendered — before the fix, the typed class silently rendered
+    the un-niced ticks instead (data domain [0.5, 9.5] renders ticks 0..10
+    niced; the pre-fix typed class instead rendered whatever the encoded
+    column's raw min/max happened to be).
+    """
+    from ferrum._core import LinearScale
+    from tests._svg_extents import axis_tick_labels
+
+    df = pl.DataFrame({"x": [0.5, 5.0, 9.5], "y": [1.0, 2.0, 3.0]})
+
+    svg_typed = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=LinearScale(nice=True)), y="y").to_svg()
+    )
+    svg_dict = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", scale={"type": "linear", "nice": True}), y="y")
+        .to_svg()
+    )
+    svg_nonice = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=LinearScale(nice=False)), y="y").to_svg()
+    )
+    typed_ticks = axis_tick_labels(svg_typed, axis="x")
+    dict_ticks = axis_tick_labels(svg_dict, axis="x")
+    nonice_ticks = axis_tick_labels(svg_nonice, axis="x")
+    assert typed_ticks == dict_ticks, (
+        f"typed LinearScale(nice=True) ticks {typed_ticks} must match the raw-dict "
+        f"equivalent's ticks {dict_ticks}"
+    )
+    assert typed_ticks != nonice_ticks, (
+        f"nice=True ticks {typed_ticks} must differ from the nice=False baseline {nonice_ticks} "
+        f"— otherwise nice= isn't actually reaching the render path"
+    )
+    # The discriminating signal: nice() WIDENS [0.5, 9.5] outward to exactly
+    # [0, 10]. A broken system (pre-fix: the typed class ignoring nice= on a
+    # data-derived domain) renders the raw column extent instead — its tick
+    # set would never contain the widened "0"/"10" bounds.
+    assert "0" in typed_ticks and "10" in typed_ticks, (
+        f"data domain [0.5, 9.5] with nice=True must render the niced [0, 10] "
+        f"bounds as ticks, got {typed_ticks}"
+    )
+    assert "0" not in nonice_ticks or "10" not in nonice_ticks, (
+        f"the nice=False baseline must NOT already contain both widened bounds "
+        f"(or this domain doesn't actually discriminate), got {nonice_ticks}"
+    )
+
+
+def test_nice_renders_niced_ticks_for_typed_time_scale_with_no_domain():
+    """#153's disclosed behavior change for `TimeScale`, pinned at render
+    time — the sibling of the `LinearScale` pin above, closing the
+    render-tick coverage gap the spec review flagged (Time/Log/Symlog were
+    previously pinned only at the Rust wire-flag level, not rendered SVG).
+
+    Data domain 2024-01-02T03:17:00Z .. 2024-01-04T09:42:00Z (neither
+    endpoint on an hour boundary): calendar-nice widens both endpoints
+    outward to the nearest hour, so the typed class's rendered ticks must
+    match its raw-dict equivalent AND differ from the un-niced baseline
+    (measured: niced ticks start at "03:00"; the un-niced baseline starts
+    later, at "06:00", since it never widens past the data's actual start).
+    """
+    import datetime
+
+    from ferrum._core import TimeScale
+    from tests._svg_extents import axis_tick_labels
+
+    lo = datetime.datetime(2024, 1, 2, 3, 17, 0, tzinfo=datetime.timezone.utc)
+    hi = datetime.datetime(2024, 1, 4, 9, 42, 0, tzinfo=datetime.timezone.utc)
+    mid = lo + (hi - lo) / 2
+    df = pl.DataFrame({"x": [lo, mid, hi], "y": [1.0, 2.0, 3.0]})
+
+    svg_typed = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=TimeScale(nice=True)), y="y").to_svg()
+    )
+    svg_dict = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", scale={"type": "time", "nice": True}), y="y")
+        .to_svg()
+    )
+    svg_nonice = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=TimeScale(nice=False)), y="y").to_svg()
+    )
+    typed_ticks = axis_tick_labels(svg_typed, axis="x")
+    dict_ticks = axis_tick_labels(svg_dict, axis="x")
+    nonice_ticks = axis_tick_labels(svg_nonice, axis="x")
+    assert typed_ticks == dict_ticks, (
+        f"typed TimeScale(nice=True) ticks {typed_ticks} must match the raw-dict "
+        f"equivalent's ticks {dict_ticks}"
+    )
+    assert typed_ticks != nonice_ticks, (
+        f"nice=True ticks {typed_ticks} must differ from the nice=False baseline {nonice_ticks} "
+        f"— otherwise nice= isn't actually reaching the render path"
+    )
+    assert typed_ticks[0] == "03:00", (
+        f"calendar-nice must widen the domain's start back to the 03:00 hour boundary, "
+        f"got first tick {typed_ticks[0]!r} (full: {typed_ticks})"
+    )
+    assert nonice_ticks[0] != "03:00", (
+        f"the nice=False baseline must NOT already start at 03:00 (or this domain doesn't "
+        f"actually discriminate), got {nonice_ticks}"
+    )
+
+
+def test_nice_renders_niced_ticks_for_typed_log_scale_with_no_domain():
+    """#153's disclosed behavior change for `LogScale`, pinned at render
+    time — see `test_nice_renders_niced_ticks_for_typed_time_scale_with_no_domain`
+    above for why this coverage exists (spec-review finding, render-tick
+    parity across all four typed scale classes).
+
+    Data domain [3, 700] (neither endpoint an exact power of 10): nice()
+    rounds outward to the enclosing decades (`[1, 1000]`, matching the Rust
+    `log_nice_rounds_to_decades` unit test), so the typed class's rendered
+    ticks must match its raw-dict equivalent AND differ from the un-niced
+    baseline (measured: niced ticks start exactly at "1"; the un-niced
+    baseline starts inside the data's own range, at "3.9811").
+    """
+    from ferrum._core import LogScale
+    from tests._svg_extents import axis_tick_labels
+
+    df = pl.DataFrame({"x": [3.0, 350.0, 700.0], "y": [1.0, 2.0, 3.0]})
+
+    svg_typed = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=LogScale(nice=True)), y="y").to_svg()
+    )
+    svg_dict = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", scale={"type": "log", "nice": True}), y="y")
+        .to_svg()
+    )
+    svg_nonice = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=LogScale(nice=False)), y="y").to_svg()
+    )
+    typed_ticks = axis_tick_labels(svg_typed, axis="x")
+    dict_ticks = axis_tick_labels(svg_dict, axis="x")
+    nonice_ticks = axis_tick_labels(svg_nonice, axis="x")
+    assert typed_ticks == dict_ticks, (
+        f"typed LogScale(nice=True) ticks {typed_ticks} must match the raw-dict "
+        f"equivalent's ticks {dict_ticks}"
+    )
+    assert typed_ticks != nonice_ticks, (
+        f"nice=True ticks {typed_ticks} must differ from the nice=False baseline {nonice_ticks} "
+        f"— otherwise nice= isn't actually reaching the render path"
+    )
+    assert typed_ticks[0] == "1", (
+        f"nice=True must round the domain down to the enclosing decade (1), "
+        f"got first tick {typed_ticks[0]!r} (full: {typed_ticks})"
+    )
+    assert nonice_ticks[0] != "1", (
+        f"the nice=False baseline must NOT already start at the decade boundary 1 "
+        f"(or this domain doesn't actually discriminate), got {nonice_ticks}"
+    )
+
+
+def test_nice_renders_niced_ticks_for_typed_symlog_scale_with_no_domain():
+    """#153's disclosed behavior change for `SymlogScale`, pinned at render
+    time — see `test_nice_renders_niced_ticks_for_typed_time_scale_with_no_domain`
+    above for why this coverage exists (spec-review finding, render-tick
+    parity across all four typed scale classes).
+
+    Same repro domain as the `LinearScale` pin ([0.5, 9.5] -> niced [0, 10]):
+    `SymlogScale.nice()` uses the identical `nice_step`-count-10 rounding
+    `LinearScaleData::nice` does, so the typed class's rendered ticks must
+    match its raw-dict equivalent AND differ from the un-niced baseline.
+    """
+    from ferrum._core import SymlogScale
+    from tests._svg_extents import axis_tick_labels
+
+    df = pl.DataFrame({"x": [0.5, 5.0, 9.5], "y": [1.0, 2.0, 3.0]})
+
+    svg_typed = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=SymlogScale(nice=True)), y="y").to_svg()
+    )
+    svg_dict = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", scale={"type": "symlog", "nice": True}), y="y")
+        .to_svg()
+    )
+    svg_nonice = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", scale=SymlogScale(nice=False)), y="y").to_svg()
+    )
+    typed_ticks = axis_tick_labels(svg_typed, axis="x")
+    dict_ticks = axis_tick_labels(svg_dict, axis="x")
+    nonice_ticks = axis_tick_labels(svg_nonice, axis="x")
+    assert typed_ticks == dict_ticks, (
+        f"typed SymlogScale(nice=True) ticks {typed_ticks} must match the raw-dict "
+        f"equivalent's ticks {dict_ticks}"
+    )
+    assert typed_ticks != nonice_ticks, (
+        f"nice=True ticks {typed_ticks} must differ from the nice=False baseline {nonice_ticks} "
+        f"— otherwise nice= isn't actually reaching the render path"
+    )
+    assert "0" in typed_ticks and "10" in typed_ticks, (
+        f"data domain [0.5, 9.5] with nice=True must render the niced [0, 10] "
+        f"bounds as ticks, got {typed_ticks}"
+    )
+    assert "0" not in nonice_ticks or "10" not in nonice_ticks, (
+        f"the nice=False baseline must NOT already contain both widened bounds "
+        f"(or this domain doesn't actually discriminate), got {nonice_ticks}"
+    )
 
 
 # ---------------------------------------------------------------------------
