@@ -46,11 +46,13 @@ import pytest
 
 import ferrum as fm
 from _category_dtype_matrix import (
+    BAND_MARKS,
     CATEGORY_DTYPES,
     band_geometry,
     category_frame,
     category_levels,
     mark_layer,
+    render_mark,
     utf8_twin_frame,
 )
 from _svg_rects import svg_elements
@@ -59,15 +61,6 @@ from _svg_rects import svg_elements
 #: whose geometry is readable as rects/spans. `mark_swarm` is exercised
 #: separately (it draws circles, not bands) and `mark_boxen` at the spec level
 #: (see the module docstring).
-_BAND_MARKS = {
-    "boxplot": lambda chart: chart.mark_boxplot(size=0.6),
-    "violin": lambda chart: chart.mark_violin(),
-    "errorbar": lambda chart: chart.mark_errorbar(),
-}
-
-
-def _svg(build, frame, **encode):
-    return build(fm.Chart(frame)).encode(**encode).to_svg()
 
 
 def test_boxplot_int64_draws_the_bands_its_utf8_twin_draws():
@@ -79,10 +72,10 @@ def test_boxplot_int64_draws_the_bands_its_utf8_twin_draws():
     mattering", not "these happen to be today's pixel values".
     """
     numeric = band_geometry(
-        _svg(_BAND_MARKS["boxplot"], category_frame("Int64"), x="cat", y="value")
+        render_mark(BAND_MARKS["boxplot"], category_frame("Int64"), x="cat", y="value")
     )
     reference = band_geometry(
-        _svg(_BAND_MARKS["boxplot"], utf8_twin_frame("Int64"), x="cat", y="value")
+        render_mark(BAND_MARKS["boxplot"], utf8_twin_frame("Int64"), x="cat", y="value")
     )
 
     assert len(numeric.rect_band_extents) == 3
@@ -90,7 +83,7 @@ def test_boxplot_int64_draws_the_bands_its_utf8_twin_draws():
     assert numeric == reference
 
 
-@pytest.mark.parametrize("mark", sorted(_BAND_MARKS))
+@pytest.mark.parametrize("mark", sorted(BAND_MARKS))
 @pytest.mark.parametrize("dtype", sorted(CATEGORY_DTYPES))
 def test_band_geometry_is_dtype_invariant(mark, dtype):
     """Every cell of the matrix renders what its `Utf8` twin renders.
@@ -99,9 +92,9 @@ def test_band_geometry_is_dtype_invariant(mark, dtype):
     makes `Boolean` (two levels, so wider bands) a real comparison rather than
     an exclusion.
     """
-    build = _BAND_MARKS[mark]
-    cell = band_geometry(_svg(build, category_frame(dtype), x="cat", y="value"))
-    twin = band_geometry(_svg(build, utf8_twin_frame(dtype), x="cat", y="value"))
+    build = BAND_MARKS[mark]
+    cell = band_geometry(render_mark(build, category_frame(dtype), x="cat", y="value"))
+    twin = band_geometry(render_mark(build, utf8_twin_frame(dtype), x="cat", y="value"))
 
     assert cell.stub_count == 0
     # Not merely `cell == twin`: an all-empty geometry would satisfy equality

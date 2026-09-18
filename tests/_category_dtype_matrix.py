@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
+import ferrum as fm
 import polars as pl
 
 from _svg_rects import data_bar_rects, mark_layer, svg_elements
@@ -199,3 +200,32 @@ def band_geometry(svg: str, *, band_axis: str = "x") -> BandGeometry:
         span_lengths=tuple(spans),
         stub_count=stubs,
     )
+
+
+#: The composite statistical marks whose category channel lays out as bands.
+#: Built here rather than in either consumer because both
+#: `test_declared_type_through_desugar.py` (#171's own half) and
+#: `test_numeric_category_dispatch.py` (the #171+#185 family contract) sweep
+#: the same marks with the same constructor kwargs, and a second copy is how
+#: the two modules would silently drift apart on, say, `mark_boxplot`'s
+#: `size=`. `boxen` is separated out because it additionally needs #185's
+#: transform fix, so a consumer pinning only #171's half excludes it.
+BAND_MARKS = {
+    "boxplot": lambda chart: chart.mark_boxplot(size=0.6),
+    "violin": lambda chart: chart.mark_violin(),
+    "errorbar": lambda chart: chart.mark_errorbar(),
+}
+
+#: `BAND_MARKS` plus `boxen` -- the full family, which only renders once both
+#: `#171` (ordinal dispatch) and `#185` (transform group dtypes) have landed.
+FAMILY_MARKS = {**BAND_MARKS, "boxen": lambda chart: chart.mark_boxen()}
+
+
+def render_mark(build, frame, **encode) -> str:
+    """Render *build*'s mark over *frame*, encoded by **encode**.
+
+    The one-liner both consumers had privately. Kept here so the family's
+    render path is stated once: a consumer that needed to pass, say, a theme
+    or a coord would otherwise fork it.
+    """
+    return build(fm.Chart(frame)).encode(**encode).to_svg()
