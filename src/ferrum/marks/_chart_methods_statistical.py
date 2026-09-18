@@ -190,6 +190,11 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
+        bins : str, int or float, optional
+            The whole binning rule in one value: ``"sturges"``,
+            ``"fd"``/``"freedman_diaconis"``, an ``int`` bin count, or a
+            ``float`` bin width.  Mutually exclusive with ``bin_count`` /
+            ``bin_width``.
         bin_count : int, optional
             Target number of bins.  Ignored when ``bin_width`` is set.
             Default is chosen automatically from Sturges' rule.

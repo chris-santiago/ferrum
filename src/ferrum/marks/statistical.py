@@ -214,6 +214,7 @@ def desugar_density(
 def desugar_histogram(
     field: str,
     *,
+    bins: Any = None,
     bin_count: Any = None,
     bin_width: Any = None,
     extent: Any = None,
@@ -247,6 +248,12 @@ def desugar_histogram(
     ----------
     field : str
         Numeric column to bin.
+    bins : str, int, float or None, default None
+        The whole binning rule in one value, forwarded to ``Bin(bins=)``:
+        ``"sturges"``, ``"fd"``/``"freedman_diaconis"``, an ``int`` bin count,
+        or a ``float`` bin width.  Mutually exclusive with ``bin_count`` /
+        ``bin_width`` (``Bin`` itself refuses the combination, so the rule has
+        one owner).  ``None`` leaves the decision to those two.
     bin_count : int or None, default None
         Desired number of bins.  ``None`` uses Sturges' rule.
     bin_width : float or None, default None
@@ -301,6 +308,7 @@ def desugar_histogram(
     validate_choice("mark_histogram", "multiple", multiple, _MULTIPLE_MODES)
     validate_choice("mark_histogram", "orientation", orientation, _ORIENTATIONS)
     bin_kwargs: dict = dict(
+        bins=bins,
         bin_count=bin_count,
         bin_width=bin_width,
         extent=extent,

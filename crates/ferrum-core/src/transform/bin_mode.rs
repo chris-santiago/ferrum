@@ -4,11 +4,13 @@
 //! (e.g. both a fixed count and a fixed width) unrepresentable — and is reused by
 //! both binning transforms with one shared bin-edge resolver. `Bin2D` constructs
 //! it directly from its `bins_x`/`bins_y` Python args via [`parse_bin_axis`]; the
-//! 1-D `Bin` keeps its flat `bin_count`/`bin_width` constructor params and resolves
-//! them to a `BinMode` at the boundary (see `bin.rs`).
+//! 1-D `Bin` accepts the same rule-bearing spelling through its own `bins` param
+//! (#193) and additionally keeps its flat `bin_count`/`bin_width` params, which
+//! it resolves to a `BinMode` at the boundary (see `bin.rs`).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyBool;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +21,10 @@ use crate::scale::ticks::sturges_floor;
 /// Serde shape is a tagged enum (`{"kind":"sturges"}`, `{"kind":"fixed","n":10}`,
 /// `{"kind":"width","w":2.0}`, `{"kind":"freedman_diaconis"}`) — this is the wire
 /// `Bin2D` already emits via its `bins_x`/`bins_y` fields. The 1-D `Bin` does NOT
-/// serialize `BinMode` directly; it projects to/from flat `bin_count`/`bin_width`
-/// keys via a serde shim (see `bin.rs::BinWire`).
+/// serialize `BinMode` directly; it projects to/from the flat
+/// `bin_count`/`bin_width`/`bin_rule` keys via a serde shim (see
+/// `bin.rs::BinWire`), which carries every mode — including
+/// `FreedmanDiaconis` — round-trip intact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum BinMode {
@@ -28,6 +32,76 @@ pub(crate) enum BinMode {
     FreedmanDiaconis,
     Fixed { n: usize },
     Width { w: f64 },
+}
+
+impl BinMode {
+    /// The canonical wire/refusal name of the modes that derive their bin count
+    /// from a *rule* rather than from a number the caller supplied.
+    ///
+    /// One table, read by both [`parse_bin_axis`] (which accepts every spelling
+    /// that maps onto a name here) and the 1-D `Bin` wire shim (`bin.rs`'s
+    /// `BinWire::bin_rule`), so a rule cannot be parseable but unserializable —
+    /// the #193 wire hazard, where `FreedmanDiaconis` parsed fine and then
+    /// serialized as Sturges.
+    ///
+    /// `Fixed`/`Width` return `None`: they are carried by the numeric wire keys
+    /// (`bin_count`/`bin_width`) and by the numeric constructor params.
+    pub(crate) fn rule_name(&self) -> Option<&'static str> {
+        match self {
+            BinMode::Sturges => Some("sturges"),
+            BinMode::FreedmanDiaconis => Some("freedman_diaconis"),
+            BinMode::Fixed { .. } | BinMode::Width { .. } => None,
+        }
+    }
+
+    /// The rule name a mode must be spelled out under because nothing else in
+    /// the 1-D projection can express it — `None` when the mode is already
+    /// fully carried by something else.
+    ///
+    /// `Fixed`/`Width` are carried by the numeric `bin_count`/`bin_width`
+    /// spellings, and `Sturges` is the documented default that both the wire
+    /// and `__repr__` express as the *absence* of any mode key, so every
+    /// pre-#193 payload and repr keeps its exact bytes. Only Freedman-Diaconis
+    /// is left with nothing to say it. Shared by the wire shim
+    /// (`bin.rs::BinWire::bin_rule`) and `PyBin::__repr__` so the two cannot
+    /// disagree about which modes need spelling out.
+    pub(crate) fn explicit_rule_name(&self) -> Option<&'static str> {
+        match self {
+            BinMode::FreedmanDiaconis => self.rule_name(),
+            BinMode::Sturges | BinMode::Fixed { .. } | BinMode::Width { .. } => None,
+        }
+    }
+
+    /// Inverse of [`rule_name`](Self::rule_name), also accepting the `"fd"`
+    /// shorthand. `None` for anything outside the rule vocabulary.
+    pub(crate) fn from_rule_name(name: &str) -> Option<BinMode> {
+        match name {
+            "sturges" => Some(BinMode::Sturges),
+            "fd" | "freedman_diaconis" => Some(BinMode::FreedmanDiaconis),
+            _ => None,
+        }
+    }
+
+    /// The bin count this mode knows *without* an extent — `Some` only for
+    /// `Fixed`.
+    ///
+    /// NICING-TARGET CONTRACT (#193): nicing rounds the extent against a target
+    /// bin count, but every rule-derived mode (`Sturges`, `Width`,
+    /// `FreedmanDiaconis`) computes its count *from* the extent, so using its
+    /// own count as the nicing target would be circular. All three therefore
+    /// nice against `sturges_floor(n)` — a stable, extent-independent target —
+    /// and only then resolve their real count over the niced range. That is
+    /// exactly what `Width` has always done; FD joins it rather than inventing a
+    /// second rule. Both the per-group path (`bin.rs`'s `resolve_bin_extent`,
+    /// shared with `Kde`'s count-scale derivation) and the faceted pin
+    /// (`bin.rs`'s `global_extent`) ask this one question, so a panel and its
+    /// facet-wide pin cannot disagree about where the edges fall.
+    pub(crate) fn nice_target_count(&self) -> Option<usize> {
+        match self {
+            BinMode::Fixed { n } => Some(*n),
+            BinMode::Sturges | BinMode::FreedmanDiaconis | BinMode::Width { .. } => None,
+        }
+    }
 }
 
 /// Compute IQR for a sorted slice. Used only by the Freedman-Diaconis arm.
@@ -100,31 +174,75 @@ pub(crate) fn resolve_bin_count(
 /// Parse a Python `bins`-axis value into a [`BinMode`].
 ///
 /// Accepts a rule string (`"sturges"` / `"fd"` / `"freedman_diaconis"`), an int
-/// (fixed count), or a float (fixed width). Used by `Bin2D`'s constructor
-/// (`ctx = "Bin2D"`) and `Kde`'s `count_scale` (`ctx = "stat_kde"`, batch F);
-/// the 1-D `Bin` keeps its separate `bin_count`/`bin_width` params instead.
-/// `ctx` prefixes both error messages so each caller's error names the
-/// transform the user actually invoked, mirroring `resolve_bin_count`'s own
-/// `ctx` parameter.
+/// (fixed count), or a float (fixed width), and refuses everything else by name.
+/// This is the single owner of the `bins` vocabulary for all three binning
+/// entries: `Bin2D`'s constructor (`ctx = "Bin2D"`), `Kde`'s `count_scale`
+/// (`ctx = "stat_kde"`, batch F) and — since #193 — the 1-D `Bin`'s `bins` param
+/// and the figure layer's [`validate_bin_rule`]. `ctx` prefixes every error
+/// message so each caller's error names the entry the user actually invoked,
+/// mirroring `resolve_bin_count`'s own `ctx` parameter.
+///
+/// Two refusals the arms below make *before* falling through, because falling
+/// through silently changed the caller's meaning (spec §6, #193):
+///
+/// - a Python `bool` is not an integer bin count. `bool` subclasses `int`, so
+///   `True` used to satisfy the integer arm and request a one-bin histogram.
+/// - a non-positive integer is not a bin width. `-3` used to fail the `usize`
+///   arm and land in the float arm as `Width { w: -3.0 }`, i.e. the caller's
+///   *count* silently became a (nonsensical) *width*.
 pub(crate) fn parse_bin_axis(obj: &Bound<'_, PyAny>, ctx: &str) -> PyResult<BinMode> {
     if let Ok(s) = obj.extract::<&str>() {
-        return match s {
-            "sturges" => Ok(BinMode::Sturges),
-            "fd" | "freedman_diaconis" => Ok(BinMode::FreedmanDiaconis),
-            _ => Err(PyValueError::new_err(format!(
+        return BinMode::from_rule_name(s).ok_or_else(|| {
+            PyValueError::new_err(format!(
                 "{ctx}: unknown bins value '{s}'; expected 'sturges'|'fd'|int|float"
+            ))
+        });
+    }
+    if obj.is_instance_of::<PyBool>() {
+        return Err(PyValueError::new_err(format!(
+            "{ctx}: bins must not be a bool ({obj}); expected 'sturges'|'fd'|int|float"
+        )));
+    }
+    // Integer arm, gated on Python's integer protocol (`__index__`) rather than
+    // on a successful `usize` extraction: a numpy integer is accepted exactly
+    // like a builtin `int`, a `float` is not, and a negative or out-of-range
+    // integer refuses HERE instead of falling through to the width arm.
+    if let Ok(index) = obj.call_method0("__index__") {
+        return match index.extract::<usize>() {
+            Ok(n) if n >= 1 => Ok(BinMode::Fixed { n }),
+            _ => Err(PyValueError::new_err(format!(
+                "{ctx}: bins as an int must be a bin count >= 1 within machine range; got {obj}"
             ))),
         };
     }
-    if let Ok(n) = obj.extract::<usize>() {
-        return Ok(BinMode::Fixed { n });
-    }
     if let Ok(w) = obj.extract::<f64>() {
+        if !w.is_finite() || w <= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "{ctx}: bins as a float must be a positive finite bin width; got {w}"
+            )));
+        }
         return Ok(BinMode::Width { w });
     }
     Err(PyValueError::new_err(format!(
         "{ctx}: bins must be 'sturges'|'fd'|int|float",
     )))
+}
+
+/// Replay [`parse_bin_axis`] under a caller-supplied `ctx`, for its refusal only.
+///
+/// Exists so a figure-level entry can refuse a malformed `bins=` **in its own
+/// voice** — `displot: unknown bins value 'auto'; …` rather than naming the
+/// private `Bin` transform the figure happens to build — without restating the
+/// accepted vocabulary in Python, where it would immediately be free to drift
+/// from the parser above. Same shape as `validate_scale_dict`
+/// (`spec/encoding.rs`): ask the real gate directly instead of constructing a
+/// throwaway production object to catch its constructor's exception.
+///
+/// `ctx` is the public entry name the caller invoked (`"displot"`), matching
+/// Python's own `validate_choice(func, …)` convention.
+#[pyfunction]
+pub fn validate_bin_rule(bins: &Bound<'_, PyAny>, ctx: &str) -> PyResult<()> {
+    parse_bin_axis(bins, ctx).map(|_| ())
 }
 
 #[cfg(test)]
@@ -230,6 +348,149 @@ mod tests {
                 "ValueError: stat_kde: bins must be 'sturges'|'fd'|int|float"
             );
         });
+    }
+
+    // ── #193: the two properties the parser did not previously guarantee ───────
+
+    /// Evaluate a Python expression and parse it as a `bins` value.
+    fn parse_py(py: Python<'_>, expr: &str, ctx: &str) -> PyResult<BinMode> {
+        let obj = py
+            .eval(std::ffi::CString::new(expr).unwrap().as_c_str(), None, None)
+            .unwrap();
+        parse_bin_axis(&obj, ctx)
+    }
+
+    /// A Python `bool` must NOT satisfy the integer arm. `bool` subclasses
+    /// `int`, so `True` used to parse as `Fixed{1}` — a one-bin histogram from
+    /// a caller who never asked for a count at all.
+    #[test]
+    fn parse_bin_axis_refuses_bool_instead_of_reading_it_as_a_count() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            for expr in ["True", "False"] {
+                let err = parse_py(py, expr, "displot").unwrap_err().to_string();
+                assert!(
+                    err.contains("displot: bins must not be a bool"),
+                    "{expr} must refuse as a bool, got: {err}"
+                );
+            }
+        });
+    }
+
+    /// A negative integer must refuse in the INTEGER arm. It used to fail the
+    /// `usize` extraction and fall through to the float arm, where the caller's
+    /// bin *count* silently became a bin *width* of -3.
+    #[test]
+    fn parse_bin_axis_refuses_negative_int_instead_of_reading_it_as_a_width() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let err = parse_py(py, "-3", "displot").unwrap_err().to_string();
+            assert!(
+                err.contains("bins as an int must be a bin count >= 1"),
+                "a negative int must refuse as a count, got: {err}"
+            );
+            assert!(err.contains("got -3"), "the refusal must name the value: {err}");
+            // Zero refuses at the same boundary, rather than constructing
+            // `Fixed{0}` and erroring later at apply time.
+            let zero = parse_py(py, "0", "displot").unwrap_err().to_string();
+            assert!(zero.contains("bins as an int must be a bin count >= 1"), "got: {zero}");
+            // An integer too large for `usize` refuses here too — it must not
+            // reach the float arm and become a ~1e30 bin width.
+            let huge = parse_py(py, "10**30", "displot").unwrap_err().to_string();
+            assert!(huge.contains("within machine range"), "got: {huge}");
+        });
+    }
+
+    /// A positive integer still parses as a fixed count, and an object that is
+    /// integral by `__index__` (a numpy integer is the real case) parses the
+    /// same way rather than degrading.
+    #[test]
+    fn parse_bin_axis_accepts_index_protocol_integers() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            assert_eq!(parse_py(py, "9", "displot").unwrap(), BinMode::Fixed { n: 9 });
+            let expr = "type('I', (), {'__index__': lambda self: 9})()";
+            assert_eq!(parse_py(py, expr, "displot").unwrap(), BinMode::Fixed { n: 9 });
+        });
+    }
+
+    /// A float is a bin WIDTH, and a width that cannot bin anything refuses at
+    /// the boundary instead of constructing a spec that explodes at apply time.
+    #[test]
+    fn parse_bin_axis_float_is_a_width_and_refuses_nonpositive_or_nonfinite() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            assert_eq!(parse_py(py, "0.5", "displot").unwrap(), BinMode::Width { w: 0.5 });
+            for expr in ["0.0", "-0.5", "float('nan')", "float('inf')"] {
+                let err = parse_py(py, expr, "displot").unwrap_err().to_string();
+                assert!(
+                    err.contains("bins as a float must be a positive finite bin width"),
+                    "{expr} must refuse, got: {err}"
+                );
+            }
+        });
+    }
+
+    /// `validate_bin_rule` is the same gate under the caller's own name: it
+    /// accepts exactly what `parse_bin_axis` accepts and refuses with the
+    /// caller's `ctx` (the public entry) as the prefix, so a figure-level
+    /// refusal never names a private transform the user did not invoke.
+    #[test]
+    fn validate_bin_rule_mirrors_the_parser_under_the_callers_name() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            for expr in ["'sturges'", "'fd'", "'freedman_diaconis'", "7", "0.5"] {
+                let obj = py
+                    .eval(std::ffi::CString::new(expr).unwrap().as_c_str(), None, None)
+                    .unwrap();
+                assert!(validate_bin_rule(&obj, "displot").is_ok(), "{expr} must validate");
+            }
+            let obj = py.eval(c"'auto'", None, None).unwrap();
+            let err = validate_bin_rule(&obj, "displot").unwrap_err().to_string();
+            assert_eq!(
+                err,
+                "ValueError: displot: unknown bins value 'auto'; expected 'sturges'|'fd'|int|float"
+            );
+        });
+    }
+
+    /// The rule table is shared: every name `from_rule_name` accepts is a name
+    /// `parse_bin_axis` accepts, and every rule mode can spell itself back out
+    /// via `rule_name` — the property that makes the wire carrier safe.
+    #[test]
+    fn rule_name_and_from_rule_name_are_inverses() {
+        for mode in [BinMode::Sturges, BinMode::FreedmanDiaconis] {
+            let name = mode.rule_name().expect("rule modes must have a name");
+            assert_eq!(BinMode::from_rule_name(name), Some(mode));
+        }
+        assert_eq!(BinMode::Fixed { n: 3 }.rule_name(), None);
+        assert_eq!(BinMode::Width { w: 1.0 }.rule_name(), None);
+        assert_eq!(BinMode::from_rule_name("auto"), None);
+    }
+
+    /// `explicit_rule_name` is `Some` only for the mode the 1-D projection
+    /// cannot otherwise express — the property that keeps every pre-#193 wire
+    /// payload and `Bin(...)` repr byte-identical while FD gains a spelling.
+    #[test]
+    fn explicit_rule_name_is_some_only_for_freedman_diaconis() {
+        assert_eq!(
+            BinMode::FreedmanDiaconis.explicit_rule_name(),
+            Some("freedman_diaconis")
+        );
+        assert_eq!(BinMode::Sturges.explicit_rule_name(), None);
+        assert_eq!(BinMode::Fixed { n: 3 }.explicit_rule_name(), None);
+        assert_eq!(BinMode::Width { w: 1.0 }.explicit_rule_name(), None);
+    }
+
+    /// Only `Fixed` knows its bin count before an extent exists; every
+    /// rule-derived mode answers `None` and therefore nices against the Sturges
+    /// count (NICING-TARGET CONTRACT — see `nice_target_count`'s doc).
+    #[test]
+    fn nice_target_count_is_some_only_for_fixed() {
+        assert_eq!(BinMode::Fixed { n: 12 }.nice_target_count(), Some(12));
+        assert_eq!(BinMode::Sturges.nice_target_count(), None);
+        assert_eq!(BinMode::Width { w: 2.0 }.nice_target_count(), None);
+        assert_eq!(BinMode::FreedmanDiaconis.nice_target_count(), None);
     }
 
     // ── BUG-HUNT (step4): degenerate / boundary resolve_bin_count inputs ────────

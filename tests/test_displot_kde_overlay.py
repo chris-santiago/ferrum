@@ -328,11 +328,18 @@ class TestOverlayCountAxisVisibility:
         )
 
     def test_stat_count_sets_count_scale_matching_bins(self, unimodal_df):
-        """stat="count" must set `count_scale` from the same bin-count rule
-        the histogram's own `Bin` transform actually used: `bin_count` when
-        `bins` is an int, else "sturges" (the 1-D `Bin`'s only auto rule --
-        it has no Freedman-Diaconis fallback, so a raw non-int `bins` string
-        would silently diverge from what the bars actually used).
+        """stat="count" must set `count_scale` from the same rule the
+        histogram's own `Bin` transform actually used: `bin_count` when
+        `bins` is an int, "sturges" when `bins` is unset.
+
+        RATIONALE CORRECTED (#193): this used to add "...because the 1-D
+        `Bin` has no Freedman-Diaconis fallback, so a raw non-int `bins`
+        string would silently diverge". It has one now -- `bins=` routes
+        through the shared parser -- so `count_scale` carries the caller's
+        rule through verbatim instead of downgrading it. The two rows
+        asserted here are unaffected by that (an int and the unset default
+        mean the same thing before and after); the rule rows are pinned in
+        `tests/test_displot_bins_vocabulary.py`.
         """
         chart = fm.displot(unimodal_df, x="x", kind="hist", kde=True, stat="count", bins=12)
         spec = json.loads(chart.to_spec().to_json())

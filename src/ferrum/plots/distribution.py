@@ -26,6 +26,7 @@ from ferrum import (
     Stack,
 )
 from ferrum._coerce import to_polars
+from ferrum._core import validate_bin_rule
 from ferrum._desugar import (
     _explicit_positional_scale,
     _propagate_layer_scale,
@@ -134,28 +135,18 @@ def _multiple_to_position(multiple: str, hue: Any):
     raise ValueError(f"unknown multiple {multiple!r}")
 
 
-def _histogram_bin_count(bins: Any) -> int | None:
-    """Return the value `mark_histogram`'s `Bin` transform actually receives for `bin_count`.
+def _overlay_count_scale(bins: Any) -> Any:
+    """Return the `Kde(count_scale=...)` value matching what the bars were binned by.
 
-    An int fixes the count; any other `bins` value (the `"sturges"` default,
-    or any other rule string such as `"fd"`) becomes `None`, because 1-D
-    `Bin`'s `bin_count` parameter is `Optional[int]` only -- it has no
-    string-rule vocabulary, and `None` always falls back to `Bin`'s own
-    Sturges default.
+    `Kde(count_scale=)` and `Bin(bins=)` read the identical vocabulary from
+    the identical Rust parser, so the caller's own `bins` is forwarded
+    unchanged and the overlay tracks the bars by construction -- there is no
+    rule the bars can honor that the overlay must downgrade. The one
+    translation: `bins=None` means "let `Bin` pick" (Sturges), while
+    `count_scale=None` means "do not count-scale at all", so the `Bin`
+    default is spelled out here rather than passed through as `None`.
     """
-    return bins if isinstance(bins, int) else None
-
-
-def _histogram_count_scale(bins: Any) -> int | str:
-    """Return the `Kde(count_scale=...)` value that bit-matches what `Bin` actually used.
-
-    `Bin` cannot honor a non-int `bins` rule (see `_histogram_bin_count`), so
-    matching the *real* bars means requesting `"sturges"` here too rather
-    than the raw `bins` string -- passing e.g. `"fd"` through would compute
-    the overlay's bin width from a rule the bars themselves never applied.
-    """
-    bin_count = _histogram_bin_count(bins)
-    return bin_count if bin_count is not None else "sturges"
+    return bins if bins is not None else "sturges"
 
 
 def _kde_overlay(
@@ -207,13 +198,18 @@ def _kde_overlay(
         name="kde_overlay",
     )
     if hue is not None:
-        kde_kwargs["groupby"] = hue
+        # `_field_name`, not the raw `hue`: a channel object (`fm.Color("g")`)
+        # is a documented `hue=` spelling and `groupby=` takes only a column
+        # name. This helper takes the unresolved `hue` because its color
+        # ENCODING below wants the channel itself; `_displot_build` resolves
+        # the same name once for its own consumers (see `hue_field` there).
+        kde_kwargs["groupby"] = _field_name(hue)
     # count_scale may only be requested when the histogram's own value axis
     # is actually a count axis -- a future axis-changing mode must extend
     # this predicate's reading, not add a fourth ad hoc clause here.
     histogram_value_axis_is_count = kind == "hist" and stat == "count" and multiple != "fill"
     if histogram_value_axis_is_count:
-        kde_kwargs["count_scale"] = _histogram_count_scale(bins)
+        kde_kwargs["count_scale"] = _overlay_count_scale(bins)
     transform = _KdeTransform(x_field, **kde_kwargs)
 
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
@@ -346,14 +342,17 @@ def displot(
         ``"density"`` normalises so the total area integrates to 1.
         Validated for every ``kind`` (not just ``"hist"``): an unsupported
         value raises regardless of ``kind``.
-    bins : int or str, default "sturges"
-        Binning rule for ``kind="hist"``.  An integer is forwarded as
-        ``bin_count``.  A string is accepted but, today, only changes
-        behavior for the exact value ``"sturges"`` (the default): any other
-        string (e.g. ``"fd"``) is silently treated the same as ``"sturges"``,
-        since the underlying ``Bin`` transform has no string-rule vocabulary
-        and always falls back to Sturges' rule when no integer count is
-        given.
+    bins : str, int or float, default "sturges"
+        Binning rule for ``kind="hist"`` and ``kind="ecdf"``.  ``"sturges"``
+        (the default) and ``"fd"``/``"freedman_diaconis"`` select a rule; an
+        integer fixes the bin count; a float fixes the bin *width* in data
+        units (numpy / ``Bin2D`` / ``Kde`` parity).  ``None`` is Sturges.
+        Anything else is refused by name: an unknown rule string, a ``bool``
+        (``True`` is not a one-bin request), and a zero, negative or
+        non-finite number all raise ``ValueError`` naming ``displot`` and the
+        accepted set.  When ``kde=True`` scales its curve onto the count
+        axis, it does so from this same rule, so the overlay always tracks
+        the bars actually drawn.
     bandwidth : str, default "scott"
         Bandwidth selector for ``kind="kde"`` (``"scott"`` or ``"silverman"``).
     bw_adjust : float, default 1.0
@@ -408,6 +407,8 @@ def displot(
     ValueError
         If ``kind``, ``multiple``, or ``stat`` is not one of the supported values.
     ValueError
+        If ``bins`` is not one of the supported rules, counts, or widths.
+    ValueError
         If ``kind="ecdf"`` is used without specifying ``x=``.
 
     Examples
@@ -426,6 +427,13 @@ def displot(
     validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
     validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
     validate_choice("displot", "stat", stat, _DISPLOT_VALID_STAT)
+    # `bins` is validated here, alongside the three closed vocabularies, so a
+    # malformed value is refused as `displot: ...` rather than by whichever
+    # transform this call happens to build (`Bin` for hist/ecdf, `Kde` for the
+    # overlay). The vocabulary itself is not restated: `validate_bin_rule` IS
+    # the parser those transforms construct through.
+    if bins is not None:
+        validate_bin_rule(bins, "displot")
 
     return _displot_build(
         data,
@@ -489,8 +497,18 @@ def _displot_build(
     The public ``displot`` validates ``kind``/``multiple``; this builder owns the
     mark/transform dispatch, optional kde/rug overlays, faceting, and sizing.
     """
+    # `hue` may be a bare column name or a channel object (`fm.Color("g")`) --
+    # both are documented spellings, and #130 made an untyped `fm.Color` read
+    # as nominal, so the channel spelling is now the one the guidance points
+    # at. Only the color ENCODING wants the channel; every other consumer
+    # below (the position adjustment's `by=`, and each transform's `groupby=`)
+    # takes a bare column name and rejects anything else. Resolved once here,
+    # via the package's shared extraction point, so no consumer re-derives it
+    # and none can be left holding the raw object.
+    hue_field = _field_name(hue)
+
     # Position adjustment from `multiple`.
-    position = _multiple_to_position(multiple, hue)
+    position = _multiple_to_position(multiple, hue_field)
 
     # Build the base chart.
     chart = Chart(data)
@@ -519,13 +537,13 @@ def _displot_build(
         # (bin, group) rows preserving the hue column for color encoding +
         # position adjustment.
         hist_kwargs: dict = dict(
-            bin_count=_histogram_bin_count(bins),
+            bins=bins,
             cumulative=cumulative,
             density=(stat == "density"),
             position=position,
         )
         if hue is not None and multiple in ("stack", "fill", "dodge"):
-            hist_kwargs["groupby"] = hue
+            hist_kwargs["groupby"] = hue_field
         chart = chart.mark_histogram(**hist_kwargs)
     elif kind == "kde":
         # When hue is bound, thread `groupby=hue` so the Kde transform emits
@@ -541,7 +559,7 @@ def _displot_build(
             position=position,
         )
         if hue is not None:
-            kde_kwargs["groupby"] = hue
+            kde_kwargs["groupby"] = hue_field
         chart = chart.mark_density(**kde_kwargs)
     elif kind == "ecdf":
         # ECDF: cumulative bin → step line.
@@ -552,24 +570,20 @@ def _displot_build(
 
         # Extract the original field name for the axis title.
         _ecdf_x_name = x.field if isinstance(x, _CB_ecdf) else str(x)
-        # Thread the unwrapped hue field as the Bin transform's groupby,
-        # mirroring the kde branch above -- `hue` may be a channel object
-        # (e.g. fm.Color("g")), and `_field_name` is the shared extraction
-        # point for exactly this trap (see its docstring). Without a
-        # groupby, Bin's output schema drops the hue column entirely, so
-        # the color channel set below unconditionally names a column the
-        # transform no longer emits. `shared_extent=True` is unconditional
-        # (not gated on `multiple=`): an ECDF is a per-group comparison, so
-        # a common x-grid is the only reading under which the curves are
-        # comparable.
-        _ecdf_groupby = _field_name(hue)
+        # `hue_field` (the unwrapped name resolved once above) is the Bin
+        # transform's groupby. Without a groupby, Bin's output schema drops
+        # the hue column entirely, so the color channel set below
+        # unconditionally names a column the transform no longer emits.
+        # `shared_extent=True` is unconditional (not gated on `multiple=`):
+        # an ECDF is a per-group comparison, so a common x-grid is the only
+        # reading under which the curves are comparable.
         chart = chart.transform(
             Bin(
                 field=_ecdf_x_name,
-                bin_count=_histogram_bin_count(bins),
+                bins=bins,
                 cumulative=True,
-                groupby=_ecdf_groupby,
-                shared_extent=_ecdf_groupby is not None,
+                groupby=hue_field,
+                shared_extent=hue_field is not None,
             )
         )
         chart = chart.mark_line()

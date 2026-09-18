@@ -163,8 +163,9 @@
 //! field names. **Corrected 2026-09-05:** this is NOT "identical to the
 //! Rust field name at every site in this crate" — the
 //! `"bin"` entry below is the one site where they diverge: `BinSpec` carries
-//! `#[serde(into = "BinWire", from = "BinWire")]`, so the wire it actually
-//! (de)serializes through is `BinWire`'s flat `bin_count`/`bin_width` keys,
+//! `#[serde(into = "BinWire", try_from = "BinWire")]`, so the wire it actually
+//! (de)serializes through is `BinWire`'s flat `bin_count`/`bin_width`/`bin_rule`
+//! keys,
 //! not the Rust-side typed `mode: BinMode` field the struct exposes to
 //! in-crate callers (a manual audit once read the Rust field name and missed
 //! this; the drift guard catches it). No other top-level spec struct in
@@ -285,9 +286,9 @@ fn letter_value_secondary_outputs() -> Vec<SecondaryOutput> {
 pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
     let fit_outputs = || FIT_OUTPUT_COLUMNS.to_vec();
     Some(match kind {
-        // `BinSpec` carries `#[serde(into = "BinWire", from = "BinWire")]`
+        // `BinSpec` carries `#[serde(into = "BinWire", try_from = "BinWire")]`
         // (bin.rs) — the wire it actually (de)serializes through is the flat
-        // `BinWire` shim's `bin_count`/`bin_width` keys, not the Rust-side
+        // `BinWire` shim's `bin_count`/`bin_width`/`bin_rule` keys, not the Rust-side
         // typed `mode: BinMode` field the struct exposes to callers within
         // this crate. `params_match_spec_struct_serde_fields` (tests.rs)
         // deserializes `BinSpec` directly (as any real caller's `transforms_json`
@@ -322,8 +323,8 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             ],
             secondary_outputs: vec![],
             params: vec![
-                "field", "bin_count", "bin_width", "extent", "nice", "cumulative",
-                "shared_extent", "groupby", "agg_field", "agg", "name",
+                "field", "bin_count", "bin_width", "bin_rule", "extent", "nice",
+                "cumulative", "shared_extent", "groupby", "agg_field", "agg", "name",
             ],
         },
         "bin_2d" => TransformRegistryEntry {

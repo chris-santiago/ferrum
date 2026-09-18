@@ -50,7 +50,9 @@ fn nice_extent(lo: f64, hi: f64, target: usize) -> (f64, f64) {
 /// `spec.nice && spec.extent.is_none()` gate: nicing only ever applies to an
 /// auto-derived extent, never a caller-pinned one. `ctx` is threaded through
 /// to `resolve_bin_count`'s error messages, same as the inline call it
-/// replaces.
+/// replaces. The nicing target comes from [`BinMode::nice_target_count`] — see
+/// its NICING-TARGET CONTRACT doc for why every rule-derived mode (Sturges,
+/// Width, and since #193 Freedman-Diaconis) nices against the Sturges count.
 pub(crate) fn resolve_bin_extent(
     clean: &[f64],
     mode: &BinMode,
@@ -60,11 +62,10 @@ pub(crate) fn resolve_bin_extent(
     ctx: &str,
 ) -> PyResult<(f64, f64, usize)> {
     let (lo, hi) = if should_nice {
-        let target = match mode {
-            BinMode::Fixed { n } => *n,
-            _ => sturges_floor(clean.len()),
-        }
-        .max(1);
+        let target = mode
+            .nice_target_count()
+            .unwrap_or_else(|| sturges_floor(clean.len()))
+            .max(1);
         nice_extent(lo, hi, target)
     } else {
         (lo, hi)
@@ -77,12 +78,14 @@ pub(crate) fn resolve_bin_extent(
 ///
 /// The bin-count decision is a typed [`BinMode`] (no overlapping
 /// `bin_count`/`bin_width` `Option`s). The flat `bin_count`/`bin_width` JSON wire
-/// keys are preserved by the [`BinWire`] serde shim (see `#[serde(into/from)]`),
-/// so existing wire payloads round-trip byte-for-byte and the precedence
-/// (`bin_count` wins over `bin_width` wins over Sturges) is resolved once at the
-/// (de)serialization boundary rather than at apply time.
+/// keys are preserved by the [`BinWire`] serde shim (see
+/// `#[serde(into/try_from)]`), so existing wire payloads round-trip
+/// byte-for-byte and the precedence (`bin_count` wins over `bin_width` wins over
+/// Sturges) is resolved once at the (de)serialization boundary rather than at
+/// apply time. A rule the numeric keys cannot spell rides the additive
+/// `bin_rule` key (#193), so every mode survives `spec → wire → spec`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(into = "BinWire", from = "BinWire")]
+#[serde(into = "BinWire", try_from = "BinWire")]
 pub(crate) struct BinSpec {
     pub field: String,
     pub mode: BinMode,
@@ -129,6 +132,19 @@ struct BinWire {
     bin_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     bin_width: Option<f64>,
+    /// The rule-derived mode carrier (#193). The flat numeric keys can only
+    /// spell `Fixed` and `Width`, so before this key existed
+    /// `BinMode::FreedmanDiaconis` serialized as "neither" and read back as
+    /// Sturges — a chart's `to_dict()`/`to_json()` stated binning it did not
+    /// render. `BinWire` is `deny_unknown_fields`, so the carrier has to be an
+    /// additive, explicitly-named key rather than a widened numeric one.
+    ///
+    /// Written only for Freedman-Diaconis: Sturges remains the wire's *default*
+    /// (the absence of all three keys), so every pre-#193 payload keeps its
+    /// exact bytes. The name itself comes from [`BinMode::rule_name`], the same
+    /// table `parse_bin_axis` accepts, so a parseable rule is always writable.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    bin_rule: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     extent: Option<(f64, f64)>,
     #[serde(default = "default_true")]
@@ -152,18 +168,29 @@ struct BinWire {
     name: Option<String>,
 }
 
-impl From<BinWire> for BinSpec {
-    fn from(w: BinWire) -> Self {
-        // Resolve the flat-field precedence once at the boundary: bin_count wins,
-        // then bin_width, else Sturges (mirrors the old apply-time match).
-        let mode = if let Some(n) = w.bin_count {
-            BinMode::Fixed { n }
-        } else if let Some(width) = w.bin_width {
-            BinMode::Width { w: width }
-        } else {
-            BinMode::Sturges
+impl TryFrom<BinWire> for BinSpec {
+    type Error = String;
+
+    fn try_from(w: BinWire) -> Result<Self, String> {
+        // Resolve the wire's mode keys once at the boundary. `bin_rule` names a
+        // mode outright and so cannot be combined with a numeric key — that
+        // pair has no single reading, and the wire refuses rather than picking
+        // one. Among the two numeric keys the pre-#193 precedence is unchanged:
+        // bin_count wins, then bin_width, else Sturges.
+        let mode = match (&w.bin_rule, w.bin_count, w.bin_width) {
+            (Some(rule), None, None) => BinMode::from_rule_name(rule).ok_or_else(|| {
+                format!("stat_bin: unknown bin_rule '{rule}'; expected 'sturges'|'fd'|'freedman_diaconis'")
+            })?,
+            (Some(rule), _, _) => {
+                return Err(format!(
+                    "stat_bin: bin_rule '{rule}' cannot be combined with bin_count/bin_width"
+                ))
+            }
+            (None, Some(n), _) => BinMode::Fixed { n },
+            (None, None, Some(width)) => BinMode::Width { w: width },
+            (None, None, None) => BinMode::Sturges,
         };
-        BinSpec {
+        Ok(BinSpec {
             field: w.field,
             mode,
             extent: w.extent,
@@ -174,23 +201,27 @@ impl From<BinWire> for BinSpec {
             agg_field: w.agg_field,
             agg: w.agg,
             name: w.name,
-        }
+        })
     }
 }
 
 impl From<BinSpec> for BinWire {
     fn from(s: BinSpec) -> Self {
-        let (bin_count, bin_width) = match s.mode {
-            BinMode::Fixed { n } => (Some(n), None),
-            BinMode::Width { w } => (None, Some(w)),
-            BinMode::Sturges => (None, None),
-            // unreachable for 1-D Bin; the constructor only yields Sturges/Fixed/Width
-            BinMode::FreedmanDiaconis => (None, None),
+        // Exactly one of the three mode keys is ever written, and Sturges writes
+        // none of them (see `BinWire::bin_rule`). `explicit_rule_name` decides
+        // which modes the numeric keys cannot express, and supplies a spelling
+        // `try_from` reads back.
+        let (bin_count, bin_width) = match &s.mode {
+            BinMode::Fixed { n } => (Some(*n), None),
+            BinMode::Width { w } => (None, Some(*w)),
+            BinMode::Sturges | BinMode::FreedmanDiaconis => (None, None),
         };
+        let bin_rule = s.mode.explicit_rule_name().map(str::to_string);
         BinWire {
             field: s.field,
             bin_count,
             bin_width,
+            bin_rule,
             extent: s.extent,
             nice: s.nice,
             cumulative: s.cumulative,
@@ -239,13 +270,15 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
     // site, not in the shared fold. Only nice when `nice=true` and no explicit
     // extent was set.
     if spec.nice {
-        // Sturges fallback target from the clean count. When the mode is
-        // `Fixed{n}`, `clean.len()` is unused but the coercion is cheap; extracting
-        // it avoids a second `column_extent` call. Width/Sturges/FD all fall back
-        // to the Sturges target, preserving the old `bin_count.unwrap_or(sturges)`.
-        let target = match &spec.mode {
-            BinMode::Fixed { n } => (*n).max(1),
-            _ => {
+        // Same nicing target `resolve_bin_extent` uses per group, asked through
+        // the same [`BinMode::nice_target_count`] — Width/Sturges/FD all fall
+        // back to the Sturges count, so the faceted pin and the per-panel
+        // partition cannot disagree about the edges. Only the fallback arm
+        // scans the column for `clean.len()`, so a `Fixed{n}` spec still pays
+        // no second column pass.
+        let target = match spec.mode.nice_target_count() {
+            Some(n) => n.max(1),
+            None => {
                 let schema = batch.schema();
                 let idx = schema.index_of(&spec.field).ok()?;
                 let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field).ok()?;
@@ -662,6 +695,13 @@ use crate::transform::core::TransformSpec;
 /// ----------
 /// field : str
 ///     Column to bin (must be Float64).
+/// bins : str, int or float, optional
+///     The whole bin-count decision in one value, with the vocabulary
+///     ``Bin2D(bins_x=)`` and ``Kde(count_scale=)`` already accept:
+///     ``"sturges"``, ``"fd"``/``"freedman_diaconis"``, an ``int`` bin count
+///     (``bool`` refused; ``numpy`` integers accepted), or a ``float`` bin
+///     width. Anything else is refused by name. Mutually exclusive with
+///     ``bin_count``/``bin_width`` — pass either this or one of those, not both.
 /// bin_count : int, optional
 ///     Number of equal-width bins. Mutually exclusive with ``bin_width``.
 ///     When both are omitted, Sturges' rule determines bin count.
@@ -709,10 +749,11 @@ pub(crate) struct PyBin(pub(crate) TransformSpec);
 #[pymethods]
 impl PyBin {
     #[new]
-    #[pyo3(signature = (field, *, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, shared_extent = false, groupby = None, agg_field = None, agg = None, name = None))]
+    #[pyo3(signature = (field, *, bins = None, bin_count = None, bin_width = None, extent = None, nice = true, cumulative = false, shared_extent = false, groupby = None, agg_field = None, agg = None, name = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
+        bins: Option<&Bound<'_, PyAny>>,
         bin_count: Option<usize>,
         bin_width: Option<f64>,
         extent: Option<(f64, f64)>,
@@ -768,14 +809,32 @@ impl PyBin {
             }
         }
         let groupby = parse_groupby_pyany(groupby)?;
-        // Resolve the flat constructor params to a typed mode with today's
-        // precedence: bin_count wins → Fixed; else bin_width → Width; else Sturges.
-        let mode = if let Some(n) = bin_count {
-            BinMode::Fixed { n }
-        } else if let Some(w) = bin_width {
-            BinMode::Width { w }
-        } else {
-            BinMode::Sturges
+        // `bins` names the whole decision in one value — the rule-bearing
+        // spelling `Bin2D(bins_x=)` and `Kde(count_scale=)` already accept,
+        // parsed by the same shared owner (#193). It is mutually exclusive with
+        // the two numeric params rather than layered on top of them: with a
+        // precedence rule instead, `Bin(bins="fd", bin_count=10)` would silently
+        // discard one of the caller's two answers.
+        let mode = match bins {
+            Some(obj) => {
+                if bin_count.is_some() || bin_width.is_some() {
+                    return Err(PyValueError::new_err(
+                        "Bin: bins= is mutually exclusive with bin_count=/bin_width=; pass only one",
+                    ));
+                }
+                crate::transform::bin_mode::parse_bin_axis(obj, "Bin")?
+            }
+            // Flat-param precedence, unchanged: bin_count wins → Fixed; else
+            // bin_width → Width; else Sturges.
+            None => {
+                if let Some(n) = bin_count {
+                    BinMode::Fixed { n }
+                } else if let Some(w) = bin_width {
+                    BinMode::Width { w }
+                } else {
+                    BinMode::Sturges
+                }
+            }
         };
         Ok(PyBin(TransformSpec::Bin(BinSpec {
             field: field.to_string(),
@@ -807,11 +866,24 @@ impl PyBin {
                 // `agg_field`/`agg` addition broke that convention for every
                 // pre-existing `Bin(...)` repr without being requested by
                 // the brief or spec, and nothing pinned it. Not reintroduced.
+                //
+                // #193: a rule mode the numeric projection cannot spell gains a
+                // trailing `bins=` term rather than printing as `bin_count=None,
+                // bin_width=None`, which would repr-lie about the binning the
+                // same way the wire used to. Sturges keeps printing as the
+                // all-None default it has always printed as, so every
+                // pre-#193 repr stays byte-identical.
+                let bins_term = s
+                    .mode
+                    .explicit_rule_name()
+                    .map(|rule| format!(", bins='{rule}'"))
+                    .unwrap_or_default();
                 format!(
-                    "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={})",
+                    "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={}{})",
                     s.field, bin_count, bin_width, s.extent,
                     if s.nice { "True" } else { "False" },
                     if s.cumulative { "True" } else { "False" },
+                    bins_term,
                 )
             }
             #[allow(unreachable_patterns)]
@@ -1259,6 +1331,64 @@ mod tests {
         }
     }
 
+    /// NICING-TARGET CONTRACT (#193), the faceted half: under Freedman-Diaconis
+    /// the facet-wide pin `global_extent` computes and the edges a panel would
+    /// compute for itself must be the SAME edges. Both ask
+    /// `BinMode::nice_target_count`, which answers `None` for every
+    /// rule-derived mode, so both nice against `sturges_floor(n)` and only then
+    /// count via FD. Were either side to nice against its own FD count instead,
+    /// the pinned range and the per-panel range would diverge and faceted
+    /// panels would show bars at different positions than an unfaceted one.
+    #[test]
+    fn fd_niced_global_extent_matches_the_apply_path_edges() {
+        pyo3::Python::initialize();
+        // A spread wide enough for a non-degenerate IQR, so the FD arm actually
+        // fires instead of falling back to Sturges.
+        let values: Vec<f64> = (0..64).map(|i| 0.13 + (i as f64) * 0.15).collect();
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::FreedmanDiaconis,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            agg_field: None,
+            agg: None,
+            name: None,
+        };
+        let batch = batch_with(values);
+        let Some((lo, hi)) = super::global_extent(&spec, &batch) else {
+            panic!("global_extent must return Some for valid data");
+        };
+        let out_pinned = apply(&BinSpec { extent: Some((lo, hi)), nice: false, ..spec.clone() }, &batch).unwrap();
+        let out_auto = apply(&spec, &batch).unwrap();
+        assert_eq!(
+            out_pinned.num_rows(),
+            out_auto.num_rows(),
+            "FD bin count must agree between the pinned and auto extents"
+        );
+        let pinned_starts = col_f64(&out_pinned, "bin_start");
+        let auto_starts = col_f64(&out_auto, "bin_start");
+        for i in 0..out_pinned.num_rows() {
+            assert!(
+                (pinned_starts.value(i) - auto_starts.value(i)).abs() < 1e-12,
+                "FD bin_start[{i}] mismatch: pinned={}, auto={}",
+                pinned_starts.value(i),
+                auto_starts.value(i)
+            );
+        }
+        // And the FD count is genuinely FD's, not the Sturges count the nicing
+        // target happens to use — otherwise this test would pass on a spec that
+        // never reached the FD arm at all.
+        let sturges_n = crate::scale::ticks::sturges_floor(64);
+        assert_ne!(
+            out_auto.num_rows(),
+            sturges_n,
+            "fixture must discriminate: FD resolved to the Sturges count ({sturges_n})"
+        );
+    }
+
     /// `global_extent` returns the explicitly-set extent when `spec.extent` is `Some`.
     #[test]
     fn test_bin_global_extent_explicit_extent_passthrough() {
@@ -1661,6 +1791,9 @@ mod tests {
             BinMode::Fixed { n: 42 },
             BinMode::Width { w: 0.5 },
             BinMode::Width { w: 100.0 },
+            // #193 made FD constructable from `Bin(bins="fd")`, so it joins the
+            // set this test sweeps rather than staying a documented wire hole.
+            BinMode::FreedmanDiaconis,
         ] {
             let spec = BinSpec { mode: mode.clone(), ..sturges_spec() };
             let json = serde_json::to_string(&spec).unwrap();
@@ -1672,23 +1805,74 @@ mod tests {
         }
     }
 
-    /// A hand-authored `BinSpec` with `mode = FreedmanDiaconis` is NOT
-    /// representable on the flat 1-D wire: `From<BinSpec>` maps FD → (None, None),
-    /// identical to Sturges, so a serialize→deserialize cycle silently DOWNGRADES
-    /// FD to Sturges. This pins that lossy collapse as a documented contract; if a
-    /// future change makes the 1-D Bin emit FD, this test will fail and force the
-    /// wire to gain an `fd` flag instead of silently corrupting the mode.
+    /// Freedman-Diaconis survives the 1-D wire (#193).
+    ///
+    /// FLIPPED FROM ITS OPPOSITE. This test used to pin the collapse — FD
+    /// serialized as neither flat numeric key, exactly like Sturges, so a
+    /// serialize→deserialize cycle silently downgraded it, and its own docstring
+    /// said "if a future change makes the 1-D Bin emit FD, this test will fail
+    /// and force the wire to gain an `fd` flag". `Bin(bins="fd")` is that
+    /// change, and `BinWire::bin_rule` is that flag. What is pinned now is the
+    /// other half of that sentence: the rule reaches the wire under its own
+    /// name, and reads back as itself rather than as the fallback it would have
+    /// resolved to.
     #[test]
-    fn bughunt_binwire_freedman_diaconis_collapses_to_sturges() {
+    fn binwire_freedman_diaconis_round_trips_under_its_own_name() {
         let spec = BinSpec { mode: BinMode::FreedmanDiaconis, ..sturges_spec() };
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(!json.contains("freedman"), "FD must not appear on flat wire: {json}");
+        assert!(
+            json.contains(r#""bin_rule":"freedman_diaconis""#),
+            "FD must be spelled out on the wire, got: {json}"
+        );
+        assert!(!json.contains("bin_count"), "FD must not emit bin_count: {json}");
+        assert!(!json.contains("bin_width"), "FD must not emit bin_width: {json}");
         let back: BinSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(
             back.mode,
-            BinMode::Sturges,
-            "FD silently collapses to Sturges on the flat 1-D wire (lossy by design)"
+            BinMode::FreedmanDiaconis,
+            "FD must read back as FD, not as the Sturges it used to collapse into"
         );
+    }
+
+    /// `bin_rule` accepts the same spellings `parse_bin_axis` does (one table,
+    /// `BinMode::from_rule_name`), and refuses anything else by name instead of
+    /// falling back to Sturges.
+    #[test]
+    fn binwire_bin_rule_accepts_every_parser_spelling_and_refuses_others() {
+        for (wire_name, expected) in [
+            ("sturges", BinMode::Sturges),
+            ("fd", BinMode::FreedmanDiaconis),
+            ("freedman_diaconis", BinMode::FreedmanDiaconis),
+        ] {
+            let json = format!(r#"{{"field":"x","bin_rule":"{wire_name}"}}"#);
+            let parsed: BinSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.mode, expected, "bin_rule '{wire_name}' misread");
+        }
+        let err = serde_json::from_str::<BinSpec>(r#"{"field":"x","bin_rule":"auto"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown bin_rule 'auto'"),
+            "an unknown rule must be refused by name, got: {err}"
+        );
+    }
+
+    /// `bin_rule` names a mode outright, so pairing it with a numeric key has no
+    /// single reading: the wire refuses rather than silently dropping one of the
+    /// two answers (unlike the legacy bin_count/bin_width pair, whose
+    /// precedence predates this key and is preserved above).
+    #[test]
+    fn binwire_bin_rule_with_a_numeric_key_refuses() {
+        for payload in [
+            r#"{"field":"x","bin_rule":"fd","bin_count":7}"#,
+            r#"{"field":"x","bin_rule":"fd","bin_width":2.5}"#,
+        ] {
+            let err = serde_json::from_str::<BinSpec>(payload).unwrap_err().to_string();
+            assert!(
+                err.contains("cannot be combined with bin_count/bin_width"),
+                "conflicting mode keys must refuse, got: {err} for {payload}"
+            );
+        }
     }
 
     /// A degenerate hand-authored wire with `bin_count:0` deserializes WITHOUT

@@ -443,6 +443,7 @@ class Bin:
         self,
         field: str,
         *,
+        bins: Optional[Union[str, int, float]] = None,
         bin_count: Optional[int] = None,
         bin_width: Optional[float] = None,
         extent: Optional[Tuple[float, float]] = None,
@@ -943,6 +944,15 @@ def scale_accepted_keys(scale_type: str) -> list[str]: ...
 # dict valid?" without constructing a throwaway EncodingSpec for the side
 # effect of its exception.
 def validate_scale_dict(scale: dict) -> None: ...
+
+# Wave-4 task 9 (#193): the ``bins=`` vocabulary gate — the same parser
+# ``Bin(bins=)``, ``Bin2D(bins_x=)`` and ``Kde(count_scale=)`` construct
+# through, callable for validation only. Raises ValueError prefixed with
+# ``ctx`` (the public entry name the caller invoked, e.g. ``"displot"``) on a
+# malformed value; returns None on a valid one. Exists so a figure entry can
+# refuse in its own voice without a second copy of the accepted spellings
+# living in Python.
+def validate_bin_rule(bins: Any, ctx: str) -> None: ...
 
 # ---------- Palette registry accessors ----------
 #
