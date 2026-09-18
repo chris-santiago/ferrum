@@ -497,22 +497,7 @@ fn apply_dodge(
             coord_flipped,
         })?;
 
-    // 1. Compute median spacing of unique band values (bandwidth proxy for a
-    //    continuous band axis).
-    let mut uniques: Vec<f64> = (0..band_arr.len())
-        .filter(|i| !band_arr.is_null(*i))
-        .map(|i| band_arr.value(i))
-        .collect();
-    uniques.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    uniques.dedup();
-    if uniques.len() < 2 {
-        return Ok(batch.clone());
-    }
-    let mut diffs: Vec<f64> = uniques.windows(2).map(|w| w[1] - w[0]).collect();
-    diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let bandwidth = diffs[diffs.len() / 2];
-
-    // 2. Determine group→slot order: legend order when the dodge field is the
+    // 1. Determine group→slot order: legend order when the dodge field is the
     //    categorical color field, else first-appearance order (see
     //    `ordered_dodge_groups`).
     let groups_in_order = ordered_dodge_groups(&by_cats, slot_domain);
@@ -525,19 +510,111 @@ fn apply_dodge(
         return Ok(batch.clone());
     }
 
-    let pad_total = bandwidth * padding * 2.0;
-    let sub_band = (bandwidth - pad_total) / n_groups as f64;
-
-    let mut new_band = Vec::with_capacity(band_arr.len());
-    for (i, g) in by_cats.iter().enumerate() {
-        let group_idx = *seen.get(g).unwrap();
-        let offset =
-            -bandwidth / 2.0 + bandwidth * padding + sub_band * (group_idx as f64 + 0.5);
-        new_band.push(band_arr.value(i) + offset);
-    }
+    // 2. A SPAN row (`x`+`x2`, or `y`+`y2` when the band is y) carries its own
+    //    band as an interval — a histogram bin — rather than a single value the
+    //    band is centered on. Both endpoints must move, into the group's own
+    //    sub-slot inside that interval.
+    //
+    //    Offsetting only the band column (which is all this branch did before,
+    //    and still does for a point row) computed each rect from an OFFSET start
+    //    against an UN-OFFSET end, so `multiple="dodge"` drew bins of
+    //    `bin_width ∓ offset`: measured on `displot(bins=10, hue=)`, one group's
+    //    bars were 61.46px and the other's 38.88px inside a 50.17px bin — unequal,
+    //    overlapping, and one wider than the whole band. The shared grid was
+    //    right (that is the Python half of this fix, `_multiple.py`'s
+    //    `shared_extent=True` for dodge); only the widths were wrong.
+    //
+    //    The slot layout is `apply_dodge_ordinal`'s convention, not a new one:
+    //    Dodge's `padding` is taken off each END of the band and the `n_groups`
+    //    sub-slots are laid end to end from the band's leading edge. The row's
+    //    OWN span is subdivided rather than the median-spacing `bandwidth`
+    //    proxy, so a non-uniform final bin keeps its slots inside itself; for
+    //    the uniform grid a shared-extent histogram produces, the two are equal.
+    //
+    //    A row whose span is null, non-finite, or non-positive (an inverted or
+    //    degenerate bin) is passed through untouched on both columns: there is
+    //    no interval to subdivide, and every such row is already dropped
+    //    downstream (`col_as_f64`'s null skip, then `bar.rs`'s `is_zero_extent`,
+    //    which names the drop).
+    //
+    //    This branch also needs no bandwidth proxy, which is why it is resolved
+    //    BEFORE the median-spacing block below rather than after it: that
+    //    block's `uniques.len() < 2` bail exists because spacing is undefined
+    //    for a single band value, and applying it to a span row would leave a
+    //    one-bin dodged histogram (`bins=1`) with its groups fully overlapped —
+    //    the same failure this fix exists to remove, surviving in the one shape
+    //    where the band interval is known from the row itself.
+    let span_end = if band_on_y { encoding.y2.as_ref() } else { encoding.x2.as_ref() }
+        .and_then(|e| batch.schema().index_of(&e.field).ok())
+        .filter(|idx| *idx != band_col_idx)
+        .and_then(|idx| {
+            batch
+                .column(idx)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|arr| (idx, arr))
+        });
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    cols[band_col_idx] = Arc::new(Float64Array::from(new_band));
+
+    if let Some((end_idx, end_arr)) = span_end {
+        let mut new_start: Vec<Option<f64>> = Vec::with_capacity(band_arr.len());
+        let mut new_end: Vec<Option<f64>> = Vec::with_capacity(band_arr.len());
+        let value_at = |arr: &Float64Array, i: usize| (!arr.is_null(i)).then(|| arr.value(i));
+        for (i, g) in by_cats.iter().enumerate() {
+            let group_idx = *seen.get(g).unwrap();
+            let (Some(lo), Some(hi)) = (value_at(band_arr, i), value_at(end_arr, i)) else {
+                // Null on either endpoint: both columns keep their exact
+                // values (nulls included), so a row this batch could never
+                // draw is not turned into one it draws at the wrong place.
+                new_start.push(value_at(band_arr, i));
+                new_end.push(value_at(end_arr, i));
+                continue;
+            };
+            let span = hi - lo;
+            if !span.is_finite() || span <= 0.0 {
+                new_start.push(Some(lo));
+                new_end.push(Some(hi));
+                continue;
+            }
+            let slot = (span - span * padding * 2.0) / n_groups as f64;
+            let slot_lo = lo + span * padding + slot * group_idx as f64;
+            new_start.push(Some(slot_lo));
+            new_end.push(Some(slot_lo + slot));
+        }
+        cols[band_col_idx] = Arc::new(Float64Array::from(new_start));
+        cols[end_idx] = Arc::new(Float64Array::from(new_end));
+    } else {
+        // 3. A POINT row's band is centered on its single value, and its width
+        //    is the median spacing of the unique band values (the bandwidth
+        //    proxy a continuous axis has no ordinal `bandwidth()` for). Each
+        //    group's mark moves to the CENTER of its sub-slot, since there is no
+        //    second endpoint to carry the slot's extent. Unchanged behavior.
+        let mut uniques: Vec<f64> = (0..band_arr.len())
+            .filter(|i| !band_arr.is_null(*i))
+            .map(|i| band_arr.value(i))
+            .collect();
+        uniques.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        uniques.dedup();
+        if uniques.len() < 2 {
+            return Ok(batch.clone());
+        }
+        let mut diffs: Vec<f64> = uniques.windows(2).map(|w| w[1] - w[0]).collect();
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let bandwidth = diffs[diffs.len() / 2];
+        let pad_total = bandwidth * padding * 2.0;
+        let sub_band = (bandwidth - pad_total) / n_groups as f64;
+
+        let mut new_band = Vec::with_capacity(band_arr.len());
+        for (i, g) in by_cats.iter().enumerate() {
+            let group_idx = *seen.get(g).unwrap();
+            let offset =
+                -bandwidth / 2.0 + bandwidth * padding + sub_band * (group_idx as f64 + 0.5);
+            new_band.push(band_arr.value(i) + offset);
+        }
+        cols[band_col_idx] = Arc::new(Float64Array::from(new_band));
+    }
+
     let schema = batch.schema();
     RecordBatch::try_new(schema, cols).map_err(|e| crate::render::RenderError::PositionAdjustFailed {
         adjustment: "Dodge",
@@ -1205,6 +1282,176 @@ mod tests {
         assert!((xa.value(1) - 1.25).abs() < 1e-9, "row1 x={}", xa.value(1));
         assert!((xa.value(2) - 1.75).abs() < 1e-9, "row2 x={}", xa.value(2));
         assert!((xa.value(3) - 2.25).abs() < 1e-9, "row3 x={}", xa.value(3));
+    }
+
+    /// A dodged SPAN row (`x`+`x2` — a histogram bin) must land in its group's
+    /// own sub-slot INSIDE the bin: equal widths across groups, adjacent, and
+    /// together spanning the bin minus Dodge's padding at each end. This is the
+    /// half of `multiple="dodge"` that was missing once the Python side started
+    /// sharing bin edges across hue groups (`_multiple.py`'s
+    /// `shared_extent=True`): the shared grid was right, but this branch
+    /// offset only `x` and left `x2` where it was, so each rect was measured
+    /// from an offset start to an un-offset end.
+    ///
+    /// RED against that: with only `x` offset, row 0 (group a, padding 0) spans
+    /// [-0.25, 1.0] — width 1.25, wider than the whole bin — and row 1 (group b)
+    /// spans [0.25, 1.0], width 0.75. The two overlap for 0.75 of the bin. The
+    /// exact-value assertions below fail on both counts.
+    #[test]
+    fn dodge_continuous_span_subdivides_the_bin_into_equal_slots() {
+        // Two bins ([0,1), [1,2)) x two groups, the shape a shared-extent
+        // dodged histogram produces.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end", DataType::Float64, false),
+            Field::new("count", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 7.0, 2.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "bin_start".into(), type_: None, ..Default::default() }),
+            x2: Some(EncodingSpec { field: "bin_end".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "count".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+
+        let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let span = |i: usize| (lo.value(i), hi.value(i));
+        // padding 0, 2 groups -> each slot is half its bin, laid end to end.
+        let expected = [(0.0, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0)];
+        for (i, (elo, ehi)) in expected.iter().enumerate() {
+            let (glo, ghi) = span(i);
+            assert!(
+                (glo - elo).abs() < 1e-9 && (ghi - ehi).abs() < 1e-9,
+                "row {i} slot: expected [{elo}, {ehi}], got [{glo}, {ghi}]"
+            );
+        }
+
+        // The three properties, stated as properties rather than as the
+        // coordinates above: equal widths, no overlap, one shared step.
+        let widths: Vec<f64> = (0..4).map(|i| hi.value(i) - lo.value(i)).collect();
+        assert!(
+            widths.iter().all(|w| (w - widths[0]).abs() < 1e-9),
+            "every group's slot must be the same width; got {widths:?}"
+        );
+        assert!(hi.value(0) <= lo.value(1) + 1e-9, "bin0's two slots must not overlap");
+        assert!(hi.value(2) <= lo.value(3) + 1e-9, "bin1's two slots must not overlap");
+        // Group a's step from bin0 to bin1 is the bin width — the shared grid
+        // the Python half established, which this fix must not move.
+        assert!((lo.value(2) - lo.value(0) - 1.0).abs() < 1e-9, "group a's bin step must stay 1.0");
+        assert!((lo.value(3) - lo.value(1) - 1.0).abs() < 1e-9, "group b's bin step must stay 1.0");
+    }
+
+    /// Dodge's own `padding` is taken off each END of the bin and the slots are
+    /// laid end to end from its leading edge — `apply_dodge_ordinal`'s
+    /// convention, not a second one invented for the continuous branch.
+    #[test]
+    fn dodge_continuous_span_padding_insets_both_ends_of_the_bin() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end", DataType::Float64, false),
+            Field::new("count", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "bin_start".into(), type_: None, ..Default::default() }),
+            x2: Some(EncodingSpec { field: "bin_end".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "count".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let s = dummy_scales();
+        // padding 0.1 -> 0.1 off each end of a 1.0 bin, two 0.4 slots between.
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.1 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        for (i, (elo, ehi)) in [(0.1, 0.5), (0.5, 0.9)].iter().enumerate() {
+            assert!(
+                (lo.value(i) - elo).abs() < 1e-9 && (hi.value(i) - ehi).abs() < 1e-9,
+                "row {i} slot: expected [{elo}, {ehi}], got [{}, {}]",
+                lo.value(i),
+                hi.value(i)
+            );
+        }
+    }
+
+    /// A row with no span to subdivide passes through untouched on BOTH
+    /// columns — nulls included. Without the null preservation, rebuilding the
+    /// span column from a plain `Vec<f64>` would turn a null endpoint into a
+    /// non-null `0.0`, and a row the drawer skips today would start drawing a
+    /// rect back to the axis origin.
+    #[test]
+    fn dodge_continuous_span_leaves_null_and_degenerate_rows_alone() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, true),
+            Field::new("bin_end", DataType::Float64, true),
+            Field::new("count", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                // row0: null start; row1: null end; row2: zero-width bin;
+                // row3: a well-formed bin, so the dodge is not a no-op.
+                Arc::new(Float64Array::from(vec![None, Some(0.0), Some(2.0), Some(4.0)])),
+                Arc::new(Float64Array::from(vec![Some(1.0), None, Some(2.0), Some(5.0)])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "bin_start".into(), type_: None, ..Default::default() }),
+            x2: Some(EncodingSpec { field: "bin_end".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "count".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+
+        assert!(lo.is_null(0) && (hi.value(0) - 1.0).abs() < 1e-9, "null start row must pass through");
+        assert!(hi.is_null(1) && (lo.value(1) - 0.0).abs() < 1e-9, "null end row must pass through");
+        assert!(
+            (lo.value(2) - 2.0).abs() < 1e-9 && (hi.value(2) - 2.0).abs() < 1e-9,
+            "a zero-width bin has no interval to subdivide and must pass through"
+        );
+        // The well-formed row still dodges: group b (slot 1) takes the upper
+        // half of [4, 5].
+        assert!(
+            (lo.value(3) - 4.5).abs() < 1e-9 && (hi.value(3) - 5.0).abs() < 1e-9,
+            "the well-formed row must still take its slot; got [{}, {}]",
+            lo.value(3),
+            hi.value(3)
+        );
     }
 
     #[test]

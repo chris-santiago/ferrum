@@ -63,6 +63,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::layout::axis::resolve_axis_title;
 use crate::layout::{
     LegendDirection, LegendOrient, LegendOverrides, TextAnchor, ThemeInputs,
 };
@@ -744,12 +745,30 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
 ///
 /// Python forwards `""` only when `Legend(title=None)` is explicitly passed,
 /// so `Some("")` here is always the caller's intentional suppress sentinel.
+///
+/// "Mirrors the axis-title contract" is now literal: this is the last rung of
+/// the title cascade, and it reads the same [`resolve_axis_title`] every other
+/// rung does (`prepare::build_axis_input`'s per-channel title,
+/// `AxisInput::fill_chart_level_title`, `legend::aux_legend_title`'s two-rung
+/// composition) rather than the hand copy of its three arms it used to carry.
+///
+/// No `title_claimed`-style companion bit is needed here, unlike
+/// [`crate::layout::AxisStyleOverrides::title_claimed`] on the axis side. That
+/// bit exists because a LATER chart-level fill has to tell "this slot was
+/// explicitly suppressed" from "this slot was never set", and
+/// `resolve_axis_title`'s `Option<String>` collapses both to `None`. Nothing
+/// fills `legend_overrides.title` chart-level: `apply_chart_config_to_legend_overrides`
+/// does not touch it, and the only other writer,
+/// [`suppress_legend_if_chart_level_disabled`], clears `legend_title` in the
+/// same breath, so both inputs to this resolution are already `None` by the
+/// time it runs. Wiring a `configure_legend(title=)` filler would change that,
+/// and is the point at which the three-state title wants to become a type
+/// rather than a convention.
 fn effective_legend_title(prep: &prepare::PreparedInputs) -> Option<String> {
-    match prep.legend_overrides.title.as_deref() {
-        Some(s) if s.trim().is_empty() => None, // explicit suppress — no fallback
-        Some(s) => Some(s.to_owned()),           // explicit non-empty title
-        None => prep.legend_title.clone(),       // absent — fall through to field-name default
-    }
+    resolve_axis_title(
+        prep.legend_overrides.title.as_deref(),
+        prep.legend_title.clone(),
+    )
 }
 
 /// Whether chart-level `configure_legend(...)` fully suppresses the legend

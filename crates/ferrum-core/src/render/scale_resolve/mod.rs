@@ -2003,11 +2003,22 @@ fn positional_binding<'a>(
 /// `independent_y` layers need no exemption here: their `y` is bound on their
 /// own encoding by construction (that is how their slot resolves), so they
 /// satisfy the rule through the ordinary "own encoding" arm.
-fn validate_drawing_layers_can_plot(
-    spec: &ChartSpec,
-    has_x: bool,
-    has_y: bool,
-) -> Result<(), RenderError> {
+///
+/// **Why no `has_x`/`has_y` parameters, unlike [`single_axis_eligible`].** This
+/// runs only after the caller's two `x_enc.ok_or(…)?` / `y_enc.ok_or(…)?`, so
+/// both spec-wide bindings exist by the time it is reached: the pair
+/// [`mark_single_axis_eligible`] asks about is `(true, true)` here, always.
+/// Threading it from the call site advertised a data-dependent decision at a
+/// site where the decision is constant, and made a transposition of the two
+/// arguments an unobservable (equivalent) edit — the mutation gate found
+/// exactly that. Naming the constant at the one place it is asked states the
+/// precondition instead of hiding it in a parameter. The consequence is
+/// unchanged and now explicit: an `Arc` layer under a polar coord reads its
+/// theta arm as `true` whichever channel names theta, so this refusal never
+/// fires for an arc — which is correct here, since the coord's theta channel
+/// IS bound spec-wide (that is what the caller's `ok_or` proved) and an arc's
+/// radius channel is optional by design.
+fn validate_drawing_layers_can_plot(spec: &ChartSpec) -> Result<(), RenderError> {
     let Some(layers) = spec.layers.as_deref() else {
         return Ok(());
     };
@@ -2032,8 +2043,10 @@ fn validate_drawing_layers_can_plot(
                 continue;
             }
             // One channel is enough for this mark, so the axis it cannot reach
-            // is one its own builder is written to do without.
-            if mark_single_axis_eligible(layer.mark, spec, has_x, has_y) {
+            // is one its own builder is written to do without. Both spec-wide
+            // bindings are `true` here by this function's precondition — see
+            // its doc comment for why they are named rather than threaded.
+            if mark_single_axis_eligible(layer.mark, spec, /* has_x */ true, /* has_y */ true) {
                 continue;
             }
             return Err(RenderError::LayerMissingPositionalChannel {
@@ -2211,7 +2224,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // layer that draws may still have nothing to plot on it. Asked here, after
     // the channel-level check above, so each refusal keeps its own lane — see
     // `validate_drawing_layers_can_plot`.
-    validate_drawing_layers_can_plot(spec, has_x, has_y)?;
+    validate_drawing_layers_can_plot(spec)?;
 
     // Data-aware sort (channel shorthand `"-y"`, sort-field objects) needs both
     // positional field names so an ordinal axis can aggregate the opposite
