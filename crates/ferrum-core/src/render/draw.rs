@@ -28,7 +28,7 @@ impl DrawCtx<'_> {
     /// the independent variable [`marks::curve`](super::marks::curve) fits the
     /// dependent one against.
     ///
-    /// Normally a series advances along x with its value on y. TWO things put
+    /// Normally a series advances along x with its value on y. THREE things put
     /// the value on x and the position/category on y instead:
     ///
     /// - **`CoordFlip`** — [`Encoding::flip_positional`](crate::spec::encoding::Encoding::flip_positional)
@@ -37,21 +37,76 @@ impl DrawCtx<'_> {
     /// - **A horizontal stack** (`Stack(value_axis=X)`, or a horizontal
     ///   composite-mark desugar) — `apply_stack` cumulates the x column and
     ///   stamps `__stack_value_on_x__`.
+    /// - **A producer's own declaration** ([`MarkKwargsSpec::value_axis`]) —
+    ///   `#172`(2). A desugar that remaps its value onto `x` and emits neither
+    ///   a flip nor a stack says so here. `mark_density(orientation=
+    ///   "horizontal")` at the default `multiple="layer"` is exactly that
+    ///   shape: its spec carries no `coord` and no `position`, so the first two
+    ///   producers see nothing, and its rendered spec is indistinguishable from
+    ///   an ordinary vertical area whose rows arrived unsorted.
+    ///
+    /// # The three are NOT peers, and combining them with `||` is a bug
+    ///
+    /// They answer different questions, in different spaces:
+    ///
+    /// - The **declaration** is a statement about the RENDERED series — which
+    ///   screen axis carries the value, full stop. It is authored pre-flip and
+    ///   moved into post-flip space by
+    ///   [`LayerPrepared::flip_coords`](crate::render::prepare) alongside the
+    ///   channel swap, so by the time it is read here it already accounts for
+    ///   the flip.
+    /// - **`CoordFlip` and the stack stamp** are statements about
+    ///   TRANSFORMATIONS applied to a series whose authored orientation is the
+    ///   default, vertical. They say what happened to that default; they do not
+    ///   describe the result of a series that was never vertical to begin with.
+    ///
+    /// So the composition is a PRECEDENCE, not a disjunction: a declaration
+    /// answers outright, and the transformations only speak for an undeclared
+    /// series. This mirrors
+    /// [`resolve_stack_value_on_x`](crate::render::position) exactly — the same
+    /// `Some(X) => true, Some(Y) => false, None => coord_flipped` triad, for the
+    /// same reason — so the crate composes this fact one way, not two.
+    ///
+    /// A disjunction shipped briefly and was wrong for exactly one input:
+    /// `mark_density(orientation="horizontal").coord(CoordFlip())`. Flipping the
+    /// declaration turns its disjunct off, but `coord_flipped()` stays true and
+    /// carries the `||` on its own, so the chart rendered horizontal while its
+    /// post-flip encoding (`x`=observation, `y`=density) is an ordinary vertical
+    /// area — measured, it closed its fill on the panel's LEFT edge where the
+    /// plain vertical density with the identical post-flip encoding closes on the
+    /// bottom. Under precedence the flipped declaration says `Y` and that is the
+    /// answer.
     ///
     /// Any future producer of a horizontal series belongs HERE. Deriving this
     /// per-mark is what went wrong once already: the first attempt enumerated
     /// call sites, knew about the stamp, and did not know about the flip, so
     /// every flipped curve was fitted against the wrong axis while each mark's
-    /// const asserted it could not happen.
+    /// const asserted it could not happen. *Inferring* it per-mark is what went
+    /// wrong the second time: `#172`(2) first read the answer off the traced
+    /// edge's monotonicity, which cannot tell a horizontal density from an
+    /// unsorted vertical area — measured, it turned the latter's fill inside
+    /// out. A declaration cannot be misread; an inference can.
     ///
     /// A mark whose points are NOT built from the positional encodings this
     /// describes (a `y2` band, whose bottom edge rides the row's own x) must
     /// override this — see `marks::area::BottomEdge::axis`.
     pub(crate) fn series_curve_axis(&self) -> super::marks::curve::CurveAxis {
         use super::marks::curve::CurveAxis;
-        let horizontal = self.coord_flipped()
-            || super::position::BatchPositionMeta::from_batch(self.batch).stack_value_on_x();
-        if horizontal { CurveAxis::Y } else { CurveAxis::X }
+        use crate::spec::position::StackValueAxis;
+        let value_on_x = match self.mark_style.misc.value_axis {
+            // Declared, in post-flip space: the whole answer.
+            Some(StackValueAxis::X) => true,
+            Some(StackValueAxis::Y) => false,
+            // Undeclared, so the authored orientation is the default (vertical)
+            // and the series is horizontal exactly if something turned it: the
+            // user's flip, or a stack that cumulated the x column.
+            None => {
+                self.coord_flipped()
+                    || super::position::BatchPositionMeta::from_batch(self.batch)
+                        .stack_value_on_x()
+            }
+        };
+        if value_on_x { CurveAxis::Y } else { CurveAxis::X }
     }
 
     /// Project a quantitative value to a pixel coordinate, honoring this mark's
@@ -232,8 +287,9 @@ pub struct SegmentStyle {
     pub arrow_size: Option<f64>,
 }
 
-/// Geometry-sizing overrides that don't cluster with a single style family:
-/// `band_size` (tick/rect band fraction) and image-tile `width`/`height`.
+/// Per-mark overrides that don't cluster with a single style family:
+/// `band_size` (tick/rect band fraction), image-tile `width`/`height`, the
+/// `clip` escape, and the declared `value_axis`.
 #[derive(Debug, Clone, Default)]
 pub struct MiscStyle {
     /// S8: band fraction for tick/rect category bands.
@@ -246,6 +302,18 @@ pub struct MiscStyle {
     /// `MarkBatch` construction site, matching every mark before this field
     /// existed.
     pub clip: Option<bool>,
+    /// `#172`(2): the producer's declaration of which positional channel
+    /// carries this mark's value. Resolved straight through from
+    /// [`MarkKwargsSpec::value_axis`], whose doc carries the full rationale,
+    /// and read by [`DrawCtx::series_curve_axis`]. `None` — every spec written
+    /// before this field existed — leaves that answer exactly as it was.
+    ///
+    /// It rides `MarkStyle` rather than being read off `ctx.spec` because a
+    /// layer's `DrawCtx` spec is `ChartSpec { mark, encoding, ..spec.clone() }`
+    /// (`render/scene_build.rs`), so `ctx.spec.mark_style` is the CHART's, not
+    /// the layer's. `resolve_mark_style` is the per-layer resolution, which
+    /// makes this the per-layer answer.
+    pub value_axis: Option<crate::spec::position::StackValueAxis>,
 }
 
 /// Per-mark resolved style. Fields are populated from theme defaults (mark-aware)
@@ -485,6 +553,8 @@ pub fn resolve_mark_style(
     // Batch H Task 1: arrow / arrow_size (segment)
     if let Some(a) = o.arrow { style.segment.arrow = Some(a); }
     if let Some(sz) = o.arrow_size { style.segment.arrow_size = Some(sz); }
+    // `#172`(2): the producer's declared value axis (line family)
+    if let Some(va) = o.value_axis { style.misc.value_axis = Some(va); }
 
     Ok(style)
 }

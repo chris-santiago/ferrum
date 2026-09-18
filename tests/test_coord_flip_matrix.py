@@ -65,6 +65,14 @@ MARK_CONFIGS = {
         "encoding": {"x": "x:Q", "y": "y:Q", "x2": "x2:Q", "y2": "y2:Q"},
         "expected_elements": ["<line"],
     },
+    # `#172`(3): mark_ribbon's absence from this matrix is why a flipped
+    # ribbon drew nothing for as long as it did — `flip_positional` moves the
+    # authored `y2` to `x2`, and the drawer read only `y2`. It needs a band
+    # channel to draw at all, so its row binds `y2` where the others do not.
+    "mark_ribbon": {
+        "encoding": {"x": "x:Q", "y": "y:Q", "y2": "y2:Q"},
+        "expected_elements": ["<path"],
+    },
 }
 
 

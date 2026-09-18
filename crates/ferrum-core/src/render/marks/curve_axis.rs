@@ -7,12 +7,14 @@
 //! compare them.
 //!
 //! - `line` reads [`DrawCtx::series_curve_axis`](crate::render::draw::DrawCtx::series_curve_axis)
-//!   — `CoordFlip` or a `__stack_value_on_x__` stamp makes it `Y`.
+//!   — `CoordFlip`, a `__stack_value_on_x__` stamp, or (since `#172`(2)) a
+//!   producer's `value_axis="x"` declaration makes it `Y`.
 //! - `area` reads `BottomEdge::axis`, which deliberately DISAGREES with the
 //!   series under `CoordFlip` + an explicit `Stack(value_axis="y")`, because the
-//!   arm that builds the bottom point is the one that knows what was built.
-//! - `ribbon` reads the `RIBBON_CURVE_AXIS` const — always `X`, because a
-//!   `y`..`y2` band at a shared x is a vertical idiom by construction.
+//!   arm that builds the bottom point is the one that knows what was built. Its
+//!   `Baseline` arm defers to the series, so it inherits the declaration too.
+//! - `ribbon` reads `band_curve_axis` — `X` for a `y`..`y2` band at a shared x,
+//!   `Y` for the `x`..`x2` band `CoordFlip` produces.
 //!
 //! Each is individually well-argued. None of them is checked against the other
 //! two, and `curve.rs`'s own doc says getting the axis wrong is *silent*: the
@@ -70,14 +72,17 @@ enum Stack {
     ValueOnY,
 }
 
-/// One cell of the matrix: a coordinate system, a stack shape, and whether the
-/// `y2` band channel is bound.
+/// One cell of the matrix: a coordinate system, a stack shape, and which band
+/// channel (if either) is bound. `x2` is the post-flip spelling of `y2` —
+/// `flip_positional` moves the user's `y2` there — so the two are alternatives,
+/// never both.
 #[derive(Debug, Clone, Copy)]
 struct Shape {
     name: &'static str,
     flip: bool,
     stack: Stack,
     y2: bool,
+    x2: bool,
 }
 
 /// Four rows whose x advances non-monotonically while y advances steadily, so
@@ -121,6 +126,7 @@ fn matrix_spec(mark: Mark, shape: Shape) -> ChartSpec {
             x: quantitative("x"),
             y: quantitative("y"),
             y2: if shape.y2 { quantitative("hi") } else { None },
+            x2: if shape.x2 { quantitative("hi") } else { None },
             ..Default::default()
         },
         transforms: Vec::new(),
@@ -203,26 +209,51 @@ fn observed_axis(mark: Mark, shape: Shape) -> CurveAxis {
     })
 }
 
-const PLAIN: Shape = Shape { name: "plain", flip: false, stack: Stack::None, y2: false };
-const FLIPPED: Shape = Shape { name: "CoordFlip", flip: true, stack: Stack::None, y2: false };
-const STACK_X: Shape =
-    Shape { name: "Stack(value_axis=x)", flip: false, stack: Stack::ValueOnX, y2: false };
-const STACK_Y: Shape =
-    Shape { name: "Stack(value_axis=y)", flip: false, stack: Stack::ValueOnY, y2: false };
+const PLAIN: Shape =
+    Shape { name: "plain", flip: false, stack: Stack::None, y2: false, x2: false };
+const FLIPPED: Shape =
+    Shape { name: "CoordFlip", flip: true, stack: Stack::None, y2: false, x2: false };
+const STACK_X: Shape = Shape {
+    name: "Stack(value_axis=x)",
+    flip: false,
+    stack: Stack::ValueOnX,
+    y2: false,
+    x2: false,
+};
+const STACK_Y: Shape = Shape {
+    name: "Stack(value_axis=y)",
+    flip: false,
+    stack: Stack::ValueOnY,
+    y2: false,
+    x2: false,
+};
 const FLIP_STACK_Y: Shape = Shape {
     name: "CoordFlip + Stack(value_axis=y)",
     flip: true,
     stack: Stack::ValueOnY,
     y2: false,
+    x2: false,
 };
-const BAND: Shape = Shape { name: "y2 band", flip: false, stack: Stack::None, y2: true };
+const BAND: Shape =
+    Shape { name: "y2 band", flip: false, stack: Stack::None, y2: true, x2: false };
 const BAND_FLIPPED: Shape =
-    Shape { name: "y2 band + CoordFlip", flip: true, stack: Stack::None, y2: true };
+    Shape { name: "y2 band + CoordFlip", flip: true, stack: Stack::None, y2: true, x2: false };
 const BAND_STACK_X: Shape = Shape {
     name: "y2 band + Stack(value_axis=x)",
     flip: false,
     stack: Stack::ValueOnX,
     y2: true,
+    x2: false,
+};
+/// The shape a flipped ribbon ACTUALLY reaches the drawer as: `flip_positional`
+/// has already moved the user's `y2` to `x2`, so `y2` is unbound and the band
+/// spans x at a shared y.
+const X2_BAND_FLIPPED: Shape = Shape {
+    name: "x2 band + CoordFlip",
+    flip: true,
+    stack: Stack::None,
+    y2: false,
+    x2: true,
 };
 
 /// `mark_line` advances along x, except where something puts the value on x.
@@ -286,18 +317,17 @@ fn area_fits_against_the_axis_its_bottom_edge_arm_builds() {
     }
 }
 
-/// `mark_ribbon` is x-parameterized unconditionally, and this pins that the
-/// const is a statement about the shape rather than an assumption about
-/// producers.
+/// `mark_ribbon` answers from the band channel it read, not from the batch or
+/// the coordinate system.
 ///
 /// The horizontal-stack row is a DELIBERATE disagreement with `line` and `area`
 /// on the identically-stamped batch: ribbon's band spans `y`..`y2` at a shared
-/// x and its vertices are sorted by x-pixel before tracing, so the shape it
-/// builds is vertical no matter what the stack cumulated. If ribbon ever learns
-/// to read `x2`, that is a band on the other axis and this row must change with
-/// it.
+/// x and its vertices are sorted by shared-pixel before tracing, so the shape it
+/// builds is vertical no matter what the stack cumulated. The `x2` row is the
+/// mirror `#172`(3) added: the band the flip moved to `x2` spans x at a shared
+/// y, so it — and only it — is y-parameterized.
 #[test]
-fn ribbon_is_x_parameterized_whatever_the_batch_is_stamped_with() {
+fn ribbon_follows_the_band_channel_not_the_batch_or_the_coordinate_system() {
     for shape in [BAND, BAND_STACK_X] {
         assert_eq!(
             observed_axis(Mark::Ribbon, shape),
@@ -306,21 +336,27 @@ fn ribbon_is_x_parameterized_whatever_the_batch_is_stamped_with() {
             shape.name
         );
     }
+    assert_eq!(
+        observed_axis(Mark::Ribbon, X2_BAND_FLIPPED),
+        CurveAxis::Y,
+        "mark_ribbon / {}: an x..x2 band at a shared y is y-parameterized",
+        X2_BAND_FLIPPED.name
+    );
 }
 
-/// The premise the ribbon rows rest on: under `CoordFlip`, `flip_positional`
-/// has moved the user's `y2` to `x2`, so `encoding.y2` is unbound and ribbon
-/// emits nothing. There is no flipped ribbon for the const to be wrong about.
+/// The one shape that still draws nothing: a ribbon with NEITHER band channel.
 ///
-/// Stated here as well as in `ribbon.rs` because this matrix would otherwise
-/// have a visible hole where every other mark has a flip row.
+/// Before `#172`(3) this was how every flipped ribbon arrived — `flip_positional`
+/// moved `y2` to `x2` and the drawer read only `y2` — and the matrix recorded
+/// the hole as the reason ribbon had no flip row. Now the flip row is
+/// [`X2_BAND_FLIPPED`] above, and the empty case is what it always should have
+/// been: no band was asked for.
 #[test]
-fn ribbon_has_no_flipped_row_because_a_flipped_ribbon_renders_nothing() {
-    let unbound_y2 = Shape { name: "CoordFlip (y2 moved to x2)", ..FLIPPED };
+fn ribbon_without_a_band_channel_renders_nothing() {
+    let no_band = Shape { name: "CoordFlip, no band channel", ..FLIPPED };
     assert!(
-        render(Mark::Ribbon, unbound_y2).is_empty(),
-        "a flipped ribbon reaches the drawer with y2 unbound and must emit nothing — if this \
-         now renders, RIBBON_CURVE_AXIS needs a flip case"
+        render(Mark::Ribbon, no_band).is_empty(),
+        "a ribbon with neither y2 nor x2 bound has no band to draw"
     );
 }
 

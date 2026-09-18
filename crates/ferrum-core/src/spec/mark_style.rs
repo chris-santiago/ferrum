@@ -153,6 +153,42 @@ pub struct MarkKwargsSpec {
     /// short segment cannot produce a head that overshoots its start point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrow_size: Option<f64>,
+    // ── `#172`(2): declared value axis (line family) ─────────────────────────
+    /// Which positional channel carries this mark's VALUE (the dependent
+    /// variable), when the mark's producer put it somewhere `CoordFlip` and
+    /// the position adjustment cannot reveal.
+    ///
+    /// `Some(X)` means the value is on `x`, so the series advances along `y` —
+    /// a horizontal series. `Some(Y)` means the ordinary vertical shape.
+    /// `None`/unset means "undeclared": the coordinate system and the stack
+    /// stamp decide alone, exactly as before this field existed, so every spec
+    /// that omits it renders byte-identically.
+    ///
+    /// Read by [`DrawCtx::series_curve_axis`](crate::render::draw::DrawCtx),
+    /// the one place that answers "which coordinate does this series advance
+    /// along", so `mark_line`, `mark_area` and every other consumer of that
+    /// answer get it from one rule.
+    ///
+    /// **Why this lives on mark kwargs rather than inside
+    /// [`PositionAdjust::Stack`](crate::spec::position::PositionAdjust).**
+    /// GH #77 put the identical declaration there because `apply_stack` was
+    /// the only consumer that needed it. `mark_density(orientation=
+    /// "horizontal")` at its default `multiple="layer"` emits NO position
+    /// adjustment at all, so it has no `Stack` to state it in — and its spec is
+    /// otherwise indistinguishable from an ordinary vertical area whose rows
+    /// arrived unsorted (no `coord`, no `position`, `x` and `y` both
+    /// quantitative). `#172`(2)'s first attempt inferred the axis from the
+    /// traced edge's monotonicity instead; that misread an unsorted vertical
+    /// area as horizontal, which is a silent wrong render, so the inference was
+    /// deleted in favour of this declaration. Mark kwargs are the right home
+    /// because they already resolve per LAYER (`layer.mark_style >
+    /// chart.mark_style > theme`) — a `ChartSpec`-level field would be
+    /// inherited wholesale by every layer through `scene_build`'s
+    /// `..spec.clone()` — and because a desugar already has a slot for exactly
+    /// this kind of per-mark declaration (`MarkDesugarResult.mark_kwargs`,
+    /// which `desugar_function` already uses for `clip=False`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_axis: Option<crate::spec::position::StackValueAxis>,
 }
 
 impl MarkKwargsSpec {
@@ -185,6 +221,66 @@ impl MarkKwargsSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::position::StackValueAxis;
+
+    // ── `#172`(2) wire contract: `value_axis` on mark kwargs ────────────────
+    //
+    // Mirrors `spec/position.rs`'s own GH #77 trio
+    // (`stack_value_axis_x_round_trips_and_serializes`,
+    // `stack_value_axis_absent_when_none`,
+    // `stack_value_axis_defaults_to_none_when_absent_from_json`), because this
+    // is the same declaration in a second slot and the two must stay spelled
+    // identically. Byte-stability is proven by round-tripping a PRE-CHANGE
+    // payload, not by reading the serde attributes.
+
+    /// `Some(X)` serializes as a present `"value_axis":"x"` key and round-trips.
+    #[test]
+    fn value_axis_x_round_trips_and_serializes() {
+        let m = MarkKwargsSpec {
+            value_axis: Some(StackValueAxis::X),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""value_axis":"x""#), "got {json}");
+        assert_eq!(serde_json::from_str::<MarkKwargsSpec>(&json).unwrap(), m);
+    }
+
+    /// `Some(Y)` spells `"y"` — the same two values `Stack`'s slot accepts, so
+    /// a producer choosing between the slots never has to change the value.
+    #[test]
+    fn value_axis_y_spells_the_same_token_stacks_slot_does() {
+        let m = MarkKwargsSpec {
+            value_axis: Some(StackValueAxis::Y),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""value_axis":"y""#), "got {json}");
+        assert_eq!(serde_json::from_str::<MarkKwargsSpec>(&json).unwrap(), m);
+    }
+
+    /// `None` is absent from the wire entirely, so every spec written before
+    /// this field existed serializes to the bytes it always did.
+    #[test]
+    fn value_axis_absent_when_none() {
+        let m = MarkKwargsSpec { fill: Some("#123456".into()), ..Default::default() };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("value_axis"), "got {json}");
+        assert_eq!(serde_json::from_str::<MarkKwargsSpec>(&json).unwrap(), m);
+    }
+
+    /// The byte-stability proof proper: a payload captured BEFORE this field
+    /// existed still parses, leaves `value_axis` at `None`, and re-serializes
+    /// to the identical bytes. A `#[serde(default)]` that had been forgotten
+    /// would fail the parse; a missing `skip_serializing_if` would fail the
+    /// re-serialization.
+    #[test]
+    fn a_pre_change_payload_round_trips_to_identical_bytes() {
+        const PRE_CHANGE: &str =
+            r##"{"size":100.0,"fill":"#2563eb","opacity":0.7,"interpolate":"step","clip":false}"##;
+        let parsed: MarkKwargsSpec = serde_json::from_str(PRE_CHANGE).unwrap();
+        assert!(parsed.value_axis.is_none(), "an absent key must resolve None, not a default axis");
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), PRE_CHANGE);
+    }
 
     #[test]
     fn without_paint_clears_fill_and_stroke_only() {

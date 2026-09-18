@@ -221,6 +221,10 @@ impl LayerPrepared {
     /// exact inversion of its intent, refusing `mark_rule().encode(x=...)`
     /// under `CoordFlip` and drawing an inherited column's values for a flipped
     /// layered reference line.
+    ///
+    /// It is equally load-bearing for `mark_style.value_axis` (`#172`(2)) —
+    /// the third member of the group, and the field whose omission from this
+    /// method proved the doc comment above right.
     fn flip_coords(&mut self) {
         // The channel swap itself (x↔y with x2↔y2, Phase 10c-pre) is
         // `Encoding::flip_positional` — the crate's single expression of the
@@ -228,6 +232,30 @@ impl LayerPrepared {
         // -aware layer read so the two can never disagree.
         self.encoding.flip_positional();
         std::mem::swap(&mut self.x_is_own, &mut self.y_is_own);
+        // `#172`(2): `mark_style.value_axis` NAMES A CHANNEL, so it is a
+        // coordinate-space field and belongs to the group this method owns —
+        // the omission this doc comment anticipated.
+        //
+        // A desugar stamps it while building its PRE-flip encoding
+        // (`desugar_density(orientation="horizontal")` remaps the density onto
+        // `x` and says `value_axis="x"`), and `DrawCtx::series_curve_axis`
+        // reads it from the POST-flip `LayerPrepared` that
+        // `scene_build`'s `resolve_mark_style(layer.mark_style, …)` resolves.
+        // Left unflipped, `mark_density(orientation="horizontal")
+        // .coord(CoordFlip())` reports a horizontal series while its post-flip
+        // encoding (`x`=observation, `y`=density) is an ordinary vertical area
+        // — measured, that closed its fill on the panel's LEFT edge where its
+        // unflipped twin closes on the bottom. Two spellings of one shape, two
+        // answers.
+        if let Some(mark_style) = self.mark_style.as_mut() {
+            if let Some(axis) = mark_style.value_axis {
+                use crate::spec::position::StackValueAxis;
+                mark_style.value_axis = Some(match axis {
+                    StackValueAxis::X => StackValueAxis::Y,
+                    StackValueAxis::Y => StackValueAxis::X,
+                });
+            }
+        }
     }
 }
 
@@ -2973,6 +3001,89 @@ mod tests {
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    /// `#172`(2) cycle-3: `value_axis` travels with the channel swap.
+    ///
+    /// It is authored in PRE-flip space by a desugar and read in POST-flip
+    /// space by `DrawCtx::series_curve_axis`, so a flip must move it exactly
+    /// as it moves `x`/`y` themselves. Asserted through `build_layers` — the
+    /// production entry, which is also what proves a SINGLE-layer chart
+    /// (`spec.layers == None`) gets the treatment, since that is the shape
+    /// `mark_density(orientation="horizontal").coord(CoordFlip())` has.
+    ///
+    /// The unflipped row is the control: without a flip the declaration must
+    /// arrive exactly as the producer wrote it.
+    #[test]
+    fn a_flip_moves_value_axis_into_post_flip_space_with_the_channels() {
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use crate::spec::position::StackValueAxis;
+
+        // The spec `desugar_density(orientation="horizontal")` emits: the
+        // density on `x`, the observation on `y`, and the declaration saying so.
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "density".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "value".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: Some(MarkKwargsSpec {
+                value_axis: Some(StackValueAxis::X),
+                ..Default::default()
+            }),
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let unflipped = build_layers(&spec, false);
+        assert_eq!(unflipped.len(), 1, "a single-layer chart prepares one layer");
+        assert_eq!(
+            unflipped[0].mark_style.as_ref().unwrap().value_axis,
+            Some(StackValueAxis::X),
+            "control: with no flip the declaration arrives as the producer wrote it"
+        );
+        assert_eq!(
+            unflipped[0].encoding.x.as_ref().unwrap().field,
+            "density",
+            "control premise: the channels did not move either"
+        );
+
+        let flipped = build_layers(&spec, true);
+        assert_eq!(
+            flipped[0].encoding.x.as_ref().unwrap().field,
+            "value",
+            "premise: the flip moved the observation onto x"
+        );
+        assert_eq!(
+            flipped[0].mark_style.as_ref().unwrap().value_axis,
+            Some(StackValueAxis::Y),
+            "…so the declaration must move with it: post-flip the value is on Y, an \
+             ordinary vertical area. Left unflipped it reads X, and \
+             `mark_density(orientation=\"horizontal\").coord(CoordFlip())` closes its fill \
+             on the panel's left edge while its unflipped twin closes on the bottom."
+        );
+
+        // A layer carrying no mark kwargs at all must survive the flip
+        // untouched — the `None` arm, which is every chart in the corpus.
+        let mut bare = spec.clone();
+        bare.mark_style = None;
+        assert!(
+            build_layers(&bare, true)[0].mark_style.is_none(),
+            "a layer with no mark kwargs gains none from the flip"
+        );
+    }
 
     #[test]
     fn parse_label_overlap_maps_vega_tokens() {

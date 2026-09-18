@@ -119,7 +119,11 @@ def desugar_density(
     MarkDesugarResult
         Single-mark mode on the 1D path: ``.mark`` is ``"area"`` or ``"line"``,
         ``.remap`` is ``{"x": "value", "y": "density"}``, and ``.position`` is a
-        ``Stack`` adjuster for ``multiple="stack"`` or ``"fill"``.  Layered mode
+        ``Stack`` adjuster for ``multiple="stack"`` or ``"fill"``.
+        ``.mark_kwargs`` is ``{"value_axis": "x"}`` when
+        ``orientation="horizontal"`` (``None`` otherwise), declaring which
+        axis carries the curve's value so the drawer closes the baseline on
+        the panel's left edge instead of its bottom (GH #172).  Layered mode
         on the 2D bivariate path (``.layers`` set, via ``desugar_contour``).
 
     Raises
@@ -207,8 +211,37 @@ def desugar_density(
     # dodging is a bar behavior, and mark_histogram keeps the owner's `Dodge`.
     position = None if multiple == "dodge" else semantics.position
 
+    # #172(2): a horizontal density's value (the density column) lands on x,
+    # so the series advances along y -- the mark's baseline is a VERTICAL
+    # segment at the panel's left edge, not the panel bottom. Rust's
+    # DrawCtx::series_curve_axis has no way to know that from the spec alone
+    # (x/y are both quantitative and CoordFlip is never set here), so this
+    # desugar states it on the wire via MarkKwargsSpec.value_axis (wire
+    # contract: crates/ferrum-core/src/spec/mark_style.rs's `value_axis` doc).
+    # multiple="stack"/"fill" already state
+    # it a second way through the Stack position adjuster built above
+    # (multiple_semantics(value_axis=...)), but that only covers those two
+    # modes -- "layer" and "dodge" both emit position=None, so this stamp is
+    # the only declaration they get. Rust resolves the three signals by
+    # PRECEDENCE, not as a disjunction: this field is a statement about the
+    # RENDERED series (LayerPrepared::flip_coords moves it into post-flip space
+    # with the channels), so where it is present it answers outright, and
+    # CoordFlip / Stack.value_axis -- which describe a TRANSFORMATION of a
+    # series that was vertical by default -- are consulted only in its absence.
+    # That is why the key must stay absent for a vertical density rather than
+    # being stamped "y": under precedence an explicit "y" would mean
+    # "definitely vertical" and would cancel a user's CoordFlip.
+    # Same rule serves fill=False (mark="line") for free: the consumer,
+    # DrawCtx::series_curve_axis, is read by both marks/line.rs and
+    # marks/area.rs's Baseline arm.
+    mark_kwargs = {"value_axis": "x"} if orientation == "horizontal" else None
+
     return MarkDesugarResult(
-        mark=mark, transforms=transforms, remap=encoding_remap, position=position
+        mark=mark,
+        transforms=transforms,
+        remap=encoding_remap,
+        position=position,
+        mark_kwargs=mark_kwargs,
     )
 
 

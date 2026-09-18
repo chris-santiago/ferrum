@@ -1,4 +1,15 @@
-//! mark_area: filled region between y(x) and the x-axis baseline.
+//! mark_area: filled region between the value curve and the baseline of the
+//! axis that curve's series advances along.
+//!
+//! "Along y, closing on the x baseline" is not a `CoordFlip` special case
+//! (`#172`(2)): `mark_density(orientation="horizontal")` remaps the density
+//! column onto `x` *without* setting `CoordFlip` and with no stack to stamp,
+//! so it reaches the same geometry with every coordinate-system flag saying
+//! "vertical". That producer declares its value axis instead
+//! (`MarkKwargsSpec::value_axis`), which
+//! [`DrawCtx::series_curve_axis`](crate::render::draw::DrawCtx) reads for the
+//! whole line family — so this module answers the question in one place, from a
+//! declaration, and never infers it from the geometry it is about to draw.
 //!
 //! Grouping rules (mirroring line.rs D8):
 //! - Color encoding only: one area per color category. Nominal (Utf8) and
@@ -85,10 +96,30 @@ impl<'a> BottomEdge<'a> {
                 if *value_on_x { CurveAxis::Y } else { CurveAxis::X }
             }
             // No bottom edge is built, so there is no construction to read the
-            // answer off; the series' own axis governs (this is the arm that
-            // carries `CoordFlip` for an unstacked area).
+            // answer off; the series' own axis governs. That is the arm which
+            // carries `CoordFlip` for an unstacked area — and, since `#172`(2),
+            // the producer's `value_axis` declaration, which is how
+            // `mark_density(orientation="horizontal")` reaches it with no flip
+            // and no stack stamp. An earlier attempt inferred the axis here
+            // from `top`'s monotonicity instead; that cannot tell a horizontal
+            // density from an unsorted vertical area, and measured, it closed
+            // the latter's fill on the wrong edge. The inference is gone: one
+            // rule, in `series_curve_axis`, fed by declarations only.
             Self::Baseline => ctx.series_curve_axis(),
         }
+    }
+}
+
+/// Where a point on the traced edge meets the fill's baseline.
+///
+/// The baseline lies on the coordinate the series does NOT advance along, so
+/// the point keeps its own independent coordinate and takes the baseline for
+/// its dependent one: straight down to the panel bottom for an x-advancing
+/// series, straight across to the panel's left edge for a y-advancing one.
+fn baseline_meet(axis: CurveAxis, baseline: f64, point: (f64, f64)) -> (f64, f64) {
+    match axis {
+        CurveAxis::X => (point.0, baseline),
+        CurveAxis::Y => (baseline, point.1),
     }
 }
 
@@ -98,15 +129,40 @@ fn build_top_line_cmds(top: &[(f64, f64)], trace: Trace) -> Vec<ferrum_scene::Pa
 }
 
 /// Build closed area path commands: top edge (with interpolation) + baseline closure.
+///
+/// `baseline` is a coordinate on the axis the series does NOT advance along —
+/// the panel bottom under [`CurveAxis::X`], the panel's left edge under
+/// [`CurveAxis::Y`] — so the two closure segments run to it from the edge's
+/// last and first points. Before `#172`(2) the closure was hard-coded to a
+/// y-baseline, which turned a y-advancing area's fill into very nearly the
+/// complement of the region it should have shaded.
 fn build_area_cmds(top: &[(f64, f64)], baseline: f64, trace: Trace) -> Vec<ferrum_scene::PathCmd> {
     use ferrum_scene::PathCmd;
     let mut cmds = build_top_line_cmds(top, trace);
-    let last_x = top[top.len() - 1].0;
-    let x0 = top[0].0;
-    cmds.push(PathCmd::LineTo { x: last_x, y: baseline });
-    cmds.push(PathCmd::LineTo { x: x0, y: baseline });
+    for point in [top[top.len() - 1], top[0]] {
+        let (x, y) = baseline_meet(trace.axis, baseline, point);
+        cmds.push(PathCmd::LineTo { x, y });
+    }
     cmds.push(PathCmd::Close);
     cmds
+}
+
+/// The straight baseline segment an `S10` edge border draws where there is no
+/// traced bottom edge: the same two points [`build_area_cmds`] closes on, as
+/// an open `MoveTo`/`LineTo` pair.
+///
+/// Shared with the fill rather than re-derived beside it, because the two
+/// carried the identical y-baseline hard-code and a border that disagrees with
+/// the fill it outlines is the failure mode worth designing out.
+fn build_baseline_edge_cmds(
+    top: &[(f64, f64)],
+    baseline: f64,
+    axis: CurveAxis,
+) -> Vec<ferrum_scene::PathCmd> {
+    use ferrum_scene::PathCmd;
+    let (x0, y0) = baseline_meet(axis, baseline, top[0]);
+    let (x1, y1) = baseline_meet(axis, baseline, top[top.len() - 1]);
+    vec![PathCmd::MoveTo { x: x0, y: y0 }, PathCmd::LineTo { x: x1, y: y1 }]
 }
 
 /// Build closed stacked/`y2` band path commands: top edge forward, bottom edge
@@ -211,6 +267,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         step: AREA_STEP_SPELLING,
         axis: bottom_edge.axis(ctx),
     };
+    // The fill closes on the panel edge at the LOW end of the axis carrying the
+    // value — the bottom for an x-advancing series, the left for a y-advancing
+    // one. `baseline_x` has been in hand since GH #77; until `#172`(2) only the
+    // horizontal stack's bottom point used it.
+    let baseline = match trace.axis {
+        CurveAxis::X => baseline_y,
+        CurveAxis::Y => baseline_x,
+    };
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -285,7 +349,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cmds = if is_stacked || has_y2 {
             build_stacked_area_cmds(&top, &bottom, trace)
         } else {
-            build_area_cmds(&top, baseline_y, trace)
+            build_area_cmds(&top, baseline, trace)
         };
         let fill = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => {
@@ -361,16 +425,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 closed: false,
             });
 
-            // Bottom edge: trace the y2 edge when bound, else flat baseline.
+            // Bottom edge: trace the y2 edge when bound, else the same straight
+            // baseline the fill closes on.
             let bottom_cmds = if has_y2 && !bottom.is_empty() {
                 build_top_line_cmds(&bottom, trace)
             } else {
-                let x0 = top[0].0;
-                let x_last = top[top.len() - 1].0;
-                vec![
-                    ferrum_scene::PathCmd::MoveTo { x: x0, y: baseline_y },
-                    ferrum_scene::PathCmd::LineTo { x: x_last, y: baseline_y },
-                ]
+                build_baseline_edge_cmds(&top, baseline, trace.axis)
             };
             group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: bottom_cmds,
@@ -1878,6 +1938,203 @@ mod tests {
             BottomEdge::Baseline.axis(&ctx),
             CurveAxis::Y,
             "no bottom edge is built, so the series governs — here the flip makes it Y"
+        );
+    }
+
+    /// The generalized closure, stated as geometry: a `Baseline` fill's two
+    /// closing segments meet the baseline on the coordinate the series does
+    /// NOT advance along.
+    ///
+    /// Pinned on the builder rather than only end-to-end because the hard-code
+    /// `#172`(2) removed lived here, and the S10 edge border now shares these
+    /// two points instead of re-deriving them beside the fill.
+    #[test]
+    fn a_baseline_fill_closes_on_the_axis_its_series_does_not_advance_along() {
+        use ferrum_scene::PathCmd;
+        let along_x: [(f64, f64); 3] = [(10.0, 30.0), (20.0, 15.0), (40.0, 25.0)];
+        let along_y: [(f64, f64); 3] = [(30.0, 10.0), (15.0, 20.0), (25.0, 40.0)];
+
+        let vertical_cmds = build_area_cmds(&along_x, 100.0, vertical(Interpolate::Linear));
+        assert_eq!(
+            &vertical_cmds[vertical_cmds.len() - 3..],
+            &[
+                PathCmd::LineTo { x: 40.0, y: 100.0 },
+                PathCmd::LineTo { x: 10.0, y: 100.0 },
+                PathCmd::Close,
+            ],
+            "an x-advancing fill drops to the y baseline at its last and first x — unchanged"
+        );
+
+        let horizontal = Trace { method: Interpolate::Linear, step: AREA_STEP_SPELLING, axis: CurveAxis::Y };
+        let horizontal_cmds = build_area_cmds(&along_y, 4.0, horizontal);
+        assert_eq!(
+            &horizontal_cmds[horizontal_cmds.len() - 3..],
+            &[
+                PathCmd::LineTo { x: 4.0, y: 40.0 },
+                PathCmd::LineTo { x: 4.0, y: 10.0 },
+                PathCmd::Close,
+            ],
+            "a y-advancing fill runs ACROSS to the x baseline at its last and first y; the \
+             pre-fix hard-code emitted `LineTo {{ x: 25, y: <panel bottom> }}` instead, shading \
+             very nearly the complement of the right region"
+        );
+
+        // The S10 edge border draws the identical segment, open.
+        assert_eq!(
+            build_baseline_edge_cmds(&along_y, 4.0, CurveAxis::Y),
+            vec![PathCmd::MoveTo { x: 4.0, y: 10.0 }, PathCmd::LineTo { x: 4.0, y: 40.0 }],
+            "the border outlines the same baseline the fill closes on"
+        );
+        assert_eq!(
+            build_baseline_edge_cmds(&along_x, 100.0, CurveAxis::X),
+            vec![PathCmd::MoveTo { x: 10.0, y: 100.0 }, PathCmd::LineTo { x: 40.0, y: 100.0 }],
+            "the vertical border is the flat bottom segment it always was — unchanged"
+        );
+    }
+
+    /// `#172`(2) end to end: `value_axis="x"` on the wire reaches the closure.
+    ///
+    /// This is the whole chain in one assertion — `MarkKwargsSpec::value_axis`
+    /// → `resolve_mark_style` → `MarkStyle::misc` → `DrawCtx::series_curve_axis`
+    /// → `BottomEdge::Baseline` → `build_area_cmds`. It replaces the deleted
+    /// monotonicity inference, and it is written as a PAIR on identical data so
+    /// it discriminates the declaration from anything else about the fixture:
+    ///
+    /// - **undeclared** — the shape a `mark_density(orientation="horizontal")`
+    ///   spec has today before its producer stamps anything, and equally the
+    ///   shape of an ordinary vertical area whose rows arrived unsorted. It must
+    ///   close on the panel BOTTOM. The inference this replaces closed it on the
+    ///   left, which is the silent wrong render that got the inference deleted.
+    /// - **declared `x`** — the same rows, the same scales, one wire key added.
+    ///   It must close on the panel's LEFT edge.
+    #[test]
+    fn a_declared_x_value_axis_moves_the_closure_and_nothing_else_does() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::position::StackValueAxis;
+        use ferrum_scene::PathCmd;
+
+        // x turns twice while y ascends steadily — the horizontal-density
+        // signature, and also a perfectly ordinary unsorted vertical area.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 90.0, 40.0, 20.0])),
+            Arc::new(Float64Array::from(vec![0.0, 10.0, 20.0, 30.0])),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            // No flip, and no position adjustment to stamp a stack: the two
+            // producers `series_curve_axis` knew about before see nothing.
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+
+        // Flipped twin of the same spec, for the precedence assertions below.
+        // `DrawCtx` reads the flip off `spec.coord`, so a second spec is all a
+        // flipped context needs here.
+        let flipped_spec = ChartSpec { coord: Some(crate::spec::coord::CoordKind::Flip), ..spec.clone() };
+
+        let closure_on = |chart: &ChartSpec, overrides: Option<&crate::spec::mark_style::MarkKwargsSpec>| {
+            let mark_style = resolve_mark_style(overrides, &theme, &Mark::Area).unwrap();
+            let ctx = DrawCtx { spec: chart, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            let cmds = super::build(&ctx).nodes.into_iter().find_map(|n| {
+                if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
+            }).expect("an area must emit a closed Path");
+            match (&cmds[cmds.len() - 3], &cmds[cmds.len() - 2]) {
+                (PathCmd::LineTo { x: x0, y: y0 }, PathCmd::LineTo { x: x1, y: y1 }) => {
+                    ((*x0, *y0), (*x1, *y1))
+                }
+                other => panic!("expected the two closing LineTos, got {other:?}"),
+            }
+        };
+        let closure = |overrides: Option<&crate::spec::mark_style::MarkKwargsSpec>| {
+            closure_on(&spec, overrides)
+        };
+
+        let (last, first) = closure(None);
+        assert_eq!(
+            (last.1, first.1),
+            (100.0, 100.0),
+            "UNDECLARED: both closing points sit on the panel bottom (y=100). This is the \
+             control the deleted monotonicity inference failed — it read this same edge as \
+             y-advancing and closed an ordinary vertical area on the left."
+        );
+
+        let declared = crate::spec::mark_style::MarkKwargsSpec {
+            value_axis: Some(StackValueAxis::X),
+            ..Default::default()
+        };
+        let (last, first) = closure(Some(&declared));
+        assert_eq!(
+            (last.0, first.0),
+            (0.0, 0.0),
+            "DECLARED x: both closing points sit on the panel's left edge (x=0), because the \
+             producer said the value is on x"
+        );
+        assert!(
+            (last.1 - first.1).abs() > f64::EPSILON,
+            "…and the closure is a VERTICAL segment spanning the edge's y extent, not a \
+             degenerate point; got {last:?} and {first:?}"
+        );
+
+        // `value_axis="y"` — the assertion whose RATIONALE changed in cycle 4,
+        // not just its value.
+        //
+        // It used to read "a declaration can only say horizontal, never
+        // 'definitely vertical, ignore the flip'", because `series_curve_axis`
+        // combined its three signals with `||`. That is precisely the property
+        // that failed: flipping the declaration to `Y` removed one disjunct
+        // while `coord_flipped()` stayed true and carried the `||` alone, so
+        // `mark_density(orientation="horizontal").coord(CoordFlip())` rendered
+        // horizontal when its post-flip encoding is vertical. The signals are
+        // now a PRECEDENCE, and `Some(Y)` DOES mean "definitely vertical" —
+        // which is exactly how the post-flip declaration cancels the user's
+        // flip.
+        //
+        // So the pair below is no longer "a redundant restatement": the
+        // unflipped row shows `Some(Y)` agreeing with the undeclared default,
+        // and the FLIPPED row is the discriminating one — it is the assertion
+        // a disjunction fails and a precedence passes.
+        let declared_y = crate::spec::mark_style::MarkKwargsSpec {
+            value_axis: Some(StackValueAxis::Y),
+            ..Default::default()
+        };
+        assert_eq!(
+            closure(Some(&declared_y)),
+            closure(None),
+            "unflipped, a declared y value axis agrees with the undeclared default, byte for byte"
+        );
+
+        // Premise: the flip really does move an UNDECLARED area's closure, so
+        // the next assertion is about the declaration overriding it rather than
+        // about the flip being inert on this fixture.
+        let (flipped_last, flipped_first) = closure_on(&flipped_spec, None);
+        assert_eq!(
+            (flipped_last.0, flipped_first.0),
+            (0.0, 0.0),
+            "premise: undeclared + CoordFlip closes on the panel's left edge"
+        );
+        assert_eq!(
+            closure_on(&flipped_spec, Some(&declared_y)),
+            closure(None),
+            "DECLARED y + CoordFlip: the post-flip declaration says the value is on y, so the \
+             series is vertical and closes on the panel bottom — identical to the unflipped, \
+             undeclared area. This is `mark_density(orientation=\"horizontal\")\
+             .coord(CoordFlip())` in miniature: `flip_coords` turns the producer's `x` into \
+             `y`, and precedence lets it cancel the flip. Under the `||` this replaced, \
+             `coord_flipped()` alone kept the answer horizontal and the fill closed on the left."
         );
     }
 

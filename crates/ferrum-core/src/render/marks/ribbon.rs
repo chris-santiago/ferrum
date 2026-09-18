@@ -1,25 +1,28 @@
-//! Ribbon mark: closed area between y(x) and y2(x) along a shared x. Used by
-//! `mark_errorband`, `mark_smooth(ci=...)`, `mark_learning_curve` /
-//! `mark_validation_curve` (with pre-aggregated CI columns), and the QQ
-//! confidence-interval region.
+//! Ribbon mark: closed area between a lower and an upper bound along a shared
+//! coordinate. Used by `mark_errorband`, `mark_smooth(ci=...)`,
+//! `mark_learning_curve` / `mark_validation_curve` (with pre-aggregated CI
+//! columns), and the QQ confidence-interval region.
 //!
-//! Path emission (spec §4.2.4), per color group when a color encoding is bound:
+//! Path emission (spec §4.2.4), per color group when a color encoding is bound,
+//! shown for the ordinary `y`..`y2` band at a shared x:
 //!     M x[0] y[0]
 //!     L x[1] y[1] ... L x[n-1] y[n-1]
 //!     L x[n-1] y2[n-1] L x[n-2] y2[n-2] ... L x[0] y2[0]
 //!     Z
 //!
-//! Walks x ascending on the top edge (y), then x descending on the bottom edge
-//! (y2) to close the polygon. Both edges trace under the mark's `interpolate=`
-//! method via [`marks::curve`](super::curve), so the `L` runs above become
-//! step or cubic commands when a non-linear method is set (spec §6.1); the
-//! shape shown is the `linear` case. When a color encoding is bound, rows are first
-//! partitioned by color category and each group emits its own closed polygon
-//! (mirroring `line.rs`); otherwise all rows form one polygon. Without
-//! per-color grouping, multi-series CI bands (e.g. train vs test learning
-//! curves) collapse into a single zigzag polygon stitching across categories.
+//! Walks the shared coordinate ascending on the lower edge, then descending on
+//! the upper edge to close the polygon. Both edges trace under the mark's
+//! `interpolate=` method via [`marks::curve`](super::curve), so the `L` runs
+//! above become step or cubic commands when a non-linear method is set (spec
+//! §6.1); the shape shown is the `linear` case. When a color encoding is bound,
+//! rows are first partitioned by color category and each group emits its own
+//! closed polygon (mirroring `line.rs`); otherwise all rows form one polygon.
+//! Without per-color grouping, multi-series CI bands (e.g. train vs test
+//! learning curves) collapse into a single zigzag polygon stitching across
+//! categories.
 //!
-//! When `encoding.y2` is unset the drawer silently skips — ribbon requires y2.
+//! When neither `y2` nor `x2` is bound the drawer skips — ribbon requires a
+//! band channel.
 
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
@@ -32,37 +35,69 @@ use crate::render::scale_resolve::{ColorInput, ScaleKind};
 /// [`StepSpelling`].
 const RIBBON_STEP_SPELLING: StepSpelling = StepSpelling::Vertices;
 
-/// A ribbon's band spans `y`..`y2` at a SHARED x, and its vertices are sorted
-/// by x-pixel before tracing — so x is the independent coordinate for the same
-/// structural reason `mark_area`'s `BottomEdge::Y2` arm is x-parameterized: a
-/// `y2` band is a vertical idiom by construction.
+/// Which channel pair forms a ribbon's band, and therefore which coordinate
+/// its edges advance along.
 ///
-/// This does NOT rest on "no producer emits a horizontal ribbon" — that
-/// premise is what went wrong in cycle 2. It rests on the channel pair that
-/// forms the band, read a few lines below as `spec.encoding.y2`. `CoordFlip`
-/// cannot reach here: `flip_positional` moves the user's `y2` to `x2`, which
-/// leaves `encoding.y2` unbound and makes `build` return empty (pinned by
-/// `ribbon_under_coord_flip_emits_nothing`). Whoever teaches ribbon to read
-/// `x2` is adding a band on the OTHER axis and must pick the axis where they
-/// read that channel.
-const RIBBON_CURVE_AXIS: CurveAxis = CurveAxis::X;
+/// A ribbon's band spans a lower and an upper bound at a SHARED coordinate,
+/// and the pair that carries the bounds *is* the parameterization — the same
+/// rule `mark_area`'s `BottomEdge::axis` states. A `y`..`y2` band spans y at a
+/// shared x, so x is independent; `CoordFlip`'s `flip_positional` moves the
+/// user's `y2` to `x2`, producing the mirror image — an `x`..`x2` band spanning
+/// x at a shared y, with y independent.
+///
+/// This is read off `spec.encoding`, never off `ctx.coord_flipped()`: the flip
+/// is one producer of the horizontal band, not its definition. Before `#172`(3)
+/// the unbound `y2` made `build` return empty, so every flipped `mark_ribbon`,
+/// `mark_errorband`, `mark_smooth(ci=)`, `mark_learning_curve`,
+/// `mark_validation_curve` and QQ CI region silently drew nothing.
+fn band_curve_axis(spec: &crate::spec::chart::ChartSpec) -> Option<(&str, CurveAxis)> {
+    match (spec.encoding.y2.as_ref(), spec.encoding.x2.as_ref()) {
+        (Some(e), _) => Some((e.field.as_str(), CurveAxis::X)),
+        (None, Some(e)) => Some((e.field.as_str(), CurveAxis::Y)),
+        (None, None) => None,
+    }
+}
 
-fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
-    // For ordinal x scales, stringify the column (works for Utf8 and integer
+/// Place a vertex from its shared coordinate and its value, in screen space.
+///
+/// One expression for both band orientations, so the top and bottom edges
+/// cannot be assembled by two spellings that drift apart.
+fn edge_point(axis: CurveAxis, shared: f64, value: f64) -> (f64, f64) {
+    match axis {
+        CurveAxis::X => (shared, value),
+        CurveAxis::Y => (value, shared),
+    }
+}
+
+/// Pixels for the coordinate both edges share, plus whether that coordinate is
+/// ordinal (an ordinal shared coordinate keeps its row order instead of being
+/// sorted by pixel).
+///
+/// `scale`/`field` are the shared axis's, not x's: under a flipped band the
+/// shared coordinate is y. Keeping one resolver rather than a y-side copy is
+/// what keeps the ordinal/f64/string fallback chain — and `clip=False`'s
+/// extrapolating read — identical on both axes.
+fn resolve_shared_pixels(
+    ctx: &DrawCtx,
+    scale: &ScaleKind,
+    field: &str,
+    n: usize,
+) -> Option<(Vec<Option<f64>>, bool)> {
+    // For ordinal scales, stringify the column (works for Utf8 and integer
     // dtypes) and look up band centers. This must come before the f64 path
     // because col_as_f64 succeeds on integer columns, but to_pixel_f64 returns
     // None for ordinal scales, producing all-None pixels.
-    if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
-        if let Ok(xs_s) = col_as_positional_category_str(ctx.batch, xf) {
+    if matches!(scale, ScaleKind::Ordinal(_)) {
+        if let Ok(xs_s) = col_as_positional_category_str(ctx.batch, field) {
             let pixels: Vec<Option<f64>> = xs_s
                 .into_iter()
                 .take(n)
-                .map(|v| v.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+                .map(|v| v.as_deref().and_then(|s| scale.to_pixel_str(s)))
                 .collect();
             return Some((pixels, true));
         }
     }
-    if let Ok(xs_f) = col_as_f64(ctx.batch, xf) {
+    if let Ok(xs_f) = col_as_f64(ctx.batch, field) {
         // `DrawCtx::to_pixel`, not `to_pixel_f64` directly, so
         // `mark_ribbon(clip=False)` keeps its out-of-domain vertices like
         // `mark_line` does — one meaning for one public kwarg across the whole
@@ -70,15 +105,15 @@ fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64
         let pixels: Vec<Option<f64>> = xs_f
             .into_iter()
             .take(n)
-            .map(|v| v.and_then(|x| ctx.to_pixel(&ctx.scales.x, x)))
+            .map(|v| v.and_then(|x| ctx.to_pixel(scale, x)))
             .collect();
         return Some((pixels, false));
     }
-    if let Ok(xs_s) = col_as_str(ctx.batch, xf) {
+    if let Ok(xs_s) = col_as_str(ctx.batch, field) {
         let pixels: Vec<Option<f64>> = xs_s
             .into_iter()
             .take(n)
-            .map(|v| v.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+            .map(|v| v.as_deref().and_then(|s| scale.to_pixel_str(s)))
             .collect();
         return Some((pixels, true));
     }
@@ -98,25 +133,32 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (Some(a), Some(b)) => (a, b),
         _ => return empty(),
     };
-    let y2f = match spec.encoding.y2.as_ref() {
-        Some(e) => e.field.as_str(),
-        None => return empty(),
-    };
-
-    let ys = match col_as_f64(ctx.batch, yf) {
-        Ok(v) => v,
-        Err(_) => return empty(),
-    };
-    let y2s = match col_as_f64(ctx.batch, y2f) {
-        Ok(v) => v,
-        Err(_) => return empty(),
-    };
-    let n = ys.len().min(y2s.len());
-    let (x_pixels, x_is_ordinal) = match resolve_x_pixels(ctx, xf, n) {
+    let (band_field, curve_axis) = match band_curve_axis(spec) {
         Some(v) => v,
         None => return empty(),
     };
-    let n = n.min(x_pixels.len());
+    // The lower bound rides the same axis as the band channel; the remaining
+    // positional channel is the coordinate both edges share.
+    let (lower_field, shared_field, value_scale, shared_scale) = match curve_axis {
+        CurveAxis::X => (yf, xf, &ctx.scales.y, &ctx.scales.x),
+        CurveAxis::Y => (xf, yf, &ctx.scales.x, &ctx.scales.y),
+    };
+
+    let lows = match col_as_f64(ctx.batch, lower_field) {
+        Ok(v) => v,
+        Err(_) => return empty(),
+    };
+    let highs = match col_as_f64(ctx.batch, band_field) {
+        Ok(v) => v,
+        Err(_) => return empty(),
+    };
+    let n = lows.len().min(highs.len());
+    let (shared_pixels, shared_is_ordinal) =
+        match resolve_shared_pixels(ctx, shared_scale, shared_field, n) {
+            Some(v) => v,
+            None => return empty(),
+        };
+    let n = n.min(shared_pixels.len());
 
     let cf = color_field(ctx, spec);
     // Ribbon only uses color (no detail channel); the helper's detail=None path
@@ -177,7 +219,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let trace = Trace {
         method: interpolate,
         step: RIBBON_STEP_SPELLING,
-        axis: RIBBON_CURVE_AXIS,
+        axis: curve_axis,
     };
 
     let meta = MetadataColumns::from_ctx(ctx);
@@ -194,17 +236,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let mut indices: Vec<usize> = rows
             .into_iter()
             .filter(|&i| {
-                let xp_ok = x_pixels.get(i).and_then(|v| *v).map(|p| p.is_finite()).unwrap_or(false);
-                let yv_ok = ys.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
-                let y2v_ok = y2s.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
-                xp_ok && yv_ok && y2v_ok
+                let sp_ok = shared_pixels.get(i).and_then(|v| *v).map(|p| p.is_finite()).unwrap_or(false);
+                let lo_ok = lows.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
+                let hi_ok = highs.get(i).and_then(|v| *v).map(|v| v.is_finite()).unwrap_or(false);
+                sp_ok && lo_ok && hi_ok
             })
             .collect();
-        if !x_is_ordinal {
+        if !shared_is_ordinal {
             indices.sort_by(|&a, &b| {
-                let xa = x_pixels[a].unwrap_or(f64::NAN);
-                let xb = x_pixels[b].unwrap_or(f64::NAN);
-                xa.partial_cmp(&xb).unwrap_or(std::cmp::Ordering::Equal)
+                let sa = shared_pixels[a].unwrap_or(f64::NAN);
+                let sb = shared_pixels[b].unwrap_or(f64::NAN);
+                sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             });
         }
         if indices.len() < 2 {
@@ -217,29 +259,38 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let pixels: Vec<(f64, f64, f64)> = indices
             .iter()
             .filter_map(|&i| {
-                let cx = x_pixels.get(i).and_then(|v| *v)?;
-                let yv = ys[i]?;
-                let y2v = y2s[i]?;
-                let cy = ctx.to_pixel(&ctx.scales.y, yv)?;
-                let cy2 = ctx.to_pixel(&ctx.scales.y, y2v)?;
+                let shared = shared_pixels.get(i).and_then(|v| *v)?;
+                let lo = ctx.to_pixel(value_scale, lows[i]?)?;
+                let hi = ctx.to_pixel(value_scale, highs[i]?)?;
                 let xo = x_offsets.get(i).copied().unwrap_or(0.0);
                 let yo = y_offsets.get(i).copied().unwrap_or(0.0);
-                Some((cx + xo, cy + yo, cy2 + yo))
+                // Each pixel offset belongs to the axis it displaces, so the
+                // pair follows the band's orientation along with everything
+                // else: a shared-x band takes `xo` on the shared coordinate
+                // and `yo` on both bounds, a shared-y band the reverse.
+                let (shared_off, value_off) = match curve_axis {
+                    CurveAxis::X => (xo, yo),
+                    CurveAxis::Y => (yo, xo),
+                };
+                Some((shared + shared_off, lo + value_off, hi + value_off))
             })
             .collect();
         if pixels.len() < 2 {
             continue;
         }
 
-        // Build closed path commands: top edge x ascending, bottom edge x
-        // descending, Close. Both edges describe the SAME function of x under
-        // the mark's interpolation method (spec §6.1), so a curved band is
-        // bounded by two curves and a stepped one by two matching step
-        // functions. Both edges are collected in FORWARD (x-ascending) order:
-        // `extend_reversed` owns walking the bottom back and mirroring
-        // `step-before`/`step-after`, which are direction-dependent.
-        let top_edge: Vec<(f64, f64)> = pixels.iter().map(|&(x, y, _)| (x, y)).collect();
-        let bottom_edge: Vec<(f64, f64)> = pixels.iter().map(|&(x, _, y2)| (x, y2)).collect();
+        // Build closed path commands: lower edge with the shared coordinate
+        // ascending, upper edge descending, Close. Both edges describe the SAME
+        // function of the shared coordinate under the mark's interpolation
+        // method (spec §6.1), so a curved band is bounded by two curves and a
+        // stepped one by two matching step functions. Both edges are collected
+        // in FORWARD (shared-ascending) order: `extend_reversed` owns walking
+        // the upper edge back and mirroring `step-before`/`step-after`, which
+        // are direction-dependent.
+        let top_edge: Vec<(f64, f64)> =
+            pixels.iter().map(|&(s, lo, _)| edge_point(curve_axis, s, lo)).collect();
+        let bottom_edge: Vec<(f64, f64)> =
+            pixels.iter().map(|&(s, _, hi)| edge_point(curve_axis, s, hi)).collect();
         let mut cmds = trace.subpath(&top_edge);
         trace.extend_reversed(&mut cmds, &bottom_edge);
         cmds.push(PathCmd::Close);
@@ -861,13 +912,20 @@ mod tests {
         assert_eq!(tooltips[0].fields[0].value, "t0", "representative tooltip is row 0's");
     }
 
+    /// With NEITHER band channel bound there is no band to draw, so the drawer
+    /// still skips. Since `#172`(3) the gate is "no `y2` and no `x2`" rather
+    /// than "no `y2`" — this fixture binds neither, which is what keeps it a
+    /// statement about a missing band instead of a restatement of the flipped
+    /// case below.
     #[test]
-    fn ribbon_no_y2_silently_skips() {
+    fn ribbon_without_either_band_channel_skips() {
         let spec = ribbon_spec(false);
+        assert!(spec.encoding.y2.is_none() && spec.encoding.x2.is_none(),
+            "test premise: neither band channel is bound");
         let batch = two_col_batch(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
         let result = render(&spec, &batch);
         assert!(result.nodes.iter().all(|n| !matches!(n, ferrum_scene::SceneNode::Path { .. })),
-            "no path should be emitted without y2");
+            "no path should be emitted without a band channel");
     }
 
     // ── Interpolation wiring (F-L02-03, batch E task 1) ──────────────────
@@ -959,14 +1017,22 @@ mod tests {
             "the ring turns at the same x it reached; got {last_top_x} then {first_bottom_x}");
     }
 
-    /// Pins the premise `RIBBON_CURVE_AXIS`'s disposition rests on: `CoordFlip`
-    /// cannot produce a horizontal ribbon, because `flip_positional` moves the
-    /// user's `y2` to `x2` and ribbon requires `encoding.y2`. If ribbon ever
-    /// learns to read `x2`, this test fails and whoever taught it must choose
-    /// the curve axis at that read — rather than inheriting an x-parameterized
-    /// const that silently stops being true.
+    /// `#172`(3), the inversion of `ribbon_under_coord_flip_emits_nothing`.
+    ///
+    /// That test pinned the premise the old `RIBBON_CURVE_AXIS = CurveAxis::X`
+    /// const rested on — that `CoordFlip` could not produce a horizontal
+    /// ribbon, because `flip_positional` moves the user's `y2` to `x2` and
+    /// ribbon read only `y2` — and instructed whoever taught ribbon to read
+    /// `x2` to CHOOSE the curve axis at that read. This is that choice, taken
+    /// and pinned: the band channel decides the axis (`band_curve_axis`), so a
+    /// post-flip `x`..`x2` band draws, y-parameterized, and the `emits nothing`
+    /// assertion is now the bug rather than the contract.
+    ///
+    /// What it asserts is geometry, not presence: the ring's vertices pair off
+    /// into shared y-values, which is what "a band across x at a shared y"
+    /// means and what a band mistakenly built against x would not satisfy.
     #[test]
-    fn ribbon_under_coord_flip_emits_nothing() {
+    fn ribbon_under_coord_flip_draws_a_y_parameterized_band() {
         // A faithful POST-FLIP rendering spec. The user wrote
         // `.encode(x=cat, y=lo, y2=hi).coord(CoordFlip())`; `flip_positional`
         // swaps x<->y and x2<->y2, so the drawer receives:
@@ -975,21 +1041,21 @@ mod tests {
         //   y  = cat  (category)
         //   y2 = unbound
         //
-        // Binding `x2` is what makes this a tripwire rather than a restatement
-        // of "no y2 emits nothing" (already covered by
-        // `ribbon_no_y2_silently_skips`): the band IS present in the spec, on
-        // the channel a flipped ribbon would have to read. The assertion is
-        // therefore "ribbon does not consume the post-flip x2 band", and it
-        // goes RED the day ribbon learns to — which is the day
-        // `RIBBON_CURVE_AXIS = CurveAxis::X` stops being true.
-        // The category column spans the band's value range, so the band's
-        // endpoints are INSIDE the y-scale domain. That matters: with a
-        // narrower category range every band row would be dropped as
-        // out-of-domain, and the test would pass for that reason instead of
-        // the one it is asserting — silently ceasing to be a tripwire. The
-        // premise assertion below is what pins that.
+        // Binding `x2` is what makes this a statement about the flip rather
+        // than a restatement of "no band channel emits nothing" (covered by
+        // `ribbon_without_either_band_channel_skips`): the band IS present in
+        // the spec, on the channel only a flipped ribbon receives it on.
+        //
+        // The category column spans the band's value range, so every row's
+        // endpoints are INSIDE both scales' domains and none is dropped as
+        // out-of-domain. The command-count assertions below are what pin that:
+        // a fixture that lost rows to clipping would emit a shorter ring and
+        // fail rather than quietly prove less.
+        // No row's bounds coincide under EITHER reading, so every vertex pair
+        // below is a real span rather than a degenerate point — the control
+        // and the flipped case are held to the same standard.
         let batch = three_col_batch(
-            vec![0.0, 2.0, 4.0, 7.0], // "x" column — the category, post-flip on y
+            vec![0.0, 2.0, 4.0, 6.0], // "x" column — the category, post-flip on y
             vec![0.0, 2.0, 1.0, 3.0], // "y" column — lower bound, post-flip on x
             vec![4.0, 6.0, 5.0, 7.0], // "y2" column — upper bound, post-flip on x2
         );
@@ -1002,28 +1068,74 @@ mod tests {
         assert!(spec.encoding.y2.is_none(), "test premise: the flip left y2 unbound");
         assert!(spec.encoding.x2.is_some(), "test premise: the band sits on x2");
 
-        // Premise: this data IS renderable as a band. Bind the same columns on
-        // `y`/`y2` and the mark emits a path — so when the flipped spec below
-        // emits nothing, it is because ribbon does not READ x2, not because the
-        // values were dropped. Without this the tripwire can pass vacuously.
-        let mut renderable = ribbon_spec(true);
-        renderable.encoding.x = Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() });
-        renderable.encoding.y = Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
-        renderable.encoding.y2 = Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() });
-        assert!(
-            !render(&renderable, &batch).nodes.is_empty(),
-            "test premise: these columns must render as a band when bound to y/y2, \
-             otherwise the flipped assertion below proves nothing"
-        );
+        // The mirror control: the SAME columns bound the unflipped way. Its
+        // ring must pair off on x (a band across y at a shared x); the flipped
+        // ring below must pair off on y. Asserting both is what separates "the
+        // band is y-parameterized" from "a band is drawn at all" — the pre-fix
+        // const would have produced an x-paired ring here too, had it drawn
+        // anything.
+        let mut unflipped = ribbon_spec(true);
+        unflipped.encoding.x = Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() });
+        unflipped.encoding.y = Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() });
+        unflipped.encoding.y2 = Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() });
 
-        let result = render(&spec, &batch);
-        assert!(
-            result.nodes.is_empty(),
-            "a flipped ribbon's band sits on x2, which ribbon does not read, so it must \
-             emit nothing; got {} node(s) — if this now renders, RIBBON_CURVE_AXIS needs \
-             revisiting (a band across x is y-parameterized)",
-            result.nodes.len()
-        );
+        /// A linear 4-row band's ring: `M p0, L p1..p3, L q3..q0, Z`. Returns
+        /// the eight vertices in emission order.
+        fn ring_vertices(result: &crate::render::draw::MarkBuildResult) -> Vec<(f64, f64)> {
+            let cmds = result
+                .nodes
+                .iter()
+                .find_map(|n| match n {
+                    ferrum_scene::SceneNode::Path { commands, .. } => Some(commands.clone()),
+                    _ => None,
+                })
+                .expect("a band-bound ribbon must emit a closed Path");
+            assert_eq!(
+                cmds.len(),
+                9,
+                "a 4-row linear band is M + 7 L + Z — a shorter ring means rows were \
+                 dropped and the pairing below would prove less; got {cmds:?}"
+            );
+            assert!(matches!(cmds[8], PathCmd::Close), "the ring is closed; got {cmds:?}");
+            cmds[..8]
+                .iter()
+                .map(|c| match *c {
+                    PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } => (x, y),
+                    ref other => panic!("expected a straight linear ring, got {other:?}"),
+                })
+                .collect()
+        }
+
+        let unflipped_ring = ring_vertices(&render(&unflipped, &batch));
+        for k in 0..4 {
+            let (lower, upper) = (unflipped_ring[k], unflipped_ring[7 - k]);
+            assert!(
+                (lower.0 - upper.0).abs() < 1e-9,
+                "control: a y..y2 band spans y at a SHARED x, so vertex {k} and its partner \
+                 must share an x; got {lower:?} and {upper:?}"
+            );
+            assert!(
+                (lower.1 - upper.1).abs() > 1e-9,
+                "control: and must differ in y — that difference IS the band; got \
+                 {lower:?} and {upper:?}"
+            );
+        }
+
+        let flipped_ring = ring_vertices(&render(&spec, &batch));
+        for k in 0..4 {
+            let (lower, upper) = (flipped_ring[k], flipped_ring[7 - k]);
+            assert!(
+                (lower.1 - upper.1).abs() < 1e-9,
+                "a post-flip x..x2 band spans x at a SHARED y, so vertex {k} and its partner \
+                 must share a y; got {lower:?} and {upper:?} — an x-paired ring here means the \
+                 band was built against the wrong coordinate"
+            );
+            assert!(
+                (lower.0 - upper.0).abs() > 1e-9,
+                "and must differ in x — that difference IS the flipped band; got {lower:?} \
+                 and {upper:?}"
+            );
+        }
     }
 
     /// The refusal reaches ribbon through the same chokepoint as line and area.

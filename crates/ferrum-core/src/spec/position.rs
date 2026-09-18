@@ -25,7 +25,7 @@ pub enum StackOffset { Zero, Normalize, Center }
 #[serde(rename_all = "snake_case")]
 pub enum StackAnchor { Top, Mid }
 
-/// GH #77: which positional channel carries the stacked *value* column.
+/// GH #77: which positional channel carries a mark's *value* column.
 ///
 /// `apply_stack` (`render/position.rs`) historically picked the value vs.
 /// category axis purely from `coord_flipped` (set only by real `CoordFlip`).
@@ -36,6 +36,20 @@ pub enum StackAnchor { Top, Mid }
 /// x. `StackValueAxis` lets the desugar declare the value axis explicitly on
 /// the wire; `None` preserves the pre-#77 `coord_flipped`-only convention
 /// byte-identically.
+///
+/// **This type is no longer stack-only (`#172`(2)).** It is now also the
+/// payload of [`MarkKwargsSpec::value_axis`](crate::spec::mark_style::MarkKwargsSpec::value_axis),
+/// because the declaration GH #77 needed for `multiple="stack"` is the SAME
+/// fact `multiple="layer"` needs and could not state: a `Stack` is one
+/// producer of a horizontal series, not the definition of one. A desugar that
+/// remaps its value onto `x` states it once, in whichever of the two slots it
+/// has — inside its `Stack` when it emits one, on its mark kwargs when it does
+/// not — and both spell the value `"x"`/`"y"`.
+///
+/// The name still says `Stack` for one reason only: renaming it would touch
+/// `render/position.rs`, which a parallel task owns. Renaming to
+/// `ValueAxis` is a pure-Rust rename with no wire impact and is logged as a
+/// follow-up.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StackValueAxis { X, Y }

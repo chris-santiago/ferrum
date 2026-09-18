@@ -45,9 +45,14 @@ mod band_width;
 mod clip_escape;
 
 /// Test-only: the cross-mark `CurveAxis` agreement matrix. Three independent
-/// derivations (`series_curve_axis`, `BottomEdge::axis`, `RIBBON_CURVE_AXIS`)
+/// derivations (`series_curve_axis`, `BottomEdge::axis`, `band_curve_axis`)
 /// answer one question, getting it wrong is silent, and it has already gone
 /// wrong twice — so the check has to compare each mark's chosen axis against
 /// the shape its point loop actually builds.
+///
+/// `band_curve_axis` replaced the former `RIBBON_CURVE_AXIS` const in wave 5
+/// (`#172`(3)): a ribbon's curve axis is a function of the band channel it
+/// actually reads (`y2`, else `x2`), not a constant, so a flipped ribbon draws
+/// a y-parameterized band instead of nothing.
 #[cfg(test)]
 mod curve_axis;
