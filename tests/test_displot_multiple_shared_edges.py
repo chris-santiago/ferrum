@@ -13,6 +13,24 @@ histogram construction and the kde overlay each read that one pair.
 ``displot`` forwards the mode and its own ``position_by=`` so the caller's
 ``by=hue`` grouping survives the desugar's position.
 
+EXTENDED (wave-4 close remediation): ``"dodge"`` binned per-group too, and the
+one-owner module ratified it with a rationale the render did not support --
+"dodged bars occupy their own slot within a shared band" over an output with no
+shared band at all (measured: 9 bars of width 35.37 px against 10 of width
+21.05 px, sharing not one x position). The band a dodged bar takes its slot in
+IS the bin, so ``"dodge"`` now bins on a shared extent like ``"stack"`` and
+``"fill"``. This is a deliberate, user-approved rendering change for
+``multiple="dodge"``; the ``"dodge"`` entry in ``_PRE_FIX_SVG_DIGESTS`` below
+was retired rather than re-baselined for exactly that reason.
+
+Shared edges were necessary and not sufficient. The Rust ``apply_dodge`` then
+had to move BOTH ends of a span bar rather than only its start, before a slot
+had a width worth asserting; that landed, so ``TestDodgeSharesTheBand`` pins
+the slot geometry too -- equal widths, adjacent rather than overlapping,
+tiling the padded band -- and the bar COUNT, because the first group's
+negative offset used to push the leftmost bin start below the resolved
+x-domain and lose that bar to a ``NaN`` with nothing counting bars.
+
 Scope: this module pins the mode-to-geometry contract for the histogram kind,
 plus the input contract of the one public door this fix opened
 (``mark_histogram(position_by=)``). The overlay's own scaling lives in
@@ -31,10 +49,26 @@ import pytest
 import ferrum as fm
 from tests._svg_rects import data_bar_rects
 
-#: Modes whose groups must land on one shared bin grid, and modes that keep
-#: per-group extents. A stack needs shared edges to have anything to stack.
-SHARED_EDGE_MODES = ("stack", "fill")
-PER_GROUP_EDGE_MODES = ("layer", "dodge")
+#: Modes whose groups must land on one shared bin grid, and the one mode that
+#: keeps per-group extents. A stack needs shared edges to have anything to
+#: stack; a dodge needs them to have a band to take a slot in. Only "layer"
+#: asks nothing of its neighbours, so only "layer" may bin per group.
+SHARED_EDGE_MODES = ("stack", "fill", "dodge")
+PER_GROUP_EDGE_MODES = ("layer",)
+
+#: The subset of SHARED_EDGE_MODES that also draws every group's bars at one
+#: width on one set of x keys. "dodge" shares the edges but then subdivides
+#: each band into per-group slots, so its bars are the same width as each
+#: other but NOT as the band, and they are not co-located -- a different
+#: rendered shape from one contract.
+STACKING_MODES = ("stack", "fill")
+
+#: `Dodge`'s default padding, eaten at BOTH ends of the band before the slots
+#: are cut (`pad_total = band * padding * 2`). Named once: the wire test below
+#: pins that this is the value that reaches the spec, and the dodge geometry
+#: test predicts the rendered slot width from it, so the two readings cannot
+#: drift into two numbers.
+DODGE_PADDING = 0.05
 
 
 @pytest.fixture
@@ -51,6 +85,28 @@ def two_group_df():
     return pl.DataFrame(
         {
             "x": np.concatenate([rng.normal(0, 1, n), rng.normal(6, 1, n)]),
+            "g": ["a"] * n + ["b"] * n,
+        }
+    )
+
+
+@pytest.fixture
+def overlapping_two_group_df():
+    """Two uniform samples over the SAME range, tagged by ``g``.
+
+    For the bar-count property only. On the separated fixture above, a bin
+    where a group has (almost) no rows still renders -- the bar carries a
+    minimum height (measured 8 px) -- so a count there would be pinning the
+    height clamp rather than the thing at issue. Here every group genuinely
+    has rows in every bin (measured minimum bar height 212 px), so "10 bins
+    requested, 10 bars drawn, for each group" is a statement about bars that
+    each have data behind them.
+    """
+    rng = np.random.default_rng(7)
+    n = 300
+    return pl.DataFrame(
+        {
+            "x": np.concatenate([rng.uniform(0, 10, n), rng.uniform(0, 10, n)]),
             "g": ["a"] * n + ["b"] * n,
         }
     )
@@ -76,10 +132,50 @@ def _kde_overlay_transform(chart) -> dict:
     return next(t for t in spec["transforms"] if t.get("name") == "kde_overlay")
 
 
+def _one_grid_step(xs: set[float], *, label: str) -> float:
+    """Return the single bin step *xs* lies on, asserting that it has one.
+
+    A group whose bars all come off one bin grid has starts that differ by
+    whole multiples of one spacing -- a bin nobody landed in leaves a
+    double gap, not a shifted grid.
+    """
+    starts = sorted(xs)
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert gaps, f"{label}: fewer than two distinct bar starts ({starts})"
+    step = min(gaps)
+    off_grid = [g for g in gaps if abs(g / step - round(g / step)) > 0.01]
+    assert not off_grid, (
+        f"{label}: bar starts {starts} have gaps {gaps}, not all whole multiples "
+        f"of {step} -- these bars did not come off one bin grid"
+    )
+    # Refine: `min(gaps)` carries the rounding of two 2-dp coordinates, which
+    # compounds into a visible drift across ten bands. The span divided by the
+    # whole number of steps it covers does not.
+    return (starts[-1] - starts[0]) / sum(round(g / step) for g in gaps)
+
+
+def _slot_offset(xs: set[float], *, step: float, origin: float, label: str) -> float:
+    """Return the constant offset of *xs* within its band, asserting it is one.
+
+    Each group's bars sit at the same position inside every band it appears
+    in, so ``(x - origin) % step`` is one value across the whole group.  That
+    value IS the group's dodge slot.
+    """
+    residues = [(x - origin) % step for x in sorted(xs)]
+    # A residue a hair under `step` is the same slot as one a hair over zero.
+    residues = [r - step if r > step - 0.05 else r for r in residues]
+    spread = max(residues) - min(residues)
+    assert spread < 0.05, (
+        f"{label}: bars sit at {sorted(set(round(r, 2) for r in residues))} within "
+        "their bands -- one group's bars must take ONE slot, not several"
+    )
+    return residues[0]
+
+
 class TestSharedBinEdges:
     """Under stack and fill, every group's bars share bin edges and widths."""
 
-    @pytest.mark.parametrize("multiple", SHARED_EDGE_MODES)
+    @pytest.mark.parametrize("multiple", STACKING_MODES)
     def test_groups_share_bin_edge_positions_and_widths(self, two_group_df, multiple):
         """One edge grid, one bar width, and keys both groups actually share.
 
@@ -136,18 +232,188 @@ class TestSharedBinEdges:
         assert _bin_transform(chart)["shared_extent"] is True
 
     @pytest.mark.parametrize("multiple", PER_GROUP_EDGE_MODES)
-    def test_layer_and_dodge_keep_per_group_extents(self, two_group_df, multiple):
-        """The non-stacking modes are unchanged: each group bins over its own
-        range, because nothing needs to pair up across groups."""
+    def test_layer_keeps_per_group_extents(self, two_group_df, multiple):
+        """``"layer"`` is the one mode that still bins per group.
+
+        Overlaid distributions ask nothing of each other -- no pairing, no
+        slot -- so each group is free to bin over its own range, and does:
+        the two groups' grids have DIFFERENT steps, which is the positive
+        statement of "these were binned separately" (an `xs_a != xs_b`
+        inequality would also pass on two groups that shared a grid and
+        merely landed in different bins).
+        """
         chart = fm.displot(two_group_df, x="x", hue="g", kind="hist", multiple=multiple)
         assert _bin_transform(chart)["shared_extent"] is False
 
         geometry = _bar_geometry_by_fill(chart.to_svg())
-        (_fill_a, (xs_a, _wa)), (_fill_b, (xs_b, _wb)) = sorted(geometry.items())
-        assert xs_a != xs_b, (
-            f"multiple={multiple!r}: the two groups' bars landed on identical x "
-            "positions -- this fixture's groups are well separated, so that means "
-            "the shared extent leaked into a mode that must not have one"
+        (fill_a, (xs_a, _wa)), (fill_b, (xs_b, _wb)) = sorted(geometry.items())
+        step_a = _one_grid_step(xs_a, label=f"multiple={multiple!r} {fill_a}")
+        step_b = _one_grid_step(xs_b, label=f"multiple={multiple!r} {fill_b}")
+        assert step_a != pytest.approx(step_b, rel=1e-3), (
+            f"multiple={multiple!r}: both groups binned at step {step_a} -- this "
+            "fixture's groups have very different ranges, so one shared step means "
+            "a shared extent leaked into the one mode that must not have one"
+        )
+
+
+class TestDodgeSharesTheBand:
+    """``multiple="dodge"`` bins every group against one grid, then slots them.
+
+    The mode's own rationale is that each group takes its own slot within a
+    shared band. That band is the bin, so the bins have to be the same bins
+    first -- and they were not: ``_multiple.py`` mapped ``"dodge"`` to
+    ``shared_extent=False`` and this fixture rendered 9 blue bars of width
+    35.37 px against 10 red bars of width 21.05 px, sharing not one x
+    position. The guarding test asserted only ``xs_a != xs_b``, which is a
+    claim about DIFFERENCE and was true precisely because the bug was live.
+
+    The slot geometry is asserted too, now that it means something. Sharing
+    the edges was necessary but not sufficient: the continuous-axis
+    `apply_dodge` used to add its per-group offset to the band column alone
+    and leave the span's second coordinate (`bin_end`) where it was, so a
+    span bar's two edges moved by different amounts -- measured 60.91 px and
+    38.53 px against a 49.72 px band, overlapping, one of them overrunning
+    the band entirely. Both coordinates move now, so a slot is a slot: same
+    width for every group, adjacent rather than overlapping, and the whole
+    band accounted for by `n_groups` slots plus the padding at each end.
+
+    Scope: these are the figure-level properties a `displot` caller sees.
+    The slot arithmetic itself is unit-tested Rust-side; this module does not
+    restate it, it checks that what reached the SVG has the shape the
+    arithmetic promises.
+    """
+
+    def test_wire_states_the_shared_extent(self, two_group_df):
+        chart = fm.displot(two_group_df, x="x", hue="g", kind="hist", multiple="dodge")
+        assert _bin_transform(chart)["shared_extent"] is True
+
+    def test_both_groups_bin_on_one_grid_and_take_distinct_slots(self, two_group_df):
+        """One step for both groups, and a constant sub-band offset between them."""
+        svg = fm.displot(two_group_df, x="x", hue="g", kind="hist", multiple="dodge").to_svg()
+        geometry = _bar_geometry_by_fill(svg)
+        assert len(geometry) == 2, f"expected bars for 2 hue levels, got {len(geometry)}"
+        (fill_a, (xs_a, _wa)), (fill_b, (xs_b, _wb)) = sorted(geometry.items())
+
+        # 1. One bin grid, shared. Pre-fix these were 29.25 px and 27.16 px:
+        #    two groups binning their own ranges into their own bin widths.
+        step_a = _one_grid_step(xs_a, label=f"dodge {fill_a}")
+        step_b = _one_grid_step(xs_b, label=f"dodge {fill_b}")
+        assert step_a == pytest.approx(step_b, rel=1e-3), (
+            f"dodge: {fill_a} bars step {step_a} px, {fill_b} bars step {step_b} px "
+            "-- the groups were binned on two different grids, so neither group's "
+            "bars share a band with the other's"
+        )
+
+        # 2. Distinct slots WITHIN that shared band: each group sits at one
+        #    constant offset inside its band, and the two offsets differ by
+        #    less than a whole band (same band, different slot) and by more
+        #    than nothing (dodged, not superimposed).
+        origin = min(xs_a | xs_b)
+        slot_a = _slot_offset(xs_a, step=step_a, origin=origin, label=f"dodge {fill_a}")
+        slot_b = _slot_offset(xs_b, step=step_a, origin=origin, label=f"dodge {fill_b}")
+        separation = abs(slot_a - slot_b)
+        assert 0.0 < separation < step_a, (
+            f"dodge: {fill_a} sits at {slot_a:.2f} and {fill_b} at {slot_b:.2f} within "
+            f"a {step_a:.2f} px band -- the two groups must take different slots of "
+            "the SAME band, not the same slot and not a band apart"
+        )
+
+    def test_both_groups_slots_are_the_same_width(self, two_group_df):
+        """Two groups splitting one band get one width between them.
+
+        Different widths mean the groups are not commensurable even where
+        they do line up -- the taller-looking group might simply be wider.
+        The band is common (asserted above), so anything but one width is a
+        subdivision that does not divide.
+        """
+        svg = fm.displot(two_group_df, x="x", hue="g", kind="hist", multiple="dodge").to_svg()
+        (fill_a, (_xa, widths_a)), (fill_b, (_xb, widths_b)) = sorted(
+            _bar_geometry_by_fill(svg).items()
+        )
+        assert len(widths_a) == 1 and len(widths_b) == 1, (
+            f"dodge: {fill_a} drew widths {sorted(widths_a)} and {fill_b} "
+            f"{sorted(widths_b)} -- one group's bars must all be one width"
+        )
+        assert widths_a == widths_b, (
+            f"dodge: {fill_a} bars are {sorted(widths_a)[0]} px wide and {fill_b} bars "
+            f"{sorted(widths_b)[0]} px -- two groups splitting one band get one width"
+        )
+
+    def test_the_slots_tile_the_padded_band_without_overlapping(self, two_group_df):
+        """Adjacent, not overlapping, and between them the whole band.
+
+        `Dodge` eats `DODGE_PADDING` of the band at EACH end and cuts what is
+        left into one slot per group, so a slot is ``band * (1 - 2*padding) /
+        n_groups`` and the two slots sit edge to edge. Both halves matter and
+        fail differently: overlapping slots hide one group behind the other,
+        and slots that do not span the padded band leave the bars floating in
+        a gap that belongs to no one.
+        """
+        svg = fm.displot(two_group_df, x="x", hue="g", kind="hist", multiple="dodge").to_svg()
+        (fill_a, (xs_a, widths_a)), (fill_b, (xs_b, widths_b)) = sorted(
+            _bar_geometry_by_fill(svg).items()
+        )
+        step = _one_grid_step(xs_a, label=f"dodge {fill_a}")
+        width = sorted(widths_a)[0]
+
+        # 1. The slot is what is left of the band after padding, split two ways.
+        expected = step * (1.0 - 2.0 * DODGE_PADDING) / 2.0
+        assert width == pytest.approx(expected, abs=0.05), (
+            f"dodge: slots are {width:.2f} px of a {step:.2f} px band; two slots plus "
+            f"{DODGE_PADDING:.0%} padding at each end wants {expected:.2f} px. The bars "
+            "do not account for the band they were cut from"
+        )
+
+        # 2. Edge to edge, taken in the band. The leftmost pair is one band's
+        #    two slots (asserted one slot apart above), so the left group's
+        #    right edge is where the right group's left edge starts.
+        left, right = sorted((min(xs_a), min(xs_b)))
+        assert left + width <= right + 0.05, (
+            f"dodge: a slot starting at {left:.2f} px runs {width:.2f} px wide, past "
+            f"the next slot's start at {right:.2f} px -- the two groups overlap"
+        )
+        assert right - (left + width) < 0.05 + step * DODGE_PADDING, (
+            f"dodge: {right - (left + width):.2f} px of unclaimed band sits between the "
+            "two slots -- the slots must tile the padded band, not float inside it"
+        )
+        assert sorted(widths_b)[0] == pytest.approx(width, abs=0.05)
+
+    @pytest.mark.parametrize("bins", [6, 10, 17])
+    def test_no_group_loses_a_bar_to_an_out_of_domain_slot(self, overlapping_two_group_df, bins):
+        """The bins asked for are the bars drawn -- for BOTH groups.
+
+        The leftmost band is where a dodge can silently cost a group a bar:
+        the first group's slot offset is negative, so before the Rust fix it
+        pushed that bin's start below the resolved x-domain, where the
+        unclamped linear scale returns NaN and the row is skipped. The bar
+        was ABSENT, not mis-sized, and nothing counted bars -- the render
+        simply had 9 where it should have had 10, which is invisible unless
+        something asserts the count.
+
+        Parametrized over three bin counts so the assertion tracks the rule
+        the caller stated rather than one constant that happens to match; a
+        render that always drew ten bars would fail two of the three.
+
+        This fixture's groups both span the full range, so every bin has rows
+        from both and every bar has data behind it (see the fixture).
+        """
+        svg = fm.displot(
+            overlapping_two_group_df, x="x", hue="g", kind="hist", multiple="dodge", bins=bins
+        ).to_svg()
+        (fill_a, (xs_a, _wa)), (fill_b, (xs_b, _wb)) = sorted(_bar_geometry_by_fill(svg).items())
+        assert len(xs_a) == bins and len(xs_b) == bins, (
+            f"dodge with bins={bins}: {fill_a} drew {len(xs_a)} bars and {fill_b} "
+            f"{len(xs_b)} -- a group short a bar lost it, it did not merge it"
+        )
+
+        # ...and specifically the leftmost band carries both, which is the
+        # band the negative offset used to push out of the domain.
+        step = _one_grid_step(xs_a, label=f"dodge {fill_a}")
+        origin = min(xs_a | xs_b)
+        assert min(xs_a) - origin < step and min(xs_b) - origin < step, (
+            f"dodge: {fill_a} starts at {min(xs_a):.2f} px and {fill_b} at "
+            f"{min(xs_b):.2f} px, more than one {step:.2f} px band apart -- one group "
+            "has no bar in the leftmost band"
         )
 
 
@@ -182,7 +448,7 @@ class TestPositionGroupingSurvives:
         [
             ("stack", {"type": "stack", "by": "g", "offset": "zero", "anchor": "top"}),
             ("fill", {"type": "stack", "by": "g", "offset": "normalize", "anchor": "top"}),
-            ("dodge", {"type": "dodge", "by": "g", "padding": 0.05}),
+            ("dodge", {"type": "dodge", "by": "g", "padding": DODGE_PADDING}),
             ("layer", {"type": "identity"}),
         ],
     )
@@ -263,8 +529,14 @@ class TestPositionByRefusesNonColumnNames:
 #: `src/ferrum/marks/_chart_methods_statistical.py` restored by file copy,
 #: `src/ferrum/marks/_multiple.py` removed) -- a record of the old behavior,
 #: not a re-baseline of the new one.
+#:
+#: `"dodge"` was in this table and was REMOVED, not re-measured: the close
+#: remediation moved that render on purpose (see `TestDodgeSharesTheBand`),
+#: so its digest is no longer a statement about anything. Re-baselining it to
+#: the new bytes would turn a record of "this path is untouched" into a
+#: record of "whatever it does today", which is what the entry exists to
+#: prevent. The three below still hold the original pre-fix bytes.
 _PRE_FIX_SVG_DIGESTS = {
-    "dodge": "36598053f906346983ad31d12e02e0e67c9b701e7a2a83cccc398e3785820707",
     "kde_kind_stack": "c5572e1467e762e9009b92f838db248ee80241534022a6a1fc4cbb841605d9ea",
     "layer": "529199fcca368cb3740c509a0aaac7a164a4ce7a49208f4bcd83f5e3c71ba68e",
     "no_hue": "634e2b6966ca6998ce1008efff01279df5f070ab1742ee2cde825d1016302754",
@@ -273,11 +545,10 @@ _PRE_FIX_SVG_DIGESTS = {
 
 @pytest.mark.parametrize("name", sorted(_PRE_FIX_SVG_DIGESTS))
 def test_unaffected_paths_render_byte_identically(two_group_df, name):
-    """`multiple="layer"`/`"dodge"`, the no-hue path, and the `kind="kde"`
-    branch (which does not forward the mode) are unchanged by this fix."""
+    """`multiple="layer"`, the no-hue path, and the `kind="kde"` branch
+    (which does not forward the mode) are unchanged by this fix."""
     calls = {
         "layer": dict(x="x", hue="g", kind="hist", multiple="layer"),
-        "dodge": dict(x="x", hue="g", kind="hist", multiple="dodge"),
         "no_hue": dict(x="x", kind="hist", multiple="stack"),
         "kde_kind_stack": dict(x="x", hue="g", kind="kde", multiple="stack"),
     }

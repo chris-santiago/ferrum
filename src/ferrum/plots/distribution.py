@@ -35,6 +35,7 @@ from ferrum._desugar import (
 from ferrum._layer import _Layer
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
+from ferrum._warn import warn_once
 from ferrum.marks._desugar_helpers import nominal_color_channel, resolve_color_groupby
 from ferrum.marks._multiple import MULTIPLE_MODES, MultipleSemantics, multiple_semantics
 from ferrum.plots._helpers import _field_name, _finalize_chart
@@ -50,6 +51,22 @@ _DISPLOT_VALID_KINDS = {"hist", "kde", "ecdf", "rug"}
 # owner has no mapping for, or refuse one it has.
 _DISPLOT_VALID_MULTIPLE = MULTIPLE_MODES
 _DISPLOT_VALID_STAT = {"count", "density"}
+
+# The kinds whose distribution variable is the one `x=` names: each bins or
+# evaluates that variable and COMPUTES the other axis (a count, a density, a
+# cumulative frequency), so there is no slot for a `y=` variable to fill.
+# `"rug"` is the one exception -- a tick mark draws its ticks against either
+# axis -- which is why this is a named set and not "every kind".
+_DISPLOT_KINDS_REQUIRING_X = frozenset({"hist", "ecdf", "kde"})
+
+# The kinds that actually bin, i.e. the only ones `bins=` can act on.  The
+# `kde=True` overlay reads `bins=` too, but only to count-scale itself onto a
+# HISTOGRAM's count axis (`_overlay_count_scale`), so it adds no kind here.
+_DISPLOT_KINDS_THAT_BIN = frozenset({"hist", "ecdf"})
+
+# displot's own `bins=` default, named so the "did the caller state a rule of
+# their own?" test below and the signature cannot drift apart.
+_DISPLOT_DEFAULT_BINS = "sturges"
 
 _CATPLOT_VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}
 _RELPLOT_VALID_KINDS = {"scatter", "line"}
@@ -127,7 +144,7 @@ def _count_facet_levels(data: Any, field: str) -> int:
         return 1
 
 
-def _multiple_to_position(multiple: str, hue: Any) -> MultipleSemantics:
+def _multiple_to_position(multiple: str, hue: Any, *, value_axis: str | None) -> MultipleSemantics:
     """Return displot's ``(position, shared_extent)`` pair for *multiple*.
 
     A thin binding of the package-wide owner (``marks/_multiple.py``) to
@@ -144,8 +161,16 @@ def _multiple_to_position(multiple: str, hue: Any) -> MultipleSemantics:
     Both halves come from the owner, so the binning extent the histogram's
     ``Bin`` receives and the adjustment that positions its bars can never
     disagree about the mode again (GH #194).
+
+    ``value_axis`` is required, with no default, for the same reason: it is
+    the owner's third input (which axis a ``Stack`` cumulates, GH #77) and
+    the mark desugar passes it too.  Leaving it out here made displot's
+    adjustment and the desugar's equal only because displot happens never to
+    build a horizontal histogram -- a silent drop that would have started
+    disagreeing the moment it did.  The caller states the axis instead, so
+    the equality is checkable where it is claimed.
     """
-    position, shared_extent = multiple_semantics(multiple, by=hue)
+    position, shared_extent = multiple_semantics(multiple, by=hue, value_axis=value_axis)
     return MultipleSemantics(position if position is not None else Identity(), shared_extent)
 
 
@@ -224,9 +249,29 @@ def _kde_overlay(
         # ENCODING below wants the channel itself; `_displot_build` resolves
         # the same name once for its own consumers (see `hue_field` there).
         kde_kwargs["groupby"] = _field_name(hue)
-    # count_scale may only be requested when the histogram's own value axis
-    # is actually a count axis -- a future axis-changing mode must extend
-    # this predicate's reading, not add a fourth ad hoc clause here.
+    # count_scale may only be requested when the histogram's value axis is
+    # measured IN COUNTS. That is the whole of this predicate's question --
+    # its UNIT, not its baseline -- and the three clauses are the complete
+    # reading of it: `kind == "hist"` (ecdf's axis is a cumulative count of a
+    # different quantity, rug has no value axis at all), `stat == "count"`
+    # (density is already normalized), `multiple != "fill"` (fill's
+    # `Stack(offset="normalize")` rescales the bars to a [0, 1] proportion,
+    # so the axis stops being counts at all).
+    #
+    # NOT answered here, and deliberately: where each group's bars START.
+    # `multiple="stack"` keeps the axis in counts -- so a count-scaled curve
+    # is in the right units and tracks each group's own bar SEGMENT height
+    # (`test_overlay_curve_tracks_its_own_bars_in_every_count_mode` measures
+    # that ratio) -- but offsets every group above the first onto the stack
+    # below it, while the overlay is drawn from zero by the explicit
+    # `position=Identity()` set below. Measured on two 200-row groups,
+    # `stat="count"`: the bar stack tops out at y=24 while the curves peak at
+    # y=165. Excluding `"stack"` from this predicate would NOT fix that -- it
+    # would replace a curve in the right units with an unscaled density
+    # (peak ~0.2 against an axis reaching ~200), i.e. an invisible sliver at
+    # the baseline, which is strictly worse. The fix that would is stacking
+    # the overlay with the bars (what seaborn draws), which is a change to
+    # the overlay's POSITION, not to this reading; it is filed separately.
     histogram_value_axis_is_count = kind == "hist" and stat == "count" and multiple != "fill"
     if histogram_value_axis_is_count:
         kde_kwargs["count_scale"] = _overlay_count_scale(bins)
@@ -295,6 +340,93 @@ def _apply_facet_sizing(
 # ---------------------------------------------------------------------------
 
 
+def _reject_displot_without_x(*, kind: str, x: Any, y: Any, kde: bool, rug: bool) -> None:
+    """Refuse, in displot's own voice, a call whose distribution variable is missing.
+
+    Two questions, one answer, one site.  Three kinds
+    (:data:`_DISPLOT_KINDS_REQUIRING_X`) draw the variable ``x=`` names and
+    compute the other axis themselves; the ``kde=``/``rug=`` overlays are
+    drawn against that same variable.  Neither can be built from a ``y=``
+    binding, and both used to fail badly:
+
+    - the kinds raised in the MARK's voice -- ``mark_histogram() requires
+      .encode(x=...)`` / the ``mark_density()`` twin -- naming a method the
+      caller never called, from a figure function that validates everything
+      else as ``displot(...)`` (``kind="ecdf"`` was the one that already
+      answered in displot's voice; its message is subsumed here so the three
+      cannot drift into three descriptions of one rule);
+    - the overlays said nothing at all.  ``displot(y=..., kind="rug",
+      kde=True)`` promoted the rug into layered mode and then appended no
+      overlay, because the overlay block guards on ``x_field is not None``:
+      measured 0 ``<polyline>`` elements against 1 for the identical call
+      with ``x=``.  A requested mark that vanishes is the REFUSE-MALFORMED /
+      WARN-DEGRADED policy's central case, and it is a refusal rather than a
+      warning: the overlay is not a knob that got ignored but a whole mark
+      with nowhere to stand, and the identical "this needs x=" question one
+      line up is already answered by refusing.
+
+    Called from ``displot`` itself, beside the closed-vocabulary checks, so
+    the refusal is raised before any chart is built.
+    """
+    if x is not None:
+        return
+
+    # The variable the caller DID bind, and the fix spelled in their own
+    # column name.  `_field_name` (not `repr(y)`) so a channel-object `y=`
+    # reports the column rather than the channel's repr.
+    bound = _field_name(y)
+    observed = f"y={bound!r}" if y is not None else "x=None, y=None"
+    pass_x = f"Pass x={bound!r}" if y is not None else "Pass x='<column>'"
+    binds = "binds y= instead" if y is not None else "binds neither"
+
+    if kind in _DISPLOT_KINDS_REQUIRING_X:
+        nowhere = "so a y= variable has nowhere to go" if y is not None else "and none was given"
+        raise ValueError(
+            f"displot(kind={kind!r}, {observed}) is not supported -- kind={kind!r} "
+            "draws the distribution of the variable x= names and computes the other "
+            f"axis itself (a count, a density, a cumulative frequency), {nowhere}. "
+            f"{pass_x}, or kind='rug', which draws its ticks against either axis."
+        )
+
+    overlay = "kde" if (kde and kind != "kde") else "rug" if (rug and kind != "rug") else None
+    if overlay is not None:
+        raise ValueError(
+            f"displot(kind={kind!r}, {observed}, {overlay}=True) is not supported -- "
+            f"the {overlay}= overlay is drawn against the variable x= names, and this "
+            f"call {binds}, so the overlay has no variable to read. {pass_x} "
+            f"(kind='rug' draws the same ticks from x= or y=), or drop {overlay}=."
+        )
+
+
+def _warn_inert_bins(*, kind: str, bins: Any) -> None:
+    """Warn when the caller named a binning rule the ``kind=`` cannot act on.
+
+    ``bins=`` is validated for every kind (so a malformed rule is refused as
+    ``displot(...)`` rather than by whichever transform happens to be built),
+    but only ``kind="hist"``/``"ecdf"`` bin anything: measured,
+    ``displot(x="v", kind="kde", bins=3)`` and ``bins=97`` render byte-
+    identically, as do ``kind="rug", kde=True`` with either.  Accepted-and-
+    inert is the WARN-DEGRADED half of the standing policy, so it warns
+    rather than refusing -- the chart the caller asked for is still drawn,
+    it just is not binned by their rule.
+
+    Only a rule the caller actually STATED warns.  ``bins=None`` and
+    ``bins="sturges"`` both mean "the default rule", which is what a
+    non-binning kind would have used anyway, so nothing the caller said is
+    lost and there is nothing to report.
+    """
+    if kind in _DISPLOT_KINDS_THAT_BIN or bins is None or bins == _DISPLOT_DEFAULT_BINS:
+        return
+    warn_once(
+        "displot",
+        "bins",
+        f"displot(kind={kind!r}, bins={bins!r}): bins= is inert for kind={kind!r} -- "
+        "it evaluates no binned statistic, so the rule you named cannot act on "
+        "anything and the render is identical for every value. Drop bins=, or use "
+        "kind='hist'/'ecdf', which bin.",
+    )
+
+
 def displot(
     data: Any,
     *,
@@ -308,7 +440,7 @@ def displot(
     cumulative: bool = False,
     log_scale: bool = False,
     stat: str = "count",
-    bins: Any = "sturges",
+    bins: Any = _DISPLOT_DEFAULT_BINS,
     bandwidth: Any = "scott",
     bw_adjust: float = 1.0,
     multiple: str = "layer",
@@ -336,8 +468,14 @@ def displot(
         Input data accepted by ``Chart(data)``.
     x : str or encoding, optional
         Column name for the distribution variable (horizontal axis).
+        Required by ``kind="hist"``, ``"kde"`` and ``"ecdf"``, which compute
+        the other axis themselves, and by the ``kde=``/``rug=`` overlays,
+        which are drawn against this same variable.
     y : str or encoding, optional
-        Column name for the distribution variable (vertical axis).
+        Column name for the distribution variable (vertical axis).  Honored
+        by ``kind="rug"`` only -- a tick mark draws against either axis.  The
+        other three kinds refuse a ``y=``-only call by name rather than
+        rendering something the caller did not ask for.
     hue : str or encoding, optional
         Column name to map to color (one distribution per level).
     col : str, optional
@@ -363,7 +501,10 @@ def displot(
         Validated for every ``kind`` (not just ``"hist"``): an unsupported
         value raises regardless of ``kind``.
     bins : str, int or float, default "sturges"
-        Binning rule for ``kind="hist"`` and ``kind="ecdf"``.  ``"sturges"``
+        Binning rule for ``kind="hist"`` and ``kind="ecdf"`` -- the only two
+        kinds that bin.  Stating a non-default rule on ``kind="kde"`` or
+        ``kind="rug"`` emits a ``UserWarning``: the value is accepted and
+        validated, but nothing evaluates it there.  ``"sturges"``
         (the default) and ``"fd"``/``"freedman_diaconis"`` select a rule; an
         integer fixes the bin count; a float fixes the bin *width* in data
         units (numpy / ``Bin2D`` / ``Kde`` parity).  ``None`` is Sturges.
@@ -435,7 +576,14 @@ def displot(
     ValueError
         If ``bins`` is not one of the supported rules, counts, or widths.
     ValueError
-        If ``kind="ecdf"`` is used without specifying ``x=``.
+        If ``kind="hist"``, ``"kde"`` or ``"ecdf"`` is used without ``x=``,
+        or if ``kde=``/``rug=`` requests an overlay on a call that binds no
+        ``x=``.  Both name ``displot`` and the variable actually bound.
+
+    Warns
+    -----
+    UserWarning
+        If ``bins=`` states a rule on a ``kind=`` that does not bin.
 
     Examples
     --------
@@ -460,6 +608,13 @@ def displot(
     # the parser those transforms construct through.
     if bins is not None:
         validate_bin_rule(bins, "displot")
+    # ...and a well-formed rule that this `kind=` cannot act on is reported
+    # too, rather than accepted and silently dropped.
+    _warn_inert_bins(kind=kind, bins=bins)
+    # Every "this needs x=" refusal, in displot's voice, before any chart is
+    # built -- including the overlay case, which used to render a chart
+    # missing the mark it was asked for.
+    _reject_displot_without_x(kind=kind, x=x, y=y, kde=kde, rug=rug)
 
     return _displot_build(
         data,
@@ -520,8 +675,13 @@ def _displot_build(
 ) -> Chart:
     """Construct the displot chart from validated inputs.
 
-    The public ``displot`` validates ``kind``/``multiple``; this builder owns the
-    mark/transform dispatch, optional kde/rug overlays, faceting, and sizing.
+    The public ``displot`` validates ``kind``/``multiple``/``stat``/``bins``
+    AND refuses every call whose distribution variable is missing
+    (``_reject_displot_without_x``); this builder owns the mark/transform
+    dispatch, optional kde/rug overlays, faceting, and sizing.  It therefore
+    assumes ``x is not None`` wherever the kind or an overlay needs it -- the
+    guard is not repeated here, so there is one answer to "this needs x=" and
+    it is spelled in displot's voice.
     """
     # `hue` may be a bare column name or a channel object (`fm.Color("g")`) --
     # both are documented spellings, and #130 made an untyped `fm.Color` read
@@ -536,7 +696,14 @@ def _displot_build(
     # What `multiple=` means, decided once: the position adjustment AND the
     # binning extent mode. Every consumer below reads this pair; none
     # re-derives either half (GH #194).
-    semantics = _multiple_to_position(multiple, hue_field)
+    #
+    # `value_axis=None` is displot's own statement, not an omission: displot
+    # exposes no `orientation=`, so every histogram and density it builds is
+    # vertical and cumulates on y -- the same value the desugar derives from
+    # its own (unset, therefore "vertical") `orientation=`. Giving displot a
+    # horizontal orientation means changing this argument, not discovering
+    # later that it was never passed.
+    semantics = _multiple_to_position(multiple, hue_field, value_axis=None)
     position = semantics.position
 
     # Build the base chart.
@@ -568,14 +735,16 @@ def _displot_build(
         #
         # `multiple=` IS forwarded (GH #194): it is what tells the `Bin`
         # transform to bin every group against one global extent under
-        # "stack"/"fill", without which the groups land on different edges at
-        # different widths and `apply_stack` has no pairs to stack. `position=`
-        # stays explicit alongside it and is not redundant: for "layer" the
-        # desugar declares no adjustment and displot wants an explicit
-        # `Identity()` (see `_multiple_to_position`), and for the other three
-        # modes the desugar's own adjustment -- which overwrites this one --
-        # is built by the same owner from the same `position_by`, so the two
-        # are equal by construction rather than by coincidence.
+        # "stack"/"fill"/"dodge", without which the groups land on different
+        # edges at different widths -- `apply_stack` has no pairs to stack,
+        # and a dodged slot has no shared band to take its place in.
+        # `position=` stays explicit alongside it and is not redundant: for
+        # "layer" the desugar declares no adjustment and displot wants an
+        # explicit `Identity()` (see `_multiple_to_position`), and for the
+        # other three modes the desugar's own adjustment -- which overwrites
+        # this one -- is built by the same owner from the same three inputs
+        # (`multiple`, `position_by`/`by`, and a `value_axis` both sides now
+        # state rather than drop), so the two are equal by construction.
         hist_kwargs: dict = dict(
             bins=bins,
             cumulative=cumulative,
@@ -604,14 +773,13 @@ def _displot_build(
             kde_kwargs["groupby"] = hue_field
         chart = chart.mark_density(**kde_kwargs)
     elif kind == "ecdf":
-        # ECDF: cumulative bin → step line.
-        if x is None:
-            raise ValueError("displot(kind='ecdf') requires x=")
+        # ECDF: cumulative bin → step line.  `x is not None` here by
+        # `_reject_displot_without_x`.
         from ferrum.encoding import X as _X_ecdf
-        from ferrum.encoding.base import ChannelBase as _CB_ecdf
 
-        # Extract the original field name for the axis title.
-        _ecdf_x_name = x.field if isinstance(x, _CB_ecdf) else str(x)
+        # The original field name, for the Bin field and the axis title --
+        # through the same shared extraction point `hue_field` uses above.
+        _ecdf_x_name = _field_name(x)
         # `hue_field` (the unwrapped name resolved once above) is the Bin
         # transform's groupby. Without a groupby, Bin's output schema drops
         # the hue column entirely, so the color channel set below
@@ -657,11 +825,13 @@ def _displot_build(
     # advancing it.  The overlay _Layer objects set data_source to the named
     # transform key so they read the correct output.
     if (kde and kind != "kde") or (rug and kind != "rug"):
-        from ferrum.encoding.base import ChannelBase as _CB_overlay
-
         chart = chart._resolve_pending()
         chart = chart._clone()
-        x_field = x.field if isinstance(x, _CB_overlay) else str(x) if x is not None else None
+        # Same shared extraction point as `hue_field` and the ecdf branch.
+        # Not `None` here: an overlay on an x-less call is refused in
+        # displot's voice (`_reject_displot_without_x`) rather than promoting
+        # the primary mark to layered mode and appending nothing.
+        x_field = _field_name(x)
 
         # Convert single-mark chart to layered mode: promote the existing
         # mark + encoding into a primary layer so overlay layers can be
@@ -676,7 +846,7 @@ def _displot_build(
             chart._layers = [primary_layer]
             chart._mark = None
 
-        if kde and kind != "kde" and x_field is not None:
+        if kde and kind != "kde":
             kde_transform, kde_layer = _kde_overlay(
                 x_field,
                 hue=hue,
@@ -724,7 +894,7 @@ def _displot_build(
                     "y": _Y_overlay(kde_layer.encoding["y"]),
                 }
 
-        if rug and kind != "rug" and x_field is not None:
+        if rug and kind != "rug":
             from ferrum.marks._desugar_helpers import identity_transform
 
             rug_xform = identity_transform("rug_data")
@@ -1780,11 +1950,16 @@ def _catplot_build(
     #
     # An already-built channel object (`hue=fm.Color(...)`) is a DIFFERENT
     # case, and `hue_order=` is what decides which rule applies (#190,
-    # spec-review cycle 2 correction): with no `hue_order=`, the channel
-    # passes through completely untouched via `nominal_color_channel` --
-    # preserving whatever type it already states or infers, INCLUDING a
-    # numeric column's continuous colorbar, exactly as before this task
-    # (byte-identical). `hue_order=` changes that: ordering a fixed list of
+    # spec-review cycle 2 correction): with no `hue_order=`, the channel goes
+    # through `nominal_color_channel`, which honors an explicit `type_=`
+    # verbatim and types the channel nominal when it declares none.
+    # CORRECTED (#130, commit bb5149ef, this same wave): that pass-through
+    # used to be total -- an untyped `fm.Color("g")` kept whatever its
+    # column's dtype inferred, including a numeric column's continuous
+    # colorbar -- so the branch below was once the only site that retyped
+    # anything. It no longer is, and a numeric-column channel object without
+    # `hue_order=` no longer renders byte-identically to the pre-#130 output.
+    # `hue_order=` still changes what happens here: ordering a fixed list of
     # named levels is a statement `sort=` cannot honor against a Continuous
     # scale at all, so passing `hue_order=` is itself a declaration that
     # this channel is categorical -- forcing nominal typing the same way a
@@ -1825,7 +2000,15 @@ def _catplot_build(
                 )
             color_kwargs = dict(hue_kwargs)
             if hue_explicit_type is None:
-                color_kwargs["type_"] = "nominal"
+                # `"type"`, not `"type_"`: `hue_kwargs` is a copy of a channel's
+                # already-normalized `_kwargs`, and `ChannelBase.__init__`
+                # DISCARDS `type_` whenever a `type` key is present. A channel
+                # spelled `fm.Color("g", type_=None)` carries `{"type": None}`
+                # -- untyped to `option("type")`, which is what selects this
+                # branch -- so writing `type_` here silently lost the nominal
+                # typing on exactly the channels that most needed it. One key,
+                # one spelling, written the way the reader will read it.
+                color_kwargs["type"] = "nominal"
             color_kwargs["sort"] = list(hue_order)
             color_channel = _Color(hue_name, **color_kwargs)
         else:
@@ -1859,7 +2042,10 @@ def _catplot_build(
     if cat_name is not None:
         x_kwargs = dict(cat_kwargs)
         if cat_explicit_type is None:
-            x_kwargs["type_"] = cat_type
+            # `"type"` for the same reason as `color_kwargs` above: this dict
+            # is a copy of an already-normalized `_kwargs`, where a `type_`
+            # key loses to the `type` key already in it.
+            x_kwargs["type"] = cat_type
         if order is not None:
             x_kwargs["sort"] = list(order)
         # `cat_domain` (Jitter/Dodge clipping padding, quality finding 1):

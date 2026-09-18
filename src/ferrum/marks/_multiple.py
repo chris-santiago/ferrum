@@ -6,7 +6,10 @@ they binned/gridded against one global extent or each against its own
 (``shared_extent``)?  The answers are not independent: bars can only be
 stacked when every group's bars land on the same edges, so stacking without
 a shared extent is not a weaker stack, it is a side-by-side render wearing a
-stack's name.
+stack's name.  The same is true of dodging, one word over -- a slot is a
+subdivision of a band, and without shared edges there is no band the groups
+both belong to -- so ``"layer"``, which asks nothing of its neighbours, is
+the only mode that may bin per group.
 
 ``multiple_semantics`` decides both together and is the only place either is
 decided.  GH #194 is what happens otherwise: ``desugar_histogram`` derived
@@ -25,7 +28,12 @@ mode from silently mapping to "layer".
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - import kept out of the runtime path
+    # Deferred: `ferrum.position` is imported inside `multiple_semantics` so
+    # this leaf module stays importable from anywhere in the package.
+    from ferrum.position import Dodge, Identity, Stack
 
 MULTIPLE_MODES = ("dodge", "fill", "layer", "stack")
 
@@ -35,16 +43,18 @@ class MultipleSemantics(NamedTuple):
 
     Attributes
     ----------
-    position : Position or None
+    position : Dodge, Stack, Identity or None
         The position adjustment the mode requires, or ``None`` for "no
         adjustment declared" (``multiple="layer"``).  A caller that wants an
-        explicit no-op in the spec substitutes its own ``Identity()``.
+        explicit no-op in the spec substitutes its own ``Identity()``, which
+        is why that type is in the annotation even though this module never
+        builds one.
     shared_extent : bool
         Whether the mark's binning/gridding transform must compute one
         global extent across all groups before splitting them.
     """
 
-    position: Any
+    position: "Dodge | Stack | Identity | None"
     shared_extent: bool
 
 
@@ -91,10 +101,16 @@ def multiple_semantics(
     if multiple == "layer":
         return MultipleSemantics(None, False)
     if multiple == "dodge":
-        # Dodged bars occupy their own slot within a shared band, so they do
-        # not need a common bin grid to be comparable -- each group keeps
-        # its own extent, exactly as "layer" does.
-        return MultipleSemantics(Dodge(by=by), False)
+        # The band a dodged bar takes its slot in IS the bin, so the bins
+        # have to be the same ones for every group before a slot means
+        # anything. Without a shared extent each group bins over its own
+        # range: measured on two 300-row groups, `multiple="dodge"` drew one
+        # group as 9 bars of width 35.37 px and the other as 10 of width
+        # 21.05 px, sharing not one x position -- #194's "two histograms
+        # standing side by side wearing a stack's name", under a different
+        # word. Shared edges are what make the slots adjacent instead of
+        # merely overlapping.
+        return MultipleSemantics(Dodge(by=by), True)
     if multiple == "stack":
         return MultipleSemantics(Stack(by=by, offset="zero", value_axis=value_axis), True)
     if multiple == "fill":

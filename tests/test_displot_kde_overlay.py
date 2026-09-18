@@ -375,8 +375,12 @@ class TestOverlayBinWidthParity:
     because `_displot_build` never forwarded `multiple=` into
     `mark_histogram`. It forwards it now, and both sides read the same owner
     (`marks/_multiple.py`), so the mirrored value is `True` under
-    `"stack"`/`"fill"` and `False` under `"layer"`/`"dodge"`. The mirroring
-    itself is unchanged, and is still what this class exists to guard.
+    `"stack"`/`"fill"`/`"dodge"` -- every mode whose groups have to land on
+    one grid to mean anything -- and `False` only under `"layer"`. The
+    mirroring itself is unchanged, and is still what this class exists to
+    guard: the test below reads both transforms and compares them, so it
+    states no per-mode constant of its own and did not move when `"dodge"`
+    changed sides.
     """
 
     def test_wire_shared_extent_matches_the_real_bin_transform(self, two_group_df):
@@ -645,20 +649,47 @@ class TestOverlayPositionIndependence:
     def test_rug_tick_positions_independent_of_multiple(self, two_group_df):
         """Rug tick x-positions must not be dodged, stacked, or filled by
         `multiple=` -- a rug tick marks each row's raw x value, not an
-        aggregated bar. `multiple="dodge"` changes the *bars'* rendered
-        bytes (they shift side by side); it must leave the rug ticks' x
-        positions identical to `multiple="layer"`.
+        aggregated bar.
+
+        RE-EXPRESSED (wave-4 close remediation), not re-baselined. This
+        compared raw PIXELS between a `multiple="layer"` render and a
+        `multiple="dodge"` one, which stopped being a statement about the rug
+        the moment `"dodge"` began binning on a shared extent: the bars' own
+        x DOMAIN differs between the two renders (a dodged bin_start is
+        offset half a band below the data minimum), so every pixel in the
+        panel moves, ticks included, without anything having been dodged.
+        Measured after that change: the same tick shifts 89.71 -> 72.08 px
+        while keeping its position *relative to the data* exactly.
+
+        The property itself is scale-free, and is asserted as such: the rug
+        is an affine image of the raw values, so normalizing each render by
+        its own tick extent must give the identical picture. A rug that
+        inherited the dodge would shift ONE stroke's ticks by a constant, and
+        no normalization can undo a per-group offset.
         """
         layer_svg = fm.displot(two_group_df, x="x", hue="g", rug=True, multiple="layer").to_svg()
         dodge_svg = fm.displot(two_group_df, x="x", hue="g", rug=True, multiple="dodge").to_svg()
         layer_ticks = _rug_tick_x1_by_stroke(layer_svg)
         dodge_ticks = _rug_tick_x1_by_stroke(dodge_svg)
         assert dodge_ticks, "no rug tick lines found -- helper filter may be wrong"
-        assert dodge_ticks == layer_ticks, (
-            "rug tick x-positions differ between multiple='dodge' and "
-            "multiple='layer' -- the rug overlay appears to have inherited "
-            "the primary mark's dodge position"
-        )
+        assert set(dodge_ticks) == set(layer_ticks), "the two renders drew different strokes"
+
+        def _normalized(ticks: dict) -> dict:
+            every = [x for xs in ticks.values() for x in xs]
+            lo, hi = min(every), max(every)
+            span = hi - lo
+            return {
+                stroke: sorted(round((x - lo) / span, 4) for x in xs)
+                for stroke, xs in ticks.items()
+            }
+
+        layer_norm, dodge_norm = _normalized(layer_ticks), _normalized(dodge_ticks)
+        for stroke in sorted(layer_norm):
+            assert dodge_norm[stroke] == pytest.approx(layer_norm[stroke], abs=1e-3), (
+                f"rug ticks for {stroke} sit differently within the data extent under "
+                "multiple='dodge' than under multiple='layer' -- the rug overlay "
+                "appears to have inherited the primary mark's dodge position"
+            )
 
 
 # ---------------------------------------------------------------------------
